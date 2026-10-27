@@ -1,0 +1,217 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-526",
+  "completed": "2026-10-27T00:35:00Z",
+  "planDocument": "dispatch://INFRA-526/artifact/plan-md",
+  "summary": "A typed block in a text body (comment, ask, message, reply) is drawn as the document draws it: the headless engine gains a renderBlock option (as lib.ts has) through which markdown-engine draws renderTypedBlock for a callout and the AskBlockView shell for an ask; useRenderedMarkdown portals the document's read-only AskBlockCard into the shell's slots through a React context app.tsx provides (breaking the MarkdownBody import cycle); server-owned attributes are reset to defaults on parse so a comment cannot forge an outcome; the typed-block and card styles move from .dispatch-doc to :is(.dispatch-doc, .dispatch-markdown).",
+  "baseCommit": "7f7edb8d (main, #2267)",
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Red browser test first",
+      "files": [
+        "packages/dispatch/e2e/text-typed-blocks.e2e.ts"
+      ],
+      "detail": "Two tests on /issues/<KEY>/conversation: a comment's callout shows [data-proof-block-name]=callout, [data-proof-block-badge]=warning (filled background), [data-proof-block-title]=Read this, header height <= 40; a comment's ask block shows [data-dispatch-ask-pill=high] 'High', 'Decision', option rows [data-dispatch-ask-record] with A and B, the source [data-proof-block-content] > ul hidden, border-left-width 4px. Run at the unchanged base: `cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone`, expected 4 failed; quote on the PR."
+    },
+    {
+      "id": 2,
+      "title": "Headless engine takes renderBlock",
+      "files": [
+        "packages/proof-editor/src/lib-headless.ts",
+        "packages/proof-editor/src/tests/block-schema.test.ts",
+        "packages/proof-editor/AGENTS.md"
+      ],
+      "detail": "HeadlessProofOptions.renderBlock?: HostBlockRenderer passed to blockSchemaPlugins at line 106; export type HostBlockRenderer; one test that toDOM keeps the renderer's spec plus data-proof-block-attr-* and data-block-id; AGENTS.md allowed-edit list gains the sixteenth kind and both counts change."
+    },
+    {
+      "id": 3,
+      "title": "Move the document's pure drawing into features/doc/typed-block-drawing.ts",
+      "files": [
+        "packages/dispatch/web/src/features/doc/typed-block-drawing.ts",
+        "packages/dispatch/web/src/features/doc/ask-block.ts",
+        "packages/dispatch/web/src/features/doc/AskBlockCard.tsx",
+        "packages/dispatch/web/src/features/doc/AskBlockCard.test.tsx",
+        "packages/dispatch/web/src/features/doc/ask-block.test.ts",
+        "packages/dispatch/web/src/features/doc/VersionView.tsx",
+        "packages/dispatch/web/src/features/doc/ProofDocument.tsx"
+      ],
+      "detail": "renderTypedBlock, askBlockFacts, AskBlockFacts, AskBlockHost, askBlockShell(facts) (frame class, content class, urgency/state/malformed data), renderAskBlockShell(node) (static shell spec: section, not-prose header slot, content hole, not-prose footer slot; no data-dispatch-ask-block, no data-dispatch-ask-options). Type-only prosemirror-model imports; no milkdown values. AskBlockView.applyShell uses askBlockShell. No behaviour change in the editors."
+    },
+    {
+      "id": 4,
+      "title": "Text engine draws, body mounts the card",
+      "files": [
+        "packages/dispatch/web/src/features/refs/markdown-engine.ts",
+        "packages/dispatch/web/src/features/refs/markdown-cards.ts",
+        "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx",
+        "packages/dispatch/web/src/features/doc/AskBlockCard.tsx",
+        "packages/dispatch/web/src/app.tsx"
+      ],
+      "detail": "renderBlock = ask ? renderAskBlockShell : renderTypedBlock (Dispatch type looked up by name; the proof-editor BlockTypeSchema is not assignable to Dispatch's); parse resets every server:true attribute to its schema default; a context module carries the card component; useRenderedMarkdown pairs painted ask shells with parsed ask nodes in document order, sets data-dispatch-ask-options=rows only where it mounts a card, portals keyed ask-<index>; AskBlockCard gains detached (drops the 're-activates' malformed footer) and exports TextAskBlockCard; app.tsx provides it around every body-rendering subtree."
+    },
+    {
+      "id": 5,
+      "title": "Styles outside documents",
+      "files": [
+        "packages/dispatch/web/src/styles.css"
+      ],
+      "detail": "Re-scope :288-360, :364-370, :408-415, :485-603 to :is(.dispatch-doc, .dispatch-markdown); keep :385-401 (revert-layer) and :417-422 (editing) document-only; update the comment at :281-287; swatch comments unchanged."
+    },
+    {
+      "id": 6,
+      "title": "Unit tests on the shared path",
+      "files": [
+        "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx"
+      ],
+      "detail": "Replace the body-only callout test with header assertions; ask card under the provider; forged server attributes draw no 'Answered by' or ticked row; no provider keeps the list visible; malformed in text shows Malformed and no 're-activates'. `cd packages/dispatch && bun test web/src/features/refs web/src/features/doc`."
+    },
+    {
+      "id": 7,
+      "title": "Documentation",
+      "files": [
+        "packages/dispatch/AGENTS.md",
+        "packages/proof-editor/AGENTS.md"
+      ],
+      "detail": "dispatch AGENTS.md:291 (MarkdownBody draws typed blocks as the document does; previews stay one line) and :898 (the header is never in the editors' HTML; the text engine draws it through renderBlock, and paste still reads only the content hole)."
+    },
+    {
+      "id": 8,
+      "title": "Runs, proof, simplify, PR",
+      "files": [],
+      "detail": "Head: the new spec in chromium and iphone (4 passed); typed-blocks, ask-blocks, conversation, inbox, doc, document, references specs in chromium and iphone; `bun test`, `bun run typecheck`, `bun run lint` in packages/dispatch; `bun run test`, `bun run typecheck` in packages/proof-editor; `bunx biome check packages/dispatch packages/proof-editor`. Throwaway entry-chunk check: after build:web, `grep -c dispatch-ask-block-editing` on the entry chunk named by web/dist/index.html is 0, size recorded against the base. Light and dark screenshots for the reviewer. ce-simplify-code once; PR body with Dispatch: INFRA-526, both quoted e2e runs and the E2E lines. After merge, the deployment's production check."
+    }
+  ],
+  "acceptance": [
+    {
+      "criterion": "A1a. A comment holding a callout with a title shows the callout's kind and title",
+      "surface": "Issue Conversation tab /issues/<KEY>/conversation (chromium, iphone)",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone",
+      "negativeControl": "Same command at the unchanged base fails the callout test in both projects"
+    },
+    {
+      "criterion": "A1b. A comment holding an ask block shows its card",
+      "surface": "Same",
+      "command": "Same",
+      "negativeControl": "Same command at the base fails the ask test in both projects"
+    },
+    {
+      "criterion": "A1c. After the deploy, the deployment's Dispatch production check on the page",
+      "surface": "Production Dispatch",
+      "command": "gh api \"repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main\" -H \"Accept: application/vnd.github.raw\" | bash -s -- --commit <merge sha> --page /issues/INFRA-526/conversation --route /api/v1/issues/INFRA-526/comments --route /api/v1/schema/blocks",
+      "negativeControl": "n/a; output goes on the PR and the issue, naming the running build when it does not carry the merge (dispatch://INFRA-64)"
+    },
+    {
+      "criterion": "A2 (plan). Header and card styled in text: one-row header, filled badge, source list folded under rows, accent border",
+      "surface": "Same as A1",
+      "command": "Same as A1",
+      "negativeControl": "Locators absent at the base"
+    },
+    {
+      "criterion": "A3 (plan). A comment cannot forge a decision outcome; no provider keeps the options; a malformed block in text names no re-activation",
+      "surface": "MarkdownBody, shared by every text surface",
+      "command": "cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx",
+      "negativeControl": "Removing the server-attribute reset fails the forged-attribute case"
+    },
+    {
+      "criterion": "A4 (plan). Documents and past versions unchanged",
+      "surface": "Document and version view",
+      "command": "Task 8 e2e list and bun test web/src/features/doc",
+      "negativeControl": "n/a"
+    },
+    {
+      "criterion": "A5 (plan). The provider does not move ask-block.ts into the entry chunk",
+      "surface": "Built SPA",
+      "command": "Task 8 entry-chunk grep",
+      "negativeControl": "n/a"
+    }
+  ],
+  "decisions": [
+    "D1 callouts drawn by renderTypedBlock; D2 ask blocks drawn as the document's read-only card (shell + AskBlockCard readOnly, no ask row); D3 server-owned attributes reset on parse in text; D4 detached prop drops the malformed 're-activates' sentence; D5 React context injection breaks the MarkdownBody/AskCard import cycle; D6 rows attribute set only where a card mounts; D7 inline bodies, MarkdownPreview and headlines stay one line of text (out of scope by design); D8 plain-text copy carries the header words, HTML paste stays exact, linkify and search decorate reach the header (accepted); D9 portals keyed by position; D10 no data-dispatch-ask-block on a text shell; D11 styles re-scoped, colours the document's."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: references/pr-body.md defines the proof entries, the PR body and the simplify pass; references/findings.md for anything outside the issue",
+      "ce-simplify-code: the one simplify pass per pull request pr-body.md requires",
+      "dispatch: the production record is posted on the issue as a message"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md's proof definition and the tester's rules for re-running the named commands on the named surfaces"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for approving the head and references/review-threads.md for threads"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "1. 'Shows its card' has two readings (full read-only AskBlockCard vs static shell); the full card shows server-owned attributes a commenter can forge, and the malformed footer's 're-activates' sentence is false in a comment.",
+        "answer": "D2 picks the document's read-only card (the spec's 'drawing the document uses'; a frame around the same paragraph and list would not fix the complaint). D3 resets server-owned attributes on parse in the text engine; D4 drops the sentence with a detached prop. A3 tests both."
+      },
+      {
+        "finding": "2. The styling half has no acceptance and the CSS to move is wider than cited; hiding the source list without rows would lose the options.",
+        "answer": "Task 5 lists every rule to re-scope and the two to keep document-only; D6 sets data-dispatch-ask-options only where a card mounts; A2 adds box height, badge background, folded list and border assertions in chromium and iphone; screenshots light and dark for the reviewer; styles-css-pin swatch comments kept."
+      },
+      {
+        "finding": "3. A provider in app.tsx would pull ask-block.ts (milkdown state, picture-view) into the entry chunk.",
+        "answer": "Task 3 moves the pure drawing to typed-block-drawing.ts with type-only prosemirror-model imports and re-points AskBlockCard; A5 greps the entry chunk for the PluginKey literal."
+      },
+      {
+        "finding": "4. lib-headless.ts is a copied file with fifteen enumerated edit kinds; HostBlockRenderer is not exported from the headless entry; two doc statements become partly false.",
+        "answer": "Task 2 adds the sixteenth kind and both counts, exports the type; D8 records why the schema hook beats a serializer override (copy attributes); Task 7 rewords AGENTS.md:291 and :898 and the moved doc comment."
+      },
+      {
+        "finding": "5. Surfaces in scope are unclear; A1 covers one.",
+        "answer": "D7: inline bodies, MarkdownPreview and headlines stay one line of text by design. The shared path is proven by MarkdownBody unit tests (Task 6); the e2e reads the Conversation tab's comment body, which renders the full MarkdownBody (ConversationTab.tsx:737)."
+      },
+      {
+        "finding": "6. One test cannot show both halves failing; how the test runs on the parent commit.",
+        "answer": "Task 1 writes two tests and runs them first against the unchanged base (red-first), so no checkout of the parent is needed; the command and expected 4 failures are named."
+      },
+      {
+        "finding": "7. The production check is undefined and the e2e suite is destructive against production.",
+        "answer": "The deployment instructions define the check script; A1c names the exact command, page and routes. Nothing is written to production."
+      },
+      {
+        "finding": "8. Copy and paste out of a comment changes.",
+        "answer": "D8: accepted; HTML paste reads only the content hole and keeps data-proof-block-attr-* (the reason for the renderBlock path); a plain-text copy carries what the reader sees."
+      },
+      {
+        "finding": "9. Linkify and search decorate reach the header.",
+        "answer": "D8: accepted; a reference in a title becomes a link as in every body, a search hit in a title is highlighted; card slots are empty when those passes run."
+      },
+      {
+        "finding": "10. Portal lifetime under repaint, streaming and late height.",
+        "answer": "D9: portals keyed ask-<index>; height lands one commit after the body as DispatchPicture does today."
+      },
+      {
+        "finding": "11. Nested cards and a second decision id under the editor root.",
+        "answer": "D10: the text shell carries no data-dispatch-ask-block; nesting a card inside a document's ask footer reply is accepted and bounded by content."
+      },
+      {
+        "finding": "12. Sibling issues touch the same seam.",
+        "answer": "Read INFRA-525/527/528/529 specs: 527 and 528 add node drawings in the same renderer, 529 changes unknown-directive reading, 525 may move BlockTypeSchema. Recorded as a textual-conflict risk; whichever lands second resolves it; no shared decision needed. Reported to the architect."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Change: 'The read-only engine draws typed blocks with the drawing the document uses.'",
+      "plan": "Callouts use the document's drawing as is. An ask block uses the document's read-only card, but in text the engine resets server-owned attributes (state, answered_by, answered_at, selected, answer, invalid, copied_from, copied_from_document) to their defaults, and the card omits the malformed footer sentence 'Fix the block text; the decision re-activates once it parses.'",
+      "evidence": "block-schema.ts:106-121 parses server-owned attributes from markdown and nothing on the comment path validates them, so the unchanged card would draw 'Answered by <anyone>', ticked rows and a 'Copied from' link a commenter wrote (AskBlockCard.tsx:105-128); no server activates a block in text, so the sentence at AskBlockCard.tsx:136-140 is false there.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
+  ],
+  "risks": [
+    "INFRA-527/528/529/525 touch markdown-engine.ts, useRenderedMarkdown.tsx, lib-headless.ts or BlockTypeSchema: textual conflicts for whichever lands second.",
+    "A pod's Playwright run is about three times slower than CI; give commands at least an hour; webkit and firefox projects run only in CI.",
+    "The pod's bun test fails Markdown tests until proof-sdk-upstream's src/ is copied in (INFRA-42 rig note); a rig gap, not a finding."
+  ]
+}
