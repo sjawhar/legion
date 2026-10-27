@@ -104,6 +104,14 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(untickedBox).not.toBeChecked();
       await expect(untickedBox).toBeDisabled();
 
+      // The two boxes look different at a glance: the ticked one is filled, the unticked one not.
+      const tickedFill = await tickedBox.evaluate((box) => getComputedStyle(box).backgroundColor);
+      const untickedFill = await untickedBox.evaluate(
+        (box) => getComputedStyle(box).backgroundColor
+      );
+      expect(tickedFill).not.toBe(untickedFill);
+      expect(tickedFill).not.toBe("rgba(0, 0, 0, 0)");
+
       // Each box stands on its item's first line, in place of the bullet.
       await ticked.scrollIntoViewIfNeeded();
       await expectBoxOnTextLine(ticked);
