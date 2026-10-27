@@ -156,9 +156,9 @@ func TestAnUncountedPushOntoAMarkedRedKeepsTheMarkInEitherOrder(t *testing.T) {
 			marked := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
 				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, FixAttempts: 3, BlockedAttempts: 3, HeadCounted: "h2"}
 			got := arrive(marked, "h3", tc.paths, tc.byReviewApp, pushFirst)
-			if got.FixAttempts != 3 || got.BlockedAttempts != 3 || got.HeadCounted != "h2" || got.HeadCountedBefore != "" {
-				t.Errorf("%s, push first %v: fixAttempts=%d blockedAttempts=%d headCounted=%q headCountedBefore=%q, want 3, 3, \"h2\" and \"\"",
-					tc.name, pushFirst, got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.HeadCountedBefore)
+			if got.FixAttempts != 3 || got.BlockedAttempts != 3 || got.HeadCounted != "h2" || got.HeadCountedBefore != "" || got.HeadCountedFrom != "" {
+				t.Errorf("%s, push first %v: fixAttempts=%d blockedAttempts=%d headCounted=%q headCountedBefore=%q headCountedFrom=%q, want 3, 3, \"h2\", \"\" and \"\"",
+					tc.name, pushFirst, got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.HeadCountedBefore, got.HeadCountedFrom)
 			}
 		}
 	}

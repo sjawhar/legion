@@ -24,7 +24,10 @@ import (
 // (HeadCountedBefore), which the take-back restores, and the head it moved from (HeadCountedFrom),
 // which names the push the take-back answers: a head whose push has not arrived is counted, and when
 // that push proves handoff-only or the review App's, the attempt is left as it would have been had
-// the push arrived first.
+// the push arrived first. That holds for a head that replaced the recorded one in one push. A head
+// the daemon reached past one it never recorded (a read of GitHub's head, a reopen) is counted from
+// a head no push of its own names, so no late push takes that count back, though a push that
+// arrived first would have spared it (headPush takes any push that left the head).
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
 	pending := headPush(pr.Pushes, pr.HeadSHA, headSHA)
 	pr.Pushes = keptPushes(pr.Pushes, headSHA)
@@ -135,9 +138,10 @@ func carriesApproval(p record.ClassifiedPush) bool {
 // the counted attempt's mark that count replaced (AdvancePullRequestHead). Only the counted move's
 // own push takes it back: the push that left the counted head from the head the count moved from
 // (HeadCountedFrom). A push that left the same head from another head - the required-checks pass's
-// compare from an approved head - says nothing about the move the count counted, which can carry
-// code that push does not. A push replaces an earlier record of the same two heads, so a
-// redelivered push is recorded once.
+// compare from an approved head, or the last of several pushes past a head the daemon never
+// recorded - says nothing about the move the count counted, which can carry code that push does
+// not. A push replaces an earlier record of the same two heads, so a redelivered push is recorded
+// once.
 func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullRequest {
 	pushes := make([]record.ClassifiedPush, 0, len(pr.Pushes)+1)
 	for _, p := range pr.Pushes {
