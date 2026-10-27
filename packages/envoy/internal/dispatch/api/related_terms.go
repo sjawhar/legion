@@ -48,7 +48,7 @@ const searchTermStatsLease = "search-term-stats"
 // relatedQOpener is the related-item check's q in place of search's (searchQOpener): the chosen
 // lexemes as a tsquery already built (relatedTerms.TSQuery), never re-stemmed through
 // websearch_to_tsquery, and no own_key, since no issue key is the whole text.
-// relatedCoordinationQuery opens the check's two queries with it.
+// The check's two queries (relatedKeywordQuery, relatedMeaningQuery) open with it.
 const relatedQOpener = `
 with q as (select $1::tsquery as tsq, $4::text as term, ''::text as own_key),
 `
@@ -219,7 +219,7 @@ type relatedTerm struct {
 	Surface string
 	DF      int
 	// IDF is the lexeme's idf as the picker weighed it, and its weight in the check's keyword
-	// rank (relatedCoordinationQuery); Score is the text's tf of it times IDF.
+	// rank (relatedCoordinationRank); Score is the text's tf of it times IDF.
 	IDF   float64
 	Score float64
 }

@@ -73,53 +73,40 @@ const (
 const relatedEFSearch = `set local hnsw.ef_search = 400`
 
 var (
+	// relatedKeywordLegs is search's keyword legs (searchKeywordLegs) ranked by the chosen
+	// lexemes' weights (relatedCoordinationRank).
+	relatedKeywordLegs = searchKeywordLegs(relatedCoordinationRank)
 	// relatedKeywordQuery is the check's stage 1: search's keyword query (searchQueryBody) over the
-	// chosen lexemes, its keyword arms ranked by the chosen lexemes' weights
-	// (relatedCoordinationQuery). Parameters: searchQueryBody's $1-$8, then $9 the lexemes and $10
-	// their idf.
-	relatedKeywordQuery = relatedCoordinationQuery(searchQueryBody, 9)
+	// chosen lexemes, with relatedKeywordLegs. Parameters: searchQueryBody's $1-$8, then $9 the
+	// lexemes and $10 their idf.
+	relatedKeywordQuery = relatedQOpener + relatedTermWeights(9) + searchQueryBody(relatedKeywordLegs)
 	// relatedMeaningQuery is the check's stage 2: search's meaning query, which fuses the same
-	// keyword arms, ranked the same way, with the meaning arms, over the same lexemes and the
-	// text's embedding. Parameters: searchQueryMeaningBody's $1-$11, then $12 the lexemes and $13
-	// their idf.
-	relatedMeaningQuery = relatedCoordinationQuery(searchQueryMeaningBody, 12)
+	// keyword legs with the meaning arms, over the same lexemes and the text's embedding.
+	// Parameters: searchQueryMeaningBody's $1-$11, then $12 the lexemes and $13 their idf.
+	relatedMeaningQuery = relatedQOpener + relatedTermWeights(12) + searchQueryMeaningBody(relatedKeywordLegs)
 )
 
-// relatedArmAliases names the item each of searchKeywordLegsSQL's five arms ranks (an issue, a
-// document's version, a comment, an ask, a message), each by ts_rank_cd(<alias>.search, q.tsq).
-var relatedArmAliases = []string{"i", "v", "c", "k", "m"}
+// relatedCoordinationRank ranks a keyword arm's item, searchColumn its search vector, by
+// idf-weighted coordination in place of search's ts_rank_cd: the sum of the idf of every chosen
+// lexeme the item holds, so an item holding three of the text's rare words outranks one
+// repeating one of them, which cover density favours. On a project's closed duplicates it listed
+// more of the issues they were closed into than ts_rank_cd over the same terms or the old
+// 40-word OR query (TestRelatedRecallOnDuplicates). ts_rank_cd, normalised into [0, 1) and scaled
+// by a thousandth, only orders items holding the same lexemes. Each lexeme is tested with @@
+// against a tsquery of its own (relatedTermWeights), a binary search of the item's sorted vector,
+// not by unnesting the vector, which costs a document's whole length.
+func relatedCoordinationRank(searchColumn string) string {
+	return "((select sum(w.idf) from term_weights w where " + searchColumn + " @@ w.tq) + 0.001 * ts_rank_cd(" + searchColumn + ", q.tsq, 32))"
+}
 
-// relatedCoordinationQuery is body, one of search's two query bodies, under relatedQOpener with
-// each keyword arm ranked by idf-weighted coordination in place of ts_rank_cd: the sum of the idf
-// of every chosen lexeme the item holds, so an item holding three of the text's rare words
-// outranks one repeating one of them, which cover density favours. On a project's closed
-// duplicates it listed more of the issues they were closed into than ts_rank_cd over the same
-// terms or the old 40-word OR query (TestRelatedRecallOnDuplicates). ts_rank_cd, normalised into
-// [0, 1) and scaled by a thousandth, only orders items holding the same lexemes. Each lexeme is
-// tested with @@ against a tsquery of its own, a binary search of the item's sorted vector, not by
-// unnesting the vector, which costs a document's whole length. The rest of body (the meaning
-// arms, the per-kind windows, the RRF over lists and kinds, the page) is search's own.
-//
-// It panics unless each arm's rank occurs in body exactly once and no other ts_rank_cd is left, so
-// an edit of search's arms cannot leave one of the check's arms ranked as search ranks it: the
-// package fails to initialise instead.
-//
-// Parameters: body's, then $lexemes the chosen lexemes and $lexemes+1 their idf, in one order.
-func relatedCoordinationQuery(body string, lexemes int) string {
-	for _, alias := range relatedArmAliases {
-		rank := "ts_rank_cd(" + alias + ".search, q.tsq)"
-		if found := strings.Count(body, rank); found != 1 {
-			panic(fmt.Sprintf("dispatch: search's query body holds %q %d times, the related-item check wants it once", rank, found))
-		}
-		body = strings.Replace(body, rank, "((select sum(w.idf) from term_weights w where "+alias+".search @@ w.tq) + 0.001 * ts_rank_cd("+alias+".search, q.tsq, 32))", 1)
-	}
-	if found := strings.Count(body, "ts_rank_cd("); found != len(relatedArmAliases) {
-		panic(fmt.Sprintf("dispatch: search's query body ranks %d arms by ts_rank_cd, the related-item check reranks %d", found, len(relatedArmAliases)))
-	}
-	return relatedQOpener + fmt.Sprintf(`term_weights as (
+// relatedTermWeights is the term_weights CTE relatedCoordinationRank reads: each chosen lexeme
+// as a tsquery of its own and its idf, from $lexemes the chosen lexemes and $lexemes+1 their idf,
+// in one order.
+func relatedTermWeights(lexemes int) string {
+	return fmt.Sprintf(`term_weights as (
   select quote_literal(w.lexeme)::tsquery as tq, w.idf from unnest($%d::text[], $%d::float8[]) w(lexeme, idf)
 ),
-`, lexemes, lexemes+1) + body
+`, lexemes, lexemes+1)
 }
 
 // The check's outcomes and search modes, as Suggestions and related_checks hold them.

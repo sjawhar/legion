@@ -46,11 +46,12 @@ const (
 	headlineOptions    = "StartSel=" + markStart + ", StopSel=" + markEnd + ", MaxWords=24, MinWords=12, MaxFragments=1"
 )
 
-// searchKeywordLegsSQL is the five-kind keyword-ranked union - issue, document, comment, ask,
-// message, each matched via ts_rank_cd against websearch_to_tsquery - shared verbatim by
-// searchQuery's own "kinds" CTE and searchQueryMeaning's "kinds" CTE, where it is unioned with
-// the five meaning_* CTEs below it - this and searchPageAndTailSQL are the one piece of
-// duplication between the two queries. Every
+// searchKeywordLegs is the five-kind keyword-ranked union - issue, document, comment, ask,
+// message, each matched against q.tsq and ranked by rank of its own search column - shared
+// verbatim by searchQueryBody's "kinds" CTE and searchQueryMeaningBody's "kinds" CTE, where it is
+// unioned with the five meaning_* CTEs below it - this and searchPageAndTailSQL are the one piece
+// of duplication between the two queries. rank is search's ts_rank_cd (searchKeywordLegsSQL) or
+// the related-item check's coordination rank (relatedCoordinationRank). Every
 // arm carries 'keyword' as its own list column even here, where searchQuery's own
 // ranked/legs/fused/page CTEs never select list by name, so it rides through unused rather than
 // needing two near-identical copies of this text, one with the column and one without.
@@ -59,17 +60,18 @@ const (
 // issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at, own, r.
 // block_id is an ask's typed block only while it is a node of the reference graph
 // (askBlockNodeSQL).
-const searchKeywordLegsSQL = `
+func searchKeywordLegs(rank func(searchColumn string) string) string {
+	return `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
          i.title as issue_title, i.status as issue_status,
          null::text as owner_project, null::text as owner_slug, null::text as owner_name, i.updated_at,
-         i.key = q.own_key as own, ts_rank_cd(i.search, q.tsq) as r
+         i.key = q.own_key as own, ` + rank("i.search") + ` as r
     from issues i, q where i.search @@ q.tsq and ($2 = '' or i.project_key = $2)
   union all
   select 'document' as kind, 'keyword', a.issue_key, case when a.issue_key is null then a.id else null::uuid end, a.id, a.id::text, null::text,
          i.title, i.status, p.key, a.slug, a.name,
          coalesce(i.updated_at, v.created_at),
-         false, ts_rank_cd(v.search, q.tsq)
+         false, ` + rank("v.search") + `
     from artifacts a
     left join issues i on i.key = a.issue_key
     join projects p on p.key = a.project_key
@@ -80,7 +82,7 @@ const searchKeywordLegsSQL = `
   select 'comment' as kind, 'keyword', c.issue_key, c.artifact_id, coalesce(c.artifact_id, (c.anchor->>'artifact_id')::uuid), c.id::text, null::text,
          i.title, i.status, p.key, a.slug, a.name,
          coalesce(i.updated_at, c.created_at),
-         false, ts_rank_cd(c.search, q.tsq)
+         false, ` + rank("c.search") + `
     from comments c
     left join issues i on i.key = c.issue_key
     left join artifacts a on a.id = c.artifact_id
@@ -90,7 +92,7 @@ const searchKeywordLegsSQL = `
   select 'ask' as kind, 'keyword', k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end,
          coalesce(k.artifact_id, k.block_artifact_id, (k.anchor->>'artifact_id')::uuid), k.id::text, ` + askBlockNodeSQL + `,
          i.title, i.status, p.key, a.slug, a.name, coalesce(i.updated_at, k.created_at),
-         false, ts_rank_cd(k.search, q.tsq)
+         false, ` + rank("k.search") + `
     from asks k
     left join issues i on i.key = k.issue_key
     left join artifacts a on a.id = coalesce(k.artifact_id, k.block_artifact_id)
@@ -99,9 +101,15 @@ const searchKeywordLegsSQL = `
   union all
   select 'message' as kind, 'keyword', m.issue_key, null::uuid, null::uuid, m.id::text, null::text,
          i.title, i.status, null::text, null::text, null::text, i.updated_at,
-         false, ts_rank_cd(m.search, q.tsq)
+         false, ` + rank("m.search") + `
     from messages m join issues i on i.key = m.issue_key, q
    where m.search @@ q.tsq and ($2 = '' or i.project_key = $2)`
+}
+
+// searchKeywordLegsSQL is search's own keyword legs, each arm ranked by ts_rank_cd.
+var searchKeywordLegsSQL = searchKeywordLegs(func(searchColumn string) string {
+	return "ts_rank_cd(" + searchColumn + ", q.tsq)"
+})
 
 // askBlockNodeSQL is the block id of ask k's typed block while that block is a node of the
 // reference graph (a document_blocks row of the document holding it), and null otherwise: an id
@@ -168,24 +176,26 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
 // kind's full body; only the page's own rows pay for one lateral fetch of their text and, after
 // that, a snippet. totals is joined outside the page, so a page past the end still answers how
 // many rows the query matches. This is the keyword-only fallback (LEGION-549 degraded mode); the
-// related-item check runs its body, with its keyword arms reranked, over its own q
-// (relatedCoordinationQuery).
+// related-item check runs its body, with its keyword arms ranked by relatedCoordinationRank,
+// over its own q.
 //
 // Parameters: $1 q, $2 project (empty for every project), $3 limit, $4 firstTerm,
 // $5 headlineOptions, $6 offset, $7 contracts.SearchKindDepth, $8 searchFusionK.
-var searchQuery = searchQOpener + searchQueryBody
+var searchQuery = searchQOpener + searchQueryBody(searchKeywordLegsSQL)
 
 // searchQOpener opens searchQuery and searchQueryMeaning: their q, the query text read as
 // websearch_to_tsquery, its first term ($4) for the snippet window, and the issue key the whole
 // text would be (own_key). The related-item check prefixes the same two bodies with its own q
-// (relatedQOpener) but replaces each keyword arm's ts_rank_cd with its idf-weighted coordination
-// rank (relatedCoordinationQuery); the rest of each body, the RRF and the page, is search's own.
+// (relatedQOpener), their keyword legs ranked by its idf-weighted coordination rank
+// (relatedCoordinationRank); the rest of each body, the RRF and the page, is search's own.
 const searchQOpener = `
 with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key),
 `
 
-// searchQueryBody is searchQuery after its q: every CTE it reads q from and the page.
-var searchQueryBody = `kinds as (` + searchKeywordLegsSQL + `
+// searchQueryBody is searchQuery after its q, over keywordLegs (searchKeywordLegs): every CTE it
+// reads q from and the page.
+func searchQueryBody(keywordLegs string) string {
+	return `kinds as (` + keywordLegs + `
 ),
 ranked as (
   select *, row_number() over (partition by kind order by own desc, r desc, updated_at desc, id) as pos,
@@ -201,6 +211,7 @@ totals as (
          (select count(*) from fused) as reachable
 ),
 ` + searchPageAndTailSQL("legs")
+}
 
 // searchQueryMeaning extends searchQuery with a second list per kind, ranked by cosine distance
 // to the query's own embedding ($9, a pgvector literal) against embeddings.embedding
@@ -222,7 +233,7 @@ totals as (
 // noise, not a weak match, and reaching legs at all would rank it by position exactly as the
 // strongest real match in an empty kind.
 //
-// kinds unions searchKeywordLegsSQL - the same five-arm keyword text searchQuery's own kinds CTE
+// kinds unions searchKeywordLegs - the same five-arm keyword text searchQuery's own kinds CTE
 // uses verbatim, each arm already carrying 'keyword' as list - with the five meaning_* CTEs
 // above. Every leg now carries which list it belongs to (list), and ranked's window partitions by
 // (kind, list): each list keeps its own top $7 and its own position numbering, so a row that
@@ -239,10 +250,11 @@ totals as (
 // Parameters: $1 q, $2 project, $3 limit, $4 firstTerm, $5 headlineOptions, $6 offset,
 // $7 contracts.SearchKindDepth, $8 searchFusionK, $9 the query's embedding (a vector literal),
 // $10 searchMeaningFloor, $11 the query embedder's identity.
-var searchQueryMeaning = searchQOpener + searchQueryMeaningBody
+var searchQueryMeaning = searchQOpener + searchQueryMeaningBody(searchKeywordLegsSQL)
 
-// searchQueryMeaningBody is searchQueryMeaning after its q.
-var searchQueryMeaningBody = `meaning_issue_candidates as (
+// searchQueryMeaningBody is searchQueryMeaning after its q, over keywordLegs (searchKeywordLegs).
+func searchQueryMeaningBody(keywordLegs string) string {
+	return `meaning_issue_candidates as (
   select i.key as issue_key, i.key as id, i.title as issue_title, i.status as issue_status, i.updated_at,
          1 - (e.embedding <=> $9::vector) as r
     from embeddings e
@@ -331,7 +343,7 @@ meaning_message as (
          false, r
     from meaning_message_candidates where r >= $10
 ),
-kinds as (` + searchKeywordLegsSQL + `
+kinds as (` + keywordLegs + `
   union all select * from meaning_issue
   union all select * from meaning_document
   union all select * from meaning_comment
@@ -357,6 +369,7 @@ totals as (
          (select count(*) from fused) as reachable
 ),
 ` + searchPageAndTailSQL("legs_unique")
+}
 
 func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {

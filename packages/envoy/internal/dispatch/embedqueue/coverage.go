@@ -41,8 +41,8 @@ type coverageSource struct {
 // meaning, so items leaves it out and the queue settles its row with no vector.
 //
 //   - issue: 0073's trigger, as 0131 replaced it, and 0131's trigger on a new version of the
-//     issue's primary document enqueue new.key and issue_embedding_text of the title and the
-//     latest version's markdown of the primary document (null when it has none).
+//     issue's primary document enqueue new.key and
+//     issue_embedding_text(new.title, issue_embedding_spec(new.key)); text is that expression.
 //   - document: 0074 enqueues new.artifact_id::text, new.markdown for every artifact_versions
 //     insert with markdown, the latest version's being the last; search ranks only doc artifacts,
 //     at their latest version (only a doc's versions carry markdown today).
@@ -55,13 +55,10 @@ type coverageSource struct {
 //     message's row is still the queue's to embed, and the pass's identity steps still reach it.
 var coverageSources = []coverageSource{
 	{
-		kind: "issue",
-		from: `issues i left join lateral (
-			select v.markdown from artifacts a join artifact_versions v on v.artifact_id = a.id
-			where a.issue_key = i.key and a.is_primary order by v.number desc limit 1
-		) spec on true`,
+		kind:      "issue",
+		from:      "issues i",
 		id:        "i.key",
-		text:      "issue_embedding_text(i.title, spec.markdown)",
+		text:      "issue_embedding_text(i.title, issue_embedding_spec(i.key))",
 		writtenAt: "i.created_at",
 	},
 	{

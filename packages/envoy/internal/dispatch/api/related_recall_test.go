@@ -272,7 +272,7 @@ func recallOldQuery(text string) string {
 
 // recallOldSearch runs the old query as the check ran it then (runFusedSearch at 08c345f7):
 // nothing for a text with no word or a query of stopwords alone, else search's own keyword query
-// (searchQOpener + searchQueryBody), here with no time limit.
+// (searchQuery), here with no time limit.
 func recallOldSearch(ctx context.Context, srv *server, project, text string) ([]model.SearchResult, error) {
 	query := recallOldQuery(text)
 	if query == "" {
