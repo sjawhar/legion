@@ -43,7 +43,7 @@ The problem and why it matters. Recommendation: the option and its reason.
 
 ## Issue status is yours to move
 
-Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, and `done` with `--reason` once you drove it in production. Never write the status of an issue with the `legion` label, or under one.
+Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, and `done` with `--reason` once you drove it in production. Never write the status of an issue with the `legion` label, or under one, and never claim one unless you are a Legion role of its tree, even when its claim reads `· not running`: the Legion daemon suspends a root's architect while the root waits on a person, so that claim reads `not running` for hours while its tree is live, and taking it takes the tree out of the workflow.
 
 A claim delivers no comments: in the same turn, `dispatch issue-update --route session:<your id>` (clear with `--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`. Never route such an issue.
 

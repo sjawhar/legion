@@ -58,7 +58,7 @@ Dispatch status) inside `intake.ApplyFact`, where no handler does I/O:
 - `release_children` first answered `held` from the children's records. A child released out of
   backlog then had none until its `todo` event landed after the answer, so it read `held: []`. It
   judges `blockers.UnfinishedOf` over the blocked-by list Dispatch showed the request. The release
-  now records such a child from its own write in the request (`api.applyOwnStatusWrite`), and the
+  now records such a child from its own write in the request (`api.recordOwnStatusWrite`), and the
   answer still judges the wait from Dispatch's list, which also covers a written child the
   workflow could not record yet (its parent unrecorded).
 - A root already in its slot was first judged like a child by the gate's opening and froze at

@@ -60,6 +60,18 @@ func (s *Postgres) DispatchIssueSeq(ctx context.Context, tx pgx.Tx, key string) 
 	return seq, true, nil
 }
 
+func (s *Postgres) DispatchClaim(ctx context.Context, tx pgx.Tx, key string) (string, error) {
+	var holder string
+	err := tx.QueryRow(ctx, `select claimed_by from dispatch_claims where key = $1`, key).Scan(&holder)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read the Dispatch claim of %s: %w", key, err)
+	}
+	return holder, nil
+}
+
 func (s *Postgres) DispatchIssues(ctx context.Context, tx pgx.Tx, project string) ([]DispatchIssueRow, error) {
 	rows, err := tx.Query(ctx, `select i.key, i.project, i.status, i.blockers, i.dispatch_seq, coalesce(c.claimed_by, ''), coalesce(c.claim_seq, 0)
 		from dispatch_issues i left join dispatch_claims c on c.key = i.key

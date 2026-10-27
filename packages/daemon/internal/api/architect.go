@@ -603,30 +603,28 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the records of the children to release")
 		return
 	}
-	// Every child the release writes todo is written first, then recorded from its own write in
-	// this request (recordOwnStatusWrite), not when the write's event comes back through the
-	// Dispatch consumer; only then is each child Dispatch already showed todo recorded from
-	// Dispatch's view of it (enterTodoChild), which answers the request when it cannot record one
-	// (CHILD_NOT_RECORDED and the like). So such a child never holds back the release, or the
-	// record, of the rest of the wave. Each pass runs in releaseOrder, which takes a parent the
-	// wave releases before its child, since the workflow records a child only under a recorded
-	// parent; a written child whose parent is one of the wave's todo children is recorded once more
-	// after that parent was. A written child the record does not take still stands released:
-	// Dispatch shows it todo, and its write's event records it when the consumer delivers it, so
-	// that failure is logged and does not fail the release.
+	// A child the release writes todo under none of the wave's todo children is written, then
+	// recorded from its own write in this request (recordOwnStatusWrite), not when the write's event
+	// comes back through the Dispatch consumer; all of these are written before any is recorded, so
+	// none holds back another's release. The rest go in one pass in releaseOrder, which takes a
+	// parent the wave releases before its child (the workflow records a child only under a recorded
+	// parent): each child Dispatch already showed todo is recorded from Dispatch's view of it
+	// (enterTodoChild), which answers the request when it cannot record one (CHILD_NOT_RECORDED and
+	// the like), and each child to write under one of those, directly or through other children to
+	// write, is written and recorded after its parent. Neither its record nor its write goes before
+	// that parent is recorded: a child applied then, from the request or from its write's event
+	// delivered by a consumer that keeps up, would be recorded by no handler of the workflow, and
+	// admission, which applies after it, would take one carrying the legion label for an orphan and
+	// record it as a root of its own. A written child the record does not take still stands
+	// released: Dispatch shows it todo, and its write's event records it when the consumer delivers
+	// it, so that failure is logged and does not fail the release.
 	ordered := releaseOrder(children)
+	underTodo := underTodoChild(children)
 	written := make(map[string]dispatch.Issue, len(ordered))
-	foundTodo := make(map[string]bool, len(ordered))
-	for _, child := range ordered {
-		if !child.write {
-			foundTodo[child.view.Key] = true
-			continue
-		}
+	write := func(child releasedChild) bool {
 		issue, ok := s.setDispatchStatus(w, r, child.view.Key, "todo")
-		if !ok {
-			return
-		}
 		written[child.view.Key] = issue
+		return ok
 	}
 	record := func(child releasedChild) {
 		if failure := s.recordOwnStatusWrite(r.Context(), written[child.view.Key]); failure != nil {
@@ -635,17 +633,25 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, child := range ordered {
-		if child.write {
-			record(child)
-		}
-	}
-	for _, child := range ordered {
-		if !child.write && !s.enterTodoChild(w, r, grant.Tree, child.view) {
+		if child.write && !underTodo[child.view.Key] && !write(child) {
 			return
 		}
 	}
 	for _, child := range ordered {
-		if child.write && child.view.Parent != nil && foundTodo[*child.view.Parent] {
+		if child.write && !underTodo[child.view.Key] {
+			record(child)
+		}
+	}
+	for _, child := range ordered {
+		switch {
+		case !child.write:
+			if !s.enterTodoChild(w, r, grant.Tree, child.view) {
+				return
+			}
+		case underTodo[child.view.Key]:
+			if !write(child) {
+				return
+			}
 			record(child)
 		}
 	}
@@ -714,6 +720,37 @@ func releaseOrder(children []releasedChild) []releasedChild {
 	return ordered
 }
 
+// underTodoChild names the written children of the wave that sit under a child of the wave Dispatch
+// already showed todo, directly or through written children of the wave: those the release records
+// only once enterTodoChild has recorded that todo child. A chain is followed through the wave's own
+// children only.
+func underTodoChild(children []releasedChild) map[string]bool {
+	byKey := make(map[string]releasedChild, len(children))
+	for _, child := range children {
+		byKey[child.view.Key] = child
+	}
+	under := make(map[string]bool, len(children))
+	for _, child := range children {
+		if !child.write {
+			continue
+		}
+		seen := map[string]bool{child.view.Key: true}
+		for parent := child.view.Parent; parent != nil && !seen[*parent]; {
+			above, inWave := byKey[*parent]
+			if !inWave {
+				break
+			}
+			if !above.write {
+				under[child.view.Key] = true
+				break
+			}
+			seen[*parent] = true
+			parent = above.view.Parent
+		}
+	}
+	return under
+}
+
 // releaseOutcome answers what this request did with each of its children, once its writes and
 // observations are in, in the request's own order. It reads each child's record again and the
 // project's whole mirror with one query (record.Store.DispatchIssues), as every blocker judgement
@@ -722,7 +759,7 @@ func releaseOrder(children []releasedChild) []releasedChild {
 //
 // A child is started when this request started its first phase (startedByRelease): the request
 // records every child it releases, one it writes todo — out of backlog, or parked at done — by its
-// own write (applyOwnStatusWrite), and one Dispatch already shows todo by Dispatch's view of it
+// own write (recordOwnStatusWrite), and one Dispatch already shows todo by Dispatch's view of it
 // (enterTodoChild). Otherwise it is held when it waits on an issue that is not done, unless it is
 // running a phase it was already in: what it waits on is judged from the blockers Dispatch showed
 // the request (blockers.UnfinishedOf), which the workflow's enterChild held a recorded child at
