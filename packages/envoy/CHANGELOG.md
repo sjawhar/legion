@@ -1721,7 +1721,7 @@
   conform clears `invalid` and updates the row. It used to index such an ask as valid, with its
   option lists concatenated and its question's paragraphs joined. This changes how such a
   document is read: at the time of the change, a census of every live document in all 11 Dispatch
-  projects (5,499 documents, 633 ask blocks) found no ask it newly marks.
+  projects (6,029 documents, 636 ask blocks, 19 of them open) found no ask it newly marks.
 
 - The document editor now draws a pasted container directive it refuses, an unknown typed block
   such as `:::note` or a typed block with a refused attribute, as its literal lines around its
