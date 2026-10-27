@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-527",
+  "completed": "2026-10-27T04:12:00Z",
+  "pr": "https://github.com/sjawhar/legion/pull/2322",
+  "head": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+  "base": "7f7edb8de3e32f2b65fd3b5600577ddddc420142",
+  "proof": [
+    {
+      "criterion": "A1 (spec) and A4: a comment with one ticked and one unticked task item shows a ticked and an unticked checkbox, read-only, in light and dark",
+      "surface": "Issue page, Conversation tab (/issues/<KEY>/conversation), expanded thread; Chromium desktop and Chromium as iPhone 13 (full-screen Thread dialog); real Go server, Postgres 17 + pgvector",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts e2e/theme.e2e.ts )",
+      "observed": "15 passed, 1 skipped (theme's iPhone-only margin-sheet row on desktop). Rows A1 light/dark in chromium and iphone: exactly 2 checkboxes; 'Tag the build' checked + disabled, 'Publish the notes' unchecked + disabled; each box vertically overlaps its text's first line; task li list-style-type none; ticked box background-color differs from unticked and is not transparent; a mouse click at the ticked box's centre leaves both states unchanged. Screenshots dispatch://INFRA-527/artifact/task-items-light-chromium-png and dispatch://INFRA-527/artifact/task-items-dark-chromium-png.",
+      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+      "negativeControl": "Same spec files run at the fork point 7f7edb8d (git archive into /legion/scratch/infra-527-base, the branch's spec files copied in, database dispatch_527_implementer_base, ports 17777/17021-17024): all A1 rows failed at expect(locator).toHaveCount(2) with Received: 0, after the comment's text assertion had passed."
+    },
+    {
+      "criterion": "A2 (plan): a reply under a decision inside a document shows one checked and one unchecked disabled checkbox with no bullet",
+      "surface": "Issue page (/issues/<KEY>), spec document, decision block '#naming' reply thread (thread-<ask id>); Chromium and iPhone 13",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts )",
+      "observed": "Row 'a reply under a decision inside a document shows the checkboxes with no bullet' passed in chromium and iphone: 2 checkboxes in thread-<ask id>, 'alias added' checked + disabled, 'docs updated' unchecked + disabled, both task li list-style-type none.",
+      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+      "negativeControl": "At the fork point 7f7edb8d the same row failed in chromium and iphone at expect(locator).toHaveCount(2), Received: 0, after 'alias added' was visible."
+    },
+    {
+      "criterion": "Adjacent defect fixed in this tree's CSS block: a link inside a Markdown body takes the app's dark link blue (sky-400) in dark mode and sky-700 in light",
+      "surface": "Issue page, Conversation tab, a comment's collapsed preview and expanded body; Chromium and iPhone 13",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/theme.e2e.ts )",
+      "observed": "Row 'a link in a comment's Markdown body renders the app's link blue in dark mode and in light mode' passed in chromium and iphone: rgb(0, 105, 168) in light, rgb(0, 188, 255) in dark, collapsed and expanded.",
+      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+      "negativeControl": "At the fork point 7f7edb8d the row failed in chromium and iphone: Expected \"rgb(0, 188, 255)\", Received \"rgb(0, 105, 168)\" on the dark check."
+    },
+    {
+      "criterion": "A3 (plan): tight, loose, ordered, nested and mixed lists each give every task item exactly one disabled box ticked as its source, and a plain item none",
+      "surface": "MarkdownBody rendered in the unit DOM (bun test + happy-dom), the regression lock under the browser rows",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && bun test web/src/features/refs/",
+      "observed": "194 pass, 0 fail, 885 expect() calls; the new test asserts 8 task items each with one own disabled box, ticks [true,false,true,true,false,true,false,true], the plain item without a box, tight items holding INPUT then text with no <p>, loose and nested items' box first in their first <p>.",
+      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+      "negativeControl": "With the drawTaskCheckboxes call commented out of paintBlock the test failed: 'Expected length: 1, Received length: 0' (0 pass, 1 fail)."
+    },
+    {
+      "criterion": "No regression across the browser suite",
+      "surface": "Dispatch's whole browser suite in the issue pod, projects chromium and iphone (WebKit cannot launch in a pod; CI's dispatch job covers WebKit and Firefox)",
+      "command": "( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" timeout 3500 bun run e2e -- --project chromium ); then the five files not reached plus project.e2e.ts with --project=chromium; then iphone in two halves of the spec list with --project=iphone",
+      "observed": "chromium: 755 passed, 25 skipped, 1 failed (project.e2e.ts:30, project-page issue grouping) before the 3,500 s bound; the follow-up run of project, threads, typed-blocks, workspace and writes: 25 passed, 1 skipped, project.e2e.ts:30 passing. iphone: 412 passed / 62 skipped and 246 passed / 70 skipped, 0 failed.",
+      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+      "negativeControl": "The red leg above: the new rows fail at the fork point, so the suite's green at head is the change's effect, not a vacuous pass."
+    }
+  ],
+  "filesChanged": [
+    "packages/dispatch/web/src/features/refs/task-checkboxes.ts (new): drawTaskCheckboxes(root) inserts <input type=checkbox disabled data-markdown-task-checkbox> first in each task item's first paragraph, defaultChecked from data-checked",
+    "packages/dispatch/web/src/features/refs/MarkdownBody.tsx: paintBlock calls drawTaskCheckboxes before the tight-list unwrap; doc comment",
+    "packages/dispatch/web/src/styles.css: task li list-style none; the box drawn with appearance:none, em-sized, in the bullet's place, filled with --tw-prose-links and a per-scheme tick; dark-mode --tw-prose-links flip for .dispatch-markdown",
+    "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx: list-shape test",
+    "packages/dispatch/e2e/task-items.e2e.ts (new): rows A1 light/dark and A2",
+    "packages/dispatch/e2e/theme.e2e.ts: dark/light Markdown link row; expectTextColor polls through the 150 ms colour transition",
+    "packages/dispatch/e2e/editor.ts, packages/dispatch/e2e/ask-blocks.e2e.ts: indexedBlockAsk moved to editor.ts and shared",
+    "packages/dispatch/AGENTS.md: MarkdownBody paragraph says block bodies draw the box and previews draw no list"
+  ],
+  "trickyParts": [
+    "Harness: /legion/scratch/harness-527/setup.sh (idempotent) and env.sh (source only around harness commands; per-LEGION_ROLE ports: implementer 18777/19021-19024, tester 28777/29021-29024, reviewer 38777/39021-39024; DB_URL/DB_BASE_URL dispatch_527_<role>[_base] on the pod's one Postgres at 127.0.0.1:55432, which is left running). PLAYWRIGHT_BROWSERS_PATH is not set: Chromium is in XDG_CACHE_HOME's shared registry (tools.md).",
+    "Some specs import packages/contracts/dist: run `bun run build` in packages/contracts once (done in the workspace and in /legion/scratch/infra-527-base).",
+    "Pass test files before --project (`bun run e2e -- <files> --project=chromium`); --project is variadic and swallows file names.",
+    "A `timeout` around `bun run e2e` leaves the four fake listeners running on the lane's ports; stop them by exact PID before the next run.",
+    "A Conversation comment turn is collapsed to a one-line MarkdownPreview until 'Expand thread' is clicked (a full-screen Thread dialog on iphone); the A1 rows expand first.",
+    "Chromium paints a disabled native checkbox pale grey; the box is drawn with appearance:none so a tick reads in light mode. Firefox draws no pseudo-elements on an input, so the tick is a background image."
+  ],
+  "deviations": [
+    "Plan D4 said no accent-color and the native box's colours; the native disabled box's tick was hard to see in light mode (screenshot), so the box is drawn with appearance:none, filled in the link blue with a contrasting tick. It stays a native disabled checkbox.",
+    "Added the dark-mode Markdown link colour fix (adjacent defect in the same .dispatch-markdown CSS block: links stayed sky-700 on dark cards since #919) with its own browser row, per the repository's rule that a clear defect in code a tree touches is fixed in that tree's pull request. The architect was told.",
+    "Plan's harness note set PLAYWRIGHT_BROWSERS_PATH; skill://legion-worker/references/tools.md says not to, so env.sh leaves it unset."
+  ],
+  "openQuestions": [
+    "Sent to the INFRA-138 architect, no answer yet: a Conversation comment turn is collapsed by default to a one-line MarkdownPreview that flattens the list ('Release checklist: Tag the build Publish the notes'); per plan D5 the preview draws no box. If the architect wants the preview to show the state too, it is a change to MarkdownPreview's flattening."
+  ]
+}
