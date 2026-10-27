@@ -2,46 +2,41 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-536",
-  "completed": "2026-10-27T07:45:00Z",
-  "headTested": "49260f1091099697d58c04e349bcb941f32c7f57",
+  "completed": "2026-10-27T10:05:00Z",
+  "round": 2,
+  "headTested": "4daf66f5bda0efee2acfa07f9b98a132b6702bc0",
+  "codeHead": "738dbe90b13b",
+  "fingerprint": "changed: round 1 tested 49260f10; 738dbe90 changes escapeImageSource (render.go) after the main merge 254d40c5, so this is a full test round",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Proof 1 re-run at 49260f10 (code head b8d4616d): $TMPDIR/infra536/run-e2e.sh doc.e2e.ts -g \"backslash before a character reference\" -> 2 passed (chromium, iphone). Its negative control reproduced independently: git archive of 4bbb2a9c with the head's five e2e files (doc.e2e.ts, dispatch-cli.ts, cli-body-cap.e2e.ts, engine-reading.ts, read-back.ts), WS=<that tree> run-e2e.sh ... -> 2 failed at doc.e2e.ts:723, Expected [\"Plain &amp; end.\"] Received [\"Plain & end.\"]. Proof 2's surface driven by a throwaway Go probe (36 adversarial markdowns through parseAsTheEngine: link text, emphasis, strikethrough, heading, list, task, quote, table with escaped pipes, footnote definition, autolink, bare URL, CR/TAB/FF/NUL/surrogate/noncharacter numerics, 31-letter and over-long names, &amp\\;, code spans, hard breaks) -> Go reads every one as the engine does; the only Parse errors are the schema's own refusals (link reference definitions; a code language holding an escape or a reference, by design, refusals.go:53). Proof 3 re-run: differential.sh --base 4bbb2a9c --head 49260f10 --corpus stored.jsonl --corpus references.jsonl -> the same gate counts as the implementer's (0 regressions, 0 churn, 0 engine-tree regressions, 0 panics, 0 lost fixed points, 231 engine-tree churn all references corpus, 2 misreads references:ref-1137 and ref-1201, the INFRA-425 link address, recorded by the architect's decision); no row of report.jsonl comes from the stored corpus."
+    "how": "Proof 1 re-run at 4daf66f5: run-e2e.sh doc.e2e.ts -g \"backslash before a character reference\" -> 2 passed (chromium, iphone); the five e2e files are byte-identical to round 1, whose base run I made myself (2 failed at doc.e2e.ts:723, editor [\"Plain & end.\"]). Proof 3 re-run: differential.sh --base 4bbb2a9c --head 4daf66f5 -> the same gate counts as the implementer's (0 regressions, 0 churn, 0 engine-tree regressions, 0 panics, 0 lost fixed points; 231 engine-tree churn and 2 misreads, all from the generated corpus; no row from the stored corpus). Proof 4 (tester failure 2) driven independently on the real CLI and in the live editor (proof 2 below). The red test TestAnImageAddressEndingInABackslashRendersAndReadsBack is unchanged since 8ea780a2 (jj diff --from 8ea780a2 --to 4daf66f5: 0 files changed). The CHANGELOG merge keeps this PR's entry and main's entries, no conflict markers."
   },
-  "failed": 2,
-  "failures": [
-    {
-      "criterion": "CI green at the head tested, read on GitHub",
-      "evidence": "gh pr view 2361 --repo sjawhar/legion -> mergeable CONFLICTING, mergeStateStatus DIRTY, base main 448a4100. gh api repos/sjawhar/legion/commits/{b8d4616d1c5e,49260f10}/check-runs -> 0 check runs at either head: GitHub computes no merge ref for a conflicting head and runs no checks, so lint, types and the suites cannot be read. A trial merge (jj new --no-edit 49260f10 main@origin, abandoned after) conflicts only in packages/envoy/CHANGELOG.md: this PR's [Unreleased] Fixed entry against main's two new entries (envoy-infra integer inputs; the outbox window). The implementer merges main into legion/INFRA-536 (skill://legion-worker/references/conflicts-and-rewrites.md, Reintegrating the base)."
-    },
-    {
-      "criterion": "Change: a stored document renders it back so that it reads the same (spec); T2 image-address writer (plan)",
-      "evidence": "An image address that ends in a backslash is written as it stands by escapeImageSource (render.go:796-817: it doubles a backslash only when the next byte of the address is ASCII punctuation), so the final backslash escapes the `)` or `>` the writer adds and both Go and the engine read `![a](u\\)` as the text `![a](u)`. On the real surface: in the browser-suite stack at 49260f10, `dispatch artifact --project TPR --name slash.md --content '![a](https://a.example/u\\\\)'` (CommonMark for the address `https://a.example/u\\`, which Go and the engine both read so) exits 1 with `markdown is not a Proof document: outside Proof schema: the markdown the document would be stored as reads back otherwise (a paragraph reads back holding \"![a](https://a.example/u\\\\)\", not \"\")`; a browser edit setting such an address is refused the same way. Red test (commit 8ea780a2): `cd packages/envoy && go test ./internal/dispatch/pmdoc/ -count=1 -run TestAnImageAddressEndingInABackslashRendersAndReadsBack` (bun on PATH) -> FAIL on 5 of 6 rows (`u\\` and `u\\\\` plain, `<u v\\>` angle, both in a table cell); the row with a title after the address passes. The base 4bbb2a9c has the same defect (my probe failed the same rows there), but it is in the writer this change rewrites, the escape that makes an address read back, and the deployment rule is to fix an adjacent defect now. Checked satisfiable: changing that condition to `char == '\\\\' && (index+1 == len(src) || isASCIIPunctuation(src[index+1]))` makes the red test, TestReferencesInEveryValueRenderAndReadBackInBothParsers, TestReferenceSpellingsThatReadBackRenderUnchanged and TestRenderReadsBackInBothParsersAsTheEditorShowsIt pass (change reverted; not committed)."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
+  "ci": "read at 738dbe90 (4daf66f5 is handoff-only): lint, typecheck, test, build, changes, pr-title success; envoy-infra-go, broker-multiprocess, dispatch, envoy-go, dispatch-memory, dispatch-multiprocess, envoy-e2e-local, envoy-go-race, envoy-smoke queued. Not waited for.",
   "proof": [
     {
       "criterion": "A1 a document written through the API, A1 dispatch doc-read, and the comment control",
       "surface": "Dispatch browser suite in this pod: real Go server, real migrations on Postgres 17, production SPA bundle, live editor at /issues/<KEY>/spec (chromium, iphone), the Conversation, the real packages/envoy-client/bin/dispatch.ts",
-      "command": "cd packages/dispatch && bun run e2e doc.e2e.ts -g \"backslash before a character reference\" (in-pod: $TMPDIR/infra536/run-e2e.sh doc.e2e.ts -g \"backslash before a character reference\")",
-      "observed": "2 passed (chromium, iphone): editor [\"Plain &amp; end.\"], stored \"Plain &amp;amp; end.\\n\", comment \"Plain &amp; end.\", doc-read \"Plain &amp;amp; end.\\n\\n\\n\" before its trailer",
-      "headSha": "49260f1091099697d58c04e349bcb941f32c7f57",
-      "negativeControl": "the same test on a git archive of base 4bbb2a9c with the head's five e2e files: 2 failed at doc.e2e.ts:723, editor shows [\"Plain & end.\"]"
+      "command": "cd packages/dispatch && bun run e2e doc.e2e.ts -g \"backslash before a character reference\" (in-pod: $TMPDIR/infra536/run-e2e.sh doc.e2e.ts zz-tester-probe.e2e.ts -g \"backslash before a character reference|tester probe\")",
+      "observed": "doc.e2e.ts:707 passed in chromium (11.8s) and iphone (8.4s): editor [\"Plain &amp; end.\"], stored \"Plain &amp;amp; end.\\n\", comment \"Plain &amp; end.\", doc-read \"Plain &amp;amp; end.\" before its trailer",
+      "headSha": "4daf66f5bda0efee2acfa07f9b98a132b6702bc0",
+      "negativeControl": "the same test (e2e files unchanged) on a git archive of base 4bbb2a9c, run in round 1: 2 failed at doc.e2e.ts:723, the editor shows [\"Plain & end.\"]"
     },
     {
-      "criterion": "Every escape and character reference reads as the engine reads it, at every decoded site, on the real surface",
-      "surface": "same stack: a document written through the API, the live editor's paragraphs and link/image attributes, the stored markdown, dispatch doc-read, and dispatch artifact writing doc-read's output back",
-      "command": "throwaway packages/dispatch/e2e/zz-tester-probe.e2e.ts (deleted after the run), run-e2e.sh zz-tester-probe.e2e.ts --project chromium",
-      "observed": "1 passed: editor paragraphs equal engineParagraphs of the written markdown for 7 paragraphs (`AT&T &copy 2024 x &amp y`; `a \\uFFFD b &#00000065; c &notit; d \\uFFFD e`; `f  g &#65; h \\& i`; link; image; table cell `&amp; &copy x`); link title `&amp; t ©`, image src `https://a.example/u&amp;v`, image title `© &lt;`; stored markdown and doc-read read as the engine reads the original; doc-read uploaded as back.md version 1 reads back byte-identical",
-      "headSha": "49260f1091099697d58c04e349bcb941f32c7f57",
-      "negativeControl": "an image address ending in a backslash (`![a](https://a.example/u\\\\)`) -> dispatch artifact exits 1 with the read-back refusal: failure 2"
+      "criterion": "Every escape and character reference reads as the engine reads it, and a stored document renders back so that it reads the same, an image address ending in a backslash included (round 1 failure 2)",
+      "surface": "same stack: a spec written through the API, the live editor's paragraphs and link/image attributes, the stored markdown, dispatch doc-read and dispatch artifact",
+      "command": "throwaway packages/dispatch/e2e/zz-tester-probe.e2e.ts (deleted after the run), chromium",
+      "observed": "1 passed: the editor's 12 paragraphs equal engineParagraphs of the written markdown; link title `&amp; t ©`; image src `https://a.example/u&amp;v`, title `© &lt;`; images with addresses written `u\\\\`, `<u v\\\\>`, `u\\\\\\\\ \"t\"` and `u\\\\` in a table cell have src `https://a.example/u\\`, `https://a.example/u v\\`, `https://a.example/u\\\\`, `https://a.example/u\\`; stored markdown keeps those spellings and reads as the engine reads the original, as does doc-read; dispatch artifact --project TPR --name slash.md --content '![a](https://a.example/u\\\\)' exits 0 (version 1) and doc-read prints `![a](https://a.example/u\\\\)` as written",
+      "headSha": "4daf66f5bda0efee2acfa07f9b98a132b6702bc0",
+      "negativeControl": "the same dispatch artifact write at 49260f10 (round 1, before the fix) exited 1: `outside Proof schema: the markdown the document would be stored as reads back otherwise (a paragraph reads back holding \"![a](https://a.example/u\\\\)\", not \"\")`"
     },
     {
       "criterion": "Stored documents keep their reading",
       "surface": "pmdoc differential over 5,137 stored production documents and 8,084 generated (13,221)",
-      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base 4bbb2a9c --head 49260f10 --corpus $TMPDIR/infra536/stored.jsonl --corpus $TMPDIR/infra536/references.jsonl --out $TMPDIR/infra536/tester-diff",
-      "observed": "regressions 0, churn 0, engine-tree regressions 0, head panics 0, lost fixed points 0; engine-tree churn 231 and misreads 2 (references:ref-1137, ref-1201: the bare-URL link address, INFRA-425), every report row from the generated corpus",
-      "headSha": "49260f1091099697d58c04e349bcb941f32c7f57",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base 4bbb2a9c --head 4daf66f5 --corpus $TMPDIR/infra536/stored.jsonl --corpus $TMPDIR/infra536/references.jsonl --out $TMPDIR/infra536/tester-diff2",
+      "observed": "regressions 0, churn 0, engine-tree regressions 0, head panics 0, lost fixed points 0; engine-tree churn 231 and misreads 2 (the INFRA-425 bare-URL link address, recorded by the architect's decision), every report row from the generated corpus",
+      "headSha": "4daf66f5bda0efee2acfa07f9b98a132b6702bc0",
       "negativeControl": "the base side of the same run: 4,722 documents the head fixes and 1,483 engine trees the base renders wrong"
     }
   ]
