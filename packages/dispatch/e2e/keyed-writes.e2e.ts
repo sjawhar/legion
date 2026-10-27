@@ -632,6 +632,10 @@ for (const landed of [false, true]) {
       }
       await signingOut.getByRole("button", { name: "Sign out" }).click();
       await sent.promise;
+      // The hold is read before alice's session ends: Dispatch closes the holding tab's live
+      // socket as soon as it does, and that tab then reads whoami, so its lapse would otherwise
+      // overtake the hold and leave the sign-in page, with no indicator to read.
+      await expect(pendingWrites(holding)).toContainText("Waiting for a sign-out in another tab");
       if (landed) {
         const ended = await fetch(new URL("/auth/logout", baseUrl), {
           headers: await userHeaders("alice"),
@@ -639,7 +643,6 @@ for (const landed of [false, true]) {
         });
         expect(ended.status).toBe(200);
       }
-      await expect(pendingWrites(holding)).toContainText("Waiting for a sign-out in another tab");
       network.end();
       const closed = Date.now();
       await signingOut.close();
