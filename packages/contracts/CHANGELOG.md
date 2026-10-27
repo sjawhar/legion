@@ -30,6 +30,12 @@
   past them is its document, and one whose document or item is past them names nothing.
   `parseBlockFragment`'s `pin` is N's decimal digits as a string, so no pin past 2^53 is rounded.
   `DISPATCH_TEXT_REFERENCES` gains the block, pin and bound rows both readers of text are held to.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. `GraphNode` gains them,
+  optional because a server older than them omits them (`changed_at` was a block's alone and may
+  now be `null`), and `GraphNodeParent` (`kind`, `id`, `ref?`) is `parent`'s type: `id` is the
+  parent node's own id and `ref` is absent when the parent has no reference. An actor list the
+  server never recorded is `[]`, any other fact `null`.
 - Daemon API contract 40: `LEGION_WORKFLOW_PHASES` gains `awaiting_person`, after `admitted`, a
   root that gave its admission slot up while its architect waits on a person's answer, and the
   state issue view gains `waitingOn`, present only in that phase: `kind: "ask"` with the question's

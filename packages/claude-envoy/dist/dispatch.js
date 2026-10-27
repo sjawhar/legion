@@ -14352,7 +14352,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -14412,7 +14412,7 @@ var dispatchToolSpecs = [
     name: "dispatch_artifact",
     example: { issue: "DSP-1", name: "design.md", content: `# Design
 ` },
-    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
+    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key for an unlinked document.").optional(),
@@ -17547,12 +17547,12 @@ function issueSummary(issue2, events, references, graph, linkBase, titles) {
   ].join(`
 `);
 }
-function referenceLines(edges) {
-  if (typeof edges === "string")
-    return [`- ${edges}`];
-  if (edges.length === 0)
+function referenceLines(read) {
+  if (typeof read === "string")
+    return [`- ${read}`];
+  if (read.edges.length === 0)
     return ["- none"];
-  return edges.map((edge) => {
+  return read.edges.map((edge) => {
     const excerpt2 = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
     const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
     return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt2}${edge.created_at})${block}`;
@@ -17561,9 +17561,9 @@ function referenceLines(edges) {
 function unavailableReason(error48) {
   return dispatchAnswered(error48, 404) ? "unavailable" : `unavailable: ${messageFor(error48)}`;
 }
-async function graphEdges(client, query) {
+async function graphReferences(client, query) {
   try {
-    return (await client.getReferences(query)).edges;
+    return await client.getReferences(query);
   } catch (error48) {
     return unavailableReason(error48);
   }
@@ -17577,13 +17577,31 @@ async function issueReferencesOrUnavailable(client, key) {
 }
 async function graphSections(client, ref) {
   const [incoming, outgoing] = await Promise.all([
-    graphEdges(client, { to: ref }),
-    graphEdges(client, { from: ref })
+    graphReferences(client, { to: ref }),
+    graphReferences(client, { from: ref })
   ]);
   return graphSectionLines(incoming, outgoing);
 }
 function graphSectionLines(incoming, outgoing) {
-  return ["Referenced by:", ...referenceLines(incoming), "Links:", ...referenceLines(outgoing)];
+  return [
+    ...typeof incoming === "string" ? [] : nodeLine(incoming.node),
+    "Referenced by:",
+    ...referenceLines(incoming),
+    "Links:",
+    ...referenceLines(outgoing)
+  ];
+}
+function nodeLine(node) {
+  if (node.made_by === undefined)
+    return [];
+  const fact = (by, time3) => `${by === undefined || by.length === 0 ? "nobody recorded" : by.map(actorText).join(", ")}${time3 == null ? "" : ` at ${time3}`}`;
+  const made = fact(node.made_by, node.made_at);
+  const changed = fact(node.changed_by, node.changed_at);
+  const { parent } = node;
+  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (version ${node.parent_version})`}`;
+  return [
+    `Node: ${node.kind} ${node.ref ?? node.id} \xB7 made by ${made} \xB7 changed by ${changed}${partOf}`
+  ];
 }
 function blockLines(node, ref) {
   const head = [
@@ -19026,13 +19044,10 @@ Document token: ${listed.token}`,
             }
             throw error48;
           }),
-          graphEdges(client, { from: blockRef })
+          graphReferences(client, { from: blockRef })
         ]);
         return {
-          text: [
-            ...blockLines(incoming.node, ref),
-            ...graphSectionLines(incoming.edges, outgoing)
-          ].join(`
+          text: [...blockLines(incoming.node, ref), ...graphSectionLines(incoming, outgoing)].join(`
 `),
           details: {
             ...ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },
