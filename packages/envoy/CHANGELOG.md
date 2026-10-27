@@ -819,6 +819,57 @@
 
 ### Changed
 
+- `POST /v1/messages/publish` answers a role or ad-hoc topic message once its recipient confirmed
+  it, or 504, so a message sent through a listener reaches its recipient or its sender gets an
+  error, also while the hub's NATS servers change under the recipient (INFRA-547). A role topic is
+  no longer published on the role lane: the listener forwards the envelope to the live holder's
+  agent subject itself with a receipt, resolving the holder again and forwarding the same envelope
+  (one `event_id`, dedupe key `envoy.role.forward.<key>`) 100 ms after each miss, each forward
+  waiting at most 2 s, until a receipt arrives or 4 s from the request's arrival have passed. It
+  answers `200` with the envelope and `holder` once the holder's receipt arrived, and also,
+  forwarding nothing, when `source_session` holds the role or the holder already took the dedupe
+  key; `404` with `reason` `unclaimed` or `holder_lapsed`, as before; `403 {"error":…,
+  "reason":"capability","holder":…}` when the holder does not advertise the payload's delivery
+  mode, where the role lane dropped such a message after the 200; and `504 {"error":…,"reason":…,
+  "event_id":…,"dedupe_key":…,"holder":…,"attempts":N}` once the 4 s passed, `reason` being
+  `receipt_timeout` (the last forward reached the server and drew no receipt) or `delivery_failed`
+  (no live holder, a read that failed or ran out of time, a forward not shown to have reached the
+  server). An ad-hoc topic (one no stream subject captures, `bus.UsesCoreTransport`) is still
+  published over core NATS, then forwarded the same way, `event_id` and `dedupe_key` unchanged, to
+  the agent subject of each live `self_subscribed` session registered on it on any machine
+  (`store.Registry.MatchAll`), the sender excepted; it answers `200` when each confirmed or there
+  was none, and otherwise `504 {"error":…,"reason":"not_confirmed","event_id":…,"dedupe_key":…,
+  "delivered":[…],"undelivered":[{"session_id":…,"reason":…}]}`. A session that stopped without
+  unregistering stays registered for up to 5 minutes and is named in `undelivered` in that time; a
+  named session is not a failed delivery to the others. A session served on a port is not
+  confirmed and keeps the live topics lane's delivery. A topic the stream captures is unchanged:
+  stored before the 200, and read back through `POST /v1/replay` by a session that missed it. The
+  route publishes no delivery exception. The role lane now carries only a role topic a client
+  publishes straight onto NATS (a listener of an earlier release, an operator's `nats pub`), and
+  still forwards it once and reports a failure as an exception.
+- Every receipt-backed forward to a session's agent subject (`bus.Client.RequestCoreTo`) carries a
+  `Nats-Msg-Id` of its dedupe key and subject (`bus.ForwardMsgID`), so the stream, which captures
+  agent subjects, keeps one copy per message and recipient however many attempts the route makes;
+  `RequestCoreTo` takes as a receipt only a reply with no data and no header field, since the
+  stream's acknowledgement of that copy carries data and the server's no-responders answer a
+  `Status` header. A listener's durable acknowledges an envelope stored on an agent subject whose
+  topic is not that subject (a stored forward copy) without delivering it. During a rollout a
+  listener of an earlier release sends a stored ad-hoc forward copy to its fanout, which pushes it
+  to its serve-port sessions subscribed to the topic once per key. A soak test
+  (`cmd/listener/server_change_test.go`, build tag `serverchange`) runs both listener binaries
+  over a three-server in-process NATS cluster and proves every role, ad-hoc and captured message
+  sent every 250 ms arrives or errs across lame-duck and killed servers; CI runs it as its own
+  job, `listener-server-change`.
+- The Legion daemon reads the new answers (`packages/daemon/internal/notify`,
+  `internal/daemon/outbox.go`; the daemon keeps no CHANGELOG of its own). A 504 `receipt_timeout`
+  queues the notice again on the existing capped schedule, at most three copies; a 504
+  `delivery_failed` is retried on the row's backoff without a cap, so a hub outage drops no notice;
+  a 403 `capability` finishes the row undelivered, and for a merge-queue packet posts a Dispatch
+  message naming the refusal. It still re-holds from the role-lane exceptions a listener of an
+  earlier release raises. **Release order:** a deployment's Legion daemons take this release
+  before its listeners do. An earlier daemon reads a 504 as a generic error and retries the notice
+  without a cap, holding the architect's later notices behind it until the holder's registration
+  lapses.
 - `POST /v1/interests/subscribe` no longer stores a topic reaching a private stream subject other
   than the session's own agent subject (`bus.ReachesPrivateStreamSubject`): another session's
   `notifications.agent.<id>`, a failed-delivery lane

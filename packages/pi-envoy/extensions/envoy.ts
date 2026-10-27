@@ -1294,14 +1294,17 @@ export default function envoyExtension(pi: PiApi): void {
     receivedAt: number
   ): Promise<void> => {
     const rendered = renderInbound(raw, sessionID, subject);
-    // Acknowledge first. The listener's role lane waits two seconds for this
-    // receipt and reports a miss as a failed delivery, which the daemon answers
-    // by re-sending the message (LEGION-101); everything below — the inbox
-    // update, a Dispatch round trip, the injection — can outlast that window
-    // under load. A frame renderInbound throws on never reaches this line, so
-    // an undecodable frame is still not acknowledged. A receipt that cannot be
-    // published is logged and delivery goes on: the message must not be lost
-    // locally because the acknowledgement was.
+    // Acknowledge first. The listener waits two seconds for this receipt: its
+    // publish route, which forwards a role message or an ad-hoc topic's copy
+    // here, forwards again until a receipt arrives within its four-second window
+    // and answers a miss to the sender as an error, which the daemon answers by
+    // re-sending the message; its role lane, for a role topic published straight
+    // onto NATS, reports a miss as a failed delivery (LEGION-101). Everything
+    // below — the inbox update, a Dispatch round trip, the injection — can
+    // outlast that window under load. A frame renderInbound throws on never
+    // reaches this line, so an undecodable frame is still not acknowledged. A
+    // receipt that cannot be published is logged and delivery goes on: the
+    // message must not be lost locally because the acknowledgement was.
     const directSubject = agentSubject(sessionID);
     if (
       expectsLaneReceipt({

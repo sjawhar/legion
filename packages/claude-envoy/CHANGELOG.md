@@ -55,6 +55,12 @@
 
 ### Changed
 
+- The bundled `envoy_publish` description (`dist/` rebuilt) says a role message errs when its
+  holder did not confirm it within the listener's window, and a team or other ad-hoc topic errs
+  naming each session holding its own NATS connection that registered the topic and did not
+  confirm it; a session that stopped without unregistering stays registered for up to 5 minutes
+  and is named in that time, and a named session is not a failed delivery to the others
+  (INFRA-547).
 - The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
   `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
   while its architect waits on a person's answer, and the issue field `waitingOn`, naming the
@@ -104,6 +110,12 @@
 
 ### Fixed
 
+- A message the listener forwards to the session's agent subject is shown with the topic it was
+  published to: the channel notification's `topic` meta is the envelope's `topic`, falling back to
+  the NATS subject only when the envelope names none, where it was always the subject. A role
+  message's forward was shown under the session's own `notifications.agent.<id>`, and so was an
+  ad-hoc topic's copy the listener now confirms with the session, which can arrive before the copy
+  on the topic itself (INFRA-547).
 - The Legion tool's `handoff_complete` waits out a daemon restart: a connection refused, reset or
   closed before a response, or a 502 or 503 from a proxy, is retried with backoff for up to 10
   minutes, each attempt with a fresh grant, until the MCP client cancels the request

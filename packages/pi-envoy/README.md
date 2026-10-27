@@ -14,8 +14,13 @@ different: the listener arbitrates the core-NATS role lane for the current live 
 a receipt-backed request with the original role topic to the holder's direct agent subject.
 `envoy_unsubscribe` manages only normal topic subscriptions; it does not relinquish a held role,
 and it keeps open, listing them as kept, the subscriptions another plugin holds for that role.
-The agent pump replies after accepting the envelope; without a receipt within two seconds the
-listener emits a `delivery_failed` exception. Role messages are live only; they are not retained
+The agent pump replies after accepting the envelope. A message sent through the listener's
+`POST /v1/messages/publish` waits for that reply: the listener forwards it again after two seconds
+without one, and answers the sender with an error once four seconds pass without a reply. A role
+topic published straight onto NATS is forwarded once, and a miss is a `receipt_timeout` exception.
+The same route forwards a team or other ad-hoc topic's message to each session registered on the
+topic that holds its own NATS connection, as this one does, other than its sender, and the sender's
+error names each session that did not reply. Role messages are live only; they are not retained
 for a later claimant, and a session does not recover one it missed.
 
 `envoy_list()` shows the union of the local subscriptions and the listener's persisted interest
@@ -41,15 +46,16 @@ topic it follows, after the place it last read to, and shows each missed message
 saying it was published while the connection was down. It asks after it reconnects, after a
 subscription is reopened, when it starts or resumes, and on every heartbeat. A targeted Dispatch
 delivery recovered this way (BTW, Aside, Steer, a person's Send) is shown as that card only and
-runs nothing. Role messages and team or other ad-hoc topics are live only and are not recovered,
-and neither is anything older than 72 hours, published before the session followed the topic, or
-published before the session first ran this plugin. A message the session fails to show three
-times is replaced by one card naming it and saying how to read it. The session file keeps what
-it was shown and where it read to, so a restart skips nothing the stream still holds and shows
-nothing again (up to 20,000 messages shown in 72 hours); a crash between showing a message and
-recording it can show it twice, never lose it. Against a listener without the route, the session
-warns once that missed messages are not recovered, and live delivery goes on as before. "Missed
-messages" in `AGENTS.md` has the full rules.
+runs nothing. Role messages are live only and are not recovered; a team or other ad-hoc topic is
+recovered only from the copy the listener forwarded to the session's agent subject while it was
+registered on the topic. Nor is anything older than 72 hours, published before the session
+followed the topic, or published before the session first ran this plugin. A message the session
+fails to show three times is replaced by one card naming it and saying how to read it. The
+session file keeps what it was shown and where it read to, so a restart skips nothing the stream
+still holds and shows nothing again (up to 20,000 messages shown in 72 hours); a crash between
+showing a message and recording it can show it twice, never lose it. Against a listener without
+the route, the session warns once that missed messages are not recovered, and live delivery goes
+on as before. "Missed messages" in `AGENTS.md` has the full rules.
 
 ## Session identity
 

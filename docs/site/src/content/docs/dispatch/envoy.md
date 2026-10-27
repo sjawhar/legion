@@ -119,21 +119,25 @@ published still gets it when it reconnects
 | Topic | What it is |
 | --- | --- |
 | `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies to its comments, comments on documents it wrote, and claim changes arrive here. |
-| `notifications.role.<role>` | A role, held by one live session at a time. You publish to it; the listener hands each message to the current holder. |
+| `notifications.role.<role>` | A role, held by one live session at a time. You publish to it; the listener hands each message to the current holder and answers once the holder confirmed it. |
 | `notifications.dispatch.issue.<KEY>.>` | Every event of one Dispatch issue. |
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
-| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. Live only: it reaches every session subscribed to it when it is published, and is not retained, so a session whose connection was down when it was published never gets it. A session that holds its own NATS connection receives it directly, its own publish included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
+| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. A session that holds its own NATS connection receives it directly, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays registered for up to five minutes and is named in that time. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A session the listener delivers to over a serve port, such as an OpenCode agent, is not waited for: it receives the topic through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
 request's `.>` gets its lifecycle events as well as its comments and checks.
 
-A role message is not stored for later. If no live session holds the role, a publish through the
-API is refused with `404`. If the holder does not take a message, the listener publishes an
-exception naming the reason: `no_holder`, `delivery_failed`, or `receipt_timeout`.
+A role message is not stored for later. A publish through the API waits for the holder to confirm
+the message and answers `200` naming the holder. If no live session holds the role, it is refused
+with `404`; if the holder does not take the message's delivery mode, with `403`; and if the holder
+has not confirmed it within four seconds, with `504` and the reason, `receipt_timeout` or
+`delivery_failed`. A role message published straight onto NATS, not through the API, is forwarded
+once, and if the holder does not take it the listener publishes an exception naming the reason:
+`no_holder`, `delivery_failed`, or `receipt_timeout`.
 
 ## Messages a session missed
 
@@ -150,10 +154,12 @@ connection was down.
 - **What comes back:** messages on the session's inbox topic, `notifications.agent.<session_id>`,
   and on the topics it follows that the stream keeps, such as an issue's
   `notifications.dispatch.issue.<KEY>.>`, up to 72 hours old.
-- **What does not:** role messages and team topics, which are live only; anything from before the
-  session existed, before it followed the topic, or before it first ran a plugin version that
-  recovers; anything older than 72 hours. When the stream was recreated, or the session read it
-  too late to find everything still there, it is told once that messages may be missing.
+- **What does not:** role messages, which are live only; team topics, except the copy the listener
+  hands a session registered on the topic, which comes back on its inbox topic; anything from
+  before the session existed, before it followed the topic, or before it first ran a plugin
+  version that recovers; anything older than 72 hours. When the stream was recreated, or the
+  session read it too late to find everything still there, it is told once that messages may be
+  missing.
 - **Nothing runs late:** a person's Send or Aside, a Steer or a BTW that comes back this way is
   shown as a message only, since a person's input run late could act on an old instruction. The
   session does not take it as the person's turn and does not answer a BTW. A BTW that comes back

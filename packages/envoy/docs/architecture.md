@@ -62,7 +62,7 @@ requires a bearer checks no `Host`.
 | `/v1/roles/set` | POST | Claim a role for a live session and register its role topic |
 | `/v1/registry/{session_id}` | GET | The authoritative answer for one session — reads through the cache to the session bucket, so a session the cache has not refilled is still found, and returns the same body a `/v1/sessions` row carries. It refuses with 413 or 400 for an id NATS will not take as a key, `404 {"error":"no live session <id>"}` only for a key the bucket does not hold, and 503 with `Retry-After: 1` for a read that did not answer |
 | `/v1/messages/send` | POST | Send a direct agent-to-agent message |
-| `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. Role topics and ad-hoc topics (any `notifications.` topic the stream does not capture, such as `notifications.team.deploy-squad`) use core NATS and reach the sessions subscribed at that moment; JetStream acknowledgement for every topic the stream captures is bounded to five seconds. |
+| `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. A topic the stream captures is answered once JetStream stored it, bounded to five seconds. A role topic is forwarded to its live holder, and an ad-hoc topic (any `notifications.` topic the stream does not capture, such as `notifications.team.deploy-squad`) is published over core NATS and forwarded to each self-subscribed session registered on it; both are answered once each recipient confirmed the message, or with a 504 naming each that did not after four seconds (see "Role delivery and exceptions"). |
 | `/healthz` | GET | Health check (always available, even during startup) |
 
 ## Subscription visibility
@@ -74,18 +74,37 @@ state even while an interest registration or cleanup request is delayed or unava
 
 ## Role delivery and exceptions
 
-`notifications.role.<role>` is a live, exactly-one-holder lane. The listener's core-NATS
-queue subscriber resolves the current live role holder at delivery time, then sends a
-receipt-backed request with the original role topic to `notifications.agent.<session_id>`.
-The extension's agent pump replies after accepting that envelope. The outcome is one of three
-exception reasons: `no_holder` when no session claims the role; `delivery_failed` when a claim
-exists but the message is not known to have reached the holder (the holder lookup failed, the
-holder's registration is stale, or the publish or the flush to the server failed or timed out);
+`notifications.role.<role>` is a live, exactly-one-holder lane. A role message sent through
+`/v1/messages/publish` is delivered by the route itself: it resolves the current live role holder,
+sends a receipt-backed request with the original role topic to `notifications.agent.<session_id>`,
+and the extension's agent pump replies after accepting that envelope. Without a reply inside two
+seconds the route resolves the holder again and forwards the same envelope (one `event_id`)
+100 ms later, until a reply arrives or four seconds from the request's arrival have passed. It
+answers `200` with the `holder` once the holder replied; `404` with `reason` `unclaimed` or
+`holder_lapsed` when no live session holds the role; `403` with `reason: "capability"` when the
+holder does not take the payload's delivery mode; and `504` with `reason`, `event_id`,
+`dedupe_key`, `holder` and `attempts` once the four seconds passed. The reason is
 `receipt_timeout` when the message was forwarded and flushed to the server and the registered,
-live holder sent no receipt inside the two-second window (`bus.ErrReceiptTimeout`, which the
-client returns from the receipt wait alone — never from the flush, whose own timeout is the same
-`nats.ErrTimeout` value). A role claimant does not subscribe directly to its role subject, and a
-role message is not retained for a future claimant.
+live holder sent no receipt (`bus.ErrReceiptTimeout`, which the client returns from the receipt
+wait alone — never from the flush, whose own timeout is the same `nats.ErrTimeout` value), and
+`delivery_failed` when the message is not known to have reached the holder (no live holder to
+forward to, a holder lookup that failed or ran out of time, or a publish or flush to the server
+that failed or timed out). The route publishes no exception: its sender has the answer.
+
+An ad-hoc topic sent through the route is published over core NATS, then forwarded the same way
+to each session registered on it, on any machine, that holds its own NATS connection
+(`self_subscribed`), other than the sender. It answers `200` once each confirmed, and otherwise
+`504` with `reason: "not_confirmed"`, `delivered` and `undelivered` (each `{session_id, reason}`).
+A session that stopped without unregistering stays registered for up to five minutes and is
+named in `undelivered` in that time; it is not a failed delivery to the others. A session served
+on a port is not confirmed. Every forward carries a `Nats-Msg-Id`, so the stream keeps one copy
+per message and recipient, and listeners acknowledge that stored copy without delivering it.
+
+The role lane, a core-NATS queue subscriber in each listener, carries a role topic a client
+publishes straight onto NATS rather than through the route. It resolves the holder at delivery
+time and forwards once, and its outcome is one of three exception reasons: `no_holder` when no
+session claims the role, `delivery_failed` or `receipt_timeout` as above. A role claimant does not
+subscribe directly to its role subject, and a role message is not retained for a future claimant.
 
 When a control delivery has no holder, cannot be forwarded, or draws no receipt, Envoy emits an
 envelope on `notifications.envoy.exceptions.<original-topic>`. The exception payload preserves

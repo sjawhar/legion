@@ -4,6 +4,13 @@
 
 ### Changed
 
+- The `envoy_publish` description says when a publish errs: a role message errs when its holder
+  did not confirm it within the listener's window, and a team or other ad-hoc topic, which the
+  listener now confirms with each other session that holds its own NATS connection and registered
+  the topic, errs naming each session that did not confirm. A session that stopped without
+  unregistering stays registered for up to 5 minutes and is named in that time, and a named
+  session is not a failed delivery to the other sessions. A session on a serve port is not
+  confirmed (INFRA-547).
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
