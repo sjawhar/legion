@@ -63,10 +63,10 @@
   ],
   "openQuestions": [
     "Merge gate: #2228 (legion/INFRA-439) is still open at 3ea454d3; this PR merges only after it, once main's squash commit of #2228 is in the branch.",
-    "actionlint v1.7.7 reports five 'unexpected key \"cache-mode\" for \"job\" section' errors in release.yaml; the file before this round's change gives the same five, so none comes from this branch."
+    "Rollout: the hub's session listener must run this PR's listener before INFRA-553's move can read versions; INFRA-14 owns that sequencing."
   ],
   "discoveredComplexity": [
     "Two timing tests in files this branch does not touch failed in this pod's full-suite runs and pass alone or in the worker's runs: envoy-client envoy-config.test.ts '! command ... still running after 10 s' and claude-envoy session-title.test.ts 'queryTmux is bounded even by a tmux that ignores SIGTERM'.",
-    "actionlint reports five 'unexpected key cache-mode' errors in release.yaml that predate this branch (the setup-bun composite action's input used at job level is not something this change touches)."
+    "actionlint v1.7.7 reports five 'unexpected key \"cache-mode\" for \"job\" section' errors in release.yaml; the file before this round's change gives the same five, so none comes from this branch."
   ]
 }
