@@ -162,14 +162,18 @@ const (
 // request twice (the workflow's tellChanges). Mark places the event in the issue's Dispatch event log: the event's
 // sequence and Dispatch's time of it, from the event itself, or, for a review, from the read's
 // latest review (dispatch.Approval's Seq and At), whichever of them that read gave. A version the
-// gate seed read from Dispatch carries none.
+// gate seed read from Dispatch carries none, and says instead whether that read showed the
+// document's approval request waiting on the agent (RequestWaitsOnAgent), which is what a newer
+// version does to it: a version with neither a mark nor that cannot be placed against a root's
+// wait on its gate, and answers none.
 type DispatchArtifact struct {
-	Key        string
-	ArtifactID string
-	Kind       DispatchArtifactKind
-	Version    int
-	Reason     string
-	Mark       record.EventMark
+	Key                 string
+	ArtifactID          string
+	Kind                DispatchArtifactKind
+	Version             int
+	Reason              string
+	Mark                record.EventMark
+	RequestWaitsOnAgent bool
 }
 
 func (DispatchArtifact) isFact() {}
@@ -480,7 +484,7 @@ func (RequiredChecks) isFact() {}
 
 // PullRequestMergeability is GitHub's lazily computed verdict for whether a pull request's head
 // can be merged into Base without a conflict, decoded from GitHub's nullable `mergeable` field on
-// pullRequestMergeability's own /pulls/{number} read, which also names the base branch: never
+// readPullRequest's own /pulls/{number} read, which also names the base branch: never
 // decoded from an event, applied as a synthetic fact by the daemon's own read of each open pull
 // request (workflowRuntime.readRequiredChecks), before requiredFor's own rulesets and workflow
 // reads run. Mergeable is record.MergeabilityUnknown while GitHub is still computing it,
@@ -585,7 +589,8 @@ type HandoffComplete struct {
 	MergeNote string
 	// RecordedHead and RecordedHeadAt are the head the daemon's record held for the issue's pull
 	// request when the route read it for READY, and the record's clock then
-	// (record.PullRequest.HeadUpdatedAt). The record follows GitHub only by webhook, so it can lag:
+	// (record.PullRequest.HeadUpdatedAt). The record follows GitHub only by webhook and the
+	// daemon's two-minute read of each pull request, so it can lag:
 	// the workflow accepts READY while the record is still exactly that snapshot, or already at
 	// Commit, and otherwise refuses it, since a push landed in between. Both fields are compared, so
 	// a record that left this head and came back to it (a force push and its undo) is a moved one.
@@ -712,6 +717,36 @@ type TaskConfirmed struct {
 }
 
 func (TaskConfirmed) isFact() {}
+
+// GateRequestFound is the boot catch-up's read of the approval request Dispatch shows open on a
+// root's registered spec document (dispatch.Approval.AskID), for a gate whose document the asks'
+// mirror holds no approval request of: a gate a daemon of an earlier release registered before the
+// mirror existed, or one whose request the daemon never saw an event of. Since is the issue's
+// Dispatch sequence read before the approval, and WaitsOnAgent says the request waited on the
+// agent. The workflow writes the request's mirror row as the read found it, at Since, when it holds
+// none; when the gate is closed and armed and the request waits on the person, that is the
+// architect's hand-back of the spec, declared as a registration declares it.
+type GateRequestFound struct {
+	Issue        string
+	Generation   uint64
+	ArtifactID   string
+	RequestAsk   string
+	WaitsOnAgent bool
+	Since        int64
+}
+
+func (GateRequestFound) isFact() {}
+
+// CatchUpApplied is the boot catch-up of a root finishing: every event of its Dispatch event log
+// up to Through (0 when the catch-up applied nothing and moves no cursor) has been applied. The
+// workflow raises the root's catch-up cursor to Through; admission, which held the root out of its
+// decision while its window was applied, decides it at this fact, once.
+type CatchUpApplied struct {
+	Issue   string
+	Through int64
+}
+
+func (CatchUpApplied) isFact() {}
 
 // LingerExpired records the generation whose post-close linger elapsed.
 type LingerExpired struct {

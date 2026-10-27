@@ -1392,7 +1392,7 @@ func TestHandoffCompleteReadyRefusesAHeadThatMovedBeforeTheMergerCanArmIt(t *tes
 }
 
 // The route holds READY's commit to GitHub's head and passes the workflow the record as it read it,
-// head and clock, which follows GitHub only by webhook and can lag, and GitHub's clock in that read.
+// head and clock, which follows GitHub by webhook and a periodic read and can lag, and GitHub's clock in that read.
 // Here the record still holds an earlier push, at an earlier clock, while GitHub and the commit are
 // at retro's last: the READY passes, and its fact carries the lagging record and GitHub's clock, so
 // the workflow takes the record as lagging, not moved, and stamps the READY's head with that clock.

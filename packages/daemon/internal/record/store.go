@@ -183,6 +183,13 @@ func (s *Postgres) UnnamedIssues(ctx context.Context, tx pgx.Tx, project string)
 	return s.issuesWhere(ctx, tx, "project = $1 and repo <> '' and github_repo = ''", project, "with no GitHub spelling of their repository")
 }
 
+func (s *Postgres) HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	return s.issuesWhere(ctx, tx, "project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
+		" and key in (select issue from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
+		" and key not in (select issue from pull_requests where state in ('"+string(PullRequestOpen)+"', '"+string(PullRequestMerged)+"'))",
+		project, "in implementing with a recorded handoff and no open or merged pull request")
+}
+
 // issuesWhere is every record of project the condition selects, by key; what names them in an
 // error.
 func (s *Postgres) issuesWhere(ctx context.Context, tx pgx.Tx, condition, project, what string) ([]Issue, error) {
@@ -842,13 +849,23 @@ func (s *Postgres) RootAsks(ctx context.Context, tx pgx.Tx, issues []string) (ma
 }
 
 func (s *Postgres) StartHandout(ctx context.Context, tx pgx.Tx, issue string) error {
-	if _, err := tx.Exec(ctx, `update issues i set declared_seq = null, declared_at = null, handout_seq = greatest(i.handout_seq, i.last_dispatch_seq,
+	// A root recorded before the catch-up cursor existed gets one at its first handout from this
+	// release (caught_up_seq 0, read from the handout), since this release took in everything up to it.
+	if _, err := tx.Exec(ctx, `update issues i set declared_seq = null, declared_at = null, caught_up_seq = coalesce(i.caught_up_seq, 0),
+		handout_seq = greatest(i.handout_seq, i.last_dispatch_seq,
 		coalesce(i.awaiting_since_seq, 0),
 		coalesce((select c.claim_seq from dispatch_claims c where c.key = i.key), 0),
 		coalesce((select max(greatest(a.seq, a.waiting_on_seq, a.closed_seq, a.person_seq, a.person_answer_seq)) from root_asks a where a.issue = i.key), 0),
 		coalesce((select greatest(coalesce(g.approved_seq, 0), coalesce(g.told_changes_seq, 0)) from design_gates g where g.issue = i.key), 0))
 		where i.key = $1`, issue); err != nil {
 		return fmt.Errorf("start a handout to %s: %w", issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) RestartCaughtUp(ctx context.Context, tx pgx.Tx, issue string) error {
+	if _, err := tx.Exec(ctx, `update issues set caught_up_seq = 0 where key = $1`, issue); err != nil {
+		return fmt.Errorf("restart the catch-up cursor of %s: %w", issue, err)
 	}
 	return nil
 }
@@ -885,6 +902,27 @@ func (s *Postgres) TakeInThrough(ctx context.Context, tx pgx.Tx, issue string, s
 func (s *Postgres) ClearDeclared(ctx context.Context, tx pgx.Tx, issue string) error {
 	if _, err := tx.Exec(ctx, `update issues set declared_seq = null, declared_at = null where key = $1`, issue); err != nil {
 		return fmt.Errorf("clear the hand-back of %s: %w", issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) CaughtUpSeq(ctx context.Context, tx pgx.Tx, issue string) (int64, bool, error) {
+	var seq *int64
+	if err := tx.QueryRow(ctx, `select caught_up_seq from issues where key = $1`, issue).Scan(&seq); err != nil {
+		return 0, false, fmt.Errorf("read the catch-up cursor of %s: %w", issue, err)
+	}
+	if seq == nil {
+		return 0, false, nil
+	}
+	return *seq, true, nil
+}
+
+func (s *Postgres) SetCaughtUp(ctx context.Context, tx pgx.Tx, issue string, seq int64) error {
+	if seq < 0 {
+		return fmt.Errorf("set the catch-up cursor of %s: sequence %d is negative", issue, seq)
+	}
+	if _, err := tx.Exec(ctx, `update issues set caught_up_seq = greatest(coalesce(caught_up_seq, 0), $2) where key = $1`, issue, seq); err != nil {
+		return fmt.Errorf("set the catch-up cursor of %s at %d: %w", issue, seq, err)
 	}
 	return nil
 }
