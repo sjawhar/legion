@@ -654,9 +654,13 @@ The target names the lock:
 - `<classid>:<objid>`, for another advisory lock.
 - The ids of the lock, joined by `:`, for any other lock.
 
-For each wait, the sampler records the waiter's statement and the statement of its first blocker
-(the first pid of `pg_blocking_pids`). Each statement is the `query` of `pg_stat_activity`, cut to
-80 characters.
+For each wait, the sampler records the waiter's statement and the statement of its first blocker.
+The first blocker is the backend with the lowest pid that holds the same lock, granted, in the same
+`pg_locks` read. For a relation lock, that holder can hold a mode that does not conflict with the
+wait. Each statement is the `query` of `pg_stat_activity`, cut to 80 characters. The sampler does
+not call `pg_blocking_pids`: that function takes exclusive access to Postgres's lock manager. When
+the sampler called it for each waiter every 20 ms, 1x committed 0.47 and 0.82 events/s, against
+1.63-1.81 without the sampler, on the same build and seed.
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |

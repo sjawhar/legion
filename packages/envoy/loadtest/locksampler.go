@@ -11,8 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// lockWait is one ungranted heavyweight lock in pg_locks: what the waiter runs and what the
-// first of its blockers (pg_blocking_pids) runs. Waits group by lock type, target and mode. The
+// lockWait is one ungranted heavyweight lock in pg_locks: what the waiter runs and what its
+// blocker runs (a granted holder of the same lock, ungrantedLocksQuery). Waits group by lock type, target and mode. The
 // target is a label for the two locks this harness tracks (commit_order_lock: Dispatch's
 // commit-order advisory lock; notify_commit_lock: Postgres's NOTIFY commit lock, the database-0
 // object lock PreCommit_Notify takes), a relation name, row_wait for a transaction-id wait (a row
@@ -35,14 +35,30 @@ type lockSampler struct {
 	samples []ungrantedSample
 }
 
-// ungrantedLocksQuery reads pg_locks once per sample. pg_blocking_pids takes the lock manager's
-// partition locks, so the materialized CTE keeps it to one call per waiter. $1 and $2 are the
-// commit-order lock's classid and objid.
+// ungrantedLocksQuery reads pg_locks once per sample, in one materialized CTE, and names each
+// waiter's blocker from that same scan: a granted holder of the same lock (the lowest pid). It
+// never calls pg_blocking_pids, which takes exclusive access to the lock manager's shared state:
+// called for each of the ~45 waiters of a 1x step every 20 ms, it stalled every lock acquisition
+// in Dispatch and halved the committed rate it was measuring (1x: 0.47 and 0.82 events/s against
+// 1.63-1.81 without it, 2026-10-27). $1 and $2 are the commit-order lock's classid and objid.
 const ungrantedLocksQuery = `
-with w as materialized (
-  select l.locktype, l.mode, l.pid, l.database, l.relation, l.page, l.tuple, l.virtualxid, l.transactionid,
-         l.classid, l.objid, l.objsubid, pg_blocking_pids(l.pid) as bp
-  from pg_locks l
+with l as materialized (
+  select locktype, mode, pid, granted, database, relation, page, tuple, virtualxid, transactionid,
+         classid, objid, objsubid
+  from pg_locks
+),
+w as (
+  select l.*,
+    (select h.pid from l h
+     where h.granted and h.pid is distinct from l.pid and h.locktype = l.locktype
+       and h.database is not distinct from l.database and h.relation is not distinct from l.relation
+       and h.page is not distinct from l.page and h.tuple is not distinct from l.tuple
+       and h.virtualxid is not distinct from l.virtualxid
+       and h.transactionid is not distinct from l.transactionid
+       and h.classid is not distinct from l.classid and h.objid is not distinct from l.objid
+       and h.objsubid is not distinct from l.objsubid
+     order by h.pid limit 1) as blocker
+  from l
   where not l.granted
 )
 select w.locktype, w.mode,
@@ -61,7 +77,7 @@ select w.locktype, w.mode,
 from w
 left join pg_database d on d.oid = w.database
 left join pg_stat_activity a on a.pid = w.pid
-left join pg_stat_activity b on b.pid = w.bp[1]`
+left join pg_stat_activity b on b.pid = w.blocker`
 
 // loop samples every 20 ms from from to to over a direct Postgres connection, as the lock probe
 // does.
