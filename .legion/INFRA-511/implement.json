@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T07:50:00Z",
+  "completed": "2026-10-27T10:40:00Z",
   "proof": [
+    {
+      "criterion": "Review round 3 (narrowed): the session-change re-claim's waiting notice shows at once; its deferred outcome notices survive Oh My Pi's /new reset, including from a focused subagent view",
+      "surface": "pi-legion unit suite with the real extension wiring; the real interactive Oh My Pi 18.12.2 under a pseudo-terminal with both plugins, stand-ins and real NATS, including a focused task subagent view",
+      "command": "cd packages/pi-legion && bun test extensions/legion.test.ts; and a copy of extensions/controller-start-omp.test.ts with only DEADLINE_MS raised from 30 s to 150 s, run with LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:4222",
+      "observed": "legion.test.ts 128 pass, including 'a session switch behind a start claim held at its registration says at once that it waits for that claim', 'a re-claim's widget comes down at the session's next run, not at its start turn's run or a subagent's' and 'a host with no widget shows the re-claim's refusal from its timer once the handler has returned'. Real binary: 9 pass, including 'the operator sees a refused re-claim after /new from a focused subagent view' (refusal on screen with 'New session started'). The committed file's 30 s deadline times out every case in this pod at this head and at d42147b4 alike, because Oh My Pi now takes about 30 s to start here",
+      "headSha": "9037d3c9bb125b510b835fc7df272ead2b9d6a1d",
+      "negativeControl": "controller-session.ts from d42147b4: the waiting-notice test times out (the notice never reaches ui.notify while the registration is held)"
+    },
     {
       "criterion": "Tester round 5: after /new, the operator sees the refused re-claim warning and the hand-over notice for a /new during the start claim, both after Oh My Pi's /new flow resets the transcript",
       "surface": "real interactive Oh My Pi 18.12.2 under a pseudo-terminal with both plugins of this branch, stand-in daemon/listener/gateway, real NATS",
@@ -75,7 +83,8 @@
     "docs: root AGENTS.md, packages/pi-legion/AGENTS.md, packages/pi-shared/AGENTS.md, docs/kubernetes.md, docs/site troubleshooting, scripts/e2e/README.md and two script comments, pi-legion/pi-envoy/claude-envoy CHANGELOGs",
     "Round 2: packages/pi-legion/src/controller-session.ts (claims serialised through one in-flight claim; /legion-controller-start waits for it and decides again), packages/pi-legion/extensions/legion.test.ts (test for /legion-claim-controller during the start claim), packages/pi-legion/AGENTS.md",
     "Review round 1: packages/pi-legion/src/controller-session.ts (registration recorded before the send, claimComplete, two-form warning, no mark for a follow-up send, mark names the session current at the send, one promise chain, operatorLaunchedController, logger), packages/pi-shared/src/{interface.ts (startupTurn one optional slot), startup-turn.ts, pi-types.ts (CommandContext.isIdle required)}, packages/pi-legion/extensions/{legion.test.ts, controller-start-omp.test.ts}, packages/pi-legion/AGENTS.md, packages/pi-shared/AGENTS.md, packages/pi-legion/CHANGELOG.md, skills/legion-controller/references/session.md and its claude-envoy copy",
-    "Tester round 5: packages/pi-legion/src/controller-session.ts (re-claim notices deferred to after the session_switch handler via the host timer; startHandedOver), packages/pi-legion/extensions/{legion.test.ts (fixture timer), controller-start-omp.test.ts (register hook takes the body and may hold; onListener hook; new hand-over case)}, packages/pi-legion/AGENTS.md, CHANGELOG.md"
+    "Tester round 5: packages/pi-legion/src/controller-session.ts (re-claim notices deferred to after the session_switch handler via the host timer; startHandedOver), packages/pi-legion/extensions/{legion.test.ts (fixture timer), controller-start-omp.test.ts (register hook takes the body and may hold; onListener hook; new hand-over case)}, packages/pi-legion/AGENTS.md, CHANGELOG.md",
+    "Review round 3: packages/pi-legion/src/controller-session.ts (noteWait on the real context; hand-over and refusal notices in the legion-controller-claim widget, cleared at the next run or claim; timer fallback), packages/pi-legion/extensions/legion.ts (handleAgentStart), packages/pi-shared/src/pi-types.ts (optional ui.setWidget), tests and docs"
   ],
   "trickyParts": [
     "Sending the start message after the Envoy role claim was flaky (4/30): the listener forwards a role-lane card as soon as it records the role, which can reach the session before claimEnvoyRole resolves; the send now happens right after claims/register, before the role claim and the subscription.",
@@ -95,6 +104,7 @@
     "Residual race, recorded in the PR body: a message sent straight to the new session id between pi-envoy's registration (during startup) and the claim is an ordinary card on main's pi-envoy and can take the first turn."
   ],
   "discoveredComplexity": [
-    "Three internal/daemon tests fail in this sandbox at the base commit as well (TestATerminalAttemptLeavesLaterChildrenSIGTTOUsDefault, TestATerminalAttemptIgnoresSIGTSTP: gVisor /proc has no SigIgn; TestTmuxBootRewritesEveryOlderClonesCredentialHelper), plus Docker-only tests; scripts/skill-scenarios/rig.test.ts judge-omp cases need Docker."
+    "Three internal/daemon tests fail in this sandbox at the base commit as well (TestATerminalAttemptLeavesLaterChildrenSIGTTOUsDefault, TestATerminalAttemptIgnoresSIGTSTP: gVisor /proc has no SigIgn; TestTmuxBootRewritesEveryOlderClonesCredentialHelper), plus Docker-only tests; scripts/skill-scenarios/rig.test.ts judge-omp cases need Docker.",
+    "Review round 3: in this pod Oh My Pi now takes about 30 s to start (it took 6-9 s earlier in the session), so controller-start-omp.test.ts's 30 s per-wait deadline times out locally at any head; src/capability-report.test.ts's millisecond budgets fail under the same slowdown. CI's pi-legion job runs the committed file."
   ]
 }
