@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-657",
+  "completed": "2026-10-27T16:35:54Z",
+  "planDocument": "dispatch://INFRA-657/artifact/plan-md",
+  "base": "main@origin 2df3353c (re-fetch at implementation start)",
+  "sources": {
+    "mergeGate": "sjawhar/legion#2396 (INFRA-523) commit d26095cc3d: skills/legion-worker/references/merge-gate.md, packages/claude-envoy/legion/skills/legion-worker/references/merge-gate.md, packages/daemon/internal/prompts/go/reviewer.md; reverted on #2396 by 5bcf850e (exact revert)",
+    "skillsAgents": "sjawhar/legion#2358 (INFRA-576): skills/AGENTS.md line 25 as at e6feb0f4- (e6feb0f4 reverts it on #2358)"
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: push, handoff, PR body (references/pr-body.md) and default-branch identity check; the change is skill text so its proof is the staged skill and the guards",
+      "ce-simplify-code: the simplify pass pr-body.md requires before the implementer's proof, here limited to the moved prose"
+    ],
+    "test": [
+      "legion-worker: tester rules; re-run A1-A4 commands and their negative controls at the head, read CI at the code head (merge-gate.md CI read)"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md review rules and the PR body's E2E lines; check each hunk equals its source (d26095cc3d, e6feb0f4-) except recorded departure D1",
+      "thermonuclear-deep-review: correctness of the moved text against GitHub's documented re-run behaviour and the INFRA-490 router design",
+      "asd-ste100: none of the skill files require STE, but the PR body and any message to teammates follow it per deployment instructions"
+    ]
+  },
+  "tasks": [
+    "1. jj git fetch; base on main@origin; confirm gh pr diff 2396 and 2358 --name-only list nothing under skills/, packages/claude-envoy/legion/, packages/daemon/internal/prompts/; take any later revision of the source text and name it",
+    "2. Commit 1: apply d26095cc3d's diff (patch, not whole-file copy) to skills/legion-worker/references/merge-gate.md and packages/daemon/internal/prompts/go/reviewer.md",
+    "3. Apply D1 to both files: 're-run that job alone, once, then wait' -> 're-run it once with its run's failed jobs, then wait'; '...failed and cancelled jobs and to nothing that succeeded (or `gh run rerun --job <job-id>` for that one job)' -> '...failed and cancelled jobs and to the jobs that need them, and to no other job (measured on sjawhar/legion run 40521376914, attempts 1 and 2, 2026-10-27)' (citation optional in reviewer.md); 'refuses either' -> 'refuses it'; rewrap merge-gate.md to ~100 columns. If the architect rejects D1, keep d26095cc3d verbatim",
+    "4. cd packages/claude-envoy && bun run build; only legion/skills/legion-worker/references/merge-gate.md may change under packages/claude-envoy (restore dist/ and report any dist drift); bun run check-dist prints 'dist/ and legion/ match a fresh build'",
+    "5. Commit 2: apply the reverse of e6feb0f4's diff (skills/AGENTS.md line 25 only)",
+    "6. Open the PR against main: 'Dispatch: INFRA-657', each hunk's source, D1 before/after, the merge-order dependency on #2358, the releases the merge cuts (legion patch via packages/daemon/**, pi-legion via skills/legion-worker/**, envoy-plugin via skills/**, worker image)"
+  ],
+  "acceptance": [
+    {
+      "criterion": "A1 (spec 1): only the four files change; each hunk equals its source (D1 aside)",
+      "surface": "the pull request diff",
+      "command": "jj -R \"$LEGION_WORKSPACE\" diff --name-only --from main@origin --to <head> | grep -v '^\\.legion/' | sort  => exactly packages/claude-envoy/legion/skills/legion-worker/references/merge-gate.md, packages/daemon/internal/prompts/go/reviewer.md, skills/AGENTS.md, skills/legion-worker/references/merge-gate.md; diff of line 25 vs e6feb0f4-:skills/AGENTS.md empty; merge-gate/reviewer hunks equal d26095cc3d plus D1's three replacements",
+      "negativeControl": "a stray space in skills/legion-worker/SKILL.md makes the list print five paths"
+    },
+    {
+      "criterion": "A2 (spec 2): Sami's yes before acceptance",
+      "surface": "Dispatch ask on INFRA-490 or INFRA-657",
+      "command": "architect's own step: dispatch ask to Sami linking the PR with the change, D1, the #2358 ordering, the releases the merge cuts; sign_off only after yes. No worker posts it",
+      "negativeControl": "n/a (architect gate)"
+    },
+    {
+      "criterion": "A3 (spec 3): skill guards, partition, generated copy, prompt tests pass",
+      "surface": "the plugins' staged skills and the generated Claude Code plugin",
+      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/pi-envoy && bun test src/skills-guard.test.ts; cd packages/pi-shared && bun test test/skills-partition.test.ts; cd packages/claude-envoy && bun run check-dist && bun test tests/legion-plugin-fresh.test.ts; cd packages/daemon && go test ./internal/prompts/ ./internal/workflow/ -run 'Reviewer|Compose'",
+      "negativeControl": "hand-edit one word of packages/claude-envoy/legion/skills/legion-worker/references/merge-gate.md: bun run check-dist fails naming it; restore"
+    },
+    {
+      "criterion": "A4: what a reviewer pane loads carries the new text",
+      "surface": "pi-legion's staged skill partition and the daemon's boot snapshot of the reviewer prompt",
+      "command": "bash scripts/pi-plugin-prepack.sh --stage-skills @sjawhar/pi-legion \"$TMPDIR/p657-stage/skills\" then tr '\\n' ' ' < .../legion-worker/references/merge-gate.md | tr -s ' ' | grep -c 'the jobs that need them' => 1 and grep -c '`gh run rerun <run-id>` once' => 0; throwaway (uncommitted) Go test calling prompts.New(t.TempDir()) and reading prompts/go/reviewer.md for the same two strings. Daemon boot (stage1-skeleton.sh) needs docker, absent in the pod: state that limit",
+      "negativeControl": "the same greps on main's staged copy print 0 and 1"
+    },
+    {
+      "criterion": "A5 (spec Proven on): CI green at the code head",
+      "surface": "sjawhar/legion CI on the pull request",
+      "command": "envoy-and-contracts.yaml jobs pi-shared, pi-envoy, pi-legion, claude-envoy (or router equivalents if INFRA-520 merged), pr-and-main.yaml test and lint, pr-title: all success at the code head",
+      "negativeControl": "n/a"
+    },
+    {
+      "criterion": "A6: skills/AGENTS.md line lands only after #2358 is on main",
+      "surface": "main's release.yaml",
+      "command": "gh api 'repos/sjawhar/legion/contents/.github/workflows/release.yaml?ref=main' -H 'Accept: application/vnd.github.raw' | grep -cE '^  PI_(ENVOY|LEGION)_VERSION_ARGS:' => 2, and the names equal grep -o 'PI_[A-Z]*_VERSION_ARGS' in main's packages/pi-shared/test/skills-partition.test.ts; run by the architect before sign_off and the merger before READY",
+      "negativeControl": "on main 2df3353c today it prints 0"
+    }
+  ],
+  "decisionsForArchitect": [
+    "Ordering: the skills/AGENTS.md hunk waits on #2358's merge (A6); the merge-gate hunks wait on nothing; if #2358 stalls or renames the variables, drop or correct the hunk",
+    "D1: accept or reject the correction of the moved re-run sentence",
+    "#2358 still edits root AGENTS.md (two Conventions bullets); root AGENTS.md counts every AGENTS.md among agent-loaded files. Whether Sami's rule covers it: recommend naming it in the ask and following his answer; if yes it moves here",
+    "Other trees' open PRs #2390 (INFRA-555) and #2323 (INFRA-559) carry claude-envoy merge-gate and prompts/go/implementer.md edits: outside this tree, for the controller"
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "skills/AGENTS.md line must not merge before #2358 (main has no PI_*_VERSION_ARGS)", "answer": "A6 check before sign_off and READY; sent to the architect as an ordering decision with recommendation; drop the hunk if #2358 stalls"},
+      {"finding": "'carry only the text and note which code change it describes' is ambiguous per hunk", "answer": "merge-gate hunks wait on nothing (GitHub behaviour only); AGENTS.md hunk waits on #2358; architect decides"},
+      {"finding": "#2396 no longer carries the three files (facts.md stale)", "answer": "verified: head 5bcf850e is an exact revert of d26095cc3d; source pinned to d26095cc3d; task 1 re-checks both PRs' file lists"},
+      {"finding": "bun run build rebuilds dist/ too", "answer": "task 4 restores any dist/ change and reports it; check-dist proves the copy"},
+      {"finding": "apply hunks, not whole-file copies", "answer": "tasks 2 and 5 apply patches and stop on a failed hunk"},
+      {"finding": "acceptance 1 not machine-checkable; .legion files; reviewer.md not 'beside' skills/", "answer": "A1 exact four-path list excluding .legion/ (retro removes it), line-25 diff, hunk equality; reviewer.md is named by the spec's scope"},
+      {"finding": "'lint and test run the skill guards' is wrong", "answer": "A5 names envoy-and-contracts jobs pi-shared, pi-envoy, pi-legion, claude-envoy plus pr-and-main test/lint"},
+      {"finding": "acceptance 3 names no commands; word budgets do not apply", "answer": "A3 lists the commands; word budgets cover only the Dispatch skills, untouched"},
+      {"finding": "moved text's --job advice is wrong once INFRA-490's router makes the required check a condensing job", "answer": "D1 drops --job and corrects the dependents clause; recorded as a spec departure for the architect"},
+      {"finding": "#2358 still edits root AGENTS.md, an agent-loaded file", "answer": "decision for the architect/Sami; recommendation recorded"},
+      {"finding": "merging cuts legion, pi-legion and envoy-plugin releases and rebuilds the worker image", "answer": "PR body and the recommended ask to Sami state it"},
+      {"finding": "unsourced GitHub behaviour claims in the moved text", "answer": "verified: GitHub REST reference (failed jobs and their dependents; a job and its dependents) and sjawhar/legion run 40521376914 attempts 1-2 (cancelled re-run, succeeded kept); D1 adds the dependents clause"},
+      {"finding": "Sami's quoted rule has no dispatch:// link in the spec", "answer": "spec is the architect's; noted in the report to the architect"}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Acceptance 1: each change matches the text the two source pull requests had (or is corrected to main as it is then).",
+      "plan": "The moved re-run sentence (merge-gate.md, its generated copy, go/reviewer.md) is corrected: --failed re-runs failed and cancelled jobs and the jobs that need them, and no other job; the `gh run rerun --job` alternative is dropped; 'that job alone' becomes 'it once with its run's failed jobs'. Every other hunk is the source verbatim.",
+      "evidence": "GitHub REST reference https://docs.github.com/en/rest/actions/workflow-runs: re-run failed jobs 'and their dependent jobs'; re-run a job 'and its dependent jobs'. sjawhar/legion run 40521376914: attempt 2 re-ran cancelled lint/test and kept succeeded typecheck. Under INFRA-490's router (dispatch://INFRA-520) the one required check is a final job condensing others; --job on it re-reads the cancelled results and stays red, while --failed is right with or without the router.",
+      "outcome": {"kind": "changed", "scope": "acceptance line 1's 'matches the source text' does not hold for that one sentence; the architect may reject and keep d26095cc3d verbatim"}
+    }
+  ]
+}
