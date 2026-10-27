@@ -2,27 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-569",
-  "completed": "2026-10-27T09:30:15Z",
+  "completed": "2026-10-27T12:54:47Z",
   "decision": "approved",
-  "round": 2,
-  "reviewedCodeHead": "b7b1325d21837bc5b1efe09de299785a6dd55e69",
+  "round": 3,
+  "reviewedCodeHead": "5c49fe2b546a6ab2b88c58af2ca3b669307539b7",
   "critical": 0,
   "important": 0,
   "minor": 5,
   "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/search_ask_test.go:140", "description": "Stale comment: it says the changed answer's row stores selected as null, but since c30217fe new answers store []. Wording only (on the Fast-follow line)."},
-    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/MarkdownPreview.tsx:201", "description": "The doc says the source is never cut before the parse, but SearchPalette now cuts it with markdownHead; the markdown-fragment.ts header covers only server cuts. Wording only (Fast-follow)."},
-    {"severity": "minor", "file": "packages/dispatch/web/src/features/search/SearchPalette.test.tsx:259", "description": "The unit test pins the exact suffix that the 280-character cut produces, and AGENTS.md and the e2e comment repeat 280. Test brittleness only; the user-visible bound is also asserted (Fast-follow)."},
-    {"severity": "minor", "file": "packages/envoy-client/src/search-answer.ts:33", "description": "Hardening, no exploit path: indentedText splits on \\r?\\n only, so a lone CR or U+2028/U+2029 in a resolution reason is not indented. The excerpt already carries agent-written text."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/events.go:333", "description": "Adjacent and pre-existing: the event log and live stream send stored ask.answered payloads raw, so an old event with selected null still reads null there (web EventBody.tsx:53 previous.selected.join would throw on an old previous_answer). This PR's CHANGELOG names only the ask routes, which is accurate; recorded in the PR body's Not proven / risk and sent to the architect."}
+    {"severity": "minor", "file": "packages/envoy/CHANGELOG.md:1498", "description": "The selected-[] entry names only the ask routes. It does not name the event logs (GET /api/v1/issues/{key}/events, the artifact events route) or GET /api/v1/events, whose answer and previous_answer this delta also changes from null to []. The architect's acceptance send-back carries this fix."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/markdown-fragment.ts:4", "description": "Wording: 'at the source's end' means one cut at its end; search.e2e.ts:228 says 'in AskHitStatus' where it means 'beside'. The architect's send-back carries both."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/search/SearchPalette.test.tsx:262", "description": "The expected value is built with markdownHead's own regex, so a mistake in that regex would be copied into the expectation. Use a fixed expected value (architect's send-back)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/events_test.go:293", "description": "The live-frame half repeats coverage that TestLiveAskEventFrameCarriesTheReadTimeFields already gives; the live relay reads through readEventsAfterID like the catch-up. Drop it (architect's send-back)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/events.go:417", "description": "normalizeAnsweredSelected decodes each ask.answered payload a second time, strictly. Every writer marshals model.AskAnswer and no migration rewrites answers, so no stored payload can fail it. The architect accepts this as it is."}
   ],
-  "roundOneFindings": "All three fixed in b9278db5: indentedText for the resolution reason (search-answer.ts:33,49, test with CRLF); markdownHead(answer.text, 280) before MarkdownPreview (SearchPalette.tsx), with e2e asserting the accessible name stays under 600 characters and lacks the answer's tail word; envoy-plugin CHANGELOG entry. The architect's selected-null fix landed in c30217fe (AskAnswer.UnmarshalJSON plus [] stored on write, ask_selected_test.go). Threads PRRT_kwDORFy7ds6wkC-G, -L, -T replied on and accepted; the implementer resolved all three.",
-  "fingerprint": {"lastReviewCommit": "8476618a5dddb97d77e7d276284514a123ffd147", "lastReview": "e361983b683b2a416e14356282dfa3bcd94f8d413adff17901b622f58440bef3", "head": "cb2d966a1b94de495501d6f7d1c6263e75bb44b1", "headFingerprint": "c456ff9a1aef9847c69936b74176ebf0a2ebe2ad5d5e1c3aae20630545aad4a8", "verdict": "changed: a new round. The merge b7b1325d leaves the fingerprint of 8413b9c0 unchanged (c456ff9a at both)."},
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; the branch has no protection. CI head b7b1325d (newest pull_request run); compare to cb2d966a: handoffsOnly true, 2 files. All required checks completed success at 09:01-09:28Z (one superseded pr-title run cancelled, the newer one success). The non-required Legion Envoy and Contracts jobs were still queued at 09:29Z.",
+  "fingerprint": {"lastReviewCommit": "17f6a0a88e15bf42f9a798f652b5bc06401d5bf0", "lastReview": "c456ff9a1aef9847c69936b74176ebf0a2ebe2ad5d5e1c3aae20630545aad4a8", "head": "77a6337c77547f0dc2bab3891e04f2f4c866abcc", "headFingerprint": "de44852171837f82ae218fa7fc913b6edc03f9a4b788d4ed8ae07297e61c98d3", "verdict": "changed: a new round, limited to the architect's narrowed delta (17f6a0a8..5c49fe2b)"},
+  "ci": "Required set: lint, typecheck, test, pr-title. CI head 5c49fe2b, the newest pull_request run; compare to 77a6337c gives handoffsOnly true, 2 files. Attempt 1: test failed in TestRealTmuxSplitsIntoTheIssueWindow (packages/daemon, which this PR does not touch; run 40486298844, job 122128805370). A single re-run of the failed job (attempt 2, job 122162620823) passed. lint, typecheck and pr-title passed.",
+  "conflict": "GitHub reports the head CONFLICTING with main, on packages/envoy/CHANGELOG.md only. The architect sends the issue back from accepting for the forward merge, together with the items above.",
   "thermonuclear": {
-    "head": "b7b1325d21837bc5b1efe09de299785a6dd55e69",
-    "deepReview": "APPROVE: no critical or important finding. Every decode of AskAnswer was checked (ScanAsk, loadAskAnswersByAsk, listMyAnswers, copied_asks, restoreRetractedAsk). No struct embeds it anonymously, no strict request decode includes it, the plain alias cannot recurse, and block attributes give the same result for nil and []. The merge broke nothing in the PR's files. Minors: the event log still sends null for old events; lone CR in reasons; markdownHead leaves some Markdown (a stray ! and <url) in odd cuts.",
-    "codeQuality": "Cleanup only: the selected rule is enforced in two places (a MarshalJSON could hold it in one); a stale test comment; the unit test pins the exact 280 suffix; stale doc sentences in MarkdownPreview and markdown-fragment."
+    "head": "5c49fe2b546a6ab2b88c58af2ca3b669307539b7",
+    "deepReview": "APPROVE, with no critical or important finding. Every event serving path goes through readEventRows -> attachAskEventFields: the issue and artifact logs, the SSE catch-up and the live relay. Only selected changes. No consumer treats null specially. No stored payload can fail the decode.",
+    "codeQuality": "No critical or important finding. Minor items only (1-4 above)."
   },
-  "proofLines": "E2E (implementer) at b9278db5 and E2E (tester) at b9278db5 with a re-check at b7b1325d (fingerprint c456ff9a unchanged by the merge, smoke repeated) are both present, each with a negative control."
+  "proofLines": "E2E (implementer) and E2E (tester) are present for this round's head."
 }
