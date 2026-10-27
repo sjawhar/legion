@@ -355,7 +355,15 @@ func tailnetAdvertiserScript(h tailnetServiceHost) string {
 // (cmd/tailscale/cli/status.go:96, json.MarshalIndent with two spaces): the lines after
 // `"service-host": [` down to the `]` at that line's own indent hold the mappings, and the Service
 // is approved when one of them is the key `"svc:<name>": [`.
+//
+// The script is its container's PID 1, and the kernel drops a signal PID 1 has no handler for, so
+// without the trap the kubelet's SIGTERM would do nothing and the pod would wait out its whole
+// grace period for the SIGKILL. Every wait is nap, a sleep in the background the shell waits for:
+// a trapped signal ends wait at once, where a shell runs a trap only after a foreground sleep
+// returns. The preStop's draining file already keeps a new advertisement from starting.
 const tailnetAdvertiserBody = `set -u
+trap 'exit 0' TERM
+nap() { sleep "$1" & wait "$!"; }
 at() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 now() { date -u +%s; }
 log() { echo "$(at) $1 | $2 | $3"; }
@@ -446,7 +454,7 @@ unstick() {
     log "service advertisement" "tailscale serve drain $service" "$recovery: the drain failed: $(tr '\n' ' ' <"$err"); next recovery after ${stuck}s"
     return 0
   fi
-  sleep "$pause"
+  nap "$pause"
   still || return 1
   if ! ts serve advertise "$service" >/dev/null 2>"$err"; then
     log "service advertisement" "tailscale serve drain $service; sleep $pause; tailscale serve advertise $service" "$recovery: drained, and the advertisement failed: $(tr '\n' ' ' <"$err"); advertising again"
@@ -458,7 +466,7 @@ unstick() {
 orders=0
 while :; do
   rm -f "$ready_file"
-  until follow; do sleep "$period"; done
+  until follow; do nap "$period"; done
   node=$id
   good=0
   while :; do
@@ -469,13 +477,13 @@ while :; do
     else
       good=0
     fi
-    sleep "$period"
+    nap "$period"
     follow && [ "$id" = "$node" ] || continue 2
   done
   [ -z "$flag_file" ] || log "service advertisement" "cat $flag_file" "$(cat "$flag_file")"
   until ts serve advertise "$service" >/dev/null 2>"$err"; do
     log "service advertisement" "tailscale serve advertise $service" "failed: $(tr '\n' ' ' <"$err"); again in 10s"
-    sleep 10
+    nap 10
     still || continue 2
   done
   log "service advertisement" "tailscale serve advertise $service" "advertised as node $node"
@@ -504,7 +512,7 @@ while :; do
         log "readiness" "rm -f $ready_file" "node $node is no longer approved to host $service: not ready"
       fi
       if ! unstick; then gone="node $node changed, may no longer advertise, or was not advertised again during a recovery"; break; fi
-      sleep "$period"
+      nap "$period"
       continue
     fi
     if [ -n "$certificate" ] && [ "$held" != "$node" ]; then
@@ -520,12 +528,12 @@ while :; do
           if [ "$orders" -ge "$attempts" ]; then
             ts serve drain "$service" >/dev/null 2>&1
             log "service certificate" "tailscale cert $certificate" "$orders orders failed, the last: $why; no more from this pod: $service drained, not ready"
-            while sleep 30; do follow; done
+            while nap 30; do follow; done
           fi
           backoff=$((60 * orders + ${RANDOM:-0} % 30))
         fi
         log "service certificate" "tailscale cert $certificate" "not yet: $why; again in ${backoff}s"
-        sleep "$backoff"
+        nap "$backoff"
         continue
       fi
     fi
@@ -533,7 +541,7 @@ while :; do
       printf '%s\n' "$node" >"$ready_file.tmp" && mv "$ready_file.tmp" "$ready_file"
       log "readiness" "write $ready_file" "node $node is approved to host $service${certificate:+ and tailscaled holds its certificate}: ready"
     fi
-    sleep "$period"
+    nap "$period"
   done
   rm -f "$ready_file"
   log "readiness" "rm -f $ready_file" "$gone: not ready; advertising again once the node may"
