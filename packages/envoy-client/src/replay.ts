@@ -57,8 +57,8 @@ export const REPLAY_FAILURES_BEFORE_NOTICE = 3;
  * moves; that alone is not written at once, only with the next write or once the state last
  * written is this old, so a restart's cursors lag the stream by no more than this and its
  * retention check (a cursor below the oldest message the stream holds) stays accurate. A retention
- * gap's cursor move is written before its notice is raised, so a resume neither repeats it nor
- * finds it again.
+ * gap's cursor move is written at once, with its notice pending in the same write, so a resume
+ * neither loses the notice nor finds the gap again.
  */
 export const REPLAY_STATE_REFRESH_MS = 60 * 60 * 1000;
 
@@ -94,13 +94,35 @@ export const ReplayCursorSchema = z.object({
 export type ReplayCursor = z.infer<typeof ReplayCursorSchema>;
 
 /**
+ * A one-time notice the session has not been told yet, kept in the state written with the cursor
+ * change that raised it: a process that ends before the notice is raised raises it after the
+ * restart, at its first sweep, instead of losing it.
+ */
+const ReplayPendingNoticeSchema = z.enum(["retention_gap", "stream_recreated"]);
+
+type ReplayPendingNotice = z.infer<typeof ReplayPendingNoticeSchema>;
+
+/** What each pending notice tells the session. */
+const PENDING_NOTICE_MESSAGES: Record<ReplayPendingNotice, string> = {
+  stream_recreated:
+    "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
+  retention_gap:
+    "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing.",
+};
+
+/**
  * The cursors and the stream they belong to. Every subject the session follows is a key, with or
  * without a cursor yet, so a host can rebuild what it followed from the newest state alone after
- * the listener reaped its interests.
+ * the listener reaped its interests. The stream is known by `stream_id` (its `envoy_stream_id`
+ * metadata) when the listener answers one, and by `stream_created` otherwise. `notices` lists the
+ * notices still to be told (`ReplayPendingNoticeSchema`), and is absent when there are none; a kind
+ * this build does not know is skipped on restore, so a state a later build wrote still parses.
  */
 export const ReplayStateSchema = z.object({
+  stream_id: z.string().optional(),
   stream_created: z.string().optional(),
   subjects: z.record(z.string(), ReplayCursorSchema),
+  notices: z.array(z.string()).optional(),
 });
 
 export type ReplayState = z.infer<typeof ReplayStateSchema>;
@@ -211,7 +233,8 @@ export interface ReplayFailureNotice {
  * present only when it differs from the last state written or restored. A sweep that handled no
  * message, found no retention gap, and changed nothing but where its cursors stand writes nothing
  * (see `REPLAY_STATE_REFRESH_MS`), so an unchanged sweep writes nothing at all. A retention gap's
- * cursor move is written before its notice is raised, so a resume neither repeats it nor finds it
+ * cursor move, or a recreated stream's cursor reset, is written with its notice pending in the
+ * same write, before the notice is raised, so a resume neither loses the notice nor finds the gap
  * again.
  */
 export interface ReplayChange {
@@ -328,6 +351,7 @@ export interface ReplayEngine {
    * Replaces everything the engine holds with what a host persisted for the session it is on now.
    * Ledger entries recorded 72 hours ago or more are dropped; the state is kept at any age, so a
    * session back after longer still follows its topics. Work in flight for before is dropped.
+   * Notices the state holds pending (`ReplayState.notices`) are told by the next sweep, once.
    */
   restore(snapshot: ReplaySnapshot): void;
   /** The current state, as the next write would persist it. */
@@ -374,7 +398,13 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   // copy is at or below the cursor, so no sweep shows it and its failure is only logged. This
   // window is reasoned from the order of the reads, not driven by a test.
   const cursorStarts = new Map<string, number>();
+  // The stream the cursors were read on: its id when a listener answered one, and its creation
+  // time (`ReplayStateSchema`).
+  let streamID: string | undefined;
   let streamCreated: string | undefined;
+  // The notices not told yet, written with the cursor change that raised them, so a process that
+  // ends before telling one tells it after the restart (`ReplayPendingNoticeSchema`).
+  const pending = new Set<ReplayPendingNotice>();
   // A frame's failures by its stream sequence; in memory only, so a restart gives it three more.
   const failures = new Map<number, { count: number; error: string }>();
   // The ledger records no write has persisted yet; the state JSON the last write persisted, that
@@ -406,6 +436,11 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   };
   const log = (message: string, error?: unknown) => safely("log", () => host.log(message, error));
   const notify = (notice: ReplayNotice) => safely("notice", () => host.notify(notice));
+  // Raises a pending notice and drops it from the pending list; the next write persists the drop.
+  const tell = (kind: ReplayPendingNotice) => {
+    pending.delete(kind);
+    notify({ kind, message: PENDING_NOTICE_MESSAGES[kind] });
+  };
 
   // A host whose session read throws has no session to work for, so its work stops as on a switch.
   const sessionRead = (read: () => string | undefined) => (): string | undefined => {
@@ -442,8 +477,10 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       };
     }
     return JSON.stringify({
+      ...(streamID === undefined ? {} : { stream_id: streamID }),
       ...(streamCreated === undefined ? {} : { stream_created: streamCreated }),
       subjects,
+      ...(pending.size === 0 ? {} : { notices: [...pending].sort() }),
     });
   };
 
@@ -454,10 +491,10 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
 
   // Writes run one after another in call order, so a host that rewrites a file never has an older
   // snapshot land after a newer one. `atOnce`: the cursors moved past messages a sweep handled, or
-  // past a retention gap, which is a change written at once; a retention gap's cursor move is
-  // written before its notice is raised, so a resume neither repeats it nor finds it again.
-  // Without it, a change of nothing but the `after`s is the stream's end moving, held until the
-  // state written is `REPLAY_STATE_REFRESH_MS` old.
+  // past a retention gap, which is a change written at once. Without it, a change of nothing but
+  // the `after`s is the stream's end moving, held until the state written is
+  // `REPLAY_STATE_REFRESH_MS` old. A change to the pending notices is a change of more than the
+  // `after`s, so it is always written at once.
   const flush = (alive: () => boolean, atOnce = false): Promise<void> => {
     writes = writes.then(async () => {
       if (!alive()) return;
@@ -653,6 +690,26 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
     log("replay: the listener's replay failed; the next trigger tries again", error);
   };
 
+  // Whether the answer's stream replaced the one the cursors were read on. An answer with an id is
+  // judged by it alone: a stored id that differs is a new stream, and a creation time that changed
+  // is not, since a cluster's servers report different ones and a leader election or a restore
+  // changes it. A state stored before ids (a creation time, no id) takes the answer's id, unless a
+  // cursor stands past the stream's end, which only a new stream explains. An answer without an id
+  // is judged by its creation time.
+  const streamReplaced = (stream: ReplayResult["stream"]): boolean => {
+    if (stream.id === undefined) {
+      return (
+        streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated
+      );
+    }
+    if (streamID !== undefined && streamID !== "") return stream.id !== streamID;
+    if (streamCreated === undefined || streamCreated === "") return false;
+    for (const cursor of cursors.values()) {
+      if (cursor.after !== undefined && cursor.after > stream.last_seq) return true;
+    }
+    return false;
+  };
+
   const sweepOnce = async (): Promise<void> => {
     const binding = bind();
     if (binding === undefined) return;
@@ -665,6 +722,16 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
     const buffer = new Map<number, Buffered>();
     const holes = new Map<string, number>();
     let gapNoticed = false;
+    // Notices a restore brought back, which the process before did not live to tell. A retention
+    // gap told here is this sweep's one gap notice.
+    if (pending.size > 0) {
+      for (const kind of [...pending].sort()) {
+        if (kind === "retention_gap") gapNoticed = true;
+        tell(kind);
+      }
+      await flush(alive);
+      if (!alive()) return;
+    }
 
     for (let page = 0; page < REPLAY_PAGES_PER_SWEEP; page += 1) {
       let handledAny = false;
@@ -700,32 +767,35 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       }
 
       const { stream } = response;
-      if (streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated) {
+      const replaced = streamReplaced(stream);
+      // An answer without an id keeps the one stored, unless its stream replaced that one.
+      streamID = stream.id ?? (replaced ? undefined : streamID);
+      streamCreated = stream.created;
+      if (replaced) {
         // Sequences of the old stream mean nothing in the new one: every cursor starts again at
         // its end, as a new follow does, and what the old stream held for the session is gone.
-        streamCreated = stream.created;
+        // The reset is written with its notice pending, so a process that ends before telling it
+        // tells it after the restart.
         const at = now();
         for (const subject of cursors.keys()) {
           cursors.set(subject, { since: stream.last_seq, after: stream.last_seq });
           cursorStarts.set(subject, at);
         }
         failures.clear();
-        notify({
-          kind: "stream_recreated",
-          message:
-            "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
-        });
+        pending.add("stream_recreated");
+        await flush(alive);
+        if (!alive()) return;
+        tell("stream_recreated");
         await flush(alive);
         return;
       }
-      streamCreated = stream.created;
 
       for (const [, reading] of asking) reading.more = false;
       // Retention dropped messages below `first_seq` before a cursor read them. Nothing below it
       // can be read on any subject, so each such cursor moves to just before it, skipping nothing,
-      // and that move is written before the notice is raised: a resume neither repeats the notice
-      // nor finds the gap again. One notice tells every gap a sweep finds; a gap found after it is
-      // still moved past and written.
+      // and that move is written with the notice pending before it is raised: a resume neither
+      // loses the notice nor finds the gap again. One notice tells every gap a sweep finds; a gap
+      // found after it is still moved past and written.
       let gapped = false;
       for (const result of response.subjects) {
         const reading = readings.get(result.subject);
@@ -739,15 +809,13 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
         }
       }
       if (gapped) {
+        if (!gapNoticed) pending.add("retention_gap");
         await flush(alive, true);
         if (!alive()) return;
-        if (!gapNoticed) {
+        if (pending.has("retention_gap")) {
           gapNoticed = true;
-          notify({
-            kind: "retention_gap",
-            message:
-              "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing.",
-          });
+          tell("retention_gap");
+          await flush(alive);
         }
       }
       for (const result of response.subjects) {
@@ -890,7 +958,13 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       ledger.restore(snapshot.ledger);
       cursors.clear();
       cursorStarts.clear();
+      streamID = snapshot.state?.stream_id;
       streamCreated = snapshot.state?.stream_created;
+      pending.clear();
+      for (const kind of snapshot.state?.notices ?? []) {
+        const known = ReplayPendingNoticeSchema.safeParse(kind);
+        if (known.success) pending.add(known.data);
+      }
       for (const [subject, cursor] of Object.entries(snapshot.state?.subjects ?? {})) {
         cursors.set(subject, { ...cursor });
       }

@@ -1,5 +1,6 @@
 import { describe, expect, setSystemTime, spyOn, test } from "bun:test"
 import { createHash } from "node:crypto"
+import * as fsPromises from "node:fs/promises"
 import { mkdir, open, readdir, readFile, rm, stat, utimes } from "node:fs/promises"
 import { createServer, type Socket } from "node:net"
 import { join } from "node:path"
@@ -630,6 +631,62 @@ test("a stored frame the channel never takes is named in one notice on its third
     await second.reconnect()
     expect(notices(sink, frame.eventId)).toHaveLength(1)
     expect(cards(sink, frame.eventId)).toHaveLength(0)
+  } finally {
+    await second.session.shutdown()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test("a channel shut down while a retention gap's cursor move is written tells the gap once when started again on the same session id", async () => {
+  const directory = await scratchState()
+  const model = new StreamModel()
+  model.store("notifications.agent.ses_other", peerMessage("ses_other", "unrelated").raw)
+  const sink = channelSink()
+  const gapNotices = () => sink.shown.filter((shown) => shown.content.includes("may be missing"))
+  const first = await boot(model, sink, directory)
+  // Published while the subscription was down, then dropped by retention before any sweep read it.
+  model.store(agentSubject(SESSION), peerMessage(SESSION, "expired-1").raw)
+  const expired = model.store(agentSubject(SESSION), peerMessage(SESSION, "expired-2").raw)
+  model.expireThrough(expired)
+  const kept = peerMessage(SESSION, "kept")
+  model.store(agentSubject(SESSION), kept.raw)
+  // The file write of the gap's cursor move is in flight when the channel shuts down.
+  const realWriteFile = fsPromises.writeFile
+  let shutdown: Promise<void> | undefined
+  const landed = Promise.withResolvers<void>()
+  const writes = spyOn(fsPromises, "writeFile").mockImplementation(async (...args) => {
+    const [file, contents] = args
+    if (
+      shutdown === undefined &&
+      String(file).includes("replay-") &&
+      (JSON.parse(String(contents)) as ReplaySnapshot).state?.subjects[agentSubject(SESSION)]
+        ?.after === expired
+    ) {
+      shutdown = first.session.shutdown()
+      await realWriteFile(...args)
+      landed.resolve()
+      return
+    }
+    await realWriteFile(...args)
+  })
+  try {
+    await first.reconnect()
+    await landed.promise
+    await shutdown
+  } finally {
+    writes.mockRestore()
+    await first.session.shutdown()
+  }
+  expect(gapNotices()).toHaveLength(0)
+
+  const second = await boot(model, sink, directory)
+  try {
+    await waitFor(async () => cards(sink, kept.eventId).length === 1, "the kept frame")
+    await waitFor(async () => gapNotices().length === 1, "the gap notice")
+    await second.reconnect()
+    await second.reconnect()
+    expect(gapNotices()).toHaveLength(1)
+    expect(cards(sink, kept.eventId)).toHaveLength(1)
   } finally {
     await second.session.shutdown()
     await rm(directory, { recursive: true, force: true })

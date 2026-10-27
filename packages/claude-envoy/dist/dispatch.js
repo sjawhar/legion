@@ -19869,6 +19869,7 @@ var EnvelopeResponseSchema = EnvelopeSchema.extend({
 });
 var ReplayWireSchema = exports_external.object({
   stream: exports_external.object({
+    id: exports_external.string().min(1).optional(),
     created: exports_external.string(),
     first_seq: exports_external.number().int().nonnegative(),
     last_seq: exports_external.number().int().nonnegative()

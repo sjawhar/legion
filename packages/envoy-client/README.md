@@ -51,7 +51,9 @@ frame was delivered in while the host shuts down: it writes while the host's opt
 ledger holds the frame from the call on (Oh My Pi records every BTW's event id so, before its side
 turn and before any reply is posted).
 
-The state holds each followed subject's `since` and `after` and the stream's `created` time;
+The state holds each followed subject's `since` and `after`, the stream's `id` (`stream_id`, the
+`envoy_stream_id` the listener answers as `stream.id`) and `created` time, and the one-time
+notices raised but not told yet (`notices`);
 `restore(snapshot)` loads what a host persisted, dropping expired ledger entries and keeping the
 state at any age. A write carries the state only when it changed; a sweep that handled no message
 and only moved its cursors to the stream's end goes with the next write, or once the state last
@@ -70,8 +72,13 @@ not show, `replayedText`, `failureNoticeFields` and `replayNoticeFields` word th
 holds a newline stays inside its own field. The session is
 told once when the stream was recreated, when its cursor fell behind the stream's oldest message
 (older than 72 hours), and when the listener does not replay (404) or cannot (503
-`REPLAY_UNAVAILABLE`, 401, 403). Work started for one session stops, writing nothing, once
-`sessionID()` names another.
+`REPLAY_UNAVAILABLE`, 401, 403). A stream is recreated when its `id` differs from the stored one;
+a `created` that moved under the same id is a leader election or a restore, not a recreation. An
+answer without an id (an older listener) is judged by `created`, and a state stored before ids
+takes the answer's id unless a cursor stands past the stream's end. A recreation's cursor reset
+and a retention gap's cursor move are written with their notice in `notices`, which is dropped
+once told: a session that ends before telling it tells it once at its first sweep after the
+restart. Work started for one session stops, writing nothing, once `sessionID()` names another.
 
 The host policy both plugins share sits beside the engine, so each host keeps only how it shows a
 card, how it warns, and how it persists. `replayFollowedSubjects(ownAgentSubject, topics,

@@ -313,10 +313,13 @@ Two transcript entries hold it, written with `pi.appendEntry` and rebuilt by
 `restoreLocalSessionState` from every entry of the session file (`replaySnapshot`):
 `envoy-replay-delivered` (`{event_id?, dedupe_key?, at}`), one per frame the ledger records,
 shown live or replayed or named in a failure notice; and `envoy-replay-state`
-(`{stream_created, subjects: {<subject>: {since, after}}}`), written only when it changed, the
-newest being the state. The ledger also takes the frame of every `envoy-message` card the session
-file holds (`custom_message` entries, every branch; `writtenCardIdentity`), dated by its entry, so
-a card written just before the process ended, its record not, is not shown twice. A heartbeat
+(`{stream_id?, stream_created, subjects: {<subject>: {since, after}}, notices?}`), written only
+when it changed, the newest being the state; `notices` holds a one-time notice the sweep raised
+but has not told yet, written with the cursor change that raised it, so a process that ends before
+telling it tells it at the first sweep after the restart. The ledger also takes the frame of
+every `envoy-message` card the session file holds (`custom_message` entries, every branch;
+`writtenCardIdentity`), dated by its entry, so a card written just before the process ended, its
+record not, is not shown twice. A heartbeat
 sweep that handled no message and only moved its cursors to the stream's end, which other
 subjects' traffic moves, writes nothing: that move goes with the next write, or once the state
 last written is an hour old. A restore drops ledger entries recorded 72 hours ago or more and
@@ -341,7 +344,10 @@ subscription yielded it (`readArrivals`, which reads each subscription as its me
 not when the frames queued before it finished delivering. One card that starts no turn
 (`routeReplayNotice` sends this kind to a card, through `UnwrittenFrames.sendNotice`) says that
 the stream was recreated, so messages from before it may be lost, or that a cursor fell behind the
-stream's oldest message, so messages older than 72 hours may be missing. It is a steer with
+stream's oldest message, so messages older than 72 hours may be missing. The stream is recreated
+when the listener's `stream.id` differs from the stored `stream_id`; a `created` that moved under
+the same id (a leader election, a restore) is the same stream, and an answer without an id is
+judged by `created`. It is a steer with
 `triggerTurn: false`, so like an inert card it is handed only while the host is settled: raised
 while a turn streams, it is held, and the first settled heartbeat hands it, so no extra model turn
 runs for it; a notice held for a session the host has left is dropped. A held notice is recorded in

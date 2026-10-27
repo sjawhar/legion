@@ -52,6 +52,8 @@ function subjectMatches(filter: string, subject: string): boolean {
  */
 function createStream(clock: { now: number }) {
   let created = "2026-10-01T00:00:00Z";
+  // The stream's `envoy_stream_id`; none is an older listener's answer.
+  let id: string | undefined;
   let messages: Stored[] = [];
   let lastSeq = 0;
   let firstSeq = 1;
@@ -64,7 +66,12 @@ function createStream(clock: { now: number }) {
     const watermark = lastSeq;
     let budget = input.maxMessages ?? 100;
     return {
-      stream: { created, first_seq: firstSeq, last_seq: watermark },
+      stream: {
+        ...(id === undefined ? {} : { id }),
+        created,
+        first_seq: firstSeq,
+        last_seq: watermark,
+      },
       subjects: input.subjects.map(({ subject, after }) => {
         const reason = refused.get(subject);
         if (reason !== undefined) {
@@ -130,6 +137,14 @@ function createStream(clock: { now: number }) {
       lastSeq = 0;
       firstSeq = 1;
     },
+    /** The listener answers `streamID` as the stream's id from now on; none answers no id. */
+    identify(streamID: string | undefined) {
+      id = streamID;
+    },
+    /** The stream's creation time moves on, as a leader election or a restore moves it. */
+    restamp(newCreated: string) {
+      created = newCreated;
+    },
     answer,
     transport: {
       async replay(input: ReplayInput): Promise<ReplayResult> {
@@ -165,6 +180,8 @@ function createHost(followed: string[]) {
     deliverWith: (_frame: ReplayFrame): ReplayDeliveryOutcome | Promise<ReplayDeliveryOutcome> =>
       "shown",
     noticeWith: (_notice: ReplayFailureNotice): unknown => undefined,
+    /** Runs once a write is recorded, before it resolves: an async host's write in flight. */
+    writeWith: (_change: ReplayChange): void | Promise<void> => undefined,
   };
   const replayHost: ReplayHost = {
     sessionID: () => host.session,
@@ -190,6 +207,7 @@ function createHost(followed: string[]) {
         state: change.state,
         snapshot: () => change.snapshot(),
       });
+      return host.writeWith(change);
     },
   };
   return { host, replayHost };
@@ -249,6 +267,28 @@ async function noticedAtOnce(
 ): Promise<boolean> {
   await engine.liveFailed(followed, frame, new Error("injection threw"), receivedAt);
   return host.failureNotices.some((notice) => notice.eventId === frame.event_id);
+}
+
+/**
+ * Runs `sweep` with the host's next write held in flight, ends the session while it is, then lets
+ * the write land: a host whose write is an async file write, shut down mid-write.
+ */
+async function endSessionDuringNextWrite(
+  host: { session: string | undefined; writeWith: (change: ReplayChange) => void | Promise<void> },
+  sweep: () => Promise<void>
+): Promise<void> {
+  const writing = Promise.withResolvers<void>();
+  const landing = Promise.withResolvers<void>();
+  host.writeWith = async () => {
+    host.writeWith = () => undefined;
+    writing.resolve();
+    await landing.promise;
+  };
+  const swept = sweep();
+  await writing.promise;
+  host.session = undefined;
+  landing.resolve();
+  await swept;
 }
 
 describe("replay sweep", () => {
@@ -549,6 +589,168 @@ describe("replay sweep", () => {
     expect(host.notices).toHaveLength(1);
   });
 
+  test("a stream known by its id keeps every cursor when its creation time moves", async () => {
+    const { stream, host, engine } = setup();
+    stream.identify("stream-1");
+    await engine.sweep();
+    const first = envelope();
+    stream.publish(AGENT, first);
+    await engine.sweep();
+    // A leader election or a restore moves the creation time; the stream is the same one.
+    stream.restamp("2026-10-26T00:00:00Z");
+    const next = envelope();
+    stream.publish(AGENT, next);
+
+    await engine.sweep();
+
+    expect(host.notices).toEqual([]);
+    expect(ids(host.shown)).toEqual([first.event_id, next.event_id]);
+    expect(engine.state().stream_id).toBe("stream-1");
+    expect(engine.state().subjects).toEqual({ [AGENT]: { since: 0, after: 2 } });
+  });
+
+  test("a stream whose id changed was recreated: every cursor restarts at its end, with one notice", async () => {
+    const { stream, host, engine } = setup();
+    stream.identify("stream-1");
+    await engine.sweep();
+    stream.publish(AGENT, envelope());
+    // The new stream reports the old one's creation time: only its id tells them apart.
+    stream.recreate("2026-10-01T00:00:00Z");
+    stream.identify("stream-2");
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+
+    await engine.sweep();
+
+    expect(host.attempts).toEqual([]);
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
+    expect(engine.state()).toEqual({
+      stream_id: "stream-2",
+      stream_created: "2026-10-01T00:00:00Z",
+      subjects: { [AGENT]: { since: 2, after: 2 } },
+    });
+
+    const next = envelope();
+    stream.publish(AGENT, next);
+    await engine.sweep();
+
+    expect(ids(host.shown)).toEqual([next.event_id]);
+    expect(host.notices).toHaveLength(1);
+  });
+
+  test("a state stored before stream ids takes the answer's id and writes it at once, keeping its cursors though the creation time moved", async () => {
+    const { stream, host, engine } = setup();
+    stream.publish(AGENT, envelope());
+    engine.restore({
+      state: {
+        stream_created: "2026-10-01T00:00:00Z",
+        subjects: { [AGENT]: { since: 0, after: 1 } },
+      },
+      ledger: [],
+    });
+    stream.identify("stream-1");
+    stream.restamp("2026-10-26T00:00:00Z");
+
+    await engine.sweep();
+
+    expect(host.notices).toEqual([]);
+    expect(host.writes.map((write) => write.state)).toEqual([
+      {
+        stream_id: "stream-1",
+        stream_created: "2026-10-26T00:00:00Z",
+        subjects: { [AGENT]: { since: 0, after: 1 } },
+      },
+    ]);
+
+    const next = envelope();
+    stream.publish(AGENT, next);
+    await engine.sweep();
+
+    expect(ids(host.shown)).toEqual([next.event_id]);
+    expect(host.notices).toEqual([]);
+  });
+
+  test("a state stored before stream ids whose cursor stands past the stream's end restarts at its end, with one notice", async () => {
+    const { stream, host, engine } = setup();
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+    engine.restore({
+      state: {
+        stream_created: "2026-10-01T00:00:00Z",
+        subjects: { [AGENT]: { since: 0, after: 5 } },
+      },
+      ledger: [],
+    });
+    stream.identify("stream-1");
+
+    await engine.sweep();
+
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
+    expect(engine.state()).toEqual({
+      stream_id: "stream-1",
+      stream_created: "2026-10-01T00:00:00Z",
+      subjects: { [AGENT]: { since: 2, after: 2 } },
+    });
+  });
+
+  test("an answer without an id is judged by its creation time, even against a stored id", async () => {
+    const { stream, host, engine } = setup();
+    stream.publish(AGENT, envelope());
+    engine.restore({
+      state: {
+        stream_id: "stream-1",
+        stream_created: "2026-10-01T00:00:00Z",
+        subjects: { [AGENT]: { since: 0, after: 1 } },
+      },
+      ledger: [],
+    });
+    stream.recreate("2026-10-25T00:00:00Z");
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+
+    await engine.sweep();
+
+    expect(host.attempts).toEqual([]);
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
+    expect(engine.state()).toEqual({
+      stream_created: "2026-10-25T00:00:00Z",
+      subjects: { [AGENT]: { since: 2, after: 2 } },
+    });
+  });
+
+  test("a session that ends while a recreated stream's cursor reset is written is told the recreation once, after the restart", async () => {
+    const { stream, host, engine, make } = setup();
+    stream.identify("stream-1");
+    await engine.sweep();
+    stream.publish(AGENT, envelope());
+    stream.recreate("2026-10-25T00:00:00Z");
+    stream.identify("stream-2");
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+
+    await endSessionDuringNextWrite(host, () => engine.sweep());
+
+    expect(host.notices).toEqual([]);
+
+    host.session = SESSION;
+    const restarted = make();
+    restarted.restore(host.writes.at(-1)?.snapshot() ?? { ledger: [] });
+    await restarted.sweep();
+    const next = envelope();
+    stream.publish(AGENT, next);
+    await restarted.sweep();
+
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
+    expect(ids(host.shown)).toEqual([next.event_id]);
+
+    // The notice told is written as told: a later restart does not tell it again.
+    const again = make();
+    again.restore(host.writes.at(-1)?.snapshot() ?? { ledger: [] });
+    await again.sweep();
+
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
+  });
+
   test("a cursor below what the stream still holds moves on, with one notice", async () => {
     const { stream, host, engine } = setup();
     await engine.sweep();
@@ -584,6 +786,37 @@ describe("replay sweep", () => {
     const restarted = make();
     restarted.restore(host.writes.at(-1)?.snapshot() ?? { ledger: [] });
     await restarted.sweep();
+
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
+  });
+
+  test("a session that ends while a retention gap's cursor move is written is told the gap once, after the restart", async () => {
+    const { stream, host, engine, make } = setup();
+    await engine.sweep();
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+    stream.expireBelow(3);
+    const kept = envelope();
+    stream.publish(AGENT, kept);
+
+    await endSessionDuringNextWrite(host, () => engine.sweep());
+
+    expect(host.notices).toEqual([]);
+    expect(host.attempts).toEqual([]);
+
+    host.session = SESSION;
+    const restarted = make();
+    restarted.restore(host.writes.at(-1)?.snapshot() ?? { ledger: [] });
+    await restarted.sweep();
+    await restarted.sweep();
+
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
+    expect(ids(host.shown)).toEqual([kept.event_id]);
+
+    // The notice told is written as told: a later restart does not tell it again.
+    const again = make();
+    again.restore(host.writes.at(-1)?.snapshot() ?? { ledger: [] });
+    await again.sweep();
 
     expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
   });

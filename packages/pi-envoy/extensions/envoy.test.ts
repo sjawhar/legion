@@ -14460,6 +14460,36 @@ describe("messages missed while the subscription was down", () => {
       await second.stillOnce(second.agentSubject, frame, "evt-own-restart");
     });
 
+    test("a stream that answers the same id after a restart is the same stream, though its creation time moved", async () => {
+      // The listener answers the stream's id, which a leader election or a restore keeps.
+      class IdentifiedStream extends StreamModel {
+        override answer(request: ReplayRequest) {
+          const answered = super.answer(request);
+          return { ...answered, stream: { ...answered.stream, id: "stream-1" } };
+        }
+      }
+      const model = new IdentifiedStream();
+      const first = await bootReplay("replay-own-same-id-a", model);
+      await first.stop();
+      model.created = "2026-10-21T00:00:00Z";
+      const frame = peerMessage("ses_replay", "own-same-id");
+      model.store(first.agentSubject, frame);
+
+      const second = await bootReplay("replay-own-same-id-b", model, {
+        entries: first.entries(),
+        turn: "idle",
+      });
+      await second.tick();
+
+      expect(second.cards("evt-own-same-id")).toHaveLength(1);
+      expect(
+        [
+          ...second.fixture.deliveries.map((delivery) => delivery.content),
+          ...second.notifications,
+        ].filter((text) => text.includes("recreated"))
+      ).toEqual([]);
+    });
+
     test("a frame delivered live is not shown again when the same envelope arrives after a restart", async () => {
       const model = new StreamModel();
       // An idle host writes the live card as it takes it.

@@ -43627,6 +43627,7 @@ var EnvelopeResponseSchema = EnvelopeSchema.extend({
 });
 var ReplayWireSchema = exports_external.object({
   stream: exports_external.object({
+    id: exports_external.string().min(1).optional(),
     created: exports_external.string(),
     first_seq: exports_external.number().int().nonnegative(),
     last_seq: exports_external.number().int().nonnegative()
@@ -43867,9 +43868,16 @@ var ReplayCursorSchema = exports_external.object({
   since: exports_external.number().int().nonnegative().optional(),
   after: exports_external.number().int().nonnegative().optional()
 });
+var ReplayPendingNoticeSchema = exports_external.enum(["retention_gap", "stream_recreated"]);
+var PENDING_NOTICE_MESSAGES = {
+  stream_recreated: "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
+  retention_gap: "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing."
+};
 var ReplayStateSchema = exports_external.object({
+  stream_id: exports_external.string().optional(),
   stream_created: exports_external.string().optional(),
-  subjects: exports_external.record(exports_external.string(), ReplayCursorSchema)
+  subjects: exports_external.record(exports_external.string(), ReplayCursorSchema),
+  notices: exports_external.array(exports_external.string()).optional()
 });
 var ReplaySnapshotSchema = exports_external.object({
   state: ReplayStateSchema.optional(),
@@ -43881,7 +43889,9 @@ function createReplayEngine(options) {
   const ledger = createLedger(now);
   const cursors = new Map;
   const cursorStarts = new Map;
+  let streamID;
   let streamCreated;
+  const pending = new Set;
   const failures = new Map;
   let unwritten = [];
   let writtenState;
@@ -43904,6 +43914,10 @@ function createReplayEngine(options) {
   };
   const log = (message, error48) => safely("log", () => host.log(message, error48));
   const notify = (notice) => safely("notice", () => host.notify(notice));
+  const tell = (kind) => {
+    pending.delete(kind);
+    notify({ kind, message: PENDING_NOTICE_MESSAGES[kind] });
+  };
   const sessionRead = (read) => () => {
     try {
       return read();
@@ -43930,8 +43944,10 @@ function createReplayEngine(options) {
       };
     }
     return JSON.stringify({
+      ...streamID === undefined ? {} : { stream_id: streamID },
       ...streamCreated === undefined ? {} : { stream_created: streamCreated },
-      subjects
+      subjects,
+      ...pending.size === 0 ? {} : { notices: [...pending].sort() }
     });
   };
   const record2 = (identity) => {
@@ -44109,6 +44125,20 @@ function createReplayEngine(options) {
     }
     log("replay: the listener's replay failed; the next trigger tries again", error48);
   };
+  const streamReplaced = (stream) => {
+    if (stream.id === undefined) {
+      return streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated;
+    }
+    if (streamID !== undefined && streamID !== "")
+      return stream.id !== streamID;
+    if (streamCreated === undefined || streamCreated === "")
+      return false;
+    for (const cursor of cursors.values()) {
+      if (cursor.after !== undefined && cursor.after > stream.last_seq)
+        return true;
+    }
+    return false;
+  };
   const sweepOnce = async () => {
     const binding = bind();
     if (binding === undefined)
@@ -44122,6 +44152,16 @@ function createReplayEngine(options) {
     const buffer = new Map;
     const holes = new Map;
     let gapNoticed = false;
+    if (pending.size > 0) {
+      for (const kind of [...pending].sort()) {
+        if (kind === "retention_gap")
+          gapNoticed = true;
+        tell(kind);
+      }
+      await flush(alive);
+      if (!alive())
+        return;
+    }
     for (let page = 0;page < REPLAY_PAGES_PER_SWEEP; page += 1) {
       let handledAny = false;
       const asking = [...readings].filter(([, reading]) => reading.more).sort(([, a], [, b]) => (a.read ?? -1) - (b.read ?? -1)).slice(0, REPLAY_MAX_SUBJECTS);
@@ -44151,22 +44191,24 @@ function createReplayEngine(options) {
           answered.delete(result.subject);
       }
       const { stream } = response;
-      if (streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated) {
-        streamCreated = stream.created;
+      const replaced = streamReplaced(stream);
+      streamID = stream.id ?? (replaced ? undefined : streamID);
+      streamCreated = stream.created;
+      if (replaced) {
         const at = now();
         for (const subject2 of cursors.keys()) {
           cursors.set(subject2, { since: stream.last_seq, after: stream.last_seq });
           cursorStarts.set(subject2, at);
         }
         failures.clear();
-        notify({
-          kind: "stream_recreated",
-          message: "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost."
-        });
+        pending.add("stream_recreated");
+        await flush(alive);
+        if (!alive())
+          return;
+        tell("stream_recreated");
         await flush(alive);
         return;
       }
-      streamCreated = stream.created;
       for (const [, reading] of asking)
         reading.more = false;
       let gapped = false;
@@ -44184,15 +44226,15 @@ function createReplayEngine(options) {
         }
       }
       if (gapped) {
+        if (!gapNoticed)
+          pending.add("retention_gap");
         await flush(alive, true);
         if (!alive())
           return;
-        if (!gapNoticed) {
+        if (pending.has("retention_gap")) {
           gapNoticed = true;
-          notify({
-            kind: "retention_gap",
-            message: "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing."
-          });
+          tell("retention_gap");
+          await flush(alive);
         }
       }
       for (const result of response.subjects) {
@@ -44335,7 +44377,14 @@ function createReplayEngine(options) {
       ledger.restore(snapshot.ledger);
       cursors.clear();
       cursorStarts.clear();
+      streamID = snapshot.state?.stream_id;
       streamCreated = snapshot.state?.stream_created;
+      pending.clear();
+      for (const kind of snapshot.state?.notices ?? []) {
+        const known = ReplayPendingNoticeSchema.safeParse(kind);
+        if (known.success)
+          pending.add(known.data);
+      }
       for (const [subject2, cursor] of Object.entries(snapshot.state?.subjects ?? {})) {
         cursors.set(subject2, { ...cursor });
       }

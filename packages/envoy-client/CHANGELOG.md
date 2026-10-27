@@ -57,11 +57,16 @@
   stamped late, and yields every message it read before the subscription's end or error, as
   nats.js's own iterator does);
   `envoyNoticeText` renders a notice in TOON, so a sender's multi-line summary cannot forge a
-  field; a recreated stream, a cursor older than the stream's oldest message,
+  field; a recreated stream (a stored `stream_id` the listener's `stream.id` no longer matches, or,
+  from a listener that answers no id, a changed `created`; a `created` that moved under the same
+  id is no recreation, and a state stored before ids takes the answer's id unless a cursor stands
+  past the stream's end), a cursor older than the stream's oldest message,
   and a listener that does not replay (404) or cannot (503 `REPLAY_UNAVAILABLE`, 401, 403) are
   each told once. A sweep that only moved its cursors to the stream's end is written at most
-  hourly; a retention gap's cursor move is written before its notice is raised, so a resume
-  neither repeats that notice nor finds the gap again. A host that handed a frame or a failure
+  hourly; a recreation's cursor reset and a retention gap's cursor move are written with their
+  notice pending in the state (`notices`), so a session that ends before the notice is raised
+  raises it once at its first sweep after the restart, and a resume does not find the gap again.
+  A host that handed a frame or a failure
   notice on without writing it yet answers `queued`: the frame stays claimed and unrecorded, its
   cursor before it, until the host records it once written (`recordDelivered`), so a process that
   ends first shows it after the restart;

@@ -77,6 +77,9 @@ const EnvelopeResponseSchema = EnvelopeSchema.extend({
 
 const ReplayWireSchema = z.object({
   stream: z.object({
+    // The stream's `envoy_stream_id` metadata: absent from an older listener's answer, or for a
+    // stream without it. `created` is what identifies the stream then.
+    id: z.string().min(1).optional(),
     created: z.string(),
     first_seq: z.number().int().nonnegative(),
     last_seq: z.number().int().nonnegative(),
