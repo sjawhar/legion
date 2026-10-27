@@ -2323,8 +2323,13 @@ the synchronous listener call records the sent or failed attempt instead of blin
   own actor, so a session commenting on a document it wrote is never told of its own comment, and
   for a session the comment's mentions already reach (`suppressed_authors`: every session a
   mention resolved to, on a new comment, a reply and an ask's thread, so a mentioned session hears
-  the comment once; the follower routes do not read it). An agent's comment notifies nobody
-  (`notify` is false), so it takes no claimant, primary-document or author route at all.
+  the comment once unless it follows the comment's ask; the follower routes do not read it). An
+  agent's comment notifies nobody (`notify` is false), so it takes no claimant, primary-document
+  or author route at all. When a batch's recipient query fails, the error is carried on each event
+  that needed it (`recipientList.err`), not as the row's failure: the attempt sends the owner topic
+  and the route, then ends with that error at the claimant or author step, so `settle` backs the
+  event off with those destinations recorded, or releases it when the process is stopping or NATS
+  is unreachable.
   `ask.follower_added` and `ask.follower_removed` also route directly to the
   session they name, since a newly added follower is not subscribed to the issue topic by default.
 - Dispatch document events use `notifications.dispatch.document.<PROJECT>.<slug>.<type>` and

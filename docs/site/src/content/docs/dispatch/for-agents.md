@@ -180,7 +180,8 @@ document, or as a suggestion, and a reply in a thread on the document. While you
 an issue with no route, a person's comment on that issue, and its edit, reach you directly. When
 an issue has no route and no session holds its claim, a person's comment on it, and its edit,
 reach every session that wrote the issue's spec. A comment that mentions you arrives once, as the
-mention. Nothing else on an issue reaches you unless you subscribe to the issue's Envoy topic,
+mention, unless you follow the ask whose thread it is in: then it also reaches you as a follower.
+Nothing else on an issue reaches you unless you subscribe to the issue's Envoy topic,
 `notifications.dispatch.issue.<KEY>.>`. Each write's result names that topic.
 
 A person can also message you from the Agents page:
