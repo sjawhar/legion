@@ -693,3 +693,52 @@ func TestReferenceSpellingsThatReadBackRenderUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// An image's address that ends in a backslash is written by escapeImageSource as it stands, so
+// the backslash escapes the `)` or `>` that closes the address: `![a](u\)` reads in Go and in the
+// engine as the text `![a](u)`, and a write of the CommonMark markdown `![a](u\\)` is refused as
+// a document that reads back otherwise. Each markdown holds such an address, outside a table and
+// in a cell, in the plain and the angle form; Go must read it as the engine does, a write of it
+// must be accepted, and its rendering must read back as its reading in both parsers.
+func TestAnImageAddressEndingInABackslashRendersAndReadsBack(t *testing.T) {
+	markdowns := []string{
+		"![a](u\\\\)\n",
+		"![a](u\\\\\\\\)\n",
+		"![a](u\\\\ \"t\")\n",
+		"![a](<u v\\\\>)\n",
+		"| h |\n| --- |\n| ![a](u\\\\) |\n",
+		"| h |\n| --- |\n| ![a](<u v\\\\>) |\n",
+	}
+	trees := parseAsTheEngine(t, markdowns)
+	rendered := make([]string, len(markdowns))
+	for index, doc := range trees {
+		if doc == nil {
+			rendered[index] = markdowns[index]
+			continue
+		}
+		if err := RefuseMisreadDocument(doc); err != nil {
+			t.Errorf("a write of %q is refused: %v", markdowns[index], err)
+		}
+		markdown, err := Render(doc)
+		if err != nil {
+			t.Fatalf("Render(Parse(%q)): %v", markdowns[index], err)
+		}
+		rendered[index] = markdown
+	}
+	readings := engineReadings(t, rendered)
+	for index, doc := range trees {
+		if doc == nil {
+			continue
+		}
+		if back, err := Parse(rendered[index]); err != nil || !back.Equal(doc) {
+			got, _ := back.JSON()
+			want, _ := doc.JSON()
+			t.Errorf("Go reads the rendering %q of %q back as %s (%v), want %s", rendered[index], markdowns[index], got, err, want)
+		}
+		if engine := readings[index]; engine == nil || !engine.Equal(doc) {
+			got, _ := engine.JSON()
+			want, _ := doc.JSON()
+			t.Errorf("the engine reads the rendering %q of %q back as %s, want %s", rendered[index], markdowns[index], got, want)
+		}
+	}
+}
