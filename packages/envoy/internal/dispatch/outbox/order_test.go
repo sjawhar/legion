@@ -423,15 +423,15 @@ func TestAnEventNATSNeverAcknowledgesIsBackedOffAndRecorded(t *testing.T) {
 
 	t.Run("a lost connection", func(t *testing.T) {
 		_, url := testnats.Start(t)
-		proxy, proxied := startOutageProxy(t, strings.TrimPrefix(url, "nats://"), 0)
-		client, err := bus.ConnectOwningStream([]string{proxied})
+		proxy := testnats.StartProxy(t, url)
+		client, err := bus.ConnectOwningStream([]string{proxy.URL()})
 		if err != nil {
 			t.Fatalf("connect: %v", err)
 		}
 		t.Cleanup(client.Close)
 		database := storetest.Open(t)
 		event := seed(t, database)
-		proxy.down()
+		proxy.Cut()
 		waitFor(t, 5*time.Second, "the client noticing the cut", func() bool { return !client.Connected() })
 		outbox := holding(t, Deps{Store: database, Publisher: client})
 		outbox.scan(context.Background(), unfenced{})
@@ -446,7 +446,7 @@ func TestAnEventNATSNeverAcknowledgesIsBackedOffAndRecorded(t *testing.T) {
 			t.Fatalf("attempt_count %d, next_attempt_at %v, publish_error %v after a lost connection, want it released untouched",
 				attempts, nextAttempt, failure)
 		}
-		proxy.up(t)
+		proxy.Restore()
 		waitFor(t, 10*time.Second, "the client reconnecting", client.Connected)
 		outbox.scan(context.Background(), unfenced{})
 		if publishedAt(t, database, event.ID) == nil {

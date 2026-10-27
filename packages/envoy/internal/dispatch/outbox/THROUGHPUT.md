@@ -9,7 +9,8 @@ Treat the numbers as order-of-magnitude figures.
 
 - A real Postgres (pgvector pg16) and a real JetStream server.
 - The outbox's bus client reaches NATS through a TCP proxy that holds each chunk for half the
-  round trip, in order (`startLatencyProxy`), as a remote NATS hub does.
+  round trip, in order (`testnats.StartProxy` with `testnats.ProxyLatency`), as a remote NATS hub
+  does.
 - Load: 200 events across 20 issues, each routed to `role:reviewer`, whose holder is a
   self-subscribed session that answers every forward with its receipt. Half are human replies to a
   session's message, which take an author lookup and a third destination. That is 500

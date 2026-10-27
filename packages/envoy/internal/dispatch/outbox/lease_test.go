@@ -309,7 +309,8 @@ func TestAStoppedOutboxHandsThePublisherToTheOtherAtOnce(t *testing.T) {
 // written after the cut.
 func TestAnOutboxThatLosesNATSReleasesThePublisher(t *testing.T) {
 	_, url := testnats.Start(t)
-	proxy, proxied := startOutageProxy(t, strings.TrimPrefix(url, "nats://"), 0)
+	proxy := testnats.StartProxy(t, url)
+	proxied := proxy.URL()
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	counter := &sendCounter{}
@@ -317,7 +318,7 @@ func TestAnOutboxThatLosesNATSReleasesThePublisher(t *testing.T) {
 	waitFor(t, 10*time.Second, "the first process taking the publisher hold", cut.outbox.Publishing)
 	working := startProcess(t, "working", storetest.SecondProcess(t, database), url, counter)
 
-	proxy.down()
+	proxy.Cut()
 	downAt := time.Now()
 	waitFor(t, natsLossGrace+500*time.Millisecond, "the cut process releasing the publisher hold", func() bool {
 		return cut.outbox.hold.Load() == nil
@@ -327,6 +328,38 @@ func TestAnOutboxThatLosesNATSReleasesThePublisher(t *testing.T) {
 	waitForPublished(t, 10*time.Second-time.Since(downAt), database, counter, event)
 	if !working.outbox.Publishing() || cut.outbox.Publishing() {
 		t.Fatalf("publishing %v after the cut, want only the process whose NATS works", publishing(cut, working))
+	}
+}
+
+// A holder whose NATS connection goes silent - still connected, nothing answering - finds out when
+// a batch's sends go unanswered and a probe of their connection fails, and releases the publisher
+// hold. It does not take the hold back while its connection stays silent, although the connection
+// still reports itself connected: the other process, whose NATS works, takes it and publishes the
+// event, within 10 s of the silence.
+func TestAnOutboxWhoseNATSGoesSilentGivesThePublisherToTheOther(t *testing.T) {
+	_, url := testnats.Start(t)
+	proxy := testnats.StartProxy(t, url)
+	database := storetest.Open(t)
+	seedIssue(t, database, "T-1", nil)
+	counter := &sendCounter{}
+	silent := startProcess(t, "silent", database, proxy.URL(), counter)
+	waitFor(t, 10*time.Second, "the first process taking the publisher hold", silent.outbox.Publishing)
+	working := startProcess(t, "working", storetest.SecondProcess(t, database), url, counter)
+
+	proxy.Freeze()
+	t.Cleanup(proxy.Restore)
+	frozenAt := time.Now()
+	event := writeMessage(t, working, "after the silence")
+	waitFor(t, 10*time.Second, "the working process publishing the event", func() bool {
+		return working.outbox.Publishing() && publishedAt(t, database, event.ID) != nil
+	})
+	t.Logf("the working process published the event %s after the silence", time.Since(frozenAt).Round(time.Millisecond))
+	for range 20 {
+		if silent.outbox.Publishing() {
+			t.Fatalf("publishing %v while the silent process's connection stays silent, want only the process whose NATS works",
+				publishing(silent, working))
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

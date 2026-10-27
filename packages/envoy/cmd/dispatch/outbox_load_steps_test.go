@@ -9,10 +9,8 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"os"
@@ -27,9 +25,6 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/session"
-	envoystore "github.com/sjawhar/envoy/internal/store"
-	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 const (
@@ -52,11 +47,6 @@ const (
 	loadSetupQuiet = 2 * time.Second
 	// loadBurstComments is how many comments a burst writes on its one issue.
 	loadBurstComments = 100
-	// loadWritesInFlight bounds the writes a step has waiting on an answer. A step whose writes
-	// back up past it writes slower than its target, which its written rate shows.
-	loadWritesInFlight = 32
-	// loadMachineID is the machine the role holder registers from.
-	loadMachineID = "outbox-load-steps"
 )
 
 // loadStepRates are the write rates of the steps, in events a second: production's evening load
@@ -83,10 +73,9 @@ func TestTheOutboxLoadSteps(t *testing.T) {
 	t.Logf("runtime.NumCPU() = %d", report.CPUs)
 
 	pair := newPair(t)
-	rig := newLoadRig(t, pair.nats)
-	options := dispatchOptions{NATSURL: pair.nats, SigningKey: multiprocessSigningKey}
+	rig := newSessionRig(t, pair.nats)
 
-	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), options)
+	pair.a = pair.startProcess(t, nil)
 	pair.a.waitHealthy(t)
 	one := []*dispatchProcess{pair.a}
 	for _, rate := range loadStepRates {
@@ -94,7 +83,7 @@ func TestTheOutboxLoadSteps(t *testing.T) {
 	}
 	report.Bursts = append(report.Bursts, rig.burst(t, one))
 
-	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), options)
+	pair.b = pair.startProcess(t, nil)
 	pair.b.waitHealthy(t)
 	two := []*dispatchProcess{pair.a, pair.b}
 	for _, rate := range loadStepRates {
@@ -174,41 +163,6 @@ func (r loadReport) table() string {
 	return out.String()
 }
 
-// ───── the rig ─────────────────────────────────────────────────────────────
-
-// loadRig is the test session's NATS connection, the registries a role holder is written to, and
-// the HTTP client the comments are written through.
-type loadRig struct {
-	conn     *natsgo.Conn
-	roles    *envoystore.Registry
-	sessions *session.SessionRegistry
-	client   *http.Client
-}
-
-func newLoadRig(t *testing.T, natsURL string) *loadRig {
-	t.Helper()
-	conn := testnats.Connect(t, natsURL)
-	roles, err := envoystore.Open(conn)
-	if err != nil {
-		t.Fatalf("open the role registry: %v", err)
-	}
-	t.Cleanup(roles.StopWatch)
-	sessions, err := session.OpenSessionRegistry(conn)
-	if err != nil {
-		t.Fatalf("open the session registry: %v", err)
-	}
-	t.Cleanup(sessions.StopWatch)
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConnsPerHost = loadWritesInFlight
-	t.Cleanup(transport.CloseIdleConnections)
-	return &loadRig{
-		conn:     conn,
-		roles:    roles,
-		sessions: sessions,
-		client:   &http.Client{Transport: transport, Timeout: 30 * time.Second},
-	}
-}
-
 // loadTarget is the project one step or burst writes to: its issues, the first of which is routed
 // to role, whose holder is the test session, and the recorder of what the session received.
 type loadTarget struct {
@@ -222,7 +176,7 @@ type loadTarget struct {
 // to their topic families, to the holder's agent subject and to the role's subject, registers the
 // holder, routes the first issue to the role, and returns once the setup's own events are
 // published.
-func (r *loadRig) prepare(t *testing.T, writer *dispatchProcess, issues int) *loadTarget {
+func (r *sessionRig) prepare(t *testing.T, writer *dispatchProcess, issues int) *loadTarget {
 	t.Helper()
 	project := uniqueProjectKey(t, "LS")
 	writer.createProject(t, project, "Outbox load "+project)
@@ -258,25 +212,6 @@ func (r *loadRig) prepare(t *testing.T, writer *dispatchProcess, issues int) *lo
 	return target
 }
 
-// registerHolder makes holder role's holder as a session plugin's own registration does: the
-// claim in the role-claim bucket, and a self-subscribed session with no port, updated now, in the
-// session bucket.
-func (r *loadRig) registerHolder(t *testing.T, role, holder string) {
-	t.Helper()
-	if _, err := r.roles.SetRole(holder, loadMachineID, role, false); err != nil {
-		t.Fatalf("claim role %s for %s: %v", role, holder, err)
-	}
-	entry := session.SessionEntry{
-		MachineID:      loadMachineID,
-		Title:          "Outbox load steps",
-		UpdatedAt:      time.Now().UnixMilli(),
-		SelfSubscribed: true,
-	}
-	if err := r.sessions.Put(holder, entry); err != nil {
-		t.Fatalf("register session %s: %v", holder, err)
-	}
-}
-
 // unsubscribe ends the target's subscriptions; a step's session stops receiving once it is done.
 func (target *loadTarget) unsubscribe() {
 	for _, sub := range target.subs {
@@ -285,69 +220,12 @@ func (target *loadTarget) unsubscribe() {
 	target.subs = nil
 }
 
-// loadWrite is one comment written: its id, or the error that kept it from being written.
-type loadWrite struct {
-	commentID string
-	err       error
-}
-
-// postComment writes one comment on issue key through p, as the test's login, and returns its id.
-func (r *loadRig) postComment(p *dispatchProcess, key, body string) loadWrite {
-	payload, err := json.Marshal(map[string]string{"body": body})
-	if err != nil {
-		return loadWrite{err: err}
-	}
-	request, err := http.NewRequest(http.MethodPost, p.url("/api/v1/issues/"+key+"/comments"), bytes.NewReader(payload))
-	if err != nil {
-		return loadWrite{err: err}
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Dispatch-User", dispatchTestLogin)
-	response, err := r.client.Do(request)
-	if err != nil {
-		return loadWrite{err: err}
-	}
-	defer response.Body.Close()
-	answer, _ := io.ReadAll(response.Body)
-	if response.StatusCode != http.StatusCreated {
-		return loadWrite{err: fmt.Errorf("comment on %s: status %d: %s", key, response.StatusCode, answer)}
-	}
-	var comment struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(answer, &comment); err != nil || comment.ID == "" {
-		return loadWrite{err: fmt.Errorf("comment on %s: no id in %s: %v", key, answer, err)}
-	}
-	return loadWrite{commentID: comment.ID}
-}
-
-// written is the ids of the writes that succeeded; the failures are reported as errors on t,
-// counted and with the first of them.
-func written(t *testing.T, what string, writes []loadWrite) (ids []string, failures int) {
-	t.Helper()
-	var first error
-	for _, write := range writes {
-		if write.err != nil {
-			failures++
-			if first == nil {
-				first = write.err
-			}
-			continue
-		}
-		ids = append(ids, write.commentID)
-	}
-	if failures > 0 {
-		t.Errorf("%s: %d of %d writes failed; the first: %v", what, failures, len(writes), first)
-	}
-	return ids, failures
-}
-
 // ───── a step and a burst ──────────────────────────────────────────────────
 
 // step writes comments at rate a second for loadStepLength on a fresh project's issues, round
 // robin, through writers in turn: consecutive writes go to different processes, and with two
 // processes each issue's writes go through each of them from one round to the next.
-func (r *loadRig) step(t *testing.T, writers []*dispatchProcess, rate int) loadStepResult {
+func (r *sessionRig) step(t *testing.T, writers []*dispatchProcess, rate int) loadStepResult {
 	t.Helper()
 	what := fmt.Sprintf("step %d/s with %d processes", rate, len(writers))
 	target := r.prepare(t, writers[0], loadStepIssues)
@@ -355,9 +233,9 @@ func (r *loadRig) step(t *testing.T, writers []*dispatchProcess, rate int) loadS
 
 	interval := time.Second / time.Duration(rate)
 	total := int(loadStepLength / interval)
-	writes := make([]loadWrite, total)
+	writes := make([]commentWrite, total)
 	roleWrites := make([]bool, total)
-	slots := make(chan struct{}, loadWritesInFlight)
+	slots := make(chan struct{}, writesInFlight)
 	var inFlight sync.WaitGroup
 	started := time.Now()
 	for index := range total {
@@ -415,13 +293,13 @@ func (r *loadRig) step(t *testing.T, writers []*dispatchProcess, rate int) loadS
 
 // burst writes loadBurstComments comments on one fresh, role-routed issue, one after another as
 // fast as the first of writers answers, while every process of writers runs.
-func (r *loadRig) burst(t *testing.T, writers []*dispatchProcess) loadBurstResult {
+func (r *sessionRig) burst(t *testing.T, writers []*dispatchProcess) loadBurstResult {
 	t.Helper()
 	what := fmt.Sprintf("burst of %d comments on one issue with %d processes", loadBurstComments, len(writers))
 	target := r.prepare(t, writers[0], 1)
 	defer target.unsubscribe()
 
-	writes := make([]loadWrite, loadBurstComments)
+	writes := make([]commentWrite, loadBurstComments)
 	started := time.Now()
 	for index := range writes {
 		writes[index] = r.postComment(writers[0], target.issues[0], fmt.Sprintf("Load burst comment %d.", index))
@@ -499,12 +377,13 @@ type loadRecorder struct {
 	last   time.Time
 }
 
-// receive records each message as it arrives on destination, and answers one that carries a
-// reply subject with an empty message, the receipt a session plugin sends for a delivery.
+// receive records each message as it arrives on destination, and answers a role forward with the
+// empty receipt a session plugin sends for it (expectsLaneReceipt).
 func (r *loadRecorder) receive(destination loadDestination) natsgo.MsgHandler {
 	return func(msg *natsgo.Msg) {
 		at := time.Now()
-		if msg.Reply != "" {
+		var item contracts.Envelope
+		if err := json.Unmarshal(msg.Data, &item); err == nil && expectsLaneReceipt(msg, item) {
 			_ = msg.Respond(nil)
 		}
 		r.record(destination, msg.Data, at)

@@ -1,11 +1,9 @@
 package outbox
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,122 +24,6 @@ import (
 	envoystore "github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
-
-// latencyProxy relays TCP connections to target, holding every chunk read from either side for
-// half of rtt before writing it on, in the order it was read: a connection through it sees rtt
-// added to each round trip and nothing else, as Dispatch's connection to a remote NATS hub does.
-type latencyProxy struct {
-	listener net.Listener
-	target   string
-	delay    time.Duration
-
-	mu    sync.Mutex
-	conns []net.Conn
-}
-
-// startLatencyProxy relays to target (host:port) with rtt added to every round trip, and returns
-// the NATS URL of its own address. It closes when t ends.
-func startLatencyProxy(t *testing.T, target string, rtt time.Duration) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for the latency proxy: %v", err)
-	}
-	proxy := &latencyProxy{listener: listener, target: target, delay: rtt / 2}
-	go proxy.serve(listener)
-	t.Cleanup(proxy.close)
-	return "nats://" + listener.Addr().String()
-}
-
-// startOutageProxy relays to target (host:port) with rtt added to every round trip, until down
-// cuts every connection through it and refuses new ones; up listens on the same address again. It
-// returns the proxy and the NATS URL of its address, and closes when t ends.
-func startOutageProxy(t *testing.T, target string, rtt time.Duration) (*latencyProxy, string) {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for the outage proxy: %v", err)
-	}
-	proxy := &latencyProxy{listener: listener, target: target, delay: rtt / 2}
-	go proxy.serve(listener)
-	t.Cleanup(proxy.close)
-	return proxy, "nats://" + listener.Addr().String()
-}
-
-// down cuts every connection through the proxy and stops listening.
-func (p *latencyProxy) down() { p.close() }
-
-// up listens on the proxy's address again.
-func (p *latencyProxy) up(t *testing.T) {
-	t.Helper()
-	listener, err := net.Listen("tcp", p.listener.Addr().String())
-	if err != nil {
-		t.Fatalf("listen again: %v", err)
-	}
-	p.mu.Lock()
-	p.listener = listener
-	p.mu.Unlock()
-	go p.serve(listener)
-}
-
-func (p *latencyProxy) serve(listener net.Listener) {
-	for {
-		client, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		server, err := net.Dial("tcp", p.target)
-		if err != nil {
-			_ = client.Close()
-			continue
-		}
-		p.mu.Lock()
-		p.conns = append(p.conns, client, server)
-		p.mu.Unlock()
-		go p.relay(server, client)
-		go p.relay(client, server)
-	}
-}
-
-// relay copies src to dst, each chunk written delay after it was read.
-func (p *latencyProxy) relay(dst, src net.Conn) {
-	type chunk struct {
-		data []byte
-		due  time.Time
-	}
-	queue := make(chan chunk, 4096)
-	go func() {
-		defer close(queue)
-		buf := make([]byte, 64<<10)
-		for {
-			n, err := src.Read(buf)
-			if n > 0 {
-				queue <- chunk{data: bytes.Clone(buf[:n]), due: time.Now().Add(p.delay)}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	for c := range queue {
-		time.Sleep(time.Until(c.due))
-		if _, err := dst.Write(c.data); err != nil {
-			break
-		}
-	}
-	_ = dst.Close()
-	_ = src.Close()
-}
-
-func (p *latencyProxy) close() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	_ = p.listener.Close()
-	for _, conn := range p.conns {
-		_ = conn.Close()
-	}
-	p.conns = nil
-}
 
 // busyPoolSize is the shared pool's size in the busy case. A full pool is what the case needs, of
 // any size; filling one of production's store.sharedPoolSize would hold that many server
@@ -298,7 +180,7 @@ func newThroughputRig(t *testing.T, rtt time.Duration) *throughputRig {
 	t.Helper()
 	server, url := testnats.Start(t)
 	_ = server
-	proxied := startLatencyProxy(t, strings.TrimPrefix(url, "nats://"), rtt)
+	proxied := testnats.StartProxy(t, url, testnats.ProxyLatency(rtt)).URL()
 	client, err := bus.ConnectOwningStream([]string{proxied})
 	if err != nil {
 		t.Fatalf("connect the outbox's client through the latency proxy: %v", err)

@@ -31,7 +31,8 @@ const (
 	// server still answers, after a batch's sends failed for the connection (scanBatch).
 	probeTimeout = 2 * time.Second
 	// holdRetry is how long a standby waits to try the hold again after the database failed to
-	// answer the take or the read of the current hold's lapse.
+	// answer the take or the read of the current hold's lapse, or after a probe of its own NATS
+	// connection went unanswered (answering).
 	holdRetry = time.Second
 )
 
@@ -70,6 +71,10 @@ type Outbox struct {
 	hold atomic.Pointer[duty.Hold]
 	// claims counts the batches this outbox read, one per scanBatch: how often it scanned.
 	claims atomic.Int64
+	// probeBeforeHold is set when this process gave the publisher hold up for NATS lost, and
+	// cleared once a probe of its connection is answered (answering). Only Run's goroutine reads
+	// and writes it.
+	probeBeforeHold bool
 }
 
 // New returns an outbox for deps, with an instance id of its own. Run starts it.
@@ -99,10 +104,12 @@ func (o *Outbox) Publishing() bool {
 // Run publishes the outbox whenever this process holds the publisher hold, and stands by for it
 // otherwise, until ctx ends. It is called once per Outbox.
 //
-// A standby tries the hold only while its NATS client is connected, and only when woken: by the
-// release of the hold (duty.HoldReleasedChannel), by a timer armed to the moment the current hold
-// lapses on the database's clock (duty.Expiry, read again after every wake), or by its own NATS
-// connection changing. A holder scans on each wake until the hold is lost, NATS is lost (natsLost)
+// A standby tries the hold only while its NATS client is connected - and, once it gave the hold up
+// for NATS lost, only after a probe of its connection is answered (answering) - and only when
+// woken: by the release of the hold (duty.HoldReleasedChannel), by a timer armed to the moment the
+// current hold lapses on the database's clock (duty.Expiry, read again after every wake), or by its
+// own NATS connection changing; a standby probing a connection that does not answer probes it
+// again holdRetry later. A holder scans on each wake until the hold is lost, NATS is lost (natsLost)
 // or ctx ends. One wake channel serves both: it is signalled by every insert of events (a LISTEN on
 // eventsChannel, whose every new connection signals too, to catch up what it missed), by this
 // process's own commits (the events broker, which still reaches the outbox while the LISTEN
@@ -131,7 +138,7 @@ func (o *Outbox) Run(ctx context.Context) {
 		if hold == nil {
 			return
 		}
-		o.publish(publishing, hold)
+		o.probeBeforeHold = o.publish(publishing, hold) == natsLost
 	}
 }
 
@@ -198,9 +205,10 @@ func (o *Outbox) wakeOnConnectionChange(ctx context.Context) {
 }
 
 // standby returns the publisher hold once this process takes it, or nil once ctx ends. While its
-// NATS client is connected it tries the hold at once and after every wake, and arms a timer to the
-// moment the current hold lapses; while it is not, it waits for a wake alone, which its connection
-// coming back gives.
+// NATS client is connected and answering it tries the hold at once and after every wake, and arms a
+// timer to the moment the current hold lapses; while it is connected and not answering, it probes
+// again holdRetry later or at the next wake; while it is not connected, it waits for a wake alone,
+// which its connection coming back gives.
 func (o *Outbox) standby(ctx context.Context) *duty.Hold {
 	for {
 		if ctx.Err() != nil {
@@ -209,12 +217,16 @@ func (o *Outbox) standby(ctx context.Context) *duty.Hold {
 		var lapse *time.Timer
 		var lapsed <-chan time.Time
 		if o.deps.Publisher.Connected() {
-			hold, wait := o.tryHold(ctx)
-			if hold != nil {
-				return hold
-			}
-			if wait == 0 {
-				continue
+			wait := holdRetry
+			if o.answering() {
+				var hold *duty.Hold
+				hold, wait = o.tryHold(ctx)
+				if hold != nil {
+					return hold
+				}
+				if wait == 0 {
+					continue
+				}
 			}
 			lapse = time.NewTimer(wait)
 			lapsed = lapse.C
@@ -228,6 +240,22 @@ func (o *Outbox) standby(ctx context.Context) *duty.Hold {
 			lapse.Stop()
 		}
 	}
+}
+
+// answering reports whether this process's NATS connection answers: always, unless the process
+// gave the publisher hold up for NATS lost (probeBeforeHold) and no probe of its connection has
+// been answered since, in which case it probes the connection now. A connection that went silent
+// still reports itself connected, so without the probe the process would take back at once the
+// hold it gave up for that very connection, ahead of a standby whose NATS works.
+func (o *Outbox) answering() bool {
+	if !o.probeBeforeHold {
+		return true
+	}
+	if err := o.deps.Publisher.Window().Probe(probeTimeout); err != nil {
+		return false
+	}
+	o.probeBeforeHold = false
+	return true
 }
 
 // tryHold takes the publisher hold, or returns how long until the current holder's hold lapses on
@@ -259,15 +287,15 @@ func (o *Outbox) tryHold(ctx context.Context) (*duty.Hold, time.Duration) {
 }
 
 // publish runs this process as the holder of hold until it stops (serve), then releases the hold,
-// or drops it when it was lost.
-func (o *Outbox) publish(ctx context.Context, hold *duty.Hold) {
+// or drops it when it was lost, and returns why it stopped.
+func (o *Outbox) publish(ctx context.Context, hold *duty.Hold) holdEnd {
 	o.hold.Store(hold)
 	slog.Info("dispatch outbox: took the publisher hold", "instance", o.instance)
 	end := o.serve(ctx, hold)
 	o.hold.Store(nil)
 	if end == holdLost {
 		slog.Info("dispatch outbox: lost the publisher hold", "instance", o.instance)
-		return
+		return end
 	}
 	release, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
@@ -276,6 +304,7 @@ func (o *Outbox) publish(ctx context.Context, hold *duty.Hold) {
 		slog.Error("dispatch outbox: release the publisher hold", "instance", o.instance, "error", err)
 	}
 	slog.Info("dispatch outbox: released the publisher hold", "instance", o.instance, "reason", string(end))
+	return end
 }
 
 // serve scans while this process holds hold: once at once, then on each wake, while the NATS

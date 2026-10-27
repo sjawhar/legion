@@ -189,8 +189,8 @@ func assertStreamInOrderPerDestination(t *testing.T, url string, want int) {
 func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 	const issues, count = 2, 20
 	_, url := testnats.Start(t)
-	proxy, proxied := startOutageProxy(t, strings.TrimPrefix(url, "nats://"), 0)
-	client, err := bus.ConnectOwningStream([]string{proxied})
+	proxy := testnats.StartProxy(t, url)
+	client, err := bus.ConnectOwningStream([]string{proxy.URL()})
 	if err != nil {
 		t.Fatalf("connect the outbox's client: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 	broker := events.NewBroker()
 	seedThroughputBacklog(t, database, broker, issues, count)
 
-	proxy.down()
+	proxy.Cut()
 	stop := runOutbox(t, database, client, broker)
 	defer stop()
 	// Long enough for the outbox to have tried, and failed, more than one send.
@@ -207,7 +207,7 @@ func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 	if left := unpublishedCount(t, database); left != count {
 		t.Fatalf("%d events were marked published while NATS was down", count-left)
 	}
-	proxy.up(t)
+	proxy.Restore()
 	restarted := time.Now()
 
 	waitFor(t, 30*time.Second, "the backlog published once NATS is back", func() bool {
@@ -227,8 +227,8 @@ func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
 	const issues, count = 4, 2 * batchSize
 	_, url := testnats.Start(t)
-	proxy, proxied := startOutageProxy(t, strings.TrimPrefix(url, "nats://"), 150*time.Millisecond)
-	client, err := bus.ConnectOwningStream([]string{proxied})
+	proxy := testnats.StartProxy(t, url, testnats.ProxyLatency(150*time.Millisecond))
+	client, err := bus.ConnectOwningStream([]string{proxy.URL()})
 	if err != nil {
 		t.Fatalf("connect the outbox's client: %v", err)
 	}
@@ -253,12 +253,12 @@ func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
 		info, err := js.StreamInfo(bus.Stream)
 		return err == nil && info.State.Msgs > 0
 	})
-	proxy.down()
+	proxy.Cut()
 	if left := unpublishedCount(t, database); left != count {
 		t.Fatalf("%d events were marked published before the cut; the cut came too late to test anything", count-left)
 	}
 	time.Sleep(2 * time.Second)
-	proxy.up(t)
+	proxy.Restore()
 
 	waitFor(t, 90*time.Second, "the backlog published after the cut", func() bool {
 		return unpublishedCount(t, database) == 0

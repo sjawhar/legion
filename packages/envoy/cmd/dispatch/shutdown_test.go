@@ -522,6 +522,10 @@ func TestTheHealthWaitTakesNoAnswerOnThePortForAProcessThatLostIt(t *testing.T) 
 // dispatchTestLogin is the person the test calls the server as, through header identity.
 const dispatchTestLogin = "alice"
 
+// dispatchTestAgentToken is the shared agent token (DISPATCH_AGENT_TOKEN) the server is started
+// with: a bearer caller presenting it acts as the session its request body names.
+const dispatchTestAgentToken = "shutdown-test-token"
+
 // dispatchProcess is a Dispatch binary a test started, serving on port.
 type dispatchProcess struct {
 	*cmdtest.Process
@@ -572,7 +576,7 @@ func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatch
 		"XDG_CONFIG_HOME":                  home,
 		"XDG_DATA_HOME":                    home,
 		"DATABASE_URL":                     databaseURL,
-		"DISPATCH_AGENT_TOKEN":             "shutdown-test-token",
+		"DISPATCH_AGENT_TOKEN":             dispatchTestAgentToken,
 		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 		"DISPATCH_LISTEN_HOST":             "127.0.0.1",
