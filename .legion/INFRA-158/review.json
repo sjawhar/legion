@@ -2,33 +2,29 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T12:07:30Z",
-  "round": 10,
+  "completed": "2026-10-27T13:37:00Z",
+  "round": 11,
   "generation": 4,
-  "head": "b3855fb2027f28a87ccd000901cfb777db072f78",
+  "head": "fd3bfa69b2efd7f0093d9675bc1bc3690afee306",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 0,
-  "ci": "Required set: lint, typecheck, test, pr-title. All four queued at CI head b3855fb2 when this round ended; compare b3855fb2...e6876f3a changes only .legion/. A request for changes does not wait on CI.",
-  "thermonuclear": "At b3855fb2, scoped to what changed since review 5663501165: thermonuclear-deep-review CHANGES (58 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality CHANGES on cleanup only (24 assistant turns, all anthropic / claude-opus-5-5). Read turn by turn from each pass's session transcript.",
+  "ci": "Required set: lint, typecheck, test, pr-title. All four queued at CI head fd3bfa69 when this round ended; compare fd3bfa69...de273661 changes only .legion/. A request for changes does not wait on CI.",
+  "thermonuclear": "At fd3bfa69, scoped to that commit: thermonuclear-deep-review CHANGES (42 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality CHANGES (23 assistant turns, all anthropic / claude-opus-5-5), both on the same cache race. Read turn by turn from each pass's session transcript.",
   "checks": {
-    "decision 22 block index": "a closed issue's owed live-ahead document is indexed at its latest version's own text; an open issue's is skipped as before; #b- references resolve; the two defects below stand",
-    "leasePoolSize 11": "matches the eleven duty.Exclusive callers (issue-ask-repair, suggestion-outcomes, architecture-import, two delivery durables, delivery-reconcile, block-index, edit-notices, reference-excerpts, document-compaction, webhook-redelivery); README's nine loops and the test comment's nine leases leave out the two durables, as before",
-    "settleOutcome join": "main's #2137 paths map to stoppedShort and abandon with main's behaviour",
-    "edit notices": "a close, reopen or repair writes none: lifecycle writes credit no author, and recordEditNotice fires only for a version listing a user (edit_notices.go:93)"
+    "review 5666788227 finding 1 (paste id)": "fixed: readLive takes only the first holder of an id; probes (original, paste then edit, three copies, paste before source, typed callout, no rows) give unique ids and no held block deleted",
+    "review 5666788227 finding 2 (cache)": "fixed for a document cached while open whose issue later closes; one race remains (keyFindings[0])",
+    "take": "versionMatch.take (closed_version_blocks.go:145-151) is the only writer of m.ids and refuses a block that has an id and an id already used",
+    "refactor": "behaviour-preserving apart from the fix: 200,000 random cases with unique live ids gave identical ids before and after",
+    "earlier findings": "none came back"
   },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/block_index.go:514",
-      "description": "closedVersionBlocks adds every untyped live block with a row to liveSums keyed by block.ID, so a pasted copy carrying its source's id (an unsettled paste at the close) adds that row twice, and the anchors give two version blocks one id. Pure probe: stored 'Foo.\\n\\nFoo.\\n', rows p1 and p2, live p1, p1, p2 -> p1, p1. refs.IndexBlocks keeps the first holder, so p2 is recorded deleted at a version that holds its text, #b-p2 resolves to nothing while closed, and the reopen's settlement records it restored. Reproduced by the reviewer."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/block_index.go:363",
-      "description": "The skip now depends on whether the issue is open, but the loop's live-ahead cache (stillLiveAhead) is keyed on version, marked_at and no resident room only. An open document cached as live ahead whose close changes none of these (pre-close settlement stopped short, no open ask so no live write, persistLastActor does not move marked_at) is counted live ahead and never indexed after the close, until a restart or a room load; the previous round's symptom returns for it. Deep-review DB probe: three ticks with the same map leave it unindexed, a fresh map indexes it."
+      "file": "packages/envoy/internal/dispatch/docs/block_index.go:208",
+      "description": "stillLiveAhead compares the open value the unlocked listing read, but a document is live ahead only when the issue is open under the owner lock (:326, :363). A reopen landing between the listing and the lock caches the document with open=false; if the issue closes again before a settlement writes a version and nothing moves marked_at (a document with no asks), every later listing reads open=false, the cache matches, and the closed document is never indexed until a restart: round 9's symptom again. Fix: use the cache only while the listing sees the issue open (document.open in stillLiveAhead, or cache only when document.open)."
     }
   ],
-  "fastFollow": "Cleanup, no behaviour change: closedVersionBlocks is 174 lines of five passes in the loop's file (own file, one function per pass); its last two passes are one operation; the three repeated live-ahead switch cases; docs recomputes refs' block text hash (export one helper from refs); the PR body still names leasePoolSize 10 and round 9 open."
+  "fastFollow": "Cleanup: alignGaps and pairLeftovers build the same unmatched-by-text grouping twice (closed_version_blocks.go:271-282, 320-331); one leftovers() method."
 }
