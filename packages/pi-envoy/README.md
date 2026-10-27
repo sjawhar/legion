@@ -54,7 +54,7 @@ summary, it sends the `dispatch-first` skill, whose text never changes. At the t
 request's last message, it sends what people wrote to the session in the last 72 hours that
 Dispatch delivered to it: answers to its asks, replies on them and in its comment threads,
 comments on its documents and routed issues, mentions, and messages, newest first and word for
-word. A subagent reads its parent's list. The list is capped at 8,000 characters: the oldest
+word. A subagent reads its parent's list. The list stays under 8,000 characters (at most 7,999): the oldest
 items that do not fit are left out, and its last line says how many and that `dispatch answers`
 prints them all. It is read on every request and waits at most 800 ms for Dispatch. Past that,
 the request carries the last list read (with the time it was read), or, when none was ever read,

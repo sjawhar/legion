@@ -126,26 +126,26 @@ describe("renderSessionAnswers", () => {
     );
   });
 
-  test("a list of 7,999 or 8,000 characters is whole; at 8,001 its one item is left out", () => {
-    for (const target of [7_999, 8_000]) {
+  test("a list of 7,998 or 7,999 characters is whole; at 8,000 its one item is left out", () => {
+    for (const target of [7_998, 7_999]) {
       const item = sizedItem("fits", target);
       const rendered = renderSessionAnswers([item], { now: NOW });
       expect(rendered).toBe(`${SESSION_ANSWERS_MARKER}\n\n${renderSessionAnswerItem(item)}`);
       expect(rendered?.length).toBe(target);
     }
-    const over = renderSessionAnswers([sizedItem("over", 8_001)], { now: NOW });
+    const over = renderSessionAnswers([sizedItem("over", 8_000)], { now: NOW });
     expect(over).toBe(`${SESSION_ANSWERS_MARKER}\n\n${leftOut(1)}`);
   });
 
   test("the left-out line counts in the cap: an item fits only with the line its older items need", () => {
     const older = message("older", hoursAgo(2), "older words");
-    const exact = sizedItem("exact", 8_000, 1);
+    const exact = sizedItem("exact", 7_999, 1);
     const rendered = renderSessionAnswers([exact, older], { now: NOW });
     expect(rendered).toBe(
       `${SESSION_ANSWERS_MARKER}\n\n${renderSessionAnswerItem(exact)}\n\n${leftOut(1)}`
     );
-    expect(rendered?.length).toBe(8_000);
-    expect(renderSessionAnswers([sizedItem("past", 8_001, 1), older], { now: NOW })).toBe(
+    expect(rendered?.length).toBe(7_999);
+    expect(renderSessionAnswers([sizedItem("past", 8_000, 1), older], { now: NOW })).toBe(
       `${SESSION_ANSWERS_MARKER}\n\n${leftOut(2)}`
     );
   });
@@ -171,7 +171,7 @@ describe("renderSessionAnswers", () => {
     expect(shown.length).toBeGreaterThan(0);
     expect(shown.length).toBeLessThan(items.length);
     expect(shown).toEqual(items.slice(0, shown.length));
-    expect(rendered.length).toBeLessThanOrEqual(8_000);
+    expect(rendered.length).toBeLessThan(8_000);
     expect(rendered.endsWith(`\n\n${leftOut(items.length - shown.length)}`)).toBe(true);
     expect(rendered).toContain("run `dispatch answers` to read every one in full.");
   });

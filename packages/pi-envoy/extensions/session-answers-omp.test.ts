@@ -495,7 +495,7 @@ test.skipIf(skipped)(
     ]);
 
     const list = listOf(session.turns[0] as Seen);
-    expect(list.length).toBeLessThanOrEqual(8_000);
+    expect(list.length).toBeLessThan(8_000);
     // Shown items are the newest, a strict prefix: the first left out ends the list.
     const shown = items.map((item) => list.includes(item.text));
     const count = shown.indexOf(false);

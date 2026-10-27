@@ -241,7 +241,7 @@ test("a list past the cap stays under 8,000 characters with the left-out line", 
   }
 
   const context = contextOf(await runHook(env, sessionStart("startup", home)), "SessionStart")
-  expect(context.length).toBeLessThanOrEqual(8_000)
+  expect(context.length).toBeLessThan(8_000)
   expect(context).toBe(renderSessionAnswers(items, { now: Date.now(), total: 12 }) as string)
   expect(context).toMatch(
     /\n\n\d+ older items left out to stay under 8,000 characters: run `dispatch answers` to read every one in full\.$/,

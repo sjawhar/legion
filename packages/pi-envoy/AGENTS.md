@@ -365,7 +365,7 @@ the anchors stay on the conversation's own last messages and a change in the lis
 of the cached prefix; at the head, every change would invalidate everything after it. Its first
 line is `SESSION_ANSWERS_MARKER` (the failure line has its own), and only the last message is
 checked for it, so a second copy of the extension appends nothing and does not read again.
-Bounds, all in the shared module: 8,000 characters for the whole message, items newest first as a
+Bounds, all in the shared module: under 8,000 characters (at most 7,999) for the whole message, items newest first as a
 strict prefix with a left-out line naming `dispatch answers`; one read in flight per session for
 the whole process, the parent's and every subagent's requests joining it; each request waits at
 most `SESSION_ANSWERS_DEADLINE_MS` (800 ms), then carries the last list read (memory, then

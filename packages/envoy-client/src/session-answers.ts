@@ -136,7 +136,8 @@ export interface RenderSessionAnswersOptions {
  * The per-request message: `SESSION_ANSWERS_MARKER` (and, for a cached list, `As read at <time>;
  * Dispatch did not answer now.` on the next line), then each item newest first, blank-line
  * separated, as a strict prefix under the cap: the whole message, header and left-out line
- * included, is at most `SESSION_ANSWERS_MAX_CHARS` long; the first item that does not fit is left
+ * included, is shorter than `SESSION_ANSWERS_MAX_CHARS` (at most 7,999 characters, as the
+ * left-out line's "under 8,000" says); the first item that does not fit is left
  * out with every item after it, so an item over the cap on its own is left out whole, never cut.
  * When any item is left out, the last line counts them and names `dispatch answers`. Items are
  * filtered by the 72-hour window at `now` first. Undefined when the window holds nothing.
@@ -162,7 +163,7 @@ export function renderSessionAnswers(
     const block = renderSessionAnswerItem(item);
     const after = count - blocks.length - 1;
     const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after).length);
-    if (needed > SESSION_ANSWERS_MAX_CHARS) break;
+    if (needed >= SESSION_ANSWERS_MAX_CHARS) break;
     blocks.push(block);
     length += 2 + block.length;
   }

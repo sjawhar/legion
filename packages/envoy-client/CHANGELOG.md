@@ -78,7 +78,7 @@
   `As read at <time>; Dispatch did not answer now.` on the next line), then each item's time,
   person, relation, `dispatch://` reference and owner, an ask's question cut to 200 characters,
   `Selected:` on an answer and the words in full, newest first as a strict prefix under 8,000
-  characters (UTF-16 units, the whole message), an item over the cap left out whole, and the line
+  characters (at most 7,999 UTF-16 units, the whole message), an item over the cap left out whole, and the line
   ``<N> older items left out to stay under 8,000 characters: run `dispatch answers` to read every
   one in full.`` when any is left out; items past 72 hours at `now` are dropped at render.
   `readSessionAnswers({session, dispatch, stateDirectory?, …})` reads it for one model request
