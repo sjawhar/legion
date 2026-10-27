@@ -713,7 +713,8 @@ text = open(path).read()
 open(path, "w").write(text.replace(
     "          file: docker/Dockerfile\n",
     "          file: docker/Dockerfile\n          push: true\n          platforms: linux/amd64\n"
-    "          cache-from: type=gha\n          secrets: |\n            tok=abc\n",
+    "          cache-from: type=gha\n          secrets: |\n            tok=abc\n"
+    "          outputs: type=image,name=ghcr.io/x/y,push-by-digest=true,push=true\n",
 ))
 PYEOF
 run_check "$root"

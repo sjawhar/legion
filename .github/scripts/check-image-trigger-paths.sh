@@ -530,6 +530,7 @@ BUILD_ACTION_INPUTS = {
     "load",  # where the result goes
     "no-cache",  # cache behaviour
     "no-cache-filters",  # cache behaviour
+    "outputs",  # where the result goes; an exporter writes the result and names no input
     "secrets",  # `id=value` pairs; values, not paths (`secret-files` IS a path, so it is not here)
     "platforms",  # target architectures
     "provenance",  # attestation toggle
