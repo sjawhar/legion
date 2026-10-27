@@ -32,6 +32,11 @@ type Image struct {
 	Env []string
 	// WorkDir is where the checks run.
 	WorkDir string
+	// SkipBrowser leaves the browser row unchecked (`probe-image --skip-browser`): an image built
+	// for a deployment that turns Oh My Pi's browser off (`browser.enabled: false`) carries no
+	// Chromium. The daemon's probe Sandbox never sets it, so a Sandbox pod's image is always
+	// checked for the browser.
+	SkipBrowser bool
 }
 
 // commandTimeout bounds each command a check runs: a `--version` or a `--check` that has not
@@ -52,18 +57,22 @@ var imageChecks = map[Name]imageCheck{
 }
 
 // CheckImage checks every image-site row under img and renders every row of Table, in its order:
-// image rows present or missing with their evidence, live rows reported as what each session
-// reports at its start and `legion state` renders, deployment rows reported as what the daemon
-// reports from the deployment's configuration, withheld rows with their ruling. It runs after the
-// launch probes (daemon.ProbeImage) passed: the eval-js and skills rows are present by those
-// probes, which ran Oh My Pi — its own JavaScript runtime — and resolved the prompt-named skills.
-// err is nil when every image row's check passed; otherwise it names every missing one, so one
-// rebuild of the image fixes them all rather than the first alone. A ctx that ends ends the check
-// with an error wrapping ctx's.
+// image rows present or missing with their evidence (with img.SkipBrowser, the browser row
+// unchecked and no browser run), live rows reported as what each session reports at its start
+// and `legion state` renders, deployment rows reported as what the daemon reports from the
+// deployment's configuration, withheld rows with their ruling. It runs after the launch probes
+// (daemon.ProbeImage) passed: the eval-js and skills rows are present by those probes, which ran
+// Oh My Pi — its own JavaScript runtime — and resolved the prompt-named skills. err is nil when
+// every image row's check passed; otherwise it names every missing one, so one rebuild of the
+// image fixes them all rather than the first alone. A ctx that ends ends the check with an error
+// wrapping ctx's.
 func CheckImage(ctx context.Context, img Image) ([]State, error) {
 	var absent []string
 	states, err := render(ctx, renderer{
 		image: func(row Capability) State {
+			if row.Name == Browser && img.SkipBrowser {
+				return State{Name: row.Name, Status: StatusUnchecked, Detail: "not checked (--skip-browser): the image is for a deployment that turns Oh My Pi's browser off"}
+			}
 			detail, ok := imageChecks[row.Name](ctx, img)
 			if !ok {
 				absent = append(absent, fmt.Sprintf("capability %s is missing: %s", row.Name, detail))
