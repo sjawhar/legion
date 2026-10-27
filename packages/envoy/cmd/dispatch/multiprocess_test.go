@@ -84,10 +84,11 @@ func newPair(t *testing.T) *dispatchPair {
 	return &dispatchPair{database: storetest.Open(t), nats: multiprocessNATS(t)}
 }
 
-// start starts both processes on the pair's database and NATS, each on a free port and in a home
-// of its own, both carrying multiprocessSigningKey, and returns once each answers /healthz. The
-// two are started together rather than one after the other: several rows are about what the two
-// do when their loops fire at the same moment, which a staggered start would hide.
+// start starts both processes on the pair's database and NATS, each on a port held for it from the
+// moment the kernel chose it (startDispatchProcessWith) and in a home of its own, both carrying
+// multiprocessSigningKey, and returns once each answers /healthz. The two are started together
+// rather than one after the other: several rows are about what the two do when their loops fire at
+// the same moment, which a staggered start would hide.
 func (p *dispatchPair) start(t *testing.T, env map[string]string) {
 	t.Helper()
 	p.startSettling(t, env, 0, 0)
@@ -888,11 +889,12 @@ func requireLeasedOnce(t *testing.T, pair *dispatchPair, lease string) {
 	}
 }
 
-// lockTables holds every table named in exclusive mode in a transaction of the test's own, as a
-// writer that is taking its time would, and rolls it back when the test ends if the test has not.
-// A maintenance pass whose first statement writes one of them waits there, inside its lease, which
-// is the moment the lease is about: both processes' loops firing while one is still in its pass.
-func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
+// lockTables holds every table named in mode (`exclusive`, or `access exclusive`) in a transaction
+// of the test's own, as a writer that is taking its time would, and rolls it back when the test
+// ends if the test has not. A maintenance pass whose first statement writes one of them - or, in
+// access exclusive mode, reads one - waits there, inside its lease, which is the moment the lease
+// is about: both processes' loops firing while one is still in its pass.
+func lockTables(t *testing.T, database *store.Store, mode string, tables ...string) pgx.Tx {
 	t.Helper()
 	ctx := context.Background()
 	gate, err := database.Pool.Begin(ctx)
@@ -901,7 +903,7 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 	}
 	t.Cleanup(func() { _ = gate.Rollback(context.Background()) })
 	for _, table := range tables {
-		if _, err := gate.Exec(ctx, "lock table "+table+" in exclusive mode"); err != nil {
+		if _, err := gate.Exec(ctx, "lock table "+table+" in "+mode+" mode"); err != nil {
 			t.Fatalf("hold %s: %v", table, err)
 		}
 	}
@@ -915,19 +917,28 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Three of the six leases are observable inside a window a test can wait out:
-// reference-excerpts and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other three
+// Four of the eight leases are observable inside a window a test can wait out:
+// reference-excerpts, block-index and webhook-redelivery, whose first pass is immediate, and
+// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other four
 // are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
 // architecture-import's and delivery-reconcile's first pass is jittered uniformly over
 // SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether their passes
-// ever overlap is a coin toss no test should turn into a flake.
+// ever overlap is a coin toss no test should turn into a flake; and edit-notices' period is five
+// seconds, so this window holds many of its periods, each served once
+// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for).
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
 	// refs is where the reference-excerpt reconciliation's first statement writes
 	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does.
-	gate := lockTables(t, pair.database, "refs", "write_suggestions")
+	gate := lockTables(t, pair.database, "exclusive", "refs", "write_suggestions")
+	// The block-index reconciliation's first statements read document_block_versions and
+	// block_grammar_owed, which only access exclusive mode holds back. They are held in a gate of
+	// their own, released as soon as the other process has found the lease held: that pass's
+	// interval is 30 s, so released with the gate above - a minute in, when the suggestion sweep's
+	// first tick lands - the other process's own next tick could land beside the release and make
+	// the next period's pass before this row counts the first.
+	blockGate := lockTables(t, pair.database, "access exclusive", "document_block_versions", "block_grammar_owed")
 	pair.start(t, githubAppEnv(t, fake.URL()))
 
 	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 60*time.Second); waiting < 1 {
@@ -938,6 +949,20 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	if ran := countLease(pair.a, leaseRan, "reference-excerpts") + countLease(pair.b, leaseRan, "reference-excerpts"); ran != 0 {
 		t.Errorf("a reference-excerpt pass reported running %d times while the one holding the lease is still inside the refs lock", ran)
 	}
+
+	if waiting := storetest.WaitForLockWaiters(t, blockGate, 1, 60*time.Second); waiting < 1 {
+		t.Fatalf("no block-index pass reached the document_block_versions lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
+			pair.a.Output.String(), pair.b.Output.String())
+	}
+	waitForLease(t, pair, leaseSkipped, "block-index", 60*time.Second)
+	if ran := countLease(pair.a, leaseRan, "block-index") + countLease(pair.b, leaseRan, "block-index"); ran != 0 {
+		t.Errorf("a block-index pass reported running %d times while the one holding the lease is still inside the document_block_versions lock", ran)
+	}
+	if err := blockGate.Rollback(context.Background()); err != nil {
+		t.Fatalf("release the tables the block-index pass is waiting on: %v", err)
+	}
+	waitForLease(t, pair, leaseRan, "block-index", 60*time.Second)
+	requireLeasedOnce(t, pair, "block-index")
 
 	// The webhook redelivery sweep's first pass is held in its first GitHub call instead: it
 	// lists the App webhook's failed deliveries before it writes anything.
@@ -960,6 +985,7 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
+		{"edit-notices", "its period is 5 s, so the window holds many periods, each served once"},
 	} {
 		if ran := countLease(pair.a, leaseRan, unobserved.lease) + countLease(pair.b, leaseRan, unobserved.lease); ran > 0 {
 			t.Logf("%s ran %d times in the window, which this row does not hold to a count: %s",

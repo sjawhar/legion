@@ -7,7 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,59 +153,52 @@ func recordedChild(t *testing.T, h *harness, key string) *record.Issue {
 	return got
 }
 
-// A todo child whose parent the same wave releases cannot be recorded until the parent is: the
-// workflow records a child only under a recorded parent, and the parent's own todo event reaches
-// the daemon after the release returns. The release answers CHILD_NOT_RECORDED, and the architect's
-// retry, once the parent's event has arrived, records the child. Before, the first attempt spent
-// the child's fact id, the retry was answered as a duplicate, and the child was never recorded.
-func TestWaveReleaseRetryRecordsATodoChildOfAChildTheWaveReleased(t *testing.T) {
-	h := newHarness(t)
-	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	statuses := &statusRecorder{}
-	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
-		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
-		Handlers: []intake.Handler{engine}, Dispatch: statuses,
-	}).Handler
+// A todo child whose parent the same wave releases out of triage is recorded in that one request,
+// in whichever order the wave names the two: the release records the parent from its own todo write
+// first, and the workflow, which records a child only under a recorded parent, then records the
+// child under it. Before, the parent was recorded only once its write's todo event came back
+// through the Dispatch consumer, so the release answered CHILD_NOT_RECORDED and the child waited for
+// the architect's retry after that event.
+func TestWaveReleaseRecordsATodoChildOfAChildTheSameWaveReleases(t *testing.T) {
 	root, parent, child := "LEGION-208", "LEGION-209", "LEGION-210"
-	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
-	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
-		return records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)})
-	}); err != nil {
-		t.Fatalf("seed the live tree: %v", err)
-	}
-	statuses.issues = map[string]dispatch.Issue{
-		root:   {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
-		parent: {Key: parent, ResolvedRepo: "acme/widgets", Title: parent, Status: "triage", Parent: &root, LastSeq: 2},
-		child:  {Key: child, ResolvedRepo: "acme/widgets", Title: child, Status: "todo", Parent: &parent, LastSeq: 5},
-	}
-	architect := newLiveClaim(t, h, root, claim.RoleArchitect)
-	release := func() *httptest.ResponseRecorder {
-		t.Helper()
-		return h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": []string{parent, child}}, nil)
-	}
+	for _, wave := range [][]string{{parent, child}, {child, parent}} {
+		t.Run(strings.Join(wave, ","), func(t *testing.T) {
+			h := newHarness(t)
+			records := record.NewStore()
+			engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			statuses := &statusRecorder{}
+			h.handler = NewServer("127.0.0.1", 8437, Options{
+				Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+				Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
+				Handlers: []intake.Handler{engine}, Dispatch: statuses,
+			}).Handler
+			h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
+			if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+				return records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)})
+			}); err != nil {
+				t.Fatalf("seed the live tree: %v", err)
+			}
+			statuses.issues = map[string]dispatch.Issue{
+				root:   {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
+				parent: {Key: parent, ResolvedRepo: "acme/widgets", Title: parent, Status: "triage", Parent: &root, LastSeq: 2},
+				child:  {Key: child, ResolvedRepo: "acme/widgets", Title: child, Status: "todo", Parent: &parent, LastSeq: 5},
+			}
+			architect := newLiveClaim(t, h, root, claim.RoleArchitect)
 
-	assertFailure(t, release(), http.StatusConflict, "CHILD_NOT_RECORDED")
-	if got := recordedChild(t, h, child); got != nil {
-		t.Fatalf("the child before its parent is recorded = %#v, want none", got)
-	}
-	// The parent's todo event, from the release's write, reaches the daemon.
-	statuses.issues[parent] = dispatch.Issue{Key: parent, ResolvedRepo: "acme/widgets", Title: parent, Status: "todo", Parent: &root, LastSeq: 3}
-	if _, err := intake.ApplyFact(context.Background(), h.store.Pool(), "dispatch", "parent-todo", intake.DispatchIssue{
-		Key: parent, ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.updated", Status: "todo", Title: parent, Parent: root,
-	}, engine); err != nil {
-		t.Fatalf("apply the parent's todo event: %v", err)
-	}
-
-	if recorder := release(); recorder.Code != http.StatusOK {
-		t.Fatalf("the architect's retry = %d: %s", recorder.Code, recorder.Body)
-	}
-	if got := recordedChild(t, h, child); got == nil || got.Tree != root || got.LastDispatchSeq != 5 {
-		t.Fatalf("the child after the retry = %#v, want it recorded in %s's tree at Dispatch's sequence 5", got, root)
-	}
-	if want := []statusWrite{{issue: parent, status: "todo"}}; len(statuses.writes) != 1 || statuses.writes[0] != want[0] {
-		t.Fatalf("Dispatch writes = %#v, want only the parent's release", statuses.writes)
+			recorder := h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": wave}, nil)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("wave release = %d: %s", recorder.Code, recorder.Body)
+			}
+			if got := recordedChild(t, h, parent); got == nil || got.Tree != root || got.LastDispatchSeq != 3 {
+				t.Fatalf("the parent after the release = %#v, want it recorded in %s's tree at its write's sequence 3", got, root)
+			}
+			if got := recordedChild(t, h, child); got == nil || got.Tree != root || got.LastDispatchSeq != 5 {
+				t.Fatalf("the child after the release = %#v, want it recorded in %s's tree at Dispatch's sequence 5", got, root)
+			}
+			if want := []statusWrite{{issue: parent, status: "todo"}}; len(statuses.writes) != 1 || statuses.writes[0] != want[0] {
+				t.Fatalf("Dispatch writes = %#v, want only the parent's release", statuses.writes)
+			}
+		})
 	}
 }
 

@@ -270,18 +270,23 @@ one. Three things have to be true first, and Dispatch can check none of them for
 - **Every migration leaves the version before it able to read and write the database**
   ([Migrations](#migrations)), because a rolling update runs both versions against the one
   database while it lasts.
+- **Expect an issue's notifications out of order while two servers publish.** Each server's
+  events outbox claims a batch of events at a time, and nothing yet keeps two servers from
+  publishing adjacent batches at once, so a later event of an issue can reach NATS before an
+  earlier one, and the Legion daemon drops the earlier one as stale. Run one server, and replace it
+  rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
-to 16 connections for requests, up to 9 for the periodic work it runs once across the servers, up
-to 4 for loading documents, and one for the health check. It also holds up to four more open for
-as long as it runs. Three of them wait on Postgres notifications: one for delivery, one for the
-live event stream, and one that the server shares for everything else, document sessions
-included. The other servers on the same database find each server by the name of that shared
-connection. The fourth sends the server's own notifications about documents, and opens the first
-time the server has one to send. That is 34 connections for one server at its ceiling, and twice
-that for two. Check the database's connection limit before you start the second server: a limit
-sized for one server, with whatever else uses that database counted in, is the thing that runs
-out.
+to 64 connections for requests, up to 11 for the periodic work it runs once across the servers,
+up to 4 for loading documents, one for the health check, and one for the events outbox. It also
+holds up to four more open for as long as it runs. Three of them wait on Postgres notifications:
+one for delivery, one for the live event stream, and one that the server shares for everything
+else, document sessions included. The other servers on the same database find each server by the
+name of that shared connection. The fourth sends the server's own notifications about documents,
+and opens the first time the server has one to send. That is 85 connections for one server at its
+ceiling, and twice that for two, past a default Postgres's limit of 100. Check the database's
+connection limit before you start the second server: a limit sized for one server, with whatever
+else uses that database counted in, is the thing that runs out.
 
 What a reader sees while two servers are serving:
 

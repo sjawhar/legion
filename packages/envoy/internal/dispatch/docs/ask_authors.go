@@ -295,16 +295,17 @@ func (sources askBlockSources) author(id string, fallback model.Actor) (model.Ac
 	return fallback, true
 }
 
-// The durable ask authors (doc_ask_block_authors, migration 0122) are the authors of the ask blocks
+// The durable ask authors (doc_ask_block_authors, migration 0136) are the authors of the ask blocks
 // no settlement has indexed yet, one row per block, outliving the room and the process that saw the
 // write: a browser's block is recorded by the append of the update whose render first showed it
 // (appendUpdateTxClass), a joined write's or a seed's by the transaction that commits it
 // (Ledger.recordSettlementCredit), and a block a stamp renamed by the transaction that stores the
 // stamp (recordStampedAskAuthors). The first registration wins. A settlement deletes the rows of the
 // blocks it indexed or found indexed and of the blocks its tree no longer holds
-// (deleteSettledAskAuthors). Every write holds the document's advisory lock. An id PostgreSQL's
-// text cannot hold (storableAskBlockID) has no row: every stamp mints it again, and the stamp
-// records the author it carries to the minted id.
+// (deleteSettledAskAuthors). Every write holds the document's advisory lock. A block is keyed by
+// its id's SHA-256 (block_id_key), so an id of any length has its row. An id PostgreSQL's text
+// cannot hold (storableAskBlockID) has no row: every stamp mints it again, and the stamp records
+// the author it carries to the minted id.
 
 // storableAskBlockID reports whether id can name a durable row, as pmdoc's block-id repair keeps
 // it: any text but the empty string and one holding U+0000.
@@ -334,7 +335,7 @@ func recordAskAuthors(ctx context.Context, tx pgx.Tx, room string, authors map[s
 	if _, err := tx.Exec(ctx, `
 		insert into doc_ask_block_authors (artifact_id, block_id, actor)
 		select $1::uuid, block, actor from unnest($2::text[], $3::jsonb[]) as author(block, actor)
-		on conflict (artifact_id, block_id) do nothing
+		on conflict (artifact_id, block_id_key(block_id)) do nothing
 	`, room, blocks, encoded); err != nil {
 		return fmt.Errorf("record the document's ask block authors: %w", err)
 	}
@@ -367,7 +368,7 @@ func recordStampedAskAuthors(ctx context.Context, tx pgx.Tx, room string, stampe
 		select recorded.artifact_id, renamed.minted, recorded.actor
 		from unnest($2::text[], $3::text[]) as renamed(previous, minted)
 		join doc_ask_block_authors recorded on recorded.artifact_id = $1 and recorded.block_id = renamed.previous
-		on conflict (artifact_id, block_id) do nothing
+		on conflict (artifact_id, block_id_key(block_id)) do nothing
 	`, room, previous, minted); err != nil {
 		return fmt.Errorf("carry the authors of the ask blocks a stamp renamed: %w", err)
 	}

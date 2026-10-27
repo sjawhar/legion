@@ -188,6 +188,56 @@ func TestPutIssueRefusesAMissingOrChangedRepository(t *testing.T) {
 	})
 }
 
+// QueuedRootsUnder lists, by key, exactly the labelled todo roots whose Ancestry holds the key,
+// whatever their parent: not a root whose chain holds another key, an unlabelled one, one in
+// another status, nor a child in a tree. A root's Ancestry reads back as it was written.
+func TestQueuedRootsUnderListsTheLabelledTodoRootsWhoseChainHoldsTheKey(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := func(key, tree, status string, handed bool, ancestry ...string) Issue {
+		issue := issueFixture(key)
+		issue.Tree, issue.Status, issue.HandedOver, issue.ReadyPendingVersion, issue.Ancestry = tree, status, handed, nil, ancestry
+		if len(ancestry) != 0 {
+			issue.Parent = ParentOf(ancestry[0])
+		}
+		return issue
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, recorded := range []Issue{
+			issue("LEGION-300", "LEGION-300", "in_progress", true),
+			issue("LEGION-302", "LEGION-302", "todo", true, "LEGION-401", "LEGION-400", "LEGION-300"),
+			issue("LEGION-301", "LEGION-301", "todo", true, "LEGION-400", "LEGION-300"),
+			issue("LEGION-303", "LEGION-303", "todo", true, "LEGION-300"),
+			issue("LEGION-304", "LEGION-304", "todo", false, "LEGION-400"),
+			issue("LEGION-305", "LEGION-305", "backlog", true, "LEGION-400"),
+			issue("LEGION-306", "LEGION-300", "todo", true, "LEGION-400"),
+			issue("LEGION-307", "LEGION-307", "todo", true),
+		} {
+			must(t, records.PutIssue(ctx, tx, recorded))
+		}
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		roots, err := records.QueuedRootsUnder(ctx, tx, "LEGION-400")
+		must(t, err)
+		var keys []string
+		for _, root := range roots {
+			keys = append(keys, root.Key)
+		}
+		if !reflect.DeepEqual(keys, []string{"LEGION-301", "LEGION-302"}) {
+			t.Fatalf("QueuedRootsUnder(LEGION-400) = %v, want LEGION-301 and LEGION-302", keys)
+		}
+		if !reflect.DeepEqual(roots[1].Ancestry, []string{"LEGION-401", "LEGION-400", "LEGION-300"}) || roots[1].Status != "todo" {
+			t.Fatalf("QueuedRootsUnder(LEGION-400)[1] = %#v, want the whole record of LEGION-302", roots[1])
+		}
+		none, err := records.Issue(ctx, tx, "LEGION-307")
+		must(t, err)
+		if none.Ancestry != nil {
+			t.Fatalf("LEGION-307 reads back with Ancestry %#v, want nil as written", none.Ancestry)
+		}
+	})
+}
+
 // A record written before the schema carried the issue's repository has none, and the boot fills
 // it (daemon's backfillRepositories): UnfilledIssues lists one project's unfilled records, and
 // FillIssueRepository fills one, once, with GitHub's spelling beside the record's own.
@@ -320,7 +370,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Failing: []string{"unit"}, Cancelled: []string{"e2e"}, CheckedHead: "b1c2d3",
 		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", HeadCountedBefore: "a0b1c2", PlannedRed: true, State: PullRequestMerged, MergeSHA: "d4e5f6",
+		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", HeadCountedBefore: "a0b1c2", HeadCountedFrom: "9f8e7d", HeadArrivedFrom: "8e7d6c", PlannedRed: true, State: PullRequestMerged, MergeSHA: "d4e5f6",
 		// A base that requires no check reads back as such, never as a set that was not read.
 		Required:  []string{},
 		Workflows: []RequiredWorkflow{{Path: ".github/workflows/review.yml", Result: "failure"}}, WorkflowsHead: "b1c2d3",
@@ -374,6 +424,18 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		if len(slots) != 1 || slots[0].Issue != slot.Issue || slots[0].Index != slot.Index || !slots[0].AdmittedAt.Equal(slot.AdmittedAt) {
 			t.Fatalf("slots = %#v, want %#v", slots, slot)
 		}
+		// The slotted read admission makes on every fact returns the whole issue record, every
+		// column the issue read returns, so a column added to the issue is never left out of it.
+		slotted, err := records.SlottedIssues(ctx, tx, issue.Project)
+		must(t, err)
+		if !reflect.DeepEqual(slotted, []Issue{issue}) {
+			t.Fatalf("slotted issues = %#v, want %#v", slotted, []Issue{issue})
+		}
+		other, err := records.SlottedIssues(ctx, tx, "OTHER")
+		must(t, err)
+		if len(other) != 0 {
+			t.Fatalf("slotted issues of another project = %#v, want none", other)
+		}
 	})
 
 	inTx(t, st, func(tx pgx.Tx) {
@@ -420,6 +482,31 @@ func TestStoreRoundTripsATreeTakenBack(t *testing.T) {
 		must(t, err)
 		if !reflect.DeepEqual(got, &cleared) {
 			t.Fatalf("issue after a write that carries no mark = %#v, want %#v", got, cleared)
+		}
+	})
+}
+
+// The tree a root left is what keeps it its own tree on every later pass of the admission sweep
+// and every release of children (workflow's RanAsRoot), so PutIssue stores it and every read
+// behind issueColumns gives it back.
+func TestStoreRoundTripsTheTreeARootLeft(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	left := issueFixture("LEGION-216")
+	left.Phase, left.Status, left.HandedOverFrom = phase.Admitted, "todo", "LEGION-200"
+
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, left))
+		got, err := records.Issue(ctx, tx, left.Key)
+		must(t, err)
+		if !reflect.DeepEqual(got, &left) {
+			t.Fatalf("handed-over root = %#v, want %#v", got, left)
+		}
+		issues, err := records.TreeIssues(ctx, tx, left.Key)
+		must(t, err)
+		if !reflect.DeepEqual(issues, []Issue{left}) {
+			t.Fatalf("tree issues = %#v, want %#v", issues, []Issue{left})
 		}
 	})
 }
@@ -591,6 +678,7 @@ func samePullRequest(got, want PullRequest) bool {
 		got.BlockedAttempts == want.BlockedAttempts && reflect.DeepEqual(got.CheckRuns, want.CheckRuns) &&
 		got.Generation == want.Generation && got.Snapshot == want.Snapshot &&
 		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted && got.HeadCountedBefore == want.HeadCountedBefore &&
+		got.HeadCountedFrom == want.HeadCountedFrom && got.HeadArrivedFrom == want.HeadArrivedFrom &&
 		got.PlannedRed == want.PlannedRed && reflect.DeepEqual(got.Required, want.Required) &&
 		reflect.DeepEqual(got.Workflows, want.Workflows) && got.WorkflowsHead == want.WorkflowsHead && got.MergeSHA == want.MergeSHA
 }
@@ -699,7 +787,7 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1359, Branch: "legion/LEGION-285",
 		HeadSHA: "red-tests", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC),
 		CheckedHead: "red-tests", Failing: []string{"test"}, CheckRuns: []AttemptRun{},
-		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", HeadCountedBefore: "fix", PlannedRed: true, State: PullRequestOpen,
+		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", HeadCountedBefore: "fix", HeadCountedFrom: "fix", HeadArrivedFrom: "fix", PlannedRed: true, State: PullRequestOpen,
 	}
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.PutIssue(ctx, tx, issue))
@@ -712,9 +800,9 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		if got == nil {
 			t.Fatal("the open pull request is gone, want it kept")
 		}
-		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.HeadCountedBefore != "" || got.PlannedRed {
-			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q headCountedBefore=%q plannedRed=%v, want 0, 0, \"\", \"\" and false",
-				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.HeadCountedBefore, got.PlannedRed)
+		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.HeadCountedBefore != "" || got.HeadCountedFrom != "" || got.HeadArrivedFrom != "" || got.PlannedRed {
+			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q headCountedBefore=%q headCountedFrom=%q headArrivedFrom=%q plannedRed=%v, want 0, 0, \"\", \"\", \"\", \"\" and false",
+				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.HeadCountedBefore, got.HeadCountedFrom, got.HeadArrivedFrom, got.PlannedRed)
 		}
 	})
 }
@@ -1715,9 +1803,10 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 		"issues": {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "taken_back",
 			"linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch",
 			"github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_artifact", "awaiting_answered_at", "awaiting_answered_by",
-			"awaiting_answered_detail", "awaiting_since_seq", "awaiting_since", "handout_seq", "declared_seq", "declared_at"},
+			"awaiting_answered_detail", "awaiting_since_seq", "awaiting_since", "handout_seq", "declared_seq", "declared_at", "caught_up_seq",
+			"ancestry", "handed_over_from"},
 		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
-		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
+		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "head_counted_from", "head_arrived_from", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
 		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
 		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at"},
 		"root_asks":         {"issue", "ask", "kind", "artifact", "open", "seq", "waiting_on", "waiting_on_seq", "closed_by", "closed_seq", "by_tree", "person_seq", "person_answer_seq"},

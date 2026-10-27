@@ -465,7 +465,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A change of closed_at reaches the document rooms of every process, this one's included, from
-	// the commit itself: migration 0121's trigger notifies, and each process closes its rooms of
+	// the commit itself: migration 0135's trigger notifies, and each process closes its rooms of
 	// the issue's documents so their browsers reconnect with the scope the issue now allows.
 	s.publish(events...)
 	WriteJSON(w, http.StatusOK, withAdvice(after, advice))

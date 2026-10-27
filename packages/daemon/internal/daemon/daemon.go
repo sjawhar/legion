@@ -61,6 +61,10 @@ const (
 	// and the image probe, which wait out GitHub's and the cluster's transient trouble within
 	// retries of their own (appMintRetry, imageProbeRetry); the work after each has a budget anew.
 	bootTimeout = 30 * time.Second
+	// catchUpAttemptBound bounds one attempt of the boot's catch-up of the roots that run or wait on
+	// a person. Each root has bootTimeout of its own and the roots finished survive a retry, so this
+	// bound is no budget for the work, only the end of an attempt that would otherwise never return.
+	catchUpAttemptBound = time.Hour
 	// stopBudget bounds how long the daemon's stop waits for its own work, from the moment the stop
 	// begins (supervision.halt: at the signal, at serve's end, or when supervision fails to start,
 	// once the boot is recorded) until the daemon stamps its boot. The halt cancels every decision
@@ -101,7 +105,8 @@ const (
 	busyBackoffFirst = 250 * time.Millisecond
 )
 
-// overrides are the parts of a daemon a test replaces; the zero value is the real daemon.
+// overrides are the parts of a daemon a test replaces, and the listener `legion start` inherited;
+// the zero value is the real daemon binding its own address.
 type overrides struct {
 	// runtime builds the runtime over the worker stream in place of the configured one; nil is the
 	// configured runtime.
@@ -137,7 +142,9 @@ type overrides struct {
 	// required-checks reads and its issue branches' creates); empty, in production, is
 	// https://api.github.com.
 	githubAPI string
-	// listen opens the API listener; nil is net.Listen.
+	// listen takes the API listener for cfg's bind and port; nil binds them with net.Listen. Run's
+	// serves the socket `legion start` inherited from LEGION_LISTEN_FD (handed); a test's hands
+	// over a listener it holds.
 	listen func(network, address string) (net.Listener, error)
 	// strandedReported runs once the boot's report of the claims nothing will wake has finished,
 	// whether it logged or not (reportStranded); nil, in production, is nothing. The report runs
@@ -192,8 +199,22 @@ type Build struct {
 //
 // build is the binary's own build (Build), which the boot compares against the open production
 // checks of the repository it is built from.
-func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger) error {
-	return run(ctx, cfg, build, log, overrides{})
+//
+// listener, when not nil, is the API listener the daemon serves on in place of binding cfg's bind
+// and port: the socket `legion start` inherited (LEGION_LISTEN_FD), which it checked names both.
+// Run closes it once it stops serving, as it closes a listener it binds; a refusal before the
+// listener is taken leaves it to the caller to close.
+func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, listener net.Listener) error {
+	return run(ctx, cfg, build, log, overrides{listen: handed(listener)})
+}
+
+// handed is the listen of a daemon handed listener: it takes listener, whatever address it is
+// asked for, and binds nothing. A nil listener hands nothing, and the daemon binds its own address.
+func handed(listener net.Listener) func(network, address string) (net.Listener, error) {
+	if listener == nil {
+		return nil
+	}
+	return func(string, string) (net.Listener, error) { return listener, nil }
 }
 
 func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, o overrides) error {
@@ -271,6 +292,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		workflow.controllerFirstWake = o.controllerFirstWake
 		plan.identity = workflow.identity
 		plan.repository = workflow.issueRepository
+		plan.ensureWorkspace = workflow.ensureWorkspace
 		// Only a daemon with the workflow configured has issue records to read a phase or a tree
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
@@ -298,6 +320,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 			log.Info("legion workflow boot stage", "stage", "launcher")
 		}
 	}
+	// The API serves on the socket it was handed (Run's listener) or binds cfg's address here.
 	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
 	listen := net.Listen
 	if o.listen != nil {
@@ -370,6 +393,17 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 			err = bootprobe.Run(ctx, "list Dispatch issues for admission", readinessRetry, log,
 				readinessAttempt(workflow.reconcile, bootTimeout, dispatch.Unreachable))
 		}
+		// The catch-up of the roots that run or wait on a person is its own probe, after the
+		// reconcile that held them (holdForCatchUp). It reads Dispatch once or twice per root (the
+		// issue's latest sequence, its event log after the root's cursor, and the approval of a
+		// gate whose document the asks' mirror holds no request of), so it bounds each root by bootTimeout itself and keeps across
+		// retries the roots it finished (catchUpAwaiting); its attempt's own bound only stops a
+		// catch-up that would never end. The durable consumers start only after it, so no live
+		// fact meets a root still held.
+		if err == nil {
+			err = bootprobe.Run(ctx, "catch up the roots that run or wait on a person", readinessRetry, log,
+				readinessAttempt(workflow.catchUpAwaiting, catchUpAttemptBound, dispatch.Unreachable))
+		}
 		if err != nil {
 			s.stop()
 			listener.Close()
@@ -432,7 +466,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		case err == nil:
 			log.Info("legion daemon started",
 				"project", cfg.Project,
-				"address", address,
+				"address", listener.Addr().String(),
 				"workerStream", s.stream.Addr(),
 				"runtime", cfg.Runtime.Name,
 				"admissionCap", cfg.AdmissionCap,
@@ -519,12 +553,15 @@ type plan struct {
 	// (workflowRuntime.issueRepository: its record's, or the project's default for an issue the
 	// workflow does not record); nil without a workflow.
 	repository func(ctx context.Context, issue string) (ghrepo.Repository, string, error)
+	// ensureWorkspace provisions an issue's workspace on the daemon's host when a launch finds it
+	// missing or not checked out (workflowRuntime.ensureWorkspace); nil without a workflow.
+	ensureWorkspace func(ctx context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error
 	// repositories is the project's repository mapping as the workflow serves it, empty until the
 	// workflow reads it at boot: every role's gh bundle holds a directory for each of its owners.
 	repositories *repositories
 	// phaseHolds and treeClosable are the workflow's answers to the supervisor's two predicates;
 	// nil without a workflow, where every delivery holds and every tree closes.
-	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
+	phaseHolds   func(ctx context.Context, issue string, p phase.Phase, generation uint64) (bool, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
 	// taskConfirmed tells the workflow each agent that took its task; nil without a workflow.
 	taskConfirmed func(c supervise.Claim)
@@ -716,7 +753,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 		return err
 	}
 	if p.newRuntime == nil {
-		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir)
+		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir, cfg.Runtime.Tmux)
 		if err != nil {
 			return err
 		}
@@ -800,9 +837,10 @@ func claimRepositoryOwner(issueOf func(context.Context, claim.Token) (string, er
 }
 
 // tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
-// stream and the GitHub credential function, which boot hands the factory.
+// stream and the GitHub credential function, which boot hands the factory: the `runtime.tmux`
+// block's pane variables, Oh My Pi overlays and take_over among them.
 func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
-	return tmux.Options{
+	opts := tmux.Options{
 		Project:           project,
 		StateDir:          cfg.StateDir,
 		DaemonURL:         cfg.DaemonURL,
@@ -817,6 +855,10 @@ func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backen
 		ProviderEnvDir:    providerEnvDir,
 		Log:               log,
 	}
+	if block := cfg.Runtime.Tmux; block != nil {
+		opts.PaneEnv, opts.PiConfigFiles, opts.TakeOver = block.PaneEnv, block.PiConfigFiles, block.TakeOver
+	}
+	return opts
 }
 
 // reconfigureCloneCredential brings every shared clone an earlier daemon provisioned under the state
@@ -993,7 +1035,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			repositories: func() api.RepositoriesView { return p.repositories.view(nil) },
 			designGate:   cfg.Gates.Design, slackChannels: cfg.Projects[cfg.Project].SlackChannels,
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
-			backend: cfg.BackendFor,
+			backend: cfg.BackendFor, hostWorkspaces: !rt.ProvisionsWorkspaces(), ensureWorkspace: p.ensureWorkspace,
 		},
 		Identity:      adoptIdentity(p.identity, p.repository),
 		Secrets:       p.secretsEnroller,
@@ -1362,6 +1404,11 @@ func (s *supervision) stop() {
 	})
 }
 
+// phaseRole is the role that works a phase (workflow.RoleFor), which the operator's retry of a
+// held phase checks (api.Options.RoleFor). It is named at package level because serve's own
+// workflow parameter hides the package there.
+var phaseRole = workflow.RoleFor
+
 // serve runs the API on the listener the daemon already took until ctx is done or the server
 // fails, and returns once it is closed: one goroutine serves, the other shuts down, and the
 // shutdown runs on a context of its own so a cancelled ctx still drains the connections it has.
@@ -1422,6 +1469,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Pool:               st.Pool(),
 		Handlers:           handlers,
 		PrepareRepository:  prepare,
+		RoleFor:            phaseRole,
 		Record:             records,
 		Dispatch:           client,
 		Tokens:             tokens,
@@ -1533,10 +1581,11 @@ type source struct {
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
 // widening record.Store's fixed transaction interface; the workflow and the state route read the
-// store through it. Every read that starts from Issues is within this filtered set. Slots are not
-// filtered here: a slot's index is unique across every project's slots, so admission chooses the
-// next one over all of them and counts only its own against its cap (admit.ownSlots). The outbox's
-// claim is scoped in its SQL instead, because the lease it takes is itself the damage.
+// store through it. Every read that starts from Issues or QueuedRootsUnder is within this
+// filtered set. Slots are not filtered here: a slot's index is unique across every project's
+// slots, so admission chooses the next one over all of them and counts only its own against its
+// cap (admit.ownSlots). The outbox's claim is scoped in its SQL instead, because the lease it
+// takes is itself the damage.
 //
 // It is also where the outbox learns of its rows: every write that makes a row due — Enqueue, and
 // ExpediteOutbox — wakes the row's lane (outbox.wake) once the transaction has committed, through
@@ -1556,13 +1605,26 @@ func (s projectRecords) Issues(ctx context.Context, tx pgx.Tx) ([]record.Issue, 
 	if err != nil {
 		return nil, err
 	}
+	return s.own(all), nil
+}
+
+func (s projectRecords) QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]record.Issue, error) {
+	all, err := s.Store.QueuedRootsUnder(ctx, tx, key)
+	if err != nil {
+		return nil, err
+	}
+	return s.own(all), nil
+}
+
+// own is every issue of all in the daemon's project, in all's order.
+func (s projectRecords) own(all []record.Issue) []record.Issue {
 	issues := make([]record.Issue, 0, len(all))
 	for _, issue := range all {
 		if issue.Project == s.project {
 			issues = append(issues, issue)
 		}
 	}
-	return issues, nil
+	return issues
 }
 
 func (s projectRecords) Enqueue(ctx context.Context, tx pgx.Tx, row record.OutboxRow) error {
