@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,5 +130,109 @@ func TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow(t 
 			"its own %v take-over window one after another before the response, so the wait grows with every "+
 			"mention and the dispatch CLI's %v abort fires after the comment committed",
 			len(ended), took.Round(100*time.Millisecond), limit, listenerTakeoverWindow, clientAbort)
+	}
+}
+
+// A comment on an issue routed to s1 that mentions s1, written while the listener is replaced
+// for longer than the take-over window, decides its route on the mention's failed resolution: the
+// mention reached nobody, so suppress_route stays off and the route fan-out carries the comment to
+// s1. A sender that dies before it settles that mention leaves attempt 1 pending, holding the
+// resolve error the decision was made on. Whoever finishes the attempt later - the resume loop, or
+// a person's Retry of the pending attempt - must settle it with that resolution: s1 answers by
+// then, and a mention resolved afresh steers s1 the comment under the mention's own key, beside
+// the route's frame the listener cannot recognise it as a repeat of.
+func TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce(t *testing.T) {
+	listener := startTakeOverListener(t)
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
+	direct := directServer(deps)
+	issue := createInteractionIssue(t, handler, "TEST", "Routed resume", "before")
+	if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key,
+		map[string]any{"route": "session:s1"}, "alice"); patched.Code != http.StatusOK {
+		t.Fatalf("route the issue to s1: status=%d body=%s", patched.Code, patched.Body.String())
+	}
+
+	// Both comments are written during one take-over that outlasts the window, so each mention's
+	// resolution runs the window out before its comment commits.
+	listener.refuse(true)
+	responses := make([]*httptest.ResponseRecorder, 2)
+	var writes sync.WaitGroup
+	for index := range responses {
+		writes.Go(func() {
+			responses[index] = postMentionedComment(t, handler, issue.Key, map[string]any{
+				"body":     fmt.Sprintf("@s1, look at this (%d).", index),
+				"mentions": []map[string]any{{"target": "session:s1"}},
+			})
+		})
+	}
+	writes.Wait()
+	listener.refuse(false)
+	comments := make([]mentionedCommentRead, len(responses))
+	for index, response := range responses {
+		comments[index] = decodeMentionedComment(t, response)
+	}
+
+	// heard is how many times s1 has received comment: the mention sends the listener published
+	// under the comment's key since the last play, and the route fan-out of its comment.created.
+	heard := func(comment mentionedCommentRead) (mentionSends, routeSends int) {
+		t.Helper()
+		for _, send := range listener.published() {
+			if send.target == "s1" && strings.HasPrefix(send.key, comment.ID+":") {
+				mentionSends++
+			}
+		}
+		deliveries := eventDeliveries(t, database, deps.Docs, "comment.created", comment.ID)
+		if len(deliveries) != 1 {
+			t.Fatalf("comment.created events for %s = %#v, want one", comment.ID, deliveries)
+		}
+		for _, topic := range deliveries[0].Destinations {
+			if topic == contracts.AgentSubject("s1") {
+				routeSends++
+			}
+		}
+		return mentionSends, routeSends
+	}
+	for _, comment := range comments {
+		if mentionSends, routeSends := heard(comment); mentionSends != 0 || routeSends != 1 {
+			t.Fatalf("comment %s reached s1 by %d mention send(s) and %d route fan-out(s), want the route alone: "+
+				"its mention's resolution ran the take-over window out before the commit", comment.ID, mentionSends, routeSends)
+		}
+	}
+
+	finish := []struct {
+		name    string
+		comment mentionedCommentRead
+		run     func(t *testing.T)
+	}{
+		{"the resume loop", comments[0], func(t *testing.T) {
+			if err := direct.resumeStrandedDeliveries(context.Background()); err != nil {
+				t.Fatalf("resume pass: %v", err)
+			}
+		}},
+		{"a person's Retry", comments[1], func(t *testing.T) {
+			retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comments[1].ID+"/deliveries",
+				map[string]any{"delivery": "steer"}, "alice")
+			if retry.Code != http.StatusCreated {
+				t.Fatalf("retry the pending attempt: status=%d body=%s", retry.Code, retry.Body.String())
+			}
+		}},
+	}
+	for _, tc := range finish {
+		t.Run(tc.name, func(t *testing.T) {
+			// The comment's sender died before it settled attempt 1, its claim long lapsed.
+			strandAttempt(t, database, "comment_deliveries", "comment_id", tc.comment.ID, "'5 minutes'", "'5 minutes'")
+			listener.play()
+			tc.run(t)
+
+			mentionSends, routeSends := heard(tc.comment)
+			states := attemptStates(t, database, "comment_deliveries", "comment_id", tc.comment.ID)
+			if heardTimes := mentionSends + routeSends; heardTimes != 1 {
+				t.Fatalf("session s1 received the comment %d times, want once: %d mention steer(s) and %d route "+
+					"fan-out(s), attempts %v - the finished attempt resolved the mention afresh after the route was "+
+					"decided on its failed resolution", heardTimes, mentionSends, routeSends, states)
+			}
+			if !slices.Equal(states, []string{"1:failed"}) {
+				t.Fatalf("attempts = %v, want attempt 1 alone, settled failed with the resolution the route was decided on", states)
+			}
+		})
 	}
 }
