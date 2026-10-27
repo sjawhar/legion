@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"slices"
 	"testing"
 	"time"
@@ -67,7 +68,7 @@ func TestLiveEventsSinceCarriesOnlyTheWantedPayloads(t *testing.T) {
 		{kind: "comment.created", actor: liveUser, payload: `{"body":"a human's"}`, at: base.Add(4 * time.Second)},
 	})
 
-	events, through, at, err := liveEventsSince(context.Background(), database.Pool, 0, 100)
+	events, through, at, err := liveEventsSince(context.Background(), database.Pool, 0, math.MaxInt64, 100)
 	if err != nil {
 		t.Fatalf("liveEventsSince: %v", err)
 	}
@@ -96,7 +97,8 @@ func TestLiveEventsSinceCarriesOnlyTheWantedPayloads(t *testing.T) {
 }
 
 // A page whose rows are all unwanted returns none, and through/at still move to its last row; past
-// the newest event the read returns nothing with through at the cursor and at zero.
+// the newest event the read returns nothing with through at the cursor and at zero. The read stops
+// at the horizon it is given: a lower bound leaves the rows above it for a later read.
 func TestLiveEventsSinceMovesPastARunItIgnores(t *testing.T) {
 	database := storetest.Open(t)
 	base := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
@@ -106,7 +108,15 @@ func TestLiveEventsSinceMovesPastARunItIgnores(t *testing.T) {
 		{kind: "comment.created", actor: liveUser, payload: `{}`, at: base.Add(2 * time.Second)},
 	})
 
-	events, through, at, err := liveEventsSince(context.Background(), database.Pool, 0, 100)
+	events, through, at, err := liveEventsSince(context.Background(), database.Pool, 0, ids[1], 100)
+	if err != nil {
+		t.Fatalf("liveEventsSince through %d: %v", ids[1], err)
+	}
+	if len(events) != 0 || through != ids[1] || !at.Equal(base.Add(time.Second)) {
+		t.Fatalf("through the horizon %d: events %v, through %d at %v; want none, %d at %v", ids[1], events, through, at, ids[1], base.Add(time.Second))
+	}
+
+	events, through, at, err = liveEventsSince(context.Background(), database.Pool, 0, math.MaxInt64, 100)
 	if err != nil {
 		t.Fatalf("liveEventsSince: %v", err)
 	}
@@ -117,7 +127,7 @@ func TestLiveEventsSinceMovesPastARunItIgnores(t *testing.T) {
 		t.Fatalf("through, at = %d, %v; want the last ignored row, %d at %v", through, at, ids[2], base.Add(2*time.Second))
 	}
 
-	events, through, at, err = liveEventsSince(context.Background(), database.Pool, ids[2], 100)
+	events, through, at, err = liveEventsSince(context.Background(), database.Pool, ids[2], math.MaxInt64, 100)
 	if err != nil {
 		t.Fatalf("liveEventsSince past the newest: %v", err)
 	}
@@ -140,7 +150,7 @@ func TestLiveEventsSinceScansAtMostLimitRows(t *testing.T) {
 
 	var pages [][]int64
 	for cursor := ids[0] - 1; ; {
-		events, through, _, err := liveEventsSince(context.Background(), database.Pool, cursor, 2)
+		events, through, _, err := liveEventsSince(context.Background(), database.Pool, cursor, math.MaxInt64, 2)
 		if err != nil {
 			t.Fatalf("liveEventsSince(%d, 2): %v", cursor, err)
 		}

@@ -1090,6 +1090,114 @@ func TestACatchUpPastIgnoredEventsAdvancesTheCursor(t *testing.T) {
 	conn.none(t, time.Second, "500 events no view reads")
 }
 
+// startCaughtUp starts the hub and waits until its event cursor stands at the log's head, so the
+// next event appended takes the id right after the cursor. It answers that cursor.
+func (r *hubRig) startCaughtUp(t *testing.T) int64 {
+	t.Helper()
+	r.hub.start()
+	r.waitConnected(t)
+	head := eventHead(t, r.database)
+	r.waitForEventCursor(t, head, "the log's head")
+	return head
+}
+
+// waitForEventCursor waits for the hub's event cursor to reach want. The wait is generous: an open
+// write anywhere on the test cluster holds back the safe horizon the hub reads up to.
+func (r *hubRig) waitForEventCursor(t *testing.T, want int64, what string) {
+	t.Helper()
+	deadline := time.Now().Add(sseFrameWait)
+	for {
+		_, cursor := r.cursors()
+		if cursor >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the hub's event cursor = %d after %s, want it at %d (%s)", cursor, sseFrameWait, want, what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// isP0 is whether the hub holds key among the open P0 issues, which it keeps from the issue
+// events it acts on (applyEventLocked).
+func (r *hubRig) isP0(key string) bool {
+	r.hub.mu.Lock()
+	defer r.hub.mu.Unlock()
+	_, p0 := r.hub.p0[key]
+	return p0
+}
+
+// T6. Event ids are not commit order: a write that drew the lower id a can still be open after one
+// that drew b > a has committed. A catch-up that read b and moved its cursor there would never read
+// a, and the views a touches would miss it for good. The hub's catch-up reads only up to the safe
+// horizon, which a's open transaction holds below a, so b's commit (its notification, as another
+// task's write reaches the hub) moves the cursor nowhere near a until a commits, and then past both.
+func TestAHubCatchUpNeverMovesItsCursorPastAnOpenLowerID(t *testing.T) {
+	rig := newHubRig(t, nil)
+	first := createHubIssue(t, rig.handler, map[string]any{"title": "First"})
+	second := createHubIssue(t, rig.handler, map[string]any{"title": "Second"})
+	rig.startCaughtUp(t)
+
+	low, high, commitLow := appendOutOfOrder(t, rig.database, rig.deps.Events, first, second)
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		rig.hub.catchUpNow()
+		if _, cursor := rig.cursors(); cursor >= low {
+			t.Fatalf("the hub's event cursor = %d while id %d is open below the committed %d; want it below %d", cursor, low, high, low)
+		}
+	}
+
+	commitLow()
+	rig.waitForEventCursor(t, high, "both ids committed")
+}
+
+// T6. The broker hands the hub an event as soon as its own transaction commits, which with ids out
+// of commit order can be cursor+2 while cursor+1 is still open. The hub acts at once only on the
+// event right after its cursor; cursor+2 goes to the catch-up, which reads only up to the safe
+// horizon, so the hub acts on neither while cursor+1 is open (acting on cursor+2 would move the
+// cursor past cursor+1, which it would then never act on), and on both once cursor+1 commits.
+// Each event makes its own issue a P0 in the hub's view, which is what shows it was acted on.
+func TestAHubActsOnABrokerEventOnlyOnceEveryLowerIDIsFinal(t *testing.T) {
+	rig := newHubRig(t, nil)
+	first := createHubIssue(t, rig.handler, map[string]any{"title": "First"})
+	second := createHubIssue(t, rig.handler, map[string]any{"title": "Second"})
+	cursor := rig.startCaughtUp(t)
+
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	ctx := t.Context()
+	open, err := rig.database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the lower id's transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = open.Rollback(context.Background()) })
+	low, err := rig.deps.Events.Append(ctx, open, issueOwner(first).event("issue.updated", alice,
+		map[string]any{"key": first, "priority": 0, "status": "open"}))
+	if err != nil {
+		t.Fatalf("append the lower id: %v", err)
+	}
+	high := appendHubEvent(t, rig, issueOwner(second).event("issue.updated", alice,
+		map[string]any{"key": second, "priority": 0, "status": "open"}))
+	if low.ID != cursor+1 || high.ID != cursor+2 {
+		t.Fatalf("event ids %d (open) and %d (committed), want %d and %d right after the hub's cursor", low.ID, high.ID, cursor+1, cursor+2)
+	}
+
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		rig.hub.catchUpNow()
+		if _, at := rig.cursors(); at != cursor || rig.isP0(first) || rig.isP0(second) {
+			t.Fatalf("while %d is open: the hub's cursor = %d, %s a P0 = %v, %s a P0 = %v; want the cursor at %d and neither acted on",
+				low.ID, at, first, rig.isP0(first), second, rig.isP0(second), cursor)
+		}
+	}
+
+	if err := open.Commit(ctx); err != nil {
+		t.Fatalf("commit the lower id: %v", err)
+	}
+	rig.deps.Events.Publish(low)
+	rig.waitForEventCursor(t, high.ID, "both ids committed")
+	if !rig.isP0(first) || !rig.isP0(second) {
+		t.Fatalf("after both commits: %s a P0 = %v, %s a P0 = %v; want both acted on", first, rig.isP0(first), second, rig.isP0(second))
+	}
+}
+
 func TestADroppedBrokerSubscriptionIsRestoredWithoutMissingAnEvent(t *testing.T) {
 	release := make(chan struct{})
 	releaseOnce := sync.OnceFunc(func() { close(release) })

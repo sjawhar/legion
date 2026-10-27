@@ -32,20 +32,25 @@ type liveEvent struct {
 	payload  json.RawMessage
 }
 
-// liveEventsSince reads up to limit events after cursor, oldest first, carrying the payload only of
-// an event the hub reads (deliveryLiveEventTypes) or one a session wrote (its actor's title can move
-// a view's session titles). through and at are the last id it scanned and that row's created_at, so
-// the hub moves its cursor past a run of events it ignores and never scans them again; through is
-// cursor, and at zero, when nothing lies past it.
-func liveEventsSince(ctx context.Context, q queryer, cursor int64, limit int) (events []liveEvent, through int64, at time.Time, err error) {
+// liveEventsSince reads up to limit events after cursor and at or below safe, oldest first,
+// carrying the payload only of an event the hub reads (deliveryLiveEventTypes) or one a session
+// wrote (its actor's title can move a view's session titles). through and at are the last id it
+// scanned and that row's created_at, so the hub moves its cursor past a run of events it ignores
+// and never scans them again; through is cursor, and at zero, when nothing lies past it.
+//
+// safe is the safe horizon the caller read (events.Horizon), at or below which every event is
+// final. Event ids are not commit order, so a lower id can still be open after a higher one has
+// committed; bounded by safe, a read that moves the cursor to through skips no id that can still
+// commit, and through is always an existing row at or below an H, which the reset check needs.
+func liveEventsSince(ctx context.Context, q queryer, cursor, safe int64, limit int) (events []liveEvent, through int64, at time.Time, err error) {
 	rows, err := q.Query(ctx, `
 		select id, created_at, type, coalesce(issue_key, ''), actor,
-		       case when (type = any($2) or actor->>'kind' = 'session') then payload end
+		       case when (type = any($3) or actor->>'kind' = 'session') then payload end
 		from events
-		where id > $1
+		where id > $1 and id <= $2
 		order by id
-		limit $3
-	`, cursor, deliveryLiveEventTypes, limit)
+		limit $4
+	`, cursor, safe, deliveryLiveEventTypes, limit)
 	if err != nil {
 		return nil, 0, time.Time{}, err
 	}

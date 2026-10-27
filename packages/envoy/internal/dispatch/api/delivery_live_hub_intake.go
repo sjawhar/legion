@@ -20,7 +20,12 @@ import (
 func (h *deliveryHub) intake(ctx context.Context) {
 	broker := h.server.deps.Events
 	events, unsubscribe := broker.Subscribe()
-	defer func() { unsubscribe() }()
+	defer func() {
+		unsubscribe()
+		if h.gapTimer != nil {
+			h.gapTimer.Stop()
+		}
+	}()
 	for attempt := 1; !h.readCursors(); attempt++ {
 		if !waitFor(ctx, pglisten.RedialBackoff(attempt)) {
 			return
@@ -55,7 +60,15 @@ func (h *deliveryHub) intake(ctx context.Context) {
 	}
 }
 
-// readCursors reads where both logs stand and the open P0 issues.
+// readCursors reads where both logs stand and the open P0 issues. The event cursor is the last
+// event at or below the first safe horizon proven after the call (Horizon.Await), with its
+// created_at, never the log's raw max(id): event ids are not commit order, so a newest id the hub
+// started on could stand above a lower id still open, which no catch-up (id > cursor) would ever
+// read. The horizon is at or above every id committed before the call, so the cursor covers what
+// the hub's subscribers' first answers read, and it stands on a row the reset check can compare.
+//
+// The wait for that horizon, which an open write anywhere on the instance can hold back, ends
+// with the hub's lifetime: the read then fails, and intake's retry loop returns.
 func (h *deliveryHub) readCursors() bool {
 	ctx, pool := h.readContext(), h.server.deps.Store.Pool
 	seq, err := delivery.LatestChangeSeq(ctx, pool)
@@ -66,7 +79,10 @@ func (h *deliveryHub) readCursors() bool {
 	var eventID int64
 	var eventAt time.Time
 	if err == nil {
-		eventID, eventAt, _, err = eventCursorCheck(ctx, pool, 0)
+		var safe int64
+		if safe, err = h.server.horizon().Await(ctx); err == nil {
+			eventID, eventAt, err = lastEventThrough(ctx, pool, safe)
+		}
 	}
 	var p0 map[string]struct{}
 	if err == nil {
@@ -87,7 +103,8 @@ func (h *deliveryHub) readCursors() bool {
 }
 
 // catchUp catches up the change log, the event log, or both; a read that fails is tried again a
-// second later.
+// second later. An event catch-up that leaves a gap open above the safe horizon schedules its own
+// re-read (rereadGap).
 func (h *deliveryHub) catchUp(changes, events bool) {
 	if changes {
 		if err := h.catchUpChanges(); err != nil && h.lifetime.Err() == nil {
@@ -96,11 +113,42 @@ func (h *deliveryHub) catchUp(changes, events bool) {
 		}
 	}
 	if events {
-		if err := h.catchUpEvents(); err != nil && h.lifetime.Err() == nil {
-			slog.Warn("dispatch: delivery live hub could not read the events; retrying", "error", err)
-			time.AfterFunc(time.Second, func() { signal(h.wakeEvents) })
+		safe, gap, err := h.catchUpEvents()
+		if err != nil {
+			if h.lifetime.Err() == nil {
+				slog.Warn("dispatch: delivery live hub could not read the events; retrying", "error", err)
+				time.AfterFunc(time.Second, func() { signal(h.wakeEvents) })
+			}
+			return
 		}
+		h.rereadGap(safe, gap)
 	}
+}
+
+// rereadGap schedules the next event catch-up while a gap stands open above the safe horizon
+// (Horizon.Pending): an event observed above the horizon that the catch-up could not read. The
+// commit's notification can wake a catch-up before the horizon covers that commit, since only a
+// later observation proves an earlier one safe, and nothing notifies again once the open lower
+// ids have ended; without this re-read an event held back would wait for the next unrelated
+// commit. The wait is the relay's (eventRelayGapMin doubling to eventRelayGapMax while the
+// horizon stands still, back to eventRelayGapMin whenever it moves), and the timer runs only while
+// a gap is open, so an idle hub observes nothing. Only the intake goroutine calls it.
+func (h *deliveryHub) rereadGap(safe int64, gap bool) {
+	if h.gapTimer != nil {
+		h.gapTimer.Stop()
+		h.gapTimer = nil
+	}
+	switch {
+	case !gap:
+		h.gapWait = 0
+		return
+	case h.gapWait == 0 || safe != h.gapSafe:
+		h.gapWait = eventRelayGapMin
+	default:
+		h.gapWait = min(2*h.gapWait, eventRelayGapMax)
+	}
+	h.gapSafe = safe
+	h.gapTimer = time.AfterFunc(h.gapWait, func() { signal(h.wakeEvents) })
 }
 
 // catchUpChanges reads every delivery change after the cursor, marking the views each can touch.
@@ -162,38 +210,61 @@ func (h *deliveryHub) catchUpChanges() error {
 	}
 }
 
-// catchUpEvents reads every event after the cursor, acting on those the hub reads. It first checks
-// for a reset log: one whose newest id is below the cursor, or whose row at the cursor is gone or
-// was created at another time than the hub read (e2e/seed.ts:20 and :150 truncate events with
-// RESTART IDENTITY). A reset moves the cursor to the newest event, reloads the open P0 issues and
-// marks every view dirty; a cursor row some other path deleted costs only that.
-func (h *deliveryHub) catchUpEvents() error {
-	ctx, pool := h.readContext(), h.server.deps.Store.Pool
+// catchUpEvents reads every event after the cursor and at or below the safe horizon, acting on
+// those the hub reads, and answers the horizon it read through and whether a gap stands open
+// above it (Horizon.Pending). Event ids are not commit order (events.Broker.Append), so the read
+// is capped at the horizon H, at or below which every event is final, and the cursor moves only
+// to the last row scanned, an existing row at or below H: everything at or below the cursor is
+// final and was acted on, which is also what lets receive act on the event right after it.
+//
+// It first checks for a reset log: one whose newest id is below the cursor, or whose row at the
+// cursor is gone or was created at another time than the hub read (e2e/seed.ts:20 and :150
+// truncate events with RESTART IDENTITY). The horizon is then the old log's, standing among the
+// old ids above every id the new log has handed out, so it is forgotten (Horizon.Reset) and the
+// cursor moves to the last event at or below a horizon proven afresh (Horizon.Await, which waits
+// for every write open at the reset to end), never to the new log's raw max(id), which could step
+// over a lower id the refill still holds open. A reset also reloads the open P0 issues and marks
+// every view dirty; a cursor row some other path deleted costs only that.
+func (h *deliveryHub) catchUpEvents() (safe int64, gap bool, err error) {
+	ctx, pool, horizon := h.readContext(), h.server.deps.Store.Pool, h.server.horizon()
 	h.mu.Lock()
 	cursor, at := h.eventCursor, h.eventAt
 	h.mu.Unlock()
 	from := cursor
-	maxID, maxAt, cursorAt, err := eventCursorCheck(ctx, pool, cursor)
+	maxID, _, cursorAt, err := eventCursorCheck(ctx, pool, cursor)
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 	if maxID < cursor || (cursor > 0 && (cursorAt == nil || !cursorAt.Equal(at))) {
+		horizon.Reset()
+		safe, err := horizon.Await(ctx)
+		if err != nil {
+			return 0, false, err
+		}
+		to, toAt, err := lastEventThrough(ctx, pool, safe)
+		if err != nil {
+			return 0, false, err
+		}
 		p0, err := delivery.OpenP0Keys(ctx, pool)
 		if err != nil {
-			return err
+			return 0, false, err
 		}
 		now := h.clock.Now()
 		h.mu.Lock()
-		h.eventCursor, h.eventAt, h.p0 = maxID, maxAt, p0
+		h.eventCursor, h.eventAt, h.p0 = to, toAt, p0
 		h.dirtyAllLocked(now)
 		h.mu.Unlock()
-		h.note(deliveryHubNote{what: "events caught up", from: from, through: maxID})
-		return nil
+		h.note(deliveryHubNote{what: "events caught up", from: from, through: to})
+		return safe, horizon.Pending(), nil
+	}
+	safe, err = horizon.Safe(ctx)
+	if err != nil {
+		return 0, false, err
 	}
 	for {
-		events, through, throughAt, err := liveEventsSince(ctx, pool, cursor, deliveryLivePage)
+		events, through, throughAt, err := liveEventsSince(ctx, pool, cursor, safe, deliveryLivePage)
 		if err != nil {
-			return err
+			return 0, false, err
 		}
 		if through == cursor {
 			break
@@ -207,19 +278,22 @@ func (h *deliveryHub) catchUpEvents() error {
 		h.mu.Unlock()
 		scanned := through - cursor
 		cursor = through
-		// Ids leave gaps, so a page that spans fewer ids than its limit scanned fewer rows: the log
-		// ran dry.
+		// Ids leave gaps, so a page that spans fewer ids than its limit scanned fewer rows: it
+		// reached the horizon. A full page at the horizon reads once more, and finds nothing.
 		if scanned < deliveryLivePage {
 			break
 		}
 	}
 	h.note(deliveryHubNote{what: "events caught up", from: from, through: cursor})
-	return nil
+	return safe, horizon.Pending(), nil
 }
 
-// receive acts on one event the broker published. Ids are allocated in commit order, so the event
-// right after the cursor is acted on at once; any other leaves a gap the store fills, or follows
-// a reset, which the catch-up's check tells.
+// receive acts on one event the broker published. The broker publishes only committed events
+// (Broker.Publish), and everything at or below the cursor is final (catchUpEvents moves it only to
+// a row at or below a safe horizon, and this only to an event right after it), so the event right
+// after the cursor leaves nothing open below it and is acted on at once, even above the horizon.
+// Any other leaves a gap below it that may still be open, or follows a reset, and goes to the
+// catch-up, which reads only up to the horizon and whose check tells a reset.
 func (h *deliveryHub) receive(event model.Event) {
 	h.mu.Lock()
 	next := event.ID == h.eventCursor+1

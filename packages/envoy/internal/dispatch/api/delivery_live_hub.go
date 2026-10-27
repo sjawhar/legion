@@ -170,6 +170,12 @@ type deliveryHub struct {
 	// Each wake holds at most one pending signal: what it asks for covers every signal before it.
 	wakeWork, wakeChanges, wakeEvents, connected chan struct{}
 	barrier                                      chan chan struct{}
+	// gapTimer is the scheduled re-read of an event gap left open above the safe horizon, gapWait
+	// its current delay (zero while no gap is open) and gapSafe the horizon the catch-up that
+	// scheduled it read through (rereadGap). Only the intake goroutine touches them.
+	gapTimer *time.Timer
+	gapWait  time.Duration
+	gapSafe  int64
 
 	mu    sync.Mutex
 	views map[string]*deliveryView // by canonical view key
@@ -180,6 +186,7 @@ type deliveryHub struct {
 	changeAt  time.Time
 	epoch     int64
 	// eventCursor and eventAt are the last event id scanned and its created_at, to tell a reset log.
+	// Every event at or below eventCursor is final (catchUpEvents, receive).
 	eventCursor int64
 	eventAt     time.Time
 	// p0 is the open P0 issues (OpenP0Keys), kept current from issue event payloads.
