@@ -53,10 +53,11 @@ const (
 	dispatchProxyMemory = "256Mi"
 )
 
-// Autopilot's bounds for the app pod's total request, the general-purpose compute class's under the
+// Autopilot's bounds for a pod's total request, the general-purpose compute class's under the
 // safe-to-evict annotation (https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests):
 // below the floor or outside the memory-per-CPU ratio Autopilot raises the pod's request, so the
 // container would not run at the size the component renders; above the ceiling it rejects the pod.
+// autopilotPodSize checks a pod against them.
 var (
 	autopilotPodMinCPU    = big.NewRat(1, 2)
 	autopilotPodMaxCPU    = big.NewRat(30, 1)
@@ -603,22 +604,11 @@ func newDispatchPprofPort(args *DispatchArgs) (int, error) {
 
 // newDispatchAppDisruption resolves appPriorityClassName and appPdbMinAvailable, the app pod's
 // priority class and its PodDisruptionBudget's minAvailable: "" and 0, rendering nothing, when
-// unset. It refuses a class name that is empty or not a DNS subdomain, and one with the system-
-// prefix, which Kubernetes reserves for its own system-cluster-critical and system-node-critical
-// classes: those outrank every workload so the cluster's own components are scheduled first, and
-// an application pod holding one could preempt them. It refuses a budget below 1, which protects
-// no pod, and above replicas, which no number of ready pods can meet.
+// unset. It refuses a class name as podPriorityClass does, and a budget below 1, which protects
+// no pod, or above replicas, which no number of ready pods can meet.
 func newDispatchAppDisruption(args *DispatchArgs, replicas int) (priorityClass string, pdbMinAvailable int, err error) {
-	if args.AppPriorityClassName != nil {
-		priorityClass = *args.AppPriorityClassName
-		switch {
-		case priorityClass == "":
-			return "", 0, errors.New("appPriorityClassName is empty; leave it unset for no priority class")
-		case !dnsSubdomain(priorityClass):
-			return "", 0, fmt.Errorf("appPriorityClassName %q must be a DNS subdomain, the shape of a PriorityClass's name", priorityClass)
-		case strings.HasPrefix(priorityClass, "system-"):
-			return "", 0, fmt.Errorf("appPriorityClassName %q is a class Kubernetes reserves for its own system components (the system- prefix); name a PriorityClass of your own", priorityClass)
-		}
+	if priorityClass, err = podPriorityClass("appPriorityClassName", args.AppPriorityClassName); err != nil {
+		return "", 0, err
 	}
 	if args.AppPdbMinAvailable != nil {
 		pdbMinAvailable = *args.AppPdbMinAvailable
@@ -630,59 +620,129 @@ func newDispatchAppDisruption(args *DispatchArgs, replicas int) (priorityClass s
 }
 
 // newDispatchAppResources resolves appCpu and appMemory, the envoy-dispatch container's request
-// and limit, and refuses a size at which Autopilot would not run the app pod as rendered: the
-// pod's total, with the cloud-sql-proxy sidecar's, below autopilotPodMinCPU or
-// autopilotPodMinMemory or outside the memory-per-CPU ratio (Autopilot raises it), or above
-// autopilotPodMaxCPU or autopilotPodMaxMemory (Autopilot rejects it).
+// and limit, and refuses a size at which Autopilot would not run the app pod as rendered, with the
+// cloud-sql-proxy sidecar beside it (autopilotPodSize).
 func newDispatchAppResources(args *DispatchArgs) (cpu, memory string, err error) {
-	cpu, memory = defaultDispatchAppCPU, defaultDispatchAppMemory
-	if args.AppCpu != nil {
-		if *args.AppCpu == "" {
-			return "", "", errors.New("appCpu is empty; leave it unset for " + defaultDispatchAppCPU)
+	return autopilotPodSize(autopilotPod{
+		name:     "the app pod",
+		cpuInput: "appCpu", memoryInput: "appMemory",
+		cpu: args.AppCpu, memory: args.AppMemory,
+		defaultCPU: defaultDispatchAppCPU, defaultMemory: defaultDispatchAppMemory,
+		memoryExamples: "4Gi or 6144Mi",
+		sidecars:       []autopilotSidecar{{name: "cloud-sql-proxy", cpu: dispatchProxyCPU, memory: dispatchProxyMemory}},
+	})
+}
+
+// podPriorityClass resolves input, a pod's priority class (name, nil when unset): "" when unset.
+// It refuses a name that is empty or not a DNS subdomain, and one with the system- prefix, which
+// Kubernetes reserves for its own system-cluster-critical and system-node-critical classes: those
+// outrank every workload so the cluster's own components are scheduled first, and an application
+// pod holding one could preempt them. Each refusal is a core.InputError naming input.
+func podPriorityClass(input string, name *string) (string, error) {
+	if name == nil {
+		return "", nil
+	}
+	switch {
+	case *name == "":
+		return "", core.InputErrorf(input, "%s is empty; leave it unset for no priority class", input)
+	case !dnsSubdomain(*name):
+		return "", core.InputErrorf(input, "%s %q must be a DNS subdomain, the shape of a PriorityClass's name", input, *name)
+	case strings.HasPrefix(*name, "system-"):
+		return "", core.InputErrorf(input, "%s %q is a class Kubernetes reserves for its own system components (the system- prefix); name a PriorityClass of your own", input, *name)
+	}
+	return *name, nil
+}
+
+// autopilotPod is a pod Autopilot sizes: its main container, whose request and limit the inputs
+// cpuInput and memoryInput set (cpu and memory, nil when unset for defaultCPU and defaultMemory),
+// and the sidecars beside it at fixed sizes. name is the pod as a refusal names it, such as "the
+// app pod", and memoryExamples the quantities a refusal of memoryInput suggests.
+type autopilotPod struct {
+	name                      string
+	cpuInput, memoryInput     string
+	cpu, memory               *string
+	defaultCPU, defaultMemory string
+	memoryExamples            string
+	sidecars                  []autopilotSidecar
+}
+
+// autopilotSidecar is a sidecar's fixed size, request and limit, and its name as a refusal writes
+// it before 's, such as "cloud-sql-proxy" or "the reloader".
+type autopilotSidecar struct{ name, cpu, memory string }
+
+// autopilotPodSize resolves pod's main container's CPU and memory and refuses a size at which
+// Autopilot would not run the pod as rendered: the pod's total, with its sidecars', below
+// autopilotPodMinCPU or autopilotPodMinMemory or outside the memory-per-CPU ratio (Autopilot
+// raises the smaller of the two, so the refusal names that one's input), or above
+// autopilotPodMaxCPU or autopilotPodMaxMemory (Autopilot rejects the pod). Each refusal is a
+// core.InputError naming cpuInput or memoryInput, and quotes the sidecars' sizes it counted.
+func autopilotPodSize(pod autopilotPod) (cpu, memory string, err error) {
+	cpu, memory = pod.defaultCPU, pod.defaultMemory
+	if pod.cpu != nil {
+		if *pod.cpu == "" {
+			return "", "", core.InputErrorf(pod.cpuInput, "%s is empty; leave it unset for %s", pod.cpuInput, pod.defaultCPU)
 		}
-		cpu = *args.AppCpu
+		cpu = *pod.cpu
 	}
-	if args.AppMemory != nil {
-		if *args.AppMemory == "" {
-			return "", "", errors.New("appMemory is empty; leave it unset for " + defaultDispatchAppMemory)
+	if pod.memory != nil {
+		if *pod.memory == "" {
+			return "", "", core.InputErrorf(pod.memoryInput, "%s is empty; leave it unset for %s", pod.memoryInput, pod.defaultMemory)
 		}
-		memory = *args.AppMemory
+		memory = *pod.memory
 	}
-	appCPU, err := appQuantity("appCpu", cpu, "1, 1500m or 2")
+	podCPU, err := appQuantity(pod.cpuInput, cpu, "1, 1500m or 2")
 	if err != nil {
-		return "", "", err
+		return "", "", &core.InputError{Input: pod.cpuInput, Err: err}
 	}
-	appMemory, err := appQuantity("appMemory", memory, "4Gi or 6144Mi")
+	podMemory, err := appQuantity(pod.memoryInput, memory, pod.memoryExamples)
 	if err != nil {
-		return "", "", err
+		return "", "", &core.InputError{Input: pod.memoryInput, Err: err}
 	}
-	proxyCPU, _ := quantityValue(dispatchProxyCPU)
-	proxyMemory, _ := quantityValue(dispatchProxyMemory)
-	podCPU := new(big.Rat).Add(appCPU, proxyCPU)
-	podMemory := new(big.Rat).Add(appMemory, proxyMemory)
-	if podCPU.Cmp(autopilotPodMinCPU) < 0 {
-		return "", "", fmt.Errorf("appCpu %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it",
-			cpu, milliCPU(new(big.Rat).Sub(autopilotPodMinCPU, proxyCPU)), dispatchProxyCPU, milliCPU(autopilotPodMinCPU))
+	sidecarCPU, sidecarMemory := new(big.Rat), new(big.Rat)
+	for _, sidecar := range pod.sidecars {
+		value, _ := quantityValue(sidecar.cpu)
+		sidecarCPU.Add(sidecarCPU, value)
+		value, _ = quantityValue(sidecar.memory)
+		sidecarMemory.Add(sidecarMemory, value)
 	}
-	if podCPU.Cmp(autopilotPodMaxCPU) > 0 {
-		return "", "", fmt.Errorf("appCpu %q must be at most %s: with cloud-sql-proxy's %s the app pod would request above %s CPU, and Autopilot rejects such a pod",
-			cpu, milliCPU(new(big.Rat).Sub(autopilotPodMaxCPU, proxyCPU)), dispatchProxyCPU, autopilotPodMaxCPU.RatString())
+	podCPU.Add(podCPU, sidecarCPU)
+	podMemory.Add(podMemory, sidecarMemory)
+	// with names each sidecar's size, as size writes it, for a refusal.
+	with := func(size func(autopilotSidecar) string) string {
+		sizes := make([]string, len(pod.sidecars))
+		for i, sidecar := range pod.sidecars {
+			sizes[i] = sidecar.name + "'s " + size(sidecar)
+		}
+		return "with " + strings.Join(sizes, " and ")
 	}
-	if podMemory.Cmp(autopilotPodMinMemory) < 0 {
-		return "", "", fmt.Errorf("appMemory %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it",
-			memory, mebibytes(new(big.Rat).Sub(autopilotPodMinMemory, proxyMemory)), dispatchProxyMemory, mebibytes(autopilotPodMinMemory))
-	}
-	if podMemory.Cmp(autopilotPodMaxMemory) > 0 {
-		return "", "", fmt.Errorf("appMemory %q must be at most %s: with cloud-sql-proxy's %s the app pod would request above 110Gi, and Autopilot rejects such a pod",
-			memory, mebibytes(new(big.Rat).Sub(autopilotPodMaxMemory, proxyMemory)), dispatchProxyMemory)
+	cpuOf := func(s autopilotSidecar) string { return s.cpu }
+	memoryOf := func(s autopilotSidecar) string { return s.memory }
+	switch {
+	case podCPU.Cmp(autopilotPodMinCPU) < 0:
+		return "", "", core.InputErrorf(pod.cpuInput, "%s %q must be at least %s: %s %s would request less than %s, below which Autopilot raises it",
+			pod.cpuInput, cpu, milliCPU(new(big.Rat).Sub(autopilotPodMinCPU, sidecarCPU)), with(cpuOf), pod.name, milliCPU(autopilotPodMinCPU))
+	case podCPU.Cmp(autopilotPodMaxCPU) > 0:
+		return "", "", core.InputErrorf(pod.cpuInput, "%s %q must be at most %s: %s %s would request above %s CPU, and Autopilot rejects such a pod",
+			pod.cpuInput, cpu, milliCPU(new(big.Rat).Sub(autopilotPodMaxCPU, sidecarCPU)), with(cpuOf), pod.name, autopilotPodMaxCPU.RatString())
+	case podMemory.Cmp(autopilotPodMinMemory) < 0:
+		return "", "", core.InputErrorf(pod.memoryInput, "%s %q must be at least %s: %s %s would request less than %s, below which Autopilot raises it",
+			pod.memoryInput, memory, mebibytes(new(big.Rat).Sub(autopilotPodMinMemory, sidecarMemory)), with(memoryOf), pod.name, mebibytes(autopilotPodMinMemory))
+	case podMemory.Cmp(autopilotPodMaxMemory) > 0:
+		return "", "", core.InputErrorf(pod.memoryInput, "%s %q must be at most %s: %s %s would request above 110Gi, and Autopilot rejects such a pod",
+			pod.memoryInput, memory, mebibytes(new(big.Rat).Sub(autopilotPodMaxMemory, sidecarMemory)), with(memoryOf), pod.name)
 	}
 	gibPerCPU := new(big.Rat).Quo(podMemory, podCPU)
 	gibPerCPU.Quo(gibPerCPU, new(big.Rat).SetInt64(1<<30))
-	if gibPerCPU.Cmp(autopilotMinGiBPerCPU) < 0 || gibPerCPU.Cmp(autopilotMaxGiBPerCPU) > 0 {
-		return "", "", fmt.Errorf("appCpu %q and appMemory %q: with cloud-sql-proxy's %s and %s the app pod must hold between 1 and 6.5 GiB of memory per CPU, or Autopilot raises the smaller of the two",
-			cpu, memory, dispatchProxyCPU, dispatchProxyMemory)
+	if gibPerCPU.Cmp(autopilotMinGiBPerCPU) >= 0 && gibPerCPU.Cmp(autopilotMaxGiBPerCPU) <= 0 {
+		return cpu, memory, nil
 	}
-	return cpu, memory, nil
+	smaller := pod.cpuInput // too much memory per CPU: Autopilot raises the CPU
+	if gibPerCPU.Cmp(autopilotMinGiBPerCPU) < 0 {
+		smaller = pod.memoryInput
+	}
+	return "", "", core.InputErrorf(smaller, "%s %q and %s %q: %s %s must hold between 1 and 6.5 GiB of memory per CPU, or Autopilot raises the smaller of the two",
+		pod.cpuInput, cpu, pod.memoryInput, memory,
+		with(func(s autopilotSidecar) string { return s.cpu + " and " + s.memory }), pod.name)
 }
 
 // appQuantity is the exact value of input's quantity, or a refusal naming input.

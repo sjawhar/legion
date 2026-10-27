@@ -1,6 +1,10 @@
 package gcp
 
-import "strconv"
+import (
+	"strconv"
+
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+)
 
 // CloudConfig is the hub VM's cloud-config document, for the tests outside the package.
 type CloudConfig = cloudConfig
@@ -19,6 +23,83 @@ func CloudConfigOf(args *NatsHubArgs) (CloudConfig, string, error) {
 		return CloudConfig{}, "", err
 	}
 	return s.vm.document(), s.userData, nil
+}
+
+// NatsHubAuthConf is the authorization args render for the hub's NATS server, for the test that
+// holds gcp:ClusteredNatsHub's to the same rendering.
+func NatsHubAuthConf(args *NatsHubArgs) (string, error) {
+	s, err := newSettings(args)
+	if err != nil {
+		return "", err
+	}
+	return s.vm.natsConf, nil
+}
+
+// ClusteredNatsHubSettings is the resolved gcp:ClusteredNatsHub configuration the external tests
+// assert. Tailnet is nil without tailnet.
+type ClusteredNatsHubSettings struct {
+	Name, Namespace, ServiceName, ServiceURL string
+	NatsImage, ReloaderImage, ExporterImage  string
+	NatsReplicas, StreamMaxBytes             int
+	DiskSizeGb, MaxFileStoreGb               int
+	NatsCPU, NatsMemory                      string
+	StorageClassName, PriorityClassName      string
+	ClientNamespaces                         []string
+	MonitorNamespaces                        []string
+	MetricsNamespaces                        []string
+	AuthConf                                 string
+	PodSelector                              map[string]string
+	Tailnet                                  *ClusteredHubTailnetSettings
+}
+
+// ClusteredHubTailnetSettings is the resolved tailnet entry, its listener's environment included.
+type ClusteredHubTailnetSettings struct {
+	ServiceName, TailnetDNSName     string
+	Tags                            []string
+	Replicas                        int
+	TailscaleImage                  string
+	ListenerImage, MachineID        string
+	SeedSecretName, SeedSecretKey   string
+	ListenerCPU, ListenerMemory     string
+	ListenerEnv                     []string
+	TailnetNatsURL, TailnetEnvoyURL string
+}
+
+// ResolveClusteredNatsHub resolves gcp:ClusteredNatsHub's plain inputs for the external refusal
+// and default tests, which need no engine.
+func ResolveClusteredNatsHub(args *ClusteredNatsHubArgs) (ClusteredNatsHubSettings, error) {
+	s, err := newClusteredHubSettings(args)
+	if err != nil {
+		return ClusteredNatsHubSettings{}, err
+	}
+	settings := ClusteredNatsHubSettings{
+		Name: s.name, Namespace: s.namespace, ServiceName: s.serviceName, ServiceURL: s.serviceURL,
+		NatsImage: s.images.nats, ReloaderImage: s.images.reloader, ExporterImage: s.images.exporter,
+		NatsReplicas: s.natsReplicas, StreamMaxBytes: s.streamMaxBytes,
+		DiskSizeGb: s.size.diskSizeGb, MaxFileStoreGb: s.size.maxFileStoreGb,
+		NatsCPU: s.size.natsCPU, NatsMemory: s.size.natsMemory,
+		StorageClassName: s.storageClassName, PriorityClassName: s.priorityClassName,
+		ClientNamespaces: s.clientNamespaces, MonitorNamespaces: s.monitorNamespaces, MetricsNamespaces: s.metricsNamespaces,
+		AuthConf:    s.authConf,
+		PodSelector: clusteredHubSelector(s.name),
+	}
+	if t := s.tailnet; t != nil {
+		l := t.listener
+		settings.Tailnet = &ClusteredHubTailnetSettings{
+			ServiceName: t.serviceName, TailnetDNSName: t.tailnetDNSName, Tags: t.tags, Replicas: t.replicas,
+			TailscaleImage: t.tailscaleImage, ListenerImage: l.image, MachineID: l.machineID,
+			SeedSecretName: l.seedSecretName, SeedSecretKey: l.seedSecretKey, ListenerCPU: l.cpu, ListenerMemory: l.memory,
+			ListenerEnv: l.env, TailnetNatsURL: t.natsURL, TailnetEnvoyURL: t.envoyURL,
+		}
+	}
+	return settings, nil
+}
+
+// RefuseClusteredHubSecret is value, gcp:ClusteredNatsHub's secret Input input (kubeconfig or
+// tailnetAuthKey), as the hub named name reads it once it resolves: blank and seed refused by the
+// rule gcp:Dispatch's credentials run, refuseDispatchSeedInSecret.
+func RefuseClusteredHubSecret(value pulumi.StringInput, name, input string) pulumi.StringOutput {
+	return refuseDispatchSeedInSecret(value, clusteredHubType+" "+name, input)
 }
 
 // DispatchRollingUpdate is the resolved rolling update's bounds, for the tests outside the package.

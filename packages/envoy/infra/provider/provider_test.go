@@ -53,6 +53,7 @@ type schema struct {
 		InputProperties map[string]property `json:"inputProperties"`
 		RequiredInputs  []string            `json:"requiredInputs"`
 		Properties      map[string]property `json:"properties"`
+		Required        []string            `json:"required"`
 	} `json:"resources"`
 	Types map[string]struct {
 		Properties map[string]property `json:"properties"`
@@ -81,6 +82,7 @@ func TestSchemaTypes(t *testing.T) {
 		"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt",
 		"envoy-infra:aws:Authorization", "envoy-infra:aws:User", "envoy-infra:nats:Rules",
 		"envoy-infra:gcp:NatsUser", "envoy-infra:gcp:Permissions", "envoy-infra:gcp:HubListener", "envoy-infra:gcp:SessionUser",
+		"envoy-infra:gcp:ClusteredHubTailnet", "envoy-infra:gcp:ClusteredHubListener",
 	}, slices.Collect(maps.Keys(servedSchema(t).Types)))
 }
 
@@ -137,6 +139,55 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	}
 	// core refuses an empty allow, so the schema requires it, and a generated SDK says so.
 	require.ElementsMatch(t, []string{"allow"}, s.Types["envoy-infra:nats:Rules"].Required)
+}
+
+func TestSchemaServesTheClusteredNatsHubComponent(t *testing.T) {
+	s := servedSchema(t)
+	hub, ok := s.Resources["envoy-infra:gcp:ClusteredNatsHub"]
+	require.True(t, ok, "the schema lists envoy-infra:gcp:ClusteredNatsHub")
+	require.True(t, hub.IsComponent)
+	require.ElementsMatch(t, []string{
+		"kubeconfig", "namespace", "name", "serviceName", "natsImage", "reloaderImage", "exporterImage",
+		"natsReplicas", "streamMaxBytes", "maxFileStoreGb", "diskSizeGb", "storageClassName", "natsCpu", "natsMemory",
+		"priorityClassName", "clientNamespaces", "monitorNamespaces", "metricsNamespaces", "users", "sessionUser",
+		"tailnet", "tailnetAuthKey",
+	}, slices.Collect(maps.Keys(hub.InputProperties)))
+	require.ElementsMatch(t, []string{
+		"kubeconfig", "namespace", "name", "serviceName", "natsImage", "reloaderImage", "exporterImage", "clientNamespaces",
+	}, hub.RequiredInputs)
+	for name, in := range hub.InputProperties {
+		require.Equal(t, name == "kubeconfig" || name == "tailnetAuthKey", in.Secret, "only kubeconfig and tailnetAuthKey are secret inputs, not %s", name)
+	}
+	for _, input := range []string{"natsReplicas", "streamMaxBytes", "maxFileStoreGb", "diskSizeGb"} {
+		require.Equal(t, "integer", hub.InputProperties[input].Type, input)
+	}
+	require.Equal(t, "#/types/envoy-infra:gcp:NatsUser", hub.InputProperties["users"].Items.Ref)
+	require.Equal(t, "#/types/envoy-infra:gcp:SessionUser", hub.InputProperties["sessionUser"].Ref)
+	// Generated SDKs append Args to an object type's name for its input type, so the Go names
+	// ClusteredHubTailnetArgs and ClusteredHubListenerArgs would reach consumers doubled.
+	require.Equal(t, "#/types/envoy-infra:gcp:ClusteredHubTailnet", hub.InputProperties["tailnet"].Ref)
+	tailnet := s.Types["envoy-infra:gcp:ClusteredHubTailnet"]
+	require.Equal(t, "#/types/envoy-infra:gcp:ClusteredHubListener", tailnet.Properties["listener"].Ref)
+	require.ElementsMatch(t, []string{"serviceName", "tailnetDnsName", "tags", "replicas", "tailscaleImage", "listener"},
+		slices.Collect(maps.Keys(tailnet.Properties)))
+	require.ElementsMatch(t, []string{"serviceName", "tailnetDnsName", "tags", "tailscaleImage", "listener"}, tailnet.Required)
+	require.Equal(t, "integer", tailnet.Properties["replicas"].Type)
+	listener := s.Types["envoy-infra:gcp:ClusteredHubListener"]
+	require.ElementsMatch(t, []string{"image", "machineId", "nkey", "seedSecretName", "seedSecretKey", "allowedHosts", "cpu", "memory"},
+		slices.Collect(maps.Keys(listener.Properties)))
+	require.ElementsMatch(t, []string{"image", "nkey", "seedSecretName", "seedSecretKey"}, listener.Required)
+
+	require.ElementsMatch(t, []string{"serviceUrl", "podSelector", "statefulSetName", "tailnetNatsUrl", "tailnetEnvoyUrl"},
+		slices.Collect(maps.Keys(hub.Properties)))
+	for name, out := range hub.Properties {
+		require.False(t, out.Secret, "%s is no secret", name)
+	}
+	require.Equal(t, "object", hub.Properties["podSelector"].Type)
+	require.Equal(t, "string", hub.Properties["tailnetNatsUrl"].Type)
+	// The tailnet URLs are null without tailnet, yet listed required: pulumi-go-provider keys a
+	// component's outputs by the whole pulumi tag, so an output takes no optional tag.
+	require.ElementsMatch(t, []string{"serviceUrl", "podSelector", "statefulSetName", "tailnetNatsUrl", "tailnetEnvoyUrl"},
+		hub.Required)
 }
 
 func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
@@ -271,6 +322,7 @@ func TestConstructRefusesAFractionInEveryIntegerInput(t *testing.T) {
 	}
 	// aws:NatsService logRetentionDays; aws:WebhookListener logRetentionDays and natsReplicas;
 	// gcp:Dispatch replicas, pprofPort and azureEmbedTokensPerMinute; gcp:NatsHub diskSizeGb;
-	// host:Listener port.
-	require.GreaterOrEqual(t, covered, 8)
+	// gcp:ClusteredNatsHub natsReplicas, streamMaxBytes, maxFileStoreGb and diskSizeGb; host:Listener
+	// port.
+	require.GreaterOrEqual(t, covered, 12)
 }
