@@ -17,6 +17,7 @@ import {
   type Clipboard,
   copy,
   documentEditor,
+  indexedBlockAsk,
   openWithCaret,
   paste,
   selectEditorText,
@@ -45,22 +46,6 @@ async function expectHosted(block: Locator): Promise<Locator> {
   const card = hostedCard(block);
   await expect(card).toBeVisible();
   return card;
-}
-
-/** Waits until the issue's spec block has been indexed into an open ask and returns it. */
-async function indexedBlockAsk(issueKey: string, blockId: string) {
-  await expect
-    .poll(async () =>
-      (await getIssue(issueKey)).open_asks.some((candidate) => candidate.block_id === blockId)
-    )
-    .toBe(true);
-  const blockAsk = (await getIssue(issueKey)).open_asks.find(
-    (candidate) => candidate.block_id === blockId
-  );
-  if (blockAsk === undefined) {
-    throw new Error(`the ${blockId} decision was not indexed`);
-  }
-  return blockAsk;
 }
 
 /** Copies the whole document through the editor's own copy handler. */

@@ -1,8 +1,9 @@
 import { expect, type Locator, test } from "@playwright/test";
 
-import { answerAsk, createComment, createIssue, createProject, getIssue } from "./api";
-import { documentEditor } from "./editor";
+import { answerAsk, createComment, createIssue, createProject } from "./api";
+import { documentEditor, indexedBlockAsk } from "./editor";
 import { resetDatabase } from "./seed";
+import { centerOf } from "./touch";
 import { asUser } from "./users";
 
 test.beforeEach(async () => {
@@ -59,15 +60,6 @@ async function expectBoxOnTextLine(item: Locator): Promise<void> {
   expect(line.top).toBeLessThan(box.bottom);
 }
 
-/** The middle of an element's box, in page coordinates. */
-async function centreOf(locator: Locator): Promise<{ x: number; y: number }> {
-  const box = await locator.boundingBox();
-  if (box === null) {
-    throw new Error("the element has no box");
-  }
-  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-}
-
 for (const colorScheme of ["light", "dark"] as const) {
   test(`a comment's ticked and unticked task items show a ticked and an unticked checkbox (${colorScheme})`, async ({
     browser,
@@ -120,7 +112,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       await expect(unticked).toHaveCSS("list-style-type", "none");
 
       // A click on a box changes nothing: the boxes are read-only.
-      const { x, y } = await centreOf(tickedBox);
+      const { x, y } = await centerOf(tickedBox);
       await page.mouse.click(x, y);
       await expect(tickedBox).toBeChecked();
       await expect(untickedBox).not.toBeChecked();
@@ -141,15 +133,7 @@ test("a reply under a decision inside a document shows the checkboxes with no bu
     spec: 'Intro.\n\n:::ask{#naming urgency="med" multiple="false"}\nWhich alias?\n\n- short\n- long\n:::\n\nAfter.\n',
     title: "Alias decision",
   });
-  await expect
-    .poll(async () =>
-      (await getIssue(issue.key)).open_asks.some((ask) => ask.block_id === "naming")
-    )
-    .toBe(true);
-  const blockAsk = (await getIssue(issue.key)).open_asks.find((ask) => ask.block_id === "naming");
-  if (blockAsk === undefined) {
-    throw new Error("the naming decision was not indexed");
-  }
+  const blockAsk = await indexedBlockAsk(issue.key, "naming");
   await answerAsk(
     blockAsk.id,
     { expected_edited_at: null, selected: ["short"], text: "Short it is." },

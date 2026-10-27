@@ -24,9 +24,7 @@ export function drawTaskCheckboxes(root: HTMLElement): void {
     box.type = "checkbox";
     box.disabled = true;
     box.setAttribute("data-markdown-task-checkbox", "");
-    const checked = item.getAttribute("data-checked") === "true";
-    box.toggleAttribute("checked", checked);
-    box.checked = checked;
+    box.defaultChecked = item.getAttribute("data-checked") === "true";
     paragraph.prepend(box);
   }
 }

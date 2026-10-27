@@ -468,14 +468,17 @@ a {
   --tw-prose-invert-quotes: inherit;
   --tw-prose-invert-captions: inherit;
   --tw-prose-invert-links: #00bcff; /* sky-400 */
+  --dispatch-markdown-task-tick: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23ffffff' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
 /* `dark:prose-invert` would flip links by setting `--tw-prose-links` to the invert value, but it
    does so inside a Tailwind cascade layer, and the unlayered rule above always beats a layered
-   one, so without this the links stay sky-700 on a dark card. */
+   one, so without this the links stay sky-700 on a dark card. It also swaps a ticked task box's
+   white tick for a slate-900 one. */
 @media (prefers-color-scheme: dark) {
   .dispatch-markdown {
     --tw-prose-links: var(--tw-prose-invert-links);
+    --dispatch-markdown-task-tick: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%230f172b' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   }
 }
 
@@ -500,11 +503,11 @@ a {
    and pulled back by its negative start margin into the space the bullet stood in. With its end
    margin the item's words then start where a plain item's do: `prose-sm` indents an item's text
    2em, its `ul`/`ol` padding plus its `li` padding, and the ask footer's rules below keep that
-   sum. It is read-only, so it takes no pointer events either. No ask-footer twin is needed: the
-   footer's `li` rule sets only margin and padding, and its `ul` list-style-type reaches the item
-   by inheritance, which the item's own `list-style` overrides.
+   sum. No ask-footer twin is needed: the footer's `li` rule sets only margin and padding, and its
+   `ul` list-style-type reaches the item by inheritance, which the item's own `list-style`
+   overrides.
    The box is drawn here (`appearance: none`) rather than by the browser, which paints a disabled
-   native box pale grey, so on a light card its tick was hard to see. It stays a native disabled
+   native box pale grey, its tick hard to see on a light card. It stays a native disabled
    checkbox (role, checked state, no tab stop); only its look changes. An unticked box is an empty
    outline in a muted mix of the text colour; a ticked one is filled in the app's link blue
    (`--tw-prose-links`, so it follows the scheme as the links do: sky-700 in light, sky-400 in
@@ -535,14 +538,8 @@ a {
 
 .dispatch-markdown [data-markdown-task-checkbox]:checked {
   background-color: var(--tw-prose-links);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23ffffff' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-image: var(--dispatch-markdown-task-tick);
   border-color: var(--tw-prose-links);
-}
-
-@media (prefers-color-scheme: dark) {
-  .dispatch-markdown [data-markdown-task-checkbox]:checked {
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%230f172b' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  }
 }
 
 /* The block's slots are `not-prose` (`AskBlockView`): the editor root is `prose`, and the card
