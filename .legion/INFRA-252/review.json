@@ -2,27 +2,16 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-252",
-  "completed": "2026-10-26T22:28:00Z",
-  "round": 9,
-  "scope": "The forward merge of main 5c4548f0 (#2253) at 2286fec9 and the migration renumber to 0056; the unchanged-diff fingerprint changed (92fc86c9… at 7d1a9cc1, 41993c3c… at 1028a2a6), so a full round on the merge.",
-  "reviewedCodeHead": "2286fec9ca1408b7e7d2d3936dfffb5e7e160a38",
-  "decision": "changes_requested",
-  "critical": 1,
+  "completed": "2026-10-27T00:03:00Z",
+  "round": 10,
+  "scope": "Narrowed by the architect (conflict return): the forward merge of main ba9a24e2 (#2258) at c78e5a51, the renumber to 0057_issue_ancestry, migrations.All with main's 0056_root_ask_mirror, and the docs/solutions number fix.",
+  "reviewedCodeHead": "c78e5a511aec08eda51fbfd1c5c04e006cd82a11",
+  "decision": "approved",
+  "critical": 0,
   "important": 0,
-  "minor": 1,
-  "mergeResolution": "Clean: every line either side added in the 18 files both touched survives; #2253 changed only design_gates, so issueColumns/PutIssue/scanIssue still line up; adoption never meets #2253's gate logic (an adoptable root never had an architect, so no gate); migration_0055_test.go is main's unchanged and migration_0056_test.go keeps every seed and assertion of the backfill test, seeded through 55; store, record, admit, workflow, api and intake suites pass on the auditors' Postgres; required checks green at 2286fec9 (Tests 40404687016, PR Title 40404783928). Retro's commits above the approved head touched only docs/solutions and .legion/.",
-  "keyFindings": [
-    {
-      "severity": "critical",
-      "file": "packages/daemon/internal/store/migrations/0056_issue_ancestry.up.sql",
-      "description": "Main moved again after this merge: #2258 (ba7b80ee) added 0056_root_ask_mirror.up.sql, so this branch's 0056 collides on version 56, and GitHub reports the PR CONFLICTING (git merge-tree with origin/main ba9a24e2 conflicts in intake/facts.go and store/migration_0056_test.go). Forward-merge main, renumber to 0057_issue_ancestry.up.sql with its test, and prove migrations.All on the merged head."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/solutions/daemon/a-guard-column-a-new-sweep-reads-is-backfilled-from-traces-nothing-prunes-and-proved-from-the-previous-migration-INFRA-252.md",
-      "description": "Lines 39-41 still name 0055_issue_ancestry.up.sql and store/migration_0055_test.go 'from version 54'; after the renumbers that file is main's gate test. Retro's next pass corrects it to the final number (a docs/solutions commit does not void approval)."
-    }
-  ],
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at 1028a2a6 (code 2286fec9): deep APPROVE, quality CHANGES on the stale docs/solutions reference only; both found the merge resolution clean and ran the store and admit suites on embedded Postgres. Provider not verified.",
-  "ci": "At 2286fec9, read 2026-10-26T22:26Z: Tests 40404687016 success (lint, typecheck, test), PR Title 40404783928 success, Docs success; Worker Image in progress and Legion Envoy and Contracts queued (not required). Compare 2286fec9...1028a2a6 touches only .legion/. GitHub mergeable: CONFLICTING against main ba9a24e2."
+  "minor": 0,
+  "keyFindings": [],
+  "verification": "Only intake/facts.go was hand-resolved: DispatchIssue keeps this PR's Ancestry/Reread beside #2258's ClaimedBy/ClaimKnown; ObservedIssue/ListedIssue carry the claim and Ancestry is added at preparation; settleObserved copies only Ancestry/Reread onto the Delivered event, which keeps its own claim. #2258 added no issues columns (root_asks, dispatch_claims tables) and projectRecords embeds record.Store. Both sides' changes survive in all files both touched. migrations.All on the head and on its merge with main 7f7edb8d lists 55 design_gate_review_marks, 56 root_ask_mirror, 57 issue_ancestry; main's migration_0056_test.go is unchanged; migration_0057_test.go differs from the former backfill test only in its number, name and migrateThrough(56); the docs/solutions learning names 0057 and version 56. Auditors ran store, intake, admit, record, blockers and workflow suites on embedded Postgres: all ok.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality at 093695b0 (code c78e5a51): both APPROVE, no findings. Provider not verified.",
+  "ci": "At c78e5a51, read 2026-10-27T00:01Z: Tests 40414541648 success (lint, typecheck, test), PR Title 40414648260 success, Docs success. Required: lint, typecheck, test, pr-title. Compare c78e5a51...093695b0 touches only .legion/. GitHub MERGEABLE against main 7f7edb8d, which added no migration."
 }
