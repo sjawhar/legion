@@ -314,6 +314,11 @@ jobs:
       - name: Test third-party notices
         run: bun test scripts/third-party-notices.test.ts
 
+      # The checker's own unit tests only. scripts/semantic-line-breaks.guides.test.ts checks the
+      # guides' layout and runs on demand, deliberately not here: no CI gate over the guides.
+      - name: Test the semantic line-break checker
+        run: bun test scripts/semantic-line-breaks.test.ts
+
       - name: Test the Bun pin check
         run: .github/scripts/check-bun-version.test.sh
 
