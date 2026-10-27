@@ -26,6 +26,31 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "restart-test")
 	listener.waitHealthy(t)
 
+	// subscribe writes an interest through another listener's registry and waits for this
+	// listener's cache to list it, failing as round's write when it does not within 3s of since.
+	subscribe := func(round int, since time.Time) {
+		writer := testnats.Connect(t, uri)
+		registry, err := store.Open(writer)
+		if err != nil {
+			t.Fatalf("restart %d: open the interest registry as another listener: %v", round, err)
+		}
+		sessionID := "ses_restart_writer_" + strconv.Itoa(round)
+		if _, err := registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "other-listener"}, []string{"notifications.agent." + sessionID}); err != nil {
+			t.Fatalf("restart %d: subscribe through another listener: %v", round, err)
+		}
+		writer.Close()
+		deadline := time.Now().Add(3 * time.Second)
+		for !listsInterest(t, listener.port, sessionID) {
+			if time.Now().After(deadline) {
+				t.Fatalf("restart %d: %s after the listener reconnected, its interest cache still missed a subscription another listener wrote", round, time.Since(since).Round(time.Millisecond))
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	// One interest before the first restart, so the cache has applied a revision a Rewatch can
+	// resume after: an empty bucket has none, and is read in full.
+	subscribe(0, time.Now())
+
 	for restart := 1; restart <= 3; restart++ {
 		server.Stop(t)
 		server.Start(t)
@@ -38,23 +63,17 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 		}
 		reconnectedAt := time.Now()
 
-		writer := testnats.Connect(t, uri)
-		registry, err := store.Open(writer)
-		if err != nil {
-			t.Fatalf("restart %d: open the interest registry as another listener: %v", restart, err)
+		// The reconnect hook's Rewatch resumes the interest cache after the last revision it
+		// applied rather than reading the bucket again. Nothing was written while the server was
+		// down, and every write before it (the previous round's) reached the cache, so the
+		// resumed watcher applies none. The write below waits for that line, so it cannot land
+		// before the resumed consumer exists and be counted in it.
+		warmUp := interestWarmUp(t, listener, restart+1)
+		if warmUp["outcome"] != "resumed" || warmUp["entries"] != float64(0) || warmUp["delete_markers"] != float64(0) {
+			t.Fatalf("restart %d: the interest cache's warm-up after the reconnect = %v, want resumed with no entries and no delete markers", restart, warmUp)
 		}
-		sessionID := "ses_restart_writer_" + strconv.Itoa(restart)
-		if _, err := registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "other-listener"}, []string{"notifications.agent." + sessionID}); err != nil {
-			t.Fatalf("restart %d: subscribe through another listener: %v", restart, err)
-		}
-		writer.Close()
-		deadline = time.Now().Add(3 * time.Second)
-		for !listsInterest(t, listener.port, sessionID) {
-			if time.Now().After(deadline) {
-				t.Fatalf("restart %d: %s after the listener reconnected, its interest cache still missed a subscription another listener wrote", restart, time.Since(reconnectedAt).Round(time.Millisecond))
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
+
+		subscribe(restart, reconnectedAt)
 	}
 
 	listener.Terminate(t)
@@ -66,6 +85,29 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 		if errorLine.MatchString(line) {
 			t.Fatalf("NATS restarts and the shutdown after them logged an error: %s", line)
 		}
+	}
+}
+
+// interestWarmUp waits for the listener's nth interest registry warm-up line (1 is its start's)
+// and returns it.
+func interestWarmUp(t *testing.T, p *listenerProcess, n int) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var lines []map[string]any
+		for line := range strings.SplitSeq(p.Output.String(), "\n") {
+			var record map[string]any
+			if json.Unmarshal([]byte(line), &record) == nil && record["msg"] == "interest registry cache warm-up" {
+				lines = append(lines, record)
+			}
+		}
+		if len(lines) >= n {
+			return lines[n-1]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no interest registry warm-up line %d within 10s:\n%s", n, p.Output.String())
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

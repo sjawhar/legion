@@ -49,13 +49,14 @@ func (w warmUpWriter) Write(p []byte) (int, error) {
 }
 
 // awaitBenchWarmUp returns the next warm-up line, failing b when none comes within
-// rewatchBenchWait or the scan did not complete.
+// rewatchBenchWait or the scan timed out. A rewatch that resumes from the last revision it applied
+// logs "resumed", a full read "completed"; either reached its nil marker.
 func awaitBenchWarmUp(b *testing.B, warmUps <-chan benchWarmUp) benchWarmUp {
 	b.Helper()
 	select {
 	case line := <-warmUps:
-		if line.Outcome != "completed" {
-			b.Fatalf("warm-up ended %q after %d entries, want completed", line.Outcome, line.Entries)
+		if line.Outcome != "completed" && line.Outcome != "resumed" {
+			b.Fatalf("warm-up ended %q after %d entries, want completed or resumed", line.Outcome, line.Entries)
 		}
 		return line
 	case <-time.After(rewatchBenchWait):
@@ -202,10 +203,15 @@ func benchmarkStoreRewatch(b *testing.B, keys int) {
 			b.Fatalf("Rewatch: %v", err)
 		}
 		// Readiness stays released after the first generation, so the new generation's own
-		// warm-up line is what says its scan reached the nil marker.
+		// warm-up line is what says its scan reached the nil marker. Nothing writes during the
+		// loop, so a full read delivers every key and a resume none.
 		line := awaitBenchWarmUp(b, warmUps)
-		if line.Entries != int64(keys) {
-			b.Fatalf("warm-up delivered %d entries, want %d", line.Entries, keys)
+		want := int64(keys)
+		if line.Outcome == "resumed" {
+			want = 0
+		}
+		if line.Entries != want {
+			b.Fatalf("%s warm-up delivered %d entries, want %d", line.Outcome, line.Entries, want)
 		}
 		entries += line.Entries
 	}
