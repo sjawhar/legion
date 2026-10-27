@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-557",
+  "completed": "2026-10-27T14:40:00Z",
+  "testedHead": "24a88452c22fbe510853617a94557e865146df3d",
+  "handoffHead": "bdee5417f0911256f40ea6e29f53fc4cbd55e05e",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 25m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at 24a88452: every row PASS, ok 540.080s (SIGKILL slowest 12.0 s, node loss 11.9 s, graceful 3.4 s, standby 140 s, readiness 503 starting then 200). Ran TestTwoBuilds/a_build_from_before_the_lease against a base binary I built from `git archive 819dc283`: PASS, takeover 1.067 s, 302 messages each prompted once. The kill -9 smoke was driven independently: smoke3.sh in kill mode, where the send through the standby reached the port session 12.04 s after the kill."
+  },
+  "failures": [
+    {
+      "criterion": "Spec item 2 / acceptance: take-over within seconds when the active pod loses its node, and exactly one pod delivers (no message lost). A graceful stop of the pod that took a lost node's expired lease must hand over to the next standby.",
+      "evidence": "Red test packages/envoy/cmd/listener/multiprocess_test.go TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s, shown failing by `cd packages/envoy && go test -tags multiprocess -count=2 -run '^TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s$' -v ./cmd/listener`: '99 of 161 messages never reached their session within 15s' (2 of 2 runs). The next standby takes the released lease, logs 'durable is push-bound by a subscriber without the lease; waiting for its binding to end' (it reads the lost pod's lingering connection as a pre-lease build) and /healthz answers 200 healthy role standby with active_instance itself. Real surface, $TMPDIR/infra557-test/smoke3.sh: three real cmd/listener processes, a real nats-server 2.10.29 process, curl. SIGSTOP the active pod, then SIGTERM the new holder: 'm00003 NOT reached within 420 s'. The standby waited 3 min 42 s before 'durable receiving' and m00003 was never delivered [inference: the server spent MaxDeliver 20 x ack wait 6 s on the lost connection]. Control: the same script with SIGKILL in place of SIGSTOP delivered m00003 1.04 s after the SIGTERM."
+    },
+    {
+      "criterion": "Architect Q2 contract (README 'Take-over'): after a hard take-over each session keeps the order of its events.",
+      "evidence": "Red test packages/envoy/cmd/listener/multiprocess_test.go TestTwoPodsGracefulStopDuringAHardTakeoversHoldKeepsOrder, shown failing by `cd packages/envoy && go test -tags multiprocess -count=4 -run '^TestTwoPodsGracefulStopDuringAHardTakeoversHoldKeepsOrder$' -v ./cmd/listener` (4 of 4 runs): 'ses_mp_holdstop_one took evt-mp-0051 (published 5.001s ...) before evt-mp-0001 (published 0s ...), out of the publish order'. The new holder gets SIGTERM 2 s into its 7 s hold and NAKs what it holds in arrival order. The next standby takes the released lease and delivers at once, without the hold, so messages the lost pod was sent arrive after newer ones. A SIGKILL form of the scenario failed 6 of 11 runs the same way."
+    },
+    {
+      "criterion": "CI green at the head (static checks read on GitHub)",
+      "evidence": "`gh api repos/sjawhar/legion/pulls/2404` gives mergeable false, mergeable_state dirty against main 8ea7d06d. `gh api repos/sjawhar/legion/actions/runs?head_sha=24a88452…` gives no runs (none for bdee5417 either), because GitHub runs no pull_request workflow on a conflicting head. `git merge-tree --write-tree 24a88452 8ea7d06d` lists conflicts in 14 files: packages/envoy/AGENTS.md, cmd/listener/{api,delivery,main}.go, cmd/listener/reconnect_shutdown_test.go, docs/architecture.md, internal/bus/nats.go, internal/integration/{delivery,e2e}_test.go, internal/session/{handler,registry,session}.go, internal/store/{kv,kv_test}.go. On main, #2167 (session-addressed send from the store) overlaps item 5. The merge changes the diff, so the next round is a full test round."
+    }
+  ],
+  "failed": 3,
+  "passedChecks": [
+    "Three pods, SIGKILL of the active pod: exactly one standby takes over, 51 messages once each, in order, slowest 11.8 s",
+    "Rolling update of two replicas with surge 1 (a, b, then c, SIGTERM a, then d, SIGTERM b), 3 runs: ~102 messages each run, all within 10 s, no repeat, one active pod at the end",
+    "Node loss, then thaw: the old pod stands down to standby. Then SIGKILL of the new holder: the old pod takes over, delivering each message once and in order within 15 s",
+    "Lease key deleted 3 times under a running holder: one active pod, every message once",
+    "Whole nats-server restart under load (3 s and 9 s outage): one active pod, every message once and in order",
+    "Nothing Dispatch-specific: the only 'dispatch' machine id in the diff is in cmd/listener/dispatch_resolution_test.go"
+  ],
+  "notes": [
+    "SIGKILL take-over measured at 12.0 s. That meets the architect's Q2 bound of 15 s, not the spec's 10 s. The implement handoff records this as an architect decision.",
+    "The throwaway rows are in $TMPDIR/infra557-test/tester_mp_test.go.keep and the scripts in $TMPDIR/infra557-test/smoke3.sh. Neither is committed."
+  ]
+}
