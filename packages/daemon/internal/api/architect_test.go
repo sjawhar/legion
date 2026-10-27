@@ -733,10 +733,10 @@ func TestWaveReleaseOfAChildNamedTwiceWritesItOnce(t *testing.T) {
 	var response WaveReleaseResponse
 	decodeInto(t, recorder, &response)
 	if want := []string{"LEGION-209", "LEGION-210"}; !reflect.DeepEqual(response.Released, want) {
-		t.Fatalf("released = %#v, want %#v", response.Released, want)
+		t.Errorf("released = %#v, want %#v", response.Released, want)
 	}
 	if want := []statusWrite{{issue: "LEGION-209", status: "todo"}, {issue: "LEGION-210", status: "todo"}}; !reflect.DeepEqual(statuses.writes, want) {
-		t.Fatalf("Dispatch writes = %#v, want each child written once: %#v", statuses.writes, want)
+		t.Errorf("Dispatch writes = %#v, want each child written once: %#v", statuses.writes, want)
 	}
 }
 
