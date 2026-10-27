@@ -95,6 +95,12 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 			if tableID == "" {
 				t.Fatalf("blocks = %#v, want table", blocks)
 			}
+			// The browser writes into a room it has open. A write to a document no room holds
+			// loads none (publishLiveWrite), so the room is loaded here, before the gate below
+			// holds the asks table a room's load reads.
+			if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+				t.Fatalf("load the document's room: %v", err)
+			}
 
 			gate, err := database.Pool.Begin(context.Background())
 			if err != nil {

@@ -284,6 +284,9 @@ type Service struct {
 	// awarenessRelay carries this process's rooms' awareness to the other processes and is ygo's
 	// relay (awareness_relay.go); the other processes' reaches it on room sync's awareness lane.
 	awarenessRelay *awarenessRelay
+	// roomQueries asks the other processes about a document room and answers their questions
+	// (room_query.go), on room sync's query and answer lanes.
+	roomQueries *roomQueries
 	// hostname names this process on each document socket's upgrade (ProcessHeader), read once
 	// when the service is built; empty when the host would not say, and then no header is sent.
 	hostname string
@@ -619,6 +622,7 @@ func New(deps Deps) *Service {
 	service.catchUps = newRoomCatchUps(service)
 	service.roomSyncSender = newRoomSyncSender(service)
 	service.awarenessRelay = newAwarenessRelay(service)
+	service.roomQueries = newRoomQueries(service)
 	switch hostname, err := os.Hostname(); {
 	case err != nil:
 		slog.Warn("dispatch: read the host name the document sockets name their process by", "error", err)

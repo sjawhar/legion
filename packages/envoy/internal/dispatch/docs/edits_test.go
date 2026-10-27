@@ -356,6 +356,11 @@ func TestApplyOpsResolvesAgainstDocumentInsideApply(t *testing.T) {
 	if _, err := joinedReplaceText(service, artifactID, "base", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("prepare document: %v", err)
 	}
+	// The write resolves inside the Apply of the room a browser edits; a write to a document no
+	// room holds loads none (publishLiveWrite), so the room is loaded here.
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document's room: %v", err)
+	}
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	service.srv.OnInject = func(ctx context.Context, info ygws.InjectInfo) error {

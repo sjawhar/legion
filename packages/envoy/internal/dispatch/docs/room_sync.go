@@ -67,7 +67,7 @@ const (
 	// trigger migration 0121 puts on issues.closed_at (Service.issueOpenChanged).
 	issueOpenChangedChannel = "dispatch_issue_open_changed"
 	// documentQueryChannel carries one process's question about a room to every other member,
-	// and documentAnswerChannel each member's answer to it.
+	// and documentAnswerChannel each member's answer to it; room_query.go has their wire format.
 	documentQueryChannel  = "dispatch_doc_query"
 	documentAnswerChannel = "dispatch_doc_answer"
 )
@@ -147,9 +147,9 @@ type roomSync struct {
 	// awareness, issueOpenChanged, query and answer handle the four channels beside the
 	// document-change channels the service's catch-up follows (handlers): documentAwarenessChannel,
 	// issueOpenChangedChannel, documentQueryChannel and documentAnswerChannel. Nil drops that
-	// channel's notifications. awareness is the service's awareness relay (awarenessRelay.received)
-	// and issueOpenChanged the service's Service.issueOpenChanged; nothing sets the others yet
-	// outside tests.
+	// channel's notifications. awareness is the service's awareness relay (awarenessRelay.received),
+	// issueOpenChanged the service's Service.issueOpenChanged, and query and answer the service's
+	// room queries (roomQueries.query, roomQueries.answer).
 	awareness, issueOpenChanged, query, answer func(ctx context.Context, payload string)
 	// listening runs after each LISTEN's connected work has run (connected). Nil outside tests: a
 	// test waits on it before the write whose notification it expects, since a notification sent
@@ -162,6 +162,8 @@ func newRoomSync(service *Service) *roomSync {
 		service:          service,
 		awareness:        service.awarenessRelay.received,
 		issueOpenChanged: service.issueOpenChanged,
+		query:            service.roomQueries.query,
+		answer:           service.roomQueries.answer,
 	}
 }
 

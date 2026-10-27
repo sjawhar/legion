@@ -301,11 +301,11 @@ func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
 	}
 }
 
-// A document only the API touches - an agent's edit, a read outside any transaction - has no
-// browser to leave its room. ygo stamps such a room idle when the Server.Apply that touched it
-// returns, so its idle sweep evicts the room within the idle timeout and a sweep of the API's last
-// touch, as it evicts a room its last browser left (roomIdleTimeout), and the document reads back
-// what the API wrote.
+// A document only the API touches - a read outside any transaction - has no browser to leave its
+// room. ygo stamps such a room idle when the Server.Apply that touched it returns, so its idle
+// sweep evicts the room within the idle timeout and a sweep of the API's last touch, as it evicts
+// a room its last browser left (roomIdleTimeout), and the document reads back what the API wrote.
+// An agent's edit of a document no room holds loads none at all (publishLiveWrite).
 func TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -331,7 +331,9 @@ func TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("agent edit: %v", err)
 	}
-	leaves("agent's edit")
+	if resident() {
+		t.Fatal("the agent's edit of a document no room held loaded its room")
+	}
 
 	if _, err := service.currentToken(ctx, artifactID); err != nil {
 		t.Fatalf("read outside any transaction: %v", err)
@@ -535,7 +537,11 @@ func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
 	ctx := context.Background()
-	// A write the room's update observer sees, which makes its replica.
+	// A write the room's update observer sees, which makes its replica: the room is loaded first,
+	// since a write to a document no room holds publishes into none (publishLiveWrite).
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatal(err)
+	}
 	if err := joinedProjectMark(service, artifactID, "projection", MarkRecord{
 		Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
 	}, model.Actor{Kind: "user", ID: "bob"}); err != nil {
@@ -740,6 +746,10 @@ func TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt(t *testing.T) {
 				return nil
 			}
 			seedServiceText(t, service, artifactID, "before")
+			// A write publishes only into a room the process holds (publishLiveWrite).
+			if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+				t.Fatalf("load the document's room: %v", err)
+			}
 			if test.peer {
 				httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 				t.Cleanup(httpServer.Close)

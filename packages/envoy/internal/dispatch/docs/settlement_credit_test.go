@@ -803,6 +803,11 @@ func TestABrowserEditAfterARoomReloadIsOwed(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	// The writes below publish into this room, which the test then reloads; a write to a document
+	// no room holds publishes into none (publishLiveWrite).
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document's room: %v", err)
+	}
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	alice := model.Actor{Kind: "user", ID: "alice"}
