@@ -61,8 +61,10 @@ function runningIndexAsset(): string {
       return asset;
     }
   }
-  // The build ID keeps Vite's entry chunk distinct for every deployment. The production index
-  // script above is the normal comparison value; this fallback only applies outside that document.
+  // The build ID keeps Vite's entry chunk distinct for every deployment, including a rebuild with
+  // no source change: vite.config.ts defines it, and this is the reference that writes it into the
+  // entry chunk, so it stays. It is not an entry path, and deploymentChanged compares nothing with
+  // it: a page that names no entry chunk (Vite's dev server loads /src/main.tsx) offers no reload.
   return __DISPATCH_BUILD__;
 }
 
@@ -72,7 +74,9 @@ function runningIndexAsset(): string {
 // so during a rolling update or a rollback, while two builds are live, a tab was told to reload
 // into a page the next request could replace with its own build again. Anything but a 200 offers
 // nothing: a 404 from a process older than the route (one of the two during a roll), a 401, a 5xx,
-// and a network failure, which rejects and which the caller swallows.
+// and a network failure, which rejects and which the caller swallows. A page that names no entry
+// chunk offers nothing either: the build ID it falls back to is never a live entry path, so under
+// `bun run dev` every focus would offer a reload.
 async function deploymentChanged(): Promise<boolean> {
   const response = await fetch(DASHBOARD_BUILDS_PATH, { cache: "no-store" });
   if (response.status !== 200) {
@@ -83,7 +87,8 @@ async function deploymentChanged(): Promise<boolean> {
     return false;
   }
   const [newest] = live;
-  return typeof newest === "string" && newest !== runningIndexAsset();
+  const running = runningIndexAsset();
+  return typeof newest === "string" && INDEX_ASSET_PATH.test(running) && newest !== running;
 }
 
 // Set from the start of a navigation away from this page (`beforeunload`, or the Navigation API's

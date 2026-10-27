@@ -530,6 +530,34 @@ for (const [when, builds] of noNotice) {
   });
 }
 
+test("shows no update notice on a page that names no entry chunk, as Vite's dev server's does", async () => {
+  // Vite defines the build ID in its dev server as in a build; bun's test runner defines nothing.
+  const globals = globalThis as { __DISPATCH_BUILD__?: string };
+  globals.__DISPATCH_BUILD__ = "dev-build";
+  const devScript = runningPage("/src/main.tsx");
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(
+    serverAnswering({
+      status: 200,
+      body: { serving: "/assets/index-new.js", live: ["/assets/index-new.js"] },
+    })
+  );
+  const view = render(<DeploymentResilience />);
+
+  try {
+    fireEvent.focus(window);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    await settleCheck();
+
+    expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
+    expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", { cache: "no-store" });
+  } finally {
+    fetch.mockRestore();
+    devScript.remove();
+    view.unmount();
+    Reflect.deleteProperty(globals, "__DISPATCH_BUILD__");
+  }
+});
+
 test("waits one minute before checking for another deployment on focus", async () => {
   const currentScript = runningPage("/assets/index-current.js");
   let now = 100_000;
