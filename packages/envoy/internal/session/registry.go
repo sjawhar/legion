@@ -57,9 +57,10 @@ func (e SessionEntry) HostOrMachine() string {
 type SessionRegistryOption func(*sessionRegistryOpts)
 
 type sessionRegistryOpts struct {
-	replicas int
-	ttl      time.Duration
-	log      *slog.Logger
+	replicas          int
+	ttl               time.Duration
+	lastSeenRetention time.Duration
+	log               *slog.Logger
 }
 
 func WithSessionReplicas(n int) SessionRegistryOption {
@@ -68,6 +69,16 @@ func WithSessionReplicas(n int) SessionRegistryOption {
 
 func WithSessionTTL(d time.Duration) SessionRegistryOption {
 	return func(o *sessionRegistryOpts) { o.ttl = d }
+}
+
+// WithLastSeenRetention sets how long after a session leaves the cache LastSeen still answers its
+// final heartbeat; the id's revision fence is kept as long. The default, and any value shorter
+// than the bucket's TTL, is one TTL: the fence must outlive the id's leaving by at least one TTL
+// for dropping it to stay safe (expireDue). The listener keeps it for as long as the interest
+// reaper can still hold a dead session's interest, so its interests API can report the session's
+// last heartbeat for every interest row it still lists.
+func WithLastSeenRetention(d time.Duration) SessionRegistryOption {
+	return func(o *sessionRegistryOpts) { o.lastSeenRetention = d }
 }
 
 // WithSessionLogger sets the logger the registry and its cache watcher write through. The listener
@@ -109,6 +120,9 @@ func (s lastSeenSession) expired(now time.Time) bool {
 // problem for the interest registry.
 type SessionRegistry struct {
 	ttl time.Duration
+	// lastSeenRetention is WithLastSeenRetention's value; zero, as in a registry built from a
+	// struct literal, means one TTL (retention).
+	lastSeenRetention time.Duration
 
 	mu             sync.RWMutex
 	cache          map[string]cachedSession
@@ -161,11 +175,12 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 		}
 	}
 	r := &SessionRegistry{
-		ttl:            ttl,
-		cache:          map[string]cachedSession{},
-		cacheRevisions: map[string]uint64{},
-		lastSeen:       map[string]lastSeenSession{},
-		log:            opts.log,
+		ttl:               ttl,
+		lastSeenRetention: opts.lastSeenRetention,
+		cache:             map[string]cachedSession{},
+		cacheRevisions:    map[string]uint64{},
+		lastSeen:          map[string]lastSeenSession{},
+		log:               opts.log,
 	}
 	r.watcher = kvwatch.New("session registry", kv, r.applyWatched, r.resetCache, kvwatch.WithLogger(opts.log))
 	// The watcher populates the cache asynchronously. A synchronous Keys()+per-key Get() loop
@@ -265,6 +280,14 @@ func (r *SessionRegistry) WaitForCacheReady(ctx context.Context) error {
 // TTL returns the liveness window configured by the backing session bucket.
 func (r *SessionRegistry) TTL() time.Duration {
 	return r.ttl
+}
+
+// retention is how long after a session leaves the cache its lastSeen record and revision fence
+// are kept: WithLastSeenRetention's value, and never less than one TTL, so a registry built from a
+// struct literal keeps them one TTL. It means nothing when the TTL is not positive: then nothing
+// expires and no record is kept.
+func (r *SessionRegistry) retention() time.Duration {
+	return max(r.lastSeenRetention, r.ttl)
 }
 
 // CacheReady reports whether the cache is ready (kvwatch.Watcher.Ready). Observability for
@@ -384,12 +407,13 @@ func (r *SessionRegistry) Refresh(ctx context.Context, sessionID string) (Sessio
 }
 
 // LastSeen returns a recently expired or explicitly removed session's final
-// heartbeat time. It is retained for one additional registry TTL so callers
+// heartbeat time. It is retained for the registry's retention (one TTL unless
+// WithLastSeenRetention set longer) after the session left the cache, so callers
 // can report why an otherwise durable reference stopped resolving. A live
 // session answers 0. It takes only the shared lock and changes nothing: an
 // expired entry the expiry timer has not removed yet answers what its removal
-// will record (its UpdatedAt until one TTL past its deadline), so the answer is
-// the same before and after the removal.
+// will record (its UpdatedAt until the retention past its deadline), so the
+// answer is the same before and after the removal.
 func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 	now := time.Now()
 	r.mu.RLock()
@@ -508,10 +532,10 @@ func (r *SessionRegistry) cachedRevision(sessionID string) uint64 {
 
 // evictCachedSessionLocked removes sessionID from the cache for a delete, a purge or a malformed
 // value at revision, unless the revision fence holds a newer revision, and moves the removed entry's
-// final heartbeat to lastSeen: until one TTL from now, or for an entry already past its deadline,
-// until one TTL past that deadline, which is what its expiry would have recorded. The fence moves to
-// revision and leaves one TTL from now (expireDue), whether or not a lastSeen record was written.
-// Callers must hold r.mu for writing.
+// final heartbeat to lastSeen: for the retention from now, or for an entry already past its
+// deadline, for the retention past that deadline, which is what its expiry would have recorded. The
+// fence moves to revision and leaves the retention from now (expireDue), whether or not a lastSeen
+// record was written. Callers must hold r.mu for writing.
 func (r *SessionRegistry) evictCachedSessionLocked(sessionID string, revision uint64) {
 	if revision < r.cacheRevisions[sessionID] {
 		return
@@ -526,11 +550,11 @@ func (r *SessionRegistry) evictCachedSessionLocked(sessionID string, revision ui
 	}
 	delete(r.cache, sessionID)
 	r.cacheRevisions[sessionID] = revision
-	r.scheduleLocked(sessionID, expireLastSeen, now.Add(r.ttl))
+	r.scheduleLocked(sessionID, expireLastSeen, now.Add(r.retention()))
 }
 
-// retainLastSeenLocked records lastSeen as sessionID's final heartbeat until one TTL after left,
-// the time the session left the cache. Callers must hold r.mu for writing.
+// retainLastSeenLocked records lastSeen as sessionID's final heartbeat until the retention after
+// left, the time the session left the cache. Callers must hold r.mu for writing.
 func (r *SessionRegistry) retainLastSeenLocked(sessionID string, lastSeen int64, left time.Time) {
 	seen, ok := r.lastSeenRecord(lastSeen, left)
 	if !ok {
@@ -542,13 +566,13 @@ func (r *SessionRegistry) retainLastSeenLocked(sessionID string, lastSeen int64,
 	r.lastSeen[sessionID] = seen
 }
 
-// lastSeenRecord is the record a session whose final heartbeat was lastSeen keeps for one TTL
-// after it left the cache at left, or false when none is kept (no TTL, or no heartbeat time).
-// LastSeen answers an expired entry still in the cache from the same record, so it answers the
-// same before and after the entry's removal.
+// lastSeenRecord is the record a session whose final heartbeat was lastSeen keeps for the
+// retention after it left the cache at left, or false when none is kept (no TTL, or no heartbeat
+// time). LastSeen answers an expired entry still in the cache from the same record, so it answers
+// the same before and after the entry's removal.
 func (r *SessionRegistry) lastSeenRecord(lastSeen int64, left time.Time) (lastSeenSession, bool) {
 	if r.ttl <= 0 || lastSeen <= 0 {
 		return lastSeenSession{}, false
 	}
-	return lastSeenSession{lastSeen: lastSeen, expiresAt: left.Add(r.ttl)}, true
+	return lastSeenSession{lastSeen: lastSeen, expiresAt: left.Add(r.retention())}, true
 }

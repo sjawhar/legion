@@ -302,3 +302,84 @@ func TestNonPositiveTTLNeverRemovesOrSchedules(t *testing.T) {
 		})
 	}
 }
+
+// TestLastSeenRetentionKeepsTheRecordAndFenceThatLong lets a session expire and removes another in
+// a registry whose retention is longer than its TTL: LastSeen answers each one's final heartbeat,
+// and the fence holds off a stale replay, until the retention has passed since the session left
+// the cache, well past one TTL, and both leave together after it.
+func TestLastSeenRetentionKeepsTheRecordAndFenceThatLong(t *testing.T) {
+	const (
+		ttl       = 50 * time.Millisecond
+		retention = time.Second
+	)
+	r := newTestRegistry(ttl)
+	r.lastSeenRetention = retention
+	created := time.Now()
+	heartbeat := created.UnixMilli()
+	stale := watchedPut(t, "ses_deleted", 1, created, SessionEntry{Port: 1, UpdatedAt: heartbeat})
+	r.applyWatched(watchedPut(t, "ses_expired", 2, created, SessionEntry{Port: 2, UpdatedAt: heartbeat}))
+	r.applyWatched(stale)
+	deleted := time.Now()
+	r.applyWatched(watchedDelete("ses_deleted", 3))
+	waitForCacheSize(t, r, 0)
+
+	// Several TTLs after both left, well inside the retention.
+	time.Sleep(4 * ttl)
+	for _, id := range []string{"ses_expired", "ses_deleted"} {
+		if got := r.LastSeen(id); got != heartbeat {
+			t.Fatalf("LastSeen(%s) %s after it left = %d, want its heartbeat %d", id, time.Since(created), got, heartbeat)
+		}
+	}
+	if revision, ok := fence(r, "ses_deleted"); !ok || revision != 3 {
+		t.Fatalf("fence for ses_deleted = %d (held %v), want 3 within the retention", revision, ok)
+	}
+	r.applyWatched(stale)
+	if _, err := r.Get("ses_deleted"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("Get(ses_deleted) after a replay the fence holds off = %v, want ErrKeyNotFound", err)
+	}
+	if got := r.LastSeen("ses_deleted"); got != heartbeat {
+		t.Fatalf("LastSeen(ses_deleted) after a replay the fence holds off = %d, want %d", got, heartbeat)
+	}
+
+	waitUntil(t, func() bool {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		return len(r.lastSeen) == 0 && len(r.cacheRevisions) == 0 && len(r.expiries) == 0
+	})
+	if gone := time.Since(deleted); gone < retention {
+		t.Fatalf("records and fences left %s after ses_deleted was removed, before the retention %s", gone, retention)
+	}
+	for _, id := range []string{"ses_expired", "ses_deleted"} {
+		if got := r.LastSeen(id); got != 0 {
+			t.Fatalf("LastSeen(%s) after the retention = %d, want 0", id, got)
+		}
+	}
+}
+
+// TestLastSeenRetentionShorterThanTheTTLKeepsOneTTL asks for a retention shorter than the TTL: the
+// record and the fence are still kept one TTL, so dropping the fence stays safe.
+func TestLastSeenRetentionShorterThanTheTTLKeepsOneTTL(t *testing.T) {
+	const ttl = 500 * time.Millisecond
+	r := newTestRegistry(ttl)
+	r.lastSeenRetention = time.Millisecond
+	now := time.Now()
+	r.applyWatched(watchedPut(t, "ses_deleted", 1, now, SessionEntry{Port: 1, UpdatedAt: now.UnixMilli()}))
+	deleted := time.Now()
+	r.applyWatched(watchedDelete("ses_deleted", 2))
+
+	// Many retentions later, well inside one TTL.
+	time.Sleep(50 * time.Millisecond)
+	if got := r.LastSeen("ses_deleted"); got != now.UnixMilli() {
+		t.Fatalf("LastSeen(ses_deleted) %s after it left = %d, want its heartbeat %d", time.Since(deleted), got, now.UnixMilli())
+	}
+	if revision, ok := fence(r, "ses_deleted"); !ok || revision != 2 {
+		t.Fatalf("fence for ses_deleted = %d (held %v), want 2 within one TTL", revision, ok)
+	}
+	waitUntil(t, func() bool {
+		_, ok := fence(r, "ses_deleted")
+		return !ok
+	})
+	if gone := time.Since(deleted); gone < ttl {
+		t.Fatalf("the fence left %s after the delete, before one TTL %s", gone, ttl)
+	}
+}

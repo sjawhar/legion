@@ -1688,6 +1688,16 @@
 
 ### Fixed
 
+- Dispatch's subscribers list shows a subscriber whose session is no longer live with its session's
+  last heartbeat again, not its interest row's `updated_at`, which can be up to 5 minutes earlier
+  since the listener rewrites an unchanged row only that often (sjawhar/legion#2377). The
+  listener's `GET /v1/interests/` and `GET /v1/interests/<session_id>` rows now carry `last_seen`,
+  the session's last heartbeat as its session cache knows it, omitted when unknown, and the
+  listener keeps a dead session's last heartbeat until the interest reaper's grace has passed
+  (`store.InterestReapGrace` + `store.InterestRefreshAge` after the session left the cache,
+  `session.WithLastSeenRetention`), so every row the reaper still holds can carry it. Dispatch
+  falls back to the row's `updated_at` when the listener sends no `last_seen` (it restarted since
+  the session died, or predates the field).
 - A listener's NATS reconnect, and a self-health rebuild of a cache watcher, no longer read the
   interest, role claim, session and CI buckets again in full. Each `Rewatch` now resumes after the
   last revision its cache applied and delivers only what was written since, and its

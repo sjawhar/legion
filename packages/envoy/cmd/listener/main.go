@@ -754,10 +754,15 @@ func main() {
 	}
 	cacheReadyCancel()
 
+	// A dead session's last heartbeat is kept for as long as the interest reaper can still hold its
+	// interest: the reaper deletes the row only InterestReapGrace + InterestRefreshAge after its
+	// last write, so /v1/interests/ can report the session's real last heartbeat (the row's
+	// updated_at lags it by up to InterestRefreshAge) for every row it still lists.
 	sessions, err := session.OpenSessionRegistry(
 		client.Conn,
 		session.WithSessionReplicas(cfg.NATSReplicas),
 		session.WithSessionLogger(logger.Slog()),
+		session.WithLastSeenRetention(store.InterestReapGrace+store.InterestRefreshAge),
 	)
 	if err != nil {
 		log.Fatal(err)

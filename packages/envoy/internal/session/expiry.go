@@ -12,9 +12,10 @@ const (
 	// expireLive is the deadline of the id's live cache entry. At it the entry leaves the cache and
 	// its final heartbeat moves to lastSeen.
 	expireLive expiryKind = iota
-	// expireLastSeen is the deadline of the id's lastSeen record and of its revision fence, one TTL
-	// after the id left the cache. At it the record leaves lastSeen and, when the id is still not
-	// cached, the fence leaves cacheRevisions.
+	// expireLastSeen is the deadline of the id's lastSeen record and of its revision fence, the
+	// registry's retention (one TTL unless WithLastSeenRetention set longer) after the id left the
+	// cache. At it the record leaves lastSeen and, when the id is still not cached, the fence leaves
+	// cacheRevisions.
 	expireLastSeen
 )
 
@@ -63,9 +64,9 @@ func (h *expiryHeap) Pop() any {
 // scheduleLocked sets the deadline of id's kind of expiry to deadline, in place when one is already
 // scheduled, and re-arms the expiry timer when the earliest deadline moved earlier. A lastSeen
 // deadline only ever moves later: the revision fence it ends must outlive every time the id left
-// the cache by one TTL. A non-positive ttl or a zero deadline schedules nothing: such an entry never
-// expires. A registry built from a struct literal has no heap, index or timer until its first
-// schedule. Callers must hold r.mu for writing.
+// the cache by the retention. A non-positive ttl or a zero deadline schedules nothing: such an
+// entry never expires. A registry built from a struct literal has no heap, index or timer until its
+// first schedule. Callers must hold r.mu for writing.
 func (r *SessionRegistry) scheduleLocked(id string, kind expiryKind, deadline time.Time) {
 	if r.ttl <= 0 || deadline.IsZero() {
 		return
@@ -121,16 +122,16 @@ func (r *SessionRegistry) armExpiryLocked() {
 //
 // A live entry's deadline removes the entry only when the cache still holds it with that same
 // expiresAt; a write that replaced it since moved the deadline, and then nothing happens. Removing it
-// records its final heartbeat in lastSeen until one TTL after its deadline, so LastSeen answers the
-// same before and after the removal, and schedules the id's lastSeen deadline.
+// records its final heartbeat in lastSeen until the retention after its deadline, so LastSeen
+// answers the same before and after the removal, and schedules the id's lastSeen deadline.
 //
 // A lastSeen deadline removes the id's lastSeen record and, when the cache holds no entry for the
 // id, its revision fence in cacheRevisions, so the fence map holds only live ids and ids that left
-// within one TTL. Dropping the fence is safe: any revision older than the fence was written before
-// the id left the cache, so its Created() is more than one TTL in the past, and expiryFor gives a
-// late delivery of it a deadline that has already passed. cacheSessionLocked does not insert such a
-// delivery for an id it does not hold, so it neither makes the id live nor brings back a LastSeen
-// answer.
+// within the retention. Dropping the fence is safe because the retention is never less than one
+// TTL: any revision older than the fence was written before the id left the cache, so its Created()
+// is more than one TTL in the past, and expiryFor gives a late delivery of it a deadline that has
+// already passed. cacheSessionLocked does not insert such a delivery for an id it does not hold, so
+// it neither makes the id live nor brings back a LastSeen answer.
 func (r *SessionRegistry) expireDue() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -148,7 +149,7 @@ func (r *SessionRegistry) expireDue() {
 			}
 			r.retainLastSeenLocked(id, cs.entry.UpdatedAt, cs.expiresAt)
 			delete(r.cache, id)
-			r.setExpiryLocked(id, expireLastSeen, cs.expiresAt.Add(r.ttl))
+			r.setExpiryLocked(id, expireLastSeen, cs.expiresAt.Add(r.retention()))
 		case expireLastSeen:
 			if seen, ok := r.lastSeen[id]; ok {
 				if seen.expiresAt.After(now) {
