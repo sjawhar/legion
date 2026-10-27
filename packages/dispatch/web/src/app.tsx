@@ -8,6 +8,7 @@ import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
+import { TextAskBlockCard } from "./features/doc/AskBlockCard";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
@@ -15,6 +16,7 @@ import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
 import { MarginProvider } from "./features/margin/margin-context";
 import { AgentRegistryPoller } from "./features/refs/agent-registry";
+import { TextAskCard } from "./features/refs/markdown-cards";
 import { RefPreviewHost } from "./features/refs/RefPreview";
 import {
   AGENT_ARTIFACT_PATH,
@@ -745,10 +747,14 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
 
 function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
   useEventStream();
+  // Every Markdown body the shell renders - routes, the margin, the inbox drawer, previews and
+  // dialogs - draws a decision block in its text as the read-only card (`TextAskCard`).
   return (
     <KeymapProvider>
       <AgentRegistryPoller />
-      <AppShell user={user} />
+      <TextAskCard.Provider value={TextAskBlockCard}>
+        <AppShell user={user} />
+      </TextAskCard.Provider>
     </KeymapProvider>
   );
 }

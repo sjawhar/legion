@@ -26,6 +26,9 @@ const PILL_CLASS = "rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-
 export interface AskBlockCardProps {
   /** The indexed ask row for this block, once the server has created it. */
   ask: Ask | undefined;
+  /** The block stands in text no server reads - a comment, ask or message body - so nothing
+   *  ever activates it: a malformed one is not told to fix its text to re-activate. */
+  detached?: boolean;
   host: AskBlockHost;
   /** Called once the server has recorded the reader's answer from this block. */
   onAnswered?: (id: string) => void;
@@ -46,6 +49,7 @@ export interface AskBlockCardProps {
  * itself is the editor's content, so no part of this card repeats it. */
 export function AskBlockCard({
   ask,
+  detached = false,
   host,
   onAnswered,
   owner,
@@ -135,9 +139,11 @@ export function AskBlockCard({
       )}
       {createPortal(
         malformed ? (
-          <p className={`mt-3 text-sm ${textMutedOnSurfaceMuted}`}>
-            Fix the block text; the decision re-activates once it parses.
-          </p>
+          detached ? null : (
+            <p className={`mt-3 text-sm ${textMutedOnSurfaceMuted}`}>
+              Fix the block text; the decision re-activates once it parses.
+            </p>
+          )
         ) : hosted ? (
           <AskCard
             ask={ask}
@@ -155,6 +161,13 @@ export function AskBlockCard({
       )}
     </>
   );
+}
+
+/** The read-only card a past version shows, for a decision block in a text body (a comment, ask
+ *  or message): what the app provides as `TextAskCard`, so `useRenderedMarkdown` mounts it into
+ *  each `ask` shell the body draws. The block reads its own attributes, never an ask row. */
+export function TextAskBlockCard({ host }: { host: AskBlockHost }): ReactNode {
+  return <AskBlockCard ask={undefined} detached host={host} owner={undefined} readOnly />;
 }
 
 /** Where a copied block's source stands, by the state settlement wrote into the block. */
