@@ -19,7 +19,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -79,18 +82,27 @@ func (b *lockedBuffer) count(msg string, attrs ...string) int {
 	return n
 }
 
+// harness is one sweeper's world: GitHub's App webhook API, the App client, the redelivery KV
+// bucket, and the database holding the GitHub rate limits every process shares, which the client
+// and the sweeper both obey. Its clock is the sweeper's (claims, backoff, cursor); a recorded
+// rate limit is judged by the database's clock, so a test moves a limit's end back
+// (passLimits) rather than advancing the clock past it.
 type harness struct {
-	t       *testing.T
-	webhook *githubapptest.Webhook
-	client  *githubapp.Client
-	state   bus.KeyValue
-	logs    *lockedBuffer
-	clock   *clock
+	t        *testing.T
+	webhook  *githubapptest.Webhook
+	client   *githubapp.Client
+	state    bus.KeyValue
+	database *store.Store
+	limits   *ratelimit.Store
+	logs     *lockedBuffer
+	clock    *clock
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	nc, err := natsgo.Connect(testnats.URL(t))
+	database := storetest.Open(t)
+	_, natsURL := testnats.Start(t)
+	nc, err := natsgo.Connect(natsURL)
 	if err != nil {
 		t.Fatalf("connect NATS: %v", err)
 	}
@@ -107,20 +119,45 @@ func newHarness(t *testing.T) *harness {
 	webhook := githubapptest.NewWebhook(t, &key.PublicKey, clientID, nil)
 	c := &clock{now: time.Now().UTC().Truncate(time.Second)}
 	webhook.SetClock(c.Now)
-	client, err := githubapp.New(&auth.AppConfig{ClientID: clientID, PEM: pemText}, webhook.URL())
+	limits := ratelimit.New(database.Pool)
+	client, err := githubapp.New(&auth.AppConfig{ClientID: clientID, PEM: pemText}, webhook.URL(), githubapp.WithLimits(limits))
 	if err != nil {
 		t.Fatalf("App client: %v", err)
 	}
-	return &harness{t: t, webhook: webhook, client: client, state: state, logs: &lockedBuffer{}, clock: c}
+	return &harness{t: t, webhook: webhook, client: client, state: state, database: database, limits: limits, logs: &lockedBuffer{}, clock: c}
 }
 
 func (h *harness) sweeper() *redeliver.Sweeper {
 	return &redeliver.Sweeper{
 		GitHub: h.client,
 		State:  h.state,
+		Limits: h.limits,
 		Logger: slog.New(slog.NewTextHandler(h.logs, nil)),
 		Now:    h.clock.Now,
 	}
+}
+
+// passLimits moves the end of every recorded rate limit into the past, as waiting out GitHub's
+// time would; the rows stay, strikes and all.
+func (h *harness) passLimits() {
+	h.t.Helper()
+	if _, err := h.database.Pool.Exec(context.Background(), `update github_rate_limits set until = now() - interval '1 second'`); err != nil {
+		h.t.Fatalf("move the recorded rate limits back: %v", err)
+	}
+}
+
+// limitLeft is how long scope's recorded limit has left by the database's clock; zero or less
+// when it has passed or there is none.
+func (h *harness) limitLeft(scope string) time.Duration {
+	h.t.Helper()
+	limit, found, err := h.limits.Get(context.Background(), scope)
+	if err != nil {
+		h.t.Fatalf("read the %s rate limit: %v", scope, err)
+	}
+	if !found {
+		return 0
+	}
+	return limit.Wait
 }
 
 // fail records an attempt GitHub made that the receiver answered with code, ago before now.
@@ -349,7 +386,8 @@ func TestARefusedDeliveryOutsideTheWindowIsAskedAgain(t *testing.T) {
 // GitHub answers a request over a rate limit with 403 or 429 and says when to try again
 // (Retry-After, or x-ratelimit-remaining 0 and x-ratelimit-reset). The sweep stops there, counts
 // nothing against the delivery it was asking for, and sends GitHub nothing more, listing
-// included, until that time has passed.
+// included, until that time has passed by the database's clock: its own backoff holds at least a
+// minute, and the App's limit holds GitHub's wait as given.
 func TestARateLimitStopsTheSweepUntilGitHubsRetryTime(t *testing.T) {
 	retryAfter := func(*harness) http.Header { return http.Header{"Retry-After": {"60"}} }
 	for _, tc := range []struct {
@@ -388,15 +426,20 @@ func TestARateLimitStopsTheSweepUntilGitHubsRetryTime(t *testing.T) {
 			}
 
 			// GitHub would answer now, but the sweep does not ask before the time GitHub gave.
+			if left := h.limitLeft("redelivery"); left < 50*time.Second || left > time.Minute {
+				t.Fatalf("the sweep's backoff has %s left, want GitHub's minute", left)
+			}
+			if left := h.limitLeft(githubapp.AppScope); left < 50*time.Second || left > time.Minute {
+				t.Fatalf("the App's limit has %s left, want GitHub's minute", left)
+			}
 			h.webhook.Limit(tc.method, 0, nil)
 			listings := h.webhook.Listings()
-			h.clock.advance(30 * time.Second)
 			h.sweep(redeliver.Options{})
 			if got := len(h.requests()); got != wantSent || h.webhook.Listings() != listings {
 				t.Fatalf("a sweep before the retry time called GitHub: %d requests (want %d), %d listings (want %d)", got, wantSent, h.webhook.Listings(), listings)
 			}
 
-			h.clock.advance(31 * time.Second)
+			h.passLimits()
 			report := h.sweep(redeliver.Options{})
 			for i := range 3 {
 				if got := outcome(report, fmt.Sprintf("guid-%d", i)); got != redeliver.Redelivered {
@@ -423,15 +466,15 @@ func (p pausedListing) Deliveries(context.Context, time.Time, func() error) ([]g
 	return nil, nil
 }
 
-// The rate limit is one record every sweeper on the bucket shares. A sweeper that read a limit
-// already past and finished clear of it clears that record and no other: a limit another sweeper
-// recorded while it ran stands, and a third sweeper sends GitHub nothing before it.
+// The sweep's backoff is one row every sweeper shares. A sweeper that read a backoff already past
+// and finished clear of it deletes that row and no other: a limit another sweeper recorded while
+// it ran stands, and a third sweeper sends GitHub nothing before it.
 func TestASweepClearsOnlyTheRateLimitItRead(t *testing.T) {
 	h := newHarness(t)
 	h.fail("guid-limited", http.StatusServiceUnavailable, time.Minute)
 	h.webhook.Limit(http.MethodPost, http.StatusTooManyRequests, http.Header{"Retry-After": {"60"}})
 	h.sweep(redeliver.Options{})
-	h.clock.advance(61 * time.Second) // the limit has passed, and its record is still there
+	h.passLimits() // the limit has passed, and its row is still there
 
 	paused := pausedListing{GitHub: h.client, entered: make(chan struct{}), release: make(chan struct{})}
 	first := h.sweeper()
@@ -480,9 +523,9 @@ func (p *pausedClaim) Create(key string, value []byte) (uint64, error) {
 	return revision, err
 }
 
-// A sweeper reads the shared rate limit again right before each request it sends GitHub, so one
-// that claimed a delivery before another sweeper recorded a limit sends nothing once it is in
-// force, and undoes its claim.
+// A sweeper reads the shared limits again right before each request it sends GitHub, so one that
+// claimed a delivery before another sweeper recorded a limit sends nothing once it is in force,
+// and undoes its claim.
 func TestASweepPausedBeforeItsRequestSendsNothingUnderANewLimit(t *testing.T) {
 	h := newHarness(t)
 	h.fail("guid-older", http.StatusServiceUnavailable, 2*time.Minute)
@@ -517,8 +560,60 @@ func TestASweepPausedBeforeItsRequestSendsNothingUnderANewLimit(t *testing.T) {
 	// Its claim was undone: once the limit passes, guid-newer is asked for as its first attempt.
 	h.webhook.Limit(http.MethodPost, 0, nil)
 	h.clock.advance(2*time.Minute + time.Second)
+	h.passLimits()
 	if got := outcome(h.sweep(redeliver.Options{}), "guid-newer"); got != redeliver.Redelivered {
 		t.Fatalf("after the limit: guid-newer outcome %q, want %q", got, redeliver.Redelivered)
+	}
+}
+
+// A secondary limit met again and again on redelivery requests doubles the sweep's own backoff
+// (one, two, then four minutes), and only the sweep's: the App's limit holds GitHub's minute, so
+// once that minute has passed the App's own calls reach GitHub while the sweep still waits.
+func TestARedeliveryBackoffHoldsTheSweepAndNotTheApp(t *testing.T) {
+	h := newHarness(t)
+	h.fail("guid-limited", http.StatusServiceUnavailable, time.Minute)
+	h.webhook.Limit(http.MethodPost, http.StatusForbidden, nil) // a secondary limit: GitHub asks for a minute
+	for strike := 1; strike <= 3; strike++ {
+		h.passLimits()
+		if report := h.sweep(redeliver.Options{}); report.RateLimitedUntil.IsZero() {
+			t.Fatalf("sweep %d was not rate-limited: %+v", strike, report)
+		}
+	}
+	if left := h.limitLeft("redelivery"); left < 3*time.Minute+50*time.Second || left > 4*time.Minute {
+		t.Fatalf("after three limits the sweep's backoff has %s left, want four minutes", left)
+	}
+	if left := h.limitLeft(githubapp.AppScope); left > time.Minute {
+		t.Fatalf("after three limits the App's limit has %s left, want GitHub's minute", left)
+	}
+
+	if _, err := h.database.Pool.Exec(context.Background(), `update github_rate_limits set until = now() - interval '1 second' where scope = $1`, githubapp.AppScope); err != nil {
+		t.Fatalf("move the App's limit back: %v", err)
+	}
+	listings := h.webhook.Listings()
+	if _, err := h.client.Deliveries(context.Background(), h.clock.Now().Add(-time.Hour), nil); err != nil {
+		t.Fatalf("the App's listing past GitHub's minute: %v", err)
+	}
+	if h.webhook.Listings() != listings+1 {
+		t.Fatalf("the App's listing did not reach GitHub past GitHub's minute")
+	}
+	h.webhook.Limit(http.MethodPost, 0, nil)
+	requests := len(h.requests())
+	if report := h.sweep(redeliver.Options{}); report.RateLimitedUntil.IsZero() || len(h.requests()) != requests || h.webhook.Listings() != listings+1 {
+		t.Fatalf("a sweep inside its own backoff called GitHub: %+v", report)
+	}
+}
+
+// A dry run that meets a rate limit reports the backoff it would record and records none.
+func TestADryRunAtARateLimitRecordsNoBackoff(t *testing.T) {
+	h := newHarness(t)
+	h.fail("guid-listed", http.StatusServiceUnavailable, time.Minute)
+	h.webhook.Limit(http.MethodGet, http.StatusTooManyRequests, http.Header{"Retry-After": {"90"}})
+	report := h.sweep(redeliver.Options{Since: h.clock.Now().Add(-time.Hour), DryRun: true})
+	if report.Complete || report.RateLimitedUntil.IsZero() {
+		t.Fatalf("a rate-limited dry run reported complete=%t until %s", report.Complete, report.RateLimitedUntil)
+	}
+	if _, found, err := h.limits.Get(context.Background(), "redelivery"); err != nil || found {
+		t.Fatalf("a dry run recorded a backoff (found %t, %v)", found, err)
 	}
 }
 

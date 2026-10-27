@@ -14,7 +14,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // redeliveryPace spaces redelivery requests a second apart, as GitHub's REST best practices ask of
@@ -24,12 +26,14 @@ const redeliveryPace = time.Second
 
 // webhookSweeper builds the redelivery sweep for the App whose key Dispatch holds. It returns nil
 // when there is no key to sign with (the endpoints take only an App JWT) or no NATS for its
-// state.
-func webhookSweeper(natsClient *bus.Client, app *auth.AppConfig, apiBase string) (*redeliver.Sweeper, error) {
+// state. Its App client and its own backoff obey the GitHub rate limits every process shares, in
+// the database's github_rate_limits.
+func webhookSweeper(natsClient *bus.Client, database *store.Store, app *auth.AppConfig, apiBase string) (*redeliver.Sweeper, error) {
 	if natsClient == nil {
 		return nil, nil
 	}
-	github, err := githubapp.New(app, apiBase)
+	limits := ratelimit.New(database.Pool)
+	github, err := githubapp.New(app, apiBase, githubapp.WithLimits(limits))
 	if err != nil || github == nil {
 		return nil, err
 	}
@@ -37,19 +41,22 @@ func webhookSweeper(natsClient *bus.Client, app *auth.AppConfig, apiBase string)
 	if err != nil {
 		return nil, err
 	}
-	return &redeliver.Sweeper{GitHub: github, State: state, Logger: slog.Default(), Pace: redeliveryPace}, nil
+	return &redeliver.Sweeper{GitHub: github, State: state, Limits: limits, Logger: slog.Default(), Pace: redeliveryPace}, nil
 }
 
 // redeliverWebhooks is the operator command over the same sweep: it lists the App webhook's
 // failed deliveries since --since and, unless --dry-run, redelivers them under the running
-// sweep's rules and records. It leaves the running sweep's cursor alone. It connects to
-// envoy.natsUrls as the nkey user NATS_NKEY_SEED_FILE (or NATS_NKEY_SEED) names and never runs
-// envoy.natsSeed, so a run against a NATS that requires a user needs NATS_NKEY_SEED_FILE.
+// sweep's rules and records. It leaves the running sweep's cursor alone. It opens the database
+// DATABASE_URL names, as the server does, for the GitHub rate limits every process shares, and
+// migrates nothing. It connects to envoy.natsUrls as the nkey user NATS_NKEY_SEED_FILE (or
+// NATS_NKEY_SEED) names and never runs envoy.natsSeed, so a run against a NATS that requires a
+// user needs NATS_NKEY_SEED_FILE.
 func redeliverWebhooks(ctx context.Context, args []string, env settingValues, out io.Writer) int {
 	flags := flag.NewFlagSet("redeliver-webhooks", flag.ContinueOnError)
 	flags.SetOutput(out)
 	flags.Usage = func() {
 		fmt.Fprintln(out, "usage: envoy-dispatch redeliver-webhooks --since <duration> [--dry-run]")
+		fmt.Fprintln(out, "Opens the database DATABASE_URL names, for the GitHub rate limits every Dispatch process shares.")
 		fmt.Fprintln(out, "Connects to envoy.natsUrls as the nkey user NATS_NKEY_SEED_FILE (or NATS_NKEY_SEED) names;")
 		fmt.Fprintln(out, "it never runs envoy.natsSeed, so a run against a NATS that requires a user needs NATS_NKEY_SEED_FILE.")
 		flags.PrintDefaults()
@@ -63,6 +70,17 @@ func redeliverWebhooks(ctx context.Context, args []string, env settingValues, ou
 		fmt.Fprintln(out, "redeliver-webhooks: --since is required, for example --since 72h")
 		return 2
 	}
+	databaseURL := strings.TrimSpace(env.get("DATABASE_URL"))
+	if databaseURL == "" {
+		fmt.Fprintln(out, "redeliver-webhooks: DATABASE_URL is required: the GitHub rate limits every process obeys live there")
+		return 2
+	}
+	database, err := store.Open(ctx, databaseURL)
+	if err != nil {
+		fmt.Fprintf(out, "redeliver-webhooks: open database: %v\n", err)
+		return 1
+	}
+	defer database.Pool.Close()
 	envoyConfig, err := loadEnvoyConfig(env, config.LoadOptions{})
 	if err != nil {
 		fmt.Fprintf(out, "redeliver-webhooks: load envoy config: %v\n", err)
@@ -84,7 +102,7 @@ func redeliverWebhooks(ctx context.Context, args []string, env settingValues, ou
 		fmt.Fprintf(out, "redeliver-webhooks: load app credentials: %v\n", err)
 		return 1
 	}
-	sweeper, err := webhookSweeper(natsClient, app, strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")))
+	sweeper, err := webhookSweeper(natsClient, database, app, strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")))
 	if err != nil {
 		fmt.Fprintf(out, "redeliver-webhooks: %v\n", err)
 		return 1

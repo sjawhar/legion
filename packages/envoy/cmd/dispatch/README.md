@@ -99,11 +99,16 @@ reach the stream adds nothing to the stream.
 - A rate-limited answer (403 or 429, as GitHub's REST rate-limit documentation describes one)
   stops the sweep and counts nothing against the delivery. No sweep sends GitHub anything until
   the time GitHub gave (`Retry-After`, or `x-ratelimit-reset` when no requests remain), and at
-  least one minute, doubling while limits follow one another. Each sweep reads the recorded limit
-  again right before every request it sends, so one limit stops every sweeper at its next request;
-  a request already sent when another sweeper records a limit is not recalled. It logs
-  `level=WARN msg="webhook redelivery rate-limited by GitHub"`. Redelivery requests go a second
-  apart, as GitHub asks of a large number of POSTs.
+  least one minute, doubling while limits follow one another, up to 64 minutes. Both live in
+  `github_rate_limits` (migration `0123`), judged by the database's clock: GitHub's own wait under
+  the App's scope, `app`, which every process's App calls obey (Running more than one process,
+  below), and the doubling under the sweep's own, `redelivery`, so a limit met on redelivery
+  requests never holds token mints and installation lookups past GitHub's wait. Each sweep reads
+  both again right before every request it sends, so one limit stops every sweeper at its next
+  request; a request already sent when another sweeper records a limit is not recalled. A sweep
+  that finishes clear of a passed backoff deletes it, unless another sweep struck it meanwhile. It
+  logs `level=WARN msg="webhook redelivery rate-limited by GitHub"`. Redelivery requests go a
+  second apart, as GitHub asks of a large number of POSTs.
 - A delivery the listener answered with 4xx is never redelivered: the listener refused the
   request itself, and the same bytes would fail the same way.
 - A delivery GitHub has recorded an `OK` attempt for is never asked for again, even when a request
@@ -132,28 +137,30 @@ reach the stream adds nothing to the stream.
 - A sweep looks back one hour. After a gap in sweeping (Dispatch down), it resumes from its
   cursor, back to GitHub's three days. The first sweep ever made looks back one hour only.
 
-The cursor, the last rate limit, and one record per delivery acted on live in the JetStream KV
-bucket `envoy_webhook_redelivery`. Its 72-hour TTL matches GitHub's horizon. A compare-and-swap
-claim, written before the request and replaced by GitHub's answer after it, keeps two Dispatch
-processes from requesting the same attempt twice, and the operator command honours the same rate
-limit.
+The cursor and one record per delivery acted on live in the JetStream KV bucket
+`envoy_webhook_redelivery`. Its 72-hour TTL matches GitHub's horizon. A compare-and-swap claim,
+written before the request and replaced by GitHub's answer after it, keeps two Dispatch processes
+from requesting the same attempt twice, and the operator command honours the same rate limits.
 
 The operator command runs the same sweep over a chosen window. It does not move the running
 sweep's cursor. `--dry-run` lists every failed delivery and what the sweep would do with it,
-and requests and writes nothing:
+and requests and writes nothing of its own; a rate limit GitHub answers its listing with is
+recorded for every process, as any process's is:
 
 ```bash
 envoy-dispatch redeliver-webhooks --since 72h --dry-run   # list what would be redelivered
 envoy-dispatch redeliver-webhooks --since 72h             # redeliver under the sweep's rules
 ```
 
-It reads the same App credentials and NATS configuration as the server, but owns nothing on the
-bus: unlike the server it neither creates nor updates `ENVOY_NOTIFICATIONS`, and it refuses a
-NATS server that is not the machine it runs on, naming the URL. Run inside the Dispatch
-container it reaches that deployment's NATS with `ENVOY_ALLOW_REMOTE_NATS=1
-envoy-dispatch redeliver-webhooks …`. It connects as the nkey user `NATS_NKEY_SEED_FILE` (or
-`NATS_NKEY_SEED`) names and runs no `!` command, so it never reads `envoy.natsSeed`: a run against
-a NATS that requires a user needs `NATS_NKEY_SEED_FILE`.
+It reads the same App credentials and NATS configuration as the server, and opens the database
+`DATABASE_URL` names for the rate limits every process shares; it migrates nothing, so it runs
+against a database the server of its release has already migrated. It owns nothing on the bus:
+unlike the server it neither creates nor updates `ENVOY_NOTIFICATIONS`, and it refuses a NATS
+server that is not the machine it runs on, naming the URL. Run inside the Dispatch container it
+reaches that deployment's NATS with `ENVOY_ALLOW_REMOTE_NATS=1 envoy-dispatch redeliver-webhooks
+…`. It connects as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`) names and runs no
+`!` command, so it never reads `envoy.natsSeed`: a run against a NATS that requires a user needs
+`NATS_NKEY_SEED_FILE`.
 
 ## Moving uploaded files to the bucket
 
@@ -421,6 +428,21 @@ What the two processes share, and what each keeps to itself:
   process reads `unknown` for the next five seconds together (`api/issue_route_status.go`). A
   refresh of the answer between two page reads can still move issues across a page boundary, as
   any change does under offset paging.
+- GitHub's rate limits hold every process. GitHub budgets the App and each installation, not a
+  process, and warns that requests sent while limited may get the integration banned, so a limit
+  one process meets is recorded in `github_rate_limits` (migration `0123`) and every process reads
+  it before it sends GitHub anything (`githubapp.Client.request`, `githubapp/ratelimit`). Scope
+  `app` holds the calls the App JWT signs (installation lookups, token mints, the webhook delivery
+  endpoints) and `installation:<id>` the calls under that installation's token, each for the wait
+  GitHub gave, by the database's clock. While one is in force a call under it fails at once with
+  no request: the GitHub proxy answers `503 GITHUB_RATE_LIMITED` with `Retry-After` (Routes,
+  below), a delivery intake read fails and is acknowledged as any failure is and the five-minute
+  reconcile catches up once the limit ends, and the webhook redelivery sweep stops (Webhook
+  redelivery, above). A database that cannot be read or written leaves each process to GitHub's
+  own answers, with a log line. Installation tokens stay in each process: GitHub budgets the
+  installation, not the token, and storing tokens would put live credentials in Postgres and its
+  backups. A repository's installation is remembered for ten minutes, so every process finds an
+  App moved to another installation within that.
 - Seven periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
@@ -869,6 +891,16 @@ release before it neither reads nor writes the table and keeps its per-process c
 while both serve, so only processes of this release agree on a route; rolling back past it is an
 image rollback alone.
 
+Migration `0123_github_rate_limits` creates `github_rate_limits`, one row per scope GitHub
+budgets (`app`, `installation:<id>`) and one for the webhook redelivery sweep's own backoff
+(`redelivery`): until when no process sends GitHub a request under the scope, judged against the
+database's `now()` as `embeddings_rate_limit`'s budget is, the strikes the sweep doubles its wait
+by, and when the row was last written, which the sweep matches so it deletes only the backoff it
+read (`githubapp/ratelimit`). It is a new table, so nothing existing is read, locked or
+rewritten, and the census answers `0`. The release before it neither reads nor writes the table:
+while both serve, its processes obey only the answers GitHub gives each of them, and its sweeps
+keep their backoff in the NATS KV bucket; rolling back past it is an image rollback alone.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -1260,7 +1292,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/auth/logout` | POST | cookie or trusted header | End the person's Dispatch sessions, forget their refresh token, and clear the session cookie. |
 | `/auth/whoami` | GET | cookie or trusted header | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
 | `/auth/_dev/signin` | GET | none; `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Sign in the person `login` names, lowercased, without the sign-in issuer: `302` to the sanitized `next` (default `/`) with the session cookie. `400 DEV_SIGNIN_INPUT` without `login`, `403 DEV_SIGNIN_FORBIDDEN` for a non-loopback peer or a request carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` or `Via`. Each mint logs at WARN with the email and the peer. Not mounted otherwise. |
-| `/api/github/rest/...` | GET | cookie or trusted header | Read GitHub as the GitHub App installation that covers the repository: a pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`), a commit's check runs (`repos/{o}/{r}/commits/{sha}/check-runs`) or a commit's workflow runs (`repos/{o}/{r}/actions/runs?head_sha={sha}`, the query being the full 40-hex `head_sha` and at most a numeric `per_page` and `page`, each once), the only reads the web app makes; the checks pill joins each check run to its workflow run for the workflow name and event, keeping the newest run of each check as GitHub's merge does and dropping the runs of an event GitHub does not evaluate for a pull request (only `push`, `pull_request`, `pull_request_review`, `pull_request_target`, `deployment` and `deployment_status` count). A workflow-runs answer of `200` is trimmed to `total_count` and, per run in GitHub's order, only `check_suite_id`, `event` and `name`, so a run's head commit (message, author), actor and repository never reach the browser; a body that does not decode is `502 GITHUB_UPSTREAM`, and any other status passes through unchanged. The pill needs the App's Actions: read, which the delivery reconcile already needs: without it `actions/runs` answers `403` and the pill disappears. Every person shares the App's credential, which reads far more of a repository than that, so any other method is `405 METHOD_NOT_ALLOWED`; any other path, a workflow-runs read with any other query, or a path under it (`actions/runs/{id}`, its jobs or logs) `404 GITHUB_PATH_REFUSED`; and a repository the App is not installed on, or no App key, `503 GITHUB_TOKEN_UNAVAILABLE`. |
+| `/api/github/rest/...` | GET | cookie or trusted header | Read GitHub as the GitHub App installation that covers the repository: a pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`), a commit's check runs (`repos/{o}/{r}/commits/{sha}/check-runs`) or a commit's workflow runs (`repos/{o}/{r}/actions/runs?head_sha={sha}`, the query being the full 40-hex `head_sha` and at most a numeric `per_page` and `page`, each once), the only reads the web app makes; the checks pill joins each check run to its workflow run for the workflow name and event, keeping the newest run of each check as GitHub's merge does and dropping the runs of an event GitHub does not evaluate for a pull request (only `push`, `pull_request`, `pull_request_review`, `pull_request_target`, `deployment` and `deployment_status` count). A workflow-runs answer of `200` is trimmed to `total_count` and, per run in GitHub's order, only `check_suite_id`, `event` and `name`, so a run's head commit (message, author), actor and repository never reach the browser; a body that does not decode is `502 GITHUB_UPSTREAM`, and any other status but a rate limit passes through unchanged. The pill needs the App's Actions: read, which the delivery reconcile already needs: without it `actions/runs` answers `403` and the pill disappears. Every person shares the App's credential, which reads far more of a repository than that, so any other method is `405 METHOD_NOT_ALLOWED`; any other path, a workflow-runs read with any other query, or a path under it (`actions/runs/{id}`, its jobs or logs) `404 GITHUB_PATH_REFUSED`; and a repository the App is not installed on, or no App key, `503 GITHUB_TOKEN_UNAVAILABLE`. A GitHub rate limit is `503 GITHUB_RATE_LIMITED` with `Retry-After` the whole seconds GitHub asked for (at least one), never `502 GITHUB_UPSTREAM` or GitHub's own `403`: GitHub's answer to the token mint or to the read, or a limit any process already met under the App or the installation, when GitHub is not asked at all (Running more than one process, above). |
 | `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`files`; null when it is not). A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. `files` is reported and never decides `ok` or the status: a bucket that stops answering is `200` with `files: false`, so a bucket outage fails uploads and downloads and nothing else, and a deploy check that wants the bucket asserts `files: true` itself. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). |
 | `/api/v1/events` | GET | cookie, trusted header, or bearer | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every live document on every process and wait for the settlements in flight, answering once every process has; not mounted unless `DISPATCH_TEST_HOOKS=1`. |

@@ -16,11 +16,30 @@ import (
 )
 
 // fakeGitHub answers the App's installation lookup and token mint, and records every other read.
+// limitMint and limitRead, when set, are the rate-limited answer the token mint and every read
+// give instead.
 type fakeGitHub struct {
 	mu            sync.Mutex
 	installations map[string]int64
 	reads         []string
 	response      string
+	limitMint     *limitedAnswer
+	limitRead     *limitedAnswer
+}
+
+// limitedAnswer is a rate-limited GitHub answer: its status and headers, with GitHub's body.
+type limitedAnswer struct {
+	status int
+	header http.Header
+}
+
+func (a *limitedAnswer) write(w http.ResponseWriter) {
+	for name, values := range a.header {
+		w.Header()[name] = values
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(a.status)
+	fmt.Fprint(w, `{"message":"API rate limit exceeded for installation."}`)
 }
 
 func (f *fakeGitHub) handler(t *testing.T) http.Handler {
@@ -34,6 +53,10 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "app_slug": "envoy", "permissions": map[string]string{"pull_requests": "read", "checks": "read"}})
 	})
 	mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		if f.limitMint != nil {
+			f.limitMint.write(w)
+			return
+		}
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"token": "ghs_installation_" + r.PathValue("id"), "expires_at": time.Now().Add(time.Hour)})
 	})
@@ -41,6 +64,10 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 		f.mu.Lock()
 		f.reads = append(f.reads, r.Method+" "+r.URL.RequestURI()+" "+r.Header.Get("Authorization"))
 		f.mu.Unlock()
+		if f.limitRead != nil {
+			f.limitRead.write(w)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("X-GitHub-Request-Id", "req-1")
 		if f.response != "" {
@@ -265,5 +292,36 @@ func TestProxyWithoutTheAppIsUnavailable(t *testing.T) {
 	response = proxy(nil, http.MethodGet, "/api/github/rest/repos/acme/web/pulls/1")
 	if response.Code != http.StatusServiceUnavailable || errorCode(t, response) != "GITHUB_TOKEN_UNAVAILABLE" {
 		t.Fatalf("no App key: status %d body %s, want 503 GITHUB_TOKEN_UNAVAILABLE", response.Code, response.Body.String())
+	}
+}
+
+// A rate limit, met minting the installation token or answered to the read itself, is 503
+// GITHUB_RATE_LIMITED with GitHub's wait as Retry-After, so the web app waits and asks again: never
+// a 502 that reads as GitHub failing, and never GitHub's own 403, which reads as a refusal.
+func TestProxyAnswersARateLimitWithRetryAfter(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		mint, read *limitedAnswer
+		retryAfter string
+	}{
+		{"the read answered 403 with no requests remaining", nil, &limitedAnswer{http.StatusForbidden, http.Header{
+			"X-Ratelimit-Remaining": {"0"}, "Retry-After": {"30"},
+		}}, "30"},
+		{"the read answered 429", nil, &limitedAnswer{http.StatusTooManyRequests, http.Header{"Retry-After": {"7"}}}, "7"},
+		{"the token mint answered 429", &limitedAnswer{http.StatusTooManyRequests, http.Header{"Retry-After": {"45"}}}, nil, "45"},
+		// With no header GitHub asks for a minute.
+		{"the token mint answered 403 naming a secondary limit", &limitedAnswer{http.StatusForbidden, nil}, nil, "60"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, fake := newProxyRig(t)
+			fake.limitMint, fake.limitRead = tc.mint, tc.read
+			response := proxy(client, http.MethodGet, "/api/github/rest/repos/acme/web/pulls/7")
+			if response.Code != http.StatusServiceUnavailable || errorCode(t, response) != "GITHUB_RATE_LIMITED" {
+				t.Fatalf("status %d body %s, want 503 GITHUB_RATE_LIMITED", response.Code, response.Body.String())
+			}
+			if got := response.Header().Get("Retry-After"); got != tc.retryAfter {
+				t.Fatalf("Retry-After %q, want %q", got, tc.retryAfter)
+			}
+		})
 	}
 }

@@ -169,12 +169,16 @@ With NATS configured and the GitHub App private key loaded, startup also runs th
 redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every
 `redeliver.Interval` it lists the App webhook's failed deliveries and redelivers them through
 GitHub's App API. Its cursor and per-delivery claims live in the `envoy_webhook_redelivery` KV
-bucket. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep once
-over a chosen window without moving the cursor. The README's "Webhook redelivery" section has
-the rules: 4xx is never redelivered, bounded attempts, GitHub's rate limits, the log lines.
-Like `natstail`, it connects as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`)
-names and runs no `!` command, so it never reads `envoy.natsSeed`: a run against a NATS that
-requires a user needs `NATS_NKEY_SEED_FILE`.
+bucket; its rate-limit backoff lives in Postgres's `github_rate_limits` (scope `redelivery`,
+beside the App's `app` and each installation's `installation:<id>`, which every process's
+`githubapp.Client` obeys; `internal/dispatch/githubapp/ratelimit`), so the server hands the sweep
+its own store. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep
+once over a chosen window without moving the cursor; it opens the database `DATABASE_URL` names,
+as the server does, and refuses to run without it, but migrates nothing. The README's "Webhook
+redelivery" section has the rules: 4xx is never redelivered, bounded attempts, GitHub's rate
+limits, the log lines. Like `natstail`, it connects as the nkey user `NATS_NKEY_SEED_FILE` (or
+`NATS_NKEY_SEED`) names and runs no `!` command, so it never reads `envoy.natsSeed`: a run
+against a NATS that requires a user needs `NATS_NKEY_SEED_FILE`.
 
 With `DISPATCH_FILE_STORE_BUCKET` set, uploaded files' bytes live in that bucket under
 `files/sha256/<hash>` (`internal/dispatch/files`; `main.go`'s `openFileStore` builds the store
@@ -395,7 +399,8 @@ evaluate for a pull request (only `push`, `pull_request`, `pull_request_review`,
 `pull_request_target`, `deployment` and `deployment_status` count). A workflow-runs answer of `200`
 is trimmed to `total_count` and, per run in GitHub's order, only `check_suite_id`, `event` and
 `name`, so a run's head commit (message, author), actor and repository never reach the browser; a
-body that does not decode is `502 GITHUB_UPSTREAM`, and any other status passes through unchanged.
+body that does not decode is `502 GITHUB_UPSTREAM`, and any other status but a rate limit passes
+through unchanged.
 GitHub's answer is read within 16 MiB rather than the proxy's usual 1 MiB, since each run carries
 its repository and head commit (about 12.8 KB a run) and a page of 100 passes 1 MiB before it is
 trimmed.
@@ -405,7 +410,9 @@ which can read far more of a repository than the web app shows, so the proxy for
 another method is `405 METHOD_NOT_ALLOWED`; another path, a workflow-runs read with any other
 query, or a path under it (`actions/runs/{id}`, its jobs or logs) `404 GITHUB_PATH_REFUSED`; and a
 repository the App is not installed on, or a deployment with no App key,
-`503 GITHUB_TOKEN_UNAVAILABLE`.
+`503 GITHUB_TOKEN_UNAVAILABLE`. A GitHub rate limit, answered to the token mint or the read, or
+recorded by any process in `github_rate_limits` (then GitHub is not asked), is
+`503 GITHUB_RATE_LIMITED` with `Retry-After`.
 
 ## Routes
 

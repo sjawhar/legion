@@ -8,9 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
@@ -71,10 +74,13 @@ func workflowRunsOfOneCommit(rawQuery string) bool {
 // installation token of the App installation covering the path's repository. A workflow-runs read
 // GitHub answers 200 is trimmed to workflowRuns, and a body that does not decode as workflow runs
 // is 502 GITHUB_UPSTREAM; every other answer, and a workflow-runs answer of any other status,
-// passes through as GitHub sent it. Any other method is 405; a path the web app does not read, or
-// a workflow-runs read whose query is not one commit's head_sha and its page, is 404
-// GITHUB_PATH_REFUSED; a repository the App is not installed on, or a deployment with no App key,
-// is 503 GITHUB_TOKEN_UNAVAILABLE. The caller has already established that a person is asking.
+// passes through as GitHub sent it, but a rate limit. Any other method is 405; a path the web app
+// does not read, or a workflow-runs read whose query is not one commit's head_sha and its page, is
+// 404 GITHUB_PATH_REFUSED; a repository the App is not installed on, or a deployment with no App
+// key, is 503 GITHUB_TOKEN_UNAVAILABLE. A rate limit is 503 GITHUB_RATE_LIMITED with Retry-After:
+// GitHub's answer to the token mint or to the read, or a limit another request or process already
+// met (githubapp.Limits), in which case GitHub is not asked. The caller has already established
+// that a person is asking.
 func ProxyREST(w http.ResponseWriter, r *http.Request, client *githubapp.Client) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -90,6 +96,10 @@ func ProxyREST(w http.ResponseWriter, r *http.Request, client *githubapp.Client)
 	}
 	owner, repo := match[1], match[2]
 	token, err := client.RepositoryToken(r.Context(), owner, repo)
+	if limited, ok := githubapp.AsRateLimit(err); ok {
+		rateLimited(w, limited)
+		return
+	}
 	switch {
 	case errors.Is(err, githubapp.ErrNoAppKey):
 		unavailable(w, "the GitHub App is not configured")
@@ -113,6 +123,10 @@ func ProxyREST(w http.ResponseWriter, r *http.Request, client *githubapp.Client)
 		}
 	}
 	body, status, header, err := read(r.Context(), token, target)
+	if limited, ok := githubapp.AsRateLimit(err); ok {
+		rateLimited(w, limited)
+		return
+	}
 	if err != nil {
 		slog.Warn("dispatch: GitHub proxy read failed", "path", target, "error", err)
 		var tooLarge *githubapp.ResponseTooLargeError
@@ -121,6 +135,10 @@ func ProxyREST(w http.ResponseWriter, r *http.Request, client *githubapp.Client)
 			return
 		}
 		api.WriteJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub read failed", "code": "GITHUB_UPSTREAM"})
+		return
+	}
+	if limited := githubapp.RateLimit(status, header, body); limited != nil {
+		rateLimited(w, limited)
 		return
 	}
 	if match[3] != "" && status == http.StatusOK {
@@ -142,4 +160,16 @@ func ProxyREST(w http.ResponseWriter, r *http.Request, client *githubapp.Client)
 
 func unavailable(w http.ResponseWriter, message string) {
 	api.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": message, "code": "GITHUB_TOKEN_UNAVAILABLE"})
+}
+
+// rateLimited answers a GitHub rate limit: 503 GITHUB_RATE_LIMITED, Retry-After the whole seconds
+// left of GitHub's wait (at least one), so the web app waits as GitHub asks rather than reading a
+// refusal or an outage.
+func rateLimited(w http.ResponseWriter, limited *githubapp.RateLimitError) {
+	seconds := max(int64(math.Ceil(limited.Wait.Seconds())), 1)
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	api.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{
+		"error": "GitHub rate-limited the App; retry after " + (time.Duration(seconds) * time.Second).String(),
+		"code":  "GITHUB_RATE_LIMITED",
+	})
 }

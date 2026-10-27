@@ -421,7 +421,7 @@ func main() {
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
 
-	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
+	sweeper, err := webhookSweeper(natsClient, database, appCfg, boot.GitHubAPIBase)
 	if err != nil {
 		slog.Error("dispatch: open webhook redelivery", "error", err)
 		os.Exit(1)

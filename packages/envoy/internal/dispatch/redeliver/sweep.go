@@ -18,7 +18,9 @@
 //
 // GitHub rate-limits the App: redelivery requests are paced (Sweeper.Pace), and a rate-limited
 // answer to any request stops the sweep, which then sends GitHub nothing until the time GitHub
-// gave.
+// gave, at least a minute doubled for every limit since a sweep last finished clear. That backoff
+// is the sweep's own scope (redeliveryScope) in the GitHub rate limits every Dispatch process
+// shares (githubapp/ratelimit), judged by the database's clock.
 //
 // Dispatch runs the sweep because it holds the App's private key, which the list and redeliver
 // endpoints require (they take only an App JWT).
@@ -38,6 +40,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
 )
 
 const (
@@ -60,8 +63,14 @@ const (
 	maxBackoff      = 16 * time.Minute
 	defaultRequests = 300
 	cursorKey       = "cursor"
-	limitKey        = "rate_limit"
 	recordPrefix    = "guid."
+
+	// redeliveryScope is the sweep's own scope in the shared GitHub rate limits: its doubling
+	// backoff after a rate-limited answer. A sweep checks it together with githubapp.AppScope, the
+	// App's own budget, which holds GitHub's wait as given; the doubling stays under this scope, so
+	// a secondary limit met on redelivery requests never holds the App's token mints and
+	// installation lookups past the wait GitHub gave.
+	redeliveryScope = "redelivery"
 )
 
 // GitHub is the App webhook delivery API the sweep reads and asks.
@@ -180,6 +189,11 @@ type Options struct {
 type Sweeper struct {
 	GitHub GitHub
 	State  bus.KeyValue
+	// Limits is the GitHub rate limits every process shares (github_rate_limits): a sweep reads
+	// its own backoff (redeliveryScope) and the App's limit before every request, and strikes its
+	// backoff at a rate-limited answer. Nil shares none: the sweep stops at GitHub's answer and
+	// nothing holds the next sweep (tests that are not about limits).
+	Limits *ratelimit.Store
 	Logger *slog.Logger
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
@@ -229,14 +243,6 @@ func claimDeadline() time.Duration { return 3 * githubapp.RequestTimeout }
 
 type cursorRecord struct {
 	At time.Time `json:"at"`
-}
-
-// limitRecord is the rate limit GitHub last answered with, shared by every sweeper on the bucket.
-type limitRecord struct {
-	// Until is when a sweep may send GitHub a request again.
-	Until time.Time `json:"until"`
-	// Strikes counts rate limits with no sweep clear of one in between; each doubles the wait.
-	Strikes int `json:"strikes"`
 }
 
 // webhookRedeliveryLease names the lease one sweep of Run's loop runs under. It is not what makes
@@ -315,14 +321,14 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 		}
 	}
 	report := Report{Since: since, Complete: true}
-	limit, limitRevision, err := s.readLimit()
+	read, recorded, err := s.readBackoff(ctx)
 	if err != nil {
 		return Report{}, err
 	}
-	// checkLimit runs ahead of every request, the listing's first page included, so a limit in
-	// force now stops the sweep before it asks GitHub anything.
-	listed, err := s.GitHub.Deliveries(ctx, since, s.checkLimit)
-	if s.stoppedAtLimit(&report, err, limit, now, opts.DryRun) {
+	// The limits are read again ahead of every request, the listing's first page included, so a
+	// limit in force now stops the sweep before it asks GitHub anything.
+	listed, err := s.GitHub.Deliveries(ctx, since, func() error { return s.limitHeld(ctx) })
+	if s.stoppedAtLimit(ctx, &report, err, opts.DryRun) {
 		return report, nil
 	}
 	if err != nil {
@@ -362,7 +368,7 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 			break
 		}
 		decision, requested, err := s.decide(ctx, guid, byGUID[guid], delivered[guid], now, opts.DryRun)
-		if s.stoppedAtLimit(&report, err, limit, now, opts.DryRun) {
+		if s.stoppedAtLimit(ctx, &report, err, opts.DryRun) {
 			report.Decisions = append(report.Decisions, decision)
 			return report, nil
 		}
@@ -381,8 +387,8 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 			}
 		}
 	}
-	if limitRevision != 0 && !opts.DryRun {
-		s.clearLimit(limitRevision)
+	if recorded && !opts.DryRun {
+		s.clearBackoff(ctx, read)
 	}
 	if continuous && report.Complete && !opts.DryRun {
 		s.writeCursor(now, cursorRevision)
@@ -391,44 +397,45 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 }
 
 // stoppedAtLimit reports whether err ends the sweep at a rate limit, and marks the report so:
-// GitHub's own rate-limited answer, which it records (rateLimited), or a limit another sweeper
-// recorded, found right before a request.
-func (s *Sweeper) stoppedAtLimit(report *Report, err error, read limitRecord, now time.Time, dryRun bool) bool {
-	var limited *githubapp.RateLimitError
-	var inForce *limitInForce
+// GitHub's own rate-limited answer, which strikes the sweep's backoff (rateLimited), or a limit
+// already recorded, found right before a request.
+func (s *Sweeper) stoppedAtLimit(ctx context.Context, report *Report, err error, dryRun bool) bool {
+	var held *heldLimit
+	limited, isLimit := githubapp.AsRateLimit(err)
 	switch {
-	case errors.As(err, &limited):
-		s.rateLimited(report, limited, read, now, dryRun)
-	case errors.As(err, &inForce):
-		report.Complete, report.RateLimitedUntil = false, inForce.until
+	case errors.As(err, &held):
+		report.Complete, report.RateLimitedUntil = false, held.until
+	case isLimit && limited.Held:
+		// The App's client found a limit recorded after this sweep's own read; GitHub was not asked.
+		report.Complete, report.RateLimitedUntil = false, s.now().Add(limited.Wait)
+	case isLimit:
+		s.rateLimited(ctx, report, limited, dryRun)
 	default:
 		return false
 	}
 	return true
 }
 
-// rateLimited ends a sweep at a rate-limited answer. The wait is GitHub's, and at least a minute
-// doubled for each limit since a sweep last finished clear of one (up to 64 minutes), as GitHub
-// asks of a request that keeps failing on a secondary limit. A dry run records nothing, and
-// reports the limit it would have recorded over the one it read.
-func (s *Sweeper) rateLimited(report *Report, limited *githubapp.RateLimitError, read limitRecord, now time.Time, dryRun bool) {
-	next := nextLimit(read, limited, now)
-	if !dryRun {
-		next = s.recordLimit(limited, now)
+// rateLimited ends a sweep at a rate-limited answer. It strikes the sweep's backoff: the wait is
+// GitHub's, and at least a minute doubled for each limit since a sweep last finished clear of one
+// (up to 64 minutes), as GitHub asks of a request that keeps failing on a secondary limit. A dry
+// run records nothing, and reports the limit it would have recorded.
+func (s *Sweeper) rateLimited(ctx context.Context, report *Report, limited *githubapp.RateLimitError, dryRun bool) {
+	next := ratelimit.Limit{Until: s.now().Add(max(limited.Wait, time.Minute)), Strikes: 1}
+	if s.Limits != nil {
+		strike := s.Limits.Strike
+		if dryRun {
+			strike = s.Limits.PreviewStrike
+		}
+		struck, err := strike(ctx, redeliveryScope, limited.Wait)
+		if err != nil {
+			s.Logger.Error("webhook redelivery rate limit not recorded; the next sweep may ask GitHub before it passes", "until", next.Until.Format(time.RFC3339), "error", err)
+		} else {
+			next = struck
+		}
 	}
 	report.Complete, report.RateLimitedUntil = false, next.Until
 	s.Logger.Warn("webhook redelivery rate-limited by GitHub", "status", limited.Status, "until", next.Until.Format(time.RFC3339), "strikes", next.Strikes, "error", limited.Error())
-}
-
-// nextLimit is the limit to record over current after GitHub's answer limited: one more strike,
-// and the later of the wait it gives and a limit another sweeper recorded.
-func nextLimit(current limitRecord, limited *githubapp.RateLimitError, now time.Time) limitRecord {
-	next := limitRecord{Strikes: current.Strikes + 1}
-	next.Until = now.Add(max(limited.Wait, time.Minute<<min(next.Strikes-1, 6)))
-	if current.Until.After(next.Until) {
-		next.Until = current.Until
-	}
-	return next
 }
 
 // refusedUnlisted returns the deliveries, newest first, whose failed attempts the listing did not
@@ -570,8 +577,8 @@ func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.
 		decision.Outcome = ClaimedElsewhere
 		return decision, false, nil
 	}
-	// Another sweeper may have recorded a limit since this one read it; nothing is sent under it.
-	if err := s.checkLimit(); err != nil {
+	// Another process may have recorded a limit since this sweep read them; nothing is sent under it.
+	if err := s.limitHeld(ctx); err != nil {
 		s.undoClaim(guid, current, claimRevision, claim.ClaimedAt, decision)
 		decision.Outcome = RateLimited
 		return decision, false, err
@@ -627,25 +634,47 @@ func (s *Sweeper) undoClaim(guid string, before record, claimRevision uint64, cl
 	}
 }
 
-// limitInForce is a rate limit another sweeper recorded, found right before a request.
-type limitInForce struct{ until time.Time }
+// heldLimit is a limit already recorded in the shared GitHub rate limits, found right before a
+// request: the sweep's own backoff or the App's limit, whichever ends last.
+type heldLimit struct{ until time.Time }
 
-func (e *limitInForce) Error() string {
+func (e *heldLimit) Error() string {
 	return "GitHub rate-limited the App until " + e.until.Format(time.RFC3339)
 }
 
-// checkLimit reads the shared rate limit again right before a request to GitHub, since another
-// sweeper may have recorded one after this sweep started. It is a *limitInForce while one is.
-// A request already sent when another sweeper records a limit is not recalled.
-func (s *Sweeper) checkLimit() error {
-	limit, _, err := s.readLimit()
+// limitHeld reads the shared limits right before a request to GitHub, since another sweep or
+// process may have recorded one after this sweep started. It is a *heldLimit while the sweep's
+// backoff or the App's limit is in force by the database's clock. A request already sent when
+// another process records a limit is not recalled.
+func (s *Sweeper) limitHeld(ctx context.Context) error {
+	if s.Limits == nil {
+		return nil
+	}
+	limit, found, err := s.Limits.InForce(ctx, redeliveryScope, githubapp.AppScope)
 	if err != nil {
 		return err
 	}
-	if s.now().Before(limit.Until) {
-		return &limitInForce{until: limit.Until}
+	if found {
+		return &heldLimit{until: limit.Until}
 	}
 	return nil
+}
+
+// readBackoff returns the sweep's backoff row as it stands, in force or passed; recorded is false
+// when there is none.
+func (s *Sweeper) readBackoff(ctx context.Context) (backoff ratelimit.Limit, recorded bool, err error) {
+	if s.Limits == nil {
+		return ratelimit.Limit{}, false, nil
+	}
+	return s.Limits.Get(ctx, redeliveryScope)
+}
+
+// clearBackoff forgets the backoff a sweep read once the sweep has finished clear of it, so the
+// next limit starts again at one minute; a strike another sweep recorded meanwhile stands.
+func (s *Sweeper) clearBackoff(ctx context.Context, backoff ratelimit.Limit) {
+	if err := s.Limits.Clear(ctx, backoff); err != nil {
+		s.Logger.Warn("webhook redelivery rate limit not cleared", "error", err)
+	}
 }
 
 func (s *Sweeper) attrs(decision Decision) []any {
@@ -716,44 +745,6 @@ func (s *Sweeper) readCursor() (time.Time, uint64, error) {
 func (s *Sweeper) writeCursor(at time.Time, revision uint64) {
 	if _, err := writeState(s.State, cursorKey, cursorRecord{At: at}, revision); err != nil && !isConflict(err) {
 		s.Logger.Warn("webhook redelivery cursor not written", "error", err)
-	}
-}
-
-// readLimit returns the recorded rate limit and its revision, zero when none is recorded.
-func (s *Sweeper) readLimit() (limitRecord, uint64, error) {
-	return readState[limitRecord](s.State, limitKey, "rate limit")
-}
-
-// recordLimit records GitHub's latest rate limit for every sweeper on the bucket. It counts from
-// the record as it stands when it writes, not as this sweep read it at its start, and writes only
-// over the revision it read, reading again when another sweeper wrote first.
-func (s *Sweeper) recordLimit(limited *githubapp.RateLimitError, now time.Time) limitRecord {
-	next := nextLimit(limitRecord{}, limited, now)
-	for range 5 {
-		current, revision, err := s.readLimit()
-		if err != nil {
-			s.Logger.Error("webhook redelivery rate limit not recorded; the next sweep may ask GitHub before it passes", "until", next.Until.Format(time.RFC3339), "error", err)
-			return next
-		}
-		next = nextLimit(current, limited, now)
-		_, err = writeState(s.State, limitKey, next, revision)
-		if err == nil {
-			return next
-		}
-		if !isConflict(err) {
-			s.Logger.Error("webhook redelivery rate limit not recorded; the next sweep may ask GitHub before it passes", "until", next.Until.Format(time.RFC3339), "error", err)
-			return next
-		}
-	}
-	s.Logger.Error("webhook redelivery rate limit not recorded: other sweepers kept rewriting it", "until", next.Until.Format(time.RFC3339))
-	return next
-}
-
-// clearLimit forgets the rate limit a sweep read at revision once the sweep has finished clear of
-// it, and no other: a limit another sweeper recorded meanwhile stands.
-func (s *Sweeper) clearLimit(revision uint64) {
-	if err := s.State.Delete(limitKey, nats.LastRevision(revision)); err != nil && !isConflict(err) {
-		s.Logger.Warn("webhook redelivery rate limit not cleared", "error", err)
 	}
 }
 

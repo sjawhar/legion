@@ -52,7 +52,7 @@ func (c *Client) Deliveries(ctx context.Context, since time.Time, before func() 
 		if err != nil {
 			return nil, err
 		}
-		body, status, header, err := c.request(ctx, http.MethodGet, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
+		body, status, header, err := c.request(ctx, AppScope, http.MethodGet, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -94,7 +94,7 @@ func (c *Client) Redeliver(ctx context.Context, deliveryID int64) error {
 		return err
 	}
 	target := c.base + "/app/hook/deliveries/" + strconv.FormatInt(deliveryID, 10) + "/attempts"
-	body, status, header, err := c.request(ctx, http.MethodPost, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
+	body, status, header, err := c.request(ctx, AppScope, http.MethodPost, target, "Bearer "+jwt, mediaTypeJSON, nil, responseLimit)
 	if err != nil {
 		return err
 	}
@@ -110,13 +110,22 @@ func (c *Client) Redeliver(ctx context.Context, deliveryID int64) error {
 // RateLimitError is GitHub refusing a request because the App is over a rate limit. Wait is how
 // long GitHub asks for before the next request. GitHub warns that requests made while limited
 // may get the integration banned.
+//
+// A held error is a limit already recorded for Scope in the limits every process shares
+// (Limits): the request was never sent, Status and Body are empty, and Wait is what the recorded
+// limit has left.
 type RateLimitError struct {
 	Status int
 	Wait   time.Duration
 	Body   string
+	Scope  string
+	Held   bool
 }
 
 func (e *RateLimitError) Error() string {
+	if e.Held {
+		return fmt.Sprintf("GitHub rate limit on %s in force for another %s; the request was not sent", e.Scope, e.Wait.Round(time.Second))
+	}
 	return fmt.Sprintf("rate-limited by GitHub (status %d), next request in %s: %s", e.Status, e.Wait, e.Body)
 }
 

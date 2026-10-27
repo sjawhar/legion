@@ -34,6 +34,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/ratelimit"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -191,7 +192,13 @@ func NewDeps(input DepsInput) (Deps, error) {
 		}
 		envoyClient = envoy.New(envoyURL, options...)
 	}
-	github, err := githubapp.New(input.App, input.GitHubAPIBase)
+	// The GitHub client obeys and records the rate limits every process shares (github_rate_limits):
+	// GitHub budgets the App and each installation, not this process.
+	var githubOptions []githubapp.Option
+	if input.Store != nil {
+		githubOptions = append(githubOptions, githubapp.WithLimits(ratelimit.New(input.Store.Pool)))
+	}
+	github, err := githubapp.New(input.App, input.GitHubAPIBase, githubOptions...)
 	if err != nil {
 		return Deps{}, err
 	}
