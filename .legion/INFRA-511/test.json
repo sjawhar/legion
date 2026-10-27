@@ -2,32 +2,32 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T12:33:00Z",
+  "completed": "2026-10-27T13:18:00Z",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 9 at PR head 55da0c69 (code 6d51373b). The change is test-only: the focused-subagent case's wait now skips any request whose system prompt is Oh My Pi's task-label prompt ('Label the delegated work'). Since 719b127e only controller-start-omp.test.ts and .legion/ changed, so the plugin and Go code are what round 6 drove. The pod was still slow: loadExtensions finished at 26.4 s of wall time and 9.3 s of CPU. I ran the focused-subagent case alone 8 times as committed: 8 pass. I ran the whole committed file twice: 9 pass, 0 fail each time (341 s). My round-4 red test block is unchanged apart from its case timeout, which now names CASE_TIMEOUT_MS (sha256 equal at 51f87278 and 6d51373b after normalising that constant)."
+    "how": "Round 10 at PR head 7e583d0c (code bbc7410b): reclaimAfterSessionChange takes down a re-claim widget shown for another session when the switch lands back on the registered session (review finding: a widget from a /new's refused re-claim stayed after /resume back to the working controller session). I re-ran the committed real-binary file as it is: 9 pass, 0 fail (346 s, in this still-slow pod). I drove the fix on the real binary with my own probe (/legion/scratch/tmp/i511t/probe-r10.test.ts), with a negative control on the reviewed head's controller-session.ts."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Round 8's failure is fixed: the focused-subagent /new case is no longer flaky on the slow host, and the whole real-binary file passes there as committed",
-      "surface": "the committed real-binary file controller-start-omp.test.ts, real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins of this head, stand-ins, real NATS, in this pod while loadExtensions takes about 26 s",
-      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts -t \"focused subagent view\" (8 times), then the same command without -t (twice)",
-      "observed": "Focused-subagent case: 8 of 8 pass (43-49 s each). Whole file: 9 pass, 0 fail, twice (341.3 s and 341.9 s). Its cases cover the start turn shown after startup, typing into it, Esc, the start message first and once, a card or notice after it, a claim refusal on screen, the refused re-claim after /new, the hand-over notice after a /new during the start claim, and the refused re-claim after /new from a focused subagent view.",
-      "headSha": "55da0c694464f1f5f208dde691ccc3847f8018d6",
-      "negativeControl": "At 5fd0f13e (round 8) the same case failed 1 of 6 runs with 'cannot be revived', because its wait matched the task-label request. At 9613f45a (round 7) it failed 2 of 5. At 9037d3c9 (round 6) the whole file failed 0/9 during startup."
+      "criterion": "Review finding (round 9 review): after a /new whose re-claim is refused before it registers, a /resume back to the registered controller session takes the refusal widget down, and that session keeps working",
+      "surface": "real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins of this head, a stand-in that gives each registration its own secret and refuses the second registration with 403, real NATS",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test --timeout 900000 ./extensions/zz-tester-probe-r10.test.ts (copy of /legion/scratch/tmp/i511t/probe-r10.test.ts, removed after), case R10: start, then /new (re-claim refused), then `/resume <S1 id>` typed in the composer",
+      "observed": "1 pass. After /new: registrations 2, and the refusal widget '… re-claiming the controller for this session failed …' on screen. After /resume back to S1: still 2 registrations (no claim needed), S1's transcript on screen, and 'widget still on screen after resume: false'. A set_status in S1 then returned {} with grant secret-1, which was current (statusWrites 1).",
+      "headSha": "7e583d0cfccdcc64a507a31cab20142cd7f1b675",
+      "negativeControl": "The same probe with packages/pi-legion/src/controller-session.ts restored from the reviewed head ce943410 (`jj restore --from ce943410 …`, put back right after): 0 pass, 1 fail, with 'widget still on screen after resume: true'. The workspace was clean afterwards (`jj status`: no changes)."
     },
     {
-      "criterion": "The plugin behaviour this pull request delivers (no code change since round 6)",
-      "surface": "round 6's real-binary probes at 719b127e, and the built CLI smoke from round 5",
-      "command": "/legion/scratch/tmp/i511t/probe-r6.test.ts (3 pass); bun /legion/scratch/tmp/i511t/drive.ts pos (SMOKE PASS at c66e0039, Go unchanged since)",
-      "observed": "/new behind a held start claim says it waits at once. The hand-over line and the two re-claim refusals stay on screen after the /new reset, with true wording, and go at the next run. The built `legion controller start` launches the controller whose first turn is the start message.",
-      "headSha": "55da0c694464f1f5f208dde691ccc3847f8018d6",
-      "negativeControl": "Round 1's red tests and refusals (overlapping registrations giving 403 'invalid controller secret'; stdin not a terminal; contract 40 and 42; interface 3) are recorded in the earlier rounds' handoffs at d3f73ec4, 17aa79c9 and 80a6b0db."
+      "criterion": "The pull request's real-binary proof still passes on the slow host after the code change",
+      "surface": "the committed controller-start-omp.test.ts, unmodified",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts",
+      "observed": "9 pass, 0 fail, 346.1 s",
+      "headSha": "7e583d0cfccdcc64a507a31cab20142cd7f1b675",
+      "negativeControl": "Round 6 at 9037d3c9: 0/9 at startup with 30 s deadlines. Round 8 at 5fd0f13e: the focused-subagent case failed 1 of 6."
     }
   ],
   "observations": [
-    "CI at code head 6d51373b: build, changes, lint, typecheck, test and pr-title queued when read at 2026-10-27T12:32Z; not waited on. PR head 55da0c69 is handoff-only."
+    "CI at code head bbc7410b: build, changes, lint, typecheck, test and pr-title queued when read at 2026-10-27T13:17Z; not waited on. PR head 7e583d0c is handoff-only."
   ]
 }
