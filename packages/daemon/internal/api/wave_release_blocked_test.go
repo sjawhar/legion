@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strings"
@@ -465,5 +466,96 @@ func TestWaveReleaseStandsWhenTheRecordDoesNotTakeALandedWrite(t *testing.T) {
 	deliverEcho(t, h, statuses.issues[child])
 	if recorded := recordedChild(t, h, child); recorded == nil || recorded.Tree != releaseRoot || recorded.LastDispatchSeq != 8 {
 		t.Fatalf("the record of %s after its todo event = %#v, want it in %s's tree at sequence 8", child, recorded, releaseRoot)
+	}
+}
+
+// A todo child the release cannot record yet (its parent is outside the wave and unrecorded, so
+// the answer is CHILD_NOT_RECORDED) does not hold back the rest of the wave: every child the release
+// writes todo is written first, and recorded from its own write, before the stuck child answers.
+func TestWaveReleaseWritesAndRecordsTheWaveBeforeAStuckTodoChildAnswers(t *testing.T) {
+	h, statuses := releaseHarness(t, true)
+	stuck, unrecordedParent, free := "LEGION-209", "LEGION-299", "LEGION-210"
+	parent := releaseRoot
+	statuses.issues[unrecordedParent] = dispatch.Issue{Key: unrecordedParent, ResolvedRepo: "acme/widgets", Title: unrecordedParent, Status: "triage", Parent: &parent, LastSeq: 3}
+	child := todoChild(stuck)
+	child.Parent = &unrecordedParent
+	statuses.issues[stuck] = child
+	statuses.issues[free] = backlogChild(free)
+	architect := newLiveClaim(t, h, releaseRoot, claim.RoleArchitect)
+
+	recorder := h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": []string{stuck, free}}, nil)
+
+	assertFailure(t, recorder, http.StatusConflict, "CHILD_NOT_RECORDED")
+	if wantWrites := []statusWrite{{free, "todo"}}; !reflect.DeepEqual(statuses.writes, wantWrites) {
+		t.Fatalf("Dispatch writes = %#v, want %s released whatever %s answered", statuses.writes, free, stuck)
+	}
+	if recorded := recordedChild(t, h, free); recorded == nil || recorded.Tree != releaseRoot || recorded.Phase != phase.Planning || recorded.LastDispatchSeq != 8 {
+		t.Fatalf("the record of %s = %#v, want it recorded from its own write, planning, at sequence 8", free, recorded)
+	}
+	if recorded := recordedChild(t, h, stuck); recorded != nil {
+		t.Fatalf("the record of %s = %#v, want none while its parent is unrecorded", stuck, recorded)
+	}
+}
+
+// A child the release writes todo is not recorded from that write when the daemon has already
+// applied a later event of the child that recorded nothing — a person moved it back to backlog
+// right after the release, and that event beat the release to the fact lock. The write's answer is
+// older than what Dispatch has said since, so it applies nothing, and no planner starts for a child
+// Dispatch shows in backlog.
+func TestWaveReleaseDoesNotRecordAChildFromAWriteALaterEventOvertook(t *testing.T) {
+	h, statuses := releaseHarness(t, true)
+	child := "LEGION-209"
+	statuses.issues[child] = backlogChild(child)
+	// The person's backlog, one event after the release's write (sequence 8), already applied:
+	// the mirror holds it, and the workflow recorded nothing for a child in backlog.
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		return record.NewStore().PutDispatchIssue(context.Background(), tx, record.DispatchIssueRow{Key: child, Project: testDispatchProject, Status: "backlog", Seq: 9})
+	}); err != nil {
+		t.Fatalf("seed the mirror row of %s: %v", child, err)
+	}
+	architect := newLiveClaim(t, h, releaseRoot, claim.RoleArchitect)
+
+	response, _ := releaseWave(t, h, architect, child)
+
+	if want := (WaveReleaseResponse{Released: []string{child}, Started: []string{}, Held: []HeldChild{}}); !reflect.DeepEqual(response, want) {
+		t.Fatalf("release answered %#v, want %#v", response, want)
+	}
+	if recorded := recordedChild(t, h, child); recorded != nil {
+		t.Fatalf("the record of %s = %#v, want none: Dispatch moved it back to backlog after the release's write", child, recorded)
+	}
+}
+
+// A todo child whose parent is outside the wave and not recorded yet is answered
+// CHILD_NOT_RECORDED, and the architect's retry, once the parent's own todo event has recorded it,
+// records the child: each attempt is its own fact, so the retry applies Dispatch's view again.
+func TestWaveReleaseRetryRecordsATodoChildOnceItsParentIsRecorded(t *testing.T) {
+	h, statuses := releaseHarness(t, true)
+	child, parentKey, root := "LEGION-210", "LEGION-209", releaseRoot
+	statuses.issues[parentKey] = dispatch.Issue{Key: parentKey, ResolvedRepo: "acme/widgets", Title: parentKey, Status: "triage", Parent: &root, LastSeq: 2}
+	todo := todoChild(child)
+	todo.Parent, todo.LastSeq = &parentKey, 5
+	statuses.issues[child] = todo
+	architect := newLiveClaim(t, h, releaseRoot, claim.RoleArchitect)
+	release := func() *httptest.ResponseRecorder {
+		t.Helper()
+		return h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": []string{child}}, nil)
+	}
+
+	assertFailure(t, release(), http.StatusConflict, "CHILD_NOT_RECORDED")
+	if got := recordedChild(t, h, child); got != nil {
+		t.Fatalf("the child before its parent is recorded = %#v, want none", got)
+	}
+	// The parent's own todo event, from its release by someone else, reaches the daemon.
+	statuses.issues[parentKey] = dispatch.Issue{Key: parentKey, ResolvedRepo: "acme/widgets", Title: parentKey, Status: "todo", Parent: &root, LastSeq: 3}
+	deliverEcho(t, h, statuses.issues[parentKey])
+
+	if recorder := release(); recorder.Code != http.StatusOK {
+		t.Fatalf("the architect's retry = %d: %s", recorder.Code, recorder.Body)
+	}
+	if got := recordedChild(t, h, child); got == nil || got.Tree != releaseRoot || got.LastDispatchSeq != 5 {
+		t.Fatalf("the child after the retry = %#v, want it recorded in %s's tree at Dispatch's sequence 5", got, releaseRoot)
+	}
+	if len(statuses.writes) != 0 {
+		t.Fatalf("Dispatch writes = %#v, want none: the child was already todo", statuses.writes)
 	}
 }

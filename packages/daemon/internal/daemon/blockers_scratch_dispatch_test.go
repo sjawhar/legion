@@ -331,10 +331,12 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	}
 	t.Logf("the daemon mirrors %s and %s in backlog and keeps no record of either before the release:\n%s", stalled, ready, body)
 
-	// On this bench the release's todo events can reach the daemon before its answer, and a record
-	// one of them wrote would look the same as one the release wrote. What tells them apart is the
-	// fact path's own ledger of every fact it applied (processed_events): the release's own writes
-	// are applied as facts of the API under the own-write id, which no Dispatch event ever is.
+	// On this bench the release's todo events can reach the daemon before its answer, so a record at
+	// the answer alone does not show the release wrote it. The fact path's own ledger of every fact
+	// it applied (processed_events) shows the release applied a fact of its own for each write, under
+	// the own-write id no Dispatch event carries; on main it applies none. Which of that fact and a
+	// todo event that beat it wrote the record the bench cannot tell, and need not: the api tests
+	// (wave_release_blocked_test.go) record the child from its write with no event delivered at all.
 	ownWrites := func() int {
 		t.Helper()
 		var count int

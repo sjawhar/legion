@@ -49,9 +49,8 @@ func (s *server) setDispatchStatus(w http.ResponseWriter, r *http.Request, issue
 // before.
 //
 // Once the write has landed, a failure here leaves the record to the event, and the caller is
-// answered so (recordOwnStatusWrite says which failure). A route that writes the same status again
-// on its retry gets the issue back from Dispatch at the same sequence, with no new event, and
-// applies it then.
+// answered so (recordOwnStatusWrite says which failure). A route that writes the status again on
+// its retry gets the issue back at the sequence of that write's own event, and applies it then.
 func (s *server) applyOwnStatusWrite(w http.ResponseWriter, r *http.Request, written dispatch.Issue) bool {
 	if failure := s.recordOwnStatusWrite(r.Context(), written); failure != nil {
 		writeFailure(w, failure.status, failure.code, failure.message)

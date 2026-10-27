@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -43,6 +44,20 @@ func (s *Postgres) PutDispatchClaim(ctx context.Context, tx pgx.Tx, key, holder 
 		return fmt.Errorf("put the Dispatch claim of %s: %w", key, err)
 	}
 	return nil
+}
+
+// DispatchIssueSeq is the sequence of the latest Dispatch event of key the mirror holds, and whether
+// it holds one: every issue event the daemon applies writes its row first (blockers.Mirror).
+func (s *Postgres) DispatchIssueSeq(ctx context.Context, tx pgx.Tx, key string) (int64, bool, error) {
+	var seq int64
+	err := tx.QueryRow(ctx, `select dispatch_seq from dispatch_issues where key = $1`, key).Scan(&seq)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, false, nil
+	case err != nil:
+		return 0, false, fmt.Errorf("read the Dispatch mirror sequence of %s: %w", key, err)
+	}
+	return seq, true, nil
 }
 
 func (s *Postgres) DispatchIssues(ctx context.Context, tx pgx.Tx, project string) ([]DispatchIssueRow, error) {

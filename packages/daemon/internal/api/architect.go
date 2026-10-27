@@ -396,8 +396,9 @@ const (
 // carried on by the child's own events, each with its actor. A child already recorded, which the
 // earlier attempt of a wave this call retries released, has had that observation.
 //
-// The workflow records a child only under a recorded parent, and a parent this same wave released
-// is recorded only once its own todo event arrives. A child the observation did not record is
+// The workflow records a child only under a recorded parent. A parent this same wave writes todo is
+// recorded by its own write first (waveRelease, releaseOrder); one outside the wave, or one the
+// record could not take, may still be unrecorded. A child the observation did not record is
 // answered CHILD_NOT_RECORDED, retryable: each attempt is its own fact (requestFactID), so the
 // retry applies the observation again once the parent is recorded. Its durable retry record bounds
 // attempts with exponential backoff; after the limit, it queues one notice to the tree architect
@@ -602,27 +603,50 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the records of the children to release")
 		return
 	}
-	// Each child the release writes todo is recorded by its own write in this request
-	// (recordOwnStatusWrite), not when the write's event comes back through the Dispatch consumer,
-	// and a child Dispatch already shows todo by Dispatch's view of it (enterTodoChild). The
-	// workflow records a child only under a recorded parent, so a parent this wave releases goes
-	// first. A written child the record does not take here still stands released: Dispatch shows it
-	// todo, and its write's event records it when the consumer delivers it, so that failure is
-	// logged and does not fail the release, whose retry would find the child todo and write nothing.
-	for _, child := range releaseOrder(children) {
+	// Every child the release writes todo is written first, then recorded from its own write in
+	// this request (recordOwnStatusWrite), not when the write's event comes back through the
+	// Dispatch consumer; only then is each child Dispatch already showed todo recorded from
+	// Dispatch's view of it (enterTodoChild), which answers the request when it cannot record one
+	// (CHILD_NOT_RECORDED and the like). So such a child never holds back the release, or the
+	// record, of the rest of the wave. Each pass runs in releaseOrder, which takes a parent the
+	// wave releases before its child, since the workflow records a child only under a recorded
+	// parent; a written child whose parent is one of the wave's todo children is recorded once more
+	// after that parent was. A written child the record does not take still stands released:
+	// Dispatch shows it todo, and its write's event records it when the consumer delivers it, so
+	// that failure is logged and does not fail the release.
+	ordered := releaseOrder(children)
+	written := make(map[string]dispatch.Issue, len(ordered))
+	foundTodo := make(map[string]bool, len(ordered))
+	for _, child := range ordered {
 		if !child.write {
-			if !s.enterTodoChild(w, r, grant.Tree, child.view) {
-				return
-			}
+			foundTodo[child.view.Key] = true
 			continue
 		}
-		written, ok := s.setDispatchStatus(w, r, child.view.Key, "todo")
+		issue, ok := s.setDispatchStatus(w, r, child.view.Key, "todo")
 		if !ok {
 			return
 		}
-		if failure := s.recordOwnStatusWrite(r.Context(), written); failure != nil {
+		written[child.view.Key] = issue
+	}
+	record := func(child releasedChild) {
+		if failure := s.recordOwnStatusWrite(r.Context(), written[child.view.Key]); failure != nil {
 			s.log.Warn("api: release_children wrote a child todo, but the record did not take the write; the write's event will record it",
-				"issue", written.Key, "code", failure.code, "reason", failure.message)
+				"issue", child.view.Key, "code", failure.code, "reason", failure.message)
+		}
+	}
+	for _, child := range ordered {
+		if child.write {
+			record(child)
+		}
+	}
+	for _, child := range ordered {
+		if !child.write && !s.enterTodoChild(w, r, grant.Tree, child.view) {
+			return
+		}
+	}
+	for _, child := range ordered {
+		if child.write && child.view.Parent != nil && foundTodo[*child.view.Parent] {
+			record(child)
 		}
 	}
 	started, held, err := s.releaseOutcome(r.Context(), children)
