@@ -955,7 +955,13 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			}
 			children = append(children, content...)
 		case *ast.AutoLink:
-			children = appendTextPiece(children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.URL(source)), "title": nil}}))
+			// goldmark gives an email autolink the bare address as its URL; the browser editor's
+			// engine, like a comment's renderer, links it to the address's mailto: URL.
+			href := string(current.URL(source))
+			if current.AutoLinkType == ast.AutoLinkEmail {
+				href = "mailto:" + href
+			}
+			children = appendTextPiece(children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}))
 		case *extensionast.Strikethrough:
 			content, err := within(current, Mark{Type: "strike_through"})
 			if err != nil {

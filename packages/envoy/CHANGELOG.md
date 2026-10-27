@@ -1418,6 +1418,12 @@
 
 ### Fixed
 
+- A bare email address, or one written `<a@b.test>`, in Markdown written to a document through the
+  API is now stored and shown as a link to its `mailto:` URL, `[a@b.test](mailto:a@b.test)`, as a
+  comment and the browser editor show it (INFRA-530). Dispatch linked it to the bare address, which
+  the editor's link opener resolved as a page path under the document's own URL. A document that
+  already holds `[a@b.test](a@b.test)` keeps that link's bare target until it is edited.
+
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
   Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no
