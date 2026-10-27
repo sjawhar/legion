@@ -227,15 +227,16 @@ func TestServePortHolderMessagesArriveInOrderBehindARefusedOneOnTheDurablePath(t
 }
 
 // Two listeners, each on its own machine id and so its own durable, both read a message to a
-// session neither has, and both raise its no_holder exception: the stream stores one, under the
-// Nats-Msg-Id exception.no_holder.<the message's own Nats-Msg-Id>, or its stream sequence when it has
-// none. Before, each listener's exception was stored, one per listener.
+// session neither has, and both raise its no_holder exception when they give it up: the stream
+// stores one, under the Nats-Msg-Id exception.no_holder.<the message's own Nats-Msg-Id>, or its
+// stream sequence when it has none. Before, each listener's exception was stored, one per listener.
+// A zero retry window gives each message up on its first delivery (unplaceableAgentDelivery).
 func TestOneExceptionIsStoredForAMessageToAnAbsentSessionWhicheverListenersRaiseIt(t *testing.T) {
 	binary := cmdtest.Build(t, "envoy-listener")
 	uri := testnats.URL(t)
 	machines := []string{"exception-one", "exception-two"}
 	for _, machineID := range machines {
-		listener := startListenerProcess(t, binary, uri, machineID)
+		listener := startListenerProcess(t, binary, uri, machineID, "ENVOY_UNPLACEABLE_RETRY_WINDOW=0s")
 		t.Cleanup(func() {
 			if t.Failed() {
 				t.Logf("listener %s's output:\n%s", machineID, listener.Output.String())

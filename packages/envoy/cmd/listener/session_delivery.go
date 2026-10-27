@@ -283,7 +283,7 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 	if err != nil || entry.Delivery != session.DeliveryConsumer {
 		return
 	}
-	topics, err := storedInterestTopics(d.registry, sessionID)
+	topics, err := storedInterestTopics(ctx, d.registry, sessionID)
 	if err != nil {
 		m.logger.Warn("session consumer filter left unchanged: the session's interests could not be read",
 			slog.String("session_id", sessionID), slog.String("error", err.Error()))
@@ -299,10 +299,11 @@ func (m *sessionDelivery) refollow(ctx context.Context, d *listenerDeps, session
 	}
 }
 
-// storedInterestTopics is the topics of sessionID's stored interest row, none when it has no row.
-func storedInterestTopics(registry *store.Registry, sessionID string) ([]string, error) {
-	interest, err := registry.Get(sessionID)
-	if errors.Is(err, nats.ErrKeyNotFound) {
+// storedInterestTopics is the topics of sessionID's stored interest row, read within ctx: none when
+// it has no row, or a row this build cannot decode, whose topics nothing routes (store.Registry.Get).
+func storedInterestTopics(ctx context.Context, registry *store.Registry, sessionID string) ([]string, error) {
+	interest, err := registry.Get(ctx, sessionID)
+	if errors.Is(err, nats.ErrKeyNotFound) || errors.Is(err, store.ErrMalformedInterest) {
 		return nil, nil
 	}
 	if err != nil {

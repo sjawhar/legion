@@ -392,7 +392,7 @@ func (m *sessionRelays) wanted(sessionID string) (want, servingPort bool) {
 		return entry.MachineID == m.machineID, false
 	}
 	owner := entry.MachineID
-	if interest, err := m.registry.Get(sessionID); err == nil && interest.MachineID != "" {
+	if interest, err := m.registry.Get(m.ctx, sessionID); err == nil && interest.MachineID != "" {
 		owner = interest.MachineID
 	}
 	return owner == m.machineID, true
@@ -442,7 +442,7 @@ func (m *sessionRelays) relay(ctx context.Context, run *relayRun) {
 // not carry session consumers), relayRetry otherwise.
 func (m *sessionRelays) restart(ctx context.Context, run *relayRun) (bus.SessionConsumerStart, *bus.SessionPull, relayOutcome) {
 	sessionID := run.sessionID
-	topics, err := storedInterestTopics(m.registry, sessionID)
+	topics, err := storedInterestTopics(ctx, m.registry, sessionID)
 	if err != nil {
 		m.logger.Warn("session relay could not read the session's interests; retrying", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 		return bus.SessionConsumerStart{}, nil, relayRetry

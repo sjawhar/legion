@@ -33,14 +33,16 @@ const (
 )
 
 // durableSettle settles one durable message once its handler and every push the handler handed to
-// a serving-port worker have ended: it acks the message, or NAKs it (durableRetryDelay) when any
-// of them asked for a retry. Every acknowledgement call on the message goes through it, under its
-// lock, so the worker that keeps the message in progress never races the one that settles it.
+// a serving-port worker have ended: it acks the message, or NAKs it when any of them asked for a
+// retry, after the longest delay any of them asked for (durableRetryDelay for end's retry). Every
+// acknowledgement call on the message goes through it, under its lock, so the worker that keeps the
+// message in progress never races the one that settles it.
 type durableSettle struct {
 	mu      sync.Mutex
 	msg     *nats.Msg
 	open    int
 	retry   bool
+	delay   time.Duration
 	settled bool
 }
 
@@ -55,18 +57,35 @@ func (s *durableSettle) hold() {
 	s.mu.Unlock()
 }
 
-// end ends one party, asking for a retry when retry is set; the last one settles the message.
+// end ends one party, asking for a retry after durableRetryDelay when retry is set; the last one
+// settles the message.
 func (s *durableSettle) end(retry bool) {
+	if retry {
+		s.retryAfter(durableRetryDelay)
+		return
+	}
+	s.finish(false, 0)
+}
+
+// retryAfter ends one party, asking for a retry after delay; the last one settles the message.
+func (s *durableSettle) retryAfter(delay time.Duration) {
+	s.finish(true, delay)
+}
+
+func (s *durableSettle) finish(retry bool, delay time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.retry = s.retry || retry
+	if retry {
+		s.retry = true
+		s.delay = max(s.delay, delay)
+	}
 	s.open--
 	if s.open > 0 || s.settled {
 		return
 	}
 	s.settled = true
 	if s.retry {
-		_ = s.msg.NakWithDelay(durableRetryDelay)
+		_ = s.msg.NakWithDelay(s.delay)
 		return
 	}
 	_ = s.msg.Ack()
@@ -293,7 +312,7 @@ func ownsServingPortSession(cfg listenerDeliveryHandlerConfig, sessionID string,
 	if entry.Port <= 0 {
 		return false
 	}
-	interest, err := cfg.registry.Get(sessionID)
+	interest, err := cfg.registry.Get(context.Background(), sessionID)
 	if err != nil {
 		interest = store.Interest{SessionID: sessionID}
 	}

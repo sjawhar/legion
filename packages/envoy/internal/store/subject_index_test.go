@@ -192,7 +192,7 @@ func TestSubjectIndexFollowsTheInterestBucket(t *testing.T) {
 		t.Fatalf("machine m2 matched %v, another machine's interest", got)
 	}
 
-	if err := other.Remove("ses_idx", []string{"notifications.dispatch.issue.IDX-1.>"}); err != nil {
+	if err := other.Remove(t.Context(), "ses_idx", []string{"notifications.dispatch.issue.IDX-1.>"}); err != nil {
 		t.Fatalf("unsubscribe the topic: %v", err)
 	}
 	pollMatch(t, r, "m1", topic, 0, 5*time.Second)
@@ -206,7 +206,7 @@ func TestSubjectIndexFollowsTheInterestBucket(t *testing.T) {
 	if got := r.Match("m1", topic); len(got) != 1 {
 		t.Fatalf("a registry's own write matched %v at once, want the session", got)
 	}
-	if err := other.deleteInterest("ses_idx"); err != nil {
+	if err := other.deleteInterest(t.Context(), "ses_idx"); err != nil {
 		t.Fatalf("delete the interest: %v", err)
 	}
 	pollMatch(t, r, "m1", topic, 0, 5*time.Second)

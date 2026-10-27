@@ -76,7 +76,7 @@ func TestOnChangeReportsWritesDeletesAndAnotherListenersWrites(t *testing.T) {
 		"the follower's own write of ses_local")
 
 	// A delete, whoever made it, leaves the session missing when it is reported.
-	if err := writer.Delete("ses_remote"); err != nil {
+	if err := writer.Delete(context.Background(), "ses_remote"); err != nil {
 		t.Fatalf("delete through the writer: %v", err)
 	}
 	awaitSessionChange(t, changes, func(c sessionChange) bool { return c.sessionID == "ses_remote" && !c.live },
