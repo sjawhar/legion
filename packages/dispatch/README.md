@@ -142,27 +142,44 @@ agent sees it, through the HTTP API and the real `dispatch` CLI
 shell's Dispatch URL, token file and Envoy configuration never reach it). It covers a comment
 citing a block and the block's backlinks, a deleted and restored block, a pinned block reference
 that changes and is removed, `GET /api/v1/block-links` between the blocks of two documents, each
-block's changed version, every block `part_of` its document, a link in a list item, and the older
-`GET /api/v1/artifacts/{id}/references` route. Each passing check prints
-`PASS: <section> <what>`; the first failure prints `FAIL: <section> <what>: <observed>` and exits 1.
-Its three inputs:
+block's changed version, every block `part_of` its document, a link in a list item, the six facts
+every node carries (`made_by`, `made_at`, `changed_by`, `changed_at`, `parent`, `parent_version`)
+for an issue, a document, a file, a picture, a block, a removed pinned block, an ask, a comment, a
+message, a session and a component, read by its own reference, as an edge's other end and on the
+`Node:` line of `dispatch read`, and the older `GET /api/v1/artifacts/{id}/references` route. Each
+passing check prints `PASS: <section> <what>`; the first failure prints
+`FAIL: <section> <what>: <observed>` and exits 1. Its inputs:
 
 - `DISPATCH_URL`, the server;
 - `DISPATCH_TOKEN`, an agent bearer, or `DISPATCH_TOKEN_FILE`, a file holding one, which the script
   reads itself and never prints;
-- `PROJECT`, an existing project key.
+- `PROJECT`, an existing project key;
+- `COMPONENT_SOURCE`, where the component nodes come from:
+  - `fixture` seeds the harness's fake GitHub on `FAKE_GITHUB_PORT` (9022 under
+    `bun run dispatch:local`) with a two-component model in `acme/r12-arch` (`web`, part of
+    `platform`), replacing every repository the fake served, adds that repository as an
+    architecture source of `PROJECT`, syncs it, and removes the source on exit, also when a check
+    fails;
+  - `existing` reads the first project whose architecture holds a component with a parent, and
+    writes nothing to it; a server with none is a `FAIL`;
+  - `none` proves `GET /api/v1/settings/architecture-sources` is `[]` and prints
+    `PASS: R12 component: this server has no architecture source, so it holds no component node`;
+    a source present is a `FAIL` naming `COMPONENT_SOURCE=existing`.
 
-It writes one issue in `PROJECT` (its spec, comments and the documents `cites.md`, `decisions.md`,
-`changes.md` and `list.md`) and closes it, also when a check fails. Against
-`bun run dispatch:local`:
+It writes two issues in `PROJECT`: the first holds the spec, comments and the documents `cites.md`,
+`decisions.md`, `changes.md` and `list.md`; the second is its child, retitled, holding an ask the
+script rewords, a comment on a quote of its spec and a reply, a message and a reply, and the
+uploads `notes.txt` and `pixel.png`. It resolves the ask and closes both issues, also when a check
+fails. Against `bun run dispatch:local`:
 
 ```bash
 DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE \
+  COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 \
   bash packages/dispatch/e2e/acceptance/block-graph.sh
 ```
 
-`e2e/acceptance/block-coverage.sh` takes the same inputs, with `PROJECT` optional (unset, every
-project), and only reads. For every document it can list (each project's documents and each
+`e2e/acceptance/block-coverage.sh` takes the first three inputs, with `PROJECT` optional (unset,
+every project), and only reads. For every document it can list (each project's documents and each
 issue's documents), it counts the document as not indexed when `GET /api/v1/artifacts/{id}/blocks`
 lists blocks while `GET /api/v1/references?to=<document>&kind=part_of` lists none, and prints
 `documents=<n> indexed=<n> not_indexed=<n>`, then each not-indexed document's reference. A document
