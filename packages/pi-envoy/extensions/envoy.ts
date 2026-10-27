@@ -2089,8 +2089,11 @@ export default function envoyExtension(pi: PiApi): void {
     claimedRoleSessionID = id;
     // The transcript is the one thing `omp --resume` guarantees, so it is
     // the durable record of the claim: the listener reaps a dead session's
-    // interest row (role claim included) after its ten-minute stale-interest
-    // grace window, and this process's memory dies with it.
+    // interest row 15 minutes after the row's last write and releases the
+    // role claim separately, one session TTL after heartbeats stop (a role
+    // claim is not an interest: see `ReapRoleClaims` in
+    // packages/envoy/internal/store/kv.go), and this process's memory dies
+    // with it.
     pi.appendEntry(ROLE_CLAIM_ENTRY, { role });
     if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
     // The role it moved off is handed back under the id its hold was under (a fork's parent,
