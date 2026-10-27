@@ -614,6 +614,46 @@ describe("Mermaid diagrams", () => {
     }
   });
 
+  // A link reference definition is no block of the parse, so the diagram is the document's last
+  // block while the source's last line is the definition, not the diagram's closing fence. The
+  // fence did close, so the diagram is finished and draws.
+  test("a closed mermaid fence followed by a link reference definition draws its diagram", async () => {
+    const view = render(
+      <MarkdownBody
+        markdown={`${fence("sequenceDiagram\n  Alice->>Bob: Hi")}\n[spec]: https://example.com/spec\n`}
+      />
+    );
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Alice");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // CommonMark closes a fence only with a line of the opener's character, at least as long as the
+  // opener. A streamed turn's last line that would close some other fence (three backticks under
+  // a four-backtick opener, tildes under a backtick one) leaves the block open, so it stays code.
+  test("a body ending in a line that cannot close its mermaid fence keeps it as code", async () => {
+    const done = fence("sequenceDiagram\n  Alice->>Bob: Hi");
+    for (const streaming of [
+      "````mermaid\nsequenceDiagram\n  Carol->>Dave: Yo\n```",
+      "```mermaid\nsequenceDiagram\n  Carol->>Dave: Yo\n~~~",
+    ]) {
+      resetMermaidDiagrams();
+      const view = render(<MarkdownBody markdown={`${done}\n${streaming}`} />);
+      try {
+        await waitFor(() => expect(figuresIn(view.container).length).toBeGreaterThan(0));
+        expect(figuresIn(view.container)).toHaveLength(1);
+        const code = view.container.querySelectorAll("pre")[1];
+        expect(code?.textContent).toContain("Carol->>Dave: Yo");
+        expect(code?.closest("figure")).toBeNull();
+      } finally {
+        view.unmount();
+      }
+    }
+  });
+
   test("a body whose source changes while the renderer loads draws only the newest source", async () => {
     // With the engine loaded the body paints in its layout effect, so only the renderer is late.
     await warmMarkdownRenderer();
