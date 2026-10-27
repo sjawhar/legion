@@ -248,6 +248,9 @@ type Server struct {
 	srv       *natsserver.Server
 	jetStream bool
 	monitor   string
+	// name is the name the server gave its clients at its latest start, kept while it is
+	// stopped.
+	name string
 }
 
 // URL is the server's client URL, which stays the same across every Stop and Start: it names the
@@ -271,16 +274,58 @@ func (s *Server) Stop(t testing.TB) {
 }
 
 func (s *Server) stop() {
-	s.mu.Lock()
-	srv := s.srv
-	s.srv = nil
-	s.monitor = ""
-	s.mu.Unlock()
+	srv := s.detach()
 	if srv == nil {
 		return
 	}
 	srv.Shutdown()
 	srv.WaitForShutdown()
+}
+
+// detach takes the running nats-server off s and returns it, or nil when none runs, for the caller
+// to shut down: from then on the relay refuses every new connection, as it does for a stopped
+// server, and Start treats the server as stopped.
+func (s *Server) detach() *natsserver.Server {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	srv := s.srv
+	s.srv = nil
+	s.monitor = ""
+	return srv
+}
+
+// Name is the name the server gives its clients, which nats.go reports as ConnectedServerName: the
+// server_name its configuration sets, which every start keeps, or else an ID each start makes up.
+// A stopped server keeps the name of its latest start.
+func (s *Server) Name() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.name
+}
+
+// LameDuck shuts the server down as an operator's lame-duck signal does: the server stops
+// accepting clients, hands off the JetStream leaderships it holds, and closes its clients over its
+// configured lame_duck_duration, so they move to the other servers they know rather than all at
+// once. It returns once the server has shut down, keeping its store and URL for a later Start as
+// Stop does. A stopped server does nothing.
+func (s *Server) LameDuck(t testing.TB) {
+	t.Helper()
+	srv := s.detach()
+	if srv == nil {
+		return
+	}
+	go srv.LameDuckShutdown()
+	down := make(chan struct{})
+	go func() {
+		srv.WaitForShutdown()
+		close(down)
+	}()
+	select {
+	case <-down:
+	case <-time.After(connectTimeout):
+		srv.Shutdown()
+		t.Fatalf("the NATS server did not finish its lame duck within %s: %s", connectTimeout, s.log.String())
+	}
 }
 
 // Start runs the server again on the store and the configuration it had, and returns once it
@@ -459,6 +504,7 @@ func (s *Server) launch(t testing.TB) {
 	defer s.mu.Unlock()
 	s.srv = srv
 	s.jetStream = opts.JetStream
+	s.name = srv.Name()
 	if addr := srv.MonitorAddr(); addr != nil {
 		s.monitor = "http://" + addr.String()
 	}
@@ -468,11 +514,22 @@ func (s *Server) launch(t testing.TB) {
 // ReloadOptions merges it over the options it is given, whichever server made it.
 var flagsMu sync.Mutex
 
+// rigLameDuck is the lame_duck_duration and rigLameDuckGrace the lame_duck_grace_period of every
+// server whose configuration sets neither: nats-server's two minutes would hold a test that long
+// in each Server.LameDuck, and its configuration file refuses a duration under 30 seconds, so the
+// rig sets them on the options it parsed. Four seconds still spreads the closing of the server's
+// clients over time, after a second in which they hear the server is going.
+const (
+	rigLameDuck      = 4 * time.Second
+	rigLameDuckGrace = time.Second
+)
+
 // serverOptions parses the configuration at path and serverArgs as nats-server parses its own
 // command line, then imposes what this rig owns: loopback, a client and a monitoring port the
-// server picks, the test's own store, no signal handlers, and path as the configuration file.
-// serverArgs replace nats-server's defaults rather than add to them, as the arguments after the
-// image's own command do.
+// server picks, the test's own store, no signal handlers, path as the configuration file, and the
+// lame duck's timing when the configuration sets none (rigLameDuck). serverArgs replace
+// nats-server's defaults rather than add to them, as the arguments after the image's own command
+// do.
 func serverOptions(path string, serverArgs []string, store string) (*natsserver.Options, error) {
 	flags := flag.NewFlagSet("nats-server", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -494,6 +551,10 @@ func serverOptions(path string, serverArgs []string, store string) (*natsserver.
 	opts.StoreDir = store
 	opts.NoSigs = true
 	opts.ConfigFile = path
+	if opts.LameDuckDuration == 0 && opts.LameDuckGracePeriod == 0 {
+		opts.LameDuckDuration = rigLameDuck
+		opts.LameDuckGracePeriod = rigLameDuckGrace
+	}
 	return opts, nil
 }
 
@@ -746,6 +807,20 @@ func gatePorts(text string) (first, count int, err error) {
 // ephemeral range, relaying to srv, and closes it when the test ends.
 func StartGate(t testing.TB, srv *Server) *Gate {
 	t.Helper()
+	listener := listenInGateBand(t)
+	if listener == nil {
+		return nil
+	}
+	g := &Gate{t: t, server: strings.TrimPrefix(srv.URL(), "nats://"), address: listener.Addr().String()}
+	g.relay = newRelay(listener, g.target)
+	t.Cleanup(g.Close)
+	return g
+}
+
+// listenInGateBand listens on a free port of the band gatePorts chooses from this machine's
+// ephemeral range, and fails the test when it finds none.
+func listenInGateBand(t testing.TB) net.Listener {
+	t.Helper()
 	// An unreadable file is empty text, which gatePorts reads as the fallback range.
 	text, _ := os.ReadFile(ephemeralRangePath)
 	first, count, err := gatePorts(string(text))
@@ -753,19 +828,13 @@ func StartGate(t testing.TB, srv *Server) *Gate {
 		t.Fatalf("choose a gate port: %v", err)
 		return nil
 	}
-	g := &Gate{t: t, server: strings.TrimPrefix(srv.URL(), "nats://")}
 	var last error
 	for range 100 {
-		address := fmt.Sprintf("127.0.0.1:%d", first+rand.IntN(count))
-		listener, err := net.Listen("tcp", address)
-		if err != nil {
-			last = err
-			continue
+		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", first+rand.IntN(count)))
+		if err == nil {
+			return listener
 		}
-		g.address = address
-		g.relay = newRelay(listener, g.target)
-		t.Cleanup(g.Close)
-		return g
+		last = err
 	}
 	t.Fatalf("hold a gate port: %v", last)
 	return nil
