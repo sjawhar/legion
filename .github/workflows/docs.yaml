@@ -4,7 +4,10 @@ name: Docs
 # publishes it to GitHub Pages (https://sjawhar.github.io/legion/) on every push to main. The site's
 # reference pages are generated from packages/ and skills/ at build time, so those paths rebuild it,
 # and scripts/third-party-notices.ts writes the THIRD_PARTY_NOTICES.txt it publishes, and so does
-# a change to the private-name guard the built site is checked with.
+# a change to the private-name guard the built site is checked with. A draft's head builds nothing
+# until the pull request is marked ready (`ready_for_review`), and a closed pull request's run
+# builds nothing: it only cancels that pull request's runs still waiting or running (the
+# concurrency comment below).
 on:
   push:
     branches: [main]
@@ -16,6 +19,7 @@ on:
       - ".github/workflows/docs.yaml"
       - ".github/scripts/check-private-names.sh"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, closed]
     paths:
       - "docs/site/**"
       - "packages/**"
@@ -24,8 +28,12 @@ on:
       - ".github/workflows/docs.yaml"
       - ".github/scripts/check-private-names.sh"
 
+# A new push to a pull request, or its closing, cancels that pull request's run still waiting or
+# running. On pull_request the key is the pull request's number: a merged pull request's closed
+# event carries github.ref = refs/heads/main, so keyed on github.ref it would cancel main's own
+# Pages build. push keeps its github.ref key, with cancel-in-progress off.
 concurrency:
-  group: docs-${{ github.ref }}
+  group: docs-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Read-only: no job here writes to the repository, a registry or the API. The token clones,
@@ -36,6 +44,8 @@ permissions:
 
 jobs:
   build:
+    # push carries no pull_request and no closed action, so it always builds.
+    if: ${{ github.event.action != 'closed' && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     # The screenshots step boots Dispatch on the e2e harness, which needs a database it may
     # truncate.

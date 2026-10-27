@@ -1,7 +1,10 @@
 name: Tests
 
-# lint, typecheck and test are the checks main's ruleset requires, so they run on every pull request
-# with no path filter, and each covers the shipped daemon (packages/daemon, the Go `legion`).
+# lint, typecheck and test are the checks main's ruleset requires, so they run with no path filter
+# on every head of a pull request that is not a draft, and again when a draft is marked ready for
+# review; each covers the shipped daemon (packages/daemon, the Go `legion`). On a draft's head they
+# report `skipped`, which GitHub counts as passing, but GitHub merges no draft, and marking it
+# ready (`ready_for_review`) starts a run at that head whose newer checks replace the skipped ones.
 on:
   push:
     branches:
@@ -9,13 +12,16 @@ on:
   merge_group:
     types: [checks_requested]
   pull_request:
-    types: [opened, reopened, synchronize]
+    types: [opened, reopened, synchronize, ready_for_review]
 
-# A new push to a pull request cancels that pull request's still-running checks here; outside
-# pull_request the key is github.sha, not github.ref, so a busy runner pool never drops a
-# main push's or merge-queue entry's run (why: this PR's description).
+# A new push to a pull request cancels that pull request's still-running checks here. On
+# pull_request the key is the pull request's number: tests-closed.yaml joins this same group when
+# the pull request closes, cancelling what still waits or runs, and a merged pull request's closed
+# event carries github.ref = the base branch, so the number is the only key that names the pull
+# request on every event. Outside pull_request the key is github.sha, not github.ref, so a busy
+# runner pool never drops a main push's or merge-queue entry's run (why: this PR's description).
 concurrency:
-  group: tests-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: tests-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Read-only: no job here writes to the repository, a registry or the API. The token clones and
@@ -26,6 +32,9 @@ permissions:
 
 jobs:
   lint:
+    # Each job here skips on a draft's head (the comment at the top says why that merges nothing
+    # untested); push and merge_group carry no pull_request, so there they run.
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     # check-pr-text.sh reads a pull request's commits through the compare route (`contents: read`),
     # its reviews and review comments (`pull-requests: read`) and its issue comments
@@ -39,8 +48,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # This workflow runs on every pull request with no path filter, so the pin check runs on
-      # every change rather than only on one that touches a package.
+      # This workflow has no path filter, so the pin check runs on every change rather than only
+      # on one that touches a package.
       - name: Check every Bun install reads .bun-version
         run: .github/scripts/check-bun-version.sh
 
@@ -76,9 +85,10 @@ jobs:
 
       # A pull request's title, body and commit messages reach main's squash commit, the
       # generated release notes and GitHub's pages, and its comments and reviews are public on its
-      # page, so this required job checks them at every push. pr-title.yaml checks them again when
-      # the pull request is opened, reopened or edited or a review is submitted or edited. A push
-      # to main or a merge-queue run carries no pull request.
+      # page, so this required job checks them at every push to a pull request that is not a draft
+      # and when a draft is marked ready. pr-title.yaml checks them at every push too, draft or
+      # not, and when the pull request is opened, reopened or edited or a review is submitted or
+      # edited. A push to main or a merge-queue run carries no pull request.
       - name: Check the pull request's title, body, branch name, commits, comments and reviews name nothing private
         if: github.event_name == 'pull_request'
         env:
@@ -173,6 +183,7 @@ jobs:
 
 
   typecheck:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
 
     steps:
@@ -193,6 +204,7 @@ jobs:
 
 
   test:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     services:
       postgres:

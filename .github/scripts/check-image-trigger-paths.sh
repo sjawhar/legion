@@ -23,7 +23,12 @@
 #   * GATES are an ALLOWLIST: unknown means refused, never ungated. A gate resolves to
 #     `dorny/paths-filter` outputs tested `== 'true'` and joined by `||`, or to terms that
 #     cannot narrow by path, or it is refused. GitHub compares case-insensitively, so this
-#     check does too.
+#     check does too. Two event terms are admitted beside those, `!github.event.pull_request.draft`
+#     and `github.event.action != 'closed'`: both are true on every event that builds an image a
+#     deployment can pin (push, merge_group, workflow_call from a push, workflow_dispatch carry
+#     no pull_request and no closed action), and on a pull request they skip only a head that
+#     `ready_for_review` builds next, or a closed pull request, which merges nothing more. A
+#     positive draft test and `== 'closed'` stay refused.
 #   * A build in a `run:` step is DETECTED, and EVERY detection is refused - there is no
 #     pattern that can excuse one. The detector judges ONE COMMAND at a time and is drawn
 #     broad: a container-CLI word followed later on the command by `build`, `bake` or `b`, the
@@ -102,9 +107,16 @@ EQUALS_TRUE = re.compile(r"needs\.([\w-]+)\.outputs\.([\w-]+)\s*==\s*'true'")
 # sit beside the filters clause without being refused. GitHub's comparisons are
 # case-insensitive (Expressions → Operators), so these are too: `needs.X.result == 'Success'`
 # must read exactly like `== 'success'`, or a capital letter walks a narrowing gate past the
-# allowlist.
+# allowlist. `!github.event.pull_request.draft` and `github.event.action != 'closed'` narrow by
+# event, not by change, and only where no pinnable image is built: push, merge_group,
+# workflow_call from a push and workflow_dispatch carry no pull_request and no closed action, so
+# both are true there; on a pull request they skip only a draft's head, which `ready_for_review`
+# builds next, or a closed pull request, which merges nothing more. Their opposites
+# (`github.event.pull_request.draft`, `== true`, `github.event.action == 'closed'`) skip every
+# build a deployment pins, so they stay refused.
 NEUTRAL = re.compile(
-    r"always\(\)|success\(\)|!\s*cancelled\(\)|needs\.[\w-]+\.result(\s*[=!]=\s*'[A-Za-z_]+')?",
+    r"always\(\)|success\(\)|!\s*cancelled\(\)|needs\.[\w-]+\.result(\s*[=!]=\s*'[A-Za-z_]+')?"
+    r"|!\s*github\.event\.pull_request\.draft|github\.event\.action\s*!=\s*'closed'",
     re.I,
 )
 RESULT_TERM = re.compile(r"needs\.([\w-]+)\.result\s*(==|!=)\s*'([A-Za-z_]+)'", re.I)
@@ -657,8 +669,14 @@ def gate_outputs(condition: str) -> list[tuple[str, str]]:
     job does not have. Each top-level `&&` conjunct is therefore either THE filters clause
     (`needs.<job>.outputs.<name> == 'true'` tests joined by `||`, at most one such conjunct;
     other `||` terms there only widen, so they are allowed), or made entirely of terms that do
-    not narrow by path — `always()`, `success()`, `!cancelled()`, `needs.<job>.result` — or it
-    is refused, quoting the term."""
+    not narrow by path — `always()`, `success()`, `!cancelled()`, `needs.<job>.result` — or of
+    the two event terms `!github.event.pull_request.draft` and `github.event.action !=
+    'closed'`, or it is refused, quoting the term. Those two are true on every event that builds
+    an image a deployment can pin (push, merge_group, workflow_call from a push and
+    workflow_dispatch carry no pull_request and no closed action), and on a pull request they
+    skip only a head that `ready_for_review` builds next, or a closed pull request, which merges
+    nothing more; a positive draft test or `== 'closed'` skips the pinnable builds, so it is
+    refused."""
     if not condition.strip():
         return []
     conjuncts = [unwrap(part) for part in split_top(unwrap(condition), "&&")]
@@ -673,7 +691,8 @@ def gate_outputs(condition: str) -> list[tuple[str, str]]:
             f"against a path filter; express which CHANGES reach the job as a "
             f"dorny/paths-filter output tested `== 'true'`, and leave anything else "
             f"(`always()`, `success()`, `!cancelled()`, a `needs.<job>.result` comparison that "
-            f"still admits `skipped`) beside it"
+            f"still admits `skipped`, `!github.event.pull_request.draft`, "
+            f"`github.event.action != 'closed'`) beside it"
         )
     if not clauses:
         return []

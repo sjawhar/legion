@@ -571,6 +571,81 @@ for shape in "success()" '"!cancelled()"' "always() && needs.changes.outputs.img
   check "if: $shape passes" "$(is "$status" 0)"
 done
 
+echo "case: the draft and closed event terms stay accepted"
+# Both are true on every event that builds a pinnable image (push, merge_group, workflow_call,
+# workflow_dispatch carry no pull_request and no closed action). A bare `!github…` is a YAML tag,
+# so those shapes are quoted or wrapped in ${{ }}.
+shape_index=0
+for shape in '"!github.event.pull_request.draft"' "github.event.action != 'closed'" \
+  "\${{ !github.event.pull_request.draft && needs.changes.outputs.img == 'true' }}" \
+  "github.event.action != 'closed' && needs.changes.outputs.img == 'true'"; do
+  shape_index=$((shape_index + 1))
+  root=$(fixture "gate-event-accepted-$shape_index")
+  gate_probe "$root" "  docker:
+    needs: changes
+    if: $shape
+    runs-on: ubuntu-24.04
+"
+  run_check "$root"
+  check "if: $shape passes" "$(is "$status" 0)"
+  case $shape in
+    *needs.changes.outputs.img*)
+      check "  and reads the filter beside it" "$(contains "$out" 'jobs.docker.if (jobs.changes filter img)')" ;;
+  esac
+done
+
+# changes_if <root> <expression>: gates the dorny/paths-filter job itself, as
+# envoy-and-contracts.yaml gates the changes job its envoy-smoke build needs.
+changes_if() {
+  python3 - "$1/.github/workflows/image.yaml" "$2" <<'PYEOF'
+import sys
+path, expression = sys.argv[1], sys.argv[2]
+text = open(path).read()
+marker = "  changes:\n    runs-on: ubuntu-24.04\n"
+assert marker in text, "no changes job to gate"
+open(path, "w").write(text.replace(marker, f"  changes:\n    if: {expression}\n    runs-on: ubuntu-24.04\n"))
+PYEOF
+}
+
+root=$(fixture gate-event-on-changes)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+"
+changes_if "$root" "\${{ github.event.action != 'closed' && !github.event.pull_request.draft }}"
+run_check "$root"
+check "both event terms on the needed changes job pass" "$(is "$status" 0)"
+check "  and the build job's filter is still read" "$(contains "$out" 'jobs.docker.if (jobs.changes filter img)')"
+
+# The control: the changes job's if: is read, so a positive draft test there is refused.
+root=$(fixture gate-event-on-changes-refused)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+"
+changes_if "$root" "github.event.pull_request.draft"
+run_check "$root"
+check "a positive draft test on the needed changes job is refused" "$(is "$status" 1)"
+check "  and names that job" "$(contains "$out" 'jobs.changes builds or calls an image, and its if: is narrowed by')"
+
+echo "case: a positive draft test or an == 'closed' test is refused"
+# Each is false on push, workflow_call and workflow_dispatch, so it skips every pinnable build.
+shape_index=0
+for shape in "github.event.pull_request.draft" "github.event.pull_request.draft == true" "github.event.action == 'closed'"; do
+  shape_index=$((shape_index + 1))
+  root=$(fixture "gate-event-refused-$shape_index")
+  gate_probe "$root" "  docker:
+    needs: changes
+    if: $shape
+    runs-on: ubuntu-24.04
+"
+  run_check "$root"
+  check "if: $shape is refused" "$(is "$status" 1)"
+  check "  and quotes the term" "$(contains "$out" 'which this check cannot')"
+done
+
 echo "case: needs.<job>.result is neutral only when it admits 'skipped'"
 # The live shape this guards: envoy-smoke tidied up to reuse envoy-go's setup. always() does not
 # free the build from envoy-go's gate, because `result == 'success'` re-imposes it — GitHub

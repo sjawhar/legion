@@ -54,12 +54,15 @@ on:
   # scripts that write its third-party notices; the OMP pin (.omp-pin);
   # the context's .dockerignore; and this workflow. The final `legion probe-image` runs the image's
   # own `legion` and both plugins, so a PR that breaks any of them fails here instead of merging and
-  # publishing nothing.
+  # publishing nothing. A draft's head builds no image until the pull request is marked ready
+  # (`ready_for_review`), which builds that head. A `closed` run builds nothing: it enters the
+  # concurrency group below and cancels the pull request's build still waiting or running, as a
+  # newer head's run cancels an older head's.
   # .github/scripts/check-image-trigger-paths.sh fails the build when this list misses a file the
   # image build reads.
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review, closed]
     paths:
       - package.json
       - bun.lock
@@ -89,6 +92,22 @@ on:
       - scripts/go-third-party-notices.sh
       - scripts/assemble-third-party-notices.sh
 
+# Workflow-level, not job-level, because a job its own `if:` skips enters no job-level group: only
+# here does a closed pull request's run, whose build skips, cancel that pull request's build. On
+# pull_request the key is the pull request's number, so a newer head, or the closing, cancels an
+# older head's build of the same pull request whether it waits or runs (a merged pull request's
+# closed event carries github.ref = the base branch, so the number is the one key that names the
+# pull request). Every other event keys on github.sha, not github.ref, with cancel-in-progress
+# off, so a run never cancels a main, workflow_call or workflow_dispatch run, nor another pull
+# request's, and a dropped pending main run never leaves a commit with no image to pin (why: this
+# PR's description). Under workflow_call the github context is the caller's (release.yaml, on push
+# or workflow_dispatch), so a release run keys worker-image-<sha>, apart from release.yaml's own
+# `release-${{ github.ref }}` group. The build job repeats no group: a job group named like its
+# workflow's would wait on itself.
+concurrency:
+  group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Same-repo `pull_request` runs get this token too (a fork PR would get a read-only token, and this
 # repo takes no fork PRs), so it carries only what the pull request path needs. The release note that
 # needs `contents: write` runs in release.yaml's own `worker_image_release_note` job, and the
@@ -102,15 +121,12 @@ permissions:
 
 jobs:
   build:
+    # workflow_dispatch and a workflow_call from release.yaml (on push or workflow_dispatch) carry
+    # no pull_request and no closed action, so they always build; on a pull request this skips a
+    # draft's head, which `ready_for_review` builds next, and a closed pull request, which merges
+    # nothing more. .github/scripts/check-image-trigger-paths.sh admits these two terms.
+    if: ${{ github.event.action != 'closed' && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
-    # Job-level (not workflow-level): this file is also a called workflow, and job-level concurrency/env
-    # behave identically for `workflow_call`, `workflow_dispatch`, and `pull_request`.
-    # Two pushes to one PR serialize on the PR number (unchanged). Other events key on
-    # github.sha, not github.ref, so a dropped pending main run never leaves a commit with no
-    # image to pin (why: this PR's description).
-    concurrency:
-      group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
-      cancel-in-progress: false
     env:
       IMAGE: ghcr.io/sjawhar/legion-worker
       # The commit that is built and that the sha- tag names: the PR head on `pull_request` (github.sha

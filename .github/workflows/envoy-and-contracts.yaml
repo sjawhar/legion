@@ -60,7 +60,10 @@ on:
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
       - ".github/go-release-targets.json"
+  # `closed` runs only to cancel the pull request's runs still waiting or running (the concurrency
+  # comment below); the changes job skips it and a draft's head, so every job skips with it.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, closed]
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
@@ -107,11 +110,15 @@ on:
   merge_group:
     types: [checks_requested]
 
-# A new push to a pull request cancels that pull request's still-running checks here; outside
-# pull_request the key is github.sha, not github.ref, so a busy runner pool never drops a
-# main push's or merge-queue entry's run (why: this PR's description).
+# A new push to a pull request cancels that pull request's still-running checks here, and so does
+# its closing: the `closed` run, whose jobs all skip, enters the same group and replaces and
+# cancels the runs still waiting or running for it. On pull_request the key is the pull request's
+# number, because a merged pull request's closed event carries github.ref = the base branch, which
+# would name main's group rather than the pull request's. Outside pull_request the key is
+# github.sha, not github.ref, so a busy runner pool never drops a main push's or merge-queue
+# entry's run (why: this PR's description).
 concurrency:
-  group: envoy-and-contracts-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: envoy-and-contracts-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Read-only: no job here writes to the repository, a registry or the API. The token clones,
@@ -121,8 +128,12 @@ permissions:
   contents: read
 
 jobs:
-  # Detect which packages actually changed to skip unnecessary jobs.
+  # Detect which packages actually changed to skip unnecessary jobs. Every other job needs this
+  # one, so a closed pull request's run and a draft's head, which this one skips, run nothing; a
+  # draft runs here when it is marked ready (`ready_for_review`). push and merge_group carry no
+  # pull_request and no closed action, so there it runs.
   changes:
+    if: ${{ github.event.action != 'closed' && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     outputs:
       contracts: ${{ steps.filter.outputs.contracts }}

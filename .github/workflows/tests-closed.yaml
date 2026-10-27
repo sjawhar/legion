@@ -1,0 +1,30 @@
+name: Tests (closed pull request)
+
+# Cancels a closed pull request's Tests run (pr-and-main.yaml) still waiting or running. The one job
+# joins Tests' concurrency group, tests-<pull request number>, with cancel-in-progress, so that Tests
+# run ends `cancelled`, which neither GitHub nor the Legion daemon counts as passing: it fails
+# closed, never a skipped pass. No paths filter, because Tests has none.
+#
+# It is a workflow of its own because a `closed` run inside Tests would post skipped lint, typecheck
+# and test, which GitHub and the Legion daemon count as passing, at a head another run tested, and
+# so could turn a failure there green. This job posts no required check name: main's ruleset
+# requires lint, typecheck, test and pr-title, and this job is cancel-tests.
+#
+# On a reopen, the new Tests run enters the same group and may cancel this job if it still waits
+# for a runner. That is harmless: this job is no required check, and it has nothing left to cancel.
+on:
+  pull_request:
+    types: [closed]
+
+# The job reads and writes nothing.
+permissions: {}
+
+jobs:
+  cancel-tests:
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: tests-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Do nothing; joining the group is what cancels the Tests run
+        run: "true"
