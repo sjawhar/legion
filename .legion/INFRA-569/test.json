@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-569",
-  "completed": "2026-10-27T07:33:00Z",
-  "round": 2,
-  "testedHead": "b9278db51d9551092fc957cd6cda57ff7c4de72e",
+  "completed": "2026-10-27T07:53:30Z",
+  "round": 3,
+  "testedHead": "b7b1325d21837bc5b1efe09de299785a6dd55e69",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surfaces independently on the tester lane (port 18777, database dispatch_tester_e2e) at b9278db5, with asks of my own. I checked the CLI against bun run dispatch:local: a closing reason over three lines (one CRLF), a legacy settlement retraction with a two-line reason, a text-only answer read through four routes, and the same answer after the stored row and its event lost selected or held null. I ran the palette in headless Chromium with a 2,110-character answer, and re-ran the browser specs that touch search and answer display."
+    "how": "Round 2's independent drive of the same surfaces stands at b9278db5. The merge to b7b1325d leaves the branch's diff unchanged (my own fingerprint at both heads, equal to the implementer's), and my smoke run at b7b1325d reproduced the CLI and route results."
   },
   "failures": [],
   "failed": 0,
@@ -37,9 +37,17 @@
       "negativeControl": "In round 1, the head's search.e2e.ts run against the base app and server (94ab028a) failed: Expected substring \"Answered\" at search.e2e.ts:218 (/legion/scratch/tmp/i569-test/e2e-base.log). At 284986e6 the option held the whole answer, CSS-clamped only, which is what the reviewer found."
     }
   ],
-  "ci": "At 07:32Z GitHub had no workflow run, and no GitHub Actions check suite, for c30217fe, b9278db5 or the PR head 7ed9ad7d (actions/runs?head_sha= returned empty for all three). The two code commits went up in one push whose head, 7ed9ad7d, carries skip-checks: true, so GitHub started no workflow for code that has none. Actions is backlogged (196 runs queued repository-wide), but it still creates a queued run for every other push, for example legion/INFRA-549 at 07:31Z. This handoff push therefore omits the trailer, so GitHub runs CI on a head that contains b9278db5's code.",
+  "ci": "At 07:52Z the merge head b7b1325d had workflow runs on GitHub (Tests, Docs, Worker Image, PR Title, Legion Envoy and Contracts) with lint, typecheck, test, pr-title, build and changes all queued; one superseded PR Title run was cancelled. I read them as running and did not wait. The PR head 49071703 is handoff-only and carries skip-checks: true, which is correct now that the code head has its own runs. My round-2 untrailered push 8413b9c0 never got a run; the merge head replaced it.",
   "observations": [
-    "Pushing this handoff without skip-checks: true departs from the trailer rule for handoff-only pushes. The rule assumes the code head already has a CI verdict to carry; b9278db5 has none, and without a run the required checks would never report on the PR head.",
     "Not a defect: when markdownHead cuts inside a Markdown link or code fence, the palette shows the cut source text. The preview links to the full ask."
-  ]
+  ],
+  "rebaseRecheck": {
+    "from": "b9278db51d9551092fc957cd6cda57ff7c4de72e",
+    "to": "b7b1325d21837bc5b1efe09de299785a6dd55e69",
+    "fingerprintFrom": "c456ff9a1aef9847c69936b74176ebf0a2ebe2ad5d5e1c3aae20630545aad4a8",
+    "fingerprintTo": "c456ff9a1aef9847c69936b74176ebf0a2ebe2ad5d5e1c3aae20630545aad4a8",
+    "verdict": "rebase re-check b9278db5 → b7b1325d: fingerprint unchanged, bare gates only",
+    "command": "jj diff --from \"fork_point(\\\"main\\\"@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, computed at each head after jj git fetch",
+    "smoke": "bun run dispatch:local at b7b1325d: the SPA bundle built (2827 modules), the server booted and the seed passed. bash /legion/scratch/tmp/i569-test/r2.sh exited 0, with the same lines as round 2: indented multi-line reasons under 'Closed with no answer' and 'Closed after an answer', 'Answered by alice … · options chosen: none', and selected [] on the POST and every GET in all three stored states (log /legion/scratch/tmp/i569-test/r3-smoke.log)."
+  }
 }
