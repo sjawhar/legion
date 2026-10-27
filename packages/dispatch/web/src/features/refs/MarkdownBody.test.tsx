@@ -517,3 +517,88 @@ test("a body re-renders when its text grows, formatting what has closed since", 
     view.unmount();
   }
 });
+
+// Each list is parted from the next by a plain paragraph, so each parses as its own list.
+test("a task item draws one disabled checkbox, ticked as its source is, in every list shape", async () => {
+  const view = render(
+    <MarkdownBody
+      markdown={[
+        "- [x] done\n- [ ] todo",
+        "Loose:",
+        "- [x] loose\n\n  second para",
+        "Ordered:",
+        "1. [x] one\n2. [ ] two",
+        "Nested:",
+        "- [x] parent\n  - [ ] child",
+        "Mixed:",
+        "- plain\n- [x] mixed",
+      ].join("\n\n")}
+    />
+  );
+
+  try {
+    const tasks = await waitFor(() => {
+      const found = Array.from(
+        view.container.querySelectorAll<HTMLLIElement>('li[data-item-type="task"]')
+      );
+      expect(found).toHaveLength(8);
+      return found;
+    });
+    const taskStartingWith = (text: string): HTMLLIElement => {
+      const item = tasks.find((task) => task.textContent?.startsWith(text));
+      if (item === undefined) {
+        throw new Error(`No task item starts with "${text}".`);
+      }
+      return item;
+    };
+    // A box belongs to the item it sits closest to, so a parent's count leaves out its child's.
+    const ownBoxes = (item: HTMLLIElement): HTMLInputElement[] =>
+      Array.from(item.querySelectorAll<HTMLInputElement>("input")).filter(
+        (box) => box.closest("li") === item
+      );
+
+    for (const item of tasks) {
+      const boxes = ownBoxes(item);
+      expect(boxes).toHaveLength(1);
+      const [box] = boxes;
+      expect(box?.type).toBe("checkbox");
+      expect(box?.disabled).toBe(true);
+      expect(box?.checked).toBe(item.getAttribute("data-checked") === "true");
+    }
+    expect(tasks.map((item) => ownBoxes(item)[0]?.checked)).toEqual([
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+    ]);
+
+    const plain = Array.from(view.container.querySelectorAll("li")).find(
+      (item) => item.textContent === "plain"
+    );
+    expect(plain?.hasAttribute("data-item-type")).toBe(false);
+    expect(plain?.querySelector("input")).toBeNull();
+
+    // A tight item's paragraph is unwrapped with its box in it: box and words sit in the item.
+    for (const text of ["done", "todo", "one", "two", "child", "mixed"]) {
+      const item = taskStartingWith(text);
+      expect(item.querySelector("p")).toBeNull();
+      expect(Array.from(item.childNodes, (node) => node.nodeName)).toEqual(["INPUT", "#text"]);
+      expect(item.lastChild?.textContent).toBe(text);
+    }
+
+    // A loose or nested item keeps its paragraphs; the box leads the first one.
+    for (const text of ["loose", "parent"]) {
+      const item = taskStartingWith(text);
+      const paragraph = item.firstElementChild;
+      expect(paragraph?.tagName).toBe("P");
+      expect(paragraph?.firstChild).toBe(ownBoxes(item)[0] ?? null);
+      expect(paragraph?.textContent).toBe(text);
+    }
+  } finally {
+    view.unmount();
+  }
+});

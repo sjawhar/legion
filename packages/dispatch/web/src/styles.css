@@ -483,6 +483,30 @@ a {
   text-decoration: underline;
 }
 
+/* A task item in a `MarkdownBody` (`- [x] done`) shows the disabled checkbox
+   `features/refs/task-checkboxes.ts` draws in place of its bullet; a plain item in the same list
+   keeps its bullet. The box is sized in `em` of the surrounding text (`font-size: inherit` undoes
+   the 1rem the compact layouts above give every `input`), centred on the first line of the item,
+   and pulled back by its negative start margin into the space the bullet stood in. With its end
+   margin the item's words then start where a plain item's do: `prose-sm` indents an item's text
+   2em, its `ul`/`ol` padding plus its `li` padding, and the ask footer's rules below keep that
+   sum. It is read-only, so it takes no pointer events either. No ask-footer twin is needed: the
+   footer's `li` rule sets only margin and padding, and its `ul` list-style-type reaches the item
+   by inheritance, which the item's own `list-style` overrides. */
+.dispatch-markdown li[data-item-type="task"] {
+  list-style: none;
+}
+
+.dispatch-markdown [data-markdown-task-checkbox] {
+  block-size: 0.9375em;
+  font-size: inherit;
+  inline-size: 0.9375em;
+  margin-block: 0;
+  margin-inline: -1.375em 0.4375em;
+  pointer-events: none;
+  vertical-align: middle;
+}
+
 /* The block's slots are `not-prose` (`AskBlockView`): the editor root is `prose`, and the card
    hosted in the slots must not be typeset as document text. Tailwind Typography cannot re-enter
    `prose` inside `not-prose`, so a `MarkdownBody` in the footer (a reply, the answer note, an
