@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-584",
-  "completed": "2026-10-27T10:43:54Z",
+  "completed": "2026-10-27T10:59:23Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2328",
   "proof": [
+    {
+      "criterion": "Review round 3: check-bun-version.sh rule 8, the comment at :339-341 and the test label at check-bun-version.test.sh:165 say what the check does: no-cache only turns setup-bun's cache off and is the one other input allowed",
+      "surface": "The repository's own check, run as CI's lint job (pr-and-main.yaml: Check every Bun install reads .bun-version) and test job (Test the Bun pin check) run it",
+      "command": "cd $LEGION_WORKSPACE && PATH=/legion/scratch/tmp/venv584/bin:$PATH .github/scripts/check-bun-version.sh && .github/scripts/check-bun-version.test.sh | tail -2",
+      "observed": "`every Bun install reads .bun-version (1.3.14)`, then `Results: 108 passed, 0 failed` / `PASS: check-bun-version.sh` at 8e0352b9. The commit changes only comment text and one check label (6 lines), so the CI proof at d317a9a5 (entry 2) still describes the workflow behaviour.",
+      "headSha": "8e0352b99ae9cb5c2b540118c394efbd5d4227cf",
+      "negativeControl": "The case with the renamed label adds `bun-download-url` to the wrapper. It still exits 1 and names the input (`names the input` PASS), so the reworded rule still refuses any input other than no-cache."
+    },
     {
       "criterion": "Review round 2: required test green on a merge ref that includes #2317, and the go-envoy-infra- and go-envoy- cache pairs run to completion on a pull request with no write",
       "surface": "GitHub Actions in sjawhar/legion: this pull request's runs at d317a9a5 (Tests 40463123255, Docs 40463123212, Envoy 40463123196, Worker Image build)",
@@ -65,6 +73,6 @@
   "openQuestions": [
     "The production check after the merge: delete the pre-merge refs/pull/* cache entries (AC2), report what remains by ref and key family, check AC3 over 72 h, and run the 'Main still writes' check."
   ],
-  "round": 2,
-  "reviewAnswered": "review 5663185626 at c93db8fe (changes requested)"
+  "round": 3,
+  "reviewAnswered": "review 5665914611 at ccffa1f0 (round 2, changes requested: two wording fixes)"
 }
