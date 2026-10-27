@@ -1055,6 +1055,33 @@ jobs:
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch
         working-directory: packages/envoy
 
+  # The listener's server-change soak (packages/envoy/cmd/listener/server_change_test.go,
+  # INFRA-547): two real envoy-listener processes over a three-server NATS cluster, a session
+  # stand-in moved between the servers by lame-duck shutdowns and forced kills, and three senders
+  # publishing through the listener every 250 ms; every message must reach the session or its
+  # sender must get an error. It builds only under the `serverchange` tag, so envoy-go's unit run
+  # leaves it out, and it is a job of its own because it outlives that step: it sends for at least
+  # a minute and waits out each server's restart and the JetStream catch-up after it, which,
+  # beside the listener's other tests, is past what envoy-go's unit step holds under go test's
+  # default ten-minute package deadline. It runs the soak alone (-run TestServerChange), since
+  # envoy-go runs the package's untagged tests already; the cluster runs in the test process
+  # (internal/testnats), so it needs no container runtime and no database.
+  listener-server-change:
+    needs: changes
+    if: needs.changes.outputs.envoy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+      - name: Server-change soak of the listener
+        run: go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener
+        working-directory: packages/envoy
+
   # The two-process tests of the secrets broker (packages/envoy/cmd/broker/multiprocess_test.go,
   # INFRA-236): each row starts real cmd/broker binaries against one Postgres - which is what the
   # broker's Deployment runs once it carries more than one replica - and drives them over real
