@@ -324,6 +324,9 @@ jobs:
               # pmdoc's tests run pmdoc/gen, which imports the editor
               # (internal/dispatch/pmdoc/update_test.go:236-239, render_readback_test.go:32).
               - 'packages/proof-editor/**'
+              # pmdoc's tests run pmdoc/gen under bun, which imports @legion/proof-editor/headless,
+              # whose src/block-pointers.ts (through src/block-schema.ts) imports @legion/contracts.
+              - 'packages/contracts/src/**'
               # internal/dispatch/api/delivery_live_diff_test.go:965 and
               # internal/dispatch/docs/approval_carry_test.go:26.
               - 'packages/contracts/fixtures/delivery-live/**'
@@ -379,9 +382,11 @@ jobs:
               - 'skills/dispatch/**'
               - 'skills/dispatch-writing-specs/**'
               # The Go copies its tests hold the TypeScript to: src/dispatch-text-references.test.ts
-              # and src/dispatch-href.test.ts read the Go reader's JSON tables, and
+              # and src/dispatch-href.test.ts read the Go reader's JSON tables,
+              # src/dispatch-block-ref.test.ts reads pmdoc's block pointer table, and
               # scripts/gen-go.test.ts checks the generated Go file is current.
               - 'packages/envoy/internal/dispatch/text/testdata/**'
+              - 'packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json'
               - 'packages/envoy/internal/contracts/generated.go'
               # The second file scripts/gen-go.ts writes, checked by the same gen-go.test.ts.
               - 'packages/daemon/internal/dispatch/generated.go'

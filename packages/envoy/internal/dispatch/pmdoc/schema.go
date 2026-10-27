@@ -468,8 +468,9 @@ func renderTypedAttributes(n *Node, typ BlockTypeSchema) (string, error) {
 			}
 			encoded = string(jsonValue)
 		case "block[]":
-			// Joined by one space, as ParseBlockPointerValue reads them. A canonical reference
-			// holds none of the characters escapeDirectiveAttribute escapes, so it is written as is.
+			// Joined by one space, as ParseBlockPointerValue reads them. The joined value still
+			// passes through escapeDirectiveAttribute and strconv.Quote below, which leave a
+			// canonical reference unchanged: it holds none of the characters they escape.
 			items, ok := stringSlice(value)
 			if !ok {
 				return "", fmt.Errorf("%w: typed block %q attribute %q must be an array of block references", ErrSchema, n.Type, name)
