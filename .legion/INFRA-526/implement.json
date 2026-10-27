@@ -2,11 +2,19 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-526",
-  "completed": "2026-10-27T05:30:00Z",
-  "round": 4,
+  "completed": "2026-10-27T07:15:00Z",
+  "round": 5,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2310",
-  "rebaseRecheck": "154d6cea -> 2497adefd872c64ad0cdf4b27d062b472a4531d4: fingerprint unchanged (5051300770a6dd6d111c0f4dbd52d8014cb466caf440a0a08aafe4b82bbecfef before and after, comment https://github.com/sjawhar/legion/pull/2310#issuecomment-6434337098), bare gates only. A forward merge of main 448a4100 (contains #2317 baadccdc), no conflict, nothing else changed, as the architect directed, so the required checks test this change against a main with the daemon fix. The reviewer's round-2 fast-follow (one owner for the shell frame) is not in this round and is named on the PR's Fast-follow line.",
+  "rebaseRecheck": "c9d865ec -> b57365830bc38e45c202a8b7b390e9d84acd65ff: fingerprint unchanged (5051300770a6dd6d111c0f4dbd52d8014cb466caf440a0a08aafe4b82bbecfef before and after, comment https://github.com/sjawhar/legion/pull/2310#issuecomment-6435840897), bare gates only. A forward merge of main 32b6dd9f resolving the conflict GitHub reported: one import conflict in packages/dispatch/web/src/features/refs/markdown-engine.ts (#2210 moved referenceSpans to ./reference-spans beside this branch's ../doc/typed-block-drawing import), resolved by keeping both imports; nothing else changed. GitHub reports MERGEABLE at b5736583. Earlier round 4: 154d6cea -> 2497adef, also unchanged (main 448a4100 with #2317).",
   "proof": [
+    {
+      "criterion": "Round 5 smoke after the conflict merge: the change still draws the header and card, and keeps a reply's lists",
+      "surface": "Issue Conversation tab and issue page; real Go Dispatch server, production SPA bundle, Postgres 17 + pgvector, Playwright chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone",
+      "observed": "6 passed from a fresh build at the merge head; also bun run typecheck clean, bun run lint clean, bun test web/src/features/refs web/src/features/doc 426 pass / 0 fail",
+      "headSha": "b57365830bc38e45c202a8b7b390e9d84acd65ff",
+      "negativeControl": "The diff fingerprint excluding .legion and docs/solutions is identical before and after the merge, so the change under test is the one whose negative controls are recorded below (base 64e8c890: 4 failed; b6720fc1: the reply test failed; 9439f4a8: the nested-decision case failed)"
+    },
     {
       "criterion": "Round 4 smoke after the forward merge: the change still draws the header and card, and keeps a reply's lists",
       "surface": "Issue Conversation tab and issue page; real Go Dispatch server, production SPA bundle, Postgres 17 + pgvector, Playwright chromium and iphone",
