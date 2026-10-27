@@ -2,26 +2,19 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-583",
-  "completed": "2026-10-27T08:50:05Z",
-  "round": "review round 2: the answer at code head c53d0f10 (handoff 46d5195f) to the changes requested at b77feab1",
-  "decision": "changes_requested",
+  "completed": "2026-10-27T10:48:33Z",
+  "round": "review round 3: the answer at code head 44308a09 (handoffs 8420dcc9, 8f9c083d) to the changes requested at 73b32603",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "reviewedHead": "46d5195fc0d71295aea3e3e55939037a85cc8dd5",
-  "ciAtCodeHead": "CI head c53d0f10 (compare to 46d5195f: 2 files, .legion/ only). Required lint, typecheck, test, pr-title all queued at 08:45Z (over 200 runs queued in the repository). Not waited for: this round requests changes.",
-  "roundOneFindings": "All three fixed and accepted, with my reply on each of the seven threads (PRRT_kwDORFy7ds6wmPuo, PRRT_kwDORFy7ds6wmPux, PRRT_kwDORFy7ds6wmPu1, PRRT_kwDORFy7ds6wmPu5, PRRT_kwDORFy7ds6wmPu_, PRRT_kwDORFy7ds6wmPvF, PRRT_kwDORFy7ds6wmPvM); the implementer had already resolved them.",
+  "reviewedCode": "44308a09567fb58ae1aa3c9c276dd92c8f291264",
+  "ciAtCodeHead": "CI head 8420dcc9 (newest pull_request run; compare to 8f9c083d: 1 file, .legion/ only). Required (rulesets): lint success, typecheck success, test success, pr-title success (newest run), read 10:48Z. The five non-required jobs at 8420dcc9 were still queued at 10:48Z; their steps are unchanged since scratch #2327's run 40447830920, where all five ended success.",
+  "threads": "All 8 threads I opened carry my acceptance reply: PRRT_kwDORFy7ds6wmPuo, PRRT_kwDORFy7ds6wmPux, PRRT_kwDORFy7ds6wmPu1, PRRT_kwDORFy7ds6wmPu5, PRRT_kwDORFy7ds6wmPu_, PRRT_kwDORFy7ds6wmPvF, PRRT_kwDORFy7ds6wmPvM (round 1), PRRT_kwDORFy7ds6wm6Jj (round 2). No bot threads.",
+  "thermonuclear": "Pair ran at 8072b2b5 (round 1) and 46d5195f (round 2); this round's delta (44308a09) changes one workflow comment and three AGENTS.md files only, no filter pattern, so no new pass.",
   "verifiedIndependently": [
-    "Coverage at this head: go list closures vs the filters: 0 unmatched for dispatch_memory (1025 files), dispatch_multiprocess (1030), broker_multiprocess (207), envoy_go_race (1154); envoy_infra_go 5 compile-only testdata files, as before.",
-    "Round-1 vs round-2 filters over 5,398 tracked paths plus a listenfd probe: the only difference is packages/envoy/listenfd/listenfd.go, now in dispatch_memory, dispatch_multiprocess and envoy_infra_go; the nested anchors change nothing else."
+    "The round-3 workflow change is one comment line; the filters are unchanged since c53d0f10, where I matched them against each job's go list closure (0 unmatched except 5 compile-only testdata files in envoy_infra_go).",
+    "The Critical conventions bullet (packages/envoy/AGENTS.md:2114) now limits envoy-go to the packages/envoy module and says packages/envoy/infra's unit tests run only in envoy-infra-go, which matches envoy-and-contracts.yaml:1045-1046 and 1138-1139."
   ],
-  "thermonuclear": "deep-review APPROVE at 46d5195f (minor: the listenfd comment does not name infra/host/heldportwrapper as an importer in #2229, which envoy_infra_go covers through *dispatch_server). code-quality CHANGES: the bullet at packages/envoy/AGENTS.md:2114 claims envoy-go runs every untagged unit test, false for the nested packages/envoy/infra module; the rule is written in full in five places; cmd/dispatch/AGENTS.md:594 reason (judged true: shutdown_test.go:567 runs under -tags memory).",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/AGENTS.md",
-      "description": "Line 2114, last sentence: '`envoy-go`, gated by the broad `envoy` filter, still runs every untagged unit test on every Envoy change.' envoy-go's unit step is `go list ./... | grep -v /integration | xargs go test` in packages/envoy (envoy-and-contracts.yaml:1045-1046); packages/envoy/infra is a separate module (its own go.mod and go.work), so ./... leaves it out, and envoy-infra's untagged `go test ./...` (:1138-1139) runs only in envoy-infra-go, which this PR moves behind envoy_infra_go. The sentence promises a backstop for the one job whose untagged suite has none. Limit it to the packages/envoy module and say envoy-infra's unit tests run only in envoy-infra-go, or delete it."
-    }
-  ],
-  "fastFollow": "State the keep-current rule once: the full copies in packages/envoy/cmd/dispatch/AGENTS.md:594-597 and 611-614 and packages/envoy/infra/AGENTS.md:351-354 point to the packages/envoy/AGENTS.md Critical conventions bullet, keeping only infra's fact about the cmd/dispatch and cmd/listener builds; the listenfd comment at envoy-and-contracts.yaml:204-205 also names infra/host/heldportwrapper or says it generically."
+  "keyFindings": []
 }
