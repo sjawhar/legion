@@ -54,4 +54,5 @@ related_issues:
 ---
 ```
 
-Commit it on the existing issue branch (step 3 of `skill://legion-retro`).
+Commit it on the existing issue branch before the removal commit (step 4), so the removal stays
+the last commit.
