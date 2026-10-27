@@ -192,7 +192,7 @@ export interface AskBlockHost {
  * `undefined` otherwise. The key is always present so one loop writes every stamp: a static spec
  * skips an undefined attribute (prosemirror-model's `renderSpec`), and `applyAskBlockShell`
  * removes it. */
-export type AskBlockStamps = {
+type AskBlockStamps = {
   readonly "data-dispatch-ask-urgency": AskUrgency;
   readonly "data-dispatch-ask-state": string;
   readonly "data-dispatch-ask-malformed": "true" | undefined;

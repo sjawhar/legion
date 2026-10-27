@@ -1,4 +1,11 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import {
+  type Browser,
+  type BrowserContext,
+  expect,
+  type Locator,
+  type Page,
+  test,
+} from "@playwright/test";
 
 import {
   createComment,
@@ -136,19 +143,19 @@ test("a comment's ask block shows the decision card", async ({ browser }) => {
   }
 });
 
-// A reply under a document's decision is a text body drawn inside that decision's card. The
-// decision folds its own source option list once its card's rows show the options; that fold
-// must not reach the typed blocks a reply holds: a callout's bullet list is what its author
-// wrote, and a malformed decision in the reply has no rows, so its list is the only place its
-// options show.
-test("a reply under a document's decision keeps the lists of the typed blocks it holds", async ({
-  browser,
-}) => {
+/** Files an issue titled `title` whose document holds an open decision, replies `body` under that
+ * decision, and opens the issue as alice. Returns alice's context, for the caller to close, and
+ * the reply's thread inside the document's decision card. */
+async function replyUnderDocumentDecision(
+  browser: Browser,
+  title: string,
+  body: string
+): Promise<{ alice: BrowserContext; thread: Locator }> {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
     spec: "## Specification\n\nContext.\n",
-    title: "Reply under a decision",
+    title,
   });
   await editArtifact(
     issue.primary_artifact_id,
@@ -169,23 +176,36 @@ test("a reply under a document's decision keeps the lists of the typed blocks it
   if (storage === undefined) {
     throw new Error("the storage decision was not indexed");
   }
-  await createComment(
-    issue.key,
-    {
-      ask_id: storage.id,
-      body:
-        ':::callout{kind="warning" title="Steps first"}\n- step one\n- step two\n:::\n\n' +
-        ":::ask\nBroken inner?\n\n- Fine: ok\n- : blank\n:::\n",
-    },
-    agent
-  );
+  await createComment(issue.key, { ask_id: storage.id, body }, agent);
   const alice = await asUser(browser, "alice");
 
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
     const decision = documentEditor(page).locator('[data-dispatch-ask-block="storage"]');
-    const thread = decision.getByTestId(`thread-${storage.id}`);
+    return { alice, thread: decision.getByTestId(`thread-${storage.id}`) };
+  } catch (error) {
+    await alice.close();
+    throw error;
+  }
+}
+
+// A reply under a document's decision is a text body drawn inside that decision's card. The
+// decision folds its own source option list once its card's rows show the options; that fold
+// must not reach the typed blocks a reply holds: a callout's bullet list is what its author
+// wrote, and a malformed decision in the reply has no rows, so its list is the only place its
+// options show.
+test("a reply under a document's decision keeps the lists of the typed blocks it holds", async ({
+  browser,
+}) => {
+  const { alice, thread } = await replyUnderDocumentDecision(
+    browser,
+    "Reply under a decision",
+    ':::callout{kind="warning" title="Steps first"}\n- step one\n- step two\n:::\n\n' +
+      ":::ask\nBroken inner?\n\n- Fine: ok\n- : blank\n:::\n"
+  );
+
+  try {
     await expect(thread.getByText("Broken inner?", { exact: true })).toBeVisible();
 
     // The callout's own list shows.
@@ -205,48 +225,14 @@ test("a reply under a document's decision keeps the lists of the typed blocks it
 test("a decision in a reply under a document's decision sits flush in its card", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({
-    project: "CORE",
-    spec: "## Specification\n\nContext.\n",
-    title: "Nested decision in a reply",
-  });
-  await editArtifact(
-    issue.primary_artifact_id,
-    {
-      ops: [
-        {
-          after: "end",
-          markdown:
-            ':::ask{#storage urgency="high" multiple="false" state="open"}\nWhich engine?\n\n- Postgres: reuse\n- SQLite: one file\n:::\n',
-          op: "insert",
-        },
-      ],
-    },
-    { as: "agent" }
+  const { alice, thread } = await replyUnderDocumentDecision(
+    browser,
+    "Nested decision in a reply",
+    ":::ask\nNested question?\n\n- A: a\n- B: b\n:::\n\n" +
+      ":::ask\nBroken nested?\n\n- Fine: ok\n- : blank\n:::\n"
   );
-  await expect.poll(async () => (await getIssue(issue.key)).open_asks.length).toBe(1);
-  const [storage] = (await getIssue(issue.key)).open_asks;
-  if (storage === undefined) {
-    throw new Error("the storage decision was not indexed");
-  }
-  await createComment(
-    issue.key,
-    {
-      ask_id: storage.id,
-      body:
-        ":::ask\nNested question?\n\n- A: a\n- B: b\n:::\n\n" +
-        ":::ask\nBroken nested?\n\n- Fine: ok\n- : blank\n:::\n",
-    },
-    agent
-  );
-  const alice = await asUser(browser, "alice");
 
   try {
-    const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}`);
-    const decision = documentEditor(page).locator('[data-dispatch-ask-block="storage"]');
-    const thread = decision.getByTestId(`thread-${storage.id}`);
     const nested = thread.locator('section[data-proof-block-type="ask"]');
 
     // The well-formed nested decision's question sits flush under its card's header.
@@ -306,9 +292,9 @@ test("a malformed decision's blank option shows no bullet in a body, as in the d
     await expect(
       bodyDecision.locator("[data-proof-block-content] li").filter({ hasText: "A: first" })
     ).toBeVisible();
-    const bodyBlank = bodyDecision.locator("[data-proof-block-content] li:empty");
-    await expect(bodyBlank).toHaveCount(1);
-    await expect(bodyBlank).toHaveCSS("display", "none");
+    const bodyItems = bodyDecision.locator("[data-proof-block-content] > ul > li");
+    await expect(bodyItems).toHaveCount(2);
+    await expect(bodyItems.nth(1)).toHaveCSS("display", "none");
 
     await page.goto(`/issues/${issue.key}/artifacts/${created.artifact.slug}`);
     const docDecision = documentEditor(page).locator('[data-dispatch-ask-block="blank"]');
