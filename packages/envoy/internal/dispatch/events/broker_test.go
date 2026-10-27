@@ -2,10 +2,16 @@ package events
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -283,6 +289,201 @@ func appendEvent(t *testing.T, database *store.Store, broker *Broker, event mode
 }
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+
+// statementLog records the text of every statement a pool's connections send.
+type statementLog struct {
+	mu         sync.Mutex
+	statements []string
+}
+
+func (l *statementLog) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.statements = append(l.statements, data.SQL)
+	return ctx
+}
+
+func (l *statementLog) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// count is how many statements sent from since on contain text.
+func (l *statementLog) count(since int, text string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	count := 0
+	for _, statement := range l.statements[since:] {
+		if strings.Contains(statement, text) {
+			count++
+		}
+	}
+	return count
+}
+
+func (l *statementLog) mark() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.statements)
+}
+
+// AppendAll writes a transaction's events as Append would one after another - each owner's
+// events take its next sequences in the order given, its last_seq ends at the last of them, an
+// ownerless event's sequence is 0 - but locks each owner once, takes the commit-order lock once
+// and inserts every row in one statement, and hands the events back in the order given, each with
+// the id of its own row.
+func TestAppendAllSequencesMixedOwnersInInputOrderWithOneInsert(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	if _, err := database.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('PP', 'Project');
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values
+			('PP-1', 'PP', 1, 'First', '{"kind":"user","id":"alice"}', 'U'),
+			('PP-2', 'PP', 2, 'Second', '{"kind":"user","id":"alice"}', 'V');
+	`); err != nil {
+		t.Fatalf("seed owners: %v", err)
+	}
+	var artifactID string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into artifacts (project_key, slug, name, kind, created_by)
+		values ('PP', 'notes-md', 'notes.md', 'doc', '{"kind":"user","id":"alice"}')
+		returning id::text
+	`).Scan(&artifactID); err != nil {
+		t.Fatalf("create unlinked artifact: %v", err)
+	}
+	broker := NewBroker()
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	// PP-1 already has an event, so its next sequences start past 1.
+	appendEvent(t, database, broker, model.Event{IssueKey: new("PP-1"), Type: "issue.updated", Actor: alice, Payload: map[string]any{}})
+
+	log := &statementLog{}
+	config := database.Pool.Config()
+	config.ConnConfig.Tracer = log
+	opened, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open a traced pool: %v", err)
+	}
+	traced := store.NewPool(opened)
+	t.Cleanup(traced.Close)
+
+	type owner struct {
+		key     string
+		event   func() model.Event
+		lastSeq string
+		arg     string
+	}
+	issue1 := owner{key: "PP-1", event: func() model.Event { return model.Event{IssueKey: new("PP-1")} },
+		lastSeq: `select last_seq from issues where key = $1`, arg: "PP-1"}
+	issue2 := owner{key: "PP-2", event: func() model.Event { return model.Event{IssueKey: new("PP-2")} },
+		lastSeq: `select last_seq from issues where key = $1`, arg: "PP-2"}
+	artifact := owner{key: "artifact", event: func() model.Event { return model.Event{ArtifactID: new(artifactID)} },
+		lastSeq: `select last_seq from artifacts where id = $1`, arg: artifactID}
+	project := owner{key: "project", event: func() model.Event { return model.Event{ProjectKey: new("PP")} },
+		lastSeq: `select last_seq from projects where key = $1`, arg: "PP"}
+	session := owner{key: "session", event: func() model.Event {
+		return model.Event{Payload: model.UserAgentStateEventPayload{SessionID: "session-1"}}
+	}}
+	order := []owner{issue2, artifact, issue1, issue2, project, session, issue1, artifact, issue2}
+	given := make([]model.Event, len(order))
+	for index, owner := range order {
+		event := owner.event()
+		event.Actor = alice
+		event.Type = fmt.Sprintf("comment.probe_%d", index)
+		if owner.key == "session" {
+			event.Type = "user_agent_state.updated"
+		} else {
+			event.Payload = map[string]any{"index": index}
+		}
+		if index == 2 {
+			// A refresh never wakes anyone, so the notify flags are not all one value.
+			event.Type = "comment.anchor_refreshed"
+		}
+		given[index] = event
+	}
+
+	tx, err := traced.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	since := log.mark()
+	appended, err := broker.AppendAll(ctx, tx, given)
+	if err != nil {
+		t.Fatalf("append all: %v", err)
+	}
+	statements := log.mark() - since
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if inserts := log.count(since, "insert into events"); inserts != 1 {
+		t.Errorf("AppendAll sent %d inserts into events, want 1", inserts)
+	}
+	if locks := log.count(since, "pg_advisory_xact_lock"); locks != 1 {
+		t.Errorf("AppendAll took the commit-order lock %d times, want 1", locks)
+	}
+	if ownerLocks := log.count(since, "for no key update"); ownerLocks != 4 {
+		t.Errorf("AppendAll sent %d owner locks for 4 owners, want 4", ownerLocks)
+	}
+	// Four owner locks, the commit-order lock, the insert and four last_seq advances.
+	if statements != 10 {
+		t.Errorf("AppendAll of %d events on 4 owners and a session sent %d statements, want 10", len(given), statements)
+	}
+
+	if len(appended) != len(given) {
+		t.Fatalf("AppendAll returned %d events for %d given", len(appended), len(given))
+	}
+	wantSeq := map[string]int{"PP-1": 1}
+	for index, event := range appended {
+		owner := order[index]
+		want := 0
+		if owner.key != "session" {
+			wantSeq[owner.key]++
+			want = wantSeq[owner.key]
+		}
+		if event.Type != given[index].Type || event.Seq != want {
+			t.Errorf("event %d = %s seq %d, want %s seq %d", index, event.Type, event.Seq, given[index].Type, want)
+		}
+		if owner.key != "session" && event.Project != "PP" {
+			t.Errorf("event %d project = %q, want PP", index, event.Project)
+		}
+		if want := broker.Notify(event); event.Notify != want {
+			t.Errorf("event %d notify = %t, want %t", index, event.Notify, want)
+		}
+		if index > 0 && event.ID <= appended[index-1].ID {
+			t.Errorf("event %d id %d is not above event %d's %d: ids are not in input order", index, event.ID, index-1, appended[index-1].ID)
+		}
+		var storedType string
+		var storedSeq int
+		var storedNotify bool
+		var payload []byte
+		var createdAt time.Time
+		if err := database.Pool.QueryRow(ctx, `
+			select type, seq, notify, payload, created_at from events where id = $1
+		`, event.ID).Scan(&storedType, &storedSeq, &storedNotify, &payload, &createdAt); err != nil {
+			t.Fatalf("read event %d's row: %v", index, err)
+		}
+		if storedType != event.Type || storedSeq != event.Seq || storedNotify != event.Notify || !createdAt.Equal(event.CreatedAt) {
+			t.Errorf("event %d's row %d = %s seq %d notify %t at %s, want %s seq %d notify %t at %s",
+				index, event.ID, storedType, storedSeq, storedNotify, createdAt, event.Type, event.Seq, event.Notify, event.CreatedAt)
+		}
+		if owner.key != "session" {
+			var body struct {
+				Index int `json:"index"`
+			}
+			if err := json.Unmarshal(payload, &body); err != nil || body.Index != index {
+				t.Errorf("event %d's row %d carries payload %s, want index %d", index, event.ID, payload, index)
+			}
+		}
+	}
+	for _, owner := range []owner{issue1, issue2, artifact, project} {
+		var lastSeq int
+		if err := database.Pool.QueryRow(ctx, owner.lastSeq, owner.arg).Scan(&lastSeq); err != nil {
+			t.Fatalf("read %s last_seq: %v", owner.key, err)
+		}
+		if lastSeq != wantSeq[owner.key] {
+			t.Errorf("%s last_seq = %d, want %d", owner.key, lastSeq, wantSeq[owner.key])
+		}
+	}
+}
 
 // The owner row's lock is what allocates the per-owner event sequence, so weakening it to
 // `for no key update` - which it is, so a foreign-key child insert never waits on it - has to

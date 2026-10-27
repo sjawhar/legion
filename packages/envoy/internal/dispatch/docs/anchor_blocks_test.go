@@ -56,8 +56,9 @@ func TestBackfillAnchorBlocksPinsResolvableLegacyRowsOnce(t *testing.T) {
 // A settlement's anchor refresh owns two fields of an anchor, the quote and the orphan flag. It
 // reads each open row's anchor and writes it back, so a write of the whole column erases whatever
 // another writer put in that anchor after the refresh read it - here the block id the one-time
-// BackfillAnchorBlocks repair pins. The advisory lock holds the settlement between the ask's
-// refresh event and the comment's update, which is the window a loaded CI runner hit on its own.
+// BackfillAnchorBlocks repair pins. The advisory lock holds the settlement in its update of the
+// asks, after it read the rows and before it updates the comments, which is the window a loaded
+// CI runner hit on its own.
 func TestAnchorRefreshKeepsABlockIDPinnedAfterItReadTheRow(t *testing.T) {
 	const holdKey = int64(4815162342)
 	service, artifactID := newTestService(t)
@@ -98,8 +99,8 @@ func TestAnchorRefreshKeepsABlockIDPinnedAfterItReadTheRow(t *testing.T) {
 	}
 	if _, err := service.store.Pool.Exec(context.Background(), `
 		create trigger dispatch_test_hold_anchor_refresh
-		before insert on events for each row
-		when (new.type = 'ask.anchor_refreshed')
+		before update on asks for each row
+		when (new.anchor is distinct from old.anchor)
 		execute function dispatch_test_hold_anchor_refresh()
 	`); err != nil {
 		t.Fatalf("create anchor refresh hold trigger: %v", err)
