@@ -2,37 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-527",
-  "completed": "2026-10-27T07:00:00Z",
-  "round": 3,
-  "head": "5e832b77ad6174d51302a6790697f054f869b7b4",
+  "completed": "2026-10-27T08:50:00Z",
+  "round": 4,
+  "head": "84f50938f2b741fa1f714cc765e1a35bc9c551f0",
+  "rebaseCheck": {
+    "previousHead": "5e832b77ad6174d51302a6790697f054f869b7b4",
+    "newHead": "84f50938f2b741fa1f714cc765e1a35bc9c551f0",
+    "fingerprintBefore": "f3549e3d486deea516dd1bd45d81ed86c8153dee4ec7583a2288810a740019f6",
+    "fingerprintAfter": "5a80822aa077a2a8bc91d213bd3694223ec2451adeedd5b3f0656b811da35e3c",
+    "result": "changed, so a full round. The only differing lines are the MarkdownBody paragraph of packages/dispatch/AGENTS.md, which main's #2303 also edited; the branch's task-item sentence is kept there. Every code file's diff is identical."
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's round-3 command at 5e832b77ad61 with the tester lane's ports and database: `cd packages/dispatch && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts --repeat-each=5 --project=chromium --project=iphone )` → 50 passed. Re-ran its negative control (forced-colors block cut, 3 repeats instead of 5) → 12 failed of 12, Received 0."
+    "how": "Drove the same surface at the merged head 84f50938f2b7 with the implementer's command: `cd packages/dispatch && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts e2e/theme.e2e.ts e2e/held-sends.e2e.ts --project=chromium --project=iphone )` → 26 passed, 2 skipped."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 2, important: the forced-colors rows fail every time without the fix and pass every time with it, wherever each box lands",
-      "surface": "Issue page, Conversation tab, expanded thread, light/dark and forced colors light/dark; Chromium desktop (DPR 1), Chromium HiDPI desktop (DPR 2), Chromium as iPhone 13 (DPR 3); real Go server, Postgres 17 + pgvector",
-      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts --repeat-each=5 --project=chromium --project=iphone ); plus a throwaway config (deleted) spreading the base config with a Desktop Chrome HiDPI project, `bunx playwright test --config e2e/zz-tester.config.ts e2e/task-items.e2e.ts --repeat-each=2` after `bun run build:web`",
-      "observed": "chromium + iphone: 50 passed. Chromium HiDPI: 10 of 10 passed (A1 light/dark, both forced-colors rows, decision reply, twice each).",
-      "headSha": "5e832b77ad6174d51302a6790697f054f869b7b4",
-      "negativeControl": "`@media (forced-colors: active)` block cut from web/src/styles.css: `-g \"forced colors\" --repeat-each=3` → 12 failed of 12, each at \"share of the ticked box's middle that is ink\", Received 0. The ticked box's fill rule (`.dispatch-markdown [data-markdown-task-checkbox]:checked`) cut instead: the normal light/dark rows → 4 failed of 4 in chromium and iphone, Received 0. That build also failed those rows 8 of 8 in Firefox and Chromium HiDPI. styles.css restored after each (sha256 1bd98e5a824656903ec327c51cde82df08fb3a0d92c74f3cfcf7467b0d79398e both before and after)."
+      "criterion": "A1 (spec), A2, A4 and the forced-colors rows at the merged head: ticked and unticked boxes, read-only, the ticked one filled and the unticked one empty, in light, dark and forced colors",
+      "surface": "Issue page, Conversation tab and a decision block's reply thread; Chromium desktop and Chromium as iPhone 13; real Go server, Postgres 17 + pgvector",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts e2e/theme.e2e.ts e2e/held-sends.e2e.ts --project=chromium --project=iphone )",
+      "observed": "26 passed, 2 skipped (the project-gated skips): all 10 task-items rows green in chromium and iphone, together with the theme and held-sends rows that use the shared Thread-dialog helper.",
+      "headSha": "84f50938f2b741fa1f714cc765e1a35bc9c551f0",
+      "negativeControl": "task-items.e2e.ts at the new fork point b08a56bce0c8 (git archive, the branch's task-items.e2e.ts and e2e/editor.ts copied in, own database dispatch_527_tester_base, contracts built) → 10 failed of 10, each at expect(locator).toHaveCount(2), Received: 0."
     },
     {
-      "criterion": "A1 (spec), A2 and A4 at the new head: ticked and unticked boxes, read-only, the ticked one filled and the unticked one empty, in light and dark",
-      "surface": "Issue page, Conversation tab and a decision block's reply thread; Chromium, iPhone 13, Chromium HiDPI, Firefox desktop",
-      "command": "the two commands above; Firefox through the same throwaway config with a Desktop Firefox project",
-      "observed": "All A1/A2 rows passed in Chromium, iPhone 13 and HiDPI, and in Firefox the A1 light/dark and A2 rows passed in both repeats, under the new ink oracle (>=25% of the ticked box's middle is ink, <=5% of the unticked one's).",
-      "headSha": "5e832b77ad6174d51302a6790697f054f869b7b4",
-      "negativeControl": "Fork point 7f7edb8d (round 1, my own run): 6 failed at toHaveCount(2), Received 0; and the fill-rule cut above."
+      "criterion": "The merge with #2303 (unknown colon-fenced blocks rendered formatted) keeps task boxes inside such blocks",
+      "surface": "Issue page, Conversation tab, expanded thread; Chromium",
+      "command": "throwaway packages/dispatch/e2e/zz-tester-probe.e2e.ts (deleted): one comment holding `:::note` + task list + `:::`, `::: warning` + task list + `:::`, and a plain task list",
+      "observed": "6 task items, each with one disabled box ticked as its source (true,false x3); the fence lines show as text (`:::note`, `:::`, `::: warning`). The Pandoc closing `:::` reads as lazy continuation text of the last item ('pandoc open :::'), which is main's parse, not this branch's.",
+      "headSha": "84f50938f2b741fa1f714cc765e1a35bc9c551f0",
+      "negativeControl": "Same as above: at the new fork point no box is drawn for any task item."
     }
   ],
   "observations": [
-    "Firefox under emulated forced colors: both forced-colors rows fail in each run (Received 0), as in round 2. Firefox's emulation draws the disabled native checked box rgb(199,199,206) on white with a faint tick, which is below the oracle's 96-per-channel ink bar. Chromium's emulation uses the Windows High Contrast palettes and passes. Firefox is not in CI's matrix for this spec. [inference] Real Firefox on Windows High Contrast uses the theme's GrayText; WCAG 1.4.11 exempts inactive components. Not recorded as a failure.",
-    "Round 3 changed only packages/dispatch/e2e/task-items.e2e.ts (5e832b77); styles.css, task-checkboxes.ts and MarkdownBody.tsx are unchanged since 146a10cd, so round 2's WebKit run of the CSS (masked tick visible in desktop and iPhone WebKit) still describes the product.",
-    "The round-2 note on expectBoxesLookDifferent is resolved: the helper is replaced, and the negative control failed 12 of 12 where the old one passed once in 4."
+    "Earlier rounds' Firefox forced-colors observation still holds; the CSS is unchanged since 146a10cd.",
+    "GitHub reports the pull request MERGEABLE at 0698e217."
   ],
-  "ci": "Read on GitHub at 5e832b77ad61 at 2026-10-27T06:58Z: build, changes, lint, test, typecheck and pr-title check runs queued (one earlier pr-title cancelled); not waited for. At 146a10cdeffd (same product code) lint, typecheck and test completed success; dispatch cancelled. 32ccda78 is handoff-only (skip-checks)."
+  "ci": "Read on GitHub at 84f50938f2b7 at 2026-10-27T08:48Z: build, changes, lint, test, typecheck and pr-title queued (one earlier pr-title cancelled); not waited for. 0698e217 is handoff-only."
 }
