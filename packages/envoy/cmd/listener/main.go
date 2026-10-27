@@ -95,6 +95,24 @@ func roleHolderMayBeLive(logger *logging.Logger, sessions *session.SessionRegist
 	return !errors.Is(err, nats.ErrKeyNotFound)
 }
 
+// envDuration reads a duration an operator may override through the environment: an unset or
+// empty value leaves fallback standing, and so does one time.ParseDuration refuses, after a
+// single WARN naming the variable - a listener never refuses to start over a malformed duration.
+// The WARN's message and fields are what an operator's log filter matches, so they name the
+// variable exactly as it is written in the environment.
+func envDuration(logger *logging.Logger, name string, fallback time.Duration) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		logger.Warn("invalid "+name+"; using default", slog.String("value", v), slog.String("error", err.Error()))
+		return fallback
+	}
+	return d
+}
+
 // rewatchListenerKVWatchers recreates cache watchers that are not represented
 // by bus.Client subscriptions. It attempts every one so a failed rebuild of one
 // cannot leave the other caches permanently stale too.
@@ -122,9 +140,8 @@ func endListenerKVWatchers(ctx context.Context, caches []listenerCache) {
 // isUnrecoverableSelfHealthFailure distinguishes state that must be rebuilt
 // from transient JetStream deadlines. Rebuild only while the NATS client is
 // connected; a disconnected client owns its own infinite reconnect loop. A
-// missing bucket is terminal too: no watcher notices envoy_roles going, and a
-// rebuild cannot create a bucket, so its failed rebuilds end in a restart,
-// whose store Open creates it again.
+// missing bucket is terminal too: a rebuild cannot create a bucket, so its
+// failed rebuilds end in a restart, whose store Open creates it again.
 func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []listenerCache) bool {
 	if err == nil || !client.Connected() {
 		return false
@@ -185,6 +202,13 @@ func rebuildListenerDependencies(
 // defaults: a ping every 2 minutes, 2 outstanding), so there the exit comes about 15 minutes
 // after the stall.
 const disconnectedFailureThreshold = 20
+
+// attemptCacheTTL is how long the attempt cache (below) remembers a (dedupe_key, session_id)
+// pair it recorded before a delivery. It bounds the unplaceable retry window in
+// unplaceable_delivery.go, which clears and re-records one entry per attempt: a window that
+// reached this TTL could let a message's own retries outlive the entry that keeps its redelivery
+// from being swallowed.
+const attemptCacheTTL = 5 * time.Minute
 
 // runSelfHealthMonitor leaves transient dependency timeouts degraded while
 // NATS reconnects. A terminal watcher, closed KV handle, or missing durable
@@ -341,7 +365,8 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // once the durable consumer binds, which during a rolling deploy waits out the task being replaced
 // while /v1 already serves; 200 "healthy" with the durable consumer's lag once every dependency
 // answers; 503 "unhealthy" when NATS is unavailable, the durable subscription is inactive, a
-// cache's watcher has stopped, the durable consumer is gone, or the durable consumer is
+// cache's watcher has stopped, the durable consumer is gone, a bus check did not answer within
+// healthzBudget, or the durable consumer is
 // "not bound to this listener's subscription" because it was recreated server-side and now
 // delivers elsewhere; and 200 "degraded" for a transient KV failure the self-health monitor and
 // the NATS reconnect retry. A listener that mounts no GitHub webhook route keeps no CI cache,
@@ -349,6 +374,14 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // lane is "subscribed" or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a
 // live client that is not connected or holds no valid subscription is 503 "live subscription
 // inactive", since every topic the stream does not store then reaches no session.
+//
+// The checks that go to the bus share one healthzBudget taken from the request's own context: the
+// flush, each cache's KV ping and the durable consumer's info read. A ping or that read that has
+// not answered when it ends (healthzPing) is 503 unhealthy naming the dependency and the
+// context's deadline, so a stall in JetStream alone, which the flush's core PING does not see,
+// fails the container health check inside the budget, as the 10 s JetStream wait it replaces
+// failed it by running past the check's timeout. A check that answered with a failure keeps its
+// answer.
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -358,7 +391,9 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "starting"})
 			return
 		}
-		if err := d.client.Conn.FlushTimeout(3 * time.Second); err != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), healthzBudget)
+		defer cancel()
+		if err := d.client.Conn.FlushWithContext(ctx); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "nats unavailable"})
 			return
@@ -380,8 +415,8 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			}
 		}
 		for _, c := range d.caches {
-			if err := c.cache.Ping(); err != nil {
-				writeDependencyHealth(w, c.name+" KV", err, c.cache.WatchErr() != nil || errors.Is(err, nats.ErrConnectionClosed))
+			if answered, err := healthzPing(ctx, c.cache); err != nil {
+				writeDependencyHealth(w, c.name+" KV", err, !answered || c.cache.WatchErr() != nil || errors.Is(err, nats.ErrConnectionClosed))
 				return
 			}
 		}
@@ -396,9 +431,10 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		if d.live != nil {
 			response["live_topics"] = "subscribed"
 		}
-		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer)
+		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer, nats.Context(ctx))
 		if err != nil {
-			writeDependencyHealth(w, "durable consumer", err, errors.Is(err, nats.ErrConsumerNotFound))
+			// A read ctx ended did not answer, the info read's own form of healthzPing's unanswered.
+			writeDependencyHealth(w, "durable consumer", err, ctx.Err() != nil || errors.Is(err, nats.ErrConsumerNotFound))
 			return
 		}
 		// One read and no confirming second one, unlike durableProbe's: the endpoint reports the
@@ -413,6 +449,20 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(response)
 	}
+}
+
+// healthzBudget bounds the bus checks of one /healthz answer.
+const healthzBudget = 3 * time.Second
+
+// healthzPing is cache's Ping as a /healthz request holding ctx waits for it (bus.Bounded): nats.go's
+// KV Status takes no context, so a ping that has not answered when ctx ends is answered false, with
+// ctx's error, the "context deadline exceeded" a ping that waited out the JetStream MaxWait failed
+// with. The abandoned ping runs on to its answer or that wait; what it can still do then - record a
+// recreated bucket's error on its watcher, or prune the session cache's last-seen times - is what
+// any later ping would do.
+func healthzPing(ctx context.Context, cache kvCache) (answered bool, err error) {
+	_, answered, err = bus.Bounded(ctx, func() (struct{}, error) { return struct{}{}, cache.Ping() })
+	return answered, err
 }
 
 func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, terminal bool) {
@@ -694,7 +744,7 @@ func main() {
 	// health endpoint exposes the unavailable registry while NATS recovers.
 	cacheReadyCtx, cacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := registry.WaitForCacheReady(cacheReadyCtx); err != nil {
-		logger.Warn("interest cache warm-up timed out; serving with possibly empty cache",
+		logger.Warn("interest or role claim cache warm-up timed out; serving with possibly empty cache",
 			slog.String("error", err.Error()))
 	}
 	cacheReadyCancel()
@@ -740,7 +790,6 @@ func main() {
 		MachineID:    cfg.MachineID,
 		HostBridge:   os.Getenv("ENVOY_HOST_BRIDGE"),
 		RequestLimit: 30 * time.Second,
-		Sessions:     sessions,
 	}
 
 	dedupeCache := dedupe.New(10 * time.Minute)
@@ -752,9 +801,18 @@ func main() {
 	// envelopes with the same EventID but distinct DedupeKeys. The existing
 	// dedupeCache records only successful deliveries (post-delivery) and
 	// cannot catch this slow-204 case. See #389.
-	attemptCache := dedupe.New(5 * time.Minute)
+	//
+	// attemptCacheTTL is named because the unplaceable retry below is bounded against it: a
+	// message whose retries outlived its attempt entry would have each redelivery recorded
+	// afresh instead of clearing one, so the bound is pinned by a test
+	// (TestUnplaceableRetryWindowFitsTheBoundsItDependsOn).
+	attemptCache := dedupe.New(attemptCacheTTL)
 
 	roleQueue := bus.ListenerQueue(cfg.MachineID)
+
+	// The window an agent delivery this listener cannot place is retried within before it is
+	// given up with a record (unplaceable_delivery.go).
+	unplaceableRetryWindow := envDuration(logger, "ENVOY_UNPLACEABLE_RETRY_WINDOW", defaultUnplaceableRetryWindow)
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
@@ -773,6 +831,14 @@ func main() {
 		messagesDelivered: messagesDelivered,
 		messagesNAKed:     messagesNAKed,
 		deliveryDuration:  deliveryDuration,
+
+		unplaceableRetryWindow: unplaceableRetryWindow,
+		// One deferral set for the life of the process, shared by construction by the three
+		// handlers built from this one value below - the role lane's, the durable's and the one
+		// the self-health rebind builds - so a rebind after a NATS flap draws on the budget the
+		// handler it replaces was holding rather than opening a second one beside it
+		// (unplaceableDeferrals, unplaceable_delivery.go).
+		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
 
 	// The role lane is a core-NATS queue subscription in this machine's group. During a rolling
@@ -888,14 +954,7 @@ func main() {
 	// due.
 	summaryCtx, summaryCancel := context.WithCancel(context.Background())
 	if ciStore != nil {
-		ciDebounce := 5 * time.Second
-		if v := os.Getenv("ENVOY_CI_DEBOUNCE"); v != "" {
-			if d, perr := time.ParseDuration(v); perr == nil {
-				ciDebounce = d
-			} else {
-				logger.Warn("invalid ENVOY_CI_DEBOUNCE; using default", slog.String("value", v), slog.String("error", perr.Error()))
-			}
-		}
+		ciDebounce := envDuration(logger, "ENVOY_CI_DEBOUNCE", 5*time.Second)
 		cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
 	}
 

@@ -141,7 +141,7 @@ func TestSessionRegistry_Delete(t *testing.T) {
 	entry := SessionEntry{Port: 13381, MachineID: "test-machine", Dir: "/test"}
 	reg.Put("ses_del", entry)
 
-	if err := reg.Delete("ses_del"); err != nil {
+	if err := reg.Delete(context.Background(), "ses_del"); err != nil {
 		t.Fatalf("delete failed: %v", err)
 	}
 
@@ -338,7 +338,7 @@ func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *test
 		KeyValue: reg.watcher.KV(),
 		err:      errors.New("injected history failure"),
 	})
-	if err := reg.Delete(sessionID); err != nil {
+	if err := reg.Delete(context.Background(), sessionID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
