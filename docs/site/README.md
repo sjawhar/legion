@@ -47,3 +47,5 @@ refuses relative links (`errorOnRelativeLinks`, its default) or, with that off, 
 How to write a page, the generator contract and where media goes are on the published site's
 [Contributing to these docs](https://sjawhar.github.io/legion/contributing/) page, whose source is
 `src/content/docs/contributing.md`.
+
+<!-- scratch INFRA-520 docs-draft -->
