@@ -15,17 +15,17 @@ import (
 )
 
 // publishAcknowledgementTimeout bounds one publish: the wait for a connection and the server's
-// answer to it, a JetStream acknowledgement or a core publish's flush.
+// answer to it, a JetStream acknowledgement or a Request's answer.
 const publishAcknowledgementTimeout = 5 * time.Second
 
 // ErrUnavailable is wrapped by the outcome of a window's send that NATS did not take because of
 // the connection rather than the envelope: the client had no connection within the publish window,
 // the window's connection had been lost or had reconnected since its first send (so the window
 // sent nothing), or the connection was lost or reconnected after the envelope was sent and before
-// NATS answered it, so whether it landed is unknown. A core publish whose own flush failed or ran
-// out of time is one too (answered). NATS giving no answer on a connection that stayed current is
-// ErrNotAcknowledged instead. Sending it again is safe on a JetStream subject, where its MsgId
-// drops a repeat, and on a role lane, whose receivers drop a repeat by its dedupe key.
+// NATS answered it, so whether it landed is unknown. NATS giving no answer on a connection that
+// stayed current is ErrNotAcknowledged instead. Sending it again is safe: a JetStream publish and
+// a Request under a MsgId are stored once by the stream, and the receiver of a Request drops a
+// repeat by its dedupe key.
 var ErrUnavailable = errors.New("NATS is unreachable")
 
 // ErrNotAcknowledged is wrapped by the outcome of a window's send that NATS gave no
@@ -35,10 +35,18 @@ var ErrUnavailable = errors.New("NATS is unreachable")
 // an attempt, rather than resending it on the next connection as it does an ErrUnavailable.
 var ErrNotAcknowledged = errors.New("NATS did not acknowledge the publish")
 
+// ErrNotCaptured is wrapped by the outcome of a window's PublishAsync of a topic the stream does
+// not capture (StreamCaptures), answered before anything is sent. The window publishes only to the
+// stream, whose acknowledgement answers for each envelope; a core forward goes through Request,
+// whose receiver answers it. It is neither ErrRefused nor ErrUnavailable: the caller backs the
+// envelope off as a failure of its own.
+var ErrNotCaptured = errors.New("the stream does not capture the topic")
+
 // Sender sends envelopes without waiting for NATS's answers (Client.Window).
 type Sender interface {
-	// PublishAsync sends item and returns a channel that receives the outcome exactly once: nil
-	// once NATS accepted item, or why it did not.
+	// PublishAsync sends item to the stream and returns a channel that receives the outcome
+	// exactly once: nil once the stream acknowledged item, or why it did not. A topic the stream
+	// does not capture answers ErrNotCaptured.
 	PublishAsync(item contracts.Envelope) <-chan error
 	// Request sends item over core NATS to subject, which can differ from item.Topic, with a reply
 	// inbox, and returns a channel that receives the outcome exactly once: nil once its receiver
@@ -63,41 +71,39 @@ type RequestOptions struct {
 	Timeout time.Duration
 }
 
-// Window returns a Sender whose sends all go out on one connection, in the order they are made,
-// or not at all. Its first send waits, within publishAcknowledgementTimeout, for the client to have
-// a connection, and pins the window to it. Every later send goes out on that connection only while
-// it is connected and has not reconnected since; otherwise it answers ErrUnavailable at once,
-// without sending, so what of a window reached NATS is always a prefix of what was sent: once one
-// is lost to the connection, none sent after it can land after it on a connection that came back.
+// Window returns a Sender whose sends all go out on one connection, or not at all. Its first send
+// waits, within publishAcknowledgementTimeout, for the client to have a connection, and pins the
+// window to it. Every later send checks that connection first and answers ErrUnavailable at once,
+// without sending, once it has been lost or has reconnected since, so a window does not go on
+// sending across a connection it saw fail.
 //
-// That is all the order a window keeps. Its answers come back in whatever order the server and the
-// stream give them; a JetStream publish NATS did not acknowledge may still be stored, after sends
-// made later; and a core publish sent again (below) lands after the sends made since. A caller
-// that needs one envelope to land before another sends the second only once the first's answer is
-// in: the outbox does so for each owner's events to each destination key (internal/dispatch/outbox,
-// planChains), which is the order a receiver relies on, and lets everything else proceed side by
-// side.
+// A window keeps no order of its own between its sends. Its answers come back in whatever order
+// the server and the stream give them, and a JetStream publish NATS did not acknowledge may still
+// be stored after sends made later. Order per (owner, destination) is the caller's: the outbox
+// makes the next send of one owner to one destination only once the answer to the one before it
+// is in (internal/dispatch/outbox, planChains and sendChains), so no two sends of one (owner,
+// destination) are ever in flight on a window, and lets everything else proceed side by side.
 //
-// Each send goes on the transport Publish would use (usesCoreTransport), under the same MsgId. An
-// outcome decided before anything was sent is in the channel when PublishAsync returns: a refusal
-// (ErrRefused), or ErrUnavailable. Otherwise the answer comes within publishAcknowledgementTimeout:
-// a JetStream acknowledgement (the JetStream context's PublishAsyncTimeout), or a core publish's own
-// flush, confirmed as PublishCoreTo confirms one (confirmFlushed). A JetStream publish NATS does
+// The pin's check comes before the write, and a reconnect can land between the two. That breaks no
+// order: the envelope is then written on the reconnected connection, and its answer - the stream's
+// acknowledgement, or a Request's receipt - comes on that connection and answers for it truly, as
+// for any send made after the reconnect. An earlier send lost with the old connection is answered
+// ErrUnavailable and sent again by its caller; since it is of another (owner, destination), the
+// envelope that landed ahead of it is ahead of nothing it must follow.
+//
+// PublishAsync sends only to the stream, under the MsgId Publish would use: a topic the stream does
+// not capture answers ErrNotCaptured, and a core forward goes through Request. An outcome decided
+// before anything was sent is in the channel when PublishAsync returns: a refusal (ErrRefused),
+// ErrNotCaptured, or ErrUnavailable. Otherwise the answer is the stream's acknowledgement, within
+// publishAcknowledgementTimeout (the JetStream context's PublishAsyncTimeout). A publish NATS does
 // not acknowledge, or answers with no responders, is ErrNotAcknowledged while the window's
-// connection stays current and ErrUnavailable once it does not. A core publish that its own flush
-// cannot confirm because another publish on the connection changed its last error in the meantime
-// is published again alone on the window's connection, which answers for it: once every core flush
-// of the window has returned, and one such republish at a time, so that another of the window's
-// denials cannot land during it and leave it unconfirmed too. A republish costs a round trip of its
-// own, so a batch in which one denial left many sends unconfirmed takes that many round trips more.
+// connection stays current and ErrUnavailable once it does not.
 //
 // A Request is a send of the window too, pinned and refused by the same rules, and a Probe pins
 // the window when nothing has yet (window.Request, window.Probe). The window's methods are safe to
 // call from several goroutines at once.
 func (c *Client) Window() Sender {
-	w := &window{client: c}
-	w.settled = sync.NewCond(&w.mu)
-	return w
+	return &window{client: c}
 }
 
 type window struct {
@@ -109,12 +115,6 @@ type window struct {
 	conn       *nats.Conn
 	js         nats.JetStreamContext
 	reconnects uint64
-
-	// mu guards flushing, the window's core sends and requests whose flush has not returned, and
-	// is held across a republish. settled is signalled when flushing reaches zero.
-	mu       sync.Mutex
-	flushing int
-	settled  *sync.Cond
 }
 
 func (w *window) PublishAsync(item contracts.Envelope) <-chan error {
@@ -128,10 +128,13 @@ func (w *window) PublishAsync(item contracts.Envelope) <-chan error {
 	return outcome
 }
 
-// send writes item to the window's connection and returns what waits for the server's answer.
+// send writes item to the window's connection and returns what waits for the stream's answer.
 func (w *window) send(item contracts.Envelope) (func() error, error) {
 	if err := checkSubject(item.Topic); err != nil {
 		return nil, err
+	}
+	if !StreamCaptures(item.Topic) {
+		return nil, fmt.Errorf("bus: %w: %q", ErrNotCaptured, item.Topic)
 	}
 	data, err := json.Marshal(item)
 	if err != nil {
@@ -139,9 +142,6 @@ func (w *window) send(item contracts.Envelope) (func() error, error) {
 	}
 	if err := w.pin(publishAcknowledgementTimeout); err != nil {
 		return nil, err
-	}
-	if usesCoreTransport(item.Topic) {
-		return w.sendCore(item, data)
 	}
 	return w.sendJetStream(item, data)
 }
@@ -173,70 +173,6 @@ func (w *window) pin(wait time.Duration) error {
 // window pinned it.
 func (w *window) current() bool {
 	return w.conn.IsConnected() && w.conn.Stats().Reconnects == w.reconnects
-}
-
-// sendCore publishes data, item's encoding, to item's topic over core NATS and returns what
-// confirms that the server accepted it. The send counts itself in flushing before it reads the
-// clock, so time it spent waiting behind a republish for the window's lock is not taken from its
-// own flush.
-func (w *window) sendCore(item contracts.Envelope, data []byte) (func() error, error) {
-	w.mu.Lock()
-	w.flushing++
-	w.mu.Unlock()
-	deadline := time.Now().Add(publishAcknowledgementTimeout)
-	before := observe(w.conn)
-	if err := w.conn.PublishMsg(&nats.Msg{Subject: item.Topic, Data: data}); err != nil {
-		w.flushed()
-		return nil, w.unsent(err, len(data))
-	}
-	return func() error {
-		err := confirmFlushed(w.conn, item.Topic, before, deadline)
-		w.flushed()
-		if err == nil || errors.Is(err, ErrPublishDenied) || !errors.Is(err, errPublishUnconfirmed) {
-			return w.answered(err)
-		}
-		return w.republish(item, data)
-	}, nil
-}
-
-// republish publishes data, item's encoding, again alone on the window's connection, once every
-// core flush of the window has returned, holding the window's lock so that one republish runs at
-// a time and no send of the window lands during it.
-func (w *window) republish(item contracts.Envelope, data []byte) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for w.flushing > 0 {
-		w.settled.Wait()
-	}
-	if !w.current() {
-		return fmt.Errorf("bus: %w: the window's connection was lost or reconnected before the publish to %q was sent again", ErrUnavailable, item.Topic)
-	}
-	msg := &nats.Msg{Subject: item.Topic, Data: data}
-	return w.answered(w.client.publishConfirmed(w.conn, msg, time.Now().Add(publishAcknowledgementTimeout), w.conn.PublishMsg))
-}
-
-// answered names a core publish's confirmation: accepted, denied, still unconfirmed, or
-// ErrUnavailable when the connection failed or the flush ran out of time, so whether it landed
-// is unknown.
-func (w *window) answered(err error) error {
-	if err == nil || errors.Is(err, ErrPublishDenied) || errors.Is(err, ErrUnavailable) || errors.Is(err, ErrRefused) {
-		return err
-	}
-	if !w.current() || errors.Is(err, nats.ErrConnectionClosed) || errors.Is(err, nats.ErrConnectionReconnecting) ||
-		errors.Is(err, nats.ErrTimeout) || errors.Is(err, errFlushWindowElapsed) {
-		return fmt.Errorf("bus: %w: %w", ErrUnavailable, err)
-	}
-	return err
-}
-
-// flushed records that one of the window's core sends or requests has its flush's answer.
-func (w *window) flushed() {
-	w.mu.Lock()
-	w.flushing--
-	if w.flushing == 0 {
-		w.settled.Broadcast()
-	}
-	w.mu.Unlock()
 }
 
 // sendJetStream publishes data, item's encoding, to the stream and returns what waits for its
@@ -292,9 +228,7 @@ const requestReplies = 4
 //     wrapping ErrNotAcknowledged and ErrReceiptTimeout, and the flush's own failure when the flush
 //     failed or could not confirm the publish.
 //
-// The request counts in the window's flushing until its flush returns, as a core send does, so a
-// republish neither runs while its flush is out nor has it published during one. Its inbox is
-// unsubscribed once the outcome is decided.
+// Its inbox is unsubscribed once the outcome is decided.
 func (w *window) Request(subject string, item contracts.Envelope, opts RequestOptions) <-chan error {
 	outcome := make(chan error, 1)
 	answer, err := w.request(subject, item, opts)
@@ -331,20 +265,15 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 	if opts.MsgID != "" {
 		msg.Header = nats.Header{nats.MsgIdHdr: []string{opts.MsgID}}
 	}
-	w.mu.Lock()
-	w.flushing++
-	w.mu.Unlock()
 	deadline := time.Now().Add(cmp.Or(opts.Timeout, publishAcknowledgementTimeout))
 	before := observe(w.conn)
 	if err := w.conn.PublishMsg(msg); err != nil {
-		w.flushed()
 		_ = receipt.Unsubscribe()
 		return nil, w.unsent(err, len(data))
 	}
 	return func() error {
 		defer receipt.Unsubscribe()
 		unconfirmed := confirmFlushed(w.conn, subject, before, deadline)
-		w.flushed()
 		if errors.Is(unconfirmed, ErrPublishDenied) {
 			return unconfirmed
 		}

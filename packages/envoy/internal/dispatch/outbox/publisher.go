@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/roles"
 )
 
 const (
@@ -80,6 +81,12 @@ type Deps struct {
 	// is required of a Run that ticks: there is no nil-means-unleased path, and cmd/dispatch
 	// exits at boot if the lease pool cannot be opened.
 	Leases duty.Leases
+	// RoleClaims and Sessions are where a role route's holder is resolved (roles.ResolveHolder,
+	// resolveRoleHolders): role claims read from the role bucket, released there when their holder
+	// is gone, and holders read from the session bucket. cmd/dispatch passes one roles.Buckets for
+	// both, reading on Publisher's connection.
+	RoleClaims roles.ClaimStore
+	Sessions   roles.SessionLookup
 }
 
 // compactDaily runs compactDocuments once per compactInterval until ctx ends, on a goroutine of its
@@ -130,48 +137,50 @@ type fencedSender struct {
 
 func (s fencedSender) PublishAsync(item contracts.Envelope) <-chan error {
 	if !time.Now().Before(s.hold.Deadline()) {
-		return fencedAnswer()
+		return failedAnswer(errFenced)
 	}
 	return s.Sender.PublishAsync(item)
 }
 
 func (s fencedSender) Request(subject string, item contracts.Envelope, opts bus.RequestOptions) <-chan error {
 	if !time.Now().Before(s.hold.Deadline()) {
-		return fencedAnswer()
+		return failedAnswer(errFenced)
 	}
 	return s.Sender.Request(subject, item, opts)
 }
 
-func fencedAnswer() <-chan error {
+// failedAnswer is a send's answer already decided: err.
+func failedAnswer(err error) <-chan error {
 	answer := make(chan error, 1)
-	answer <- errFenced
+	answer <- err
 	return answer
 }
 
 // scanBatch reads a batch (readBatch), resolves its events' destinations with the batch's
-// followers and authors read in at most four statements (loadLookups), and sends it through one
-// window (bus.Client.Window) as chains: the sends of one owner's events to one destination key go
-// one at a time, in id order, each once the one before it reached its destination, while the
-// chains of different owners and destination keys proceed side by side (planChains, sendChains).
-// That is the order a receiver needs and the only one the batch keeps: a session takes an owner's
-// events in id order on each subject family it receives them on, while the sends to different
-// owners or destination keys land in whatever order their answers allow. A send that fails holds
-// back only its own chain, and an event that is not due holds back its owner's later events only
-// from the destinations it has not reached. What the batch came to is written in one statement
-// (recordBatch).
+// followers and authors read in at most four statements (loadLookups) and its role routes' holders
+// read once per role (resolveRoleHolders), and sends it through one window (bus.Client.Window) as
+// chains: the sends of one owner's events to one destination key go one at a time, in id order,
+// each once the one before it reached its destination, while the chains of different owners and
+// destination keys proceed side by side (planChains, sendChains). That is the order a receiver
+// needs and the only one the batch keeps: a session takes an owner's events in id order on each
+// subject family it receives them on, while the sends to different owners or destination keys land
+// in whatever order their answers allow. A send that fails holds back only its own chain, and an
+// event that is not due holds back its owner's later events only from the destinations it has not
+// reached. What the batch came to is written in one statement (recordBatch).
 //
 // A failure is classified once every answer is in. A send that met a lost or replaced connection
 // (bus.ErrUnavailable) is no fault of its event, and its event is released with no attempt
 // counted, to be sent again on the reconnect's wake. A send NATS denied (bus.ErrPublishDenied), did
 // not acknowledge on a connection still current (bus.ErrNotAcknowledged: no acknowledgement in
-// time, no responders) or failed some other way backs its event off with the attempt counted and
-// the error recorded. A batch with a send that failed for the connection either way then looks at
-// the connection: a client that has reconnected since the batch began (its connection changed and
-// it is connected again) releases the not-acknowledged events too and keeps the hold, since the
-// resend follows on the reconnect's wake; otherwise the batch probes its window's connection, and a
-// probe that fails - a silent cut on a connection still the window's, or a client not connected -
-// reports NATS lost, which gives the publisher hold up (Outbox), and releases the not-acknowledged
-// events rather than backing them off.
+// time, no responders, no receipt from a role's holder), a role route whose holder could not be
+// resolved or is stale (roleForward), or a send that failed some other way backs its event off
+// with the attempt counted and the error recorded. A batch with a send that failed for the
+// connection either way then looks at the connection: a client that has reconnected since the
+// batch began (its connection changed and it is connected again) releases the not-acknowledged
+// events too and keeps the hold, since the resend follows on the reconnect's wake; otherwise the
+// batch probes its window's connection, and a probe that fails - a silent cut on a connection still
+// the window's, or a client not connected - reports NATS lost, which gives the publisher hold up
+// (Outbox), and releases the not-acknowledged events rather than backing them off.
 //
 // The batch runs under hold, the publisher hold: every send checks its deadline first
 // (fencedSender), and once it has passed the batch sends nothing more and is left unrecorded - the
@@ -194,6 +203,7 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 	if err := resolveDestinations(ctx, deps, events); err != nil {
 		return batchResult{}, err
 	}
+	resolveRoleHolders(deps, events)
 	chains := planChains(events)
 
 	changed := deps.Publisher.ConnectionChanged()
@@ -499,9 +509,9 @@ func deferPastWindow(events []*batchEvent) []outcome {
 //
 // A write that fails leaves the whole batch as it was read, which is what a process that dies
 // between NATS's acknowledgements and this write leaves too: the batch is sent again by the next
-// scan or the next holder. JetStream drops each repeat inside its duplicate window by its MsgId; a
-// role lane, over core NATS, carries the repeat, and its receivers drop it by its dedupe key
-// (internal/contracts/dedupe.go).
+// scan or the next holder. JetStream drops each repeat inside its duplicate window by its MsgId,
+// a role forward's included (roleForward.send), and a role's holder drops a repeat forward by its
+// dedupe key (internal/contracts/dedupe.go).
 func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid.UUID) (bool, error) {
 	if len(outcomes) == 0 {
 		return true, nil
@@ -627,11 +637,15 @@ type destinations struct {
 }
 
 func (d *destinations) add(subject, label, id string) {
-	if _, ok := d.seen[subject]; ok {
+	d.addDestination(destination{subject: subject, label: label, id: id})
+}
+
+func (d *destinations) addDestination(dest destination) {
+	if _, ok := d.seen[dest.subject]; ok {
 		return
 	}
-	d.seen[subject] = struct{}{}
-	d.list = append(d.list, destination{subject: subject, label: label, id: id})
+	d.seen[dest.subject] = struct{}{}
+	d.list = append(d.list, dest)
 }
 
 // addSessions adds each session's own subject, named by label and the session.
@@ -670,7 +684,7 @@ func eventDestinations(event model.Event, ownerTopic string, route *string, look
 }
 
 // addRoute adds the owner's route: a session route is the session's own subject, and a role route
-// its role topic, which goes over core NATS to the role lane.
+// its role topic, which the batch forwards to the role's holder (resolveRoleHolders).
 func addRoute(d *destinations, route *string) error {
 	if route == nil || *route == "" {
 		return nil
@@ -681,7 +695,7 @@ func addRoute(d *destinations, route *string) error {
 	}
 	switch parsed.Kind {
 	case "role":
-		d.add(contracts.RoleTopicPrefix+parsed.ID, "publish route", *route)
+		d.addDestination(destination{subject: contracts.RoleTopicPrefix + parsed.ID, label: "publish route", id: *route, role: parsed.ID})
 	case "session":
 		d.add(contracts.AgentSubject(parsed.ID), "publish route", *route)
 	default:

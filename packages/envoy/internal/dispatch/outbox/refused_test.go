@@ -43,6 +43,11 @@ func (p *refusingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	return answered(p.Publish(item))
 }
 
+// Request takes a role forward by its envelope's topic, the role's, as Publish takes a publish.
+func (p *refusingPublisher) Request(_ string, item contracts.Envelope, _ bus.RequestOptions) <-chan error {
+	return answered(p.Publish(item))
+}
+
 func (p *refusingPublisher) snapshot() (map[string]int, []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

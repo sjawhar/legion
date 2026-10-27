@@ -39,6 +39,11 @@ func (p *heldPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	return answer
 }
 
+// Request holds a role forward as PublishAsync holds a publish, by its envelope's topic, the role's.
+func (p *heldPublisher) Request(_ string, item contracts.Envelope, _ bus.RequestOptions) <-chan error {
+	return p.PublishAsync(item)
+}
+
 func (p *heldPublisher) sent() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()

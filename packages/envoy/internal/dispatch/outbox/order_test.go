@@ -8,12 +8,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -21,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -112,11 +115,18 @@ func (s sendClockSender) PublishAsync(item contracts.Envelope) <-chan error {
 	return s.Sender.PublishAsync(item)
 }
 
-// An issue's events each go to its topic family and to session S's own subject. S's subject fails
-// for the first event - the stream stops capturing agent subjects, so NATS answers its publish with
-// no responders - and the first event is backed off. Two later events written while it waits reach
+// An issue's events each go to its topic family and to session S. S's destination fails for the
+// first event, and the first event is backed off. Two later events written while it waits reach
 // the topic family at once, but S only after the first one does, and S takes all three in order.
+// S is reached two ways: as a session route on its own subject, which fails when the stream stops
+// capturing agent subjects, so NATS answers its publish with no responders; and as the holder of
+// the issue's role, to which the first event's forward fails because S withholds its receipt.
 func TestABackedOffEventHoldsBackOnlyItsDestination(t *testing.T) {
+	t.Run("a session route the stream does not take", holdsBackASessionRouteTheStreamRefuses)
+	t.Run("a role holder that withholds its receipt", holdsBackARoleHolderThatWithholdsItsReceipt)
+}
+
+func holdsBackASessionRouteTheStreamRefuses(t *testing.T) {
 	_, url := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
@@ -202,6 +212,105 @@ func TestABackedOffEventHoldsBackOnlyItsDestination(t *testing.T) {
 			t.Fatalf("event %d reached the topic family at stream sequence %d, after the first event reached S at %d: it waited on S",
 				event.ID, at, firstAtS)
 		}
+	}
+}
+
+func holdsBackARoleHolderThatWithholdsItsReceipt(t *testing.T) {
+	rig := newRoleRig(t)
+	const role, holder = "reviewer", "S"
+	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	// S answers no forward of the first event until released, and every other at once. Each
+	// forward it takes is recorded with whether it answered it.
+	type arrival struct {
+		id       int64
+		answered bool
+	}
+	var (
+		withheld atomic.Int64
+		released atomic.Bool
+		mu       sync.Mutex
+		arrivals []arrival
+	)
+	sub, err := rig.conn.Subscribe(contracts.AgentSubject(holder), func(msg *natsgo.Msg) {
+		id := envelopeEventID(t, msg.Data)
+		answer := id != withheld.Load() || released.Load()
+		mu.Lock()
+		arrivals = append(arrivals, arrival{id: id, answered: answer})
+		mu.Unlock()
+		if answer {
+			_ = msg.Respond(nil)
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe S: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := rig.conn.Flush(); err != nil {
+		t.Fatalf("flush S's subscription: %v", err)
+	}
+	taken := func() []arrival {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(arrivals)
+	}
+	first := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
+	withheld.Store(first.ID)
+	write := func(body string) model.Event {
+		return appendEvent(t, rig.database, rig.broker, model.Event{
+			IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+			Payload: model.Message{ID: uuid.NewString(), IssueKey: new("T-1"), Body: body},
+		})
+	}
+	stop := runOutbox(t, rig.database, rig.client, rig.broker)
+	defer stop()
+	waitFor(t, 15*time.Second, "the first event backed off for S", func() bool {
+		_, attempts := publishedDestinations(t, rig.database, first.ID)
+		return attempts > 0
+	})
+	second, third := write("second"), write("third")
+
+	topic := "notifications.dispatch.issue.T-1.message.created"
+	waitFor(t, 10*time.Second, "the later events on the topic family", func() bool {
+		bySubject, _ := streamOrder(t, rig.conn)
+		return slices.Contains(bySubject[topic], second.ID) && slices.Contains(bySubject[topic], third.ID)
+	})
+	for _, got := range taken() {
+		if got.id != first.ID {
+			t.Fatalf("S took event %d while the first event's receipt was withheld: %v", got.id, taken())
+		}
+	}
+	for _, event := range []model.Event{first, second, third} {
+		if publishedAt(t, rig.database, event.ID) != nil {
+			t.Fatalf("event %d was published before S answered the first event", event.ID)
+		}
+	}
+
+	released.Store(true)
+	waitFor(t, 45*time.Second, "all three events published", func() bool {
+		return publishedAt(t, rig.database, first.ID) != nil && publishedAt(t, rig.database, second.ID) != nil &&
+			publishedAt(t, rig.database, third.ID) != nil
+	})
+	for _, event := range []model.Event{second, third} {
+		if _, attempts := publishedDestinations(t, rig.database, event.ID); attempts != 0 {
+			t.Fatalf("event %d counted %d attempts, want none: it only waited on the first event", event.ID, attempts)
+		}
+	}
+	answeredFirst := slices.IndexFunc(taken(), func(got arrival) bool { return got.id == first.ID && got.answered })
+	if answeredFirst < 0 {
+		t.Fatalf("S never answered the first event: %v", taken())
+	}
+	var order []int64
+	for index, got := range taken() {
+		if got.id != first.ID && index < answeredFirst {
+			t.Fatalf("S took event %d before it answered the first event: %v", got.id, taken())
+		}
+		if !slices.Contains(order, got.id) {
+			order = append(order, got.id)
+		}
+	}
+	if want := []int64{first.ID, second.ID, third.ID}; !slices.Equal(order, want) {
+		t.Fatalf("S took events %v, want %v: each only after the one before it", order, want)
 	}
 }
 
@@ -490,7 +599,7 @@ func TestAPublishedEventIsWrittenOnce(t *testing.T) {
 				}
 			}
 			before := settled()
-			holding(t, Deps{Store: database, Publisher: &recordingPublisher{}}).scan(ctx, unfenced{})
+			holding(t, withHeldRoles(Deps{Store: database, Publisher: &recordingPublisher{}})).scan(ctx, unfenced{})
 			for _, event := range seeded {
 				if publishedAt(t, database, event.ID) == nil {
 					t.Fatalf("event %d was not published", event.ID)
@@ -633,7 +742,7 @@ func TestARecordFromAProcessThatLostTheHoldWritesNoBackOff(t *testing.T) {
 	}
 	done, failing, behind := message("T-1"), message("T-2"), message("T-2")
 	publisher := &recordingPublisher{failTopic: roleTopic}
-	outbox := New(Deps{Store: database, Publisher: publisher})
+	outbox := New(withHeldRoles(Deps{Store: database, Publisher: publisher}))
 	// Another process holds the hold now.
 	holdRow(t, database, uuid.New())
 

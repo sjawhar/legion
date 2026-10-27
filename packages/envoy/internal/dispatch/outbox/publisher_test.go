@@ -32,8 +32,8 @@ func answered(err error) <-chan error {
 }
 
 // publishOnly completes Publisher and bus.Sender for a test publisher the outbox only publishes
-// through: the outbox sends nothing with Request, so a Request answers that it is not served, and
-// the publisher is always connected, so its connection never changes.
+// through: a Request answers that it is not served, and the publisher is always connected, so its
+// connection never changes. A test publisher that takes role forwards serves Request itself.
 type publishOnly struct{}
 
 func (publishOnly) Request(subject string, _ contracts.Envelope, _ bus.RequestOptions) <-chan error {
@@ -53,7 +53,8 @@ type unfenced struct{}
 func (unfenced) Deadline() time.Time { return time.Now().Add(time.Hour) }
 
 // publish sends event to each of its destinations not in delivered, as a batch of that one event
-// would, one at a time, and returns every failure, each named by its destination.
+// would, one at a time - a role route forwarded to its holder as deps resolves it - and returns
+// every failure, each named by its destination.
 func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
 	if event.IssueKey == nil && event.ArtifactID == nil && event.Project == "" {
 		return nil
@@ -69,15 +70,28 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 		return err
 	}
 	list, resolveErr := eventDestinations(event, item.Topic, route, found)
+	single := &batchEvent{item: item, destinationsOf: list}
+	resolveRoleHolders(deps, []*batchEvent{single})
 	sender := deps.Publisher.Window()
 	var failures []error
-	for _, dest := range list {
+	for _, dest := range single.destinationsOf {
 		if _, ok := delivered[dest.subject]; ok {
 			continue
 		}
 		routed := item
 		routed.Topic = dest.subject
-		if err := <-sender.PublishAsync(routed); err != nil && !errors.Is(err, bus.ErrRefused) {
+		var answer <-chan error
+		switch {
+		case dest.forward == nil:
+			answer = sender.PublishAsync(routed)
+		case dest.forward.skip != "":
+			continue
+		case dest.forward.err != nil:
+			answer = failedAnswer(dest.forward.err)
+		default:
+			answer = dest.forward.send(sender, routed)
+		}
+		if err := <-answer; err != nil && !errors.Is(err, bus.ErrRefused) {
 			failures = append(failures, fmt.Errorf("%s %q: %w", dest.label, dest.id, err))
 		}
 	}
@@ -134,7 +148,21 @@ func (p *recordingPublisher) Publish(item contracts.Envelope) error {
 
 func (p *recordingPublisher) Window() bus.Sender { return p }
 
+// PublishAsync answers a topic the stream does not capture as a window does (bus.ErrNotCaptured),
+// so a role route the outbox published to its role topic, rather than forwarding it, fails here.
 func (p *recordingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	if !bus.StreamCaptures(item.Topic) {
+		return answered(fmt.Errorf("%w: %q", bus.ErrNotCaptured, item.Topic))
+	}
+	return answered(p.Publish(item))
+}
+
+// Request takes a role forward to roleHolder's subject under the forward's dedupe key as the
+// holder's receipt would answer it, recording the envelope, whose topic is still the role's.
+func (p *recordingPublisher) Request(subject string, item contracts.Envelope, _ bus.RequestOptions) <-chan error {
+	if subject != contracts.AgentSubject(roleHolder) || !strings.HasPrefix(item.DedupeKey, contracts.RoleForwardDedupePrefix) {
+		return answered(fmt.Errorf("a Request to %q with dedupe key %q is no role forward to %s", subject, item.DedupeKey, roleHolder))
+	}
 	return answered(p.Publish(item))
 }
 
@@ -168,6 +196,10 @@ func (p *blockingFailPublisher) Publish(contracts.Envelope) error {
 func (p *blockingFailPublisher) Window() bus.Sender { return p }
 
 func (p *blockingFailPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
+}
+
+func (p *blockingFailPublisher) Request(_ string, item contracts.Envelope, _ bus.RequestOptions) <-chan error {
 	return answered(p.Publish(item))
 }
 
@@ -1551,7 +1583,7 @@ func TestRunMarksIssueLessTargetedMessagesPublishedWithoutRepublishing(t *testin
 // run runs an outbox on database, publishing through publisher, until the returned func stops it.
 func run(t *testing.T, database *store.Store, publisher Publisher, broker *events.Broker) func() {
 	t.Helper()
-	return runDeps(t, Deps{Store: database, Publisher: publisher, Broker: broker, Listen: database.Pool.Listener}, time.Second)
+	return runDeps(t, withHeldRoles(Deps{Store: database, Publisher: publisher, Broker: broker, Listen: database.Pool.Listener}), time.Second)
 }
 
 // runDeps runs New(deps) until the returned func stops it, which fails t unless Run returns within

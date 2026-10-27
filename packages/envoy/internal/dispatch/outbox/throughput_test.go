@@ -21,6 +21,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/roles"
+	"github.com/sjawhar/envoy/internal/session"
+	envoystore "github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -273,15 +276,20 @@ func firstDescent(ids []int64) int {
 	return -1
 }
 
+// throughputHolder is the session that holds role:reviewer, every load issue's route, in the
+// throughput rig.
+const throughputHolder = "ses_reviewer"
+
 // throughputRig is a real NATS server with its notification stream, the deployed bus client
-// reaching it through a latency proxy, a direct connection that reads what arrived, and a migrated
+// reaching it through a latency proxy, a direct connection that reads what arrived and on which
+// role:reviewer's self-subscribed holder answers every forward with its receipt, and a migrated
 // database whose shared pool is kept busy.
 type throughputRig struct {
 	database *store.Store
 	client   *bus.Client
 	reader   *natsgo.Conn
 	broker   *events.Broker
-	// role is every envelope that arrived on the role lane, in arrival order.
+	// role is every forward the role's holder received, in arrival order.
 	roleMu sync.Mutex
 	role   []int64
 }
@@ -302,16 +310,33 @@ func newThroughputRig(t *testing.T, rtt time.Duration) *throughputRig {
 	}
 	t.Cleanup(reader.Close)
 	rig := &throughputRig{database: storetest.Open(t), client: client, reader: reader, broker: events.NewBroker()}
-	if _, err := reader.Subscribe(roleTopic, func(message *natsgo.Msg) {
+	if _, err := reader.Subscribe(contracts.AgentSubject(throughputHolder), func(message *natsgo.Msg) {
 		id := envelopeEventID(t, message.Data)
 		rig.roleMu.Lock()
 		rig.role = append(rig.role, id)
 		rig.roleMu.Unlock()
+		_ = message.Respond(nil)
 	}); err != nil {
-		t.Fatalf("subscribe to the role lane: %v", err)
+		t.Fatalf("subscribe the role's holder: %v", err)
 	}
 	if err := reader.Flush(); err != nil {
-		t.Fatalf("flush the role subscription: %v", err)
+		t.Fatalf("flush the holder's subscription: %v", err)
+	}
+	registry, err := envoystore.Open(reader)
+	if err != nil {
+		t.Fatalf("open the role registry: %v", err)
+	}
+	t.Cleanup(registry.StopWatch)
+	sessions, err := session.OpenSessionRegistry(reader)
+	if err != nil {
+		t.Fatalf("open the session registry: %v", err)
+	}
+	t.Cleanup(sessions.StopWatch)
+	if _, err := registry.SetRole(throughputHolder, "test-machine", "reviewer", false); err != nil {
+		t.Fatalf("claim role:reviewer: %v", err)
+	}
+	if err := sessions.Put(throughputHolder, session.SessionEntry{SelfSubscribed: true}); err != nil {
+		t.Fatalf("register the role's holder: %v", err)
 	}
 	return rig
 }
@@ -326,9 +351,9 @@ func (r *throughputRig) roleArrivals() []int64 {
 // 4.5 a second in production) when every NATS round trip carries a remote hub's latency and the
 // API keeps the shared database pool busy, and it keeps the order consumers rely on: each issue's
 // events reach each of its destinations in id order - its subject on the stream, the author's own
-// subject, the role lane (the Legion daemon fences an issue's facts on their sequence and drops
-// one older than the last it applied). Different issues' events interleave as their sends' answers
-// allow. The rate is logged for comparison.
+// subject, the role's holder, forwarded to with a receipt (the Legion daemon fences an issue's
+// facts on their sequence and drops one older than the last it applied). Different issues' events
+// interleave as their sends' answers allow. The rate is logged for comparison.
 //
 // The burst cases put a batch of events on one issue, the shape whose events share every
 // destination, so each destination takes them one round trip after another, and log the drain
@@ -394,48 +419,63 @@ func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 				}
 			}
 
+			issueOf := map[int64]string{}
+			for _, event := range seeded {
+				issueOf[event.ID] = *event.IssueKey
+			}
 			bySubject, all := streamOrder(t, rig.reader)
 			ownerSubjects := 0
 			for subject, ids := range bySubject {
 				if strings.HasPrefix(subject, "notifications.dispatch.issue.") {
 					ownerSubjects++
 				}
-				if at := firstDescent(ids); at >= 0 {
-					t.Fatalf("subject %s holds event %d after event %d: %v", subject, ids[at], ids[at-1], ids)
+				// The holder's subject carries every issue's forwards, interleaved as their
+				// receipts allow: the order is each issue's.
+				byIssue := map[string][]int64{}
+				for _, id := range ids {
+					byIssue[issueOf[id]] = append(byIssue[issueOf[id]], id)
+				}
+				for issue, issueIDs := range byIssue {
+					if at := firstDescent(issueIDs); at >= 0 {
+						t.Fatalf("subject %s holds %s's event %d after its event %d: %v", subject, issue, issueIDs[at], issueIDs[at-1], issueIDs)
+					}
 				}
 			}
 			if ownerSubjects != issues {
 				t.Fatalf("the stream holds %d issue subjects, want %d", ownerSubjects, issues)
 			}
-			wantStream := count + count/2 // each event's issue topic, and the replies' author topic
+			// Each event's issue topic, the replies' author topic, and each event's forward to the
+			// role's holder, whose agent subject the stream captures.
+			wantStream := count + count/2 + count
 			if len(all) != wantStream {
 				t.Fatalf("the stream holds %d messages, want %d", len(all), wantStream)
 			}
-			waitFor(t, 5*time.Second, "every role-lane envelope", func() bool { return len(rig.roleArrivals()) == len(seeded) })
-			issueOf := map[int64]string{}
-			for _, event := range seeded {
-				issueOf[event.ID] = *event.IssueKey
+			if got := len(rig.roleArrivals()); got != len(seeded) {
+				t.Fatalf("the role's holder received %d forwards, want one per event: %d", got, len(seeded))
 			}
-			roles := map[string][]int64{}
+			arrivals := map[string][]int64{}
 			for _, id := range rig.roleArrivals() {
-				roles[issueOf[id]] = append(roles[issueOf[id]], id)
+				arrivals[issueOf[id]] = append(arrivals[issueOf[id]], id)
 			}
-			for issue, ids := range roles {
+			for issue, ids := range arrivals {
 				if at := firstDescent(ids); at >= 0 {
-					t.Fatalf("the role lane received %s's event %d after its event %d", issue, ids[at], ids[at-1])
+					t.Fatalf("the role's holder received %s's event %d after its event %d", issue, ids[at], ids[at-1])
 				}
 			}
 		})
 	}
 }
 
-// runOutbox runs the outbox as cmd/dispatch wires it, on database's outbox pool and publishing
-// through client, until the returned func stops it.
+// runOutbox runs the outbox as cmd/dispatch wires it, on database's outbox pool, publishing through
+// client and resolving role routes from the role and session buckets on client's connection, until
+// the returned func stops it.
 func runOutbox(t *testing.T, database *store.Store, client *bus.Client, broker *events.Broker) func() {
 	t.Helper()
 	pool, err := database.Pool.Outbox()
 	if err != nil {
 		t.Fatalf("open the outbox's pool: %v", err)
 	}
-	return runDeps(t, Deps{Store: &store.Store{Pool: pool}, Publisher: client, Broker: broker, Listen: database.Pool.Listener}, 10*time.Second)
+	holders := roles.NewBuckets(client)
+	return runDeps(t, Deps{Store: &store.Store{Pool: pool}, Publisher: client, Broker: broker, Listen: database.Pool.Listener,
+		RoleClaims: holders, Sessions: holders}, 10*time.Second)
 }

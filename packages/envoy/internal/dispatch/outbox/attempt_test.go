@@ -44,6 +44,11 @@ func (p *countingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	return answered(p.Publish(item))
 }
 
+// Request takes a role forward by its envelope's topic, the role's, as Publish takes a publish.
+func (p *countingPublisher) Request(_ string, item contracts.Envelope, _ bus.RequestOptions) <-chan error {
+	return answered(p.Publish(item))
+}
+
 func (p *countingPublisher) attempted() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -166,7 +171,7 @@ func publishOnce(t *testing.T, database *store.Store, publisher Publisher, event
 		t.Fatalf("decode payload: %v", err)
 	}
 	route := "role:reviewer"
-	return publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, "", &route, map[string]struct{}{})
+	return publish(context.Background(), withHeldRoles(Deps{Store: database, Publisher: publisher}), event, "", &route, map[string]struct{}{})
 }
 
 func denial(subject string) error {

@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -28,11 +29,6 @@ var rolePattern = regexp.MustCompile(rolePatternString)
 
 type streamInfoLookup interface {
 	StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error)
-}
-
-type roleClaimResolver interface {
-	RoleClaim(role string) (store.RoleClaim, error)
-	ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL time.Duration) (store.ExpiredRoleClaimRelease, error)
 }
 
 type apiError struct {
@@ -376,24 +372,14 @@ func senderStamp(registry *store.Registry, sessions *session.SessionRegistry, so
 	return sender
 }
 
-const roleHolderResolutionAttempts = 2
+// roleHolderSessions is the listener's roles.SessionLookup: a holder read through
+// roleHolderSession, the cache first and then the session bucket.
+type roleHolderSessions struct {
+	*session.SessionRegistry
+}
 
-// releaseExpiredRoleClaim is the single point in the listener that
-// interprets store.ExpiredRoleClaimRelease's ExpiredRoleClaimSuperseded
-// outcome. Both resolveLiveRoleHolder (HTTP role lookups) and
-// resolveCoreRoleHolder (synchronous role-lane delivery, delivery.go) call
-// it instead of registry.ReleaseExpiredRoleClaim directly, so a claim that
-// raced a fresh SetRole before the conditional delete landed is reported as
-// "must re-resolve" in exactly one place. A second, drifted branch on
-// ExpiredRoleClaimSuperseded is exactly how a live replacement holder ends
-// up reported as this call's stale verdict — the defect this helper exists
-// to make structurally impossible.
-func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string, sessionTTL time.Duration) (release store.ExpiredRoleClaimRelease, superseded bool, err error) {
-	release, err = registry.ReleaseExpiredRoleClaim(role, sessionID, sessionTTL)
-	if err != nil {
-		return release, false, err
-	}
-	return release, release == store.ExpiredRoleClaimSuperseded, nil
+func (s roleHolderSessions) Holder(sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
+	return roleHolderSession(s.SessionRegistry, sessionID, live)
 }
 
 // roleHolderSession is a role holder's session entry for a decision that can take the role from it:
@@ -429,43 +415,44 @@ func registered(session.SessionEntry) bool { return true }
 // write timeout (main.go) and the 10 s JetStream MaxWait the read would otherwise wait out.
 const roleHolderReadTimeout = 2 * time.Second
 
-func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
-	for range roleHolderResolutionAttempts {
-		claim, err := registry.RoleClaim(role)
-		if err != nil {
-			return roleHolderResult{}, err
+// resolveLiveRoleHolder resolves role's holder for an HTTP role lookup (roles.ResolveHolder): any
+// registered session is live here. A lapsed holder's last_seen is the session registry's memory of
+// it.
+func resolveLiveRoleHolder(registry roles.ClaimStore, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
+	resolution, err := roles.ResolveHolder(registry, roleHolderSessions{sessions}, role, registered)
+	if readErr, ok := errors.AsType[*roles.ReadError](err); ok {
+		switch readErr.Step {
+		case roles.SessionRead:
+			return roleHolderResult{}, fmt.Errorf("read role holder session: %w", readErr.Err)
+		case roles.Release:
+			return roleHolderResult{}, fmt.Errorf("drop expired role claim: %w", readErr.Err)
+		default:
+			return roleHolderResult{}, readErr.Err
 		}
-		if claim.HolderSessionID == "" {
-			return roleHolderResult{state: roleHolderUnclaimed}, nil
-		}
-		entry, err := roleHolderSession(sessions, claim.HolderSessionID, registered)
-		if errors.Is(err, nats.ErrKeyNotFound) {
-			lastSeen := sessions.LastSeen(claim.HolderSessionID)
-			release, superseded, err := releaseExpiredRoleClaim(registry, role, claim.HolderSessionID, sessions.TTL())
-			if err != nil {
-				return roleHolderResult{}, fmt.Errorf("drop expired role claim: %w", err)
-			}
-			if superseded {
-				continue
-			}
-			return roleHolderResult{
-				state:             roleHolderLapsed,
-				holder:            claim.HolderSessionID,
-				lastSeen:          lastSeen,
-				lastSeenAvailable: lastSeen != 0,
-				claimRelease:      release,
-			}, nil
-		}
-		if err != nil {
-			return roleHolderResult{}, fmt.Errorf("read role holder session: %w", err)
-		}
-		return roleHolderResult{
-			state:  roleHolderLive,
-			holder: claim.HolderSessionID,
-			entry:  entry,
-		}, nil
 	}
-	return roleHolderResult{}, fmt.Errorf("role holder changed while resolving")
+	if err != nil {
+		return roleHolderResult{}, err
+	}
+	switch resolution.State {
+	case roles.Unclaimed:
+		return roleHolderResult{state: roleHolderUnclaimed}, nil
+	case roles.Lapsed:
+		lastSeen := sessions.LastSeen(resolution.Holder)
+		return roleHolderResult{
+			state:             roleHolderLapsed,
+			holder:            resolution.Holder,
+			lastSeen:          lastSeen,
+			lastSeenAvailable: lastSeen != 0,
+			claimRelease:      resolution.Release,
+		}, nil
+	case roles.Churned:
+		return roleHolderResult{}, fmt.Errorf("role holder changed while resolving")
+	}
+	return roleHolderResult{
+		state:  roleHolderLive,
+		holder: resolution.Holder,
+		entry:  resolution.Entry,
+	}, nil
 }
 
 // sendHandler publishes a direct message only while the target session has a

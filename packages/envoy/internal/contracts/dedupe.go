@@ -2,6 +2,12 @@ package contracts
 
 import "regexp"
 
+// RoleForwardDedupePrefix starts the dedupe key of a role forward: an envelope sent to a role's
+// holder on the holder's agent subject, its topic still the role's, its dedupe key this prefix and
+// the original's. The listener's role arbiter and Dispatch's outbox both forward under it, and an
+// envelope carrying it is never arbitrated again.
+const RoleForwardDedupePrefix = "envoy.role.forward."
+
 var mintedDedupeKey = regexp.MustCompile(MintedDedupeKeyPattern)
 
 // DedupeKeyNamesTheUpstreamEvent reports whether an envelope's dedupe key names its event, so that a

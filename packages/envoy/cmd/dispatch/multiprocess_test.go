@@ -325,19 +325,24 @@ func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
 
 // ───── the outbox ───────────────────────────────────────────────────────────
 
-// outboxRoleLane is the role the outbox row's issue is routed to: its events are published on
-// notifications.role.<lane>, which travels over core NATS with no message id, so the stream's
-// duplicate window hides nothing there. It is the lane a second publish of one event shows up on.
-const outboxRoleLane = "multiprocess-outbox"
+// outboxRoleLane is the role the outbox row's issue is routed to, and outboxRoleHolder its holder:
+// each event is forwarded to the holder's agent subject with a Request, which a core subscriber of
+// that subject is handed every time it is sent, whatever the stream's duplicate window keeps. It
+// is where a second publish of one event shows up.
+const (
+	outboxRoleLane   = "multiprocess-outbox"
+	outboxRoleHolder = "ses_multiprocess_outbox"
+)
 
 // Both processes run an outbox on one events table, and one of them at a time holds the publisher
 // hold and publishes, so one event is published once however many processes run: every row
 // reaches published_at, the stream holds one retained message per (dedupe key, topic), and the
-// role lane - core NATS, no message id, no deduplication anywhere - carries exactly one message per
-// event.
+// role's holder - a core subscriber that answers every forward with its receipt, as a session
+// plugin does - takes exactly one forward per event. Nothing crosses the role's own topic.
 func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 	pair := startPair(t, nil)
-	conn := testnats.Connect(t, pair.nats)
+	rig := newLoadRig(t, pair.nats)
+	conn := rig.conn
 	js, err := conn.JetStream()
 	if err != nil {
 		t.Fatalf("JetStream context: %v", err)
@@ -345,6 +350,18 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 	// This row counts only what it publishes itself: readStreamFrom starts past this head.
 	head := streamHead(t, js)
 
+	forwards := make(chan contracts.Envelope, 256)
+	holderSub, err := conn.Subscribe(contracts.AgentSubject(outboxRoleHolder), func(msg *natsgo.Msg) {
+		var item contracts.Envelope
+		if err := json.Unmarshal(msg.Data, &item); err == nil && strings.HasPrefix(item.DedupeKey, contracts.RoleForwardDedupePrefix) {
+			forwards <- item
+			_ = msg.Respond(nil)
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe the role's holder: %v", err)
+	}
+	t.Cleanup(func() { _ = holderSub.Unsubscribe() })
 	lane := make(chan contracts.Envelope, 256)
 	laneSub, err := conn.Subscribe(contracts.RoleTopicPrefix+outboxRoleLane, func(msg *natsgo.Msg) {
 		var item contracts.Envelope
@@ -353,9 +370,13 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 		}
 	})
 	if err != nil {
-		t.Fatalf("subscribe to the role lane: %v", err)
+		t.Fatalf("subscribe to the role's topic: %v", err)
 	}
 	t.Cleanup(func() { _ = laneSub.Unsubscribe() })
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush the subscriptions: %v", err)
+	}
+	rig.registerHolder(t, outboxRoleLane, outboxRoleHolder)
 
 	project := uniqueProjectKey(t, "OBX")
 	pair.a.createProject(t, project, "Outbox")
@@ -377,22 +398,28 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 
 	waitForEveryEventPublished(t, pair.database, 60*time.Second)
 
-	// The role lane's messages are read after every event is marked published, plus a settling
-	// read: a second publish of an already published event would arrive after the mark, and
-	// this is where it would be seen.
-	received := drainEnvelopes(t, lane, 3*time.Second)
+	// The holder's forwards are read after every event is marked published, plus a settling read:
+	// a second publish of an already published event would arrive after the mark, and this is
+	// where it would be seen.
+	received := drainEnvelopes(t, forwards, 3*time.Second)
 	perEvent := map[string]int{}
 	for _, item := range received {
+		if item.Topic != contracts.RoleTopicPrefix+outboxRoleLane {
+			t.Errorf("the holder received a forward of event %s on topic %q, want the role's", item.SourceEventID, item.Topic)
+		}
 		perEvent[item.SourceEventID]++
 	}
 	if len(perEvent) < comments {
-		t.Errorf("the role lane carried %d events, want at least the %d comments:\n%v", len(perEvent), comments, perEvent)
+		t.Errorf("the role's holder took %d events, want at least the %d comments:\n%v", len(perEvent), comments, perEvent)
 	}
 	for eventID, count := range perEvent {
 		if count != 1 {
-			t.Errorf("event %s reached the role lane %d times; two processes publishing one event is what the publisher hold prevents:\n%v",
+			t.Errorf("event %s reached the role's holder %d times; two processes publishing one event is what the publisher hold prevents:\n%v",
 				eventID, count, perEvent)
 		}
+	}
+	if carried := len(lane); carried != 0 {
+		t.Errorf("the role's topic carried %d envelopes, want none: the outbox forwards to the holder itself", carried)
 	}
 
 	perMessage := map[string]int{}

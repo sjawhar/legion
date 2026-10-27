@@ -15,14 +15,15 @@ import (
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
 
 // roleForwardDedupePrefix marks an envelope already sent from the role arbiter
-// to its selected agent subject. The durable agent-stream replay must ACK it
-// without re-entering the arbiter.
-const roleForwardDedupePrefix = "envoy.role.forward."
+// to its selected agent subject (contracts.RoleForwardDedupePrefix). The
+// durable agent-stream replay must ACK it without re-entering the arbiter.
+const roleForwardDedupePrefix = contracts.RoleForwardDedupePrefix
 
 const roleReceiptTimeout = 2 * time.Second
 
@@ -308,78 +309,71 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 }
 
 // resolveCoreRoleHolder resolves the current live holder for a role-lane
-// delivery, applying the terminal no_holder/delivery_failed outcome itself
-// and reporting ok=false when there is nobody to deliver to. Delivery
-// distrusts a claim whose holder has not heartbeated within
+// delivery (roles.ResolveHolder), applying the terminal no_holder/delivery_failed
+// outcome itself and reporting ok=false when there is nobody to deliver to.
+// Delivery distrusts a claim whose holder has not heartbeated within
 // session.ClaimStaleAfter even when its registry cache entry has not yet
 // expired (the plugin heartbeats every 90 seconds — DEFAULT_HEARTBEAT_MS,
 // packages/envoy-client/src/envoy-settings.ts — so three missed heartbeats
 // means the claiming process is very likely gone) — stricter
 // than resolveLiveRoleHolder's plain ErrKeyNotFound check, since a dropped
-// delivery is costlier here than an HTTP 404. Both that stricter check and
-// resolveLiveRoleHolder release an expired claim through the shared
-// releaseExpiredRoleClaim helper and retry, bounded to
-// roleHolderResolutionAttempts, whenever the release reports the claim it
-// tried to drop was already superseded by a fresh one — so a claim raced by
-// a live replacement is re-resolved to that replacement here exactly as it
-// is for GET /v1/roles/<role>, instead of reporting delivery_failed about a
-// session a fresh claim has already superseded.
+// delivery is costlier here than an HTTP 404. Both resolve through
+// roles.ResolveHolder, which releases an expired claim and resolves again,
+// bounded, whenever the release reports the claim it tried to drop was
+// already superseded by a fresh one — so a claim raced by a live replacement
+// is re-resolved to that replacement here exactly as it is for
+// GET /v1/roles/<role>, instead of reporting delivery_failed about a session a
+// fresh claim has already superseded.
 func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
-	for range roleHolderResolutionAttempts {
-		sessionID, err := cfg.registry.RoleHolder(role)
-		if err != nil {
+	fresh := func(holder session.SessionEntry) bool {
+		return holder.UpdatedAt > 0 && time.Now().UnixMilli()-holder.UpdatedAt < int64(session.ClaimStaleAfter/time.Millisecond)
+	}
+	resolution, err := roles.ResolveHolder(cfg.registry, roleHolderSessions{cfg.sessions}, role, fresh)
+	if readErr, ok := errors.AsType[*roles.ReadError](err); ok {
+		sessionID := readErr.Holder
+		switch readErr.Step {
+		case roles.ClaimRead:
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				metricStatus: "failed",
 				log: func(logger *logging.Logger) {
-					logger.Error("listener role holder lookup failed", slog.String("role", role), slog.String("error", err.Error()))
+					logger.Error("listener role holder lookup failed", slog.String("role", role), slog.String("error", readErr.Err.Error()))
 				},
 				exceptionReason: "delivery_failed",
 			})
-			return "", session.SessionEntry{}, false
-		}
-		if sessionID == "" {
+		case roles.SessionRead:
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				metricStatus: "skipped",
+				sessionID:    sessionID,
+				metricStatus: "failed",
 				log: func(logger *logging.Logger) {
-					logger.DeliveryLog(slog.LevelWarn, "listener role has no holder", "", item.Topic, item.EventID, "skipped")
+					logger.Error("listener role holder session lookup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", readErr.Err.Error()))
 				},
-				exceptionReason: "no_holder",
+				exceptionReason: "delivery_failed",
 			})
-			return "", session.SessionEntry{}, false
+		default:
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				sessionID:    sessionID,
+				metricStatus: "failed",
+				log: func(logger *logging.Logger) {
+					logger.Error("listener expired role claim cleanup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", readErr.Err.Error()))
+				},
+				exceptionReason: "delivery_failed",
+			})
 		}
-		now := time.Now().UnixMilli()
-		holder, holderErr := roleHolderSession(cfg.sessions, sessionID, func(holder session.SessionEntry) bool {
-			return holder.UpdatedAt > 0 && now-holder.UpdatedAt < int64(session.ClaimStaleAfter/time.Millisecond)
+		return "", session.SessionEntry{}, false
+	}
+	switch resolution.State {
+	case roles.Live:
+		return resolution.Holder, resolution.Entry, true
+	case roles.Unclaimed:
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			metricStatus: "skipped",
+			log: func(logger *logging.Logger) {
+				logger.DeliveryLog(slog.LevelWarn, "listener role has no holder", "", item.Topic, item.EventID, "skipped")
+			},
+			exceptionReason: "no_holder",
 		})
-		if holderErr == nil {
-			return sessionID, holder, true
-		}
-		if !errors.Is(holderErr, nats.ErrKeyNotFound) {
-			applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				sessionID:    sessionID,
-				metricStatus: "failed",
-				log: func(logger *logging.Logger) {
-					logger.Error("listener role holder session lookup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", holderErr.Error()))
-				},
-				exceptionReason: "delivery_failed",
-			})
-			return "", session.SessionEntry{}, false
-		}
-		_, superseded, err := releaseExpiredRoleClaim(cfg.registry, role, sessionID, cfg.sessions.TTL())
-		if err != nil {
-			applyDeliveryOutcome(cfg, item, deliveryOutcome{
-				sessionID:    sessionID,
-				metricStatus: "failed",
-				log: func(logger *logging.Logger) {
-					logger.Error("listener expired role claim cleanup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", err.Error()))
-				},
-				exceptionReason: "delivery_failed",
-			})
-			return "", session.SessionEntry{}, false
-		}
-		if superseded {
-			continue
-		}
+	case roles.Lapsed:
+		sessionID := resolution.Holder
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: "failed",
@@ -388,15 +382,15 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 			},
 			exceptionReason: "delivery_failed",
 		})
-		return "", session.SessionEntry{}, false
+	default:
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			metricStatus: "failed",
+			log: func(logger *logging.Logger) {
+				logger.Error("listener role holder churned past resolution bound", slog.String("role", role))
+			},
+			exceptionReason: "delivery_failed",
+		})
 	}
-	applyDeliveryOutcome(cfg, item, deliveryOutcome{
-		metricStatus: "failed",
-		log: func(logger *logging.Logger) {
-			logger.Error("listener role holder churned past resolution bound", slog.String("role", role))
-		},
-		exceptionReason: "delivery_failed",
-	})
 	return "", session.SessionEntry{}, false
 }
 

@@ -16,7 +16,7 @@ import (
 
 const (
 	orderedStreamTopic = "notifications.dispatch.issue.T-1.message.created"
-	orderedRoleTopic   = "notifications.role.ordered"
+	uncapturedTopic    = "notifications.role.uncaptured"
 )
 
 // numberedEnvelope is the index'th of a run of dispatch envelopes on topic, carrying index as its
@@ -41,10 +41,9 @@ func sourceEventID(t *testing.T, data []byte) string {
 	return envelope.SourceEventID
 }
 
-// PublishAsync sends each envelope without waiting for the answer to the one before, and NATS
-// takes them in the order they were sent: the stream stores a run sent back to back in send order,
-// a core subscriber of a role lane receives its run in send order, and every one is answered
-// accepted.
+// PublishAsync sends each envelope without waiting for the answer to the one before, every one is
+// answered accepted, and the stream stores a run sent back to back on one window's connection in
+// send order.
 func TestPublishAsyncKeepsSendOrder(t *testing.T) {
 	const count = 500
 	_, url := testnats.Start(t)
@@ -58,20 +57,11 @@ func TestPublishAsyncKeepsSendOrder(t *testing.T) {
 		t.Fatalf("connect the reader: %v", err)
 	}
 	t.Cleanup(reader.Close)
-	role, err := reader.SubscribeSync(orderedRoleTopic)
-	if err != nil {
-		t.Fatalf("subscribe to the role lane: %v", err)
-	}
-	if err := reader.Flush(); err != nil {
-		t.Fatalf("flush the subscription: %v", err)
-	}
 
 	window := client.Window()
-	answers := make([]<-chan error, 0, 2*count)
+	answers := make([]<-chan error, 0, count)
 	for index := range count {
-		answers = append(answers,
-			window.PublishAsync(numberedEnvelope(orderedStreamTopic, index)),
-			window.PublishAsync(numberedEnvelope(orderedRoleTopic, index)))
+		answers = append(answers, window.PublishAsync(numberedEnvelope(orderedStreamTopic, index)))
 	}
 	for index, answer := range answers {
 		select {
@@ -104,14 +94,42 @@ func TestPublishAsyncKeepsSendOrder(t *testing.T) {
 			t.Fatalf("stream message %d carries envelope %s, want %d", index, got, index)
 		}
 	}
-	for index := range count {
-		message, err := role.NextMsg(5 * time.Second)
-		if err != nil {
-			t.Fatalf("role lane message %d: %v", index, err)
+}
+
+// A topic the stream does not capture is answered at once, before anything is sent, with
+// ErrNotCaptured: neither a refusal, which a caller counts as reached, nor ErrUnavailable, which it
+// resends with no attempt counted, so the caller backs the envelope off. Nothing reaches a core
+// subscriber of the topic.
+func TestAWindowAnswersATopicTheStreamDoesNotCaptureAsNotCaptured(t *testing.T) {
+	_, url := testnats.Start(t)
+	client, err := bus.ConnectOwningStream([]string{url})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	reader, err := natsgo.Connect(url)
+	if err != nil {
+		t.Fatalf("connect the reader: %v", err)
+	}
+	t.Cleanup(reader.Close)
+	received, err := reader.SubscribeSync(uncapturedTopic)
+	if err != nil {
+		t.Fatalf("subscribe to the uncaptured topic: %v", err)
+	}
+	if err := reader.Flush(); err != nil {
+		t.Fatalf("flush the subscription: %v", err)
+	}
+
+	select {
+	case err := <-client.Window().PublishAsync(numberedEnvelope(uncapturedTopic, 0)):
+		if !errors.Is(err, bus.ErrNotCaptured) || errors.Is(err, bus.ErrRefused) || errors.Is(err, bus.ErrUnavailable) {
+			t.Fatalf("a publish to %s answered %v, want ErrNotCaptured, neither ErrRefused nor ErrUnavailable", uncapturedTopic, err)
 		}
-		if got := sourceEventID(t, message.Data); got != fmt.Sprint(index) {
-			t.Fatalf("role lane message %d carries envelope %s, want %d", index, got, index)
-		}
+	default:
+		t.Fatalf("a publish to %s returned with no answer, as if it had sent something", uncapturedTopic)
+	}
+	if message, err := received.NextMsg(300 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("the uncaptured topic's subscriber received %v, %v; want nothing sent", message, err)
 	}
 }
 
@@ -135,16 +153,14 @@ func TestAWindowWhoseConnectionIsLostAnswersUnavailableBeforeSending(t *testing.
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	for index, topic := range []string{orderedStreamTopic, orderedRoleTopic} {
-		answer := window.PublishAsync(numberedEnvelope(topic, index+1))
-		select {
-		case err := <-answer:
-			if !errors.Is(err, bus.ErrUnavailable) {
-				t.Fatalf("publish to %s on a lost connection answered %v, want bus.ErrUnavailable", topic, err)
-			}
-		default:
-			t.Fatalf("publish to %s on a lost connection returned with no answer, as if it had sent something", topic)
+	answer := window.PublishAsync(numberedEnvelope(orderedStreamTopic, 1))
+	select {
+	case err := <-answer:
+		if !errors.Is(err, bus.ErrUnavailable) {
+			t.Fatalf("a publish on a lost connection answered %v, want bus.ErrUnavailable", err)
 		}
+	default:
+		t.Fatal("a publish on a lost connection returned with no answer, as if it had sent something")
 	}
 }
 

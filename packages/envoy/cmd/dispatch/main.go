@@ -40,6 +40,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/roles"
 )
 
 const (
@@ -374,13 +375,18 @@ func main() {
 			slog.Error("dispatch: open the events outbox's pool", "error", err)
 			os.Exit(1)
 		}
+		// One reader of the role and session buckets serves both: a role route's holder is read
+		// straight from the buckets on the bus client's connection, with no watcher.
+		holders := roles.NewBuckets(natsClient)
 		outboxPublisher = outbox.New(outbox.Deps{
-			Store:     &store.Store{Pool: outboxPool},
-			Publisher: natsClient,
-			Broker:    broker,
-			Listen:    database.Pool.Listener,
-			Docs:      documentService,
-			Leases:    leases,
+			Store:      &store.Store{Pool: outboxPool},
+			Publisher:  natsClient,
+			Broker:     broker,
+			Listen:     database.Pool.Listener,
+			Docs:       documentService,
+			Leases:     leases,
+			RoleClaims: holders,
+			Sessions:   holders,
 		})
 		go outboxPublisher.Run(ctx)
 	}

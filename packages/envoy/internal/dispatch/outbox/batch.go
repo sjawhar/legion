@@ -210,11 +210,16 @@ func readBatch(ctx context.Context, deps Deps) (pending []pendingEvent, stopped 
 
 // destination is one subject an event is sent to, named by label and id in what a failure reports
 // (`publish route "role:reviewer": …`), since a subject alone does not say which of the event's
-// destinations it was.
+// destinations it was. subject is also what published_destinations records once it is reached. A
+// role route's subject is its role topic and role its role; forward is how the batch reaches the
+// role's holder (resolveRoleHolders), nil for every other destination, which is published to
+// subject itself.
 type destination struct {
 	subject string
 	label   string
 	id      string
+	role    string
+	forward *roleForward
 }
 
 // ownerTopicKey is the destination key of an owner's topic family (destinationKey).
@@ -225,12 +230,28 @@ const ownerTopicKey = "owner"
 // notifications.dispatch. - an issue's, a document's or a project's, one per event type - is one
 // family, the owner's topic family. Each notifications.agent.<session> subject is one, whichever
 // route reaches it: the issue's session route, an author or follower route, a previous claimant's
-// notice. A role route is its role topic.
+// notice. A role route's key is its holder's (destination.key).
 func destinationKey(subject string) string {
 	if strings.HasPrefix(subject, dispatchTopicPrefix) {
 		return ownerTopicKey
 	}
 	return subject
+}
+
+// key is the destination's key (destinationKey). A role route's forward goes to its holder's agent
+// subject, so its key is that subject, the key of every other route to the same session: a role
+// forward and a session, author or follower route to one session share one chain, and an earlier
+// event whose role route has not reached the holder holds the holder's later events back. What the
+// role route records once reached is its role topic, not the holder's subject: a role route reached
+// is reached for good, so a retry of its event skips the forward even when the role has moved to
+// another holder since, and the role topic is the one subject every later read of the event knows
+// that route by (planChains, resolveRoleHolders). A role route with no holder known - its claim
+// could not be read, or churned - is keyed on its role topic.
+func (d destination) key() string {
+	if d.forward != nil && d.forward.holder != "" {
+		return contracts.AgentSubject(d.forward.holder)
+	}
+	return destinationKey(d.subject)
 }
 
 // batchEvent is one event of a batch with what the batch made of it: its envelope and
@@ -310,6 +331,11 @@ type chain struct {
 // JetStream publishes on the same stream, so it takes a stream failing one subject and not the
 // other.
 //
+// A role route that counts as reached with nothing to send (roleForward.skip) goes on no chain: a
+// due event's is reached at once, and a not-due event's holds nothing back, since nothing of it is
+// delivered to anyone. A role route that stays pending (roleForward.err) goes on its key's chain
+// like any send, fails when its turn comes, and holds the rest of that chain back.
+//
 // An event with no owner has no destination and forms no chain; an event that cannot be read has
 // none either, and holds nothing back.
 func planChains(events []*batchEvent) []*chain {
@@ -324,12 +350,18 @@ func planChains(events []*batchEvent) []*chain {
 			byOwner[event.owner] = map[string]*chain{}
 			blocked[event.owner] = map[string]blocker{}
 		}
-		reached := publishedDestinationSet(event.destinations)
+		delivered := publishedDestinationSet(event.destinations)
 		for _, dest := range event.destinationsOf {
-			if _, ok := reached[dest.subject]; ok {
+			if _, ok := delivered[dest.subject]; ok {
 				continue
 			}
-			key := destinationKey(dest.subject)
+			if dest.forward != nil && dest.forward.skip != "" {
+				if event.due {
+					event.sends = append(event.sends, &chainSend{event: event, dest: dest, state: reached})
+				}
+				continue
+			}
+			key := dest.key()
 			if !event.due {
 				if _, ok := blocked[event.owner][key]; !ok {
 					blocked[event.owner][key] = blocker{until: event.nextAttempt}
@@ -356,10 +388,12 @@ func planChains(events []*batchEvent) []*chain {
 
 // sendChains runs chains through sender, one window: the first send of every chain at once, in the
 // order the chains were planned, and each chain's next send as soon as the answer to the one before
-// it came back as reached, so the chains proceed side by side and each one in order. A failed send
-// holds back the rest of its chain. A send that meets a lost connection or a passed deadline
-// (bus.ErrUnavailable, errFenced) stops the batch: no further send of any chain is made. So does
-// ctx ending; the answers already in are still read, and every other send in flight is lost.
+// it came back as reached, so the chains proceed side by side and each one in order. A role route
+// is forwarded to its holder with a Request (roleForward.send), or answered at once with why it
+// stays pending. A failed send holds back the rest of its chain. A send that meets a lost
+// connection or a passed deadline (bus.ErrUnavailable, errFenced) stops the batch: no further send
+// of any chain is made. So does ctx ending; the answers already in are still read, and every other
+// send in flight is lost.
 func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
 	stopped := false
 	var inflight []*chain
@@ -370,7 +404,14 @@ func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
 		send := c.sends[c.next]
 		routed := send.event.item
 		routed.Topic = send.dest.subject
-		send.answer = sender.PublishAsync(routed)
+		switch forward := send.dest.forward; {
+		case forward == nil:
+			send.answer = sender.PublishAsync(routed)
+		case forward.err != nil:
+			send.answer = failedAnswer(forward.err)
+		default:
+			send.answer = forward.send(sender, routed)
+		}
 		inflight = append(inflight, c)
 	}
 	settle := func(index int, err error) {
