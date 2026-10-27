@@ -1,0 +1,42 @@
+# Default request route mix for loadgen run (-route-mix overrides it).
+#
+# Source: the 60-second capture of Dispatch's requests at 17:19Z on 2026-10-26,
+# dispatch://INFRA-324/comment/dcb8960b-923a-4d07-a3d8-8b8d3d2cf134. The caller-group totals come
+# from the capture: 39% one dashboard tab (pinned list, inbox, replies count, about 100 issue
+# reads), 34% `dispatch read` CLI calls (issue, events, references, the two graph reads, sometimes
+# the agent list), 17% Legion pods (document reads and comment reads), 10% unattributed (spread
+# here over search, the project list and open asks).
+# INFERENCE: the split inside each caller group is inferred from the capture's prose; the capture
+# gives only the group totals.
+#
+# Format, one route per line:
+#   <weight> <caller> <identity: person|agent> GET <path template>
+# A person's request carries the trusted identity header; an agent's the stack's bearer.
+# Placeholders: {key} {project} {artifact_id} {key_ref} (URL-escaped dispatch://<key>).
+# A route's name in summary.json and TABLES.md is "<caller> GET <path template>".
+
+# dashboard tab (39)
+22 browser person GET /api/v1/issues/{key}
+6 browser person GET /api/v1/issues?project={project}
+4 browser person GET /api/v1/inbox
+3 browser person GET /api/v1/me/replies
+2 browser person GET /api/v1/me/state
+2 browser person GET /api/v1/issues/{key}/events?after=0&limit=200
+
+# dispatch read (34)
+7 cli agent GET /api/v1/issues/{key}
+7 cli agent GET /api/v1/issues/{key}/events?after=0&limit=200
+7 cli agent GET /api/v1/issues/{key}/references
+6 cli agent GET /api/v1/references?to={key_ref}
+6 cli agent GET /api/v1/references?from={key_ref}
+1 cli agent GET /api/v1/agents
+
+# Legion pods (17)
+10 pod agent GET /api/v1/artifacts/{artifact_id}/text
+4 pod agent GET /api/v1/issues/{key}/comments?artifact=spec
+3 pod agent GET /api/v1/issues/{key}/comments
+
+# unattributed (10)
+4 other agent GET /api/v1/search?q=outbox+latency
+3 other agent GET /api/v1/projects
+3 other agent GET /api/v1/asks/open?project={project}
