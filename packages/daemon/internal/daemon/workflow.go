@@ -132,6 +132,11 @@ type workflowRuntime struct {
 	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
 	// then. Only the pass touches it.
 	refusedReviews map[int64]bool
+	// openedWarned is when the pass last warned, by repository and pull request number, that it
+	// applies an open pull request GitHub shows for an issue with none recorded
+	// (readUnrecordedPullRequests): one the workflow does not record is found again every pass, and
+	// is told at most once every openedWarnEvery. Only the pass touches it.
+	openedWarned map[string]time.Time
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.

@@ -480,7 +480,7 @@ func (RequiredChecks) isFact() {}
 
 // PullRequestMergeability is GitHub's lazily computed verdict for whether a pull request's head
 // can be merged into Base without a conflict, decoded from GitHub's nullable `mergeable` field on
-// pullRequestMergeability's own /pulls/{number} read, which also names the base branch: never
+// readPullRequest's own /pulls/{number} read, which also names the base branch: never
 // decoded from an event, applied as a synthetic fact by the daemon's own read of each open pull
 // request (workflowRuntime.readRequiredChecks), before requiredFor's own rulesets and workflow
 // reads run. Mergeable is record.MergeabilityUnknown while GitHub is still computing it,
@@ -585,7 +585,8 @@ type HandoffComplete struct {
 	MergeNote string
 	// RecordedHead and RecordedHeadAt are the head the daemon's record held for the issue's pull
 	// request when the route read it for READY, and the record's clock then
-	// (record.PullRequest.HeadUpdatedAt). The record follows GitHub only by webhook, so it can lag:
+	// (record.PullRequest.HeadUpdatedAt). The record follows GitHub only by webhook and the
+	// daemon's two-minute read of each pull request, so it can lag:
 	// the workflow accepts READY while the record is still exactly that snapshot, or already at
 	// Commit, and otherwise refuses it, since a push landed in between. Both fields are compared, so
 	// a record that left this head and came back to it (a force push and its undo) is a moved one.

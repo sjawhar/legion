@@ -748,6 +748,12 @@ type Store interface {
 	// FillIssueRepository does.
 	UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error
+	// HandedOffWithoutPullRequest is every record of the Dispatch project key project in
+	// implementing, named on its repository as GitHub spells it, whose implementer has recorded its
+	// handoff and which has no open or merged pull request recorded, by key: an issue whose
+	// completion waits for the pull request record that only its opened webhook writes. A merged
+	// one is left out, as GitHub never reopens it and a new generation removes it.
+	HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	// RepoNote is what the daemon last said on issue about its repository, nil for nothing;
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)
