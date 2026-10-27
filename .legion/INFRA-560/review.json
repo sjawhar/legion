@@ -2,26 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-560",
-  "completed": "2026-10-27T11:39:58Z",
-  "round": 4,
-  "reviewedHead": "4ad1e37db20a8b5950ccfa32eb1a3200a9279d0e",
-  "codeHead": "cde9232f880b5f5dc98a22f66e2ee0f8543acbd1",
-  "decision": "changes_requested",
+  "completed": "2026-10-27T15:04:41Z",
+  "round": 5,
+  "reviewedHead": "add2045f49336fd5a9903c1a04c24ddefd768ff4",
+  "codeHead": "d31fcb180037",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 3,
-  "fingerprint": "43105ca3 (my approval) d5e89e646ec8fe404bbb7b4d84e9a3fc420d63cdfa574610810abc92c9c4c2d6; 4ad1e37d 44c4135ede6e190494a25c78990b19a5047ff1d636a49d99dc04c64679276fad. Changed, so this is a new round. The difference is the AGENTS.md Health line (main's wording, the PR's insertion unchanged) and cde9232f (store.ConnectionsPerProcess, the gcp bound constants, the test, and the docs).",
-  "ci": "Required lint, typecheck, test and pr-title at CI head dc28412d (code cde9232f) were queued at 11:33Z behind the repository's runner backlog; compare dc28412d...4ad1e37d handoffsOnly true. Not decisive for a request for changes. GitHub reports the PR MERGEABLE at 4ad1e37d.",
-  "mergeResolution": "Faithful. Both thermonuclear agents compared the PR's own diff at 43105ca3 and at 4ad1e37d: AGENTS.md gets the same /livez insertions on main's rewritten lines, and CHANGELOG.md deletes none of main's lines.",
-  "thermonuclear": {
-    "deep": "CHANGES at 4ad1e37d. Medium: the bound counts replicas+maxSurge but not terminating pods, which keep their pools until shutdown closes them (shutdown.go:106-107, inside the 35 s grace); 6 x 83 = 498 > 497 at 4 replicas. Minor: 'a test fails when a pool changes' does not catch a new pool or a fourth listener. ConnectionsPerProcess = 83 is the true per-process maximum, and the merge resolution is faithful.",
-    "quality": "CHANGES at 4ad1e37d: four production constants that no production code reads, mirroring store.ConnectionsPerProcess; the test's LessOrEqual and Greater asserts restate integer division and cannot fail. The reviewer judged both cleanup, which goes to the Fast-follow line under the architect's rule."
-  },
-  "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/infra/gcp/dispatch.go", "description": "Lines 100-103: dispatchDefaultTierRollingReplicas assumes a roll runs replicas+1 pods. A Deployment does not count terminating pods (Kubernetes Deployment docs; KEP-3973, podReplacementPolicy alpha), and a terminating server pod keeps its pools until shutdown.go:107 closes them, inside the 35 s grace, while the next surge pod can be ready in about 10 s. At the stated 4 replicas, 6 x 83 = 498 exceeds the 497 Dispatch may use, so the bound, the test pinning 4, README.md:200-203, CHANGELOG.md:938-941 and the PR body all overstate the tier. Count the terminating overlap and state it, or state the assumption and its risk."},
-    {"severity": "minor", "file": "packages/envoy/infra/README.md", "description": "Lines 202-203 (and dispatch.go:98) say a test fails 'when a pool changes'. It fails only when a counted pool's size changes; a new pool or a fourth Pool.Listener caller passes unseen. Narrow the wording."},
-    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_connections_test.go", "description": "Lines 20-24: the LessOrEqual and Greater asserts restate dispatch.go:103's integer division and cannot fail (quality agent). Fast-follow."},
-    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch.go", "description": "Lines 83-104: the constants have no production reader; the computation could live in the test against store.ConnectionsPerProcess (quality agent). Fast-follow."}
+  "important": 0,
+  "minor": 0,
+  "scope": "Narrowed by the INFRA-63 architect (11:42Z): only the removal of the default tier's replica bound, keeping store.ConnectionsPerProcess and its test, with the rule stated without a number (every app pod holding connections during a roll, terminating pods included, times ConnectionsPerProcess must fit in max_connections minus 3 reserved slots).",
+  "verified": [
+    "d31fcb18 deletes dispatchDefaultTierRollingReplicas and its constants; keeps dispatchConnectionsPerPod = 83 pinned to store.ConnectionsPerProcess by TestDispatchConnectionsPerPodIsTheServers (passes here)",
+    "git grep at the head over packages and docs finds no dispatchDefaultTier symbol, no 'N replicas rolling' and no 'up to N replicas' figure; the PR body's Change line and window notes state the rule without a number",
+    "The rule appears without a number, terminating pods included, in dispatch.go:27-30, README.md:197-202, CHANGELOG.md:937-942 and pool.go:159-165",
+    "No thermonuclear pass: the diff changes no executable statement (it removes an unread const block, edits comments and docs, and deletes test asserts)"
   ],
-  "fastFollow": "Move the default-tier bound into dispatch_connections_test.go against store.ConnectionsPerProcess, deleting the unread production constants and the two asserts that cannot fail (on the body's Fast-follow line beside the dispatchWorkload struct)."
+  "threads": "Round-4 threads PRRT_kwDORFy7ds6wqqKM and PRRT_kwDORFy7ds6wqqKS answered (accepted, fixed in d31fcb18). All 15 threads are resolved.",
+  "ci": "Required set lint, typecheck, test and pr-title, all success at CI head fd132522 (code d31fcb18). test's first attempt failed on TestTheKeeperRetriesAControllerWhoseLaunchesRanOut (packages/daemon/internal/daemon, a 60 s timeout under -race), a package this PR does not change; I re-ran the failed job once (run 40498950403, attempt 2) and it passed at 15:03:46Z. compare fd132522...add2045f handoffsOnly true. GitHub reports the PR CONFLICTING with main at 15:04Z.",
+  "keyFindings": [],
+  "fastFollow": "As the PR body names: one dispatchWorkload struct per Deployment; drop dispatchConnectionsPerPod and have the test read store.ConnectionsPerProcess alone."
 }
