@@ -530,16 +530,17 @@ func openV1Routes(gate *startingGate, ready *listenerDeps, machineID string, log
 
 // listenerStreamOptions are the options envoy-listener starts the stream with
 // (bus.ConnectOwningStream): the deployment's replica count and byte limit, from cfg, and the
-// buckets the listener opens at that count (store.Open's interest and role buckets,
-// session.OpenSessionRegistry's and cistore.Open's), which the client's keeper raises back to it
-// when a concurrent start or an operator lowered one (bus.WithKeptBuckets). The CI bucket is
-// named even on a listener with no GitHub route, which opens none: the keeper skips a bucket that
-// does not exist. main and the tests that start the listener's stream both take them from here.
+// buckets the listener opens at that count (bus.ListenerBuckets: store.Open's interest and role
+// buckets, session.OpenSessionRegistry's and cistore.Open's, the list its NATS grant is built
+// from), which the client's keeper raises back to it when a concurrent start or an operator
+// lowered one (bus.WithKeptBuckets). The CI bucket is named even on a listener with no GitHub
+// route, which opens none: the keeper skips a bucket that does not exist. main and the tests that
+// start the listener's stream both take them from here.
 func listenerStreamOptions(cfg config.Service) []bus.ConnectOption {
 	return []bus.ConnectOption{
 		bus.WithReplicas(cfg.NATSReplicas),
 		bus.WithStreamMaxBytes(cfg.StreamMaxBytes),
-		bus.WithKeptBuckets(bus.InterestBucket, bus.RoleClaimBucket, bus.SessionBucket, bus.CIStateBucket),
+		bus.WithKeptBuckets(bus.ListenerBuckets()...),
 	}
 }
 

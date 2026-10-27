@@ -47,6 +47,17 @@ const (
 	WebhookRedeliveryBucket = "envoy_webhook_redelivery"
 )
 
+// ListenerBuckets reports the KV buckets envoy-listener opens, in the order its NATS grant lists
+// them: the interest and role-claim buckets (internal/store), the session registry
+// (internal/session), and the CI state bucket, which only a listener with the GitHub webhook route
+// opens (internal/cistore). The listener's keeper raises each of them (WithKeptBuckets), and
+// envoy-infra grants the listener and the host each one's calls
+// (packages/envoy/infra/core/permissions.go), so a bucket named here is both kept and granted.
+// Each call returns a fresh slice, so no caller changes another's list.
+func ListenerBuckets() []string {
+	return []string{InterestBucket, RoleClaimBucket, SessionBucket, CIStateBucket}
+}
+
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
 // role lanes and the exception lanes.
 const NotificationTopicPrefix = "notifications."

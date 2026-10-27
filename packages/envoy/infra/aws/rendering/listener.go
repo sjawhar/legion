@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 const (
@@ -16,11 +17,6 @@ const (
 	// ListenerContainerName names the task's one container, which the service attaches to the
 	// target group and whose log streams it prefixes.
 	ListenerContainerName = "envoy-listener"
-	// MaxNatsReplicas is the most natsReplicas Check takes: NATS keeps at most 5 copies of a stream
-	// or a bucket, and the listener refuses a larger ENVOY_NATS_REPLICAS at load
-	// (config.MaxNATSReplicas in github.com/sjawhar/envoy/internal/config carries the same number;
-	// this module compiles no listener configuration package, TestCoreCompilesNoListenerConfigPackage).
-	MaxNatsReplicas = 5
 )
 
 // Webhook is one webhook a WebhookListener serves: its name in ENVOY_WEBHOOKS, the component input
@@ -97,8 +93,10 @@ func (e ListenerEnv) Check() error {
 	if e.NatsReplicas < 1 {
 		return core.InputErrorf("natsReplicas", "natsReplicas %d is below 1", e.NatsReplicas)
 	}
-	if e.NatsReplicas > MaxNatsReplicas {
-		return core.InputErrorf("natsReplicas", "natsReplicas %d is above %d, the most copies NATS keeps", e.NatsReplicas, MaxNatsReplicas)
+	// The listener refuses a larger ENVOY_NATS_REPLICAS at load by the same bound
+	// (bus.ParseNATSReplicas).
+	if e.NatsReplicas > bus.MaxReplicas {
+		return core.InputErrorf("natsReplicas", "natsReplicas %d is above %d, the most copies NATS keeps", e.NatsReplicas, bus.MaxReplicas)
 	}
 	return nil
 }

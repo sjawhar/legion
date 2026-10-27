@@ -19,32 +19,15 @@ import (
 // or subtest, so each has the stream and its buckets to itself; a test that needs a single server
 // says so.
 
-const (
-	// testStreamMaxBytes is a byte limit every member of a test cluster can reserve.
-	testStreamMaxBytes = 8 << 20
-	// clusterWait bounds every wait for the cluster to settle: a leader, a peer catching up, a
-	// consumer moved to the stream's new peers.
-	clusterWait = 30 * time.Second
-)
+// testStreamMaxBytes is a byte limit every member of a test cluster can reserve.
+const testStreamMaxBytes = 8 << 20
 
 // startClusterJetStream starts a three-server cluster and returns it with a JetStream context
-// connected to every member.
+// connected to whichever running member answers (testnats.Cluster.JetStream).
 func startClusterJetStream(t *testing.T) (*testnats.Cluster, nats.JetStreamContext) {
 	t.Helper()
 	cluster := testnats.StartCluster(t, 3)
-	return cluster, clusterJetStream(t, cluster)
-}
-
-// clusterJetStream is a JetStream context connected to whichever running member of cluster answers.
-func clusterJetStream(t *testing.T, cluster *testnats.Cluster) nats.JetStreamContext {
-	t.Helper()
-	conn := testnats.Connect(t, cluster.URL())
-	t.Cleanup(conn.Close)
-	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
-	if err != nil {
-		t.Fatalf("open JetStream: %v", err)
-	}
-	return js
+	return cluster, cluster.JetStream(t)
 }
 
 // startOnCluster runs a start of a deployed program on cluster: ConnectOwningStream with options.
@@ -56,32 +39,6 @@ func startOnCluster(t *testing.T, cluster *testnats.Cluster, options ...ConnectO
 	}
 	t.Cleanup(client.Close)
 	return client
-}
-
-// copies is how many copies of the stream the cluster holds, its leader's and its replicas'.
-func copies(info *nats.StreamInfo) int {
-	if info.Cluster == nil {
-		return 0
-	}
-	return 1 + len(info.Cluster.Replicas)
-}
-
-// awaitStream waits until every one of the stream's copies is current with its leader and returns
-// its info.
-func awaitStream(t *testing.T, js nats.JetStreamContext, stream string) *nats.StreamInfo {
-	t.Helper()
-	deadline := time.Now().Add(clusterWait)
-	for {
-		info, err := js.StreamInfo(stream)
-		if err == nil && info.Cluster != nil && info.Cluster.Leader != "" && copies(info) == info.Config.Replicas &&
-			!slices.ContainsFunc(info.Cluster.Replicas, func(peer *nats.PeerInfo) bool { return !peer.Current || peer.Offline }) {
-			return info
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("stream %s did not settle within %s: %+v (%v)", stream, clusterWait, info, err)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
 }
 
 // deployedClusterStream is the stream as a deployment with three copies and a byte limit holds it,
@@ -126,14 +83,14 @@ func TestAReconcileOnTheClusterKeepsTheCopiesTheByteLimitTheIDAndTheLimitsItDoes
 				if _, err := js.AddStream(&deployed); err != nil {
 					t.Fatalf("deploy the stream: %v", err)
 				}
-				before := awaitStream(t, js, Stream).Config
+				before := testnats.AwaitSettledStream(t, js, Stream).Config
 
 				startOnCluster(t, cluster, start.options...)
 
-				info := awaitStream(t, js, Stream)
+				info := testnats.AwaitSettledStream(t, js, Stream)
 				got := info.Config
-				if got.Replicas != 3 || copies(info) != 3 {
-					t.Errorf("stream replicas = %d with %d copies, want 3", got.Replicas, copies(info))
+				if got.Replicas != 3 || testnats.Copies(info.Cluster) != 3 {
+					t.Errorf("stream replicas = %d with %d copies, want 3", got.Replicas, testnats.Copies(info.Cluster))
 				}
 				if got.MaxBytes != testStreamMaxBytes || got.Discard != nats.DiscardOld {
 					t.Errorf("stream byte limit = %d discarding %v, want %d discarding old", got.MaxBytes, got.Discard, testStreamMaxBytes)
@@ -174,16 +131,16 @@ func TestAStartRaisesAnR1StreamToThreeCopiesKeepingItsMessagesAndMovingItsConsum
 			t.Fatalf("create durable %s: %v", durable, err)
 		}
 	}
-	before := awaitStream(t, js, Stream)
-	if copies(before) != 1 {
-		t.Fatalf("deployed stream has %d copies, want 1", copies(before))
+	before := testnats.AwaitSettledStream(t, js, Stream)
+	if testnats.Copies(before.Cluster) != 1 {
+		t.Fatalf("deployed stream has %d copies, want 1", testnats.Copies(before.Cluster))
 	}
 
 	startOnCluster(t, cluster, WithReplicas(3))
 
-	after := awaitStream(t, js, Stream)
-	if after.Config.Replicas != 3 || copies(after) != 3 {
-		t.Fatalf("stream replicas = %d with %d copies, want 3", after.Config.Replicas, copies(after))
+	after := testnats.AwaitSettledStream(t, js, Stream)
+	if after.Config.Replicas != 3 || testnats.Copies(after.Cluster) != 3 {
+		t.Fatalf("stream replicas = %d with %d copies, want 3", after.Config.Replicas, testnats.Copies(after.Cluster))
 	}
 	if after.State.Msgs != before.State.Msgs || after.State.FirstSeq != before.State.FirstSeq || after.State.LastSeq != before.State.LastSeq {
 		t.Fatalf("stream state = %+v after the raise, want the deployed %+v", after.State, before.State)
@@ -201,17 +158,7 @@ func TestAStartRaisesAnR1StreamToThreeCopiesKeepingItsMessagesAndMovingItsConsum
 		}
 	}
 	for _, durable := range durables {
-		deadline := time.Now().Add(clusterWait)
-		for {
-			info, err := js.ConsumerInfo(Stream, durable)
-			if err == nil && info.Cluster != nil && info.Cluster.Leader != "" && 1+len(info.Cluster.Replicas) == 3 {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("durable %s did not reach three copies within %s: %+v (%v)", durable, clusterWait, info, err)
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
+		testnats.AwaitConsumerCopies(t, js, Stream, durable, 3)
 	}
 }
 
@@ -236,7 +183,7 @@ func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testi
 	if _, err := created.Put("key", []byte("value")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	before := awaitStream(t, js, "KV_"+bucket)
+	before := testnats.AwaitSettledStream(t, js, "KV_"+bucket)
 
 	counting := &countingJetStream{JetStreamContext: js}
 	if _, err := OpenKeyValue(counting, bucket); err != nil {
@@ -251,9 +198,9 @@ func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testi
 		t.Fatalf("ensure the bucket at three copies: %v", err)
 	}
 
-	after := awaitStream(t, js, "KV_"+bucket)
-	if copies(after) != 3 {
-		t.Fatalf("bucket stream has %d copies, want 3", copies(after))
+	after := testnats.AwaitSettledStream(t, js, "KV_"+bucket)
+	if testnats.Copies(after.Cluster) != 3 {
+		t.Fatalf("bucket stream has %d copies, want 3", testnats.Copies(after.Cluster))
 	}
 	want := before.Config
 	want.Replicas = 3
@@ -271,7 +218,7 @@ func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testi
 	if writes := counting.written(); len(writes) != 0 {
 		t.Fatalf("a start at one copy wrote %v to a three-copy bucket, want nothing", writes)
 	}
-	if got := awaitStream(t, js, "KV_"+bucket).Config.Replicas; got != 3 {
+	if got := testnats.AwaitSettledStream(t, js, "KV_"+bucket).Config.Replicas; got != 3 {
 		t.Fatalf("bucket replicas = %d after a start at one copy, want 3", got)
 	}
 }
@@ -281,18 +228,18 @@ func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testi
 func TestTheStreamTakesTheDeploymentsByteLimitAndKeepsADeployedOne(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes))
-	info := awaitStream(t, js, Stream)
-	if info.Config.MaxBytes != testStreamMaxBytes || info.Config.Discard != nats.DiscardOld || copies(info) != 3 {
-		t.Fatalf("created stream byte limit = %d discarding %v with %d copies, want %d discarding old with 3", info.Config.MaxBytes, info.Config.Discard, copies(info), testStreamMaxBytes)
+	info := testnats.AwaitSettledStream(t, js, Stream)
+	if info.Config.MaxBytes != testStreamMaxBytes || info.Config.Discard != nats.DiscardOld || testnats.Copies(info.Cluster) != 3 {
+		t.Fatalf("created stream byte limit = %d discarding %v with %d copies, want %d discarding old with 3", info.Config.MaxBytes, info.Config.Discard, testnats.Copies(info.Cluster), testStreamMaxBytes)
 	}
 
 	startOnCluster(t, cluster, WithReplicas(3))
-	if got := awaitStream(t, js, Stream).Config.MaxBytes; got != testStreamMaxBytes {
+	if got := testnats.AwaitSettledStream(t, js, Stream).Config.MaxBytes; got != testStreamMaxBytes {
 		t.Fatalf("stream byte limit = %d after a start with none set, want the deployed %d", got, testStreamMaxBytes)
 	}
 
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(2*testStreamMaxBytes))
-	if got := awaitStream(t, js, Stream).Config.MaxBytes; got != 2*testStreamMaxBytes {
+	if got := testnats.AwaitSettledStream(t, js, Stream).Config.MaxBytes; got != 2*testStreamMaxBytes {
 		t.Fatalf("stream byte limit = %d after a start setting %d, want that", got, 2*testStreamMaxBytes)
 	}
 }
@@ -358,7 +305,7 @@ func TestRaisingTheStreamWhileAPublisherSendsKeepsEveryAcknowledgedMessage(t *te
 	close(raised)
 	<-done
 
-	awaitStream(t, js, Stream)
+	testnats.AwaitSettledStream(t, js, Stream)
 	if len(acked) == 0 {
 		t.Fatalf("no publish was acknowledged (%d failed)", failed)
 	}
@@ -406,8 +353,8 @@ func TestTwoStartsRaisingOneStreamAtOnceBothSucceed(t *testing.T) {
 		}
 	}
 	for _, stream := range []string{Stream, "KV_" + bucket} {
-		if info := awaitStream(t, js, stream); info.Config.Replicas != 3 || copies(info) != 3 {
-			t.Fatalf("%s replicas = %d with %d copies, want 3", stream, info.Config.Replicas, copies(info))
+		if info := testnats.AwaitSettledStream(t, js, stream); info.Config.Replicas != 3 || testnats.Copies(info.Cluster) != 3 {
+			t.Fatalf("%s replicas = %d with %d copies, want 3", stream, info.Config.Replicas, testnats.Copies(info.Cluster))
 		}
 	}
 }
@@ -437,7 +384,7 @@ func TestARefusedRaiseNamesTheReplicaSetting(t *testing.T) {
 		t.Fatalf("raise the bucket to five copies = %v, want the server's refusal starting %q", err, want)
 	}
 	for _, stream := range []string{Stream, "KV_" + bucket} {
-		if info := awaitStream(t, js, stream); info.Config.Replicas != 1 {
+		if info := testnats.AwaitSettledStream(t, js, stream); info.Config.Replicas != 1 {
 			t.Fatalf("%s replicas = %d after a refused raise, want 1", stream, info.Config.Replicas)
 		}
 	}
@@ -453,14 +400,14 @@ func TestOneServerStoppedAStartOfAThreeCopyDeploymentWritesNothing(t *testing.T)
 	if _, err := EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3}); err != nil {
 		t.Fatalf("create the bucket: %v", err)
 	}
-	awaitStream(t, js, Stream)
-	awaitStream(t, js, "KV_"+bucket)
+	testnats.AwaitSettledStream(t, js, Stream)
+	testnats.AwaitSettledStream(t, js, "KV_"+bucket)
 
 	cluster.Servers[2].Stop(t)
 	cluster.AwaitReady(t)
-	js = clusterJetStream(t, cluster)
-	awaitLeader(t, js, Stream, cluster.Name(2))
-	awaitLeader(t, js, "KV_"+bucket, cluster.Name(2))
+	js = cluster.JetStream(t)
+	testnats.AwaitStreamLeader(t, js, Stream, cluster.Name(2))
+	testnats.AwaitStreamLeader(t, js, "KV_"+bucket, cluster.Name(2))
 
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes))
 	startOnCluster(t, cluster, WithReplicas(3))
@@ -560,22 +507,6 @@ func TestASecondStartOnASingleServerWritesNothing(t *testing.T) {
 	}
 	if writes := counting.written(); len(writes) != 0 {
 		t.Fatalf("a second start wrote %v, want nothing", writes)
-	}
-}
-
-// awaitLeader waits until stream has a leader other than not.
-func awaitLeader(t *testing.T, js nats.JetStreamContext, stream, not string) {
-	t.Helper()
-	deadline := time.Now().Add(clusterWait)
-	for {
-		info, err := js.StreamInfo(stream)
-		if err == nil && info.Cluster != nil && info.Cluster.Leader != "" && info.Cluster.Leader != not {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("stream %s had no leader but %q within %s: %+v (%v)", stream, not, clusterWait, info, err)
-		}
-		time.Sleep(100 * time.Millisecond)
 	}
 }
 

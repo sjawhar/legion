@@ -2,7 +2,6 @@ package delivery
 
 import (
 	"testing"
-	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 
@@ -34,16 +33,6 @@ func TestDispatchDurablesMoveToThreeCopiesWhenAStartRaisesTheStream(t *testing.T
 	start(3)
 
 	for _, durable := range []string{bus.DispatchDeliveryDurable, bus.DispatchJobDurable} {
-		deadline := time.Now().Add(30 * time.Second)
-		for {
-			info, err := js.ConsumerInfo(bus.Stream, durable)
-			if err == nil && info.Cluster != nil && info.Cluster.Leader != "" && 1+len(info.Cluster.Replicas) == 3 {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("durable %s did not reach three copies: %+v (%v)", durable, info, err)
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
+		testnats.AwaitConsumerCopies(t, js, bus.Stream, durable, 3)
 	}
 }

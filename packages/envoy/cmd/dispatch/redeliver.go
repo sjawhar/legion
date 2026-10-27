@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
-	envoyconfig "github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
@@ -69,7 +68,7 @@ func redeliverWebhooks(ctx context.Context, args []string, env settingValues, ou
 		fmt.Fprintf(out, "redeliver-webhooks: load envoy config: %v\n", err)
 		return 1
 	}
-	replicas, err := envoyconfig.ParseNATSReplicas(env.get(bus.ReplicasEnvVar))
+	replicas, err := bus.ParseNATSReplicas(env.get(bus.ReplicasEnvVar))
 	if err != nil {
 		fmt.Fprintf(out, "redeliver-webhooks: %v\n", err)
 		return 1

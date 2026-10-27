@@ -313,7 +313,7 @@ func TestTheKeeperRestoresWhatAnOperatorTookAwayAndKeepsAForeignSubject(t *testi
 	cluster, js := startClusterJetStream(t)
 	logs := captureLogs(t)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), withKeepInterval(testKeepInterval))
-	info := awaitStream(t, js, Stream)
+	info := testnats.AwaitSettledStream(t, js, Stream)
 	const removed = "notifications.legion.>"
 
 	lowered := info.Config
@@ -387,7 +387,7 @@ func TestTheKeeperRaisesTheBucketsItsProgramNamesBackToTheirCopies(t *testing.T)
 			t.Fatalf("open %s at three copies: %v", bucket, err)
 		}
 		stream := "KV_" + bucket
-		info := awaitStream(t, js, stream)
+		info := testnats.AwaitSettledStream(t, js, stream)
 		before[bucket] = info.Config
 		lowered := info.Config
 		lowered.Replicas = 1
@@ -427,7 +427,7 @@ func TestTheKeeperRaisesTheBucketsItsProgramNamesBackToTheirCopies(t *testing.T)
 func TestAKeeperWithTheDefaultSettingsSendsNoUpdate(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(keeperByteLimit))
-	awaitStream(t, js, Stream)
+	testnats.AwaitSettledStream(t, js, Stream)
 
 	watcher := testnats.Connect(t, cluster.URL())
 	t.Cleanup(watcher.Close)
@@ -481,7 +481,7 @@ func TestStoppingTheClientStopsItsKeeper(t *testing.T) {
 			cluster, js := startClusterJetStream(t)
 			logs := captureLogs(t)
 			client := startOnCluster(t, cluster, WithReplicas(3), withKeepInterval(testKeepInterval))
-			info := awaitStream(t, js, Stream)
+			info := testnats.AwaitSettledStream(t, js, Stream)
 
 			entered := make(chan struct{})
 			client.mu.Lock()

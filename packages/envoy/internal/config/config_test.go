@@ -120,8 +120,9 @@ func loadWith(t *testing.T, values map[string]string) (Service, error) {
 	return Load(9020)
 }
 
-// ENVOY_NATS_REPLICAS is the deployment's replica count, 1 when unset or blank, and
-// ENVOY_STREAM_MAX_BYTES the stream's byte limit, 0 (none set) when unset or blank.
+// Load reads ENVOY_NATS_REPLICAS and ENVOY_STREAM_MAX_BYTES through bus.ParseNATSReplicas and
+// bus.ParseStreamMaxBytes (their own cases are in internal/bus): 1 copy and no byte limit when
+// unset, and the values as set otherwise.
 func TestLoadReadsTheReplicaCountAndTheStreamByteLimit(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -130,10 +131,7 @@ func TestLoadReadsTheReplicaCountAndTheStreamByteLimit(t *testing.T) {
 		maxBytes int64
 	}{
 		{"unset", nil, 1, 0},
-		{"blank", map[string]string{"ENVOY_NATS_REPLICAS": " ", "ENVOY_STREAM_MAX_BYTES": ""}, 1, 0},
-		{"one", map[string]string{"ENVOY_NATS_REPLICAS": "1"}, 1, 0},
 		{"three with a limit", map[string]string{"ENVOY_NATS_REPLICAS": " 3 ", "ENVOY_STREAM_MAX_BYTES": "10737418240"}, 3, 10 << 30},
-		{"five", map[string]string{"ENVOY_NATS_REPLICAS": "5", "ENVOY_STREAM_MAX_BYTES": "1"}, 5, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			service, err := loadWith(t, tc.values)
@@ -147,18 +145,11 @@ func TestLoadReadsTheReplicaCountAndTheStreamByteLimit(t *testing.T) {
 	}
 }
 
-// A replica count outside 1-5 or a byte limit that is not a positive number is refused, naming the
-// variable and the value.
-func TestLoadRefusesAReplicaCountOutside1To5AndAByteLimitThatIsNotPositive(t *testing.T) {
+// Load refuses a replica count or a byte limit its parser refuses, naming the variable and the
+// value.
+func TestLoadRefusesAReplicaCountOrAByteLimitItsParserRefuses(t *testing.T) {
 	for _, tc := range []struct{ name, value string }{
-		{"ENVOY_NATS_REPLICAS", "0"},
-		{"ENVOY_NATS_REPLICAS", "-1"},
 		{"ENVOY_NATS_REPLICAS", "6"},
-		{"ENVOY_NATS_REPLICAS", "x"},
-		{"ENVOY_NATS_REPLICAS", "2.5"},
-		{"ENVOY_STREAM_MAX_BYTES", "0"},
-		{"ENVOY_STREAM_MAX_BYTES", "-5"},
-		{"ENVOY_STREAM_MAX_BYTES", "x"},
 		{"ENVOY_STREAM_MAX_BYTES", "10GB"},
 	} {
 		t.Run(tc.name+"="+tc.value, func(t *testing.T) {

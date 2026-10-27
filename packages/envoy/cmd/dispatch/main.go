@@ -23,7 +23,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/bus"
-	envoyconfig "github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
@@ -79,7 +78,7 @@ type bootConfig struct {
 	NATSDisabled       bool
 	// NATSReplicas is ENVOY_NATS_REPLICAS, the deployment's replica count for the stream and the
 	// webhook redelivery bucket, and StreamMaxBytes is ENVOY_STREAM_MAX_BYTES, the stream's byte
-	// limit or 0 for none set (envoyconfig.ParseNATSReplicas, envoyconfig.ParseStreamMaxBytes).
+	// limit or 0 for none set (bus.ParseNATSReplicas, bus.ParseStreamMaxBytes).
 	NATSReplicas     int
 	StreamMaxBytes   int64
 	TestHooksEnabled bool
@@ -635,10 +634,10 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.PprofAddr = pprofAddr
-	if boot.NATSReplicas, err = envoyconfig.ParseNATSReplicas(env.get(bus.ReplicasEnvVar)); err != nil {
+	if boot.NATSReplicas, err = bus.ParseNATSReplicas(env.get(bus.ReplicasEnvVar)); err != nil {
 		return bootConfig{}, err
 	}
-	if boot.StreamMaxBytes, err = envoyconfig.ParseStreamMaxBytes(env.get(bus.StreamMaxBytesEnvVar)); err != nil {
+	if boot.StreamMaxBytes, err = bus.ParseStreamMaxBytes(env.get(bus.StreamMaxBytesEnvVar)); err != nil {
 		return bootConfig{}, err
 	}
 	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
