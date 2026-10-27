@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
@@ -42,10 +45,12 @@ var (
 const maxSettleFailures = 3
 
 const (
-	// maxLiveRooms is how many live rooms - ygo's resident rooms, loaded or loading, whoever
-	// opened them - a document socket may find before it is refused a room of its own
-	// (canOpenRoom).
-	maxLiveRooms       = 1_000
+	// maxLiveRooms is how many resident rooms - ygo's rooms, loaded or loading through their
+	// OnLoadDocument, whoever opened them - a document socket may find before it is refused a
+	// room of its own (canOpenRoom), unless Deps.MaxLiveRooms names another number.
+	maxLiveRooms = 1_000
+	// maxRoomConnections is how many browser connections the service holds before it refuses the
+	// next document socket (canAddConnection), unless Deps.MaxDocConnections names another number.
 	maxRoomConnections = 1_000
 	// roomIdleTimeout is how long a room stays resident after its last peer leaves, or after the
 	// last Server.Apply on a room no peer is in returns (New). A peer that returns within it
@@ -53,7 +58,9 @@ const (
 	roomIdleTimeout = time.Minute
 )
 
-// Deps configures the live document service.
+// Deps configures the live document service. MaxLiveRooms and MaxDocConnections are its room and
+// connection caps (cmd/dispatch's DISPATCH_MAX_LIVE_ROOMS and DISPATCH_MAX_DOC_CONNECTIONS); zero
+// is the default, 1,000 each.
 type Deps struct {
 	Store             *store.Store
 	Persistence       VersionedStore
@@ -64,6 +71,8 @@ type Deps struct {
 	Settle            time.Duration
 	MarkWait          time.Duration
 	UnrecordedMarkTTL time.Duration
+	MaxLiveRooms      int
+	MaxDocConnections int
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
@@ -224,21 +233,25 @@ type Service struct {
 	// wait ran out (retrySettleSoon, rearmSettleLocked), which runs under the room's state lock.
 	// Nil outside tests; tests count the wake-ups a room whose appends lag costs.
 	settlementWoke func(room string)
-	// roomScanned runs at each scan a document socket's admission makes over the rooms:
-	// canAddConnection's pass over every room record, and canOpenRoom's copy of ygo's live room
-	// names. Nil outside tests; tests count the scans one socket open costs.
+	// roomScanned runs at each walk over the room records, or copy of ygo's room names, that a
+	// document socket's admission makes. Admission makes none - its caps are counts
+	// (canOpenRoom, canAddConnection) - so nothing calls it, and a walk added to admission would.
+	// Nil outside tests; tests count through it (CountRoomScansForTest) that one socket open walks
+	// no rooms.
 	roomScanned func()
 	// admissionRendered runs at each render of a whole document that admitting a socket makes:
-	// ServeHTTP's check of the tree it loaded against the Proof schema, and onLoadDocument's check
-	// of the room it loads. Nil outside tests; tests count the renders one socket open costs.
+	// ServeHTTP's check of the tree it loaded against the Proof schema (admitDocument), and
+	// onLoadDocument's check of a room it loads without a socket's rendered tree. Nil outside
+	// tests; tests count the renders one socket open costs.
 	admissionRendered func(room string)
 	// afterSocketIssueRead runs in a document socket's admission (ServeHTTP) once it has read the
-	// document's issue and before it loads the document's tree (loadTree). Nil outside tests;
-	// tests use it to close the issue while the socket loads.
+	// document's issue and recorded the read on the room's state (holdForAdmission), and before it
+	// loads the document's tree (loadTree). Nil outside tests; tests use it to close the issue
+	// while the socket loads.
 	afterSocketIssueRead func(room string)
 	// afterSocketPreload runs in a cold document socket's admission (ServeHTTP) once it has offered
-	// the durable state it loaded to the room's load (preloads), and before it hands the socket to
-	// ygo. Nil outside tests; tests use it to hold two cold sockets of one room until both have
+	// the durable state it loaded to the room's load (offerPreload), and before it hands the socket
+	// to ygo. Nil outside tests; tests use it to hold two cold sockets of one room until both have
 	// offered theirs, and to watch what becomes of each one's state.
 	afterSocketPreload func(room string, loaded *persistence.LoadResult)
 	// inServiceTransaction runs first in every transaction a service mutation makes through
@@ -297,11 +310,28 @@ type Service struct {
 	instances sync.Map
 	roomLoads sync.Map
 	// reads holds the renderings of the documents cold reads served, each under the stored state
-	// it was rendered from (coldRead).
+	// it was rendered from (coldRead), within the budget New gives it from the Go memory limit
+	// (readBudgetFor).
 	reads *documentReads
+	// roomCap and connectionCap are the most resident rooms and browser connections a document
+	// socket may find before it is refused (canOpenRoom, canAddConnection): Deps.MaxLiveRooms and
+	// Deps.MaxDocConnections, else maxLiveRooms and maxRoomConnections. residentRooms counts the
+	// rooms ygo holds from each one's OnLoadDocument to its OnUnloadDocument, and connections the
+	// browsers registered on the room records (addConnection, removeConnection), so neither cap
+	// walks the rooms.
+	roomCap       int
+	connectionCap int
+	residentRooms atomic.Int64
+	connections   atomic.Int64
+	// residentBytes is the encoded bytes the resident rooms took, each room's load and every
+	// update it committed since (roomState.residentBytes), for the room figures.
+	residentBytes atomic.Int64
 	// appendFigures counts what the rooms' browser append transactions did (room_appends.go), for
-	// the room figures.
-	appendFigures roomAppendFigures
+	// the room figures, as evictorQueries counts the stale-room evictor's reads of a document's
+	// head and settlementWakeups the wakes of the waits for a room's appends (settlementWoke).
+	appendFigures     roomAppendFigures
+	evictorQueries    atomic.Uint64
+	settlementWakeups atomic.Uint64
 	// warmingAppends is set while warmRoomAppends opens a connection of the room-appends pool, so
 	// rooms that load together open one, not one each.
 	warmingAppends atomic.Bool
@@ -612,6 +642,19 @@ func New(deps Deps) *Service {
 	if deps.Events == nil {
 		deps.Events = events.NewBroker()
 	}
+	roomCap := deps.MaxLiveRooms
+	if roomCap <= 0 {
+		roomCap = maxLiveRooms
+	}
+	connectionCap := deps.MaxDocConnections
+	if connectionCap <= 0 {
+		connectionCap = maxRoomConnections
+	}
+	// The Go memory limit is the process's, set before New runs (GOMEMLIMIT, or the runtime's
+	// default of none), so the budget is read once here.
+	readBudget := readBudgetFor(debug.SetMemoryLimit(-1))
+	slog.Info("dispatch: document rooms' limits", "read_budget_bytes", readBudget,
+		"max_live_rooms", roomCap, "max_doc_connections", connectionCap)
 	persist := deps.Persistence
 	if persist == nil {
 		persist = NewPgVersioned(deps.Store)
@@ -632,7 +675,9 @@ func New(deps Deps) *Service {
 		now:               time.Now,
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
-		reads:             newDocumentReads(documentReadBudget),
+		reads:             newDocumentReads(readBudget),
+		roomCap:           roomCap,
+		connectionCap:     connectionCap,
 	}
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
 	srv := websocket.NewServerWithPersistence(adapter)
@@ -691,6 +736,134 @@ func New(deps Deps) *Service {
 // every process listening on the database hears (documentHeadNotice).
 func (s *Service) ProcessID() string {
 	return s.processID
+}
+
+// RoomFigures is what the document rooms of one Service hold and what their work costs, as the
+// loopback profiler's /debug/vars serves it (cmd/dispatch publishes it as dispatch_rooms), so an
+// operator can read room memory and append cost from a running process:
+//
+//   - ResidentRooms, the rooms ygo holds (canOpenRoom's count), RoomRecords, the room records the
+//     service keeps, and Connections, the browsers registered on them (canAddConnection's count);
+//   - PendingUpdates, the updates the rooms' persistence has yet to take, PendingUpdateBytes, the
+//     bytes of the updates the rooms' queues hold, and DurableAppends, the appends not landed;
+//   - AppendBatches, AppendedUpdates and AppendRoundTrips, what the rooms' browser append
+//     transactions committed and the round trips they sent, and BatchSizes, how many committed
+//     batches stored how many updates, by bucket ("1", "2", "3-4", ... "129-256");
+//   - Pools, the room-appends and rooms pools' connection figures;
+//   - ReadCache, the cold reads' cache's weight, entries and budget; Preloads, the cold sockets'
+//     states waiting for their room's load; ResidentBytes, the encoded bytes the resident rooms
+//     took (each load and every update since);
+//   - HeadTracker, whether the head tracker trusts itself and how many documents it holds;
+//     EvictorQueries, the stale-room evictor's reads of a document's head; SettlementWakeups,
+//     the wakes of the waits for a room's appends.
+type RoomFigures struct {
+	ResidentRooms      int64              `json:"resident_rooms"`
+	RoomRecords        int                `json:"room_records"`
+	Connections        int64              `json:"connections"`
+	PendingUpdates     int                `json:"pending_updates"`
+	PendingUpdateBytes int                `json:"pending_update_bytes"`
+	DurableAppends     int64              `json:"durable_appends"`
+	AppendBatches      uint64             `json:"append_batches"`
+	AppendedUpdates    uint64             `json:"appended_updates"`
+	AppendRoundTrips   uint64             `json:"append_round_trips"`
+	BatchSizes         map[string]uint64  `json:"batch_sizes"`
+	Pools              RoomPoolFigures    `json:"pools"`
+	ReadCache          ReadCacheFigures   `json:"read_cache"`
+	Preloads           int                `json:"preloads"`
+	ResidentBytes      int64              `json:"resident_bytes"`
+	HeadTracker        HeadTrackerFigures `json:"head_tracker"`
+	EvictorQueries     uint64             `json:"evictor_queries"`
+	SettlementWakeups  uint64             `json:"settlement_wakeups"`
+}
+
+// RoomPoolFigures is the room-appends and the rooms pools' PoolFigures.
+type RoomPoolFigures struct {
+	RoomAppends PoolFigures `json:"room_appends"`
+	Rooms       PoolFigures `json:"rooms"`
+}
+
+// PoolFigures is one pool's Stat: connections held now and idle now, acquires that found no idle
+// connection, and the time acquires waited in all. A pool not opened yet is all zeros.
+type PoolFigures struct {
+	Acquired          int32 `json:"acquired"`
+	Idle              int32 `json:"idle"`
+	EmptyAcquires     int64 `json:"empty_acquires"`
+	AcquireDurationNS int64 `json:"acquire_duration_ns"`
+}
+
+// ReadCacheFigures is the cold reads' cache's weight, entry count and budget.
+type ReadCacheFigures struct {
+	Bytes   int64 `json:"bytes"`
+	Entries int   `json:"entries"`
+	Budget  int64 `json:"budget"`
+}
+
+// HeadTrackerFigures is whether the head tracker trusts itself and how many documents it holds.
+type HeadTrackerFigures struct {
+	Trusted bool `json:"trusted"`
+	Entries int  `json:"entries"`
+}
+
+// RoomFigures computes the figures now. It takes each room record's lock in turn, briefly, and the
+// read cache's and the head tracker's, and touches no database: a pool not opened yet is reported
+// as zeros rather than opened.
+func (s *Service) RoomFigures() RoomFigures {
+	figures := RoomFigures{
+		ResidentRooms:     s.residentRooms.Load(),
+		Connections:       s.connections.Load(),
+		AppendBatches:     s.appendFigures.batches.Load(),
+		AppendedUpdates:   s.appendFigures.updates.Load(),
+		AppendRoundTrips:  s.appendFigures.roundTrips.Load(),
+		BatchSizes:        make(map[string]uint64, len(roomAppendBatchSizes)),
+		ReadCache:         s.reads.figures(),
+		ResidentBytes:     s.residentBytes.Load(),
+		HeadTracker:       s.heads.figures(),
+		EvictorQueries:    s.evictorQueries.Load(),
+		SettlementWakeups: s.settlementWakeups.Load(),
+	}
+	lower := 1
+	for index, upper := range roomAppendBatchSizes {
+		label := strconv.Itoa(upper)
+		if lower < upper {
+			label = strconv.Itoa(lower) + "-" + label
+		}
+		figures.BatchSizes[label] = s.appendFigures.sizes[index].Load()
+		lower = upper + 1
+	}
+	s.rooms.Range(func(_, value any) bool {
+		state := value.(*roomState)
+		state.mu.Lock()
+		if !state.released {
+			figures.RoomRecords++
+			figures.PendingUpdates += state.pendingUpdates
+			figures.PendingUpdateBytes += state.queuedBytes
+			figures.DurableAppends += state.durableAppends.Load()
+		}
+		state.mu.Unlock()
+		return true
+	})
+	s.preloads.Range(func(_, _ any) bool {
+		figures.Preloads++
+		return true
+	})
+	if s.store != nil && s.store.Pool != nil {
+		rooms, roomAppends := s.store.Pool.RoomPoolStats()
+		figures.Pools = RoomPoolFigures{RoomAppends: poolFigures(roomAppends), Rooms: poolFigures(rooms)}
+	}
+	return figures
+}
+
+// poolFigures is stat as PoolFigures; nil, a pool not opened yet, is all zeros.
+func poolFigures(stat *pgxpool.Stat) PoolFigures {
+	if stat == nil {
+		return PoolFigures{}
+	}
+	return PoolFigures{
+		Acquired:          stat.AcquiredConns(),
+		Idle:              stat.IdleConns(),
+		EmptyAcquires:     stat.EmptyAcquireCount(),
+		AcquireDurationNS: stat.AcquireDuration().Nanoseconds(),
+	}
 }
 
 // ShutdownDrainBudget bounds the part of Shutdown that waits on document work - each room's durable
@@ -1134,10 +1307,17 @@ func (s *Service) retrySettleSoon(room string) {
 // appends ran out, now that they have landed (retrySettleSoon, countsFellLocked). Its caller holds
 // state.mu.
 func (s *Service) rearmSettleLocked(room string, state *roomState) {
+	s.settlementWokeUp(room)
+	s.scheduleSettleAfterLocked(room, state, 0)
+}
+
+// settlementWokeUp counts one wake of a wait for room's appends, or one re-arm of a settlement
+// whose wait ran out, in the room figures (settlementWakeups), and runs the settlementWoke hook.
+func (s *Service) settlementWokeUp(room string) {
+	s.settlementWakeups.Add(1)
 	if s.settlementWoke != nil {
 		s.settlementWoke(room)
 	}
-	s.scheduleSettleAfterLocked(room, state, 0)
 }
 
 // nextRoomGeneration is the generation a state moves to when something invalidates what a
@@ -2341,6 +2521,12 @@ func waitGroup(ctx context.Context, wg *sync.WaitGroup) {
 // so the pool can see it: a caller that ever runs it with a transaction still open is refused, not
 // wedged. That context is one caller holding at most one connection, so the rooms are recorded and
 // closed one at a time.
+//
+// The close or reopen is recorded as of now (recordIssueLocked), after the commit, so it stands
+// over any read of the issue that began before it. Its caller runs it once the issue's closed
+// state has changed, so a close is acted on whatever the state recorded already: a socket's
+// admission or a load whose read began after the commit can have recorded the close first, and
+// the room still has to stop its settlement, keep its latest edit source and close.
 func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bool) {
 	rooms, err := s.documentRooms(ctx, "the issue's document rooms", `
 		select id::text from artifacts where issue_key = $1 and kind = 'doc'
@@ -2355,15 +2541,13 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 	}
 	for _, room := range rooms {
 		state := s.lockExistingState(room)
-		changed := true
 		var (
 			lastActor *model.Actor
 			creditSeq uint64
 		)
 		if state != nil {
-			changed = state.closed != closed
-			state.closed = closed
-			if closed && changed {
+			state.recordIssueLocked(issueRead{open: !closed, at: time.Now()})
+			if closed {
 				state.roomGeneration = s.nextRoomGeneration()
 				// The closed room's settlement failures are not the next room's (see
 				// reserveRoomCloseLocked): a record kept across the close and a reopen starts
@@ -2380,7 +2564,7 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			}
 			s.unlockState(room, state)
 		}
-		if closed && changed {
+		if closed {
 			persisted := lastActor == nil
 			if lastActor != nil {
 				if err := s.persistLastActor(ctx, room, *lastActor); err != nil {
@@ -2392,7 +2576,7 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			if persisted {
 				s.lastActorPersisted(room, creditSeq)
 			}
-			// A room still loading has no state yet, and is closed once it has loaded.
+			// A room still loading is closed once it has loaded: CloseRoom waits for the load.
 			_ = s.srv.CloseRoom(room, true)
 		}
 	}
@@ -2695,9 +2879,7 @@ func (s *Service) waitForRoomIdle(ctx context.Context, room string, busy func(*r
 		if err != nil {
 			return err
 		}
-		if s.settlementWoke != nil {
-			s.settlementWoke(room)
-		}
+		s.settlementWokeUp(room)
 	}
 }
 

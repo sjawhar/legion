@@ -506,9 +506,7 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 		e.armRetry(artifactID)
 		return false
 	}
-	if e.readingHead != nil {
-		e.readingHead(artifactID)
-	}
+	e.countHeadRead(artifactID)
 	head, err := currentUpdateCursor(ctx, service.store.Pool, artifactID)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -521,9 +519,7 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 		e.reachedVerdict(artifactID)
 		return false
 	}
-	if e.readingHead != nil {
-		e.readingHead(artifactID)
-	}
+	e.countHeadRead(artifactID)
 	through, head, err := service.roomBehindDurableHead(ctx, artifactID, cursor)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -792,4 +788,14 @@ func (e *staleRoomEvictor) reachedVerdict(artifactID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.attempts, artifactID)
+}
+
+// countHeadRead counts one read of artifactID's head the evictor is about to make for a room it
+// decides on, the unlocked read or the confirmation under the document's lock, in the room
+// figures (Service.evictorQueries), and runs the readingHead hook.
+func (e *staleRoomEvictor) countHeadRead(artifactID string) {
+	e.service.evictorQueries.Add(1)
+	if e.readingHead != nil {
+		e.readingHead(artifactID)
+	}
 }

@@ -24,10 +24,17 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
+// connectionState is one document socket as its admission (ServeHTTP) found it and ygo's
+// authorization of the same request (authorize) registered it: the caller, resolved once
+// (requestActor), and the admission's one read of the document's issue, which authorize takes
+// rather than resolving or reading either again; then the room, the connection id the service gave
+// the browser, and whether it is registered (addConnection). What else a socket's admission reads
+// off its request goes here too.
 type connectionState struct {
 	room  string
 	id    uint64
 	actor model.Actor
+	issue issueRead
 	added bool
 }
 
@@ -68,11 +75,14 @@ type servicePersistenceAdapter struct {
 // between the two reaches that instance through the record (roomLoad) rather than no instance at
 // all. The read itself takes no advisory lock - a durable writer holds that one across its whole
 // transaction, and a load that waited for it would wedge a write that forks the room it loads -
-// so the record, not the lock, is what keeps a room from being born behind the head.
+// so the record, not the lock, is what keeps a room from being born behind the head. The record
+// also carries what the load hands ygo (roomLoad.loaded): the history's size, and the tree a
+// socket's admission rendered from it when the load takes that socket's preload.
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 	load := a.service.beginRoomLoad(room)
-	if loaded, ok := a.service.takePreload(room); ok {
+	if loaded, tree, ok := a.service.takePreload(room); ok {
 		load.readHead(loaded.Version)
+		load.loaded(loaded.Update, tree)
 		return loaded.Update, nil
 	}
 	result, err := a.store.Load(context.Background(), room)
@@ -84,6 +94,7 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 		return nil, err
 	}
 	load.readHead(result.Version)
+	load.loaded(result.Update, nil)
 	return result.Update, nil
 }
 
@@ -164,34 +175,44 @@ func validateUpdate(update []byte) error {
 
 // preloadedDocument is the durable state a document socket's admission check decoded, kept for the
 // load ygo makes of the room next (servicePersistenceAdapter.LoadDoc), so a cold connection reads
-// and decodes the history once.
+// and decodes the history once, and the tree the check read from it and rendered, which the room's
+// load takes in place of reading and rendering the room again (onLoadDocument), so a cold
+// connection renders the document once too. The map holds the first socket's offer of a room
+// (offerPreload): a socket whose offer loses keeps no reference to its own, and the entry holds
+// its state only until a load takes it (takePreload), so neither outlasts the room's load by the
+// socket's whole lifetime.
 type preloadedDocument struct {
 	loaded persistence.LoadResult
+	tree   *pmdoc.Node
 }
 
-// takePreload is the update a socket's admission check loaded for room, while the durable head is
-// still the one it loaded: every write that changes a document's stored state raises its head (an
-// append, a rebuild), and compaction keeps both the head and the state. The head is the head
-// tracker's when it trusts itself (headTracker.head), which costs no read, and otherwise read from
-// the store. A stale or absent preload is no answer, and the caller loads the room itself.
-func (s *Service) takePreload(room string) (persistence.LoadResult, bool) {
+// takePreload is the update a socket's admission check loaded for room, with the tree it read from
+// it (nil for an empty history), while the durable head is still the one it loaded: every write
+// that changes a document's stored state raises its head (an append, a rebuild), and compaction
+// keeps both the head and the state. The head is the head tracker's when it trusts itself
+// (headTracker.head), which costs no read, and otherwise read from the store. A stale or absent
+// preload is no answer, and the caller loads the room itself. Either way the entry gives up the
+// state it held: the socket that offered it holds the entry until it ends (offerPreload).
+func (s *Service) takePreload(room string) (persistence.LoadResult, *pmdoc.Node, bool) {
 	value, ok := s.preloads.LoadAndDelete(room)
 	if !ok {
-		return persistence.LoadResult{}, false
+		return persistence.LoadResult{}, nil, false
 	}
 	preload := value.(*preloadedDocument)
+	loaded, tree := preload.loaded, preload.tree
+	preload.loaded, preload.tree = persistence.LoadResult{}, nil
 	head, trusted := s.heads.head(room)
 	if !trusted {
 		stored, err := s.persistence.Head(context.Background(), room)
 		if err != nil {
-			return persistence.LoadResult{}, false
+			return persistence.LoadResult{}, nil, false
 		}
 		head = int64(stored)
 	}
-	if head != int64(preload.loaded.Version) {
-		return persistence.LoadResult{}, false
+	if head != int64(loaded.Version) {
+		return persistence.LoadResult{}, nil, false
 	}
-	return preload.loaded, true
+	return loaded, tree, true
 }
 
 // documentSchemaCloseCode closes a document websocket whose room is outside the Proof schema
@@ -225,13 +246,25 @@ func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, ca
 	}
 }
 
-// ServeHTTP serves the Hocuspocus-framed document websocket endpoint.
-func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	room := r.PathValue("room")
-	if room == "" {
-		room = path.Base(r.URL.Path)
+// socketRoom is the document a socket request names: its route's room, else its path's last
+// segment.
+func socketRoom(r *http.Request) string {
+	if room := r.PathValue("room"); room != "" {
+		return room
 	}
-	if _, err := s.requestActor(r); err != nil {
+	return path.Base(r.URL.Path)
+}
+
+// ServeHTTP serves the Hocuspocus-framed document websocket endpoint. A socket's admission
+// resolves the caller and reads the document's issue once each, here, and hands both to ygo's
+// authorization of the same request (authorize) on the connection's state; the caps it checks are
+// counts (canOpenRoom, canAddConnection), and a warm room's schema verdict is the one its update
+// observer recorded (residentVerdict), so admitting a socket to a warm room walks no rooms and
+// renders nothing, and a cold one renders its document once (admitDocument).
+func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	room := socketRoom(r)
+	actor, err := s.requestActor(r)
+	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -239,7 +272,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "document not found", http.StatusNotFound)
 		return
 	}
-	if _, err := s.issueOpen(r.Context(), s.queryFrom(r.Context()), room); err != nil {
+	issue := issueRead{at: time.Now()}
+	if issue.open, err = s.issueOpen(r.Context(), s.queryFrom(r.Context()), room); err != nil {
 		http.Error(w, "document not found", http.StatusNotFound)
 		return
 	}
@@ -251,23 +285,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	held := s.holdForAdmission(room, issue)
+	defer s.releaseAdmission(room, held)
 	if s.afterSocketIssueRead != nil {
 		s.afterSocketIssueRead(room)
 	}
-	// A browser editor normalizes a tree it cannot represent and writes the result back, so no
-	// connection - a first one, or a provider's reconnect - joins a room outside the Proof schema
-	// until it is replaced from markdown. The server decides it here, for every client at once, by
-	// the same stored document and rendering `/text` answers with (readDocument), so a socket is
-	// refused exactly when that read is ErrDocOutsideSchema.
-	tree, loaded, err := s.loadTree(r.Context(), room)
-	if err == nil && tree != nil {
-		if s.admissionRendered != nil {
-			s.admissionRendered(room)
-		}
-		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) {
-			err = renderErr
-		}
-	}
+	withdraw, err := s.admitDocument(r.Context(), room)
 	if errors.Is(err, ErrDocOutsideSchema) {
 		refuseOutsideSchema(w, r, room, err)
 		return
@@ -276,15 +299,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	if loaded != nil {
-		preload := &preloadedDocument{loaded: *loaded}
-		s.preloads.Store(room, preload)
-		defer s.preloads.CompareAndDelete(room, preload)
-		if s.afterSocketPreload != nil {
-			s.afterSocketPreload(room, loaded)
-		}
-	}
-	connection := &connectionState{}
+	defer withdraw()
+	connection := &connectionState{actor: actor, issue: issue}
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
 	s.srv.ServeHTTP(w, r.WithContext(ctx))
 	if connection.added {
@@ -292,34 +308,85 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// admitDocument decides whether a socket may join room's document. A browser editor normalizes a
+// tree it cannot represent and writes the result back, so no connection - a first one, or a
+// provider's reconnect - joins a room outside the Proof schema until it is replaced from markdown.
+// The server decides it for every client at once, by the same document and rendering `/text`
+// answers with (readDocument), so a socket is refused exactly when that read is
+// ErrDocOutsideSchema. A resident room's update observer has rendered the room after every update
+// it took, as that read renders it, and recorded the verdict (residentVerdict), which is taken
+// as it stands; only a room with no verdict - not resident, or with a replica that lost the room's
+// state - is read and rendered here. A cold socket offers the state it read to the room's load
+// (offerPreload), and withdraw is what the socket's end runs to take that offer back.
+func (s *Service) admitDocument(ctx context.Context, room string) (withdraw func(), err error) {
+	switch s.residentVerdict(room) {
+	case verdictInsideSchema:
+		return func() {}, nil
+	case verdictOutsideSchema:
+		return nil, ErrDocOutsideSchema
+	}
+	tree, loaded, err := s.loadTree(ctx, room)
+	if err == nil && tree != nil {
+		if s.admissionRendered != nil {
+			s.admissionRendered(room)
+		}
+		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) {
+			err = renderErr
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if loaded == nil {
+		return func() {}, nil
+	}
+	return s.offerPreload(room, loaded, tree), nil
+}
+
+// offerPreload offers loaded, the durable state a cold socket's admission read for room, and tree,
+// the tree it read from it and rendered, to the room's load (takePreload). The first offer stands
+// (LoadOrStore): every offer is of a state the load checks against the head before it takes it,
+// and a socket whose offer lost keeps no reference to it, so its whole history is released at
+// once rather than when the socket ends, which can be hours later. It returns what the socket's
+// end runs: withdraw its own offer if no load took it.
+func (s *Service) offerPreload(room string, loaded *persistence.LoadResult, tree *pmdoc.Node) (withdraw func()) {
+	preload := &preloadedDocument{loaded: *loaded, tree: tree}
+	_, lost := s.preloads.LoadOrStore(room, preload)
+	if s.afterSocketPreload != nil {
+		s.afterSocketPreload(room, loaded)
+	}
+	if lost {
+		return func() {}
+	}
+	return func() { s.preloads.CompareAndDelete(room, preload) }
+}
+
+// authorize is ygo's authorization of a document socket ServeHTTP admitted. It registers the
+// browser (addConnection) as the caller ServeHTTP resolved, and takes the issue read ServeHTTP
+// made, so it resolves and reads neither again. The issue is closed for the socket when that read
+// says so or the room's state records it closed: ServeHTTP's hold on the state
+// (holdForAdmission) is where a close made while the socket loaded its document is recorded
+// (SetIssueClosed), so such a socket is admitted read-only, as one opened after the close is. A
+// closed issue, or a client schema version other than the server's, admits the socket read-only;
+// a request no admission read the issue for is read-only too.
 func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) {
-	actor, err := s.requestActor(r)
-	if err != nil {
-		return websocket.ConnectionConfig{}, false
-	}
-	room := r.PathValue("room")
-	if room == "" {
-		room = path.Base(r.URL.Path)
-	}
-	if !s.canAddConnection() {
-		return websocket.ConnectionConfig{}, false
-	}
-	if s.roomFailure(room) != nil {
-		return websocket.ConnectionConfig{}, false
-	}
-	open, err := s.issueOpen(r.Context(), s.queryFrom(r.Context()), room)
-	if err != nil {
-		return websocket.ConnectionConfig{}, false
-	}
 	connection, _ := r.Context().Value(connectionContextKey{}).(*connectionState)
-	if connection == nil {
+	if connection == nil || !s.canAddConnection() {
 		return websocket.ConnectionConfig{}, false
 	}
+	room := socketRoom(r)
+	state := s.lockState(room)
+	if state.failed != nil {
+		s.unlockState(room, state)
+		return websocket.ConnectionConfig{}, false
+	}
+	state.recordIssueLocked(connection.issue)
+	open := connection.issue.open && !state.closed
 	connection.room = room
 	connection.id = s.nextConnection.Add(1)
-	connection.actor = actor
 	connection.added = true
-	s.addConnection(room, connection.id, actor)
+	s.addConnectionLocked(state, connection.id, connection.actor)
+	s.unlockState(room, state)
 	return websocket.ConnectionConfig{
 		ReadOnly: schemaReadOnly(open, r.URL.Query().Get("schema_version")),
 	}, true
@@ -330,13 +397,23 @@ func schemaReadOnly(open bool, clientSchemaVersion string) bool {
 }
 
 // authorizeSchemaVersion confirms the existing HTTP-authorized connection's schema admission
-// through Hocuspocus's authenticated scope, which is the provider's client-visible signal.
+// through Hocuspocus's authenticated scope, which is the provider's client-visible signal. ygo
+// calls it with the room and the client's token alone. The issue's state is what room's state
+// records, which is at least as fresh as the read the connection's own admission made (authorize
+// recorded it there); only a room that records none reads the issue.
 func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (websocket.ConnectionConfig, error) {
-	open, err := s.issueOpen(context.Background(), s.queryFrom(context.Background()), room)
-	if err != nil {
-		return websocket.ConnectionConfig{}, err
+	closed, recorded := s.recordedIssueClosed(room)
+	if !recorded {
+		ctx := context.Background()
+		issue := issueRead{at: time.Now()}
+		var err error
+		if issue.open, err = s.issueOpen(ctx, s.queryFrom(ctx), room); err != nil {
+			return websocket.ConnectionConfig{}, err
+		}
+		s.recordIssueRead(room, issue)
+		closed = !issue.open
 	}
-	return websocket.ConnectionConfig{ReadOnly: schemaReadOnly(open, clientSchemaVersion)}, nil
+	return websocket.ConnectionConfig{ReadOnly: schemaReadOnly(!closed, clientSchemaVersion)}, nil
 }
 
 // ActorHeader is the header a document websocket's bearer names its session in, as the JSON of a
@@ -433,6 +510,16 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err := s.roomFailure(room); err != nil {
 		return err
 	}
+	// The room counts among the resident rooms from here (canOpenRoom) until ygo's
+	// OnUnloadDocument (releaseUnloadedRoom), unless this load fails: ygo then drops the room
+	// with no OnUnloadDocument, so the load takes its own count back.
+	s.residentRooms.Add(1)
+	resident := false
+	defer func() {
+		if !resident {
+			s.residentRooms.Add(-1)
+		}
+	}()
 	// Everything this load needs comes from the pool that owns loads. A writer holding a
 	// pooled connection and the issue's row lock waits for this load, so a read of the shared
 	// pool here waits for a connection only that writer can release: the wedge, arrived at
@@ -444,9 +531,16 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// The room's browser updates are stored on the room-appends pool, which opens a connection
 	// beside this load when it holds none, so the room's first batch dials none (warmRoomAppends).
 	s.warmRoomAppends()
-	open, err := s.issueOpen(ctx, rooms, room)
-	if err != nil {
-		return err
+	// The issue is read once per room load. A cold socket's admission, which holds the room's state
+	// while its load runs, has read it and recorded it there, as has a close or reopen of the issue
+	// since (admittedIssueRead); a load no admission holds - a settlement's warm-up, a committed
+	// write's publish - reads it here.
+	issue, admitted := s.admittedIssueRead(room)
+	if !admitted {
+		issue.at = time.Now()
+		if issue.open, err = s.issueOpen(ctx, rooms, room); err != nil {
+			return err
+		}
 	}
 	// The load takes no advisory lock, which a durable writer can hold for as long as its
 	// transaction runs: the row it reads is written whole by each writer's transaction, so a
@@ -459,27 +553,41 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
 	// returns (sjawhar/ygo v1.51.3-sami.1, provider/websocket/server.go:1749-1837: loadRoom closes
-	// the room's ready barrier after it), so nothing writes the tree while this walks it.
-	tree, err := treeOf(doc)
-	if err == nil {
-		if s.admissionRendered != nil {
-			s.admissionRendered(room)
+	// the room's ready barrier after it), so nothing writes the tree while this walks it. A load
+	// that took a cold socket's preload takes the tree that socket's admission read from the same
+	// state and found inside the schema (roomLoad.takeLoaded), so the document is rendered once.
+	var size int
+	var tree *pmdoc.Node
+	if value, ok := s.roomLoads.Load(room); ok {
+		size, tree = value.(*roomLoad).takeLoaded()
+	}
+	var renderErr error
+	if tree == nil {
+		tree, renderErr = treeOf(doc)
+		if renderErr == nil {
+			if s.admissionRendered != nil {
+				s.admissionRendered(room)
+			}
+			_, renderErr = documentMarkdown(tree)
 		}
-		_, err = documentMarkdown(tree)
 	}
 	var askBlocks map[string]struct{}
 	switch {
-	case errors.Is(err, ErrDocOutsideSchema):
-		slog.Warn("dispatch: loaded document outside Proof schema; a replacement from markdown repairs it", "room", room, "error", err)
-	case err != nil:
-		return err
+	case errors.Is(renderErr, ErrDocOutsideSchema):
+		slog.Warn("dispatch: loaded document outside Proof schema; a replacement from markdown repairs it", "room", room, "error", renderErr)
+	case renderErr != nil:
+		return renderErr
 	default:
 		askBlocks = askBlockIDs(tree)
 	}
 	// The room this load publishes holds the state it takes from here until ygo retires it
-	// (releaseIfUnusedLocked).
+	// (releaseIfUnusedLocked). The issue's state is the newest the record holds, this load's read
+	// or a close recorded after it began; the history the load decoded counts as resident.
 	state := s.lockState(room)
-	state.closed = !open
+	state.recordIssueLocked(issue)
+	open := !state.closed
+	state.residentBytes += int64(size)
+	s.residentBytes.Add(int64(size))
 	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
 	// They were not introduced by any update the observer sees, so none gains an author here.
 	if askBlocks == nil {
@@ -515,8 +623,11 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	s.unlockState(room, state)
 	// The log is opened before the observer is registered and before ygo hands the room to anyone
-	// (above), so it holds every transaction the room commits from here on, in commit order.
+	// (above), so it holds every transaction the room commits from here on, in commit order. The
+	// replica's verdict starts as this load's rendering said, and the observer's renders move it
+	// on from the first update (renderedReplica.verdict).
 	replica := s.keepReplica(doc, doc.OpenUpdateLog())
+	replica.recordVerdict(renderErr)
 	instance := s.keepInstance(room, doc)
 	hold := &instance.hold
 	doc.OnUpdate(func(update []byte, origin any) {
@@ -584,6 +695,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			s.scheduleSettle(room)
 		}
 	})
+	resident = true
 	return nil
 }
 
@@ -668,18 +780,34 @@ func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *
 // edit.
 func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
 	state := s.lockState(room)
-	state.connected[id] = actor
+	s.addConnectionLocked(state, id, actor)
 	s.unlockState(room, state)
+}
+
+// addConnectionLocked is addConnection on state, which its caller holds state.mu on. The service's
+// count of connections (connections, which canAddConnection reads) counts each id once, however
+// often it is registered.
+func (s *Service) addConnectionLocked(state *roomState, id uint64, actor model.Actor) {
+	if _, registered := state.connected[id]; !registered {
+		s.connections.Add(1)
+	}
+	state.connected[id] = actor
 }
 
 // removeConnection forgets a browser that left room, and with the last one, once ygo has retired
 // the room, the room's state (releaseIfUnusedLocked). A document without state has none to forget.
+// The service's count of connections drops only for an id the record held: a failed room's
+// browsers are found on the record that replaced it (handOverFailedRoomLocked), so each leaves
+// the count once.
 func (s *Service) removeConnection(room string, id uint64) {
 	state := s.lockExistingState(room)
 	if state == nil {
 		return
 	}
-	delete(state.connected, id)
+	if _, registered := state.connected[id]; registered {
+		delete(state.connected, id)
+		s.connections.Add(-1)
+	}
 	s.unlockState(room, state)
 }
 

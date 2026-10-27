@@ -419,6 +419,22 @@ func (p *Pool) Use() ConnectionUse {
 	return use
 }
 
+// RoomPoolStats is the document-rooms and the room-appends pools' Stat, each nil while its pool
+// has not been opened: reading them opens neither, so a reader of the room figures costs no
+// connection.
+func (p *Pool) RoomPoolStats() (rooms, roomAppends *pgxpool.Stat) {
+	p.mu.Lock()
+	roomsPool, appendsPool := p.rooms, p.roomAppends
+	p.mu.Unlock()
+	if roomsPool != nil {
+		rooms = roomsPool.Stat()
+	}
+	if appendsPool != nil {
+		roomAppends = appendsPool.Stat()
+	}
+	return rooms, roomAppends
+}
+
 func (p *Pool) guard(ctx context.Context) error {
 	if !holdsConnection(ctx) {
 		return nil

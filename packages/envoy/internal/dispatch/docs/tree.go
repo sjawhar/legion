@@ -330,6 +330,61 @@ type renderedReplica struct {
 	// markdown is the room's rendered markdown as the replica's latest update left it, or as the
 	// log's base rendered before any; nil while the document is outside the schema.
 	markdown *string
+	// verdict is what the room's latest rendering said of its document against the Proof schema
+	// (schemaVerdict): the load's (onLoadDocument), then each render the update observer makes
+	// (start, updateChangesMarkdown), each written while holding mu, in commit order. A socket's
+	// admission reads it without the lock (residentVerdict), so admitting a socket to a warm room
+	// renders nothing.
+	verdict atomic.Int32
+}
+
+// schemaVerdict is what a rendering of a document said of it against the Proof schema: inside it,
+// outside it (ErrDocOutsideSchema), or unknown - a rendering that failed for another reason, or a
+// replica that holds no state of the room (recover) - which a socket's admission answers by
+// reading and rendering the document itself.
+type schemaVerdict int32
+
+const (
+	verdictUnknown schemaVerdict = iota
+	verdictInsideSchema
+	verdictOutsideSchema
+)
+
+// verdictOf is the schemaVerdict a rendering that ended with err gives.
+func verdictOf(err error) schemaVerdict {
+	switch {
+	case err == nil:
+		return verdictInsideSchema
+	case errors.Is(err, ErrDocOutsideSchema):
+		return verdictOutsideSchema
+	}
+	return verdictUnknown
+}
+
+// recordVerdict records what the room's latest rendering, which ended with err, said of it. Its
+// caller holds mu, or is the load, before ygo hands the room to anyone.
+func (r *renderedReplica) recordVerdict(err error) {
+	r.verdict.Store(int32(verdictOf(err)))
+}
+
+// residentVerdict is the schemaVerdict the room resident for room recorded at its latest
+// rendering (renderedReplica.verdict): the answer readDocument's render of the document gives,
+// since the replica renders the room as of each update it takes, as readDocument reads it. A room
+// not resident, or one whose replica is gone, is verdictUnknown.
+func (s *Service) residentVerdict(room string) schemaVerdict {
+	live := s.srv.GetDoc(room)
+	if live == nil {
+		return verdictUnknown
+	}
+	listed, ok := s.replicas.Load(weak.Make(live))
+	if !ok {
+		return verdictUnknown
+	}
+	replica := listed.(weak.Pointer[renderedReplica]).Value()
+	if replica == nil {
+		return verdictUnknown
+	}
+	return schemaVerdict(replica.verdict.Load())
 }
 
 // lockForUpdate takes mu for the update observer. A read only tries mu, and takes it only while
@@ -374,21 +429,24 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 }
 
 // start makes the replica from base, the room's state as of just before the first update its log
-// hands over, and takes its rendering as the one that update is measured against. A base that does
-// not apply leaves no replica (recover).
+// hands over, and takes its rendering as the one that update is measured against, and its verdict
+// as the room's. A base that does not apply leaves no replica (recover) and no verdict.
 func (r *renderedReplica) start(room string, base []byte) {
 	doc := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(doc, base, nil); err != nil {
 		slog.Error("dispatch: make the document's rendered copy", "room", room, "error", err)
 		r.doc, r.markdown = nil, nil
+		r.verdict.Store(int32(verdictUnknown))
 		return
 	}
 	r.doc = doc
-	if markdown, _, err := renderDocumentForUpdate(doc); err == nil {
+	markdown, _, err := renderDocumentForUpdate(doc)
+	if err == nil {
 		r.markdown = &markdown
 	} else {
 		r.markdown = nil
 	}
+	r.recordVerdict(err)
 }
 
 // recover answers a replica that could not take an update, which leaves it holding no state the
@@ -400,6 +458,7 @@ func (r *renderedReplica) start(room string, base []byte) {
 func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, classify func(update crdt.LoggedUpdate, changed bool, tree *pmdoc.Node)) {
 	unplaced = append(unplaced, r.log.Reset()...)
 	r.doc, r.markdown = nil, nil
+	r.verdict.Store(int32(verdictUnknown))
 	slog.Error("dispatch: the document's rendered copy starts again at the room's next commit; updates it could not place count as content changes",
 		"room", room, "updates", len(unplaced))
 	if classify == nil {
@@ -503,14 +562,15 @@ func (r *renderedReplica) hold() *crdt.Doc {
 
 // updateChangesMarkdown reports whether the update the replica took last changed the room's
 // rendered markdown, the only document content a version stores, and keeps the new rendering,
-// with the tree it rendered when it changed. It renders the replica, the room's document as of
-// that update, so its caller holds mu, through renderDocumentForUpdate: the tree it reads never
-// outlives its caller's turn with the replica, so it carries none of pmdoc.Read's copy. An update
-// that changes only what no rendering carries - an anchor mark, or a heading id or list item label
-// the browser editor derives - is no content change. A document that does not render counts as
-// changed, with no tree.
+// with the tree it rendered when it changed, and the rendering's verdict. It renders the replica,
+// the room's document as of that update, so its caller holds mu, through renderDocumentForUpdate:
+// the tree it reads never outlives its caller's turn with the replica, so it carries none of
+// pmdoc.Read's copy. An update that changes only what no rendering carries - an anchor mark, or a
+// heading id or list item label the browser editor derives - is no content change. A document
+// that does not render counts as changed, with no tree.
 func (r *renderedReplica) updateChangesMarkdown(room string) (bool, *pmdoc.Node) {
 	markdown, tree, err := renderDocumentForUpdate(r.doc)
+	r.recordVerdict(err)
 	if err != nil {
 		r.markdown = nil
 		if errors.Is(err, ErrDocOutsideSchema) {

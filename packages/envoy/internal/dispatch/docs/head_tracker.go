@@ -153,6 +153,17 @@ func (t *headTracker) disconnected() {
 	t.listening = false
 }
 
+// figures is whether the tracker trusts itself (its LISTEN stands) and how many documents it
+// holds an entry for, for the room figures.
+func (t *headTracker) figures() HeadTrackerFigures {
+	if t == nil {
+		return HeadTrackerFigures{}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return HeadTrackerFigures{Trusted: t.listening, Entries: len(t.entries)}
+}
+
 // observe is a documentHeadChannel notice: room's history stands at head after a write that has
 // committed, this process's own or another's. The generation moves on and the head is recorded;
 // a write of this process whose end the tracker could not see is accounted for by it, since

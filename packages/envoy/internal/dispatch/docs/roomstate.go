@@ -111,10 +111,26 @@ type roomState struct {
 	settleFailures int
 	// settling counts the settlements running on this state (settleRoomWithin), which hold it
 	// across their database work.
-	settling   int
+	settling int
+	// closed is whether the document's issue is closed as of closedRead: when the newest read of
+	// the issue recorded here began, or when a close or reopen of the issue was recorded
+	// (SetIssueClosed). A read that began earlier than the one recorded never replaces it
+	// (recordIssueLocked), so the record is at least as fresh as any read a holder made before it.
+	// A zero closedRead is no record, and closed then says nothing.
 	closed     bool
-	failed     error
-	failedDone chan struct{}
+	closedRead time.Time
+	// admitting counts the document sockets whose admission holds this record (holdForAdmission):
+	// from the moment it records its read of the issue here until the socket ends. A cold room's
+	// load takes that read instead of reading the issue again (admittedIssueRead), and a close of
+	// the issue while the socket loads its document reaches the socket through it.
+	admitting int
+	// residentBytes is the encoded bytes the room resident on this record took: the history its
+	// load decoded and each update it committed since (recordUpdateClass). The service's
+	// residentBytes counts them too, until the room unloads or the record goes
+	// (dropResidentBytesLocked).
+	residentBytes int64
+	failed        error
+	failedDone    chan struct{}
 	// reloading marks a state whose room a close is about to retire because the room stands behind
 	// the durable head (reserveRoomCloseLocked): no transaction takes its writer slot from then on
 	// (openLiveWrite), until the close has returned, whether or not it closed the room it checked
@@ -211,10 +227,17 @@ func (s *Service) releaseIfUnused(room string) {
 	}
 }
 
-// releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so its state goes too unless
-// something still holds it, whose end releases it instead.
+// releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so it no longer counts among
+// the resident rooms (residentRooms, which its load counted in onLoadDocument), the bytes it took
+// no longer count as resident, and its state goes too unless something still holds it, whose end
+// releases it instead. ygo calls it exactly once for each room whose load succeeded, whichever way
+// the room goes: the idle sweep, the last peer leaving, CloseRoom.
 func (s *Service) releaseUnloadedRoom(_ context.Context, room string) {
-	s.releaseIfUnused(room)
+	s.residentRooms.Add(-1)
+	if state := s.lockExistingState(room); state != nil {
+		s.dropResidentBytesLocked(state)
+		s.unlockState(room, state)
+	}
 }
 
 // releaseIfUnusedLocked forgets state, room's, once ygo holds no room for it - none loaded or
@@ -235,8 +258,17 @@ func (s *Service) releaseIfUnusedLocked(room string, state *roomState) {
 // (lookUpState). Its one caller, releaseIfUnusedLocked, forgets only a state nothing holds
 // (unusedLocked), so no in-flight credit is on it. Its caller holds state.mu.
 func (s *Service) forgetLocked(room string, state *roomState) {
+	s.dropResidentBytesLocked(state)
 	state.released = true
 	s.rooms.CompareAndDelete(room, state)
+}
+
+// dropResidentBytesLocked takes the bytes state's room took out of the service's resident bytes,
+// once that room has gone or the record goes. A record outlives its room only while something
+// holds it, and a room loaded on it again counts its own load. Its caller holds state.mu.
+func (s *Service) dropResidentBytesLocked(state *roomState) {
+	s.residentBytes.Add(-state.residentBytes)
+	state.residentBytes = 0
 }
 
 // handOverFailedRoomLocked takes state, room's, out of the service once the eviction of the room
@@ -261,6 +293,8 @@ func (s *Service) forgetLocked(room string, state *roomState) {
 // the connection id the service gave it. Its caller holds state.mu.
 func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 	state.released = true
+	// The failed room is closed, so the bytes it took are no longer resident.
+	s.dropResidentBytesLocked(state)
 	// A wait for the room's appends on this record looks the room up again, and waits on the
 	// record that counts the room's updates from now on, if any does.
 	state.wakeIdleLocked()
@@ -298,11 +332,12 @@ func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 // unusedLocked is whether state holds nothing that outlasts its room. These are every holder: an
 // open writer, a running or armed settlement, a latest edit source no settlement has read, a
 // failure being recovered from (whose eviction forgets the state itself, evictRoom), a connected
-// browser, an update the room's persistence has not taken or appended, and an in-flight credit
-// whose append has not landed. Its caller holds state.mu.
+// browser, a document socket's admission (admitting), an update the room's persistence has not
+// taken or appended, and an in-flight credit whose append has not landed. Its caller holds
+// state.mu.
 func (s *Service) unusedLocked(state *roomState) bool {
 	return state.liveWriter == nil && state.settling == 0 && !s.isSettleTimerArmed(state.settle) &&
-		!state.unsettled && state.failed == nil && len(state.connected) == 0 &&
+		!state.unsettled && state.failed == nil && len(state.connected) == 0 && state.admitting == 0 &&
 		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0
 }
 
@@ -315,7 +350,8 @@ func (s *Service) unusedLocked(state *roomState) bool {
 // persistence, with no copy: a lagging room's queue holds no second copy of every update in it,
 // and the persistence finds the class by that slice (consumeUpdateClass). A queue that reaches a
 // batch's cap ends the linger of the room's browser append, whose batch has nothing more to wait
-// for.
+// for. Every update the room commits is recorded here once, so this is also where the bytes it
+// took count as resident (residentBytes).
 func (s *Service) recordUpdateClass(room string, update []byte, class documentUpdateClass) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
@@ -327,6 +363,8 @@ func (s *Service) recordUpdateClass(room string, update []byte, class documentUp
 	}
 	state.updateClasses = append(state.updateClasses, class)
 	state.queuedBytes += len(update)
+	state.residentBytes += int64(len(update))
+	s.residentBytes.Add(int64(len(update)))
 	if len(state.updateClasses) >= roomAppendBatchUpdates || state.queuedBytes >= roomAppendBatchBytes {
 		state.wakeAppendLingerLocked()
 	}
@@ -584,31 +622,97 @@ func (s *Service) roomClosed(room string) bool {
 	return state.closed
 }
 
-// canOpenRoom is whether a document socket may open room: one already live, or a new one while
-// fewer than maxLiveRooms rooms are live. A document whose room has gone counts for nothing,
-// whatever the service once kept for it.
-func (s *Service) canOpenRoom(room string) bool {
-	if s.srv.GetDoc(room) != nil {
-		return true
-	}
-	if s.roomScanned != nil {
-		s.roomScanned()
-	}
-	live := s.srv.Rooms()
-	return len(live) < maxLiveRooms || slices.Contains(live, room)
+// issueRead is one read of a document's issue: whether the issue was open, and when the read
+// began. A read sees the issue as of some moment after it began, so a read that began later is at
+// least as fresh as one that began earlier. The zero issueRead is no read at all.
+type issueRead struct {
+	open bool
+	at   time.Time
 }
 
-func (s *Service) canAddConnection() bool {
-	if s.roomScanned != nil {
-		s.roomScanned()
+// recordIssueLocked records read on state unless state holds a record made later (closedRead):
+// an older read never replaces a newer one, nor a close or reopen recorded after it began. Its
+// caller holds state.mu.
+func (state *roomState) recordIssueLocked(read issueRead) {
+	if read.at.IsZero() || read.at.Before(state.closedRead) {
+		return
 	}
-	count := 0
-	s.rooms.Range(func(_, value any) bool {
-		state := value.(*roomState)
-		state.mu.Lock()
-		count += len(state.connected)
-		state.mu.Unlock()
-		return count < maxRoomConnections
-	})
-	return count < maxRoomConnections
+	state.closed, state.closedRead = !read.open, read.at
+}
+
+// recordedIssueClosed is whether room's state records its issue closed, and whether it records
+// the issue at all: a document with no state, or a state no read or close of the issue reached,
+// records nothing.
+func (s *Service) recordedIssueClosed(room string) (closed, recorded bool) {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return false, false
+	}
+	defer s.unlockState(room, state)
+	return state.closed, !state.closedRead.IsZero()
+}
+
+// recordIssueRead records read on room's state, when the service holds one (recordIssueLocked).
+func (s *Service) recordIssueRead(room string, read issueRead) {
+	if state := s.lockExistingState(room); state != nil {
+		state.recordIssueLocked(read)
+		s.unlockState(room, state)
+	}
+}
+
+// admittedIssueRead is what room's state records of its issue while a document socket's
+// admission holds the state (holdForAdmission), and whether it does: the socket's own read, or a
+// close or reopen recorded since. A cold socket's admission triggers the room's load, which takes
+// this rather than reading the issue a second time (onLoadDocument); a load no admission holds -
+// a settlement's warm-up, a live write's publish - reads the issue itself.
+func (s *Service) admittedIssueRead(room string) (issueRead, bool) {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return issueRead{}, false
+	}
+	defer s.unlockState(room, state)
+	if state.admitting == 0 || state.closedRead.IsZero() {
+		return issueRead{}, false
+	}
+	return issueRead{open: !state.closed, at: state.closedRead}, true
+}
+
+// holdForAdmission holds room's state for a document socket's admission, from its read of the
+// issue, which it records there, until releaseAdmission, which the socket's end runs. While it
+// holds the state, a close of the issue (SetIssueClosed) finds the state and records the close on
+// it, so a socket whose issue closes while it loads its document is still admitted read-only
+// (authorize), and the room the socket's load opens takes the record rather than reading the
+// issue again (admittedIssueRead).
+func (s *Service) holdForAdmission(room string, read issueRead) *roomState {
+	state := s.lockState(room)
+	state.admitting++
+	state.recordIssueLocked(read)
+	s.unlockState(room, state)
+	return state
+}
+
+// releaseAdmission ends the hold holdForAdmission took on state, room's, and forgets the state if
+// nothing else holds it (releaseIfUnusedLocked).
+func (s *Service) releaseAdmission(room string, state *roomState) {
+	state.mu.Lock()
+	state.admitting--
+	s.unlockState(room, state)
+}
+
+// canOpenRoom is whether a document socket may open room: one already live, or a new one while
+// fewer than the service's room cap of rooms are resident. The resident rooms are a count
+// (residentRooms) that each room's load raises (onLoadDocument) and ygo's OnUnloadDocument lowers
+// (releaseUnloadedRoom), so the answer walks no list of rooms: an eviction or a deploy reconnects
+// every browser at once, and a walk on each open would cost every room for each of them. A
+// document whose room has gone counts for nothing, whatever the service once kept for it.
+func (s *Service) canOpenRoom(room string) bool {
+	return s.srv.GetDoc(room) != nil || s.residentRooms.Load() < int64(s.roomCap)
+}
+
+// canAddConnection is whether the service holds fewer browser connections than its connection
+// cap. The connections are a count (connections) that addConnection and removeConnection keep as
+// browsers join and leave, outside the room records: a failed room's eviction hands its
+// browsers to the record that replaces it (handOverFailedRoomLocked), which moves no connection.
+func (s *Service) canAddConnection() bool {
+	return s.connections.Load() < int64(s.connectionCap)
 }

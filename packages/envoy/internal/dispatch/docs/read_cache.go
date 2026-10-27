@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"runtime/debug"
 	"strconv"
 	"sync"
@@ -52,15 +53,20 @@ func readDocumentStamp(ctx context.Context, q Queryer, room string) (DocumentSta
 	return stamp, nil
 }
 
-// documentReadBudget is the most weight (documentRead.weight) the cold reads' cache holds:
-// production's task has 4,096 MiB, and one request may raise it by at most 256 MiB
-// (cmd/dispatch/memory_test.go). An entry heavier than an eighth of it is never stored.
+// documentReadBudget is the most weight (documentRead.weight) the cold reads' cache holds in a
+// process that runs with no Go memory limit, where nothing says how much memory it has: 256 MiB.
+// An entry heavier than an eighth of the budget is never stored.
 const documentReadBudget = 256 << 20
 
 // readBudgetFor is the cold reads' cache budget for a process whose Go memory limit is memoryLimit
-// (debug.SetMemoryLimit(-1), math.MaxInt64 when none is set): documentReadBudget, whatever the limit.
+// (debug.SetMemoryLimit(-1), math.MaxInt64 when none is set): a sixteenth of the limit, so the
+// cache follows the memory the process is given, at least 64 MiB, so the cache still stores a
+// document of 8 MiB, and at most 1 GiB; documentReadBudget with no limit.
 func readBudgetFor(memoryLimit int64) int64 {
-	return documentReadBudget
+	if memoryLimit == math.MaxInt64 {
+		return documentReadBudget
+	}
+	return min(max(memoryLimit/16, 64<<20), 1<<30)
 }
 
 // coldReadTimeout bounds a cold read's fold of the stored history (LoadDocument), which belongs to
@@ -108,6 +114,13 @@ type documentReads struct {
 
 func newDocumentReads(budget int64) *documentReads {
 	return &documentReads{entries: make(map[string]*list.Element), order: list.New(), budget: budget}
+}
+
+// figures is the cache's weight, its entry count and its budget, for the room figures.
+func (r *documentReads) figures() ReadCacheFigures {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return ReadCacheFigures{Bytes: r.bytes, Entries: len(r.entries), Budget: r.budget}
 }
 
 // current is artifactID's rendering when heads says nothing has written the document since the

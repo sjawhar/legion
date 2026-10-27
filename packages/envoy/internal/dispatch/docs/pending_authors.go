@@ -16,6 +16,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // A document's pending authors - every author whose change no committed version lists yet - are
@@ -203,6 +204,31 @@ type roomLoad struct {
 	// when it does (start). instance is that instance, which took advances directly from then on.
 	appended []int64
 	instance *roomInstance
+	// size is the encoded bytes of the history the load handed ygo, which the room counts as
+	// resident once it loads (onLoadDocument). tree is the tree a document socket's admission read
+	// and rendered from the state the load took (takePreload), which the room's load takes rather
+	// than reading and rendering the room again (takeLoaded); nil when the load read the store
+	// itself.
+	size int
+	tree *pmdoc.Node
+}
+
+// loaded records what the load handed ygo: update, the history, and tree, what a socket's
+// admission read from it, or nil.
+func (load *roomLoad) loaded(update []byte, tree *pmdoc.Node) {
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	load.size, load.tree = len(update), tree
+}
+
+// takeLoaded is what loaded recorded, and drops the tree: the load's record stays with the room's
+// document for as long as it is resident (keepInstance), and the tree is a whole copy of it.
+func (load *roomLoad) takeLoaded() (size int, tree *pmdoc.Node) {
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	size, tree = load.size, load.tree
+	load.tree = nil
+	return size, tree
 }
 
 // beginRoomLoad records that room is loading, before the load reads the store: every version

@@ -28,8 +28,10 @@ const (
 	requestMemoryBound    = 256 << 20
 	concurrentMemoryBound = 512 << 20
 	documentCap           = 1 << 20
-	// documentReadBudgetForTest mirrors docs.documentReadBudget. The cache's test hook supplies
-	// each entry's real accounting weight, so this process can build two complete cache fills.
+	// documentReadBudgetForTest mirrors docs.documentReadBudget, the cold reads' cache budget of a
+	// process with no Go memory limit, which the server this test starts runs under. The cache's
+	// test hook supplies each entry's real accounting weight, so this process can build two
+	// complete cache fills.
 	documentReadBudgetForTest = 256 << 20
 	// marginEditAllowance is the most a margin filled to its bounds may add to what a cold edit of
 	// its document holds: two cold edits of one heaviest document, with a full margin and without,

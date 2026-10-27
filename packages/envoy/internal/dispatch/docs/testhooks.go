@@ -74,3 +74,10 @@ func (s *Service) CountRoomScansForTest() *atomic.Int64 {
 	s.roomScanned = func() { scans.Add(1) }
 	return scans
 }
+
+// RoomCapsForTest is the service's room and connection caps (canOpenRoom, canAddConnection).
+// cmd/dispatch's settings test reads it to see DISPATCH_MAX_LIVE_ROOMS and
+// DISPATCH_MAX_DOC_CONNECTIONS reach the service through Deps.
+func (s *Service) RoomCapsForTest() (rooms, connections int) {
+	return s.roomCap, s.connectionCap
+}
