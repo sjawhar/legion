@@ -2,54 +2,54 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-497",
-  "completed": "2026-10-26T23:01:45Z",
-  "headTested": "656863b891769d34bf0447955f21415ab3659586",
-  "codeHead": "2bdf4b027a77adc70c8c10215812642cb1c36e55",
+  "completed": "2026-10-27T01:02:01Z",
+  "round": 2,
+  "headTested": "f310ed2f79a454b1b45fd81701dde1c880e33c40",
+  "codeHead": "149e44bbf1d9bebc758f5a15b323794d67b9b834",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command, `cd packages/pi-envoy && LEGION_TEST_OMP=$TMPDIR/omp-pin/omp-v18.12.2-sami.20261026-135627-linux-x64/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:15333 bun test extensions/card-delivery-omp.test.ts`, three times on the pinned binary, which I checked against GitHub's release asset digest (sha256:b513556d000f4b98be33dfb42b0fa88879455c388bb6c8fdcbeb5e032f73fdfa), and a fresh nats-server 2.10.29 service: 9 pass, 0 fail each time. Re-ran its A1 negative control: envoy.ts swapped for main's 6cdb9995 copy, so case (a) fails `expect(firstWithSend?.index).toBe(held.index + 1)` with Expected 1, Received undefined. The file was restored and cmp shows it equal."
+    "how": "I re-ran the implementer's command, `cd packages/pi-envoy && LEGION_TEST_OMP=$TMPDIR/omp-pin/omp-v18.12.2-sami.20261026-135627-linux-x64/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:15334 bun run test`, on the pinned release binary and a fresh nats-server 2.10.29: 979 pass, 0 fail, then card-delivery-omp.test.ts in its own process: 9 pass, 0 fail. I ran that file alone 2 more times and got 9/9 each time. I re-ran two of its negative controls: (1) main's 6cdb9995 envoy.ts swapped in: the 'five cards' case fails with Expected 1, Received undefined; (2) the card-wake.ts setup rule disabled: the 'set up' case fails with 'Messages request 0 came before the probe', and that request is the wake. Both files were put back, checked by cmp."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
       "criterion": "A1: cards queued while a turn runs, then a Send: the Send reaches the model at the first step after it was sent, ahead of the cards.",
-      "surface": "Pinned Oh My Pi v18.12.2-sami.20261026-135627 (linux-x64 release asset, digest checked) in RPC mode with packages/pi-envoy/extensions/envoy.ts, real nats-server 2.10.29 on 127.0.0.1:15333, omp-harness stand-ins",
-      "command": "cd packages/pi-envoy && LEGION_TEST_OMP=<pinned omp> LEGION_TEST_NATS_URL=nats://127.0.0.1:15333 bun test extensions/card-delivery-omp.test.ts; run posted at https://github.com/sjawhar/legion/pull/2278#issuecomment-6429361602",
-      "observed": "Case 'five cards then a Send' passes in 3 of 3 runs: the Send is the first message of request k+1, ahead of all five cards, and the probe is the next request.",
-      "headSha": "656863b891769d34bf0447955f21415ab3659586",
-      "negativeControl": "envoy.ts swapped for main's 6cdb9995 copy: Expected 1, Received undefined (the Send is not in request k+1); restored by cmp."
+      "surface": "Pinned Oh My Pi v18.12.2-sami.20261026-135627 (linux-x64 release asset) in RPC mode with packages/pi-envoy/extensions/envoy.ts, real nats-server 2.10.29 on 127.0.0.1:15334, omp-harness stand-ins",
+      "command": "cd packages/pi-envoy && LEGION_TEST_OMP=<pinned omp> LEGION_TEST_NATS_URL=nats://127.0.0.1:15334 bun run test; https://github.com/sjawhar/legion/pull/2278#issuecomment-6431092358",
+      "observed": "The 'five cards then a Send' case passed in 3 of 3 runs at this head: the Send is the first message of request k+1, ahead of all five cards.",
+      "headSha": "f310ed2f79a454b1b45fd81701dde1c880e33c40",
+      "negativeControl": "With main's 6cdb9995 envoy.ts swapped in: Expected 1, Received undefined. Restored by cmp."
     },
     {
-      "criterion": "A3: an interrupt (RPC abort, or abort_and_restore_queue, the Esc path) keeps queued cards folded with no turn, and they are read at the next turn; this includes an abort during a retry's backoff.",
-      "surface": "Same pinned omp RPC + pi-envoy + nats-server surface. The TUI Esc and RPC abort_and_restore_queue both call session.clearQueue({forInterrupt: true}) and then abort (omp input-controller.ts:1986, rpc-mode.ts:1885-1887).",
-      "command": "The implementer's 4 interrupt cases, plus tester case T3 (scratch $TMPDIR/tester-cases.test.ts, source in the PR comment): the stand-in answers 529 until auto_retry_start, then a card arrives during the backoff, then RPC abort.",
-      "observed": "4 implementer cases pass. T3 passes: the frames are agent_start, auto_retry_start, auto_retry_end, agent_end; no model request comes after the abort; the probe's request contains the card and no wake text.",
-      "headSha": "656863b891769d34bf0447955f21415ab3659586",
-      "negativeControl": "The auto_retry_end 'Retry cancelled' latch removed from envoy.ts: T3 fails 'timed out waiting for the session to settle', because a wake started a turn after the abort. Restored by cmp."
+      "criterion": "Review finding 2: a card that arrives while a print/JSON-mode session starts does not make the prompt throw AgentBusyError; the prompt and the card are both read and the process exits 0.",
+      "surface": "The same pinned binary run as `omp -p --mode text|json \"<prompt>\"` with only envoy.ts loaded. The stand-in holds the registration that session_start awaits while a card is published over NATS.",
+      "command": "Scratch Bun test $TMPDIR/tester-print.test.ts (source in the PR comment), run from packages/pi-envoy/extensions with LEGION_TEST_OMP and LEGION_TEST_NATS_URL set",
+      "observed": "text and json both exit 0, with 2 model requests: the first carries the card and the second carries the card and the prompt. stdout is the reply. No AgentBusyError appears.",
+      "headSha": "f310ed2f79a454b1b45fd81701dde1c880e33c40",
+      "negativeControl": "With card-wake.ts's `context?.mode === \"rpc\"` condition removed, both modes exit 1 with 'AgentBusyError: Agent is already processing' on stderr. Restored by cmp."
     },
     {
-      "criterion": "A4/A5: a card that lands as a turn ends gets exactly one turn: in an interrupted session through pi-envoy's wake, and in a session with no interrupt through the host's own resume, with no second wake.",
-      "surface": "Same surface; compaction thresholdTokens 100000, asyncEnabled false, autoContinue false, keepRecentTokens 1, methodOrder [soft], midTurnEnabled false",
-      "command": "Implementer case (c), plus tester case T1: no interrupt, a card published while post-run auto-compaction's summary request is held.",
-      "observed": "(c) passes: the wake's turn carries the late card. T1 passes: one turn reads the card, the wake text is not in it, and the probe is next with no wake text, so pi-envoy sends no second wake when the host resumes the stranded aside itself.",
-      "headSha": "656863b891769d34bf0447955f21415ab3659586",
-      "negativeControl": "Same as A3's: with the retry latch removed, the wake fires where it must not, and the harness sees it as an unrequested turn."
+      "criterion": "A3 and review finding 1: an interrupt keeps queued cards folded with no turn. This covers an interrupt during prompt setup and an abort in a retry's backoff; after an Esc, the next idle card's turn reads every card.",
+      "surface": "Same RPC surface",
+      "command": "The implementer's 5 interrupt cases, plus my round-1 cases T1 to T4 at this head ($TMPDIR/tester-cases.test.ts; source in https://github.com/sjawhar/legion/pull/2278#issuecomment-6429361602)",
+      "observed": "All 5 implementer cases pass and all 4 of mine pass. In T3 (abort during the 529 retry backoff) no turn follows the abort, and the probe's request carries the card with no wake text. In T4 the idle card after abort_and_restore_queue starts one turn that reads all 4 cards.",
+      "headSha": "f310ed2f79a454b1b45fd81701dde1c880e33c40",
+      "negativeControl": "With the setup rule disabled, a wake starts the turn the interrupt stopped ('Messages request 0 came before the probe'). Restored by cmp."
     },
     {
-      "criterion": "A2: a card that reaches an idle session starts a turn, after startup and after an interrupt too, and every card of a burst is read once.",
-      "surface": "Same surface",
-      "command": "Implementer case (d) and the startup case, plus tester cases T2 (five cards at once to an idle session after the startup phase) and T4 (abort_and_restore_queue keeps 3 cards, then one idle card)",
-      "observed": "All pass. T2: 5 cards read across 3 model requests, each card once in the session file, no wake but the startup card's. T4: the idle card starts the next request at once, and that request carries all 4 cards with no extra wake.",
-      "headSha": "656863b891769d34bf0447955f21415ab3659586",
-      "negativeControl": "Implementer's startup case control re-read from its handoff, not re-run. Instead I re-ran the main-copy swap from A1, where every card is a steer."
+      "criterion": "The round's setup rule loses no card: a card sent while the host is busy with no run active still gets read when no interrupt follows, also in a session that was interrupted earlier.",
+      "surface": "Same RPC surface. The stand-in holds a chosen open-asks read, so the prompt sits in before_agent_start.",
+      "command": "Scratch $TMPDIR/tester-r2.test.ts: S1 (a person's prompt with its setup held, a card, then release), S1b (the same after an earlier RPC abort), S2 (session interrupted earlier; a card published the instant a card-started run's RPC agent_end frame appears, 8 iterations)",
+      "observed": "S1 and S1b: the card is in the run's 2nd model request before the session settles. S2: the card is read in all 8 iterations.",
+      "headSha": "f310ed2f79a454b1b45fd81701dde1c880e33c40",
+      "negativeControl": "None of my own for this criterion. The setup-rule control above shows the rule decides the wake, and the main-copy swap shows the harness detects a delivery change."
     }
   ],
-  "ciAtHead": "Read on GitHub at about 2026-10-26T22:42Z for code head 2bdf4b027a77: Tests, Legion Envoy and Contracts (lint/typecheck/test/build), Worker Image and Docs are queued. They were not yet run, and I did not wait for them.",
+  "ciAtHead": "Read on GitHub at about 2026-10-27T01:00Z for code head 149e44bb: lint, typecheck, test, changes and build were all queued. I did not wait for them.",
   "notes": [
-    "A7 (plan mode): the pinned build has no RPC path into plan mode. setPlanModeState is called only from interactive-mode.ts, acp-agent.ts and prewalk.ts. The plan's fallback, unit tests plus the shared fold path proven by case (c), stands as planned.",
-    "A8: the PR changes no .omp-pin; packages/pi-envoy/AGENTS.md:63 names dispatch://INFRA-498.",
-    "A9 is the production check after the merge; A10 is CI's, read as queued above.",
-    "For the reviewer: the case 'an RPC prompt of /plan reaches the model as a prompt' asserts host behaviour (a TUI-only builtin), not pi-envoy behaviour. It acts as a tripwire for when RPC can reach plan mode."
+    "For the reviewer: src/card-wake.ts, around lines 50-52, says a setup card is taken by the prompt's loop 'at the first step'. On the real binary (S1, S1b) it is in the run's 2nd model request. No card is lost, but the comment is wrong.",
+    "A7 (plan mode) is unchanged from round 1: no RPC path reaches plan mode in the pinned build, so the fallback is the unit tests in src/card-wake.test.ts.",
+    "Review finding 3: the package's `bun run test` runs card-delivery-omp.test.ts in a second Bun process. Both passed together in one invocation, and CI's pi-envoy step runs that script."
   ]
 }
