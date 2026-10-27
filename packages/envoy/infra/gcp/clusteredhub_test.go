@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/infra/internal/pulumitest"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -169,6 +170,38 @@ func TestClusteredNatsHubRendersTheVMHubsAuthorization(t *testing.T) {
 		require.Equal(t, want, s.AuthConf)
 		require.NotContains(t, s.AuthConf, keyListener)
 	})
+}
+
+// The users that run Envoy programs on the clustered hub hold the update of each bucket's stream
+// their program opens (INFRA-546): a start whose ENVOY_NATS_REPLICAS is above a bucket's copies
+// raises it with that update, which the hub would refuse without the grant. The tailnet listener
+// and a host user open the listener's four buckets, and Dispatch's user also its redelivery
+// bucket; the explicit-permissions user and the session user hold only what they name.
+func TestClusteredNatsHubUsersHoldTheBucketRaise(t *testing.T) {
+	s, err := gcp.ResolveClusteredNatsHub(clusteredArgs())
+	require.NoError(t, err)
+	userLine := func(nkey string) string {
+		for line := range strings.Lines(s.AuthConf) {
+			if strings.Contains(line, `"nkey": "`+nkey+`"`) {
+				return line
+			}
+		}
+		t.Fatalf("auth.conf has no user with nkey %s:\n%s", nkey, s.AuthConf)
+		return ""
+	}
+	raise := func(bucket string) string { return `"$JS.API.STREAM.UPDATE.KV_` + bucket + `"` }
+	listenerBuckets := []string{bus.InterestBucket, bus.RoleClaimBucket, bus.SessionBucket, bus.CIStateBucket}
+	for _, user := range []struct{ name, nkey string }{
+		{"the tailnet listener", keyListener}, {"the host user", keyA}, {"Dispatch's user", keyC},
+	} {
+		for _, bucket := range listenerBuckets {
+			require.Contains(t, userLine(user.nkey), raise(bucket), "%s raises %s", user.name, bucket)
+		}
+	}
+	require.Contains(t, userLine(keyC), raise(bus.WebhookRedeliveryBucket), "Dispatch's user raises its redelivery bucket")
+	for _, nkey := range []string{keyB, keySessions} {
+		require.NotContains(t, userLine(nkey), "$JS.API.STREAM.UPDATE.KV_", "a user whose grant names no bucket raises none")
+	}
 }
 
 // Without streamMaxBytes, each pod's volume is 10 GiB and JetStream's file store 9 GiB, ⌊0.9 ×
