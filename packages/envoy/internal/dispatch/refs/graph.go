@@ -374,11 +374,7 @@ func loadIssueNodes(ctx context.Context, q Queryer, _ string, _ bool, keys []str
 			return fmt.Errorf("scan issue node: %w", err)
 		}
 		node := model.GraphNode{Kind: "issue", ID: key, IssueKey: new(key), Project: project, Ref: "dispatch://" + key, Parent: issueParent(parentKey)}
-		node.MadeBy, node.MadeAt = storedActors(createdBy), &createdAt
-		node.ChangedBy, node.ChangedAt = node.MadeBy, node.MadeAt
-		if changedAt != nil {
-			node.ChangedBy, node.ChangedAt = storedActors(changedBy), changedAt
-		}
+		setMadeAndChanged(&node, createdBy, createdAt, changedBy, changedAt)
 		nodes[[2]string{"issue", key}] = resolvedNode{GraphNode: node, text: title}
 	}
 	return rows.Err()
@@ -420,11 +416,7 @@ func loadArtifactNodes(ctx context.Context, q Queryer, _ string, byRefKey bool, 
 			lookup = refKey
 		}
 		node := model.GraphNode{Kind: "artifact", ID: id, IssueKey: issueKey, Project: project, Ref: ArtifactRef(issueKey, project, session, slug, kind, primary)}
-		node.MadeBy, node.MadeAt = storedActors(createdBy), &createdAt
-		node.ChangedBy, node.ChangedAt = node.MadeBy, node.MadeAt
-		if versionAt != nil {
-			node.ChangedBy, node.ChangedAt = storedActors(authors), versionAt
-		}
+		setMadeAndChanged(&node, createdBy, createdAt, authors, versionAt)
 		switch {
 		case issueKey != nil:
 			node.Parent = issueParent(issueKey)
@@ -555,11 +547,7 @@ func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string
 			return fmt.Errorf("scan ask node: %w", err)
 		}
 		node := model.GraphNode{Kind: "ask", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("ask", issueKey, project, slug, id)}
-		node.MadeBy, node.MadeAt = storedActors(author), &createdAt
-		node.ChangedBy, node.ChangedAt = node.MadeBy, node.MadeAt
-		if editedAt != nil {
-			node.ChangedBy, node.ChangedAt = storedActors(editedBy), editedAt
-		}
+		setMadeAndChanged(&node, author, createdAt, editedBy, editedAt)
 		node.Parent = issueParent(issueKey)
 		if parent := document.parent(); parent != nil {
 			node.Parent, node.ParentVersion = parent, version
@@ -604,16 +592,12 @@ func loadCommentNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []st
 			return fmt.Errorf("scan comment node: %w", err)
 		}
 		node := model.GraphNode{Kind: "comment", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("comment", issueKey, project, slug, id)}
-		node.MadeBy, node.MadeAt = storedActors(author), &createdAt
-		node.ChangedBy, node.ChangedAt = node.MadeBy, node.MadeAt
-		if editedAt != nil {
-			node.ChangedAt = editedAt
-		}
+		setMadeAndChanged(&node, author, createdAt, author, editedAt)
 		switch parent := document.parent(); {
 		case replyTo != nil:
-			node.Parent = &model.NodeParent{Kind: "comment", ID: *replyTo, Ref: itemRef("comment", issueKey, project, slug, *replyTo)}
+			node.Parent = itemParent("comment", issueKey, project, slug, *replyTo)
 		case askID != nil:
-			node.Parent = &model.NodeParent{Kind: "ask", ID: *askID, Ref: itemRef("ask", issueKey, project, slug, *askID)}
+			node.Parent = itemParent("ask", issueKey, project, slug, *askID)
 		case parent != nil:
 			node.Parent, node.ParentVersion = parent, version
 		default:
@@ -646,11 +630,10 @@ func loadMessageNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []st
 			return fmt.Errorf("scan message node: %w", err)
 		}
 		node := model.GraphNode{Kind: "message", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("message", issueKey, project, "", id)}
-		node.MadeBy, node.MadeAt = storedActors(author), &createdAt
-		node.ChangedBy, node.ChangedAt = node.MadeBy, node.MadeAt
+		setMadeAndChanged(&node, author, createdAt, nil, nil)
 		node.Parent = issueParent(issueKey)
 		if inReplyTo != nil {
-			node.Parent = &model.NodeParent{Kind: "message", ID: *inReplyTo, Ref: itemRef("message", issueKey, project, "", *inReplyTo)}
+			node.Parent = itemParent("message", issueKey, project, "", *inReplyTo)
 		}
 		nodes[[2]string{"message", id}] = resolvedNode{GraphNode: node, text: body}
 	}
@@ -707,6 +690,11 @@ func issueParent(key *string) *model.NodeParent {
 	return &model.NodeParent{Kind: "issue", ID: *key, Ref: "dispatch://" + *key}
 }
 
+// itemParent is the ask, comment, or message id, addressed as itemRef addresses it, as a node's parent.
+func itemParent(kind string, issueKey *string, project, slug, id string) *model.NodeParent {
+	return &model.NodeParent{Kind: kind, ID: id, Ref: itemRef(kind, issueKey, project, slug, id)}
+}
+
 // documentColumns selects, from the artifacts row aliased alias, what a document parent's node
 // id and reference are made of, in documentParent.targets' order.
 func documentColumns(alias string) string {
@@ -755,6 +743,15 @@ func storedActors(raw []byte) []model.Actor {
 		actors = append(actors, actor)
 	}
 	return actors
+}
+
+// setMadeAndChanged sets node's maker and its last change, which is the maker until changedAt is set.
+func setMadeAndChanged(node *model.GraphNode, madeBy []byte, madeAt time.Time, changedBy []byte, changedAt *time.Time) {
+	node.MadeBy, node.MadeAt = storedActors(madeBy), &madeAt
+	node.ChangedBy, node.ChangedAt = node.MadeBy, node.MadeAt
+	if changedAt != nil {
+		node.ChangedBy, node.ChangedAt = storedActors(changedBy), changedAt
+	}
 }
 
 // ArtifactRef is the address the dashboard copies for a document: an issue's primary document

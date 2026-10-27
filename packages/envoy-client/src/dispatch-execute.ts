@@ -1942,7 +1942,7 @@ function unavailableReason(error: unknown): string {
 
 /** One direction of a node's reference graph: the answer's node and its edges, or why the server
  *  could not serve it. */
-async function graphEdges(
+async function graphReferences(
   client: DispatchClient,
   query: GraphReferencesQuery
 ): Promise<GraphReferences | string> {
@@ -1973,8 +1973,8 @@ async function issueReferencesOrUnavailable(
  */
 async function graphSections(client: DispatchClient, ref: string): Promise<string[]> {
   const [incoming, outgoing] = await Promise.all([
-    graphEdges(client, { to: ref }),
-    graphEdges(client, { from: ref }),
+    graphReferences(client, { to: ref }),
+    graphReferences(client, { from: ref }),
   ]);
   return graphSectionLines(incoming, outgoing);
 }
@@ -2000,15 +2000,10 @@ function graphSectionLines(
  */
 function nodeLine(node: GraphNode): string[] {
   if (node.made_by === undefined) return [];
-  const [made, changed] = (
-    [
-      [node.made_by, node.made_at],
-      [node.changed_by, node.changed_at],
-    ] as const
-  ).map(
-    ([by, time]) =>
-      `${by === undefined || by.length === 0 ? "nobody recorded" : by.map(actorText).join(", ")}${time == null ? "" : ` at ${time}`}`
-  );
+  const fact = (by: Actor[] | undefined, time: string | null | undefined) =>
+    `${by === undefined || by.length === 0 ? "nobody recorded" : by.map(actorText).join(", ")}${time == null ? "" : ` at ${time}`}`;
+  const made = fact(node.made_by, node.made_at);
+  const changed = fact(node.changed_by, node.changed_at);
   const { parent } = node;
   const partOf =
     parent == null
@@ -4154,7 +4149,7 @@ export async function executeDispatchTool(
             }
             throw error;
           }),
-          graphEdges(client, { from: blockRef }),
+          graphReferences(client, { from: blockRef }),
         ]);
         return {
           text: [...blockLines(incoming.node, ref), ...graphSectionLines(incoming, outgoing)].join(

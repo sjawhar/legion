@@ -17511,7 +17511,7 @@ function referenceLines(read) {
 function unavailableReason(error48) {
   return dispatchAnswered(error48, 404) ? "unavailable" : `unavailable: ${messageFor(error48)}`;
 }
-async function graphEdges(client, query) {
+async function graphReferences(client, query) {
   try {
     return await client.getReferences(query);
   } catch (error48) {
@@ -17527,8 +17527,8 @@ async function issueReferencesOrUnavailable(client, key) {
 }
 async function graphSections(client, ref) {
   const [incoming, outgoing] = await Promise.all([
-    graphEdges(client, { to: ref }),
-    graphEdges(client, { from: ref })
+    graphReferences(client, { to: ref }),
+    graphReferences(client, { from: ref })
   ]);
   return graphSectionLines(incoming, outgoing);
 }
@@ -17544,10 +17544,9 @@ function graphSectionLines(incoming, outgoing) {
 function nodeLine(node) {
   if (node.made_by === undefined)
     return [];
-  const [made, changed] = [
-    [node.made_by, node.made_at],
-    [node.changed_by, node.changed_at]
-  ].map(([by, time3]) => `${by === undefined || by.length === 0 ? "nobody recorded" : by.map(actorText).join(", ")}${time3 == null ? "" : ` at ${time3}`}`);
+  const fact = (by, time3) => `${by === undefined || by.length === 0 ? "nobody recorded" : by.map(actorText).join(", ")}${time3 == null ? "" : ` at ${time3}`}`;
+  const made = fact(node.made_by, node.made_at);
+  const changed = fact(node.changed_by, node.changed_at);
   const { parent } = node;
   const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (version ${node.parent_version})`}`;
   return [
@@ -18948,7 +18947,7 @@ ${trailer.join(`
             }
             throw error48;
           }),
-          graphEdges(client, { from: blockRef })
+          graphReferences(client, { from: blockRef })
         ]);
         return {
           text: [...blockLines(incoming.node, ref), ...graphSectionLines(incoming, outgoing)].join(`

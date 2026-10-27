@@ -87,6 +87,13 @@ child_closed=0
 ask=""
 ask_resolved=0
 source_path=""
+# close_written ISSUE: closes ISSUE, an issue this script wrote, from cleanup.
+close_written() {
+  cli issue-update --issue "$1" --status "done" \
+    --reason "block-graph.sh stopped before its last check; closing the issue it wrote." \
+    >"$work/cleanup" 2>&1 ||
+    printf 'block-graph.sh: could not close %s: %s\n' "$1" "$(<"$work/cleanup")" >&2
+}
 cleanup() {
   local code=$?
   if [[ -n "$ask" && "$ask_resolved" == 0 ]]; then
@@ -96,16 +103,10 @@ cleanup() {
       printf 'block-graph.sh: could not resolve ask %s: %s\n' "$ask" "$(<"$work/cleanup")" >&2
   fi
   if [[ -n "$child" && "$child_closed" == 0 ]]; then
-    cli issue-update --issue "$child" --status "done" \
-      --reason "block-graph.sh stopped before its last check; closing the issue it wrote." \
-      >"$work/cleanup" 2>&1 ||
-      printf 'block-graph.sh: could not close %s: %s\n' "$child" "$(<"$work/cleanup")" >&2
+    close_written "$child"
   fi
   if [[ -n "$key" && "$closed" == 0 ]]; then
-    cli issue-update --issue "$key" --status "done" \
-      --reason "block-graph.sh stopped before its last check; closing the issue it wrote." \
-      >"$work/cleanup" 2>&1 ||
-      printf 'block-graph.sh: could not close %s: %s\n' "$key" "$(<"$work/cleanup")" >&2
+    close_written "$key"
   fi
   if [[ -n "$source_path" ]]; then
     send DELETE "$source_path" "$(jq -cn --arg s "$session" '{actor: {kind: "session", id: $s}}')"
@@ -731,8 +732,7 @@ if [[ "$component_source" != none ]]; then
   want_status 200 R12 "?to=$component_ref answers"
   if [[ "$component_source" == fixture ]]; then
     expect R12 "component $component carries its facts, its times recorded at the import" \
-      "$(jq -cnS --argjson parent "$of_parent" '{made_by: [], made_at: true, changed_by: [],
-        changed_at: true, parent: $parent, parent_version: null}')" "$defs .node | facts"
+      "$(wanted '[]' '[]' "$of_parent" null)" "$defs .node | facts"
   else
     # A component imported before its times were recorded has them null.
     expect R12 "component $component carries its facts" \

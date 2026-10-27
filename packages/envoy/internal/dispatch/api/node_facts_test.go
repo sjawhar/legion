@@ -59,7 +59,7 @@ func factsOf(node model.GraphNode) nodeFacts {
 func actorNames(actors []model.Actor) []string {
 	names := make([]string, len(actors))
 	for index, actor := range actors {
-		names[index] = actor.Kind + ":" + actor.ID
+		names[index] = docs.ActorRef(actor)
 	}
 	return names
 }

@@ -614,7 +614,10 @@ func DeleteOrphanComponentFacts(ctx context.Context, tx pgx.Tx, project string) 
 // prose, parent, external, paths in the model's order, and depends_on sorted. An absent list and
 // an empty one digest alike.
 func componentDigest(component Component) string {
-	paths := append([]string{}, component.Paths...)
+	paths := component.Paths
+	if paths == nil {
+		paths = []string{}
+	}
 	dependsOn := append([]string{}, component.DependsOn...)
 	slices.Sort(dependsOn)
 	// Marshal cannot fail on strings, a bool and string slices.
