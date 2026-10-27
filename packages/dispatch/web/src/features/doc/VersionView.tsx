@@ -7,12 +7,13 @@ import { whoAmIQuery } from "../../api/queries";
 import type { Ask, BlockSchema } from "../../api/types";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
-import { type AskBlockHost, installTypedBlocks } from "./ask-block";
+import { installTypedBlocks } from "./ask-block";
 import { colorForLogin } from "./connection";
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
 import { DocumentRuntime } from "./runtime";
+import type { AskBlockHost } from "./typed-block-drawing";
 
 export interface VersionViewProps {
   artifactId: string;
