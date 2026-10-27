@@ -105,9 +105,9 @@ func deref(value *string) string {
 }
 
 // SetStatus updates an issue through PATCH /api/v1/issues/{key} and returns the issue as Dispatch
-// answers the write: as the write left it, at the sequence of the event the write made (or, for a
-// status the issue already had, as it stood, at the sequence it had run to, since such a write
-// makes no event).
+// answers the write: as the write left it, at the sequence of the event the write made
+// (issue.updated, or issue.closed for done). Dispatch appends that event for every status it is
+// sent, the issue's own status included.
 func (c *HTTPClient) SetStatus(ctx context.Context, key, status string) (Issue, error) {
 	var response issueResponse
 	if err := c.request(ctx, http.MethodPatch, "/api/v1/issues/"+url.PathEscape(key), daemonWrite{

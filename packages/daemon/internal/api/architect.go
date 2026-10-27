@@ -396,8 +396,9 @@ const (
 // carried on by the child's own events, each with its actor. A child already recorded, which the
 // earlier attempt of a wave this call retries released, has had that observation.
 //
-// The workflow records a child only under a recorded parent, and a parent this same wave released
-// is recorded only once its own todo event arrives. A child the observation did not record is
+// The workflow records a child only under a recorded parent. A parent this same wave writes todo is
+// recorded by its own write first (waveRelease, releaseOrder); one outside the wave, or one the
+// record could not take, may still be unrecorded. A child the observation did not record is
 // answered CHILD_NOT_RECORDED, retryable: each attempt is its own fact (requestFactID), so the
 // retry applies the observation again once the parent is recorded. Its durable retry record bounds
 // attempts with exponential backoff; after the limit, it queues one notice to the tree architect
@@ -511,32 +512,60 @@ type issueReader func(w http.ResponseWriter, r *http.Request, key string) (dispa
 // cachedIssueReader reads each issue from Dispatch once per request. A wave's children share the
 // ancestors between them and the tree root, and the membership walk read every one of them again
 // for every child.
+//
+// An issue whose detail read fails, other than one Dispatch says does not exist, is read from the
+// project's listing instead, once per request (listedIssues). Dispatch's detail read loads the
+// issue's documents, asks, children and references beside it; in a deployment it failed for some
+// children again and again while the listing, which the daemon's boot reads in full, still carried
+// them, so every release_children naming one of them answered 502 and the child, already todo,
+// was never recorded. A release needs only what the listing carries: the status, the parent chain,
+// the blockers and the issue's sequence. An issue the listing does not carry either is a failed
+// read, answered 502 with both errors.
 func (s *server) cachedIssueReader() issueReader {
 	seen := map[string]dispatch.Issue{}
+	var listed map[string]dispatch.IssueSummary
+	var listErr error
 	return func(w http.ResponseWriter, r *http.Request, key string) (dispatch.Issue, bool) {
 		if issue, read := seen[key]; read {
 			return issue, true
 		}
-		issue, ok := s.dispatchIssue(w, r, key)
-		if ok {
-			seen[key] = issue
+		issue, err := s.dispatch.GetIssue(r.Context(), key)
+		switch {
+		case dispatch.Missing(err):
+			writeFailure(w, http.StatusNotFound, "ISSUE_NOT_FOUND", fmt.Sprintf("%s is not a Dispatch issue", key))
+			return dispatch.Issue{}, false
+		case err != nil:
+			if listed == nil && listErr == nil {
+				listed, listErr = s.listedIssues(r.Context())
+			}
+			summary, inListing := listed[key]
+			if !inListing {
+				listing := "does not carry it"
+				if listErr != nil {
+					listing = fmt.Sprintf("failed too (%v)", listErr)
+				}
+				writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", fmt.Sprintf("Dispatch read of %s failed (%v), and the project listing %s; retry release_children", key, err, listing))
+				return dispatch.Issue{}, false
+			}
+			s.log.Warn("api: Dispatch's detail read of an issue failed, so release_children read it from the project listing", "issue", key, "error", err)
+			issue = summary.Issue()
 		}
-		return issue, ok
+		seen[key] = issue
+		return issue, true
 	}
 }
 
-// dispatchIssue reads one issue from Dispatch, answering a missing issue 404 and a failed read 502.
-func (s *server) dispatchIssue(w http.ResponseWriter, r *http.Request, key string) (dispatch.Issue, bool) {
-	issue, err := s.dispatch.GetIssue(r.Context(), key)
-	switch {
-	case dispatch.Missing(err):
-		writeFailure(w, http.StatusNotFound, "ISSUE_NOT_FOUND", fmt.Sprintf("%s is not a Dispatch issue", key))
-		return dispatch.Issue{}, false
-	case err != nil:
-		writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", fmt.Sprintf("Dispatch read of %s failed; retry release_children", key))
-		return dispatch.Issue{}, false
+// listedIssues is Dispatch's listing of the daemon's project, by key.
+func (s *server) listedIssues(ctx context.Context) (map[string]dispatch.IssueSummary, error) {
+	summaries, err := s.dispatch.ListIssues(ctx, s.dispatchProject, nil)
+	if err != nil {
+		return nil, err
 	}
-	return issue, true
+	listed := make(map[string]dispatch.IssueSummary, len(summaries))
+	for _, summary := range summaries {
+		listed[summary.Key] = summary
+	}
+	return listed, nil
 }
 
 func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
@@ -574,21 +603,50 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the records of the children to release")
 		return
 	}
-	// Each child the release writes todo is recorded by its own write in this request
-	// (applyOwnStatusWrite), not when the write's event comes back through the Dispatch consumer,
-	// and a child Dispatch already shows todo by Dispatch's view of it (enterTodoChild). The
-	// workflow records a child only under a recorded parent, so a parent this wave releases goes
-	// first.
-	for _, child := range releaseOrder(children) {
+	// Every child the release writes todo is written first, then recorded from its own write in
+	// this request (recordOwnStatusWrite), not when the write's event comes back through the
+	// Dispatch consumer; only then is each child Dispatch already showed todo recorded from
+	// Dispatch's view of it (enterTodoChild), which answers the request when it cannot record one
+	// (CHILD_NOT_RECORDED and the like). So such a child never holds back the release, or the
+	// record, of the rest of the wave. Each pass runs in releaseOrder, which takes a parent the
+	// wave releases before its child, since the workflow records a child only under a recorded
+	// parent; a written child whose parent is one of the wave's todo children is recorded once more
+	// after that parent was. A written child the record does not take still stands released:
+	// Dispatch shows it todo, and its write's event records it when the consumer delivers it, so
+	// that failure is logged and does not fail the release.
+	ordered := releaseOrder(children)
+	written := make(map[string]dispatch.Issue, len(ordered))
+	foundTodo := make(map[string]bool, len(ordered))
+	for _, child := range ordered {
 		if !child.write {
-			if !s.enterTodoChild(w, r, grant.Tree, child.view) {
-				return
-			}
+			foundTodo[child.view.Key] = true
 			continue
 		}
-		written, ok := s.setDispatchStatus(w, r, child.view.Key, "todo")
-		if !ok || !s.applyOwnStatusWrite(w, r, written) {
+		issue, ok := s.setDispatchStatus(w, r, child.view.Key, "todo")
+		if !ok {
 			return
+		}
+		written[child.view.Key] = issue
+	}
+	record := func(child releasedChild) {
+		if failure := s.recordOwnStatusWrite(r.Context(), written[child.view.Key]); failure != nil {
+			s.log.Warn("api: release_children wrote a child todo, but the record did not take the write; the write's event will record it",
+				"issue", child.view.Key, "code", failure.code, "reason", failure.message)
+		}
+	}
+	for _, child := range ordered {
+		if child.write {
+			record(child)
+		}
+	}
+	for _, child := range ordered {
+		if !child.write && !s.enterTodoChild(w, r, grant.Tree, child.view) {
+			return
+		}
+	}
+	for _, child := range ordered {
+		if child.write && child.view.Parent != nil && foundTodo[*child.view.Parent] {
+			record(child)
 		}
 	}
 	started, held, err := s.releaseOutcome(r.Context(), children)
