@@ -39,8 +39,9 @@ type Limit struct {
 	Wait time.Duration
 	// Strikes counts the limits Strike recorded with no Clear in between.
 	Strikes int
-	// updatedAt is the database's now() at the row's last write, which Clear matches so it deletes
-	// only the row as read.
+	// updatedAt is the database's now() at the row's last write (every Record and Strike), which
+	// Clear matches so it deletes only the row as read, and which Wait answers as the limit's
+	// identity.
 	updatedAt time.Time
 }
 
@@ -55,14 +56,16 @@ func scan(row pgx.Row) (Limit, error) {
 	return limit, err
 }
 
-// Wait is how long the limit in force on scope has left, zero when none is. It is the read
-// githubapp.Client makes before every request it sends.
-func (s *Store) Wait(ctx context.Context, scope string) (time.Duration, error) {
+// Wait is how long the limit in force on scope has left, zero when none is, and when it was last
+// recorded. It is the read githubapp.Client makes before every request it sends. recorded is the
+// row's last write by any process, so it names one limit: time passing leaves it alone, while a
+// limit recorded again (a new one, or one extended) changes it.
+func (s *Store) Wait(ctx context.Context, scope string) (wait time.Duration, recorded time.Time, err error) {
 	limit, found, err := s.InForce(ctx, scope)
 	if err != nil || !found {
-		return 0, err
+		return 0, time.Time{}, err
 	}
-	return limit.Wait, nil
+	return limit.Wait, limit.updatedAt, nil
 }
 
 // InForce returns, of the limits in force on scopes, the one that ends last; found is false when

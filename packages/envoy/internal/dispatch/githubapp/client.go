@@ -141,8 +141,8 @@ type mintedToken struct {
 // ListInstallationRepositoriesByID (one key per installation id) and RepositoryToken (one key per
 // "owner/repo"). A singleflight.Group collapses concurrent cold-cache fetches for the same key
 // into one network call: two goroutines racing a cold cache for the same installation (plausible
-// under the cross-installation errgroup's own concurrency) share one fetch's answer instead of
-// each making its own.
+// under the cross-installation errgroup's own concurrency, or two browser reads of one repository
+// through the GitHub proxy) share one fetch's answer instead of each making its own.
 type ttlCache[K comparable, V any] struct {
 	ttl   time.Duration
 	now   func() time.Time
@@ -175,17 +175,28 @@ func (c *ttlCache[K, V]) fresh(key K) (V, bool) {
 // get returns key's cached value when fresh; otherwise it calls fetch exactly once across every
 // concurrent caller for this key (singleflight, keyed by key's string form) and caches the
 // result for the rest.
-func (c *ttlCache[K, V]) get(key K, fetch func() (V, error)) (V, error) {
+//
+// The one fetch serves every waiting caller, so it runs on ctx without its cancellation or
+// deadline: whichever caller started it may go away (a closed browser tab, an ended sync) while
+// others still wait on the same answer, and one caller's cancellation must not fail them. Each
+// request the fetch sends is still bounded by RequestTimeout. Each caller stops waiting when its
+// own ctx ends, with ctx's error.
+func (c *ttlCache[K, V]) get(ctx context.Context, key K, fetch func(context.Context) (V, error)) (V, error) {
+	var zero V
 	if value, ok := c.fresh(key); ok {
 		return value, nil
 	}
-	value, err, _ := c.group.Do(fmt.Sprint(key), func() (any, error) {
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	shared := context.WithoutCancel(ctx)
+	results := c.group.DoChan(fmt.Sprint(key), func() (any, error) {
 		// Re-check: a sibling caller may have already refreshed this key while this one waited
 		// to acquire the singleflight call.
 		if value, ok := c.fresh(key); ok {
 			return value, nil
 		}
-		fetched, err := fetch()
+		fetched, err := fetch(shared)
 		if err != nil {
 			return nil, err
 		}
@@ -194,11 +205,15 @@ func (c *ttlCache[K, V]) get(key K, fetch func() (V, error)) (V, error) {
 		c.mu.Unlock()
 		return fetched, nil
 	})
-	if err != nil {
-		var zero V
-		return zero, err
+	select {
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case result := <-results:
+		if result.Err != nil {
+			return zero, result.Err
+		}
+		return result.Val.(V), nil
 	}
-	return value.(V), nil
 }
 
 // forget drops key's cached value, so the next get fetches it again.
@@ -213,8 +228,10 @@ func (c *ttlCache[K, V]) forget(key K) {
 // one process meets must stop the others from asking too. Scopes are AppScope and
 // installationScope's.
 type Limits interface {
-	// Wait is how long the limit in force on scope has left, zero when none is.
-	Wait(ctx context.Context, scope string) (time.Duration, error)
+	// Wait is how long the limit in force on scope has left, zero when none is, and when that limit
+	// was last recorded: the same for one limit however much of it has passed, changed by every
+	// recording that makes a new limit or extends one.
+	Wait(ctx context.Context, scope string) (wait time.Duration, recorded time.Time, err error)
 	// Record records that GitHub asked for wait before the next request under scope.
 	Record(ctx context.Context, scope string, wait time.Duration) error
 }
@@ -428,7 +445,7 @@ func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) 
 	if c == nil {
 		return nil, ErrNoAppKey
 	}
-	return c.installations.get(installationsCacheKey, func() ([]Installation, error) {
+	return c.installations.get(ctx, installationsCacheKey, func(ctx context.Context) ([]Installation, error) {
 		jwt, err := c.appJWT()
 		if err != nil {
 			return nil, err
@@ -475,7 +492,7 @@ func (c *Client) RepositoryToken(ctx context.Context, owner, repo string) (strin
 		return "", ErrNoAppKey
 	}
 	name := owner + "/" + repo
-	installationID, err := c.repositories.get(name, func() (int64, error) {
+	installationID, err := c.repositories.get(ctx, name, func(ctx context.Context) (int64, error) {
 		installation, err := c.installation(ctx, owner, repo)
 		return installation.ID, err
 	})
@@ -513,7 +530,7 @@ const maxInstallationRepositories = 2000
 // search's own cost by the installation count for data that changes on human timescales, not
 // every five minutes.
 func (c *Client) ListInstallationRepositoriesByID(ctx context.Context, installationID int64) ([]string, error) {
-	return c.installationRepos.get(installationID, func() ([]string, error) {
+	return c.installationRepos.get(ctx, installationID, func(ctx context.Context) ([]string, error) {
 		token, err := c.Token(ctx, installationID)
 		if err != nil {
 			return nil, fmt.Errorf("mint token for installation %d: %w", installationID, err)
@@ -701,12 +718,12 @@ func (c *Client) doLimited(ctx context.Context, scope, method, target, authoriza
 func (c *Client) request(ctx context.Context, scope, method, target, authorization, accept string, body io.Reader, limit int64) ([]byte, int, http.Header, error) {
 	shared := c.limits != nil && scope != ""
 	if shared {
-		wait, err := c.limits.Wait(ctx, scope)
+		wait, recorded, err := c.limits.Wait(ctx, scope)
 		switch {
 		case err != nil:
 			slog.Warn("dispatch githubapp: the shared GitHub rate limit was not read; the request is sent", "scope", scope, "error", err)
 		case wait > 0:
-			return nil, 0, nil, &RateLimitError{Wait: wait, Scope: scope, Held: true}
+			return nil, 0, nil, &RateLimitError{Wait: wait, Scope: scope, Held: true, Recorded: recorded}
 		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)

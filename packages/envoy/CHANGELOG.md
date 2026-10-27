@@ -863,10 +863,15 @@
   cannot be read or written leaves each process to GitHub's answers, with a log line. The GitHub
   proxy (`/api/github/rest/...`) answers a rate limit, met now or recorded by any process,
   `503 GITHUB_RATE_LIMITED` with `Retry-After` in whole seconds (at least one), where it answered
-  `502 GITHUB_UPSTREAM` or passed GitHub's `403` through. The repository-to-installation lookup a
+  `502 GITHUB_UPSTREAM` or passed GitHub's `403` through. A request a recorded limit holds fails
+  with `GitHub rate limit on <scope> recorded at <time> is in force; the request was not sent`,
+  the same text for as long as one limit lasts, so an architecture source synced under it emits
+  one `architecture.sync_failed`, not one per sync. The repository-to-installation lookup a
   process remembers now expires after 10 minutes, so an App moved to another installation is
-  found within that rather than when the process restarts. Installation tokens stay in each
-  process's memory and are never written to the database (INFRA-562).
+  found within that rather than when the process restarts; callers that need one repository's
+  installation at once share one lookup, and one of them going away (a closed browser tab) no
+  longer fails it for the others. Installation tokens stay in each process's memory and are
+  never written to the database (INFRA-562).
 - Dispatch's test hooks act on every process serving the database, not only the one a call
   reached, so a browser suite against two processes works whichever process each request lands
   on: `POST /api/v1/events/_test/disconnect`, `POST /api/v1/delivery/_test/disconnect`,
@@ -1567,10 +1572,11 @@
   answer could not be written is logged at ERROR with `claim_expires_at` (INFRA-562).
 - Two Dispatch processes syncing one project's architecture source at once never record the older
   of the two branch heads they read over the newer one, nor a failure one met over the other's
-  success. Each importer write now commits only while the source's `last_sync_at` is the value its
-  sync loaded before fetching, and a sync another one overtook starts again from the load. Writes
-  are ordered by when each sync read the head, not by commit date, so a force-push back to an
-  older commit still imports (INFRA-562).
+  success. Each importer write now commits only while the source row's version (PostgreSQL's
+  `xmin`, changed by every write of the row, a settings save of the same branch included) is the
+  one its sync loaded before fetching, and a sync another write overtook starts again from the
+  load. Writes are ordered by when each sync read the head, not by commit date, so a force-push
+  back to an older commit still imports (INFRA-562).
 - The two Delivery page configuration warnings (a successful run with no job matching
   `production_job_names`, and a production job with no step named `production_apply_step_name`)
   are logged once across every Dispatch process, not once in each: the process whose insert into
