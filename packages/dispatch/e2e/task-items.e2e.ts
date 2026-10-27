@@ -78,43 +78,123 @@ async function expectTaskBoxes(scope: Locator, tickedText: string, untickedText:
   return { ticked, tickedBox, unticked, untickedBox };
 }
 
-/** Asserts a reader can tell the two boxes apart, however they are drawn: at least a tenth of the
- *  pixels of the two boxes' shots differ by half a colour channel's range or more. A byte compare
- *  is not enough: two boxes drawn alike still differ by a few faint antialiased edge pixels. */
-async function expectBoxesLookDifferent(tickedBox: Locator, untickedBox: Locator): Promise<void> {
-  const tickedShot = await tickedBox.screenshot({ animations: "disabled" });
-  const untickedShot = await untickedBox.screenshot({ animations: "disabled" });
-  // The page decodes the two PNGs; a Blob read by `createImageBitmap` is no fetch the page's CSP
-  // could refuse.
-  const { pixels, sameSize, strong } = await tickedBox.page().evaluate(
-    async (shots) => {
-      const [a, b] = await Promise.all(
-        shots.map(async (base64) => {
-          const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
-          const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-          const context = new OffscreenCanvas(bitmap.width, bitmap.height).getContext("2d");
-          if (!context) throw new Error("no 2d context to decode a box's shot");
-          context.drawImage(bitmap, 0, 0);
-          return context.getImageData(0, 0, bitmap.width, bitmap.height);
-        })
-      );
-      let strong = 0;
-      for (let i = 0; i < a.data.length; i += 4) {
-        const channels = [0, 1, 2].map((c) => Math.abs(a.data[i + c] - b.data[i + c]));
-        if (Math.max(...channels) >= 128) strong++;
+/** CSS pixels of background a box's shot takes in on every side of the box. */
+const BOX_SHOT_PADDING = 4;
+/** Device pixels at the outer edge of a box's shot read as the background around the box. */
+const BACKGROUND_RING = 2;
+/** How far a pixel's largest colour channel must stand from the background to count as ink. */
+const INK_CONTRAST = 96;
+
+/** How many shots of a box are taken, at most, waiting for two in a row to match. */
+const STEADY_SHOT_ATTEMPTS = 10;
+
+type Rect = { height: number; width: number; x: number; y: number };
+
+/** A shot of `box` padded by `BOX_SHOT_PADDING` on every side, with the box's rect and the clip
+ *  shot, both in CSS pixels of the viewport. The clip is widened to whole CSS pixels, so its shot
+ *  maps back to it exactly at any device pixel ratio. The shot is taken once two in a row match
+ *  with the box in the same place: the page can shift for a frame between reading the box's rect
+ *  and the shot, which would then show whatever passed under the box. */
+async function steadyShotOf(box: Locator): Promise<{ clip: Rect; rect: Rect; shot: Buffer }> {
+  let previous: { rect: Rect; shot: Buffer } | undefined;
+  for (let attempt = 0; attempt < STEADY_SHOT_ATTEMPTS; attempt++) {
+    await box.scrollIntoViewIfNeeded();
+    const rect = await box.boundingBox();
+    if (rect === null) throw new Error("the checkbox is not on the page");
+    const x = Math.floor(rect.x - BOX_SHOT_PADDING);
+    const y = Math.floor(rect.y - BOX_SHOT_PADDING);
+    const clip = {
+      height: Math.ceil(rect.y + rect.height + BOX_SHOT_PADDING) - y,
+      width: Math.ceil(rect.x + rect.width + BOX_SHOT_PADDING) - x,
+      x,
+      y,
+    };
+    const shot = await box.page().screenshot({ animations: "disabled", clip });
+    if (
+      previous?.shot.equals(shot) &&
+      previous.rect.x === rect.x &&
+      previous.rect.y === rect.y &&
+      previous.rect.width === rect.width &&
+      previous.rect.height === rect.height
+    ) {
+      return { clip, rect, shot };
+    }
+    previous = { rect, shot };
+  }
+  throw new Error(`the checkbox never held still for two shots in ${STEADY_SHOT_ATTEMPTS}`);
+}
+
+/** The share of the middle of `box` (its rect inset by a quarter on every side) that is ink: pixels
+ *  whose largest channel differs from the background by `INK_CONTRAST` or more. The background is
+ *  the per-channel median of the outermost `BACKGROUND_RING` device pixels of the box's shot. */
+async function inkedShareOfMiddle(box: Locator): Promise<number> {
+  const { clip, rect, shot } = await steadyShotOf(box);
+  // The page decodes the PNG; a Blob read by `createImageBitmap` is no fetch the page's CSP could
+  // refuse.
+  return box.page().evaluate(
+    async ({ base64, clip, contrast, rect, ring }) => {
+      const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+      const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+      const { height, width } = bitmap;
+      const context = new OffscreenCanvas(width, height).getContext("2d");
+      if (!context) throw new Error("no 2d context to decode a box's shot");
+      context.drawImage(bitmap, 0, 0);
+      const { data } = context.getImageData(0, 0, width, height);
+      const scale = width / clip.width;
+      if (height !== Math.round(clip.height * scale)) {
+        throw new Error(`a ${clip.width}x${clip.height} clip shot as ${width}x${height}`);
       }
-      return {
-        pixels: a.width * a.height,
-        sameSize: a.width === b.width && a.height === b.height,
-        strong,
-      };
+      const ringChannels: number[][] = [[], [], []];
+      for (let py = 0; py < height; py++) {
+        for (let px = 0; px < width; px++) {
+          if (px >= ring && py >= ring && px < width - ring && py < height - ring) continue;
+          for (let c = 0; c < 3; c++) ringChannels[c].push(data[(py * width + px) * 4 + c]);
+        }
+      }
+      const background = ringChannels.map(
+        (values) => values.sort((a, b) => a - b)[values.length >> 1]
+      );
+      const left = Math.ceil((rect.x - clip.x + rect.width / 4) * scale);
+      const right = Math.floor((rect.x - clip.x + (rect.width * 3) / 4) * scale);
+      const top = Math.ceil((rect.y - clip.y + rect.height / 4) * scale);
+      const bottom = Math.floor((rect.y - clip.y + (rect.height * 3) / 4) * scale);
+      let inked = 0;
+      for (let py = top; py < bottom; py++) {
+        for (let px = left; px < right; px++) {
+          const at = (py * width + px) * 4;
+          const strongest = Math.max(
+            ...background.map((value, c) => Math.abs(data[at + c] - value))
+          );
+          if (strongest >= contrast) inked++;
+        }
+      }
+      return inked / ((right - left) * (bottom - top));
     },
-    [tickedShot.toString("base64"), untickedShot.toString("base64")]
+    {
+      base64: shot.toString("base64"),
+      clip,
+      contrast: INK_CONTRAST,
+      rect,
+      ring: BACKGROUND_RING,
+    }
   );
-  expect(sameSize, "the ticked and unticked boxes are the same size").toBe(true);
-  expect(strong, "pixels that tell the ticked box from the unticked one").toBeGreaterThanOrEqual(
-    pixels / 10
-  );
+}
+
+/** Asserts a reader sees the ticked box as ticked and the unticked one as empty, however they are
+ *  drawn: at least a quarter of the ticked box's middle is ink, and at most a twentieth of the
+ *  unticked box's (drawn as styles.css draws them, half or more of a ticked box's middle is ink,
+ *  the tick the rest, and none of an unticked box's). Each box is measured against its own
+ *  surroundings, never pixel by pixel against the other box: the boxes are a fractional size at
+ *  fractional positions, so shots of two identical boxes can be cut a device pixel apart, or a
+ *  pixel different in size, and their borders alone would differ. */
+async function expectTickedFilledUntickedEmpty(
+  tickedBox: Locator,
+  untickedBox: Locator
+): Promise<void> {
+  const ticked = await inkedShareOfMiddle(tickedBox);
+  const unticked = await inkedShareOfMiddle(untickedBox);
+  expect(ticked, "share of the ticked box's middle that is ink").toBeGreaterThanOrEqual(0.25);
+  expect(unticked, "share of the unticked box's middle that is ink").toBeLessThanOrEqual(0.05);
 }
 
 /** Seeds an issue with an agent comment holding a ticked and an unticked task item. */
@@ -139,8 +219,7 @@ async function openChecklistThread(
   const turn = page.locator(`[data-turn="comment:${commentId}"]`);
   // The comment has loaded, so any failure after this is about the checkboxes.
   await expect(turn.getByText("Tag the build")).toBeVisible();
-  // A comment's turn shows a one-line preview until the reader expands its thread: in place
-  // above the phone breakpoint, as a full-screen Thread dialog below it.
+  // A comment's turn shows a one-line preview until the reader expands its thread.
   await turn.getByRole("button", { name: "Expand thread" }).click();
   return conversationThreadScope(page, project, turn);
 }
@@ -172,7 +251,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       await ticked.scrollIntoViewIfNeeded();
       await expectBoxOnTextLine(ticked);
       await expectBoxOnTextLine(unticked);
-      await expectBoxesLookDifferent(tickedBox, untickedBox);
+      await expectTickedFilledUntickedEmpty(tickedBox, untickedBox);
 
       // A click on a box changes nothing: the boxes are read-only.
       const { x, y } = await centerOf(tickedBox);
@@ -193,14 +272,13 @@ for (const colorScheme of ["light", "dark"] as const) {
     await withAlice(browser, async (page) => {
       await page.emulateMedia({ colorScheme, forcedColors: "active" });
       const thread = await openChecklistThread(page, testInfo.project.name, checklist);
-      const { ticked, tickedBox, untickedBox } = await expectTaskBoxes(
+      const { tickedBox, untickedBox } = await expectTaskBoxes(
         thread,
         "Tag the build",
         "Publish the notes"
       );
 
-      await ticked.scrollIntoViewIfNeeded();
-      await expectBoxesLookDifferent(tickedBox, untickedBox);
+      await expectTickedFilledUntickedEmpty(tickedBox, untickedBox);
 
       await thread.screenshot({
         path: testInfo.outputPath(`task-items-forced-${colorScheme}.png`),
