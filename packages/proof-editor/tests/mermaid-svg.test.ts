@@ -1,10 +1,11 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { renderProofMermaidSvg } from "proof-sdk-upstream/src/editor/plugins/mermaid-diagrams";
-import { renderMermaidSvg, sanitizeMermaidSvg } from "../src/mermaid-svg";
+import { renderMermaidMarkup } from "../src/mermaid-render";
+import { mermaidSvgElement, sanitizeMermaidSvg } from "../src/mermaid-svg";
 
 // The document is passed in and never installed as `globalThis.document`: ELK, which lays out
-// flowcharts and state diagrams, fails to build while a global `document` exists.
+// flowcharts and state diagrams, fails to build while a global `document` exists. That is also
+// what shows `renderMermaidMarkup` needs no DOM, as it must to run in a Web Worker.
 const window = new Window();
 const document = window.document as unknown as Document;
 
@@ -26,9 +27,28 @@ function attributeValues(root: Element): string[] {
   );
 }
 
-describe("renderMermaidSvg", () => {
+function parseRaw(markup: string): Element {
+  return new window.DOMParser().parseFromString(markup, "image/svg+xml")
+    .documentElement as unknown as Element;
+}
+
+describe("renderMermaidMarkup", () => {
+  test("returns the editor's svg markup for a source", () => {
+    const markup = renderMermaidMarkup("sequenceDiagram\n  Alice->>Bob: Hi");
+
+    expect(parseRaw(markup).localName).toBe("svg");
+    expect(markup).toContain("Alice");
+  });
+
+  test("throws upstream's reason for a source it refuses", () => {
+    expect(() => renderMermaidMarkup("graph TD\n  A -->")).toThrow(/^Dangling Mermaid edge/);
+  });
+});
+
+describe("mermaidSvgElement", () => {
   test("draws a sequence diagram as an svg of the document with the editor's accessible name", () => {
-    const svg = renderMermaidSvg("sequenceDiagram\n  Alice->>Bob: Hi", document);
+    const markup = renderMermaidMarkup("sequenceDiagram\n  Alice->>Bob: Hi");
+    const svg = mermaidSvgElement(markup, document);
 
     expect(svg.localName).toBe("svg");
     expect(svg.ownerDocument).toBe(document);
@@ -36,18 +56,19 @@ describe("renderMermaidSvg", () => {
     expect(svg.getAttribute("aria-label")).toBe("Rendered Mermaid diagram");
     expect(svg.textContent).toContain("Alice");
     expect(svg.textContent).toContain("Hi");
+    const rawStyle = parseRaw(markup).getElementsByTagName("style")[0]?.textContent ?? "";
+    expect(rawStyle).toContain("@import");
     const style = svg.getElementsByTagName("style")[0]?.textContent ?? "";
-    expect(style).toContain("--_text");
+    expect(style.trim()).not.toBe("");
     expect(style).not.toContain("@import");
-  });
-
-  test("throws upstream's reason for a source it refuses", () => {
-    expect(() => renderMermaidSvg("graph TD\n  A -->", document)).toThrow(/^Dangling Mermaid edge/);
+    expect(style).toBe(rawStyle.replace(/@import[^\n]*;/g, ""));
   });
 
   test("drops an author's classDef and style url() paint and keeps the arrowhead markers", () => {
-    const svg = renderMermaidSvg(
-      "graph TD\n  A --> B\n  classDef evil fill:url(https://evil.example/x.png)\n  class A evil\n  style B fill:url(https://evil.example/y.png)\n  linkStyle 0 stroke:\\75rl(https://evil.example/q)",
+    const svg = mermaidSvgElement(
+      renderMermaidMarkup(
+        "graph TD\n  A --> B\n  classDef evil fill:url(https://evil.example/x.png)\n  class A evil\n  style B fill:url(https://evil.example/y.png)\n  linkStyle 0 stroke:\\75rl(https://evil.example/q)"
+      ),
       document
     );
 
@@ -56,6 +77,14 @@ describe("renderMermaidSvg", () => {
     expect(values.some((value) => value.includes("url(#"))).toBe(true);
   });
 
+  test("throws for markup that is not an svg document", () => {
+    expect(() => mermaidSvgElement("<div>not a diagram</div>", document)).toThrow(
+      "Invalid SVG output"
+    );
+  });
+});
+
+describe("sanitizeMermaidSvg", () => {
   test("keeps every element beautiful-mermaid draws for each diagram type", () => {
     const diagrams = [
       "graph TD\n  A[Start] --> B{Choice}\n  B -->|Yes| C((Done))\n  B -.-> D[(Store)]",
@@ -66,16 +95,12 @@ describe("renderMermaidSvg", () => {
       'xychart-beta\n  title "Sales"\n  x-axis [a, b, c]\n  bar [1, 2, 3]\n  line [3, 2, 1]',
     ];
     for (const source of diagrams) {
-      const markup = renderProofMermaidSvg(source);
-      const raw = new window.DOMParser().parseFromString(markup, "image/svg+xml");
+      const markup = renderMermaidMarkup(source);
       const svg = sanitizeMermaidSvg(markup, document);
-      if (svg === null) throw new Error("beautiful-mermaid's svg did not parse");
-      expect(elementNames(svg)).toEqual(elementNames(raw.documentElement as unknown as Element));
+      expect(elementNames(svg)).toEqual(elementNames(parseRaw(markup)));
     }
   });
-});
 
-describe("sanitizeMermaidSvg", () => {
   const hostile = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
       viewBox="0 0 10 10" onload="window.hit = 1">
     <style>
@@ -96,7 +121,6 @@ describe("sanitizeMermaidSvg", () => {
 
   test("keeps the shapes, text and styling and drops every script, link and fetch", () => {
     const svg = sanitizeMermaidSvg(hostile, document);
-    if (svg === null) throw new Error("the hostile svg did not parse");
 
     expect(svg.ownerDocument).toBe(document);
     expect(elementNames(svg)).toEqual(["svg", "style", "rect", "path", "text"]);
@@ -126,7 +150,6 @@ describe("sanitizeMermaidSvg", () => {
       </svg>`,
       document
     );
-    if (svg === null) throw new Error("the svg did not parse");
 
     expect(
       attributeValues(svg).filter(
@@ -149,10 +172,30 @@ describe("sanitizeMermaidSvg", () => {
     expect(local?.getAttribute("data-label")).toBe("a\\b (x.example)");
   });
 
-  test("returns null for markup that is not an svg document", () => {
-    expect(sanitizeMermaidSvg("<div>not a diagram</div>", document)).toBeNull();
-    expect(sanitizeMermaidSvg("<svg><rect></svg>", document)).toBeNull();
-    expect(sanitizeMermaidSvg("<svg><rect/></svg>", document)).toBeNull();
-    expect(sanitizeMermaidSvg("not markup at all", document)).toBeNull();
+  test("compares element names exactly, since XML names are case-sensitive", () => {
+    expect(() =>
+      sanitizeMermaidSvg('<SVG xmlns="http://www.w3.org/2000/svg"><rect/></SVG>', document)
+    ).toThrow("Invalid SVG output");
+
+    const svg = sanitizeMermaidSvg(
+      `<svg xmlns="http://www.w3.org/2000/svg">
+        <RECT id="upper" width="1" height="1"/>
+        <rect id="lower" width="1" height="1"/>
+      </svg>`,
+      document
+    );
+    expect(elementNames(svg)).toEqual(["svg", "rect"]);
+    expect(svg.getElementsByTagName("rect")[0]?.getAttribute("id")).toBe("lower");
+  });
+
+  test("throws for markup that is not an svg document", () => {
+    for (const markup of [
+      "<div>not a diagram</div>",
+      "<svg><rect></svg>",
+      "<svg><rect/></svg>",
+      "not markup at all",
+    ]) {
+      expect(() => sanitizeMermaidSvg(markup, document)).toThrow("Invalid SVG output");
+    }
   });
 });

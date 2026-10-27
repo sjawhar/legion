@@ -19,6 +19,11 @@
       "bun": "./src/mermaid-svg.ts",
       "default": "./src/mermaid-svg.ts"
     },
+    "./mermaid-render": {
+      "types": "./src/mermaid-render.ts",
+      "bun": "./src/mermaid-render.ts",
+      "default": "./src/mermaid-render.ts"
+    },
     "./style.css": "./src/lib.css"
   },
   "main": "src/lib.ts",

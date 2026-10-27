@@ -63,6 +63,7 @@
         "!packages/proof-editor/src/record-mark-retype.ts",
         "!packages/proof-editor/src/record-mark-target.ts",
         "!packages/proof-editor/src/mermaid-svg.ts",
+        "!packages/proof-editor/src/mermaid-render.ts",
         "packages/proof-editor/upstream/**"
       ],
       "assist": { "enabled": false },
