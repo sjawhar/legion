@@ -464,7 +464,9 @@ resources:
       signInClientSecret: ${signInClientSecret}
       signInDomain: example.com
     options:
-      providers: [${gcp}, ${random}]
+      providers:
+        - ${gcp}
+        - ${random}
 ```
 
 ## host:Listener

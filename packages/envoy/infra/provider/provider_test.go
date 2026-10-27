@@ -9,9 +9,12 @@ import (
 	"github.com/blang/semver"
 	p "github.com/pulumi/pulumi-go-provider"
 	"github.com/pulumi/pulumi-go-provider/integration"
+	pproperty "github.com/pulumi/pulumi/sdk/v3/go/property"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 	"github.com/sjawhar/envoy/infra/provider"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // schemaJSON serves the plugin in process and returns the schema it answers GetSchema with.
@@ -225,4 +228,41 @@ func optionalInputs[V any](properties map[string]V, required []string) []string 
 		}
 	}
 	return optional
+}
+
+// Every integer input of every component the plugin serves refuses a fraction through Construct,
+// as a typed SDK or Pulumi YAML program sends one, naming the component and the input, before the
+// component registers anything. Each input is sent alone: the refusal runs before the component
+// decodes its inputs, so no other input need be valid. The inputs come from the served schema, so
+// an integer input is covered the day it is added.
+func TestConstructRefusesAFractionInEveryIntegerInput(t *testing.T) {
+	var covered int
+	for typ, component := range servedSchema(t).Resources {
+		for input, spec := range component.InputProperties {
+			if spec.Type != "integer" {
+				continue
+			}
+			covered++
+			t.Run(typ+"/"+input, func(t *testing.T) {
+				m := &pulumitest.Mocks{}
+				_, err := pulumitest.Construct(t, m, typ, "example", map[string]pproperty.Value{input: pproperty.New(2.5)}, false, nil)
+				require.EqualError(t, err, typ+" example: "+input+" 2.5 must be a whole number")
+				require.Empty(t, m.Types())
+			})
+			// The check's refusal quotes the component's name, so a name holding an nkey seed is
+			// left to the component, which refuses it first without quoting it.
+			t.Run(typ+"/"+input+"/a seed as the name", func(t *testing.T) {
+				seed, _ := testnats.User(t)
+				m := &pulumitest.Mocks{}
+				_, err := pulumitest.Construct(t, m, typ, seed, map[string]pproperty.Value{input: pproperty.New(2.5)}, false, nil)
+				require.ErrorContains(t, err, "nkey seed")
+				require.NotContains(t, err.Error(), seed)
+				require.Empty(t, m.Types())
+			})
+		}
+	}
+	// aws:NatsService logRetentionDays; aws:WebhookListener logRetentionDays and natsReplicas;
+	// gcp:Dispatch replicas, pprofPort and azureEmbedTokensPerMinute; gcp:NatsHub diskSizeGb;
+	// host:Listener port.
+	require.GreaterOrEqual(t, covered, 8)
 }

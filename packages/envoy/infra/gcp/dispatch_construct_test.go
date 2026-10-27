@@ -1,6 +1,7 @@
 package gcp_test
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -331,4 +332,42 @@ func TestConstructOutputsTheServiceAccountIssuerAndSubject(t *testing.T) {
 			require.Equal(t, "example-dispatch", pod["serviceAccountName"], "the subject names the pods' own ServiceAccount")
 		})
 	}
+}
+
+// Pulumi decodes an integer input into a Go int by conversion, so a typed SDK or YAML program
+// sending 2.5 replicas would get 2 with no error. Each integer input of a gcp:Dispatch whose other
+// inputs are all valid refuses a number that is not a whole number within int64's range, naming
+// the component and the input, before anything registers, and never quotes a secret one
+// (provider's TestConstructRefusesAFractionInEveryIntegerInput covers every component's).
+func TestConstructRefusesAFractionalDispatchInteger(t *testing.T) {
+	for _, input := range []string{"replicas", "pprofPort", "azureEmbedTokensPerMinute"} {
+		for _, row := range []struct {
+			value property.Value
+			want  string
+		}{
+			{property.New(2.5), input + " 2.5 must be a whole number"},
+			{property.New(-0.5), input + " -0.5 must be a whole number"},
+			{property.New(1e19), input + " 1e+19 is outside the 64-bit integer range"},
+			{property.New(math.Inf(1)), input + " +Inf is outside the 64-bit integer range"},
+			{property.New(2.5).WithSecret(true), input + " must be a whole number within the 64-bit integer range (not echoed, as it is secret)"},
+		} {
+			t.Run(row.want, func(t *testing.T) {
+				inputs := dispatchConstructBaseInputs()
+				inputs[input] = row.value
+				m, _, err := constructDispatch(t, inputs, false)
+				require.EqualError(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.want)
+				require.Empty(t, m.Types())
+			})
+		}
+	}
+}
+
+// A whole number sent as a float, as every JSON number is, still decodes: 3.0 replicas is 3.
+func TestConstructTakesAWholeDispatchIntegerSentAsAFloat(t *testing.T) {
+	inputs := dispatchConstructBaseInputs()
+	inputs["replicas"] = property.New(3.0)
+	m, _, err := constructDispatch(t, inputs, false)
+	require.NoError(t, err)
+	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
+	require.EqualValues(t, 3, spec["replicas"])
 }
