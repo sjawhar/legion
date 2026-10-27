@@ -98,7 +98,11 @@ func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *tes
 		// Its answer is not this test's.
 		_, _ = process.renameIssue(key, "Renamed")
 	}()
-	if waiting := storetest.WaitForLockWaiters(t, holder, 1, 10*time.Second); waiting < 1 {
+	// The edit's settlement queues behind the same lock two seconds in, so a count of waiters
+	// could pass with the title change still on its way: watch the title change's own statement,
+	// the issue-row lock a PATCH takes first (api's lockIssueRows). It runs in the Dispatch
+	// process, so its backend is named by that statement rather than by a pool of its own.
+	if pid := storetest.WaitForStatementBehind(t, database, holder, renameLock, 10*time.Second); pid == 0 {
 		t.Fatalf("the title change never queued behind the issue lock:\n%s", process.Output.String())
 	}
 
@@ -113,6 +117,10 @@ func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *tes
 	t.Logf("released the issue lock with %d waiting on it; exited %v after SIGTERM", waiting, time.Since(signalled))
 	process.checkSettledAtShutdown(t, database, artifactID)
 }
+
+// renameLock is the statement with which a PATCH of an issue locks the issue's row before it
+// writes (lockIssueRows in internal/dispatch/api/issue_parent.go), as pg_stat_activity shows it.
+const renameLock = `select parent_key from issues where key = $1 for no key update`
 
 // A write in flight at SIGTERM can wait on a lock past the HTTP drain's share, the document
 // service's budget and the point a fixed shutdown bound would end it, here a title change behind

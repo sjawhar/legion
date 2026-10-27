@@ -9,9 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 type turnAskRow struct {
@@ -317,6 +320,37 @@ func TestReplyUnderAnAnsweredAskRecordsNoTurn(t *testing.T) {
 	}
 }
 
+// oneConnectionHandler serves deps's routes from a store of one connection of its own and answers
+// that connection's backend process id, so every statement a request sent through it makes on
+// deps.Store runs on that one backend, and a test watches the backend that request waits on
+// (storetest.QueuedBehind) rather than count every session queued behind a lock. Its listener,
+// broker and document service are deps's, so what it writes is what the test's own handler reads.
+func oneConnectionHandler(t *testing.T, deps Deps) (http.Handler, uint32) {
+	t.Helper()
+	config := deps.Store.Pool.Config()
+	config.MaxConns = 1
+	config.MinConns = 0
+	config.MinIdleConns = 0
+	opened, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open the call's one-connection pool: %v", err)
+	}
+	callStore := &store.Store{Pool: store.NewPool(opened)}
+	// Registered before the server's wait, so the wait runs first and this closes after.
+	t.Cleanup(callStore.Pool.Close)
+	conn, err := callStore.Pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire the call's connection: %v", err)
+	}
+	pid := conn.Conn().PgConn().PID()
+	conn.Release()
+	callDeps := deps
+	callDeps.Store = callStore
+	mux := http.NewServeMux()
+	t.Cleanup(Register(mux, callDeps))
+	return mux, pid
+}
+
 // A comment's created_at is when its insert ran (migration 0065's default), after the reply took
 // the owner row, so the thread's newest reply is the one that committed last. Here the agent's
 // reply begins first and waits for the owner row while a human's reply, begun after it, commits;
@@ -330,14 +364,15 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 	for _, path := range []struct {
 		name   string
 		author string
-		// open readies the agent's reply in askID's thread and returns the call that sends it.
-		open func(t *testing.T, handler http.Handler, issueKey, askID string) func() *httptest.ResponseRecorder
+		// open readies the agent's reply in askID's thread through handler and returns the call
+		// that sends it through the handler it is given.
+		open func(t *testing.T, handler http.Handler, issueKey, askID string) func(http.Handler) *httptest.ResponseRecorder
 	}{
 		{
 			name:   "a comment posted to the ask",
 			author: sessionActor()["id"].(string),
-			open: func(t *testing.T, handler http.Handler, issueKey, askID string) func() *httptest.ResponseRecorder {
-				return func() *httptest.ResponseRecorder {
+			open: func(t *testing.T, handler http.Handler, issueKey, askID string) func(http.Handler) *httptest.ResponseRecorder {
+				return func(handler http.Handler) *httptest.ResponseRecorder {
 					return sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/comments", map[string]any{
 						"body": "The second approach.", "ask_id": askID, "actor": sessionActor(),
 					})
@@ -347,12 +382,12 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 		{
 			name:   "a mention's callback reply",
 			author: "s1",
-			open: func(t *testing.T, handler http.Handler, issueKey, askID string) func() *httptest.ResponseRecorder {
+			open: func(t *testing.T, handler http.Handler, issueKey, askID string) func(http.Handler) *httptest.ResponseRecorder {
 				clarification := decodeMentionedComment(t, postMentionedComment(t, handler, issueKey, map[string]any{
 					"body": "Say more, @session:s1.", "ask_id": askID,
 					"mentions": []map[string]any{{"target": "session:s1"}},
 				}))
-				return func() *httptest.ResponseRecorder {
+				return func(handler http.Handler) *httptest.ResponseRecorder {
 					return bearerRequest(t, handler, http.MethodPost, "/api/v1/comments/"+clarification.ID+"/reply", map[string]any{
 						"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "The second approach.",
 					})
@@ -366,7 +401,7 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 			sent := []map[string]any{}
 			listener := sessionListener(t, &live, &sent)
 			defer listener.Close()
-			handler, database := newTargetedMessageHandler(t, listener.URL)
+			handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 			issue := createInteractionIssue(t, handler, "TEST", "Racing replies", "spec")
 			askID := openTurnAsk(t, handler, issue.Key, "Which approach?")
 			other := createInteractionIssue(t, handler, "OTHER", "Another thread", "spec")
@@ -381,9 +416,30 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 			if _, err := hold.Exec(ctx, `select 1 from issues where key = $1 for no key update`, issue.Key); err != nil {
 				t.Fatalf("hold the owner row: %v", err)
 			}
+			// The agent's reply runs on a connection of its own, and the test goes on once that
+			// backend is queued behind the owner row. A count of waiters would also take the
+			// issue's spec settlement, which locks the same row, for the reply.
+			callHandler, callPID := oneConnectionHandler(t, deps)
 			replied := make(chan *httptest.ResponseRecorder, 1)
-			go func() { replied <- agentReply() }()
-			waitForDatabaseLocks(t, hold, 1)
+			go func() { replied <- agentReply(callHandler) }()
+			for deadline := time.Now().Add(10 * time.Second); ; {
+				select {
+				case response := <-replied:
+					t.Fatalf("the agent's reply answered %d before it queued behind the owner row: %s", response.Code, response.Body.String())
+				default:
+				}
+				queued, err := storetest.QueuedBehind(ctx, hold, callPID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if queued {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the agent's reply never queued behind the owner row")
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
 			var humanReplyID string
 			if err := database.Pool.QueryRow(ctx, `
 				insert into comments (issue_key, author, body, ask_id, turn)
