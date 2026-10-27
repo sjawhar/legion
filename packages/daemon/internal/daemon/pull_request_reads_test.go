@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,17 +17,21 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
+
+// compareFails, as pullRequestStandIn's changed, has every comparison answer 502.
+const compareFails = "<502>"
 
 // pullRequestStandIn is GitHub's REST API for acme/widgets as the required-checks pass reads it:
 // pull request 86 on base main, open on legion/CAPTURE-1 at head, last updated at updated, with
 // no reviews, whose base requires pr-checks-result and is unprotected. Compared with any earlier
 // head, head is that head with commits on top changing the files changed names, comma-separated;
-// with none named, GitHub has no such comparison (404). Listed by its branch
-// (GET /pulls?head=acme:legion/CAPTURE-1&state=open), it is the one open pull request there; each
-// such list is counted in listed.
+// with none named, GitHub has no such comparison (404), and with compareFails it fails (502).
+// Listed by its branch (GET /pulls?head=acme:legion/CAPTURE-1&state=open), it is the one open pull
+// request there; each such list is counted in listed.
 func pullRequestStandIn(t *testing.T, head string, updated time.Time, changed string, listed *atomic.Int32) *httptest.Server {
 	t.Helper()
 	pull := `{"number":86,"state":"open","html_url":"https://github.com/acme/widgets/pull/86","body":"Dispatch: CAPTURE-1",` +
@@ -39,6 +45,10 @@ func pullRequestStandIn(t *testing.T, head string, updated time.Time, changed st
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer outbox-token" {
 			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/repos/acme/widgets/compare/") && changed == compareFails {
+			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/repos/acme/widgets/compare/") && strings.HasSuffix(r.URL.Path, "..."+head) && len(files) > 0 {
@@ -181,6 +191,112 @@ func TestFollowHeadComparesWithTheRecordAsItStandsNow(t *testing.T) {
 	}
 	if n := headReads(t, pool, "head-read"); n != 0 {
 		t.Fatalf("followHead applied %d head facts, want none", n)
+	}
+}
+
+// handoffPush lets an approval of the recorded head ride to the new one, so it says a push changed
+// only .legion/ only when GitHub's comparison proves the code at the new head is the code at the
+// recorded one: the new head descends from the recorded one (ahead), the list is not one GitHub may
+// have cut, and every path a commit touched, a rename's old name too, is under .legion/. Anything
+// else is left to the push webhook.
+func TestHandoffPushTakesOnlyAComparisonThatProvesTheCodeUnchanged(t *testing.T) {
+	legionFiles := func(n int) string {
+		files := make([]string, n)
+		for i := range files {
+			files[i] = `{"filename":".legion/CAPTURE-1/note-` + strconv.Itoa(i) + `.md"}`
+		}
+		return strings.Join(files, ",")
+	}
+	for _, tc := range []struct {
+		name    string
+		compare string
+		handoff bool
+	}{
+		{"only .legion/ on top of the recorded head", `{"status":"ahead","files":[{"filename":".legion/CAPTURE-1/review.json"}]}`, true},
+		{"the most files GitHub lists in full, all under .legion/", `{"status":"ahead","files":[` + legionFiles(compareFilesCap-1) + `]}`, true},
+		{"diverged from the recorded head", `{"status":"diverged","files":[{"filename":".legion/CAPTURE-1/review.json"}]}`, false},
+		{"behind the recorded head", `{"status":"behind","files":[{"filename":".legion/CAPTURE-1/review.json"}]}`, false},
+		{"a list GitHub may have cut", `{"status":"ahead","files":[` + legionFiles(compareFilesCap) + `]}`, false},
+		{"a rename into .legion/ from code", `{"status":"ahead","files":[{"filename":".legion/CAPTURE-1/widget.go","previous_filename":"src/widget.go"}]}`, false},
+		{"code changed", `{"status":"ahead","files":[{"filename":"src/widget.go"}]}`, false},
+		{"no files", `{"status":"ahead","files":[]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/repos/acme/widgets/compare/code...handoff" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Write([]byte(tc.compare))
+			}))
+			t.Cleanup(server.Close)
+			github := githubrest.Client{Token: "token", API: githubrest.RepositoryAPI(server.URL, ghrepo.MustParse("acme/widgets"))}
+			pr := record.PullRequest{Repo: "acme/widgets", Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "code"}
+			push, handoff, err := handoffPush(context.Background(), github, pr, "handoff")
+			if err != nil {
+				t.Fatalf("handoffPush: %v", err)
+			}
+			if handoff != tc.handoff {
+				t.Fatalf("handoffPush says the push changed only .legion/: %t, want %t (push %+v)", handoff, tc.handoff, push)
+			}
+			if handoff && (push.Before != "code" || push.After != "handoff" || push.Branch != "legion/CAPTURE-1") {
+				t.Fatalf("the push is %+v, want legion/CAPTURE-1 from code to handoff", push)
+			}
+		})
+	}
+}
+
+// A comparison GitHub fails to answer leaves the head where the record holds it, for a later pass
+// to follow, and the pass still reads the pull request's mergeability, reviews and required checks
+// against that record, as it did before it followed heads at all.
+func TestAFailedComparisonStillReadsThePullRequest(t *testing.T) {
+	read := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
+	pool := isolatedOutboxPool(t)
+	seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
+	w := requiredRuntime(pool, pullRequestStandIn(t, "handoff", read, compareFails, &atomic.Int32{}).URL, quietLogger())
+	w.readRequiredChecks(context.Background())
+	_, pr := capturePhase(t, pool)
+	if pr.HeadSHA != "code" {
+		t.Fatalf("after the pass the record is at %q, want code: the comparison failed", pr.HeadSHA)
+	}
+	if pr.Mergeability != record.MergeabilityMergeable {
+		t.Fatalf("after the pass the recorded mergeability is %q, want %q: the pass skipped the pull request's reads", pr.Mergeability, record.MergeabilityMergeable)
+	}
+}
+
+// A pull request GitHub shows open on an issue's branch that the workflow does not record - here an
+// opened older than the closed record's clock - is looked up again every pass, and the warning that
+// the daemon applies it is logged once an hour for it, not every two minutes.
+func TestTheWarningForAnOpenedTheWorkflowDoesNotRecordComesOnceAnHour(t *testing.T) {
+	opened := time.Date(2026, 10, 26, 19, 30, 0, 0, time.UTC)
+	pool := isolatedOutboxPool(t)
+	seedUnrecorded(t, pool, "handoff")
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestClosed, Issue: "CAPTURE-1", Repo: "acme/widgets",
+			Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "handoff", HeadUpdatedAt: opened.Add(time.Hour), Failing: []string{}})
+	}); err != nil {
+		t.Fatalf("seed the closed pull request: %v", err)
+	}
+	var logs syncBuffer
+	var listed atomic.Int32
+	w := requiredRuntime(pool, pullRequestStandIn(t, "handoff", opened, "", &listed).URL, slog.New(slog.NewTextHandler(&logs, nil)))
+	warnings := func() int {
+		return strings.Count(logs.String(), "GitHub holds an open pull request for an issue whose implementer completed")
+	}
+	w.readRequiredChecks(context.Background())
+	w.readRequiredChecks(context.Background())
+	if listed.Load() != 2 || warnings() != 1 {
+		t.Fatalf("two passes listed the branch %d times and warned %d times, want 2 and 1", listed.Load(), warnings())
+	}
+	if got, _ := capturePhase(t, pool); got != phase.Implementing {
+		t.Fatalf("the issue is in %s, want implementing: the workflow records no late opened", got)
+	}
+	for key := range w.openedWarned {
+		w.openedWarned[key] = w.openedWarned[key].Add(-openedWarnEvery)
+	}
+	w.readRequiredChecks(context.Background())
+	if warnings() != 2 {
+		t.Fatalf("a pass an hour later warned %d times in all, want 2", warnings())
 	}
 }
 

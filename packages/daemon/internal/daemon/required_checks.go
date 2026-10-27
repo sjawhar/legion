@@ -61,7 +61,8 @@ func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 
 // readRequiredChecks is one pass: for each open pull request of the project it reads the pull
 // request itself (readPullRequest). When GitHub's head is not the recorded one it applies the
-// synchronize the webhook would have carried and goes on with the record that leaves (followHead).
+// synchronize the webhook would have carried and goes on with the record that leaves (followHead);
+// when following fails short of GitHub's rate limit, it goes on with the record as it stands.
 // It applies an intake.PullRequestMergeability fact whenever GitHub's lazily computed mergeability
 // is CONFLICTING or differs from the one recorded - workflow's mergeability decides a CONFLICTING
 // read every time, even one that only confirms the stored value, so a conflict the poll recorded
@@ -110,10 +111,16 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if w.logPassFailure(pr, "what a pull request's new head changed, to follow it", err) {
+			var answer *githubrest.Answer
+			if errors.As(err, &answer) && answer.RateLimited {
+				w.logPassFailure(pr, "what a pull request's new head changed, to follow it", err)
 				return
 			}
-			continue
+			// The rest of the pull request's reads go on against the record as it stands, as they
+			// did before the pass followed heads: a comparison GitHub keeps failing must not stop
+			// them, and a later pass follows the head.
+			w.log.Warn("follow the head GitHub shows for a pull request; this pass reads it at the recorded head, and a later pass follows it",
+				"repo", pr.Repo, "pullRequest", pr.Number, "recorded", pr.HeadSHA, "head", pull.Head.SHA, "error", err)
 		}
 		// The reads below start their bound only now: following a head waits on the fact lock,
 		// which the GitHub consumer's backlog can hold for a while.

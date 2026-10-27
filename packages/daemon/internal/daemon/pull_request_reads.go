@@ -28,8 +28,11 @@ import (
 // intake.PullRequestSynchronized that webhook would have carried, with GitHub's updated_at as its
 // clock, so the workflow decides it as it decides the webhook's (workflow's
 // pullRequestSynchronized), behind the same fence: a read older than the record's clock moves
-// nothing, and a webhook arriving later that is older than this read moves nothing either; one of
-// the same second runs as a redelivery does, moving nothing.
+// nothing, and a webhook arriving later that is older than this read moves nothing either. The
+// fence orders by GitHub's whole seconds, so a clock equal to the record's is not late: a webhook
+// of the same second arriving later runs as a redelivery does, and a push of the same second whose
+// webhook is applied between this read and its apply is undone by it - the record moves back to
+// the head read here, judging it again, until the next pass moves it forward.
 //
 // Before the synchronize it applies the push that reached the new head when GitHub shows it
 // changed only .legion/ (handoffPush): the push webhook waits in the same backlog, and without it a
@@ -41,8 +44,8 @@ import (
 //
 // It returns the record as the pass goes on with it: as it stands when the head did not move, and
 // otherwise as the synchronize left it, so the mergeability, review and required-check reads after
-// it judge the head GitHub shows. An error, or a record no longer open, ends this pull request's
-// part of the pass; the next pass reads it again.
+// it judge the head GitHub shows. On an error, or a record no longer open, it returns the record as
+// it last read it, and the pass reads the pull request at that head; the next pass follows it.
 func (w *workflowRuntime) followHead(ctx context.Context, github githubrest.Client, pr record.PullRequest, pull githubPullRequest) (record.PullRequest, error) {
 	if pull.State != "open" || pull.Head.SHA == "" || pull.Head.SHA == pr.HeadSHA {
 		return pr, nil
@@ -138,6 +141,11 @@ func handoffPush(ctx context.Context, github githubrest.Client, pr record.PullRe
 	return intake.Push{Repo: pr.Repo, Branch: pr.Branch, Before: pr.HeadSHA, After: head, ChangedPaths: &changed, Truncated: &whole, Forced: &unforced}, true, nil
 }
 
+// openedWarnEvery bounds readUnrecordedPullRequests's warning to one an hour for each pull request
+// it applies: one the workflow does not record (an opened older than the record's clock, a branch
+// that names no issue on the repository) is found and applied again every pass.
+const openedWarnEvery = time.Hour
+
 // readUnrecordedPullRequests is the required-checks pass's look for a pull request the daemon has
 // no record of. An implementer's completion moves its issue to testing only once the issue's pull
 // request is recorded (workflow's implementationReady), and only the opened or reopened webhook
@@ -198,8 +206,14 @@ func (w *workflowRuntime) readUnrecordedPullRequests(ctx context.Context) {
 		prior, repo := recorded[issue.Key], w.heardSpelling(issue.GitHubRepo)
 		fact := intake.PullRequestOpened{Repo: repo, Number: pull.Number, Branch: branch, HeadSHA: pull.Head.SHA, Body: pull.Body,
 			URL: pull.HTMLURL, UpdatedAt: pull.UpdatedAt, Reopened: prior != nil && prior.Number == pull.Number}
-		w.log.Warn("workflow: GitHub holds an open pull request for an issue whose implementer completed, and the daemon has none recorded; applying the opened its webhook would",
-			"repo", repo, "pullRequest", pull.Number, "issue", issue.Key, "head", pull.Head.SHA, "reopened", fact.Reopened, "updated_at", pull.UpdatedAt)
+		if key := fmt.Sprintf("%s#%d", repo, pull.Number); time.Since(w.openedWarned[key]) >= openedWarnEvery {
+			if w.openedWarned == nil {
+				w.openedWarned = map[string]time.Time{}
+			}
+			w.openedWarned[key] = time.Now()
+			w.log.Warn("workflow: GitHub holds an open pull request for an issue whose implementer completed, and the daemon has none recorded; applying the opened its webhook would",
+				"repo", repo, "pullRequest", pull.Number, "issue", issue.Key, "head", pull.Head.SHA, "reopened", fact.Reopened, "updated_at", pull.UpdatedAt)
+		}
 		eventID := fmt.Sprintf("opened-read:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, repo, pull.Number, time.Now().UnixNano())
 		if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
 			w.log.Warn("apply an open pull request read from GitHub", "repo", repo, "pullRequest", pull.Number, "issue", issue.Key, "error", err)
