@@ -2,29 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-560",
-  "completed": "2026-10-27T07:27:32Z",
-  "round": 1,
-  "reviewedHead": "c12689b3097d904907eedd83192482029df369cc",
-  "codeHead": "d0e63dd365d5b713007122feac9c2aafb40192c3",
+  "completed": "2026-10-27T08:39:37Z",
+  "round": 2,
+  "reviewedHead": "a186223cf19aade41d32231d8650253b5776a0cf",
+  "codeHead": "c40c8634e0280ba1d7ec2e7ad7cbb8b5e40a8351",
   "decision": "changes_requested",
   "critical": 0,
   "important": 2,
-  "minor": 7,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head f3d1ae8c (newest pull_request run); lint, test, typecheck, build, changes queued at 07:11Z; compare f3d1ae8c...c12689b3 handoffsOnly true, 1 file. Not decisive for a request for changes.",
+  "minor": 4,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; no branch protection. CI head 25f958aa (newest pull_request run, code c40c8634); lint, test, typecheck, build, changes queued at 08:29Z; compare 25f958aa...a186223c handoffsOnly true. Not decisive for a request for changes.",
+  "roundOneThreads": "All 9 round-1 threads verified fixed at a186223c and answered with a reply each (accepted): PRRT_kwDORFy7ds6wldf3, PRRT_kwDORFy7ds6wldf9, PRRT_kwDORFy7ds6wldgA, PRRT_kwDORFy7ds6wldgD, PRRT_kwDORFy7ds6wldgF, PRRT_kwDORFy7ds6wldgI, PRRT_kwDORFy7ds6wldgM, PRRT_kwDORFy7ds6wldgQ, PRRT_kwDORFy7ds6wldgW. The implementer had already resolved them.",
+  "census": "Present. Its searches were run again at a186223c and the hits match, except one: the `tailscale-state` search also hits docs/plans/2026-10-14-dispatch-gcp-plan.md, which the row does not list. Deployment-repository hits verified at eaf4da1: dispatch/main.go:429, Pulumi.prod.yaml:41, README.md:82 and :415, Pulumi.yaml pins envoy-infra@0.10.1.",
   "thermonuclear": {
-    "deep": "CHANGES at c12689b3: the move runbook grants no tailnet client access to svc:<hostname> (Medium); minors: README 'It heals itself' overclaims, packages/envoy/AGENTS.md does not name /livez; hardening: Role verb update unused, ServiceAccount token mounted in every front-door container",
-    "quality": "CHANGES at c12689b3: claim gate parses JSON with sed; certificate scripts repeat SAN check, API call, cert copy and variable block; per-workload replicas and budgets split across two structs; seed-check chain not a table; 82-connection figure copied into nine places; unused localAddrPort in tailnet_service.go. Judged cleanup by the reviewer (fast-follow), not blocking: every fatal arithmetic path of the backgrounded gate is guarded by entry() and left()."
+    "deep": "CHANGES at a186223c: the PR body's window notes and the reviewer's brief still describe the round-1 move (Medium, body only); no defect in the round-2 code; minor: a dead gate takes a serving pod out of the SOCKS5 endpoints until the restart; hardening: kube() curl has no --max-time; token expirationSeconds 3607 can be extended to a year, as the automount was",
+    "quality": "CHANGES at a186223c: the round-2 rework is sound. Carried cleanup: per-workload replicas and budgets in two structs; the seed-check chain is not a table; the 82-connection figure is written in nine places; localAddrPort is unused; there are two shell-variable renderers; the projected volume has an unread namespace file. The reviewer judged all of it cleanup, not blocking."
   },
   "keyFindings": [
-    {"severity": "important", "file": "PR body", "description": "No '## Contract change census': the PR renames the released input appPriorityClassName to priorityClassName, adds two required inputs (tailnetService, frontDoorToolsImage), adds refusals (databaseAvailabilityType, proxyCpu/proxyMemory not above 0, three budget ranges, tailnetService mismatch) and changes two defaults (databaseTier, proxy size). Consumer theorem-labs/agent-infra dispatch/main.go builds envoygcp.DispatchArgs and sets DatabaseTier only when configured."},
-    {"severity": "important", "file": "packages/envoy/infra/README.md", "description": "The move runbook (lines 169-177, 629-636, 705-708) and the CHANGELOG Breaking entry (line 890) never grant tailnet clients access to svc:<hostname> nor declare its tcp:443 port; Tailscale Services need a grant whose dst is the Service (tailscale.com/kb/1552), so following the runbook can cut every client off."},
-    {"severity": "minor", "file": "packages/envoy/infra/go.work.sum", "description": "Merge e854d947 changed go.work.sum (23 lines removed, 2 added) though neither parent has that content; unrelated tooling churn, restore main's copy."},
-    {"severity": "minor", "file": "packages/envoy/infra/README.md", "description": "Line 545 'It heals itself' is false when every front-door pod spent its 6 certificate orders (tailnet_service.go:523 waits for ever, liveness still passes)."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "Lines 2121-2122 (access-log exemptions, 'health endpoints reflect dependency health') do not name the new /livez."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/conn_age_test.go", "description": "TestShutdownAlreadyClosesKeepAliveConnections runs a bare httptest server, not newHTTPServer, so it pins net/http and not this server."},
-    {"severity": "minor", "file": "packages/envoy/infra/README.md", "description": "The front-door section does not say each pod renews its own certificate outside the claim budget, so frontDoorReplicas pods order that many at once at renewal."},
-    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go", "description": "Hardening: Role grants update, which no script uses (line 481); narrow to get and patch."},
-    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go", "description": "Hardening: the front-door ServiceAccount token is automounted into tailscale and advertiser too (line 530); project it into cert-publish alone."}
+    {"severity": "important", "file": "packages/envoy/infra/gcp/tailnet_service.go", "description": "The advertiser (line 358) runs `/bin/sh -c` as its container's PID 1 with no SIGTERM trap. Linux delivers a signal to a PID namespace's init only when init has a handler for it (pid_namespaces(7)), so the kubelet's SIGTERM is dropped, and each front-door pod's termination runs to the 60 s grace and SIGKILL. Fix: trap 'exit 0' TERM and `sleep N & wait $!`, plus a test that fails without them. Take INFRA-549's fix (its commit 8bf4bfe7, not on origin at 08:35Z) byte for byte, since the file is shared. Raised by the INFRA-63 architect from INFRA-549's review. A local unshare test on this gVisor host did not reproduce the drop, so it is no evidence either way."},
+    {"severity": "important", "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go", "description": "cert-publish (dispatchCertPublishLoop, lines 211-221) has the same PID 1 shape: no TERM trap, and a foreground `sleep 60`."},
+    {"severity": "minor", "file": "PR body", "description": "'Notes for the window (INFRA-561)' leaves out the client grant to svc:<hostname> on 443 (or a Service tag) and the tcp:443 port that README.md:172-183 and move step 1 require. The census's tailscale-state row does not list docs/plans/2026-10-14-dispatch-gcp-plan.md."},
+    {"severity": "minor", "file": ".legion/INFRA-560/implement.json", "description": "The proof's observed text says cert-publish exits 'within 30 s' of the gate dying. The loop checks once a pass and each pass ends in `sleep 60`, so the tester measured 57.5-59 s."},
+    {"severity": "minor", "file": "packages/envoy/infra/README.md", "description": "Lines 678-682 do not say that while cert-publish restarts after its gate dies, the pod is not ready and leaves the SOCKS5 Service even though it still hosts the Tailscale Service."},
+    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go", "description": "Hardening: kube() (line 197) runs curl with no --max-time, so a stuck request keeps the gate alive to kill -0 while it decides nothing. Add --max-time 20."}
   ],
-  "fastFollow": "Deduplicate the front-door certificate scripts' shared helpers (SAN and notAfter check, the authenticated API call, the certificate copy, the variable block rendered twice into cert-publish)."
+  "fastFollow": "Merge each Deployment's replicas and budget into one dispatchWorkload struct, held as s.app, s.frontDoor and s.listener, so newDispatchDisruption stops taking the three replica counts back."
 }
