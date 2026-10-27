@@ -82,6 +82,7 @@ func (s *Service) checkCompaction(ctx context.Context, room string) (compactionC
 	}
 	var check compactionCheck
 	var aged int64
+	var pastMaxAge bool
 	var seconds *float64
 	if err := pool.QueryRow(ctx, `
 		with later as (
@@ -98,11 +99,11 @@ func (s *Service) checkCompaction(ctx context.Context, room string) (compactionC
 				min(created_at) filter (where age_rank = $4) + make_interval(secs => $2)
 			) - now())::float8
 		from later
-	`, room, compactTail.Seconds(), compactMaxTailAge.Seconds(), int64(compactMinRows)).Scan(&check.later, &aged, &check.due, &seconds); err != nil {
+	`, room, compactTail.Seconds(), compactMaxTailAge.Seconds(), int64(compactMinRows)).Scan(&check.later, &aged, &pastMaxAge, &seconds); err != nil {
 		return compactionCheck{}, fmt.Errorf("check the document's compaction: %w", err)
 	}
 	check.aged = aged > 0
-	check.due = check.due || aged >= compactMinRows
+	check.due = pastMaxAge || aged >= compactMinRows
 	if seconds != nil {
 		check.untilDue = time.Duration(*seconds * float64(time.Second))
 	}
@@ -140,7 +141,7 @@ type compactionNext struct {
 func (s *Service) compactionStep(ctx context.Context, room string, retrying bool) compactionNext {
 	check, err := s.checkCompaction(ctx, room)
 	if err != nil {
-		warnCompaction(ctx, "dispatch: check whether a document is due a compaction", room, err)
+		warnCompaction(ctx, warnCompactionCheck, room, err)
 		return compactionNext{kind: compactionRetry}
 	}
 	switch {
@@ -153,7 +154,7 @@ func (s *Service) compactionStep(ctx context.Context, room string, retrying bool
 	}
 	result, err := s.persistence.compactRoom(ctx, room, tailRule, false)
 	if err != nil {
-		warnCompaction(ctx, "dispatch: compact a document", room, err)
+		warnCompaction(ctx, warnCompactionCompact, room, err)
 		return compactionNext{kind: compactionRetry}
 	}
 	switch result.outcome {
@@ -165,6 +166,13 @@ func (s *Service) compactionStep(ctx context.Context, room string, retrying bool
 		return compactionNext{kind: compactionDone}
 	}
 }
+
+// warnCompactionCheck and warnCompactionCompact are the messages a failed check and a failed
+// compaction log, from the queue's steps and the sweep's pass alike.
+const (
+	warnCompactionCheck   = "dispatch: check whether a document is due a compaction"
+	warnCompactionCompact = "dispatch: compact a document"
+)
 
 // warnCompaction logs a step's failure, unless it failed because the queue is stopping.
 func warnCompaction(ctx context.Context, message, room string, err error) {

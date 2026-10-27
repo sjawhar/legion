@@ -637,7 +637,7 @@ func requireLoadReadsAs(t *testing.T, versioned *PgVersioned, artifactID, what s
 	requireReadsAs(t, what, loaded.Update, want)
 }
 
-func storedUpdateCount(t *testing.T, database *store.Store, artifactID string) int {
+func storedUpdateCount(t testing.TB, database *store.Store, artifactID string) int {
 	t.Helper()
 	var rows int
 	if err := database.Pool.QueryRow(context.Background(),

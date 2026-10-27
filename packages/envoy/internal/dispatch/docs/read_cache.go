@@ -40,16 +40,19 @@ type DocumentStamp struct {
 	Row     string
 }
 
-// readDocumentStamp is the room's DocumentStamp, read through q in one statement, so the version
-// and the xmin of the row standing there are of one snapshot: the head as head reads it
-// (headVersion), then the row at it by its primary key.
+// documentStampSQL selects the room $1's DocumentStamp, its version and then its row, in one
+// statement, so the version and the xmin of the row standing there are of one snapshot: the head as
+// head reads it (headVersion), then the row at it by its primary key. A load reads it as a subquery
+// of its own statement (readStoredLog), so its stamp is this one.
+const documentStampSQL = `
+		select h.version, coalesce(u.xmin::text, '') as row_xmin
+		from (select ` + headVersion + ` as version) h
+		left join doc_updates u on u.artifact_id = $1 and u.version = h.version`
+
+// readDocumentStamp is the room's DocumentStamp, read through q (documentStampSQL).
 func readDocumentStamp(ctx context.Context, q Queryer, room string) (DocumentStamp, error) {
 	var stamp DocumentStamp
-	if err := q.QueryRow(ctx, `
-		select h.version, coalesce(u.xmin::text, '')
-		from (select `+headVersion+` as version) h
-		left join doc_updates u on u.artifact_id = $1 and u.version = h.version
-	`, room).Scan(&stamp.Version, &stamp.Row); err != nil {
+	if err := q.QueryRow(ctx, documentStampSQL, room).Scan(&stamp.Version, &stamp.Row); err != nil {
 		return DocumentStamp{}, fmt.Errorf("read document stamp: %w", err)
 	}
 	return stamp, nil

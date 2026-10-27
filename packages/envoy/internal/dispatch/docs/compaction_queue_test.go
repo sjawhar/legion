@@ -56,7 +56,7 @@ func TestTheCompactionQueueFoldsTheOldRowsOfADocumentItsWritesNoted(t *testing.T
 			if len(old) < 1+compactMinRows {
 				t.Fatalf("the writes stored %d rows, want at least %d", len(old), 1+compactMinRows)
 			}
-			ageEveryUpdate(t, service.store, artifactID, 5*time.Minute)
+			ageUpdatesThrough(t, service.store, artifactID, everyVersion, 5*time.Minute)
 			for index := 20; index < 22; index++ {
 				writers.write(t, service, artifactID, index)
 			}
@@ -166,7 +166,7 @@ func TestTheCompactionQueueComesBackToADocumentWhenItsRowsComeOfAge(t *testing.T
 	}
 	before := storedRows(t, service.store, artifactID)
 
-	ageEveryUpdate(t, service.store, artifactID, compactMaxTailAge+time.Minute)
+	ageUpdatesThrough(t, service.store, artifactID, everyVersion, compactMaxTailAge+time.Minute)
 	from := steps.count()
 	recheckNow(service)
 	steps.await(t, artifactID, from, "the queue to compact the rows come of age", func(step compactionStepRecord) bool {
@@ -273,7 +273,7 @@ func TestTheCompactionQueueStopsRetryingOnceNoRowAfterTheFirstIsOld(t *testing.T
 	steps.await(t, artifactID, 0, "a retry of the busy document", func(step compactionStepRecord) bool {
 		return step.retry > 0 && step.next.kind == compactionRetry
 	})
-	ageEveryUpdate(t, database, artifactID, 0)
+	ageUpdatesThrough(t, database, artifactID, everyVersion, 0)
 	young := storedRows(t, database, artifactID)
 	steps.await(t, artifactID, 0, "the queue to stop retrying", func(step compactionStepRecord) bool {
 		return step.retry > 0 && step.next.kind == compactionDone
@@ -299,7 +299,7 @@ func TestWritesReturnWhileTheCompactionQueueIsInsideTheirDocumentsFold(t *testin
 	steps.await(t, artifactID, 0, "the queue's check of the young rows", func(step compactionStepRecord) bool {
 		return step.next.kind == compactionLater
 	})
-	ageEveryUpdate(t, service.store, artifactID, 20*time.Minute)
+	ageUpdatesThrough(t, service.store, artifactID, everyVersion, 20*time.Minute)
 	rows := storedRows(t, service.store, artifactID)
 	foldPoint := rows[len(rows)-1].version
 
@@ -474,7 +474,7 @@ func TestShutdownsCompactionLeavesTheYoungRowsAsWritten(t *testing.T) {
 	seedServiceText(t, service, artifactID, "First.\n")
 	editLiveTree(t, service, artifactID, appendBlocks(t, "Second.\n"))
 	waitForLandedAppends(t, service, artifactID)
-	ageEveryUpdate(t, database, artifactID, 20*time.Minute)
+	ageUpdatesThrough(t, database, artifactID, everyVersion, 20*time.Minute)
 	old := storedRows(t, database, artifactID)
 	editLiveTree(t, service, artifactID, appendBlocks(t, "Third.\n"))
 	editLiveTree(t, service, artifactID, appendBlocks(t, "Fourth.\n"))
@@ -615,18 +615,8 @@ func storeAgedRows(t *testing.T, database *store.Store, rows int, age time.Durat
 	for index := range rows {
 		appendUpdates(t, versioned, artifactID, writer.write(fmt.Sprintf("Row %d.\n", index)))
 	}
-	ageEveryUpdate(t, database, artifactID, age)
+	ageUpdatesThrough(t, database, artifactID, everyVersion, age)
 	return artifactID
-}
-
-// ageEveryUpdate makes every row of the document created age before the database's clock.
-func ageEveryUpdate(t *testing.T, database *store.Store, artifactID string, age time.Duration) {
-	t.Helper()
-	if _, err := database.Pool.Exec(context.Background(), `
-		update doc_updates set created_at = now() - make_interval(secs => $2) where artifact_id = $1
-	`, artifactID, age.Seconds()); err != nil {
-		t.Fatalf("age document updates: %v", err)
-	}
 }
 
 // loadStored loads the document as a room's load does (PgVersioned.Load), without a room.

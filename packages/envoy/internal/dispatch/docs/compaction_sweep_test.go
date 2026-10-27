@@ -29,7 +29,7 @@ func TestTheCompactionSweepFoldsADocumentTheRestartedServiceNeverOpened(t *testi
 	if err := before.Shutdown(ctx); err != nil {
 		t.Fatalf("shut down the first service: %v", err)
 	}
-	backdateUpdates(t, database, artifactID, foldPoint)
+	ageUpdatesThrough(t, database, artifactID, foldPoint, time.Hour)
 	rows, cursor := storedRows(t, database, artifactID), settlementCursor(t, database, artifactID)
 	reading := storedReading(t, NewPgVersioned(database), artifactID)
 

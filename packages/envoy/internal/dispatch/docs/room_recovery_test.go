@@ -35,7 +35,7 @@ func seedFoldableText(t *testing.T, service *Service, artifactID, markdown strin
 	if _, err := joinedReplaceText(service, artifactID, markdown, model.Actor{Kind: "user", ID: "seed"}); err != nil {
 		t.Fatalf("write the seeded text: %v", err)
 	}
-	backdateEveryUpdate(t, service.store, artifactID)
+	ageUpdatesThrough(t, service.store, artifactID, everyVersion, time.Hour)
 }
 
 // failsFast runs op and requires ErrServiceUnavailable within the bound.

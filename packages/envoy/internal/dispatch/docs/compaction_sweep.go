@@ -90,15 +90,18 @@ func (s *Service) compactionSweepPass(ctx context.Context) {
 		return
 	}
 	compacted, deleted, left := 0, 0, 0
+	leave := func(room string) {
+		s.compactions.note(room)
+		left++
+	}
 	for _, room := range rooms {
 		if ctx.Err() != nil {
 			return
 		}
 		check, err := s.checkCompaction(ctx, room)
 		if err != nil {
-			warnCompaction(ctx, "dispatch: check whether a document is due a compaction", room, err)
-			s.compactions.note(room)
-			left++
+			warnCompaction(ctx, warnCompactionCheck, room, err)
+			leave(room)
 			continue
 		}
 		if !check.due {
@@ -107,15 +110,13 @@ func (s *Service) compactionSweepPass(ctx context.Context) {
 		result, err := s.persistence.compactRoom(ctx, room, tailRule, false)
 		switch {
 		case err != nil:
-			warnCompaction(ctx, "dispatch: compact a document", room, err)
-			s.compactions.note(room)
-			left++
+			warnCompaction(ctx, warnCompactionCompact, room, err)
+			leave(room)
 		case result.outcome == compactCompacted:
 			compacted++
 			deleted += result.deleted
 		case result.outcome == compactBusy || result.outcome == compactDropped:
-			s.compactions.note(room)
-			left++
+			leave(room)
 		}
 	}
 	if ctx.Err() != nil {

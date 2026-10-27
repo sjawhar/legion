@@ -482,7 +482,7 @@ func TestARoomThatFailsWhileASettlementCommitsIntoItRecovers(t *testing.T) {
 	pause := pauseRepairCommits(service)
 	generation := owedStamp(t, service, artifactID)
 	// Old rows give the eviction's compaction a fold to write, which waits for the lock.
-	backdateEveryUpdate(t, service.store, artifactID)
+	ageUpdatesThrough(t, service.store, artifactID, everyVersion, time.Hour)
 
 	settled := settleUnderPause(t, service, pause, artifactID, generation)
 	service.failRoom(artifactID, errors.New("injected room failure"))

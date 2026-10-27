@@ -2158,7 +2158,7 @@ func TestShutdownCompletesCompactionBeforeTestStoreCloses(t *testing.T) {
 	if rows := storedUpdateCount(t, database, artifactID); rows < 2 {
 		t.Fatalf("stored updates before shutdown = %d, want the seed and the edit", rows)
 	}
-	backdateEveryUpdate(t, database, artifactID)
+	ageUpdatesThrough(t, database, artifactID, everyVersion, time.Hour)
 
 	if err := service.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown document service: %v", err)

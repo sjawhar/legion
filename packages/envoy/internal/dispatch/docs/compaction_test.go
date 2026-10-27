@@ -52,7 +52,7 @@ func TestATailCompactionFoldsOnlyTheRowsOlderThanTheTail(t *testing.T) {
 				}
 			}
 			setSettlementCursor(t, database, artifactID, test.cursor)
-			backdateUpdates(t, database, artifactID, test.agedUpTo)
+			ageUpdatesThrough(t, database, artifactID, test.agedUpTo, time.Hour)
 			before, reading := storedRows(t, database, artifactID), storedReading(t, versioned, artifactID)
 
 			result := compactUnderTail(t, versioned, artifactID)
@@ -84,7 +84,7 @@ func TestARoomCloseCompactionFoldsOnlyTheRowsOlderThanTheTail(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	foldPoint := writeRoomRows(t, service, artifactID)
-	backdateUpdates(t, service.store, artifactID, foldPoint)
+	ageUpdatesThrough(t, service.store, artifactID, foldPoint, time.Hour)
 	before, cursor := storedRows(t, service.store, artifactID), settlementCursor(t, service.store, artifactID)
 	reading := storedReading(t, NewPgVersioned(service.store), artifactID)
 
@@ -106,24 +106,15 @@ func TestARoomCloseCompactionLeavesABusyDocumentForALaterCompaction(t *testing.T
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	foldPoint := writeRoomRows(t, service, artifactID)
-	backdateUpdates(t, service.store, artifactID, foldPoint)
+	ageUpdatesThrough(t, service.store, artifactID, foldPoint, time.Hour)
 	before, cursor := storedRows(t, service.store, artifactID), settlementCursor(t, service.store, artifactID)
 
 	ctx := context.Background()
-	holder, err := service.store.Pool.Acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire the lock holder's connection: %v", err)
-	}
-	defer holder.Release()
-	if _, err := holder.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, artifactID); err != nil {
-		t.Fatalf("lock the document: %v", err)
-	}
+	unlock := holdDocumentLock(t, service.store, artifactID)
 	if err := service.Evict(ctx, artifactID); err != nil {
 		t.Fatalf("evict the document's room: %v", err)
 	}
-	if _, err := holder.Exec(ctx, `select pg_advisory_unlock(hashtext($1))`, artifactID); err != nil {
-		t.Fatalf("unlock the document: %v", err)
-	}
+	unlock()
 	requireRowsAsStored(t, service.store, artifactID, before)
 	if result := compactUnderTail(t, service.persistence.(*PgVersioned), artifactID); result.outcome != compactCompacted {
 		t.Fatalf("the later compaction = %+v, want it compacted", result)
@@ -138,27 +129,18 @@ func TestAFailedRoomsEvictionCompactionWaitsForTheLockAndFoldsOnlyOldRows(t *tes
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	foldPoint := writeRoomRows(t, service, artifactID)
-	backdateUpdates(t, service.store, artifactID, foldPoint)
+	ageUpdatesThrough(t, service.store, artifactID, foldPoint, time.Hour)
 	before, cursor := storedRows(t, service.store, artifactID), settlementCursor(t, service.store, artifactID)
 	reading := storedReading(t, NewPgVersioned(service.store), artifactID)
 
 	ctx := context.Background()
-	holder, err := service.store.Pool.Acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire the lock holder's connection: %v", err)
-	}
-	defer holder.Release()
-	if _, err := holder.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, artifactID); err != nil {
-		t.Fatalf("lock the document: %v", err)
-	}
+	unlock := holdDocumentLock(t, service.store, artifactID)
 	service.failRoom(artifactID, errors.New("test: fail the room"))
 	waitFor(t, 10*time.Second, "the failed room's compaction to wait for the document's lock", func() bool {
 		return lockWaits(t, ctx, service.store, "select pg_advisory_lock(%") > 0
 	})
 	requireRowsAsStored(t, service.store, artifactID, before)
-	if _, err := holder.Exec(ctx, `select pg_advisory_unlock(hashtext($1))`, artifactID); err != nil {
-		t.Fatalf("unlock the document: %v", err)
-	}
+	unlock()
 	recoveryCtx, cancel := context.WithTimeout(ctx, recoveryBound)
 	defer cancel()
 	if err := service.awaitRoomRecovery(recoveryCtx, artifactID); err != nil {
@@ -340,7 +322,7 @@ func TestACompactionReadsTheCursorASettlementMovedInsideIt(t *testing.T) {
 	if before := settlementCursor(t, service.store, artifactID); before >= foldPoint {
 		t.Fatalf("the cursor stands at %d before the settlement, want it below the head %d", before, foldPoint)
 	}
-	backdateEveryUpdate(t, service.store, artifactID)
+	ageUpdatesThrough(t, service.store, artifactID, everyVersion, time.Hour)
 	persist := service.persistence.(*PgVersioned)
 	var settled []storedRow
 	var cursor int64
@@ -403,7 +385,7 @@ func TestACompactionSkipsAnUnfoldableLogUntilItChanges(t *testing.T) {
 			t.Fatalf("append update %d: %v", index+1, err)
 		}
 	}
-	backdateEveryUpdate(t, database, artifactID)
+	ageUpdatesThrough(t, database, artifactID, everyVersion, time.Hour)
 	stored := storedRows(t, database, artifactID)
 	folds := 0
 	versioned.duringCompactionFold = func(string) { folds++ }
@@ -425,7 +407,7 @@ func TestACompactionSkipsAnUnfoldableLogUntilItChanges(t *testing.T) {
 	if _, err := versioned.AppendUpdate(context.Background(), artifactID, crdt.EncodeStateAsUpdateV1(writer, before)); err != nil {
 		t.Fatalf("append the changing update: %v", err)
 	}
-	backdateEveryUpdate(t, database, artifactID)
+	ageUpdatesThrough(t, database, artifactID, everyVersion, time.Hour)
 	if result := compactUnderTail(t, versioned, artifactID); result.outcome != compactUnfoldable {
 		t.Fatalf("compaction after the log changed = %+v, want the rows left as unfoldable", result)
 	}
@@ -443,7 +425,7 @@ func TestABrowserAppendLandsWhileACompactionIsInsideItsFold(t *testing.T) {
 	seedServiceText(t, service, artifactID, "First.\n")
 	editLiveTree(t, service, artifactID, appendBlocks(t, "Second.\n"))
 	waitForLandedAppends(t, service, artifactID)
-	backdateEveryUpdate(t, service.store, artifactID)
+	ageUpdatesThrough(t, service.store, artifactID, everyVersion, time.Hour)
 	rows := storedRows(t, service.store, artifactID)
 	foldPoint := rows[len(rows)-1].version
 	persist := service.persistence.(*PgVersioned)
@@ -478,7 +460,7 @@ func TestAJoinedWriteCommitsWhileACompactionIsInsideItsFold(t *testing.T) {
 	seedServiceText(t, service, artifactID, "First.\n")
 	editLiveTree(t, service, artifactID, appendBlocks(t, "Second.\n"))
 	waitForLandedAppends(t, service, artifactID)
-	backdateEveryUpdate(t, service.store, artifactID)
+	ageUpdatesThrough(t, service.store, artifactID, everyVersion, time.Hour)
 	rows := storedRows(t, service.store, artifactID)
 	foldPoint := rows[len(rows)-1].version
 	persist := service.persistence.(*PgVersioned)
@@ -550,7 +532,7 @@ func newHeldCompactionDocument(t *testing.T) (*store.Store, *PgVersioned, string
 	appendUpdates(t, versioned, artifactID,
 		writer.write("one\n"), writer.write("one\n\ntwo\n"), writer.write("three\n"),
 		writer.write("three\n\nfour\n"), writer.write("five\n"))
-	backdateUpdates(t, database, artifactID, 4)
+	ageUpdatesThrough(t, database, artifactID, 4, time.Hour)
 	return database, versioned, artifactID
 }
 
@@ -580,20 +562,18 @@ func duringCompactionFold(versioned *PgVersioned, artifactID string, interfere f
 	}
 }
 
-// backdateUpdates makes the document's rows through version older than the tail.
-func backdateUpdates(t *testing.T, database *store.Store, artifactID string, through int64) {
+// everyVersion is the ceiling ageUpdatesThrough ages every row of a document under.
+const everyVersion int64 = math.MaxInt64
+
+// ageUpdatesThrough makes the document's rows through version created age before the database's
+// clock: time.Hour is older than both compactTail and compactMaxTailAge.
+func ageUpdatesThrough(t *testing.T, database *store.Store, artifactID string, through int64, age time.Duration) {
 	t.Helper()
 	if _, err := database.Pool.Exec(context.Background(), `
-		update doc_updates set created_at = now() - interval '1 hour' where artifact_id = $1 and version <= $2
-	`, artifactID, through); err != nil {
-		t.Fatalf("backdate document updates: %v", err)
+		update doc_updates set created_at = now() - make_interval(secs => $3) where artifact_id = $1 and version <= $2
+	`, artifactID, through, age.Seconds()); err != nil {
+		t.Fatalf("age document updates: %v", err)
 	}
-}
-
-// backdateEveryUpdate makes every row of the document older than the tail.
-func backdateEveryUpdate(t *testing.T, database *store.Store, artifactID string) {
-	t.Helper()
-	backdateUpdates(t, database, artifactID, math.MaxInt64)
 }
 
 // compactUnderTail compacts the document under the tail rule, waiting for its lock.
@@ -610,7 +590,7 @@ func compactUnderTail(t *testing.T, versioned *PgVersioned, artifactID string) c
 // the whole log into its head row, as a room's close does once the document has rested.
 func compactAged(t *testing.T, versioned *PgVersioned, database *store.Store, artifactID string) compactResult {
 	t.Helper()
-	backdateEveryUpdate(t, database, artifactID)
+	ageUpdatesThrough(t, database, artifactID, everyVersion, time.Hour)
 	return compactUnderTail(t, versioned, artifactID)
 }
 

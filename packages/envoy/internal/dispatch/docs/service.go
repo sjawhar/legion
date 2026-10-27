@@ -599,10 +599,8 @@ func New(deps Deps) *Service {
 	// The store tells the queue of every append it commits and every load it reads; a store that
 	// wraps a PgVersioned - a test's, to fail or hold one of its calls - tells it through the one
 	// it wraps.
-	if versioned := persist.pgVersioned(); versioned != nil {
-		note := service.noteStoredUpdates
-		versioned.noteStored.Store(&note)
-	}
+	note := service.noteStoredUpdates
+	persist.pgVersioned().noteStored.Store(&note)
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
 	srv := websocket.NewServerWithPersistence(adapter)
 	srv.HocuspocusFraming = true

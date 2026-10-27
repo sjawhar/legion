@@ -154,7 +154,7 @@ func TestACompactionChangesTheStampAndKeepsTheDocument(t *testing.T) {
 			if loaded.Stamp != before || wantMarkdown != "three\n" {
 				t.Fatalf("load before compaction = %q under %+v, want three under %+v", wantMarkdown, loaded.Stamp, before)
 			}
-			backdateUpdates(t, database, artifactID, test.agedUpTo)
+			ageUpdatesThrough(t, database, artifactID, test.agedUpTo, time.Hour)
 			if result := compactUnderTail(t, versioned, artifactID); result.outcome != compactCompacted || result.deleted != test.deleted {
 				t.Fatalf("compact = %+v, want %d rows deleted", result, test.deleted)
 			}

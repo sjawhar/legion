@@ -178,12 +178,12 @@ type storedLog struct {
 func readStoredLog(ctx context.Context, tx pgx.Tx, room string) (storedLog, error) {
 	var stored storedLog
 	if err := tx.QueryRow(ctx, `
-		select h.version, coalesce(u.xmin::text, ''), r.updates, r.bytes, o.oldest
-		from (select `+headVersion+` as version) h
-		left join doc_updates u on u.artifact_id = $1 and u.version = h.version
+		select s.version, s.row_xmin, r.updates, r.bytes, o.oldest
+		from (`+documentStampSQL+`
+		) s
 		cross join lateral (
 			select count(*) as updates, coalesce(sum(octet_length(d.update)), 0)::bigint as bytes
-			from doc_updates d where d.artifact_id = $1 and d.version <= h.version
+			from doc_updates d where d.artifact_id = $1 and d.version <= s.version
 		) r
 		cross join (select coalesce(min(version), 0) as oldest from doc_updates where artifact_id = $1) o
 	`, room).Scan(&stored.stamp.Version, &stored.stamp.Row, &stored.rows, &stored.bytes, &stored.oldest); err != nil {
@@ -349,7 +349,8 @@ type LoadedDocument struct {
 // a room load would. Like Load it reads the rows at or below the head into memory and folds them
 // once its transaction has ended when they total at most foldBufferBytes, and folds a larger log
 // while it streams it inside the transaction (foldRead). A history that does not decode is
-// ErrDocumentUnloadable. Like Load, it notes the rows it read once its transaction ends (noted).
+// ErrDocumentUnloadable. Like Load, it notes the rows it read once its transaction ends (noted)
+// when it read more than one.
 func (p *PgVersioned) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
 	if err := ctx.Err(); err != nil {
 		return LoadedDocument{}, err
@@ -381,6 +382,8 @@ func (p *PgVersioned) LoadDocument(ctx context.Context, room string) (LoadedDocu
 			return LoadedDocument{}, err
 		}
 	}
-	p.noted(room, stored.stamp.Version, stored.oldest)
+	if stored.rows > 1 {
+		p.noted(room, stored.stamp.Version, stored.oldest)
+	}
 	return loaded, nil
 }

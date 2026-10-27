@@ -39,7 +39,7 @@ type PgVersioned struct {
 	// compaction of the same rows skips them rather than folding and logging them again
 	// (compactRoom). An entry goes when the room compacts.
 	unfoldableMu sync.Mutex
-	unfoldable   map[string]foldPoint
+	unfoldable   map[string]rowVersion
 	// duringCompactionFold runs once a compaction has read and folded a room's rows, before it
 	// takes the room's lock to write the fold back. Nil outside tests; tests use it to hold a
 	// compaction inside its fold while another writer changes the document.
@@ -82,7 +82,8 @@ func NewPgVersioned(database *store.Store) *PgVersioned {
 }
 
 // Load returns the room's state at its head (stateThrough), constrained by a pending prune
-// checkpoint when one exists, and notes the rows it read once its transaction ends (noted). It
+// checkpoint when one exists, and notes the rows it read once its transaction ends (noted) when it
+// read more than one: one row has nothing to fold, and any later append notes the room itself. It
 // reads in one repeatable-read transaction on the rooms pool: the head and the count and bytes of
 // the rows at or below it, then those rows, which it folds once the transaction has committed
 // when they total at most foldBufferBytes, so a fold holds no connection a room load waits for,
@@ -121,7 +122,9 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	if readBack {
 		noteLoadReadBack(ctx, update)
 	}
-	p.noted(room, int64(head), stored.oldest)
+	if stored.rows > 1 {
+		p.noted(room, int64(head), stored.oldest)
+	}
 	return persistence.LoadResult{Update: update, Version: head}, nil
 }
 

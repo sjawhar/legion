@@ -77,16 +77,16 @@ type compactResult struct {
 	deleted int
 }
 
-// foldPoint names the row a compaction folds into: its version and the transaction that wrote it,
-// Postgres's xmin, which every rewrite of the row changes.
-type foldPoint struct {
+// rowVersion names a row: its version and the transaction that wrote it, Postgres's xmin, which
+// every rewrite of the row changes.
+type rowVersion struct {
 	version int64
 	xmin    string
 }
 
 // foldedRow is one row at or below a fold point as a compaction's read found it.
 type foldedRow struct {
-	foldPoint
+	rowVersion
 	contentChanged bool
 }
 
@@ -99,8 +99,8 @@ type compactFold struct {
 }
 
 // point is the fold point, the newest row the fold read.
-func (f compactFold) point() foldPoint {
-	return f.rows[len(f.rows)-1].foldPoint
+func (f compactFold) point() rowVersion {
+	return f.rows[len(f.rows)-1].rowVersion
 }
 
 // compactRoom folds the room's rows at or below the fold point rule picks into that row, which then
@@ -246,8 +246,8 @@ func (p *PgVersioned) writeCompaction(ctx context.Context, pool *pgxpool.Pool, r
 		if err != nil {
 			return err
 		}
-		if !slices.EqualFunc(standing, folded.rows, func(stands foldPoint, read foldedRow) bool {
-			return stands == read.foldPoint
+		if !slices.EqualFunc(standing, folded.rows, func(stands rowVersion, read foldedRow) bool {
+			return stands == read.rowVersion
 		}) {
 			return nil
 		}
@@ -290,7 +290,7 @@ func (p *PgVersioned) writeCompaction(ctx context.Context, pool *pgxpool.Pool, r
 
 // standingRows is the version and xmin of each of the room's rows through version, oldest first,
 // as tx reads them.
-func standingRows(ctx context.Context, tx pgx.Tx, room string, version int64) ([]foldPoint, error) {
+func standingRows(ctx context.Context, tx pgx.Tx, room string, version int64) ([]rowVersion, error) {
 	rows, err := tx.Query(ctx, `
 		select version, xmin::text from doc_updates
 		where artifact_id = $1 and version <= $2
@@ -300,9 +300,9 @@ func standingRows(ctx context.Context, tx pgx.Tx, room string, version int64) ([
 		return nil, fmt.Errorf("reread compacted document updates: %w", err)
 	}
 	defer rows.Close()
-	var standing []foldPoint
+	var standing []rowVersion
 	for rows.Next() {
-		var row foldPoint
+		var row rowVersion
 		if err := rows.Scan(&row.version, &row.xmin); err != nil {
 			return nil, fmt.Errorf("scan compacted document update: %w", err)
 		}
@@ -316,7 +316,7 @@ func standingRows(ctx context.Context, tx pgx.Tx, room string, version int64) ([
 
 // knownUnfoldable reports whether an earlier compaction found the room's rows through point do not
 // fold (recordUnfoldable).
-func (p *PgVersioned) knownUnfoldable(room string, point foldPoint) bool {
+func (p *PgVersioned) knownUnfoldable(room string, point rowVersion) bool {
 	p.unfoldableMu.Lock()
 	defer p.unfoldableMu.Unlock()
 	known, ok := p.unfoldable[room]
@@ -326,17 +326,18 @@ func (p *PgVersioned) knownUnfoldable(room string, point foldPoint) bool {
 // recordUnfoldable remembers that the room's rows through point do not fold into a state that reads
 // back as them, and logs it unless it was already remembered: two compactions of one room can fold
 // the same rows at once, and the log line names the rows once.
-func (p *PgVersioned) recordUnfoldable(room string, point foldPoint, misread error) {
+func (p *PgVersioned) recordUnfoldable(room string, point rowVersion, misread error) {
 	p.unfoldableMu.Lock()
 	known, ok := p.unfoldable[room]
-	if !ok || known != point {
+	already := ok && known == point
+	if !already {
 		if p.unfoldable == nil {
-			p.unfoldable = make(map[string]foldPoint)
+			p.unfoldable = make(map[string]rowVersion)
 		}
 		p.unfoldable[room] = point
 	}
 	p.unfoldableMu.Unlock()
-	if ok && known == point {
+	if already {
 		return
 	}
 	slog.Warn(misreadWarning+"; compaction leaves them as stored",

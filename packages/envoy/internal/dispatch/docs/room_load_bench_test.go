@@ -11,7 +11,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -91,7 +90,7 @@ func newRoomLoadFixture(tb testing.TB, versions, young int) *roomLoadFixture {
 	if !ok {
 		tb.Fatalf("service persistence = %T, want *PgVersioned", service.persistence)
 	}
-	artifactID := createRoomLoadDocument(tb, service, roomLoadMarkdown(0))
+	artifactID := createIssueDocument(tb, database, 1, roomLoadMarkdown(0))
 
 	comments := 0
 	if versions >= 30 {
@@ -118,7 +117,7 @@ func newRoomLoadFixture(tb testing.TB, versions, young int) *roomLoadFixture {
 	if _, err := versioned.Compact(ctx, artifactID, 1); err != nil {
 		tb.Fatalf("compact document: %v", err)
 	}
-	if rows := countRoomLoadRows(tb, service, artifactID); rows != 1 {
+	if rows := storedUpdateCount(tb, database, artifactID); rows != 1 {
 		tb.Fatalf("compacted document holds %d rows, want 1", rows)
 	}
 
@@ -126,7 +125,7 @@ func newRoomLoadFixture(tb testing.TB, versions, young int) *roomLoadFixture {
 		writeRoomLoadVersion(tb, service, artifactID, version)
 	}
 	evictRoomLoadRoom(tb, service, artifactID)
-	fixture := &roomLoadFixture{service: service, artifactID: artifactID, rows: countRoomLoadRows(tb, service, artifactID)}
+	fixture := &roomLoadFixture{service: service, artifactID: artifactID, rows: storedUpdateCount(tb, database, artifactID)}
 	if fixture.rows != 1+young {
 		tb.Fatalf("document holds %d rows after %d young versions, want %d", fixture.rows, young, 1+young)
 	}
@@ -138,7 +137,7 @@ func (fixture *roomLoadFixture) run(b *testing.B) {
 	if live := fixture.service.srv.GetDoc(fixture.artifactID); live != nil {
 		b.Fatal("the document's room is resident")
 	}
-	if rows := countRoomLoadRows(b, fixture.service, fixture.artifactID); rows != fixture.rows {
+	if rows := storedUpdateCount(b, fixture.service.store, fixture.artifactID); rows != fixture.rows {
 		b.Fatalf("document holds %d rows, want %d", rows, fixture.rows)
 	}
 	adapter := &servicePersistenceAdapter{store: fixture.service.persistence, service: fixture.service}
@@ -178,53 +177,6 @@ func roomLoadMarkdown(version int) string {
 	return b.String()
 }
 
-// createRoomLoadDocument is version 0: the document's first stored version, holding markdown, as
-// createIssueDocument writes one.
-func createRoomLoadDocument(tb testing.TB, service *Service, markdown string) string {
-	tb.Helper()
-	tree, err := pmdoc.Parse(markdown)
-	if err != nil {
-		tb.Fatalf("parse benchmark document: %v", err)
-	}
-	markdown, err = pmdoc.Render(pmdoc.StripAnchorMarks(tree))
-	if err != nil {
-		tb.Fatalf("render benchmark document: %v", err)
-	}
-	ctx := context.Background()
-	tx, err := service.store.Pool.Begin(ctx)
-	if err != nil {
-		tb.Fatal(err)
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `insert into projects (key, name) values ('BENCH', 'Benchmark')`); err != nil {
-		tb.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `
-		insert into issues (key, project_key, number, title, created_by, rank)
-		values ('BENCH-1', 'BENCH', 1, 'Benchmark', '{"kind":"user","id":"alice"}', 'U')
-	`); err != nil {
-		tb.Fatal(err)
-	}
-	var artifactID string
-	if err := tx.QueryRow(ctx, `
-		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
-		values ('BENCH-1', 'BENCH', 'spec', 'spec.md', 'doc', false, '{"kind":"user","id":"alice"}')
-		returning id::text
-	`).Scan(&artifactID); err != nil {
-		tb.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `
-		insert into artifact_versions (artifact_id, number, markdown, authors)
-		values ($1, 1, $2, '[{"kind":"user","id":"alice"}]')
-	`, artifactID, markdown); err != nil {
-		tb.Fatal(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		tb.Fatal(err)
-	}
-	return artifactID
-}
-
 // writeRoomLoadVersion writes version through the upload write path.
 func writeRoomLoadVersion(tb testing.TB, service *Service, artifactID string, version int) {
 	tb.Helper()
@@ -260,36 +212,17 @@ func writeRoomLoadComment(tb testing.TB, service *Service, artifactID string, in
 // none is. The room's persistence worker compacts the history as it exits
 // (servicePersistenceAdapter.Compact), which would fold the versions the benchmark lays out once
 // they are old; it leaves a room whose advisory lock another holder has for a later compaction,
-// so the eviction runs while this holds that lock. The eviction appends nothing that would wait
-// for it: the write path made every update durable.
+// so the eviction runs while this holds that lock (holdDocumentLock). The eviction appends nothing
+// that would wait for it: the write path made every update durable.
 func evictRoomLoadRoom(tb testing.TB, service *Service, artifactID string) {
 	tb.Helper()
-	ctx := context.Background()
-	conn, err := service.store.Pool.Acquire(ctx)
-	if err != nil {
-		tb.Fatalf("acquire the room lock's connection: %v", err)
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, artifactID); err != nil {
-		tb.Fatalf("lock document room: %v", err)
-	}
-	evicted := service.Evict(ctx, artifactID)
-	if _, err := conn.Exec(ctx, `select pg_advisory_unlock(hashtext($1))`, artifactID); err != nil {
-		tb.Fatalf("unlock document room: %v", err)
-	}
+	unlock := holdDocumentLock(tb, service.store, artifactID)
+	evicted := service.Evict(context.Background(), artifactID)
+	unlock()
 	if evicted != nil {
 		tb.Fatalf("evict document room: %v", evicted)
 	}
 	if live := service.srv.GetDoc(artifactID); live != nil {
 		tb.Fatal("the document's room is still resident after its eviction")
 	}
-}
-
-func countRoomLoadRows(tb testing.TB, service *Service, artifactID string) int {
-	tb.Helper()
-	var rows int
-	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&rows); err != nil {
-		tb.Fatalf("count document updates: %v", err)
-	}
-	return rows
 }
