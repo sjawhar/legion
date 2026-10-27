@@ -341,24 +341,30 @@ func (r *SessionRegistry) WatchErr() error {
 	return r.watcher.Err()
 }
 
-// Put writes entry as sessionID's registration. Several live processes can hold the same session
-// (shared on-disk state), and blind last-writer-wins routed deliveries to whichever heartbeated last,
-// including processes not driving the session: mergeForClaim arbitrates between entry and the stored
-// registration, and the merge is written by compare-and-set (write), so the registration it ran on
-// is the one replaced.
+// Put is PutWithin with no deadline of its own, for a caller that answers no request.
 func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
-	return r.write(sessionID, func(cur SessionEntry, curErr error, now int64) (SessionEntry, error) {
+	return r.PutWithin(context.Background(), sessionID, entry)
+}
+
+// PutWithin writes entry as sessionID's registration, each bucket call waiting no longer than ctx
+// (bus.Bounded): an HTTP route passes its request's own context. Several live processes can hold the
+// same session (shared on-disk state), and blind last-writer-wins routed deliveries to whichever
+// heartbeated last, including processes not driving the session: mergeForClaim arbitrates between
+// entry and the stored registration, and the merge is written by compare-and-set (write), so the
+// registration it ran on is the one replaced.
+func (r *SessionRegistry) PutWithin(ctx context.Context, sessionID string, entry SessionEntry) error {
+	return r.write(ctx, sessionID, func(cur SessionEntry, curErr error, now int64) (SessionEntry, error) {
 		return mergeForClaim(cur, curErr, entry, now)
 	})
 }
 
-// Amend applies change to sessionID's stored registration and writes the result as Put writes it, so
-// a change made on a listener whose cache trails the bucket lands on what another listener wrote
-// since, not on its own stale copy. base is the registration change applies to when the bucket holds
-// none (the caller's earlier read, which an expiry or a delete has overtaken), so the write registers
-// the session again.
-func (r *SessionRegistry) Amend(sessionID string, base SessionEntry, change func(*SessionEntry)) error {
-	return r.write(sessionID, func(cur SessionEntry, curErr error, now int64) (SessionEntry, error) {
+// Amend applies change to sessionID's stored registration and writes the result as PutWithin writes
+// it, within ctx, so a change made on a listener whose cache trails the bucket lands on what another
+// listener wrote since, not on its own stale copy. base is the registration change applies to when
+// the bucket holds none (the caller's earlier read, which an expiry or a delete has overtaken), so the
+// write registers the session again.
+func (r *SessionRegistry) Amend(ctx context.Context, sessionID string, base SessionEntry, change func(*SessionEntry)) error {
+	return r.write(ctx, sessionID, func(cur SessionEntry, curErr error, now int64) (SessionEntry, error) {
 		next := base
 		if curErr == nil {
 			next = cur
@@ -375,14 +381,19 @@ func (r *SessionRegistry) Amend(sessionID string, base SessionEntry, change func
 // revision moved (another listener wrote, or MaxAge removed the key under a cached revision), reads
 // the bucket entry and merges onto that: Update at its revision, or Create when there is none. After
 // writeAttempts refused writes it returns ErrWriteConflict, having written nothing.
-func (r *SessionRegistry) write(sessionID string, merge func(cur SessionEntry, curErr error, now int64) (SessionEntry, error)) error {
+//
+// Each bucket call waits no longer than ctx (bus.Bounded). A write ctx abandoned may still land after
+// this answer. That is safe: it is a compare-and-set at the revision it read, so it replaces only that
+// revision and never a write that landed since, and it writes the entry the caller's retry merges
+// again.
+func (r *SessionRegistry) write(ctx context.Context, sessionID string, merge func(cur SessionEntry, curErr error, now int64) (SessionEntry, error)) error {
 	kv := r.watcher.KV()
 	cur, revision, found := r.cachedEntry(sessionID)
 	read := !found
 	for range writeAttempts {
 		if read {
 			var err error
-			if cur, revision, found, err = r.readStored(kv, sessionID); err != nil {
+			if cur, revision, found, err = r.readStored(ctx, kv, sessionID); err != nil {
 				return err
 			}
 		}
@@ -399,11 +410,15 @@ func (r *SessionRegistry) write(sessionID string, merge func(cur SessionEntry, c
 		if err != nil {
 			return err
 		}
-		var written uint64
-		if revision == 0 {
-			written, err = kv.Create(sessionID, buf)
-		} else {
-			written, err = kv.Update(sessionID, buf, revision)
+		at := revision
+		written, answered, err := bus.Bounded(ctx, func() (uint64, error) {
+			if at == 0 {
+				return kv.Create(sessionID, buf)
+			}
+			return kv.Update(sessionID, buf, at)
+		})
+		if !answered {
+			return fmt.Errorf("write session %s to the bucket: %w", sessionID, err)
 		}
 		if errors.Is(err, nats.ErrKeyExists) {
 			continue
@@ -414,7 +429,7 @@ func (r *SessionRegistry) write(sessionID string, merge func(cur SessionEntry, c
 		r.mu.Lock()
 		r.cacheSessionLocked(sessionID, entry, r.expiryFor(time.Time{}, entry.UpdatedAt), written)
 		r.mu.Unlock()
-		r.recordSeen(kv, sessionID, written)
+		r.recordSeen(ctx, kv, sessionID, written)
 		return nil
 	}
 	return fmt.Errorf("%w: session %s", ErrWriteConflict, sessionID)
@@ -429,13 +444,16 @@ func (r *SessionRegistry) cachedEntry(sessionID string) (SessionEntry, uint64, b
 	return cs.entry, r.cacheRevisions[sessionID], ok
 }
 
-// readStored reads sessionID's registration from the bucket for a write, and applies it to the cache
-// as the watcher would (applyValue: Get answers only a stored value, never a delete marker). revision
-// is the one to write at, 0 when the bucket holds no value. A value that does not decode is found
-// false, as the cache, which evicts it, sees no registration either, and the write replaces it at its
-// revision.
-func (r *SessionRegistry) readStored(kv bus.KeyValue, sessionID string) (entry SessionEntry, revision uint64, found bool, err error) {
-	stored, err := kv.Get(sessionID)
+// readStored reads sessionID's registration from the bucket for a write, within ctx (bus.Bounded), and
+// applies it to the cache as the watcher would (applyValue: Get answers only a stored value, never a
+// delete marker). revision is the one to write at, 0 when the bucket holds no value. A value that does
+// not decode is found false, as the cache, which evicts it, sees no registration either, and the write
+// replaces it at its revision.
+func (r *SessionRegistry) readStored(ctx context.Context, kv bus.KeyValue, sessionID string) (entry SessionEntry, revision uint64, found bool, err error) {
+	stored, answered, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return kv.Get(sessionID) })
+	if !answered {
+		return SessionEntry{}, 0, false, fmt.Errorf("read session %s from the bucket: %w", sessionID, err)
+	}
 	if errors.Is(err, nats.ErrKeyNotFound) {
 		return SessionEntry{}, 0, false, nil
 	}
@@ -459,39 +477,32 @@ func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
 
 // Refresh reads sessionID's entry from the session bucket itself, applies it to the cache through
 // the watcher's own path (applyWatched), and then answers as Get does. The cache follows the bucket
-// through a watcher and so trails it: a session another listener registered a moment ago can be in
-// the bucket and not yet here. Get is the read for a caller that refuses or retries when a session
-// is missing; a caller about to take something away from a session because it looks gone asks here
-// first. A key no read may name is nats.ErrKeyNotFound, since no session can register under it:
-// one bus.KeyValue refuses (bus.ErrRefused), `ses:bad` among them, which is outside nats.go's key
+// through a watcher and so trails it: a session another listener registered a moment ago, or one
+// this listener has not re-read since its connection to the bus came back, can be in the bucket and
+// not yet here. A caller that acts on a session being missing asks here — one about to take
+// something away from a session because it looks gone, and one about to tell a sender that its
+// destination is gone, which makes that sender route around the pane, report it, or stop. Get is
+// the read for a caller that only enriches what it already holds, or that asks again anyway, since
+// a cache miss cannot tell a session that ended from one this cache has not caught up with. A key
+// no read may name is nats.ErrKeyNotFound, since no session can register under it: one
+// bus.KeyValue refuses (bus.ErrRefused), `ses:bad` among them, which is outside nats.go's key
 // alphabet and which an earlier build or a direct bucket write could leave as a role holder. Any
 // other error is a read that did not answer, ctx's end among them: nats.go's KV read takes no
 // context and waits out the JetStream MaxWait (10 s), so Refresh stops waiting when ctx ends and
-// lets that read finish on its own.
+// lets that read finish on its own (bus.Bounded).
 func (r *SessionRegistry) Refresh(ctx context.Context, sessionID string) (SessionEntry, error) {
-	type read struct {
-		entry nats.KeyValueEntry
-		err   error
-	}
-	answered := make(chan read, 1)
 	kv := r.watcher.KV()
-	go func() {
-		entry, err := kv.Get(sessionID)
-		answered <- read{entry: entry, err: err}
-	}()
-	var got read
-	select {
-	case got = <-answered:
-	case <-ctx.Done():
-		return SessionEntry{}, fmt.Errorf("read session %s from the bucket: %w", sessionID, ctx.Err())
+	entry, answered, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return kv.Get(sessionID) })
+	if !answered {
+		return SessionEntry{}, fmt.Errorf("read session %s from the bucket: %w", sessionID, err)
 	}
-	if errors.Is(got.err, bus.ErrRefused) {
-		return SessionEntry{}, fmt.Errorf("%w: %w", nats.ErrKeyNotFound, got.err)
+	if errors.Is(err, bus.ErrRefused) {
+		return SessionEntry{}, fmt.Errorf("%w: %w", nats.ErrKeyNotFound, err)
 	}
-	if got.err != nil {
-		return SessionEntry{}, got.err
+	if err != nil {
+		return SessionEntry{}, err
 	}
-	r.applyWatched(got.entry)
+	r.applyWatched(entry)
 	return r.Get(sessionID)
 }
 
@@ -556,14 +567,15 @@ func lastSeenKey(sessionID string) string {
 // recordSeen records the registration write at revision written as sessionID's last-seen time in
 // the listener state bucket, when the registry has it: it reads the write back from the session
 // bucket for the server's timestamp, the clock the registration's expiry runs on, and puts it under
-// lastSeenKey. A failure of either logs a WARN and leaves the registration, which is written, as it
-// is: the record keeps the previous write's time. A revision the read no longer finds was replaced
-// by a newer write, which records its own.
-func (r *SessionRegistry) recordSeen(kv bus.KeyValue, sessionID string, written uint64) {
+// lastSeenKey, each bucket call waiting no longer than ctx (bus.Bounded). A failure of either logs a
+// WARN and leaves the registration, which is written, as it is: the record keeps the previous
+// write's time. A revision the read no longer finds was replaced by a newer write, which records its
+// own.
+func (r *SessionRegistry) recordSeen(ctx context.Context, kv bus.KeyValue, sessionID string, written uint64) {
 	if r.seen.KeyValue == nil {
 		return
 	}
-	stored, err := kv.GetRevision(sessionID, written)
+	stored, _, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return kv.GetRevision(sessionID, written) })
 	if errors.Is(err, nats.ErrKeyNotFound) {
 		return
 	}
@@ -574,7 +586,7 @@ func (r *SessionRegistry) recordSeen(kv bus.KeyValue, sessionID string, written 
 	}
 	value, err := json.Marshal(seenRecord{At: stored.Created().UnixMilli()})
 	if err == nil {
-		_, err = r.seen.Put(lastSeenKey(sessionID), value)
+		_, _, err = bus.Bounded(ctx, func() (uint64, error) { return r.seen.Put(lastSeenKey(sessionID), value) })
 	}
 	if err != nil {
 		r.logger().Warn("session last-seen not recorded in the listener state bucket",
@@ -599,15 +611,24 @@ func (r *SessionRegistry) readSeen(sessionID string) (int64, error) {
 	return record.At, nil
 }
 
-func (r *SessionRegistry) Delete(sessionID string) error {
+// Delete deletes sessionID's entry at the revision it reads (bus.KeyValue.DeleteAtRead), each
+// bucket call waiting no longer than ctx (bus.Bounded): DELETE /v1/sessions/<session_id> passes its
+// request's own context. A delete ctx abandoned may still land after this answer, and that is safe:
+// it deletes only the revision it read, so a registration that landed since is kept, and a key it
+// found absent it deletes at none, as DeleteAtRead always has.
+func (r *SessionRegistry) Delete(ctx context.Context, sessionID string) error {
 	revision := r.cachedRevision(sessionID)
 	kv := r.watcher.KV()
-	read, err := kv.DeleteAtRead(sessionID)
+	read, answered, err := bus.Bounded(ctx, func() (uint64, error) { return kv.DeleteAtRead(sessionID) })
+	if !answered {
+		return fmt.Errorf("delete session %s from the bucket: %w", sessionID, err)
+	}
 	if err != nil {
 		return err
 	}
 	revision = max(revision, read)
-	entries, err := kv.History(sessionID)
+	// A history that does not answer falls back to the fence below: the delete itself answered.
+	entries, _, err := bus.Bounded(ctx, func() ([]nats.KeyValueEntry, error) { return kv.History(sessionID) })
 	if err == nil && len(entries) > 0 {
 		latest := entries[len(entries)-1]
 		r.mu.Lock()

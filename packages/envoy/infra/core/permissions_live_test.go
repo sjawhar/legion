@@ -65,12 +65,13 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 			t.Run("the listener reaches healthy and a session as the same user receives", func(t *testing.T) {
 				t.Parallel()
 				seed, server, uri := startGrantServer(t, image.Ref, core.HostPermissions(liveMachineID))
-				port := cmdtest.FreeTCPPort(t)
+				held := cmdtest.HoldPort(t)
+				port := held.Port
 				// The opt-in has the listener also subscribe to notifications.>, which this grant
 				// allows: the check below that the server refused nothing it was not provoked to
 				// covers that subscription too.
-				process := startListenerConfig(t, listener, uri, seed, core.ListenerConfig{
-					MachineID: liveMachineID, Port: port, HostBridge: "127.0.0.1", SubscribeAllTopics: true,
+				process := startListenerConfig(t, listener, uri, seed, held, core.ListenerConfig{
+					MachineID: liveMachineID, HostBridge: "127.0.0.1", SubscribeAllTopics: true,
 				})
 				t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port, liveHealthWindow, listenerHealthy))
 
@@ -231,8 +232,9 @@ func TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers(t *te
 		t.Run(image.Name, func(t *testing.T) {
 			t.Parallel()
 			seed, server, uri := startSplitServer(t, image.Ref)
-			process := startListenerConfig(t, listener, uri, seed, core.ListenerConfig{
-				MachineID: liveMachineID, Port: cmdtest.FreeTCPPort(t), SubscribeAllTopics: true,
+			held := cmdtest.HoldPort(t)
+			process := startListenerConfig(t, listener, uri, seed, held, core.ListenerConfig{
+				MachineID: liveMachineID, SubscribeAllTopics: true,
 			})
 			process.WaitExit(t, "its start")
 			output := process.Output.String()
@@ -424,22 +426,28 @@ func (p *servingPort) requirePrompt(t *testing.T, process *cmdtest.Process, item
 }
 
 // startListener runs the listener binary as machine liveMachineID against uri, with the environment
-// host:Listener gives its container and the user's seed, and returns it with its port.
+// host:Listener gives its container and the user's seed, on a held loopback port, and returns it
+// with its port.
 func startListener(t *testing.T, binary, uri, seed string) (*cmdtest.Process, int) {
 	t.Helper()
-	port := cmdtest.FreeTCPPort(t)
-	return startListenerConfig(t, binary, uri, seed, core.ListenerConfig{MachineID: liveMachineID, Port: port}), port
+	held := cmdtest.HoldPort(t)
+	return startListenerConfig(t, binary, uri, seed, held, core.ListenerConfig{MachineID: liveMachineID}), held.Port
 }
 
 // startListenerConfig runs the listener binary against uri with the environment config renders and
 // the user's seed, so a test that asks what a component's own ListenerConfig does to the running
-// listener starts it from that very config rather than from a hand-written environment.
-func startListenerConfig(t *testing.T, binary, uri, seed string, config core.ListenerConfig) *cmdtest.Process {
+// listener starts it from that very config rather than from a hand-written environment. The
+// listener serves on held, which it inherits as ENVOY_LISTEN_FD, so no other program can take the
+// port before it serves; config's Port is held's port, set here, and the listener checks the two
+// agree.
+func startListenerConfig(t *testing.T, binary, uri, seed string, held *cmdtest.HeldPort, config core.ListenerConfig) *cmdtest.Process {
 	t.Helper()
+	config.Port = held.Port
 	env, err := config.Env([]string{uri})
 	require.NoError(t, err)
 	cmd := exec.Command(binary)
 	cmd.Env = append(env, core.EnvNATSSeed+"="+seed)
+	held.Pass(cmd, "ENVOY_LISTEN_FD")
 	return cmdtest.Start(t, "the listener", cmd)
 }
 

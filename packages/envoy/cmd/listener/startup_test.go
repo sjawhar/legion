@@ -239,9 +239,9 @@ func TestAListenerWhoseGrantRefusesAStoreBucketExitsNamingIt(t *testing.T) {
 // subscribe notifications.role.> at once. They are one core-NATS queue group
 // (envoy-listener-<machine id>), and NATS hands each message to one member of a group, so a role
 // message reaches its holder once whichever pod takes it: no publish is forwarded by both. A
-// re-publish under the same dedupe key can land on the other pod, whose dedupe cache has not seen
-// it, and is forwarded again; the holder's pump drops that copy by its dedupe key, as it drops the
-// copy each other machine's listener forwards today.
+// re-publish under the same dedupe key that lands on the other pod finds the forward recorded in the
+// delivery ledger both pods share and is skipped; a copy that does reach the holder is dropped by
+// its pump by its dedupe key, as it drops the copy each other machine's listener forwards.
 func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T) {
 	const (
 		machineID = "two-tasks"
@@ -271,7 +271,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	frames := receiveAsSession(t, client, holderID)
 	// The old task reads the claim from the role bucket and the holder from its session cache, which
 	// can trail the bucket and not yet hold the session the replacement just registered; it then reads
-	// the holder from the session bucket itself (roleHolderSession), so its first lookup answers the
+	// the holder from the session bucket itself (liveSessionEntry), so its first lookup answers the
 	// claim rather than releasing it as lapsed.
 	if status, answer := callListener(t, old.port, http.MethodGet, "/v1/roles/"+role, ""); status != http.StatusOK {
 		t.Fatalf("the old task's lookup of %s right after the replacement accepted %s's claim: status %d %s, want 200", role, holderID, status, answer)

@@ -76,23 +76,25 @@ type mpPod struct {
 	relay    *listenerRelay
 }
 
-// mpStartPod starts binary as instance of mpMachine, on a free port, reaching the NATS at natsURL
-// through a relay of its own, with env added to its environment. The pod is killed when the test
-// ends, and its output's tail is logged when the test failed.
+// mpStartPod starts binary as instance of mpMachine, on a loopback port the kernel chose and the
+// test holds until the pod serves on it (cmdtest.HoldPort, inherited as ENVOY_LISTEN_FD), reaching
+// the NATS at natsURL through a relay of its own, with env added to its environment. The pod is
+// killed when the test ends, and its output's tail is logged when the test failed.
 func mpStartPod(t *testing.T, binary, natsURL, instance string, env ...string) *mpPod {
 	t.Helper()
 	relay := startListenerRelay(t, natsURL)
-	port := cmdtest.FreeTCPPort(t)
+	held := cmdtest.HoldPort(t)
 	cmd := exec.Command(binary)
 	cmd.Env = append([]string{
-		"PORT=" + strconv.Itoa(port),
+		"PORT=" + strconv.Itoa(held.Port),
 		"ENVOY_LISTEN_HOST=127.0.0.1",
 		"ENVOY_MACHINE_ID=" + mpMachine,
 		"ENVOY_INSTANCE_ID=" + instance,
 		"NATS_URLS=" + relay.relayed,
 		"ENVOY_API_TOKEN=" + mpToken,
 	}, env...)
-	pod := &mpPod{Process: cmdtest.Start(t, "the listener "+instance, cmd), instance: instance, port: port, relay: relay}
+	held.Pass(cmd, "ENVOY_LISTEN_FD")
+	pod := &mpPod{Process: cmdtest.Start(t, "the listener "+instance, cmd), instance: instance, port: held.Port, relay: relay}
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("%s's output, but for each delivery's lines (last 150 lines):\n%s", instance, mpTail(mpLinesWithout(pod.Output.String()), 150))
@@ -114,12 +116,12 @@ func mpLinesWithout(output string) string {
 }
 
 // mpStartPair starts pod-a, waits for it to be the machine's active pod, then starts pod-b and
-// waits for it to be its standby.
-func mpStartPair(t *testing.T, binary, natsURL string) (a, b *mpPod) {
+// waits for it to be its standby, both with env added to their environment.
+func mpStartPair(t *testing.T, binary, natsURL string, env ...string) (a, b *mpPod) {
 	t.Helper()
-	a = mpStartPod(t, binary, natsURL, "pod-a")
+	a = mpStartPod(t, binary, natsURL, "pod-a", env...)
 	mpWaitActive(t, a, 30*time.Second)
-	b = mpStartPod(t, binary, natsURL, "pod-b")
+	b = mpStartPod(t, binary, natsURL, "pod-b", env...)
 	mpWaitStandby(t, b, 30*time.Second)
 	return a, b
 }
@@ -1540,11 +1542,13 @@ func TestTwoPodsPromptWhatAKilledPodOnlyAttempted(t *testing.T) {
 // A message to a session that is not registered is reported no_holder. When the pod that reported
 // it is SIGKILLed before the durable has its acknowledgement, the standby takes the message over
 // and reports it again: both exceptions carry one id, and the stream stores one. Before INFRA-557
-// each report minted an id of its own, and the stream kept both.
+// each report minted an id of its own, and the stream kept both. The pods run with no unplaceable
+// retry window (ENVOY_UNPLACEABLE_RETRY_WINDOW=0), so each gives the message up, with its
+// no_holder, on the delivery it handles rather than deferring it for a minute first.
 func TestTwoPodsReportARedeliveredNoHolderOnceUnderOneID(t *testing.T) {
 	uri := testnats.URL(t)
 	binary := cmdtest.Build(t, "envoy-listener")
-	a, b := mpStartPair(t, binary, uri)
+	a, b := mpStartPair(t, binary, uri, "ENVOY_UNPLACEABLE_RETRY_WINDOW=0")
 	publisher := mpConnectPublisher(t, uri)
 	const nobody = "ses_mp_nobody"
 	exceptions := publisher.watchExceptions(t, nobody)
@@ -1576,16 +1580,19 @@ func TestTwoPodsReportARedeliveredNoHolderOnceUnderOneID(t *testing.T) {
 	}
 }
 
-// A send and a role claim through the pod whose cache trails: the standby sits behind a 500 ms slow
+// A send and a role claim through the pod whose cache trails: the standby sits behind a 300 ms slow
 // link, a session registers through the active pod, and at once a POST /v1/messages/send to it, and
 // for another such session a role set, go to the standby. Both answer 200, read from the bucket.
 // Before INFRA-557 the standby answers from its cache alone, which has not seen the registration:
-// 404 "no live session" and 404 "session is not registered".
+// 404 "no live session" and 404 "session is not registered". The link is slow enough that the
+// standby's cache trails each write by far more than the test takes to make its next request, and
+// fast enough that a role set's eight or so bucket round trips fit the route's 3.5 s budget
+// (sendRequestBudget).
 func TestTwoPodsSendAndRoleSetThroughThePodWhoseCacheTrails(t *testing.T) {
 	uri := testnats.URL(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	b.relay.delay(500 * time.Millisecond)
+	b.relay.delay(300 * time.Millisecond)
 	const target, claimant, role = "ses_mp_unseen_target", "ses_mp_unseen_claimant", "mp-unseen"
 
 	a.subscribe(t, fmt.Sprintf(`{"session_id":%q,"topics":[],"self_subscribed":true}`, target))
@@ -1606,16 +1613,17 @@ func TestTwoPodsSendAndRoleSetThroughThePodWhoseCacheTrails(t *testing.T) {
 }
 
 // Writes through the pod whose cache trails keep the other pod's newer write: the standby sits
-// behind a 500 ms slow link, so a write through the active pod reaches its cache half a second
-// late. A heartbeat on the standby within that half second, of a process that does not drive the
-// session, keeps the driving claim written through the active pod; a heartbeat on the standby keeps
-// a topic added through the active pod; and a role set on the standby keeps the newer host recorded
-// through the active pod. Before INFRA-557 the standby wrote its stale copy over each.
+// behind a 300 ms slow link, so a write through the active pod reaches its cache 300 ms late (slow
+// enough to trail, fast enough that a role set's bucket round trips fit sendRequestBudget). A
+// heartbeat on the standby within that window, of a process that does not drive the session, keeps
+// the driving claim written through the active pod; a heartbeat on the standby keeps a topic added
+// through the active pod; and a role set on the standby keeps the newer host recorded through the
+// active pod. Before INFRA-557 the standby wrote its stale copy over each.
 func TestTwoPodsWritesOnThePodWhoseCacheTrailsKeepTheNewerWrite(t *testing.T) {
 	uri := testnats.URL(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
-	b.relay.delay(500 * time.Millisecond)
+	b.relay.delay(300 * time.Millisecond)
 	publisher := mpConnectPublisher(t, uri)
 
 	t.Run("a driving claim", func(t *testing.T) {
@@ -1627,8 +1635,8 @@ func TestTwoPodsWritesOnThePodWhoseCacheTrailsKeepTheNewerWrite(t *testing.T) {
 			return row != nil && row["port"] == float64(34751)
 		})
 		// The heartbeat on the standby writes the session's interest first, and its reply comes over
-		// the slow link half a second later; only then does it write the registration. The driving
-		// claim lands on the active pod inside that half second, so the standby's cache has not seen
+		// the slow link 300 ms later; only then does it write the registration. The driving
+		// claim lands on the active pod inside those 300 ms, so the standby's cache has not seen
 		// it when the registration is written. (A claim written before the heartbeat began would have
 		// reached the standby's cache by then, ahead of that reply.)
 		heartbeat := make(chan mpAnswer, 1)

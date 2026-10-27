@@ -21,16 +21,21 @@ import (
 // listenerRelay stands between one listener and its NATS server, so a test can fail the link the
 // ways a pod's link fails. arm holds one NATS request from the listener; drop closes every link,
 // which nats.go reconnects through the same relay at once; cut closes them and refuses new ones
-// for a while, an outage the listener reconnects in place after; freeze stops moving bytes in
-// either direction with every socket left open, as a lost node or network leaves the server's
-// side of the connection; delay holds every byte from the server for a time before the listener
-// reads it, a slow link. New connections forward normally.
+// for a while, an outage the listener reconnects in place after; sever closes them and refuses
+// every new one for the rest of the test, which is how a bus that has gone away under the listener
+// looks; freeze stops moving bytes in either direction with every socket left open, as a lost node
+// or network leaves the server's side of the connection; delay holds every byte from the server for
+// a time before the listener reads it, a slow link. New connections forward normally.
 type listenerRelay struct {
 	listener net.Listener
 	target   string
 	relayed  string
 	done     chan struct{}
 	closing  sync.Once
+	// severed is read by relay before it dials the server, so a connection accepted after sever is
+	// closed rather than relayed; it is atomic because relay runs on its own goroutine per
+	// connection.
+	severed atomic.Bool
 
 	mu        sync.Mutex
 	trigger   []byte
@@ -89,6 +94,10 @@ func (r *listenerRelay) serve() {
 }
 
 func (r *listenerRelay) relay(client net.Conn) {
+	if r.severed.Load() {
+		_ = client.Close()
+		return
+	}
 	link := &listenerRelayLink{client: client}
 	r.mu.Lock()
 	if time.Now().Before(r.refuseUntil) {
@@ -258,6 +267,15 @@ func (r *listenerRelay) pass() {
 	case <-gate:
 	case <-r.done:
 	}
+}
+
+// sever drops every live link as drop does and refuses every connection accepted after it, so the
+// client's reconnect (MaxReconnect -1, internal/bus's options) never completes and the bus stays
+// unreachable for the rest of the test. drop alone leaves the relay forwarding, which is what a
+// reconnect through the same relay needs, and cut refuses connections only for a while.
+func (r *listenerRelay) sever() {
+	r.severed.Store(true)
+	r.drop()
 }
 
 func (r *listenerRelay) close() {

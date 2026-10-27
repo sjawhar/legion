@@ -75,6 +75,23 @@ type listenerDeliveryHandlerConfig struct {
 	messagesDelivered *metrics.Counter
 	messagesNAKed     *metrics.Counter
 	deliveryDuration  *metrics.Histogram
+	// unplaceableRetryWindow is how long an agent delivery this listener cannot place is held
+	// in the stream and redelivered before it is given up with a record of its own
+	// (agentSubjectDelivery). main.go reads it from ENVOY_UNPLACEABLE_RETRY_WINDOW, defaulting
+	// to defaultUnplaceableRetryWindow. It is spent as whole deferrals of unplaceableRetryDelay
+	// each, counted from the message's first delivery, so a window shorter than one delay - a
+	// zero one, what a caller that does not set this field asks for - retries nothing: every
+	// unplaceable delivery is given up on its first attempt. A push that failed is retried
+	// within it at most pushFailedDeferrals times, however long it is.
+	unplaceableRetryWindow time.Duration
+	// deferredUnplaceable is the set of agent deliveries this listener is holding deferred right
+	// now, the budget unplaceableDeferralCap bounds. It is required: main.go makes one and sets
+	// it once, in its deliveryConfig, so every handler built from that config - the role lane's
+	// core handler, the live lane's and the durable's, which the receive loop keeps across every
+	// resubscribe - draws on the one budget. listenerDeliveryHandler refuses a config without one
+	// rather than drawing a private set, since a set per handler would be a second budget beside
+	// the first. A test that builds a config sets its own.
+	deferredUnplaceable *unplaceableDeferrals
 }
 
 type deliveryMode uint8
@@ -117,7 +134,8 @@ func (message deliveryMessage) deliverer(cfg listenerDeliveryHandlerConfig) *ses
 // finalize makes core delivery's loss-on-failure semantics explicit: only a
 // durable JetStream message receives an acknowledgement or retry request. A role-lane or live-lane
 // message is core NATS, sent once to whoever was subscribed, so nothing acknowledges or retries it.
-// A durable retry waits durableRetryDelay (30 s) before redelivery (retryAfter).
+// A durable retry waits durableRetryDelay (30 s) before redelivery; a path whose own bound sets the
+// pace of its retries asks for its delay through retryAfter.
 func (message deliveryMessage) finalize(retry bool) {
 	if retry {
 		message.retryAfter(durableRetryDelay)
@@ -273,9 +291,6 @@ type deliveryOutcome struct {
 	// core-NATS exception for this terminal fanout outcome.
 	exceptionReason string
 	fanoutRefusal   bool
-	// exceptionFailureRetries: an exception-publish failure escalates this
-	// outcome's retry result to true.
-	exceptionFailureRetries bool
 	// exceptionFailureClearsAttempt: an exception-publish failure clears the
 	// ledger attempt, independent of (and possibly in addition to)
 	// clearAttempt below.
@@ -285,8 +300,8 @@ type deliveryOutcome struct {
 	clearAttempt bool
 	// recordDedupe records the pair delivered in the ledger (dedupe.Ledger.Record).
 	recordDedupe bool
-	// retry is this outcome's baseline retry request, before any exception-
-	// publish escalation above is folded in.
+	// retry is whether this outcome asks for the attempt to be retried
+	// (NAKed).
 	retry bool
 }
 
@@ -304,15 +319,11 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 	if outcome.log != nil {
 		outcome.log(cfg.logger)
 	}
-	retry := outcome.retry
 	clearAttempt := outcome.clearAttempt
 	if outcome.exceptionReason != "" && !isExceptionsTopic(item.Topic) && (isControlTopic(item.Topic) || outcome.fanoutRefusal) {
 		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal); err != nil {
 			cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
 			clearAttempt = clearAttempt || outcome.exceptionFailureClearsAttempt
-			if outcome.exceptionFailureRetries {
-				retry = true
-			}
 		}
 	}
 	if clearAttempt {
@@ -323,7 +334,7 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 			cfg.logger.Warn(ledgerUnavailableLine, slog.String("operation", "record"), slog.String("session_id", outcome.sessionID), slog.String("event_id", item.EventID), slog.String("error", err.Error()))
 		}
 	}
-	return retry
+	return outcome.retry
 }
 
 // clearLedgerAttempt gives attempt up so a retry prompts its pair again. A clear the ledger
@@ -414,32 +425,18 @@ func promptsHere(machineID string, interest *store.Interest, entry *session.Sess
 	return owner == "" || owner == machineID
 }
 
-// publishNoHolderExceptionOrNak publishes a "no_holder" delivery exception
-// for control topics and, if publishing itself fails, escalates to an
-// immediate NAK by finalizing message and reporting false — a message whose
-// failure notice never went out must not be silently ACKed. Shared by the
-// direct-agent path (no live session for the target) and the fanout path (no
-// matching interests at all). sessionID is "" and attempt the zero Attempt when
-// this outcome has no recipient (the fanout no-interests case).
-func publishNoHolderExceptionOrNak(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string, attempt dedupe.Attempt) bool {
-	if !isControlTopic(item.Topic) || isExceptionsTopic(item.Topic) {
-		return true
-	}
-	if err := publishDeliveryException(cfg.client, item, "no_holder", sessionID, false); err != nil {
-		clearLedgerAttempt(cfg, item, attempt)
-		cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
-		cfg.messagesNAKed.Inc()
-		message.finalize(true)
-		return false
-	}
-	return true
-}
-
 // listenerDeliveryHandler decodes and validates the envelope, then routes it
 // to exactly one of the three delivery paths based on its topic: a role
 // lane (arbitrated to whichever session currently holds the role), a direct
 // agent subject, or the general interest fanout.
+//
+// cfg arrives by value, so every handler built from one config shares the deferral set the
+// unplaceable retry bounds itself with only because the field is a pointer; a config without one
+// is a programming error, refused here at construction rather than at the first deferral.
 func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMessage) {
+	if cfg.deferredUnplaceable == nil {
+		panic("listener delivery handler built without its deferral set (deferredUnplaceable)")
+	}
 	return func(message deliveryMessage) {
 		var item contracts.Envelope
 		if err := json.Unmarshal(message.data, &item); err != nil {
@@ -535,7 +532,7 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 			})
 			return "", session.SessionEntry{}, false
 		}
-		_, superseded, err := releaseExpiredRoleClaim(cfg.registry, role, sessionID, cfg.sessions.TTL())
+		_, superseded, err := releaseExpiredRoleClaim(context.Background(), cfg.registry, role, sessionID, cfg.sessions.TTL())
 		if err != nil {
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				sessionID:    sessionID,
@@ -696,6 +693,13 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 	message.finalize(false)
 }
 
+// deliverySessionReadTimeout is delivery's own bound on its read of the target session from the
+// bucket. It is the role paths' bound (roleHolderReadTimeout, role_holder.go) today without being
+// tied to it, and it can be looser than the send route's (sendSessionReadTimeout) because no HTTP
+// caller is waiting on this read: the cost of waiting is a message held, not a request kept open,
+// and the alternative - taking the cache's miss for an answer - ACKs the message away.
+const deliverySessionReadTimeout = 2 * time.Second
+
 // agentSubjectDelivery delivers directly to the session named by the topic
 // (notifications.agent.<session>), pushing over HTTP/WebSocket when the
 // session is live and falling back to whatever session.HandleAgentMessage
@@ -706,13 +710,51 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 // write and is acked as before.
 func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
-	interest, err := cfg.registry.Get(sessionID)
+	// The JetStream metadata carries everything unplaceableAgentDelivery bounds this message
+	// by - its delivery count, against the deferrals the window buys and against
+	// unplaceableMaxDeliveries - and its stream sequence, the key of the slot a deferral of it
+	// holds, so it is read once here for both. A core delivery has none, and a durable message
+	// whose metadata will not parse can be bounded by nothing, which unplaceableAgentDelivery
+	// gives up on rather than retrying without end.
+	var metadata *nats.MsgMetadata
+	if message.mode == durableDelivery {
+		if md, mdErr := message.msg.Metadata(); mdErr == nil {
+			metadata = md
+		}
+	}
+	// A message this listener deferred has left the deferred state by the time it is delivered
+	// again, so its slot goes back before any disposition below takes one: the delivery itself is
+	// what freed it, not what this attempt decides to do with the message. The release is keyed
+	// on the message, so a delivery this listener never deferred - a first one, or a redelivery
+	// another branch's NAK or an expired AckWait produced - gives nothing back.
+	if metadata != nil {
+		cfg.deferredUnplaceable.release(metadata.Sequence.Stream)
+	}
+	interest, err := cfg.registry.Get(context.Background(), sessionID)
 	var interestPtr *store.Interest
 	if err == nil {
 		interestPtr = &interest
 	}
+	// The session record delivery pushes through is read from the session bucket itself, as the
+	// send route reads it: this listener's cache trails the bucket it follows, and is still being
+	// refilled after its bus connection came back, so a session registered a moment ago, or one
+	// this listener has not re-read since the reconnect, is in the bucket before it is in the
+	// cache - and a message dropped on that miss is gone, since it is already ACKed away.
+	// nats.ErrKeyNotFound is the bucket's own word that no record exists; any other error is a
+	// read that did not answer, which is no evidence of absence at all - the bucket was never
+	// consulted, so nothing about this session was learned, and an attempt that learned nothing
+	// can never be the ground for giving a message up. Neither needs to be told from the other
+	// below: both leave this delivery with no entry to push through, and an entry-less attempt
+	// reaches the retry decision only as ReasonNoSessionRecord, which already holds the retry
+	// open (session.HandleAgentMessage: the registry path reports that reason, and the interest
+	// path NAKs with an error, which never reaches that branch).
+	entry, entryErr := liveSessionEntry(context.Background(), cfg.sessions, sessionID, deliverySessionReadTimeout, registered)
+	var entryPtr *session.SessionEntry
+	if entryErr == nil {
+		entryPtr = &entry
+	}
 	var attempt dedupe.Attempt
-	if entry, err := cfg.sessions.Get(sessionID); err == nil && promptsHere(cfg.machineID, interestPtr, &entry) {
+	if promptsHere(cfg.machineID, interestPtr, entryPtr) {
 		var deliver bool
 		var retryIn time.Duration
 		if attempt, deliver, retryIn = ledgerAttempt(cfg, message, item, sessionID, false); !deliver {
@@ -721,7 +763,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		}
 	}
 	deliveryTimer := metrics.NewTimer()
-	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, message.deliverer(cfg))
+	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, message.deliverer(cfg))
 	if result.OwnedElsewhere {
 		// Every listener on the bus reads each inbox message from its own durable, and the owner
 		// delivers it from its copy: a no_holder exception here would report a delivered message
@@ -776,15 +818,8 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 			recordDedupe: true,
 		})
 	} else if result.Err == nil {
-		if !publishNoHolderExceptionOrNak(cfg, message, item, sessionID, attempt) {
-			return
-		}
-		applyDeliveryOutcome(cfg, item, deliveryOutcome{
-			metricStatus: "skipped",
-			log: func(logger *logging.Logger) {
-				logger.DeliveryLog(slog.LevelWarn, "listener agent session not found anywhere", sessionID, item.Topic, item.EventID, "skipped")
-			},
-		})
+		unplaceableAgentDelivery(cfg, message, item, sessionID, metadata, result, attempt)
+		return
 	}
 	if result.ShouldNAK {
 		cfg.messagesNAKed.Inc()
@@ -807,9 +842,9 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	items := cfg.registry.Match(cfg.machineID, item.Topic)
 	if len(items) == 0 {
-		if !publishNoHolderExceptionOrNak(cfg, message, item, "", dedupe.Attempt{}) {
-			return
-		}
+		// No interests is no failure: listenerDeliveryHandler routes every role and agent topic
+		// elsewhere, so a fanout topic is never a control topic and owes no delivery exception,
+		// and the message is ACKed with nothing to retry.
 		cfg.logger.Info("listener no matching interests", slog.String("topic", item.Topic))
 		message.finalize(false)
 		return
@@ -919,11 +954,8 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				log: func(logger *logging.Logger) {
 					logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
 				},
-				exceptionReason:               "delivery_failed",
-				exceptionFailureClearsAttempt: true,
-				exceptionFailureRetries:       true,
-				clearAttempt:                  retryable,
-				retry:                         retryable,
+				clearAttempt: retryable,
+				retry:        retryable,
 			}) {
 				retryIn = max(retryIn, durableRetryDelay)
 			}

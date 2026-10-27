@@ -92,7 +92,7 @@ func TestATopicAddedOnOnePodSurvivesAWriteOnAPodWhoseCacheTrails(t *testing.T) {
 		if _, err := a.Upsert(Interest{SessionID: sessionID, MachineID: "box-a"}, []string{"notifications.team.added"}); err != nil {
 			t.Fatalf("add a topic through pod A: %v", err)
 		}
-		if err := b.Remove(sessionID, []string{agent, "notifications.team.leaving"}); err != nil {
+		if err := b.Remove(context.Background(), sessionID, []string{agent, "notifications.team.leaving"}); err != nil {
 			t.Fatalf("unsubscribe through pod B: %v", err)
 		}
 		if got, want := storedTopics(t, a, sessionID), []string{"notifications.team.added"}; !slices.Equal(got, want) {
@@ -163,7 +163,7 @@ func TestInterestAndClaimWritesKeepFieldsThisBuildDoesNotKnow(t *testing.T) {
 	if got := string(storedJSON(t, interests, sessionID)["future_field"]); got != "[1,2]" {
 		t.Fatalf("interest future_field after a heartbeat = %q, want [1,2]", got)
 	}
-	if err := a.Remove(sessionID, []string{"notifications.team.gone"}); err != nil {
+	if err := a.Remove(context.Background(), sessionID, []string{"notifications.team.gone"}); err != nil {
 		t.Fatalf("unsubscribe: %v", err)
 	}
 	if got := string(storedJSON(t, interests, sessionID)["future_field"]); got != "[1,2]" {

@@ -119,7 +119,9 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 			MachineID:    rigMachineID,
 			HostBridge:   "127.0.0.1",
 			RequestLimit: 5 * time.Second,
-			Sessions:     d.sessions,
+			// No Sessions lookup: the delivery config above resolves the entry from its own
+			// sessions field and hands it to DeliverWithResultForEntry, so the deliverer holds
+			// no registry of its own (INFRA-141).
 		},
 		ledger:            testDeliveryLedger(t, d.client.Conn, machineID, "boot-pod-a"),
 		logger:            listenerRigLogger(t, "delivery listener"),
@@ -127,6 +129,13 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 		messagesDelivered: met.NewCounter("rig_messages_delivered", "test"),
 		messagesNAKed:     met.NewCounter("rig_messages_naked", "test"),
 		deliveryDuration:  met.NewHistogram("rig_delivery_duration", "test", metrics.DefaultBuckets),
+		// The set every handler built from one config shares; main.go builds one for the whole
+		// process and passes it through deliveryConfig, so a durable rebound after a flap draws on
+		// the budget its predecessor held rather than opening a second one. This rig needs one only
+		// because listenerDeliveryHandler refuses a config without it: its unplaceableRetryWindow
+		// is zero, so nothing here is ever deferred, and these tests cover Dispatch resolution and
+		// delivery rather than the retry policy (INFRA-141).
+		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
 	rig := startReceiverRig(t, d.client.Conn.ConnectedUrl(), machineID, "pod-a", jetStreamDeliveryHandler(config), testReceiveTiming(), testLeaseTiming())
 	rig.awaitState(t, receiveActive, 10*time.Second)
@@ -260,7 +269,7 @@ func (rig *dispatchRig) registerSession(t *testing.T, sessionID, title string) *
 // is left for any listener to read.
 func (rig *dispatchRig) endSession(t *testing.T, sessionID string) {
 	t.Helper()
-	if err := rig.warm.sessions.Delete(sessionID); err != nil {
+	if err := rig.warm.sessions.Delete(context.Background(), sessionID); err != nil {
 		t.Fatalf("end %s: %v", sessionID, err)
 	}
 }

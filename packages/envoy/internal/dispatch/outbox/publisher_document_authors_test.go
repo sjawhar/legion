@@ -284,10 +284,55 @@ func TestPublishAuthorRoutesSkipsTheCommenterAmongTheDocumentsWriters(t *testing
 		Payload:  map[string]any{"id": "00000000-0000-0000-0000-000000000012", "anchor": anchorOn(doc)},
 	}
 	item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1.comment.created"}
-	if err := publishAuthorRoutes(context.Background(), Deps{Store: database, Publisher: publisher}, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), Deps{Store: database, Publisher: publisher}, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 	if got := topicsOf(publisher.all()); !slices.Equal(got, []string{"notifications.agent.session-editor"}) {
 		t.Fatalf("author routes = %v, want the document's other writer alone", got)
+	}
+}
+
+// A person's spec edit, once its quiet window ends, reaches each session the document credits once
+// and the issue's route once, and never the person: a person has no Envoy topic, and the edit's
+// own actor is skipped. The event names its document by the payload's artifact_id, as the notice
+// sweep writes it (docs.sendEditNotice).
+func TestAPersonsSpecEditReachesEachSessionThatWroteTheSpecOnce(t *testing.T) {
+	database := storetest.Open(t)
+	route := "role:reviewer"
+	seedIssue(t, database, "T-1", &route)
+	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
+	writer := model.Actor{Kind: "session", ID: "session-writer"}
+	editor := model.Actor{Kind: "session", ID: "session-editor"}
+	spec := seedDocument(t, database, new("T-1"), "spec", writer, []model.Actor{writer}, []model.Actor{editor, writer}, []model.Actor{alice})
+	event := model.Event{
+		ID: 100, CreatedAt: time.Now(), IssueKey: new("T-1"), Type: "artifact.human_edited", Actor: alice,
+		Payload: map[string]any{
+			"artifact_id": spec, "name": "spec.md", "from_version": 2, "to_version": 3,
+			"editors": []any{alice.ID}, "diff": "--- previous\n+++ current\n", "diff_truncated": false,
+		},
+	}
+	event.Notify = events.NewBroker().Notify(event)
+	if !event.Notify {
+		t.Fatal("a person's artifact.human_edited does not notify, so no route would carry it")
+	}
+	publisher := &recordingPublisher{}
+	if err := publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, "", &route, map[string]struct{}{}); err != nil {
+		t.Fatalf("publish artifact.human_edited: %v", err)
+	}
+	topics := topicsOf(publisher.all())
+	if got, want := agentTopics(topics), []string{"notifications.agent.session-writer", "notifications.agent.session-editor"}; !slices.Equal(got, want) {
+		t.Fatalf("sessions reached = %v, want %v (every topic: %v)", got, want, topics)
+	}
+	routed := 0
+	for _, topic := range topics {
+		if topic == "notifications.role.reviewer" {
+			routed++
+		}
+		if strings.Contains(topic, alice.ID) {
+			t.Fatalf("the person was reached on %q", topic)
+		}
+	}
+	if routed != 1 {
+		t.Fatalf("the issue's route was reached %d times, want once (every topic: %v)", routed, topics)
 	}
 }

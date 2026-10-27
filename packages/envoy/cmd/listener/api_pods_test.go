@@ -28,7 +28,7 @@ func TestSendAndRoleSetThroughAPodWhoseCacheHasNotSeenTheRegistrationAnswer200(t
 			t.Fatalf("register ses_unseen through the other pod: %v", err)
 		}
 		recorder := httptest.NewRecorder()
-		sendHandler(observer).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send",
+		sendHandler(observer, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send",
 			strings.NewReader(`{"target_session":"ses_unseen","message":"hello"}`)))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("send to a session this pod's cache has not seen: status %d %s, want 200", recorder.Code, recorder.Body.String())

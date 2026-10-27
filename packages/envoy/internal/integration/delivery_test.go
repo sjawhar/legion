@@ -26,7 +26,7 @@ type testEnv struct {
 	ctx       context.Context
 	client    *bus.Client
 	registry  *store.Registry
-	sessions  session.SessionLookup
+	sessions  *session.SessionRegistry
 	deliverer session.Deliverer
 	ledger    *dedupe.KV
 }
@@ -72,7 +72,6 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 		MachineID:    "test-machine",
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
-		Sessions:     sessions,
 	}
 
 	env := &testEnv{
@@ -214,12 +213,17 @@ func (env *testEnv) startConsumer(machineID string) {
 				msg.Ack()
 				return
 			}
-			interest, err := env.registry.Get(sessionID)
+			interest, err := env.registry.Get(context.Background(), sessionID)
 			var interestPtr *store.Interest
 			if err == nil {
 				interestPtr = &interest
 			}
-			result := session.HandleAgentMessage(item, sessionID, machineID, interestPtr, &env.deliverer)
+			entry, entryErr := env.sessions.Get(sessionID)
+			var entryPtr *session.SessionEntry
+			if entryErr == nil {
+				entryPtr = &entry
+			}
+			result := session.HandleAgentMessage(item, sessionID, machineID, interestPtr, entryPtr, &env.deliverer)
 			if result.Delivered {
 				_ = env.ledger.Record(attempt)
 			} else {
@@ -252,7 +256,14 @@ func (env *testEnv) startConsumer(machineID string) {
 			if attempt.Verdict != dedupe.Proceed {
 				continue
 			}
-			if err := env.deliverer.Deliver(item, interest); err != nil {
+			// The listener resolves the subscriber's record and delivers through it
+			// (fanoutDelivery, cmd/listener/delivery.go); the Deliverer reads no registry.
+			targetEntry, targetErr := env.sessions.Get(interest.SessionID)
+			var target *session.SessionEntry
+			if targetErr == nil {
+				target = &targetEntry
+			}
+			if _, err := env.deliverer.DeliverWithResultForEntry(item, interest, target); err != nil {
 				_ = env.ledger.Clear(attempt)
 				failed = true
 			} else {
@@ -492,8 +503,8 @@ func TestRoleTransfer_ExactlyOneHolder(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		a, errA := env.registry.Get("ses_role_a")
-		b, errB := env.registry.Get("ses_role_b")
+		a, errA := env.registry.Get(context.Background(), "ses_role_a")
+		b, errB := env.registry.Get(context.Background(), "ses_role_b")
 		matches := env.registry.Match("test-machine", "notifications.role.legion-controller")
 		if errA == nil && errB == nil && !containsTopic(a.Topics, "notifications.role.legion-controller") && containsTopic(b.Topics, "notifications.role.legion-controller") && len(matches) == 1 && matches[0].SessionID == "ses_role_b" {
 			return
@@ -501,11 +512,11 @@ func TestRoleTransfer_ExactlyOneHolder(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	a, err := env.registry.Get("ses_role_a")
+	a, err := env.registry.Get(context.Background(), "ses_role_a")
 	if err != nil {
 		t.Fatalf("Get A failed: %v", err)
 	}
-	b, err := env.registry.Get("ses_role_b")
+	b, err := env.registry.Get(context.Background(), "ses_role_b")
 	if err != nil {
 		t.Fatalf("Get B failed: %v", err)
 	}
@@ -542,7 +553,7 @@ func TestDelivery_UnsubscribeStopsDelivery(t *testing.T) {
 	}
 
 	// Unsubscribe from the broadcast topic
-	if err := env.registry.Remove("ses_unsub", []string{broadcastTopic}); err != nil {
+	if err := env.registry.Remove(context.Background(), "ses_unsub", []string{broadcastTopic}); err != nil {
 		t.Fatalf("failed to remove interest: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond) // allow KV watch to propagate
@@ -822,13 +833,13 @@ func TestDelivery_UnsubscribeEmptyTopicsDeletesAll(t *testing.T) {
 	}
 
 	// Remove with empty topics = delete the entire KV entry
-	if err := env.registry.Remove("ses_emptyunsub", []string{}); err != nil {
+	if err := env.registry.Remove(context.Background(), "ses_emptyunsub", []string{}); err != nil {
 		t.Fatalf("failed to remove all interests: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond) // allow KV watch to propagate
 
 	// Verify the interest entry is completely gone
-	_, err := env.registry.Get("ses_emptyunsub")
+	_, err := env.registry.Get(context.Background(), "ses_emptyunsub")
 	if err == nil {
 		t.Fatal("expected error from Get after Remove(empty), but entry still exists")
 	}
@@ -913,7 +924,7 @@ func TestDelivery_KVEntryExpiresButInterestPersists(t *testing.T) {
 	for time.Now().Before(deadline) {
 		time.Sleep(500 * time.Millisecond)
 		if _, err := env.sessions.Get("ses_expiry_check"); err != nil {
-			interest, err := env.registry.Get("ses_expiry_check")
+			interest, err := env.registry.Get(context.Background(), "ses_expiry_check")
 			if err != nil {
 				t.Fatalf("interest should persist after session expiry, got: %v", err)
 			}

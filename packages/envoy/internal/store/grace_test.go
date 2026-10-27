@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func (p gracePod) advance(d time.Duration) { p.elapsed.Add(int64(d)) }
 // release asks the pod to release role's claim, whose holder is gone, and names the outcome.
 func (p gracePod) release(t *testing.T, role, holder string) string {
 	t.Helper()
-	release, err := p.ReleaseExpiredRoleClaim(role, holder, graceTestTTL)
+	release, err := p.ReleaseExpiredRoleClaim(context.Background(), role, holder, graceTestTTL)
 	if err != nil {
 		t.Fatalf("release %s's expired claim: %v", role, err)
 	}

@@ -673,7 +673,8 @@ func noLeaseConfig(user string) string {
 func TestAListenerWithoutTheLeaseGrantDeliversWithoutALease(t *testing.T) {
 	seed, public := testnats.User(t)
 	_, uri := testnats.StartConfig(t, noLeaseConfig(public), []string{"-js"}, false)
-	listener := &listenerProcess{port: cmdtest.FreeTCPPort(t)}
+	held := cmdtest.HoldPort(t)
+	listener := &listenerProcess{port: held.Port}
 	cmd := exec.Command(cmdtest.Build(t, "envoy-listener"))
 	cmd.Env = []string{
 		"PORT=" + strconv.Itoa(listener.port),
@@ -684,6 +685,7 @@ func TestAListenerWithoutTheLeaseGrantDeliversWithoutALease(t *testing.T) {
 		"ENVOY_API_TOKEN=" + listenerTestToken,
 		"ENVOY_HOST_BRIDGE=127.0.0.1",
 	}
+	held.Pass(cmd, "ENVOY_LISTEN_FD")
 	listener.Process = cmdtest.Start(t, "the listener box-ungranted", cmd)
 	listener.waitHealthy(t)
 
