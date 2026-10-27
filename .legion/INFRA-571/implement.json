@@ -2,16 +2,25 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-571",
-  "completed": "2026-10-27T05:33:37Z",
+  "completed": "2026-10-27T06:00:42Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2364",
-  "codeHead": "0fa111cd6ada",
+  "codeHead": "95693430d97d",
+  "round2": "Tester verdict fail (test.json): PR CONFLICTING with main 448a4100 (#2270 CPU/memory limits on every docker run), so no CI ran. Fix: forward merge 95693430 (jj new legion/INFRA-571 main@origin), every conflicting site keeps main's --cpus/--memory and this PR's pg18 image and /var/lib/postgresql mount; main's two new /var/lib/postgresql/data mounts on the 18 image (internal/testpg testcontainers tmpfs, stage4a-sandbox-runtime.sh session database) moved to /var/lib/postgresql; dev-postgres.test.sh's printed-run expectations gain --cpus 2 --memory 2g. Fingerprint 783d3cbe… -> 78722ecf… (changed), posted as https://github.com/sjawhar/legion/pull/2364#issuecomment-6434963164. GitHub now reports MERGEABLE.",
   "proof": [
+    {
+      "criterion": "CI's Postgres service reports 18 with vector and the full Go suite passes on it (P7) can run: the pull request merges cleanly with main",
+      "surface": "GitHub pull request #2364 mergeability",
+      "command": "gh pr view 2364 -R sjawhar/legion --json mergeable,mergeStateStatus (after jj git push of the merge 95693430)",
+      "observed": "{\"mergeStateStatus\":\"BLOCKED\",\"mergeable\":\"MERGEABLE\"} (BLOCKED = required reviews/checks pending); rg finds the old digest only in dispatch-go-postgres-16 and dev-postgres.test.sh's old_pin fixture, and /var/lib/postgresql/data only on postgres:16 daemon sites, docs/kubernetes.md's Job example and the shell-quote fixture",
+      "headSha": "95693430d97d",
+      "negativeControl": "the pre-merge head e8df9ab0 reported {\"mergeStateStatus\":\"DIRTY\",\"mergeable\":\"CONFLICTING\"} and GitHub ran no workflow on it"
+    },
     {
       "criterion": "A run that migrates a Postgres 16 database, upgrades it to 18 with pg_upgrade, then starts the server and runs a search and an issue creation, passes; its output is quoted on the pull request (P5)",
       "surface": "Dispatch server and dispatch CLI on local PGDG PostgreSQL 16.15 / 18.6 clusters with pgvector 0.8.7 (script dispatch://INFRA-571/artifact/pg-upgrade-run-sh, harness dispatch://INFRA-571/artifact/pg-harness-setup-sh)",
-      "command": "bash /legion/scratch/tmp/infra571/pg/setup.sh && bash /legion/scratch/tmp/infra571/pg-upgrade-run.sh (OLD = main 7c1290a4 server, NEW = server built from 0fa111cd); log /legion/scratch/tmp/infra571/logs/p5-run-0fa111cd.log",
+      "command": "bash /legion/scratch/tmp/infra571/pg/setup.sh && bash /legion/scratch/tmp/infra571/pg-upgrade-run.sh (OLD = main 7c1290a4 server, NEW = server built from the head); logs /legion/scratch/tmp/infra571/logs/p5-run-0fa111cd.log and logs/p5-run-merge.log (95693430)",
       "observed": "16 server_version_num 160015, old server migrated to 99, seeded 3 issues/1 comment/1 ask/4 artifacts + 200 embeddings, plan Index Scan using embeddings_cosine; pg_upgrade --check 0, pg_upgrade 0; 18 server_version_num 180006, vector 0.8.7; vacuumdb --analyze-in-stages and REINDEX DATABASE clean; head server healthy, schema_version 120, migrations 100..120 applied by its boot; dispatch search lists PGUP-1; dispatch issue --force created PGUP-4 (without --force it names PGUP-1 as a duplicate); <=> top-5 equal on 16 and 18, still an index scan",
-      "headSha": "0fa111cd6ada",
+      "headSha": "95693430d97d",
       "negativeControl": "pg_upgrade --check against an 18 cluster with default data checksums exits 1 'old cluster does not use data checksums but the new one does'; against 18 binaries without postgresql-18-pgvector exits 1 'could not load library \"$libdir/vector\": ... No such file or directory In database: dispatch'"
     },
     {
@@ -19,15 +28,15 @@
       "surface": "envoy-infra gcp:Dispatch unit tests on Pulumi mocks",
       "command": "cd packages/envoy/infra && go test ./gcp/ -count=1 -run Dispatch -v",
       "observed": "TestDispatchSettingsApplyDefaults and TestDispatchInstanceRunsTheDatabaseVersion/unset (POSTGRES_18, instance input and ResolveDispatch) and /POSTGRES_16 pass; ok github.com/sjawhar/envoy/infra/gcp",
-      "headSha": "0fa111cd6ada",
+      "headSha": "95693430d97d",
       "negativeControl": "defaultDispatchDatabaseVersion set back to POSTGRES_16 (at 9f5d5279, dispatch.go unchanged since): dispatch_test.go:129 and TestDispatchInstanceRunsTheDatabaseVersion/unset fail 'expected: \"POSTGRES_18\" actual: \"POSTGRES_16\"'"
     },
     {
       "criterion": "Dev Postgres runs 18: the dump-and-restore sequence dev-postgres.sh prints moves a migrated 16 Dispatch database onto 18 (P2, P3)",
       "surface": "dev-postgres.sh against a fake docker; the SQL half on real PGDG 16 and 18 clusters with this head's server",
-      "command": "cd packages/envoy && bash scripts/dev-postgres.test.sh && bash scripts/dev-broker.test.sh; bash /legion/scratch/tmp/infra571/p3-run.sh (log logs/p3-run-0fa111cd.log)",
+      "command": "cd packages/envoy && bash scripts/dev-postgres.test.sh && bash scripts/dev-broker.test.sh (at 95693430); bash /legion/scratch/tmp/infra571/p3-run.sh (at 0fa111cd, log logs/p3-run-0fa111cd.log)",
       "observed": "8/8 dev-postgres cases and every dev-broker case PASS (refusal lists start-if-stopped, pg_dumpall, stop, rename, run, pg_isready, restore, check, rm in order, read-only); pg_dumpall --clean --if-exists from 16 restored by psql -f into 18 with only 'current user cannot be dropped' and 'role \"postgres\" already exists', vector 0.8.7, 120 migrations, server boot on 18 applied 0, dispatch read PTHREE-1 returned its title",
-      "headSha": "0fa111cd6ada",
+      "headSha": "95693430d97d",
       "negativeControl": "re-adding 'so it has no pgvector' or dropping the docker start line for a stopped container fails the matching test case; restoring the dump into an 18 install without pgvector gives 'ERROR:  extension \"vector\" is not available' and no embeddings table"
     },
     {
