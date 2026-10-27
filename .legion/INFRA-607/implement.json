@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-607",
+  "completed": "2026-10-27T12:37:20Z",
+  "proof": [
+    {
+      "criterion": "Each loop is driven by the change it serves or, where a timer stays, does work proportional to what changed, with jitter; it does nothing while nothing changes",
+      "surface": "The real envoy-dispatch binary (base c3d09eec924c vs head a4e592e8507c) on INFRA-589's archived harness: Postgres 16 + pgvector with log_statement=all, NATS 2.10.29, the Envoy listener; config A (no embedder, no App) and config B (fake Azure embedder over https and fake GitHub App)",
+      "command": "measure/idle_pair.py idleA1|idleA2|idleB1|idleB2 (before and after side by side, slots swapped between the two runs, 20-minute window 7 minutes after start; count.py over the Postgres statement log); archive dispatch://INFRA-607/artifact/idle-measurement-tar-gz, summary dispatch://INFRA-607/artifact/measurements-md",
+      "observed": "Per process: idle A 0.637 -> 0.500 statements/s (identical in both runs), idle B 1.228/1.278 -> 0.647/0.648 statements/s, CPU 0.00110/0.00107 -> 0.00069/0.00064 cores in B. Changed loops at idle B: embedding scan 12/min -> 0, coverage 17 per 10 min -> 0, task progress 4 per 5 min -> 0, excerpts 6 per 5 min -> 0, suggestion outcomes 7/min -> 0, intake settings poll 2/min -> 0; new shared listener keep-alive 0 -> 2/min. Outbox, settlement, reconcile and architecture statements equal before and after.",
+      "headSha": "a4e592e8507c93c54f05017de20d53000985e520",
+      "negativeControl": "The before build in the same windows ran every loop on its timer (A: 1528 statements, B: 3007 over the two windows); on the head, a no-op update of a comment (update comments set body = body) wrote no embeddings row and made no embedding call over 8 s, while an edit of the same comment was embedded within 3 s (fake embedder POST count 1 -> 1, then 1 -> 2)."
+    },
+    {
+      "criterion": "A write wakes its loop through the shared listener, and a write made while the listener has no connection is caught up after the redial",
+      "surface": "The head envoy-dispatch binary in config B, its HTTP API (POST /api/v1/issues/{key}/comments as a session) and its Postgres",
+      "command": "start-dispatch.sh after 0 e2e607 B; select from pg_stat_activity where query ilike 'listen%'; curl POST /api/v1/issues/LGA-1/comments; poll embeddings for the comment; select pg_terminate_backend(<hub backend>); curl POST /api/v1/issues/LGA-2/comments during the outage",
+      "observed": "One backend holds 'listen dispatch_embeddings; listen dispatch_excerpts_owed; listen dispatch_events; listen dispatch_delivery_settings'. A new comment was embedded 596 ms after its POST. After the hub backend was terminated, Dispatch logged 'dispatch background wakes: a Postgres listener has no connection; redialing', re-listened 1.3 s later on a new backend, and the comment written during the outage was embedded within about 1 s.",
+      "headSha": "a4e592e8507c93c54f05017de20d53000985e520",
+      "negativeControl": "update comments set body = body (text unchanged, so embeddings_enqueue writes no row and sends no NOTIFY): no embedding scan and no embedder call in the next 8 s; the only statements in that window were the delivery reconcile's 5-minute lease pass."
+    },
+    {
+      "criterion": "The GitHub intake processes notifications concurrently where order does not matter and in order per pull request where it does; no lock is held across a GitHub call",
+      "surface": "The delivery intake against real NATS (in-process nats-server) and real Postgres, with a fake GitHub adding 200 ms to every call",
+      "command": "DISPATCH_INTAKE_BURST=1 go test ./internal/dispatch/delivery/ -run Burst -count=1 -v in the base export and in the head export, twice each; go test ./internal/dispatch/delivery/ -run 'TestAPullRequestHeldOnGitHubHoldsBackOnlyItsOwnMessages|TestAStoppedIntakeStaysStopped' -count=1",
+      "observed": "20 merged pull requests acknowledged in 12.636 s and 12.628 s on the base, 3.556 s and 3.56 s on the head. TestAPullRequestHeldOnGitHubHoldsBackOnlyItsOwnMessages passes: PR B is handled and acked while PR A's GitHub fetch is held, and PR A's second message starts only after its first ends.",
+      "headSha": "a4e592e8507c93c54f05017de20d53000985e520",
+      "negativeControl": "The base intake (one message at a time) took 12.6 s for the same burst; a message queued behind its key at StopDelivering is Nak'd and handled by the next intake, and a stopped intake stays unbound across a forced NATS reconnect (TestAStoppedIntakeStaysStoppedAcrossAReconnectAndSubscribesAgain fails with the bus.Client.Release call removed)."
+    },
+    {
+      "criterion": "Before and after at tonight's step on the committed load reproduction",
+      "surface": "INFRA-589's 1x step (400 sessions, 4 events/s, 60 requests/s) on the real binaries, config A, one process at a time",
+      "command": "run-step.sh step1x-1-before|step1x-2-after|step1x-3-before|step1x-4-after 1 <build>; 180 s window after a 30 s warm-up",
+      "observed": "statements/s 394.8, 392.5, 365.6, 385.2; Dispatch CPU 0.564, 0.568, 0.553, 0.553 cores; events committed 3.38, 3.43, 3.18, 3.10/s; requests ok 79.6, 75.4, 75.3, 76.2 percent: within noise, as the plan expected for a lock-saturated step. Inside the window only the suggestion loop of the changed loops runs (21 vs 26 statements per window).",
+      "headSha": "a4e592e8507c93c54f05017de20d53000985e520",
+      "negativeControl": "Two before runs of the same build differ by 29 statements/s (394.8 vs 365.6), larger than any before/after difference, which is the noise floor the comparison is read against."
+    },
+    {
+      "criterion": ".dispatch/architecture/ files for the components it changes say what is now true",
+      "surface": "The repository's architecture model as Dispatch imports it (architecture.Parse)",
+      "command": "go run -overlay $TMPDIR/infra607/archcheck/overlay.json ./cmd/archcheck_tmp .dispatch/architecture (throwaway program calling architecture.Parse)",
+      "observed": "Parses 40 components; dispatch-duty, dispatch-embedqueue, dispatch-delivery and dispatch-redeliver are added with parent dispatch-server and their packages' paths, and dispatch-server depends on all four.",
+      "headSha": "a4e592e8507c93c54f05017de20d53000985e520",
+      "negativeControl": "The stale-name grep for TaskProgressReconcileInterval, SuggestionSweepInterval, settingsPollInterval, coverageInterval and ReferenceExcerptReconcileInterval finds them only in older CHANGELOG entries of shipped changes."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/pglisten/hub.go, listener.go (+tests): shared listener, Notification with PID, OnDisconnected",
+    "packages/envoy/internal/dispatch/duty/woken.go, ticker.go (+tests): RunWoken, Jittered, per-period jitter",
+    "packages/envoy/internal/dispatch/embedqueue/queue.go, coverage.go (+tests): woken scan with due times; coverage once at boot with identity recheck",
+    "packages/envoy/internal/dispatch/docs/task_progress.go, reference_excerpts.go, refs/excerpts.go (+tests): boot pass with bounded retries; woken excerpts with per-document backoff",
+    "packages/envoy/internal/dispatch/api/suggestion_outcomes.go (+tests): cursor-based sweep woken by dispatch_events; copy_lock_order_test.go reads package-level function values",
+    "packages/envoy/internal/dispatch/delivery/settings_cache.go, keyed.go, intake.go, jobs.go, intakes.go (+tests, intake_burst_test.go): settings cache, per-key intake, StopDelivering",
+    "packages/envoy/internal/bus/nats.go (+release_test.go): Client.Release",
+    "packages/envoy/internal/dispatch/store/migrations/0121-0126 (+census), store/pool.go comments, store/storetest/traced.go",
+    "packages/envoy/cmd/dispatch/main.go, multiprocess_test.go; docs: cmd/dispatch/README.md, AGENTS.md files, CHANGELOG.md, .dispatch/architecture/"
+  ],
+  "trickyParts": [
+    "The hub signals every wake after each LISTEN, so each woken loop runs one extra pass shortly after boot; a process that found a lease held retries every HeldRetry until a pass of its own runs (multiprocess test rewritten to that rule).",
+    "write_suggestions.id is a uuid and suggestions commit outside the events' commit-order lock, so the sweep tracks new suggestions with a swept column (0125, added default true then default false: no rewrite) and the event log with a cursor (0124); a 60 s settle window keeps a comment and the agent's follow-up update judged together.",
+    "Suggestion cursor relies on events.id committing in id order (events.Broker.Append's commit-order lock); dispatch://INFRA-591 replaces that with events.Horizon and has this sweep on its consumer list."
+  ],
+  "deviations": [
+    "Plan items 2h (architecture importer shared sync) and 2i (redelivery pending index) are not in this PR: they build on INFRA-562, which has not merged; the architect split them to dispatch://INFRA-627.",
+    "Idle measurements ran before and after side by side (own database, NATS, listener and ports each, slots swapped between runs) instead of alternating one at a time; the 1x step ran one process at a time as planned.",
+    "pg_stat_statements is not in the pgserver build, so statements were counted from log_statement=all (the plan's fallback); config B's template was embedded by the head binary, so the before build's B runs ran on schema 0126 (migrations written to keep the previous release working).",
+    "Suggestion outcome cursor holds event_id only (no suggestion_id): suggestions use the swept column instead, for the reason under trickyParts."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Two api tests fail only on this pod's test Postgres: TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves needs a database whose collation is not byte order (this initdb has only C locales), and TestSavingAPathologicalBodyIsBounded is a timing bound that failed under full-suite CPU contention and passes alone."
+  ]
+}
