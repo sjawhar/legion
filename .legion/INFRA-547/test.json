@@ -2,47 +2,65 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-547",
-  "completed": "2026-10-27T07:12:30Z",
-  "round": 2,
-  "headTested": "5e7c1cb9c2400e6533a27f94fb138fddba0348b0",
-  "codeHead": "6112adc201ea4b3d9c2e325a54cfd897e79ff470",
+  "completed": "2026-10-27T08:51:00Z",
+  "round": 3,
+  "headTested": "8257662b6cd1a0e717193c106f6330a0881162de",
+  "codeHead": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command at the merged code head 6112adc2: cd packages/envoy && go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener -> --- PASS: TestServerChange (70.93s), 8 disruptions (4 lame duck, 4 kill, stand-in reconnected after 2.0-2.2 s each), role 249/249 live, ad-hoc 249/249 live, captured 182 live + 67 only by replay, errored 0. Drove its new hub-down claim on the real binary independently: 504 not_confirmed in 4.037 s. The round-1 negative control (base 3ea454d3 fails assertion 1 for 10 role and 67 ad-hoc messages) stands; the soak file is unchanged since."
-  },
-  "roundOneFailures": {
-    "1 (ad-hoc answered after 5.0 s with the hub down)": "fixed in 27e46f0d: sendToTopic publishes with bus.Client.PublishCoreContext under the send's deadline. The red test TestPublishRouteAnswersAnAdHocTopicInsideItsWindowWhileTheServerIsDown is unchanged since b1fbd1f1 and passes 3 of 3 (4.12, 4.12, 4.21 s): cd packages/envoy && go test -count=3 -run TestPublishRouteAnswersAnAdHocTopicInsideItsWindowWhileTheServerIsDown ./cmd/listener.",
-    "2 (pull request CONFLICTING, no CI)": "resolved by the forward merge 6112adc2 (parents 27e46f0d, main 657c24e4). No conflict markers remain, and the resolution's own changes (jj diff -r 6112adc2) are the CHANGELOGs, AGENTS.md and the bus rename and timeout constant that main's PublishAsync brought. At 07:12Z CI on 6112adc2 is queued (build x2, changes, lint, pr-title, test, typecheck), not settled; GitHub shows mergeable UNKNOWN while it recomputes."
+    "how": "Re-ran its command at code head e6644f73: cd packages/envoy && go test -tags serverchange -count=1 -timeout 20m -v -run TestServerChange ./cmd/listener -> --- PASS: TestServerChange (143.47s). Lane off: 8 disruptions, role 245/245, ad-hoc 245/245, captured 179 live + 66 only by replay, errored 0. Lane on (ENVOY_SUBSCRIBE_ALL_TOPICS=1): 8 disruptions, role 249/249, ad-hoc 249/249, captured 184 live + 65 only by replay, errored 0. Drove its review fixes on the real binaries independently (proof below) and re-ran its census command: E2E_NATS_PORT=14522 E2E_PORT=19120 E2E_SESSION_PORT=19121 bash scripts/e2e-local.sh -> PASS in 13 s."
   },
   "failed": 0,
   "failures": [],
-  "notes": [
-    "Wording only, not a failure: with the hub down and no registered recipient, an ad-hoc publish answers 504 {reason not_confirmed, delivered [], undelivered []} with the error text '0 of 0 sessions subscribed to notifications.team.nobody did not confirm event … within 4s: '. The sender still gets an error and nothing was published, so no message is lost silently, but the text does not say the topic's publish never reached NATS. packages/envoy/AGENTS.md's /v1/messages/publish row says an ad-hoc topic with no recipient answers 200 and does not name this outage answer."
-  ],
+  "ci": "At 08:50Z on code head e6644f73 every check is queued (build x2, changes, lint, test, typecheck, pr-title x2; 6 earlier pr-title runs cancelled); none has settled. GitHub reports the pull request MERGEABLE.",
+  "census": {
+    "driven": [
+      "envoy-client transport.ts publish (what envoy_publish in pi-envoy and claude-envoy calls), run with bun against the lane-on listener: role, holder confirms -> resolves with holder ses_holder3 in 32 ms; role, silent holder -> EnvoyApiError 'role t3-silent: event … was not confirmed by its holder ses_silent3 within 4s (receipt_timeout)' after 8.26 s (one retry under the same key); ad-hoc topic -> EnvoyApiError naming ses_silent3 (receipt_timeout) after 8.26 s; unclaimed -> 'no holder for role t3-none' in 3 ms",
+      "daemon notify.HTTPPublisher (throwaway test, deleted) against the binary: nil in 6 ms; ErrNotDelivered{receipt_timeout, ses_silent3} in 4.002 s; ErrNoHolder; ErrRefusedByHolder{ses_silent3} for a btw payload in 2 ms",
+      "packages/envoy/scripts/e2e-local.sh: PASS (13 s)",
+      "scripts/e2e/dispatch-user-turns.sh and packages/pi-envoy/scripts/smoke-delivery.sh rely only on this: a role publish to a real Oh My Pi session holding the role answers 200. I drove that path with a real omp 18.12.2 session that loads the released pi-envoy (/opt/legion/pi-envoy, --mode rpc, isolated agent dir, LEGION_* unset), registered self_subscribed on the lane-on listener and given role t3-real. Role publish through host-a -> 200 with holder 01a17c8b-… in 58 ms; through host-b -> 200 in 50 ms; ad-hoc topic whose only recipient is that session -> 200 in 50 ms. The session showed each as an envoy-message turn. I did not run the two scripts themselves: smoke-delivery.sh drives an omp TUI through tmux, and this pod has no tmux; dispatch-user-turns.sh needs Dispatch and a devbox."
+    ]
+  },
   "proof": [
     {
-      "criterion": "A role message through the sending listener is received by the holder or its sender's call errs",
-      "surface": "two real envoy-listener binaries built at 6112adc2 (ENVOY_MACHINE_ID host-a and host-b) on one nats-server 2.10.29 with JetStream, session stand-ins on their own NATS connections that receipt a forward as envoy-client's expectsLaneReceipt does, driven with curl over the HTTP API",
-      "command": "POST http://127.0.0.1:18192/v1/messages/publish (host-b) {topic: notifications.role.t2-live|t2-silent|t2-none, source: agent, idempotency_key}; holders registered and claimed through host-a",
-      "observed": "confirming holder: 200 with holder ses_holder2 in 37 ms; silent holder: 504 {reason receipt_timeout, holder ses_silent2, attempts 2} in 4.034 s; repeat of r2-live: 200, no second forward; hub stopped: 500 'nats: outbound buffer limit exceeded' in 33 ms (the documented first-read 500); after the hub restarts: 200 in 41 ms. The daemon's notify.HTTPPublisher (throwaway test, deleted) against host-b: nil in 8 ms, ErrNotDelivered{receipt_timeout} in 4.002 s, ErrNoHolder",
-      "headSha": "6112adc201ea4b3d9c2e325a54cfd897e79ff470",
-      "negativeControl": "unclaimed role -> 404 {reason unclaimed}; btw payload to a holder that does not advertise btw -> 403 {reason capability, holder ses_silent2}; topic notifications.agent.ses_holder2 -> 400 'cannot publish to agent topics'"
+      "criterion": "(review critical) with the live topics lane on, only a recipient's own receipt through the route confirms an ad-hoc message",
+      "surface": "two real envoy-listener binaries built at e6644f73: host-a with ENVOY_SUBSCRIBE_ALL_TOPICS=1, host-b without, on one nats-server 2.10.29. Session stand-ins register self_subscribed with no port on host-a and receipt a forward the way envoy-client's expectsLaneReceipt does (or never, for the silent one). Driven with curl",
+      "command": "POST http://127.0.0.1:18281/v1/messages/publish {topic: notifications.team.t3, idempotency_key: r3-adhoc}, ses_holder3 confirms and ses_silent3 never does",
+      "observed": "504 {reason not_confirmed, delivered [ses_holder3], undelivered [{ses_silent3, receipt_timeout}]} in 4.036 s (the reviewer's round-2 reproduction: 200 in 0.22 s). The same key again -> 504 naming ses_silent3, with no second forward to ses_holder3. Through host-b (lane off) -> the same 504 in 4.035 s",
+      "headSha": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
+      "negativeControl": "the implementer's: confirmTopicRecipient reading dedupeCache gives 200 after 2.1 s (want 504); the lane-on soak subtest with that read fails assertion 1"
     },
     {
-      "criterion": "The same holds for an ad-hoc topic message sent through /v1/messages/publish to a subscribed session, inside the 4 s window even while the hub is down",
-      "surface": "same rig",
-      "command": "POST http://127.0.0.1:18192/v1/messages/publish {topic: notifications.team.t2}, ses_holder2 (confirms) and ses_silent2 (never confirms) self_subscribed on host-a; then the same with the nats-server stopped",
-      "observed": "hub up: 504 {reason not_confirmed, delivered [ses_holder2], undelivered [{ses_silent2, receipt_timeout}]} in 4.045 s; a topic with no recipient: 200 in 34 ms; hub stopped: 504 {reason not_confirmed, delivered [], undelivered [ses_holder2 delivery_failed, ses_silent2 delivery_failed]} in 4.037 s (round 1: 500 after 5.04 s)",
-      "headSha": "6112adc201ea4b3d9c2e325a54cfd897e79ff470",
-      "negativeControl": "the red test TestPublishRouteAnswersAnAdHocTopicInsideItsWindowWhileTheServerIsDown failed 4 of 4 at 5f593338 (500 after 5.00 s) and passes 3 of 3 here"
+      "criterion": "A role message through the sending listener is received by the holder or its sender's call errs; the role lane itself is unchanged",
+      "surface": "same rig, and a raw core-NATS publish on notifications.role.<role> standing in for a publisher that bypasses the route",
+      "command": "POST /v1/messages/publish {topic: notifications.role.t3-live|t3-silent|t3-none} through host-a. Then an ad-hoc publish with dedupe_key dk-shared followed by a role publish to t3-silent with the same dedupe_key. Then raw publish of an envelope on notifications.role.t3-live and notifications.role.t3-silent",
+      "observed": "holder confirms -> 200 with holder in 39 ms, and a repeat -> 200 without a second forward. Silent holder -> 504 receipt_timeout, attempts 2. Shared dedupe_key -> the role send was still forwarded twice and answered 504 receipt_timeout in 4.036 s, not 200 dedupe. Raw role-lane publish -> both listeners' lanes forwarded it to ses_holder3 ('listener role forwarded', delivered). For ses_silent3 both logged 'listener role receipt timed out' and published delivery exceptions on notifications.envoy.exceptions.notifications.role.t3-silent, as before this change",
+      "headSha": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
+      "negativeControl": "unclaimed role -> 404 {reason unclaimed}; btw payload to a holder that does not advertise btw -> 403 {reason capability, holder ses_silent3}"
     },
     {
-      "criterion": "Messages sent every 250 ms for at least 60 s arrive or err while the holder's server is lame-ducked and force-killed (role, ad-hoc, captured); every repeat carries its first id",
+      "criterion": "(review important) a topic the route could not publish says so, inside the window",
+      "surface": "same rig with the nats-server stopped",
+      "command": "POST /v1/messages/publish {topic: notifications.team.t3} through host-a (2 recipients) and {topic: notifications.team.nobody} through host-b (no recipient)",
+      "observed": "both 504 {reason publish_failed, error 'notifications.team.<t> was not published within 4s: bus: waiting for NATS to reconnect: context deadline exceeded; no session was sent it'} in 4.04 s (round 2: 504 not_confirmed '0 of 0 sessions … did not confirm'). Role in the same state -> 500 in 43 ms, which the docs list for a read error before the deadline",
+      "headSha": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
+      "negativeControl": "the round-1 red test TestPublishRouteAnswersAnAdHocTopicInsideItsWindowWhileTheServerIsDown failed 4 of 4 at 5f593338 (500 after 5.0 s)"
+    },
+    {
+      "criterion": "Messages sent every 250 ms for at least 60 s arrive or err while the holder's server is lame-ducked and force-killed (role, ad-hoc, captured), with the live topics lane off and on",
       "surface": "the real envoy-listener binary, two processes over a three-server in-process nats-server cluster (TestServerChange)",
-      "command": "cd packages/envoy && go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener",
-      "observed": "--- PASS: TestServerChange (70.93s); sent for 1m2.03s with 8 disruptions; role 249/249 live, ad-hoc 249/249 live, captured 182 live + 67 only by replay, errored 0",
-      "headSha": "6112adc201ea4b3d9c2e325a54cfd897e79ff470",
-      "negativeControl": "the same test on base 3ea454d3 (round 1, file unchanged since) -> --- FAIL assertion 1: role messages 26, 48, 81, 102, 103, 139, 160, 205, 206, 229 and 67 ad-hoc messages answered 200 and never received"
+      "command": "cd packages/envoy && go test -tags serverchange -count=1 -timeout 20m -v -run TestServerChange ./cmd/listener",
+      "observed": "--- PASS (143.47s): lane off, role 245/245, ad-hoc 245/245, captured 179 live + 66 by replay, errored 0; lane on, role 249/249, ad-hoc 249/249, captured 184 live + 65 by replay, errored 0",
+      "headSha": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
+      "negativeControl": "the same test on base 3ea454d3 (round 1, independent run) -> --- FAIL assertion 1: 10 role and 67 ad-hoc messages answered 200 and never received"
+    },
+    {
+      "criterion": "A real Oh My Pi session holding a role confirms the route's forward",
+      "surface": "a real omp 18.12.2 session in --mode rpc that loads the released pi-envoy (/opt/legion/pi-envoy), isolated agent dir and file session storage, LEGION_* unset, ENVOY_URL and ENVOY_NATS_URL set to the local rig",
+      "command": "POST /v1/roles/set {session_id: 01a17c8b-…, role: t3-real}, then POST /v1/messages/publish {topic: notifications.role.t3-real} through host-a and host-b, and an ad-hoc topic registered for it alone",
+      "observed": "200 with holder 01a17c8b-2d2b-75fb-a1ab-8186d57b2cff in 58 ms and 50 ms; ad-hoc 200 in 50 ms. The session's RPC stream shows each message as an envoy-message turn (ids 507d5a46…, 3289aab3…, d31868e9…)",
+      "headSha": "e6644f73f2f34dd06253c4ea3ab24186a8ebc2aa",
+      "negativeControl": "a stand-in that never receipts the same forward -> 504 receipt_timeout in 4.04 s"
     }
   ]
 }
