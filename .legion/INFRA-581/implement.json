@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-581",
+  "completed": "2026-10-27T13:30:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2403",
+  "proof": [
+    {
+      "criterion": "A1: a comment holding each input draws on the Conversation tab with no main-thread gap of 1,000 ms or more, and a document write of each input through the API is refused with a reason in under 1,000 ms",
+      "surface": "Dispatch Conversation tab in Chromium (chromium and iphone projects) against the real Go Dispatch server and Postgres 17 + pgvector; the API's document write",
+      "command": "LEGION_ROLE=implementer source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts nested-directive.e2e.ts unknown-directive.e2e.ts typed-blocks.e2e.ts --project=chromium --project=iphone --reporter=json",
+      "observed": "18 passed, 0 unexpected; longest main-thread gap until the comment card drew: unclosed input 509 ms (chromium) / 526 ms (iphone), closed input 454 / 409 ms; no data-markdown-fallback; both inputs as a document write refused 400 INVALID_MARKDOWN in under 1 s. Editor surfaces at the same head (document, doc, editor-paste, ask-blocks, block-references, chromium): 170 passed, 1 skipped, 0 unexpected",
+      "headSha": "35423b3dd5f08bd119a01f0a1efc3aba2a254440",
+      "negativeControl": "The same rows at the base code (c9472cff, red tests on bf0a96bf): unclosed input 'Test timeout of 30000ms exceeded' on both projects; closed input 'the main thread ran no task for 8049 ms' (chromium) / 7317 ms (iphone); 4 unexpected"
+    },
+    {
+      "criterion": "A1 Go half and A2: ParseForWrite refuses both inputs in under 1 s CPU; 32 nested typed blocks parse, a 33rd is refused at its line; the browser draws a 33rd opener as text and the default mode refuses it",
+      "surface": "pmdoc.ParseForWrite (the API's document write path) and the headless engine the Conversation tab draws with",
+      "command": "cd packages/envoy && go test -count=1 -skip Linear ./internal/dispatch/pmdoc/ ./internal/dispatch/docs/ ./internal/dispatch/api/; cd packages/proof-editor && bun run test",
+      "observed": "pmdoc, docs, api ok; proof-editor 136 pass including tests/nested-directive.test.ts 8 pass (cost rows 0.2-0.65 s against a 5 s lock)",
+      "headSha": "35423b3dd5f08bd119a01f0a1efc3aba2a254440",
+      "negativeControl": "At the base the 33-deep Go row fails ('33 nested callouts: <nil>, want ErrSchema') and the proof-editor rows fail: 33 nest (Expected 32, Received 33), no default-mode refusal, cost rows 61.8 s / 60.9 s / 15.9 s / 15.5 s"
+    },
+    {
+      "criterion": "A3: both parsers read the committed corpus as before: every fixture byte-identical except frontmatter-opener-unclosed, splices.json and typed-fence-lines.json unchanged, differential gates clear",
+      "surface": "the server's and the browser editor's reading of documents",
+      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bun run check; bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base main",
+      "observed": "fixtures up to date (88 documents, 43 splice cases); versus base only frontmatter-opener-unclosed changed plus 4 new corpus fixtures; differential every gate 0, PASS (head stores 88/88, base 87)",
+      "headSha": "35423b3dd5f08bd119a01f0a1efc3aba2a254440",
+      "negativeControl": "With the fence line-ending correction disabled, bun run gen also changes browser-list-spacing, callout and quoted-items-holding-a-closed-callout"
+    }
+  ],
+  "filesChanged": [
+    "packages/proof-editor/src/directive-container.ts (new, legion-owned construct)",
+    "packages/proof-editor/src/lib-remark-directive-plugin.ts",
+    "packages/proof-editor/src/block-schema.ts",
+    "packages/proof-editor/src/read-only-directives.ts (comment)",
+    "packages/proof-editor/package.json, bun.lock, biome.json",
+    "packages/proof-editor/AGENTS.md",
+    "packages/proof-editor/tests/nested-directive.test.ts (new)",
+    "packages/dispatch/e2e/nested-directive.e2e.ts (new)",
+    "packages/dispatch/web/src/features/refs/markdown-engine.ts (comment)",
+    "packages/envoy/internal/dispatch/pmdoc/{nesting.go,parse.go,lines.go,render.go}",
+    "packages/envoy/internal/dispatch/pmdoc/{typed_nesting_test.go (new),nesting_test.go,escape_test.go,fixtures_test.go}",
+    "packages/envoy/internal/dispatch/pmdoc/testdata/{fixtures.json,corpus/*.md (4 new),corpus-errors/typed-blocks-nested-33-deep.md}",
+    "packages/envoy/cmd/dispatch/README.md, packages/envoy/CHANGELOG.md, packages/envoy/AGENTS.md"
+  ],
+  "trickyParts": [
+    "The construct keeps the old flow construct's reading through a resolveAll on the document construct: it rewrites the lineEndingBlank after each fence to lineEnding in each child flow's events before subtokenize, and moves container exit events so trailing blank lines and lazy lines attach as they did; a lazyContentEnd construct registered under the null code ends a block on a line that does not reach it, as the old sub-document did.",
+    "The 32 bound counts only directive containers open around the line, recorded by continuations; a start only reads the record, so micromark's effects.check cannot fool it.",
+    "The renderer now writes a leading rule as *** before a top-level typed block, since a --- there would read back as an unclosed front-matter opener that turns the typed block into text.",
+    "nesting_test.go's 100-block 'callouts' row became 'callouts inside quotes' (68/69 quotes around 32 callouts), since 100 nested callouts now hit the 32 bound first."
+  ],
+  "deviations": [
+    "Base e2e negative control: the first input fails by Playwright's 30 s test timeout, not the 15 s expect timeout the plan predicted (the parse holds the main thread longer than the test).",
+    "Residual reading difference found by fuzzing old vs new (2 of 120,000 random documents): a footnote definition inside a ::: block now also defines its footnote for a call earlier in the text; recorded in the CHANGELOG. No committed fixture or differential corpus document carries it.",
+    "The default-mode refusal of a bounded opener checks paragraph lines, like the existing rule: a bounded opener that becomes a setext heading is not refused in the browser (Go refuses that write)."
+  ],
+  "openQuestions": []
+}
