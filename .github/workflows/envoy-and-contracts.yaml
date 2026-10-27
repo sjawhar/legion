@@ -159,6 +159,7 @@ jobs:
       dispatch: ${{ steps.filter.outputs.dispatch }}
       dispatch_memory: ${{ steps.filter.outputs.dispatch_memory }}
       dispatch_multiprocess: ${{ steps.filter.outputs.dispatch_multiprocess }}
+      dispatch_two_builds: ${{ steps.filter.outputs.dispatch_two_builds }}
       broker_multiprocess: ${{ steps.filter.outputs.broker_multiprocess }}
       envoy_go_race: ${{ steps.filter.outputs.envoy_go_race }}
       envoy_infra_go: ${{ steps.filter.outputs.envoy_infra_go }}
@@ -172,12 +173,12 @@ jobs:
           # Each filter names everything its job's checks read: the package and what its tests
           # and typecheck read outside it, the composite actions the job installs its tools
           # through, and, for a Go build in workspace mode, every module go.work binds, whose
-          # go.mod moves the versions the build compiles. Each of the five per-job filters
-          # (dispatch_memory, dispatch_multiprocess, broker_multiprocess, envoy_go_race,
-          # envoy_infra_go) names the packages `go list -deps -test` lists for the job's command,
-          # with its build tags, the packages of each binary its tests build, and the files its
-          # tests read outside them. Any change that makes the job's command, or a binary its tests
-          # build, compile a new package or read a new file - production code included, not only a
+          # go.mod moves the versions the build compiles. Each of the six per-job filters
+          # (dispatch_memory, dispatch_multiprocess, dispatch_two_builds, broker_multiprocess,
+          # envoy_go_race, envoy_infra_go) names the packages `go list -deps -test` lists for the
+          # job's command, with its build tags, the packages of each binary its tests build, and the
+          # files its tests read outside them. Any change that makes the job's command, or a binary
+          # its tests build, compile a new package or read a new file - production code included, not only a
           # test - adds that package or file to the job's filter, since the pull request that adds
           # the import still runs the job and nothing else reports the filter falling behind. The
           # first keys, each defined with an `&anchor`, are no job's gate: each is a group written
@@ -350,6 +351,19 @@ jobs:
               - *go_workspace
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
+            # `go test -tags twobuild ./cmd/dispatch`, as dispatch_multiprocess plus what the job
+            # runs beside it: the current build's CLI (`bun packages/envoy-client/bin/dispatch.ts`,
+            # with the contracts it imports, after a frozen Bun install) and the script that builds
+            # the previous build.
+            dispatch_two_builds:
+              - '.github/workflows/envoy-and-contracts.yaml'
+              - *go_workspace
+              - *dispatch_command_tests
+              - 'packages/envoy/internal/testnats/*'
+              - 'packages/envoy/scripts/build-dispatch-build.sh'
+              - 'packages/envoy-client/**'
+              - 'packages/contracts/**'
+              - *bun_install
             # `go test -tags multiprocess ./cmd/broker`.
             broker_multiprocess:
               - '.github/workflows/envoy-and-contracts.yaml'
@@ -1373,14 +1387,14 @@ jobs:
   # build-dispatch-build.sh resolves it, which needs the whole history and the tags (fetch-depth 0),
   # and builds it from `git archive`. The build is cached by the commit and the script that built
   # it, so a pull request builds each release once; its src/ is left out of the cache, since the test
-  # reads only the parts the script copies out of it. The manual run always runs this job, whatever
-  # the path filters say, since it is how a chosen previous build is tested. Each row's NATS runs in
-  # its own test process (internal/testnats), so the job needs no container runtime of its own.
+  # reads only the parts the script copies out of it. It runs when a file its `dispatch_two_builds`
+  # filter names changes, and on every manual run, whatever the path filters say, since that is how
+  # a chosen previous build is tested. Each row's NATS runs in its own test process
+  # (internal/testnats), so the job needs no container runtime of its own.
   dispatch-two-builds:
     needs: changes
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      needs.changes.outputs.envoy == 'true' || needs.changes.outputs.dispatch == 'true'
+      github.event_name == 'workflow_dispatch' || needs.changes.outputs.dispatch_two_builds == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
