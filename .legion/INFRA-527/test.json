@@ -2,45 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-527",
-  "completed": "2026-10-27T05:27:00Z",
-  "round": 2,
-  "head": "146a10cdeffd229402365f01d5f9ca963e3f92d4",
+  "completed": "2026-10-27T07:00:00Z",
+  "round": 3,
+  "head": "5e832b77ad6174d51302a6790697f054f869b7b4",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's round-2 command at 146a10cdeffd with the tester lane's ports and database: `cd packages/dispatch && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts e2e/theme.e2e.ts e2e/held-sends.e2e.ts --project=chromium --project=iphone )` → 26 passed, 2 skipped. Re-ran its forced-colors negative control myself (block deleted): 3 of 4 rows failed in the first run, and chromium dark passed, so its claim that all four rows failed did not reproduce in that run; chromium dark then failed 3 of 3 repeats."
+    "how": "Re-ran the implementer's round-3 command at 5e832b77ad61 with the tester lane's ports and database: `cd packages/dispatch && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts --repeat-each=5 --project=chromium --project=iphone )` → 50 passed. Re-ran its negative control (forced-colors block cut, 3 repeats instead of 5) → 12 failed of 12, Received 0."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 1, important: under forced colors (Windows High Contrast) a ticked and an unticked box look different",
-      "surface": "Issue page, Conversation tab, expanded thread, emulateMedia({ colorScheme, forcedColors: 'active' }); Chromium desktop and Chromium as iPhone 13; real Go server, Postgres 17 + pgvector",
-      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts e2e/theme.e2e.ts e2e/held-sends.e2e.ts --project=chromium --project=iphone )",
-      "observed": "The four forced-colors rows passed. A throwaway probe read the computed style: appearance auto and no mask under forced colors. The pixels showed the Windows High Contrast palettes: disabled ticked box #600000 on white in light, #3FF23F on black in dark, unticked box an empty outline.",
-      "headSha": "146a10cdeffd229402365f01d5f9ca963e3f92d4",
-      "negativeControl": "The `@media (forced-colors: active)` block was deleted from web/src/styles.css (restored byte for byte afterwards). Chromium light failed with Received 0 (needs >=19.6), and iphone light and dark with Received 56 (needs >=176.4). Chromium dark passed in that first run, though both boxes were drawn as empty white outlines (dispatch://INFRA-527/artifact/tester-r2-nofix-chromium-dark-active-png); it then failed 3 of 3 repeats with Received 0."
+      "criterion": "Review round 2, important: the forced-colors rows fail every time without the fix and pass every time with it, wherever each box lands",
+      "surface": "Issue page, Conversation tab, expanded thread, light/dark and forced colors light/dark; Chromium desktop (DPR 1), Chromium HiDPI desktop (DPR 2), Chromium as iPhone 13 (DPR 3); real Go server, Postgres 17 + pgvector",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts --repeat-each=5 --project=chromium --project=iphone ); plus a throwaway config (deleted) spreading the base config with a Desktop Chrome HiDPI project, `bunx playwright test --config e2e/zz-tester.config.ts e2e/task-items.e2e.ts --repeat-each=2` after `bun run build:web`",
+      "observed": "chromium + iphone: 50 passed. Chromium HiDPI: 10 of 10 passed (A1 light/dark, both forced-colors rows, decision reply, twice each).",
+      "headSha": "5e832b77ad6174d51302a6790697f054f869b7b4",
+      "negativeControl": "`@media (forced-colors: active)` block cut from web/src/styles.css: `-g \"forced colors\" --repeat-each=3` → 12 failed of 12, each at \"share of the ticked box's middle that is ink\", Received 0. The ticked box's fill rule (`.dispatch-markdown [data-markdown-task-checkbox]:checked`) cut instead: the normal light/dark rows → 4 failed of 4 in chromium and iphone, Received 0. That build also failed those rows 8 of 8 in Firefox and Chromium HiDPI. styles.css restored after each (sha256 1bd98e5a824656903ec327c51cde82df08fb3a0d92c74f3cfcf7467b0d79398e both before and after)."
     },
     {
-      "criterion": "Review round 1, important: no hand-written colour in styles.css skips the palette pin; the masked tick still reads",
-      "surface": "Issue page, Conversation tab, expanded thread, light and dark; Chromium, iPhone 13, Firefox desktop, WebKit desktop and WebKit iPhone 13",
-      "command": "the round-2 command above for Chromium/iPhone; for Firefox and WebKit, `bunx playwright test --config e2e/zz-tester.config.ts e2e/task-items.e2e.ts`. That throwaway config (deleted) spread the base config with Desktop Firefox, Desktop Safari and iPhone 13 WebKit projects. WebKit was a private copy of the registry's webkit-2359 whose wrapper found Debian trixie libraries (gtk4, gstreamer, Mesa EGL) unpacked under $TMPDIR, also deleted.",
-      "observed": "A1 light/dark and the decision-reply row passed in Firefox and desktop WebKit, including the >=10% strong-pixel look-different check. In WebKit iPhone every box assertion passed; only the row's final thread screenshot stopped, because my project was not named `iphone` and the spec's Thread-dialog locator matched two elements. Screenshots show the tick cut through the blue fill in WebKit (dispatch://INFRA-527/artifact/tester-r2-webkit-iphone-light-none-png, dispatch://INFRA-527/artifact/tester-r2-webkit-dark-none-png) and Firefox (dispatch://INFRA-527/artifact/tester-r2-firefox-light-none-png). `grep -n '%23[0-9a-fA-F]\\{3,6\\}' web/src/styles.css` printed nothing.",
-      "headSha": "146a10cdeffd229402365f01d5f9ca963e3f92d4",
-      "negativeControl": "Fork-point run (round 1): task-items rows failed at toHaveCount(2), Received 0. At 89bf76b8, the head reviewed in round 1, styles.css held %23ffffff and %230f172b (review.json finding 2)."
-    },
-    {
-      "criterion": "A1 (spec), A2 and A4 at the new head",
-      "surface": "Issue page, Conversation tab and a decision block's reply thread; Chromium and iPhone 13",
-      "command": "the round-2 command above",
-      "observed": "A1 light/dark and A2 passed in chromium and iphone: 2 disabled checkboxes, ticked/unticked as source, on the first line, list-style none; a click changes nothing.",
-      "headSha": "146a10cdeffd229402365f01d5f9ca963e3f92d4",
-      "negativeControl": "Fork point 7f7edb8d (round 1, my own run): 6 failed at toHaveCount(2), Received: 0."
+      "criterion": "A1 (spec), A2 and A4 at the new head: ticked and unticked boxes, read-only, the ticked one filled and the unticked one empty, in light and dark",
+      "surface": "Issue page, Conversation tab and a decision block's reply thread; Chromium, iPhone 13, Chromium HiDPI, Firefox desktop",
+      "command": "the two commands above; Firefox through the same throwaway config with a Desktop Firefox project",
+      "observed": "All A1/A2 rows passed in Chromium, iPhone 13 and HiDPI, and in Firefox the A1 light/dark and A2 rows passed in both repeats, under the new ink oracle (>=25% of the ticked box's middle is ink, <=5% of the unticked one's).",
+      "headSha": "5e832b77ad6174d51302a6790697f054f869b7b4",
+      "negativeControl": "Fork point 7f7edb8d (round 1, my own run): 6 failed at toHaveCount(2), Received 0; and the fill-rule cut above."
     }
   ],
   "observations": [
-    "Firefox and WebKit under emulated forced colors draw the disabled native checked box light: Firefox uses fill rgb(199,199,206) with a white tick on white, the same in light and dark (dispatch://INFRA-527/artifact/tester-r2-firefox-light-active-png). It is visibly filled against an empty outline, but below the spec's 128-per-channel bar, so the forced-colors rows read 0 strong pixels in those engines (not in CI's matrix for this spec). Chromium's emulation uses the Windows High Contrast palettes and passes. [inference] Real Firefox on Windows High Contrast uses the theme's GrayText, which those palettes make high contrast, and real Safari has no forced-colors mode; WCAG 1.4.11 exempts inactive (disabled) components. Not recorded as a failure.",
-    "expectBoxesLookDifferent compares two element screenshots taken at different positions. In the run with the forced-colors block deleted, the chromium-dark row passed once in 4 runs although both boxes were drawn alike. The other three forced-colors rows caught the regression in every run, so the lock holds, but that one row's oracle is not deterministic on a broken build.",
-    "Round-1 notes stand: the inline variant and MarkdownPreview draw no box (plan D5), and the implementer's open question on the collapsed preview is with the INFRA-138 architect."
+    "Firefox under emulated forced colors: both forced-colors rows fail in each run (Received 0), as in round 2. Firefox's emulation draws the disabled native checked box rgb(199,199,206) on white with a faint tick, which is below the oracle's 96-per-channel ink bar. Chromium's emulation uses the Windows High Contrast palettes and passes. Firefox is not in CI's matrix for this spec. [inference] Real Firefox on Windows High Contrast uses the theme's GrayText; WCAG 1.4.11 exempts inactive components. Not recorded as a failure.",
+    "Round 3 changed only packages/dispatch/e2e/task-items.e2e.ts (5e832b77); styles.css, task-checkboxes.ts and MarkdownBody.tsx are unchanged since 146a10cd, so round 2's WebKit run of the CSS (masked tick visible in desktop and iPhone WebKit) still describes the product.",
+    "The round-2 note on expectBoxesLookDifferent is resolved: the helper is replaced, and the negative control failed 12 of 12 where the old one passed once in 4."
   ],
-  "ci": "Read on GitHub at 146a10cdeffd at 2026-10-27T05:25Z: build, changes, lint, test, typecheck and pr-title check runs queued (one earlier pr-title cancelled); the Tests, Docs, Legion Envoy and Contracts and PR Title workflow runs queued. Not waited for. a9470827 (handoff-only, skip-checks) carries no runs."
+  "ci": "Read on GitHub at 5e832b77ad61 at 2026-10-27T06:58Z: build, changes, lint, test, typecheck and pr-title check runs queued (one earlier pr-title cancelled); not waited for. At 146a10cdeffd (same product code) lint, typecheck and test completed success; dispatch cancelled. 32ccda78 is handoff-only (skip-checks)."
 }
