@@ -61,18 +61,6 @@ func newDiscovery[T any](issuer string, read func(ctx context.Context) (T, error
 	return &discovery[T]{issuer: issuer, read: read, now: time.Now}
 }
 
-// get is the discovered result, discovering it first when no attempt has succeeded yet.
-func (d *discovery[T]) get(ctx context.Context) (T, error) {
-	d.mu.Lock()
-	if d.discovered {
-		value := d.value
-		d.mu.Unlock()
-		return value, nil
-	}
-	d.mu.Unlock()
-	return d.discover(ctx)
-}
-
 // done reports whether an attempt has succeeded.
 func (d *discovery[T]) done() bool {
 	d.mu.Lock()
@@ -187,7 +175,7 @@ func NewLazyVerifier(issuer, audience string) *LazyVerifier {
 // Verify is Verifier.Verify once the issuer is discovered, discovering it first when it is not
 // and an attempt is due; before that every error matches ErrIssuerUnavailable.
 func (v *LazyVerifier) Verify(ctx context.Context, raw string) (Claims, error) {
-	verifier, err := v.discovery.get(ctx)
+	verifier, err := v.discovery.discover(ctx)
 	if err != nil {
 		return Claims{}, err
 	}

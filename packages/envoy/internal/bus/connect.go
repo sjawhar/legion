@@ -163,16 +163,22 @@ func authorizationRefusal(err error) bool {
 }
 
 // logRefusal writes the line a refused credential is reported with, naming the servers as the
-// reconnect failure's line does: without their userinfo.
+// reconnect failure's line does (serverList).
 func logRefusal(name string, urls []string, err error) {
+	slog.Error("envoy nats authorization refused",
+		slog.String("name", name),
+		slog.String("servers", serverList(urls)),
+		slog.String("error", err.Error()))
+}
+
+// serverList is urls as a log line names them: comma-separated, each without its userinfo
+// (natsURLWithoutUserinfo).
+func serverList(urls []string) string {
 	servers := make([]string, len(urls))
 	for i, raw := range urls {
 		servers[i] = natsURLWithoutUserinfo(raw)
 	}
-	slog.Error("envoy nats authorization refused",
-		slog.String("name", name),
-		slog.String("servers", strings.Join(servers, ",")),
-		slog.String("error", err.Error()))
+	return strings.Join(servers, ",")
 }
 
 // options starts from nats.GetDefaultOptions: Connect fills in only some zero fields, and the
@@ -187,14 +193,11 @@ func logRefusal(name string, urls []string, err error) {
 // connection reports on its own and then hands it to asyncErrCB, where the client reads the
 // server's refusal of its core subscription (onAsyncError).
 func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func(), asyncErrCB func(*nats.Conn, error), now func() time.Time) nats.Options {
-	if now == nil {
-		now = time.Now
-	}
 	// The throttle is built here, one per call, so it is per connection and has its own mutex:
 	// options is rebuilt for every dial attempt in connectWithContext's loop and only the attempt
 	// that connects leaves its closures on the *nats.Conn, so one live connection has exactly one
 	// throttle and a second client's first failure is never swallowed by this one's minute.
-	throttle := &reconnectErrThrottle{now: now}
+	throttle := newReconnectErrThrottle(now)
 	opts := nats.GetDefaultOptions()
 	opts.Servers = urls
 	opts.Name = name
@@ -230,13 +233,9 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 		if err != nil {
 			text = err.Error()
 		}
-		servers := make([]string, len(urls))
-		for i, raw := range urls {
-			servers[i] = natsURLWithoutUserinfo(raw)
-		}
 		slog.Warn("envoy nats reconnect attempt failed",
 			slog.String("name", name),
-			slog.String("servers", strings.Join(servers, ",")),
+			slog.String("servers", serverList(urls)),
 			slog.String("error", text))
 	}
 	opts.ReconnectedCB = func(nc *nats.Conn) {

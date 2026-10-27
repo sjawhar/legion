@@ -43,8 +43,8 @@ const Source = "dispatch"
 // Payload is a server.started envelope's payload, mirrored by DispatchServerStartedPayload in
 // packages/contracts/src/dispatch-api.ts: the commit every live server process serves, and when
 // the fleet was found serving it (the announcement's announced_at, on the database's clock), in
-// UTC to the second. The time keeps the name started_at from the per-process start this replaced,
-// since the daemon and the TypeScript schema read that name.
+// UTC to the second. The time is named started_at because the daemon and the TypeScript schema read
+// that name.
 type Payload struct {
 	Commit    string    `json:"commit"`
 	StartedAt time.Time `json:"started_at"`
@@ -118,9 +118,9 @@ func (a *Announcer) FleetCommit() *string {
 }
 
 // Run passes at once and then every Interval until ctx ends. Each pass announces the fleet's build
-// when the live processes agree on one the latest announcement does not name (announce), then
-// publishes every announcement not yet published (publish). A pass that fails is logged and the
-// next one tries again.
+// when the live processes agree on one the latest announcement does not name (announce), then,
+// when any announcement is not yet published, publishes every such one (publish). A pass that
+// fails is logged and the next one tries again.
 func (a *Announcer) Run(ctx context.Context) {
 	ticker := time.NewTicker(Interval)
 	defer ticker.Stop()
@@ -136,8 +136,14 @@ func (a *Announcer) Run(ctx context.Context) {
 
 // pass is one pass of Run.
 func (a *Announcer) pass(ctx context.Context) {
-	if err := a.announce(ctx); err != nil && ctx.Err() == nil {
+	unpublished, err := a.announce(ctx)
+	if err != nil && ctx.Err() == nil {
 		slog.Warn("dispatch: announce the server fleet's build", "error", err)
+	}
+	// A fleet with nothing to publish costs no publishing transaction each Interval. A pass whose
+	// announce failed cannot tell, so it tries.
+	if !unpublished && err == nil {
+		return
 	}
 	if err := a.publish(ctx); err != nil && ctx.Err() == nil {
 		slog.Warn("dispatch: publish the server fleet's build; the next pass retries", "error", err)
@@ -149,56 +155,59 @@ func (a *Announcer) pass(ctx context.Context) {
 // builds is mid-roll, a fleet any of whose processes carries no stamp has no build to name, and a
 // fleet still on the announced build has nothing new to say. A rollback to a build announced
 // before is a change too, and is announced again under a new seq. Without the lock it only reads,
-// since the holder decides. FleetCommit is updated once the transaction has committed.
-func (a *Announcer) announce(ctx context.Context) error {
+// since the holder decides. FleetCommit is updated once the transaction has committed. It reports
+// whether an announcement awaits publishing: one this pass inserted, or one its read found
+// unpublished, which a pass that missed the lock learns as well.
+func (a *Announcer) announce(ctx context.Context) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, statementTimeout)
 	defer cancel()
 	tx, err := a.deps.Pool.Begin(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// A no-op once the transaction has committed.
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	var locked bool
 	if err := tx.QueryRow(ctx, `select pg_try_advisory_xact_lock($1)`, announceLock).Scan(&locked); err != nil {
-		return err
+		return false, err
 	}
-	latest, err := latestCommit(ctx, tx)
+	latest, unpublished, err := readAnnouncements(ctx, tx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if locked {
 		live, err := processes.Live(ctx, tx)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if commit, agreed := servedByEvery(live); agreed && (latest == nil || *latest != commit) {
 			var seq int64
 			if err := tx.QueryRow(ctx, `insert into server_build_announcements (commit) values ($1) returning seq`, commit).Scan(&seq); err != nil {
-				return fmt.Errorf("insert the announcement of %s: %w", commit, err)
+				return false, fmt.Errorf("insert the announcement of %s: %w", commit, err)
 			}
 			slog.Info("dispatch: every live server process serves one build; announced it", "commit", commit, "seq", seq, "processes", len(live))
-			latest = &commit
+			latest, unpublished = &commit, true
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return err
+		return false, err
 	}
 	a.fleet.Store(latest)
-	return nil
+	return unpublished, nil
 }
 
-// latestCommit is the commit of the announcement with the highest seq, nil when there is none.
-func latestCommit(ctx context.Context, tx pgx.Tx) (*string, error) {
-	var commit string
-	err := tx.QueryRow(ctx, `select commit from server_build_announcements order by seq desc limit 1`).Scan(&commit)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
+// readAnnouncements reads, in one statement, the commit of the announcement with the highest seq
+// (nil when there is none) and whether any announcement is unpublished.
+func readAnnouncements(ctx context.Context, tx pgx.Tx) (*string, bool, error) {
+	var latest *string
+	var unpublished bool
+	err := tx.QueryRow(ctx, `
+		select (select commit from server_build_announcements order by seq desc limit 1),
+			exists (select 1 from server_build_announcements where published_at is null)`).Scan(&latest, &unpublished)
 	if err != nil {
-		return nil, fmt.Errorf("read the latest announcement: %w", err)
+		return nil, false, fmt.Errorf("read the announcements: %w", err)
 	}
-	return &commit, nil
+	return latest, unpublished, nil
 }
 
 // servedByEvery is the commit every live process serves, and whether there is one: at least one

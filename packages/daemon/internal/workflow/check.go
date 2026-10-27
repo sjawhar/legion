@@ -28,9 +28,8 @@ const CheckLookBound = 2 * time.Hour
 // check task tells the implementer woke it. A deploy run is a configured deploy workflow's job
 // whose named step succeeded after the merge (deployRunCompleted, then the check_compare row's
 // GitHub read). A Dispatch start is Dispatch's server.started, which announces the build every
-// Dispatch server process serves (intake.ServerStarted); the cause keeps the name `dispatch start`
-// from when each process announced its own start, since check records and the daemon's state
-// API carry it.
+// Dispatch server process serves (intake.ServerStarted); the cause is named `dispatch start`
+// because check records and the daemon's state API carry that name.
 const (
 	wakeMerge         = "merge"
 	wakeDeployed      = "issue.deployed"

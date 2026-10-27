@@ -1879,8 +1879,8 @@ export const DISPATCH_SERVER_STARTED_SUBJECT = "notifications.dispatch.server.st
 /**
  * The payload of a `server.started` envelope: the build commit every live Dispatch server process
  * serves (a fleet any of whose processes carries no stamped commit is never announced) and when
- * the fleet was found serving it, by the database's clock, in UTC. The field keeps the name
- * `started_at` from when each process announced its own start. The Legion daemon compares the
+ * the fleet was found serving it, by the database's clock, in UTC. The field is named `started_at`
+ * because the Go writer and the Legion daemon carry that name. The Legion daemon compares the
  * commit with the merges of its open production checks. Strict: the Go writer emits exactly these
  * two fields.
  */

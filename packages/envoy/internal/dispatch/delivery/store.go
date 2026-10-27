@@ -123,7 +123,7 @@ func PutSettings(ctx context.Context, pool *store.Pool, settings DeliverySetting
 // the freshness row look staler than it is.
 func RecordEventAt(ctx context.Context, pool *store.Pool) error {
 	_, err := pool.Exec(ctx, `
-		update delivery_settings set last_event_at = greatest(coalesce(last_event_at, now()), now())
+		update delivery_settings set last_event_at = greatest(last_event_at, now())
 		where singleton
 	`)
 	return err

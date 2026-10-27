@@ -41,9 +41,7 @@ type Session struct {
 // not read yet (Discover's rules bound how often). Until it has been read, AuthURL, Exchange,
 // Refresh and Revoke fail with an error matching ErrIssuerUnavailable.
 type CodeFlow struct {
-	discovery    *discovery[*codeFlowIssuer]
-	clientID     string
-	clientSecret string
+	discovery *discovery[*codeFlowIssuer]
 	// hostedDomain is the Google Workspace domain a domain-mode flow signs people in for; empty in
 	// group mode, a Cognito sign-in pool's.
 	hostedDomain string
@@ -68,8 +66,6 @@ func NewCodeFlow(issuer, clientID, clientSecret, hostedDomain string) *CodeFlow 
 		discovery: newDiscovery(issuer, func(ctx context.Context) (*codeFlowIssuer, error) {
 			return discoverCodeFlow(ctx, issuer, clientID, clientSecret)
 		}),
-		clientID:     clientID,
-		clientSecret: clientSecret,
 		hostedDomain: hostedDomain,
 		// A redirect is answered as it stands: following a 307 or 308 would re-send the form, and
 		// with it a code or a refresh token, to wherever the redirect points.
@@ -133,7 +129,7 @@ func (f *CodeFlow) Run(ctx context.Context) { f.discovery.run(ctx) }
 // domain as hd, a hint for Google's account chooser that the callback does not rely on. It fails
 // with ErrIssuerUnavailable while the issuer is not discovered.
 func (f *CodeFlow) AuthURL(ctx context.Context, redirectURL, state, nonce string) (string, error) {
-	issuer, err := f.discovery.get(ctx)
+	issuer, err := f.discovery.discover(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -151,7 +147,7 @@ func (f *CodeFlow) AuthURL(ctx context.Context, redirectURL, state, nonce string
 // browser to AuthURL bound it to. It fails with ErrIssuerUnavailable while the issuer is not
 // discovered.
 func (f *CodeFlow) Exchange(ctx context.Context, redirectURL, code, nonce string) (Session, error) {
-	issuer, err := f.discovery.get(ctx)
+	issuer, err := f.discovery.discover(ctx)
 	if err != nil {
 		return Session{}, err
 	}
@@ -182,7 +178,7 @@ func (f *CodeFlow) Exchange(ctx context.Context, redirectURL, code, nonce string
 // a timeout, a 5xx or a 429, any other OAuth error (invalid_client among them: the client's own
 // configuration, not the person), or an answer without an ID token that verifies.
 func (f *CodeFlow) Refresh(ctx context.Context, refreshToken string) (Session, error) {
-	issuer, err := f.discovery.get(ctx)
+	issuer, err := f.discovery.discover(ctx)
 	if err != nil {
 		return Session{}, err
 	}
@@ -216,7 +212,7 @@ func grantRefused(err error) bool {
 // included, is an error naming the HTTP status and the OAuth error code the body names, if any;
 // the error never carries the token.
 func (f *CodeFlow) Revoke(ctx context.Context, refreshToken string) error {
-	issuer, err := f.discovery.get(ctx)
+	issuer, err := f.discovery.discover(ctx)
 	if err != nil {
 		return err
 	}
@@ -229,7 +225,7 @@ func (f *CodeFlow) Revoke(ctx context.Context, refreshToken string) error {
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	// The token endpoint's encoding (oauth2's AuthStyleInHeader): RFC 6749 section 2.3.1.
-	request.SetBasicAuth(url.QueryEscape(f.clientID), url.QueryEscape(f.clientSecret))
+	request.SetBasicAuth(url.QueryEscape(issuer.config.ClientID), url.QueryEscape(issuer.config.ClientSecret))
 	response, err := f.http.Do(request)
 	if err != nil {
 		return fmt.Errorf("oidc: revoke: %w", err)
