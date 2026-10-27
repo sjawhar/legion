@@ -2,29 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-612",
-  "completed": "2026-10-27T15:54:32Z",
-  "decision": "approved",
-  "round": 2,
-  "reviewedHead": "7ef428f2c4b1962be47700d1556d4df022b02d3c",
-  "codeHead": "fa623f9a443c",
+  "completed": "2026-10-27T16:39:29Z",
+  "decision": "changes_requested",
+  "round": 3,
+  "reviewedHead": "71ab4dfcbcc213a7c315d2ea2bc13beadd1f925c",
+  "codeHead": "7fd9f9e4e28851e12de41e4ae218bf11f0bc0469",
+  "fingerprint": "6dbea8fa 61437fd9653572b71676d0dc3f37b96b5516ed3497911c4029415c7b21ecd3ad -> 71ab4dfc 22760bf3bd20b11b1467238c1def6941962bba9be2f37d2b8cfd325ca00509b3: changed (forward merge of main 2df3353c, #2388 moved the read-only decision into remarkDecideTypedBlocks), so a new round",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 0,
-  "keyFindings": [],
-  "roundOneThreads": [
-    {"thread": "PRRT_kwDORFy7ds6wucxp", "answer": "verified fixed in fa623f9a: replyUnderDocumentDecision holds the shared setup; assertions unchanged; no context leak", "accepted": true},
-    {"thread": "PRRT_kwDORFy7ds6wucxy", "answer": "verified fixed in fa623f9a: clientAttributes throws on a missing type; unreachable from a body (same case-sensitive match as typedBlockRefusal, empty type names refused by validateBlockSchema)", "accepted": true},
-    {"thread": "PRRT_kwDORFy7ds6wucx6", "answer": "verified fixed in fa623f9a: blank option selected by position, count 2, nth(1) display none", "accepted": true},
-    {"thread": "PRRT_kwDORFy7ds6wucx_", "answer": "verified fixed in fa623f9a: AskBlockStamps private", "accepted": true},
-    {"thread": "PRRT_kwDORFy7ds6wucyE", "answer": "verified fixed in fa623f9a: rationale written once on readOnlyDirective", "accepted": true}
-  ],
-  "declined": [
+  "keyFindings": [
     {
-      "file": "packages/proof-editor/src/read-only-directives.ts:149-152",
-      "reason": "Code-quality round 2: the lookup-and-throw repeats findType (typed-block-commands.ts:38-42). Not a defect: block-schema.ts and typed-block-commands.ts are copied upstream files (packages/proof-editor/AGENTS.md copied-file table and its seventeen edit kinds), so moving findType adds an edit kind to the audit for a one-line find whose throw cannot fire."
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/doc/typed-block-drawing.ts:218",
+      "description": "In the editable document editor the malformed content class hides the empty option that holds the caret, so typed text goes into the question. Reported by the INFRA-138 architect from dispatch://INFRA-624/comment/3cb60eb2-b4c2-4e0c-883d-f9de8cd7e7fa; reproduced at this head: decision a1 'Which one?' with no options, caret after the question, Enter, type '- ' then 'Option A' (chromium, real Dispatch server and Postgres) -> stored 'Which one?Option A\\n\\n- \\n'. The new item is <li><p><br class=ProseMirror-trailingBreak></p></li>, matched by [&_li:has(>p>br:only-child)]:hidden. Control: with the three hiding utilities removed, the item shows (display list-item) and the store is 'Which one?\\n\\n- Option A\\n'. The class must not hide an item that holds the caret, or any item in the editable editor; add a browser test that types '- Option A' into a decision with no options and finds 'Option A' stored as an option, failing at main 2df3353c and passing at head."
     }
   ],
-  "ci": "Required (rulesets): lint, typecheck, test, pr-title. CI head 42915466 (newest pull_request run): lint, typecheck, test success; newest pr-title (run 40526398129) success; build and changes success. Compare 42915466...7ef428f2: handoffsOnly true, 1 file.",
-  "thermonuclear": "Round 2 at 7ef428f2: deep review no finding; code quality one finding, declined above.",
-  "security": "untrusted-input: forged server attributes dropped at packages/proof-editor/src/read-only-directives.ts:174 (clientAttributes :144-157, now throwing on a missing type) after typedBlockRefusal :171; nothing later re-creates them (block-schema.ts:106-121, :167-170). agent-def: the two AGENTS.md edits are file-map descriptions only."
+  "mergeResolution": "Correct: remarkReadOnlyDirectives runs main's remarkDecideTypedBlocks, then dropServerAttributes on every remaining containerDirective; every one left was accepted (decideDirective keeps only accepted blocks as shallow copies), so clientAttributes' throw cannot fire, and the drop is still after the refusal. Deep review probe: forged state=answered reads open in a callout, a drawn unknown block, a list, a quote, a footnote and a drawn outer ask; state=bogus stays fence text.",
+  "ci": "Required (rulesets): lint, typecheck, test, pr-title. CI head 7fd9f9e4 (the merge push): all queued at 16:39Z; not read green. The request for changes does not wait on it.",
+  "thermonuclear": "Round 3 at 71ab4dfc (code 7fd9f9e4): deep review no finding (proof-editor 147 pass, dispatch 119 pass, tsc clean in both, throwaway probe deleted); code quality no finding.",
+  "security": "untrusted-input: forged server attributes are dropped at packages/proof-editor/src/read-only-directives.ts:32-37 (dropServerAttributes, clientAttributes :10-22) after remarkDecideTypedBlocks' accepts check (typedBlockRefusal, :56-59); decideDirective keeps only fresh copies and remarkReadOnlyDirectives is the parse's last plugin, so nothing re-creates them. agent-def: the AGENTS.md edits are file-map descriptions only."
 }
