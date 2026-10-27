@@ -866,6 +866,17 @@ test.skipIf(skip)(
       }
     }
     await session.shows("the start turn's reply", "Start procedure done.");
+    // Oh My Pi focuses only a subagent that has started its run: Enter in the hub before its
+    // first model request reaches a subagent with nothing to show ("cannot be revived"). Its
+    // request carries its assignment and not the start message, and stays held.
+    await session.until("the subagent's first model request", () =>
+      session.turns.some((turn) => {
+        const messages = JSON.stringify(turn.request.body.messages ?? []);
+        return messages.includes("Reply with done.") && !messages.includes(START_MESSAGE_JSON);
+      })
+        ? true
+        : undefined
+    );
 
     session.terminal.write("\x1ba");
     await session.shows("the agent hub with the running subagent", "Agent Hub", "1 running");
