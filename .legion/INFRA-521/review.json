@@ -2,44 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-521",
-  "completed": "2026-10-27T06:50:22Z",
-  "round": 2,
-  "decision": "changes_requested",
-  "reviewedHead": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1 (code); branch head above it carries only .legion/",
+  "completed": "2026-10-27T09:03:57Z",
+  "round": 3,
+  "decision": "approved",
+  "reviewedHead": "96fcf1de75116291e1f8256684d911a88afd231c (code); branch head above it carries only .legion/",
+  "scope": "The architect narrowed this round after the review round cap (INFRA-521 comment, 2026-10-27T06:53Z) to the four round-2 points and the required checks; any other wording point goes to the Fast-follow line.",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/dispatch/AGENTS.md:1361-1362",
-      "description": "The sentence telling authors to keep `!== \"chromium\"` skips gives a false reason. It says such a skip 'says the test is desktop-only by design', but the skips' own reasons are mostly 'the viewport is set here, not by the project' (agents.e2e.ts:762/850/956/1004, which check the phone layout at 390 px in chromium), 'one browser proves …' and 'the recovery does not depend on the layout'. It also says the skip 'keeps it off any other project whose testMatch names its file', but none of the 11 files' skipped tests is selected by another project (webkit-iphone's grep matches no skipped agent-view title; firefox-download-navigation's grep picks only the shell.e2e.ts row that the skip at :117 lets through). What the skip actually does is mark the test for the first exception."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/README.md:177-182, packages/dispatch/e2e/playwright.config.ts:15-18",
-      "description": "Both copies of the selection rule list the tag conditions ('… or say they cover the phone layout') without the exceptions this round added to AGENTS.md, so both now describe agents.e2e.ts:759/847/953/1001 and mention-composer.e2e.ts:443 (titled for the phone, untagged by design) wrongly. The Docs acceptance names README and the config comment. Cut both copies to a pointer to AGENTS.md, so the rule lives in one place."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/AGENTS.md:1320-1324,1352",
-      "description": "'desktop width' and 'phone width' are not defined. keyboard-palette.e2e.ts:1039 sets 1024 px, which the app treats as compact (COMPACT_VIEWPORT_QUERY max-width 1279px) and not phone (PHONE_VIEWPORT_QUERY max-width 767px, web/src/features/shell/useDialog.ts:7,9). Name the threshold. 'When unsure, tag it … an extra phone test costs CI minutes' is false for a test under the third exception, which fails when tagged: say the sentence applies once the exceptions are ruled out."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/e2e/margin-thread-reply.e2e.ts:226",
-      "description": "The comment says the margin is 'the desktop rail on any project'. At 1440 px it is the desktop margin; it becomes the rail only after the test clicks Hide margin (:231)."
-    }
-  ],
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
   "verified": [
-    "Round-1 threads PRRT_kwDORFy7ds6wkFAJ, PRRT_kwDORFy7ds6wkFAM and PRRT_kwDORFy7ds6wkFAR are fixed (6d04381c, 2cd0e103, 0fc4e40a) and accepted.",
-    "thermonuclear-deep-review applied the new rule mechanically to all 663 test calls: every tag agrees with the rule, and no tagged test falls under an exception.",
-    "--list at the head: iphone 223 in 53 files, which is exactly the 223 keep rows of iphone-selection-md v2; every other project lists the same tests as at base 1357b95c.",
-    "issue.e2e.ts:697 under iphone: the app picks its layout by width only (no pointer/hover media queries in web/src), so the desktop steps lay out as they do under chromium and the 390 step adds isMobile; the tester ran it green at 2cd0e103, which has the same specs as the head.",
-    "margin-thread-reply.e2e.ts:227 passing \"chromium\" changes nothing under chromium; no stale testInfo remains; the dead width ternaries are gone.",
-    "Specs at 2cd0e103 and 0fc4e40a are identical (only AGENTS.md and .legion/ differ), so the implementer's and the tester's runs at 2cd0e103 stand for this code."
+    "AGENTS.md:1365-1367: the skip sentence now says a `!== \"chromium\"` skip marks a test one project covers and keeps it out of the tag under the first exception; this matches the skips' own reasons and their run-time effect.",
+    "README.md:177-180 and playwright.config.ts:15-18 point to AGENTS.md 'Phone acceptance' and no longer restate the rule; the config keeps the true reason for the anchors.",
+    "AGENTS.md:1314-1316 defines phone width (< 768 px, PHONE_VIEWPORT_QUERY) and desktop width (>= 768 px, compact included) once; 'When unsure, tag it' now applies only once the exceptions are ruled out.",
+    "margin-thread-reply.e2e.ts:226-227: the comment now says desktop margin, not the sheet (comment only).",
+    "All 8 review threads carry the reviewer's acceptance reply; none stands.",
+    "Required checks at CI head 201f90b9 (code 96fcf1de plus .legion/ only; compare to 8ee9227e handoffsOnly true, 1 file): lint, typecheck, test (Tests run 40464436139) and pr-title (run 40464770262) completed success."
   ],
-  "notDemanded": "Quality reviewer's suggestion to replace the third exception by giving mention-composer.e2e.ts:443 its own start width and tagging it: the rule as written gives the correct selection, so this is a coverage choice for the implementer, not a finding.",
-  "ci": "CI head 08660e74 (the code 0fc4e40a plus .legion/ only): the required lint, typecheck, test and pr-title checks were still queued at 06:50Z. A request for changes does not wait on them.",
-  "thermo": "thermonuclear-deep-review: approve, two minors (the PR body count, which the reviewer fixed in the brief, and the comment at margin-thread-reply.e2e.ts:226). thermonuclear-code-quality: changes; its findings 2-4 are the first three above, and its finding 1 is in notDemanded."
+  "thermo": "Not run this round: the delta since round 2 (3089c7e2..96fcf1de) changes only AGENTS.md, README.md and two code comments, with no runtime or test code. The pair ran at 357138e7 and 0fc4e40a.",
+  "fastFollow": "R6's 'the drawer' should name the navigation drawer; the titles of approval.e2e.ts:646 and inbox-drawer.e2e.ts:43/127 use 'drawer' for the Inbox drawer, which opens on every layout. Today a literal reading only adds CI minutes."
 }
