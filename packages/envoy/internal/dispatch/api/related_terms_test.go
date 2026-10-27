@@ -14,11 +14,12 @@ import (
 )
 
 // relatedTermsServer is a server whose term statistics and picker a test drives directly, with
-// the handler that seeds its items.
+// the handler that seeds its items. It is the server that handler runs on, so a refresh a
+// seeding check started (ensureSearchTermStats) is one the test can wait out.
 func relatedTermsServer(t *testing.T) (http.Handler, *store.Store, *server) {
 	t.Helper()
-	handler, database, deps := newTestServer(t, testServerOptions{})
-	return handler, database, directServer(deps)
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	return handler, database, served
 }
 
 func refreshTermStats(t *testing.T, database *store.Store, project string) int {
@@ -28,6 +29,17 @@ func refreshTermStats(t *testing.T, database *store.Store, project string) int {
 		t.Fatalf("refresh %s's search term statistics: %v", project, err)
 	}
 	return items
+}
+
+// awaitTermStatsRefresh waits for the refresh of project's statistics srv has running, if any,
+// to end, and starts none of its own.
+func awaitTermStatsRefresh(t *testing.T, srv *server, project string) {
+	t.Helper()
+	select {
+	case <-srv.termStats.DoChan(project, func() (any, error) { return nil, nil }):
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the refresh of %s's statistics did not end", project)
+	}
 }
 
 // pickTerms picks from text as an ask's question is picked: the whole text is its title.
@@ -169,6 +181,9 @@ func TestRelatedTermsProbeLexemesWrittenSinceTheRefresh(t *testing.T) {
 	handler, database, srv := relatedTermsServer(t)
 	createSuggestionProject(t, handler, "PROBE")
 	createSearchIssue(t, handler, "PROBE", "Harbour crane schedule", "")
+	// The issue's check found no statistics and started a refresh; one ending after the test's
+	// would count the items written since.
+	awaitTermStatsRefresh(t, srv, "PROBE")
 	refreshTermStats(t, database, "PROBE")
 	createSearchIssue(t, handler, "PROBE", "Flamingo enclosure", "")
 	document := createProjectDocument(t, handler, "PROBE", "Island notes", "# Notes\nZanzibar ferries.\n")
@@ -197,6 +212,14 @@ func TestRelatedTermsProbeAProjectWithNoStatisticsAndStartItsRefresh(t *testing.
 	handler, database, srv := relatedTermsServer(t)
 	createSuggestionProject(t, handler, "FRESH")
 	createSearchIssue(t, handler, "FRESH", "Lighthouse lens", "")
+	// The issue's own check found no statistics and started a refresh: wait it out and drop
+	// what it wrote, so the pick below finds none.
+	awaitTermStatsRefresh(t, srv, "FRESH")
+	if _, err := database.Pool.Exec(context.Background(), `
+		delete from search_term_stats where project_key = 'FRESH';
+		delete from search_term_totals where project_key = 'FRESH'`); err != nil {
+		t.Fatalf("drop the statistics the seeding check's refresh wrote: %v", err)
+	}
 
 	picked := pickTerms(t, srv, "FRESH", "lighthouse beacon", relatedExclusion{})
 	if picked.StatsPresent || picked.Items != 0 {
@@ -205,11 +228,9 @@ func TestRelatedTermsProbeAProjectWithNoStatisticsAndStartItsRefresh(t *testing.
 	if term, ok := pickedTerm(picked, "lighthous"); !ok || term.DF != 1 || len(picked.Terms) != 1 {
 		t.Fatalf("picked %+v, want only 'lighthous' probed at df 1", picked.Terms)
 	}
-	select {
-	case <-srv.ensureSearchTermStats("FRESH"):
-	case <-time.After(30 * time.Second):
-		t.Fatal("the refresh the pick started did not end")
-	}
+	// Nothing else refreshes the project now, so totals present once no refresh runs are the
+	// ones the refresh the pick started wrote.
+	awaitTermStatsRefresh(t, srv, "FRESH")
 	var items int
 	if err := database.Pool.QueryRow(context.Background(), `select items from search_term_totals where project_key = 'FRESH'`).Scan(&items); err != nil {
 		t.Fatalf("read the refreshed totals: %v", err)
