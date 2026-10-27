@@ -2,43 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-528",
-  "completed": "2026-10-27T02:37:00Z",
-  "testedHead": "b00dba132e6134eec5a5b752d129cda433849b49 (code head d2e90bba64df2ce559a94b7cbb02f4e3dae7a27d)",
+  "completed": "2026-10-27T03:10:00Z",
+  "testedHead": "e0c9502649e62abb677f9c846b6083f684e7dd32 (code head 9607c1b933cf84a437dab8f596b96488261f96b3, merge of main 9f8766c6)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command on the tester lane (port 20777, db dispatch_tester_e2e): `source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox` -> 28 passed (2.2m) at b00dba13. Same command in a git worktree of the red commit ecc18ff3 with its own build:web -> 24 failed, 4 passed (9.1m): every drawing row failed on toBeVisible of the diagram image, the refusal row on its status toHaveText, the ts-fence guard row passed in all four projects. Both match the implementer's counts."
+    "how": "Re-ran its command on the tester lane (port 20777, db dispatch_tester_e2e) after `bun run build:web` at e0c95026: `bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox` -> 28 passed (2.2m), matching its count. Drove its fence claims on the same surface independently (throwaway e2e, 19 bodies below). The tester's two red tests from 313753db are unmodified at the head: `git diff 313753db e0c95026 -- MarkdownBody.test.tsx` removes no line, only adds the implementer's quote/list case."
   },
-  "failed": 3,
-  "failures": [
-    {
-      "criterion": "A1 / spec Summary: a comment, ask, message or reply holding a (finished) mermaid code block shows a drawn diagram",
-      "evidence": "A closed mermaid fence followed by a link reference definition never draws. A link definition is no block of the parse, so the diagram is the document's last leaf block, while `endsInOpenMermaidFence` (packages/dispatch/web/src/features/refs/mermaid-diagrams.ts:78-83) reads the source's last line, `[spec]: https://example.com/spec`, as no closing fence and drops the block as 'still streaming'. Real surface: a throwaway Playwright run (chromium, tester lane) with a comment `Ref def after:` + ```mermaid graph TD X --> Y``` + `[spec]: https://example.com/spec` -> 0 images named 'Rendered Mermaid diagram', the source visible as code (screenshot /legion/scratch/tmp/tester-probe-refdef.png); the same diagram without the definition draws. Red test: `a closed mermaid fence followed by a link reference definition draws its diagram` in packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx (commit 313753db), shown failing by `cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx -t Mermaid` -> Expected length: 1, Received length: 0."
-    },
-    {
-      "criterion": "Plan: a mermaid block whose fence is still open (a streamed live-view turn) stays code and never flashes a refusal",
-      "evidence": "`CLOSING_FENCE` (mermaid-diagrams.ts:48) accepts any 3+ backticks or tildes as the last line, but CommonMark closes a fence only with the opener's character at least as long as the opener. A body ending in ````` ````mermaid ... ``` ````` (four-backtick opener, the stream at three) or ```` ```mermaid ... ~~~ ```` is still open, yet draws. Red test: `a body ending in a line that cannot close its mermaid fence keeps it as code` in MarkdownBody.test.tsx (commit 313753db), failing with the same command -> Expected length: 1, Received length: 2. A fix that compares the last line with the block's own opening fence also fixes the first failure."
-    },
-    {
-      "criterion": "CI read on GitHub at the tested head",
-      "evidence": "Pull request #2311 is CONFLICTING (mergeStateStatus DIRTY) with main aa64baf6: `git merge-tree --write-tree --name-only aa64baf632c2 b00dba132e61` -> CONFLICT (content) in packages/envoy/CHANGELOG.md (merge base 7f7edb8d). GitHub computes no merge ref for a conflicting head, so no workflow ran: `gh api repos/sjawhar/legion/actions/runs?head_sha=d2e90bba...` and `?head_sha=b00dba13...` -> total_count 0; `gh pr checks 2311` -> no checks reported. Lint, types and the unit suites have no CI result at any head of this branch. The conflict is real, so the base is brought in (conflicts-and-rewrites.md, reintegrating the base)."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
+  "roundOneFailures": {
+    "linkReferenceDefinition": "fixed in 9607c1b9: the open-fence check re-parses the body with a probe line; refdef bodies draw (below).",
+    "lineThatCannotCloseFence": "fixed in 9607c1b9: ``` under ```` and ~~~ under ``` stay code (below).",
+    "conflictNoCi": "fixed in 9f8766c6: the merge of main resolved packages/envoy/CHANGELOG.md keeping both entries (`git show --remerge-diff 9f8766c6` shows only the conflict markers removed); PR #2311 reads MERGEABLE. CI at e0c95026 on GitHub at the time of reading: build x2, changes, lint, test, typecheck and pr-title all queued (one earlier pr-title cancelled); no lane had concluded."
+  },
   "proof": [
     {
       "criterion": "A1 and the spec Summary rows: comment, Inbox ask, message, reply, refusal, markup label, other-language guard",
       "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector, Desktop Chrome, iPhone 13, WebKit, Firefox",
       "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox",
       "observed": "28 passed (2.2m)",
-      "headSha": "b00dba132e6134eec5a5b752d129cda433849b49",
-      "negativeControl": "Same command at the red commit ecc18ff3 (built there) -> 24 failed, 4 passed (9.1m); the ts-fence guard row passed at both commits."
+      "headSha": "e0c9502649e62abb677f9c846b6083f684e7dd32",
+      "negativeControl": "Same command at the red commit ecc18ff3 (round 1, built there) -> 24 failed, 4 passed (9.1m); the ts-fence guard row passed at both commits."
     },
     {
-      "criterion": "Sanitizer and isolation: author text never fetches, never becomes an element, never styles the page",
-      "surface": "renderProofMermaidSvg + sanitizeMermaidSvg on happy-dom (throwaway script), and a throwaway Playwright run in chromium on the Conversation",
-      "command": "throwaway bun script feeding 14 hostile sources (style/classDef/linkStyle attribute injection with \"/><style>, label, sequence, ER and class-member injection of </text><style>, %%{init}%% fontFamily, frontmatter, click); throwaway e2e with classDef fill:url(https://evil.example/c), style fill:\\75rl(...), linkStyle stroke:url(...), page.on('request') recording every non-local request",
-      "observed": "No hostile text survives outside data-* attributes and text nodes; no <style> holds author text; frontmatter refused by upstream validation. In the browser: no evil.example or \\75rl in the shadow DOM, zero non-local requests (no Google Fonts, no evil.example), zero <style> under page svgs outside shadow roots, three diagrams in one body (two identical) each resolve url(#arrowhead) inside their own shadow root; dark mode text fill equals the card's colour; a 120-edge chain drew in 698 ms.",
-      "headSha": "b00dba132e6134eec5a5b752d129cda433849b49",
-      "negativeControl": "The raw upstream output for the injection sources does carry evil.example in presentation attributes (rawEvil true), which the sanitizer removed."
+      "criterion": "A finished diagram draws whatever follows its closed fence, and a fence the parser still reads as open (a streamed turn) stays code, in every container",
+      "surface": "Dispatch Conversation, one comment per body, chromium, real server (throwaway e2e/zz-tester-probe2.e2e.ts, deleted after the run)",
+      "command": "bunx playwright test --config e2e/playwright.config.ts e2e/zz-tester-probe2.e2e.ts --project chromium",
+      "observed": "19/19 as expected. Draw (1 image, no status): closed fence + one or two link reference definitions, ```` closed by ````, ~~~ closed by ~~~, closed in a quote, a bullet item, an ordered item, a quote inside a list item, CRLF line endings, trailing blank and whitespace lines, a paragraph right after the fence, an author line holding the probe string itself. Stay code (0 images, no refusal): ```` ended by ```, ``` ended by ~~~, open in a quote, a bullet item, an ordered item, a quote inside a list item, open followed by blank lines.",
+      "headSha": "e0c9502649e62abb677f9c846b6083f684e7dd32",
+      "negativeControl": "The same refdef body at round 1's head d2e90bba drew 0 images and showed the source as code (screenshot /legion/scratch/tmp/tester-probe-refdef.png); the ```` ... ``` body drew there, and both stay correct now."
     }
   ]
 }
