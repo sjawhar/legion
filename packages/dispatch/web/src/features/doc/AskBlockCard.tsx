@@ -19,7 +19,7 @@ import { AgentName } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildReferencePath, itemRoute, parseDispatchReference, shortForm } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { type AskBlockFacts, type AskBlockHost, askBlockFacts } from "./ask-block";
+import { type AskBlockFacts, type AskBlockHost, askBlockFacts } from "./typed-block-drawing";
 
 const PILL_CLASS = "rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase";
 
