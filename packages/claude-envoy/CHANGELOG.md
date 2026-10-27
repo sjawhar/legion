@@ -112,6 +112,12 @@
   session received none. A session of this plugin holds its own NATS connection and receives such
   a topic as before (INFRA-122).
 
+- `scripts/smoke-session-title.sh` starts nats-server (`-p -1`) and the Envoy listener (`PORT=0`)
+  on ports the kernel chooses and reads each back from the server's own log, instead of picking a
+  port that was free a moment earlier, which another program could take before the server bound
+  it; the Dispatch address its session is configured with, which nothing serves, is
+  `http://127.0.0.1:1` (INFRA-253).
+
 ### Fixed
 
 - The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the

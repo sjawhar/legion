@@ -22,8 +22,9 @@ related_issues:
   handoff commit pushed without the trailer, carries no trailer and runs CI at its head, which is a
   handoff commit (as sjawhar/legion#1944's plan commit 3b5c8f78 did on 2026-10-14: 33 check runs
   at a `plan.json`-only commit). Such a push runs every workflow in full, and `pr-and-main.yaml`'s
-  concurrency group (`tests-<ref>`, `cancel-in-progress` on `pull_request`) cancels the code head's
-  `Tests`, `Docs` and `Legion Envoy and Contracts` runs still in flight. The green runs for that
+  concurrency group (`tests-<ref>`, since 2026-10-27 `tests-<pull request number>`;
+  `cancel-in-progress` on `pull_request`) cancels the code head's `Tests`, `Docs` and
+  `Legion Envoy and Contracts` runs still in flight. The green runs for that
   code are the handoff head's; they stand for the code head only because the handoff commit's
   diff over it is `.legion/` alone — say so in the `CI` line, naming both heads and the cancelled
   run ids, so a reader does not take "cancelled at the code head" for a red.
@@ -37,15 +38,22 @@ related_issues:
   beside the handoff head's green ones. The rest of this finding stands: the `skip-checks: true` push
   rule, the concurrency group cancelling the code head's runs, that the handoff head's green runs
   stand for the code head only because the handoff commit's diff over it is `.legion/` alone, and the
-  two `Worker Image` digests below.
+  two `Worker Image` digests below (changed 2026-10-27: see the last item).
 
 - Push the implement handoff right after the code push rather than after watching the code head's
   CI: one run then covers both commits, and nothing is cancelled half-way.
-- `Worker Image` has no such group: it completes at both heads, so one logical code change has two
-  digests (`sha-<code head>` and `sha-<handoff head>`, the same build inputs but for the revision
-  label). The operator lane runs the code head's image; give the coordinator the code head, its
-  digest, and the handoff head's green run ids in one message, and the tip's digest beside them in
-  case its scripts hold the image's revision against the branch tip.
+- `Worker Image` had no such group when this note was written: it completed at both heads, so one
+  logical code change had two digests (`sha-<code head>` and `sha-<handoff head>`, the same build
+  inputs but for the revision label).
+
+  **Changed 2026-10-27 (dispatch://INFRA-600):** a newer head of the same pull request now cancels
+  the older head's `Worker Image` build, waiting or running. A handoff push without the trailer is
+  such a head. So the code head gets its own image only when its build completes before that push.
+  Wait for the run whose image you need. If the lane needs `sha-<code head>`, push the handoff
+  without the trailer only after the code head's `Worker Image` run completes. Otherwise the tip's
+  image is the one you get. The operator lane runs the code head's image. Give the coordinator the
+  code head, its digest, and the handoff head's green run ids in one message. Give the tip's digest
+  beside them in case its scripts hold the image's revision against the branch tip.
 
 ## Evidence
 

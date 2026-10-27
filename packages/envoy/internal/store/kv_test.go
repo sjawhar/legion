@@ -1268,7 +1268,8 @@ func TestInterestReaper(t *testing.T) {
 		t.Fatalf("Get ses_dead failed: %v", err)
 	}
 
-	// Reap with 0 grace window — all dead sessions should be reaped
+	// Reap with 0 grace window: a dead session's row older than InterestRefreshAge (this
+	// one is 10 minutes old) is reaped, and the live session's row is kept.
 	count, err := reg.Reap(func(sessionID string) bool {
 		return sessionID == "ses_alive"
 	}, 0)
@@ -1305,7 +1306,7 @@ func TestReapKeepsRoleClaimsForSessionRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get role interest: %v", err)
 	}
-	stale.UpdatedAt = time.Now().Add(-time.Minute).UnixMilli()
+	stale.UpdatedAt = time.Now().Add(-(InterestRefreshAge + time.Minute)).UnixMilli()
 	raw, err := json.Marshal(stale)
 	if err != nil {
 		t.Fatalf("marshal stale interest: %v", err)
@@ -1460,28 +1461,40 @@ func TestReaperGraceWindow(t *testing.T) {
 	defer cleanup()
 
 	reg, kv := coldRegistry(t, conn)
+	fixed := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	reg.now = func() time.Time { return fixed }
 
-	// Create interest updated 2 min ago — session is dead but within 10 min grace window
-	now := time.Now().UnixMilli()
-	putInterest(t, kv, Interest{SessionID: "ses_recent", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: now - 120_000})
-
-	// Warm cache
-	if _, err := reg.Get(context.Background(), "ses_recent"); err != nil {
-		t.Fatalf("Get ses_recent failed: %v", err)
+	// Dead sessions whose rows were last written 14, exactly 15, and 16 minutes ago: the
+	// listener's grace (InterestReapGrace) plus InterestRefreshAge is 15 minutes, and only a
+	// row strictly older than that is reaped.
+	rows := map[string]time.Duration{
+		"ses_14m": 14 * time.Minute,
+		"ses_15m": 15 * time.Minute,
+		"ses_16m": 16 * time.Minute,
+	}
+	for sid, age := range rows {
+		putInterest(t, kv, Interest{SessionID: sid, MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: fixed.Add(-age).UnixMilli()})
+		// Warm cache
+		if _, err := reg.Get(context.Background(), sid); err != nil {
+			t.Fatalf("Get %s failed: %v", sid, err)
+		}
 	}
 
-	// Reap with 10 min grace window — ses_recent updated only 2 min ago, should survive
-	count, err := reg.Reap(func(string) bool { return false }, 10*time.Minute)
+	count, err := reg.Reap(func(string) bool { return false }, InterestReapGrace)
 	if err != nil {
 		t.Fatalf("Reap failed: %v", err)
 	}
-	if count != 0 {
-		t.Fatalf("expected 0 reaped (within grace window), got %d", count)
+	if count != 1 {
+		t.Fatalf("expected 1 reaped (only the 16-minute row), got %d", count)
 	}
 
-	// ses_recent should still exist in KV
-	if _, err := kv.Get("ses_recent"); err != nil {
-		t.Fatalf("ses_recent should still exist within grace window: %v", err)
+	for _, sid := range []string{"ses_14m", "ses_15m"} {
+		if _, err := kv.Get(sid); err != nil {
+			t.Fatalf("%s should still exist within grace window plus refresh age: %v", sid, err)
+		}
+	}
+	if _, err := kv.Get("ses_16m"); err != natsgo.ErrKeyNotFound {
+		t.Fatalf("ses_16m should be deleted, got err: %v", err)
 	}
 }
 
