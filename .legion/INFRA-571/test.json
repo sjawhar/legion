@@ -2,19 +2,49 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-571",
-  "completed": "2026-10-27T07:12:00Z",
-  "testedHead": "469388f8cbdd (code head); branch head 8426298524c0 adds only .legion/",
-  "round": "4: tests 469388f8, which makes dev-postgres.sh's move compare the dispatch database's table count",
+  "completed": "2026-10-27T07:28:00Z",
+  "testedHead": "bc8cf8ad0a24 (code head); branch head 97b7763bb9a3 adds only .legion/",
+  "round": "5: tests bc8cf8ad. dev-postgres.sh's move checks the dispatch database's tables and rows, and no printed command removes the old container",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command: dev-postgres.test.sh with PostgreSQL 18.6 and then 16.15 binaries on PATH. Round 3's red case 'the checks printed before `docker rm -v` tell a restore of an empty dump from a whole one' passes on both. jj diff --from 4cbf4534 shows no hunk in the red block (hunks end at line 225; the block starts at 277)."
+    "how": "Re-ran dev-postgres.test.sh with PGDG 18.6 and then 16.15 server binaries on PATH: every case passes, both of my red cases included. With no server binaries the red cases print SKIP and the rest pass. jj diff --from db0a45bd --to bc8cf8ad on the test file has hunks only at lines 6, 113, 128, 162 and 177, all before the red block (from line 277), which is unchanged."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "residualRisk": "A dump that stops after its data but before its post-data section (indexes, constraints, triggers; 52,825 of 130,607 bytes of the dispatch section in the test dump) restores 52|134 like a whole one, with 0 indexes, so the printed checks pass it. Not a failure: no printed command removes the old container any more, and the damage shows before that removal. This head's server, booted on such a restore, logs 'there is no unique or exclusion constraint matching the ON CONFLICT specification (SQLSTATE 42P10)', and `dispatch issue --force` answers 'internal server error' while `dispatch read` and `dispatch comment` work. The refusal's last line gates `docker rm -v` on Dispatch working.",
+  "ci": "No workflow has completed on any head of this pull request: every code push cancelled the previous run. At bc8cf8ad (2026-10-27T07:25Z), Tests, Legion Envoy and Contracts, Docs and Worker Image were queued; not waited for. This handoff push is handoff-only (skip-checks) and starts no run, so bc8cf8ad's run can finish. The reviewer reads the CI acceptance there: envoy-go's 'Postgres service version' 1806xx|0.8.7, the full Go suite, and the three Postgres 16 lanes.",
+  "proof": [
     {
-      "criterion": "dev-postgres.sh's printed move lets a person verify the restore before `docker rm -v` deletes the old container and its data (review round 1 minor finding dev-postgres.sh:71,83-84: 'make one check read the restored data before the removal steps')",
-      "evidence": "The table count reads the schema, not the data. A dump that stops after writing its schema passes every printed check. That is pg_dumpall killed, or its redirect's disk full; data sections come last and are most of the bytes. Real surface: the real Dispatch pg_dumpall from round 2's p3 run ($TMPDIR/infra571-test/p3/dumpall.sql, 52 tables, 120 migrations), cut before its first COPY (head -n 2383: 71,684 of 135,471 bytes). It was restored, as the printed restore does, into a fresh PGDG PostgreSQL 18.6 with pgvector 0.8.7 and a dispatch database, beside the whole dump restored the same way. Both print exactly the two expected errors, listing 'dispatch postgres', table count 52, checks 1 and 180006. The cut restore holds issues=0, events=0, schema_migrations=0. This head's server (built at f843fd90; no Go change since) then exits 1: 'apply migration 1: … relation \"projects\" already exists (SQLSTATE 42P07)'. That refusal comes only after the printed `docker rm -v`. Red test: packages/envoy/scripts/dev-postgres.test.sh at commit db0a45bd, case 'the checks printed before `docker rm -v` tell a restore of a dump cut after its schema from a whole one'. The fake docker's pg_dumpall in cut mode drops everything from the first 'COPY public.' line and exits 1. Run: cd packages/envoy && (PostgreSQL server binaries on PATH) bash scripts/dev-postgres.test.sh -> 'FAIL: the checks printed before `docker rm -v` print the same after a restore of a dump cut after its schema as after a whole one' ('dispatch postgres 1 1 180006' both times), after the sanity check that the whole dump restored 25 rows and the cut one an empty table. Making the printed check also sum the dispatch tables' rows turns both red cases PASS. Tried locally and reverted: count_tables became select count(*), coalesce(sum((xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint), 0) from pg_tables where schemaname = 'public'. On the real dumps it gives 134 rows whole and 8 cut. The two exact-text cases that pin the count command need the same edit."
+      "criterion": "dev-postgres.sh's printed move lets a person tell a failed or partial dump from a whole one before the old container's data is deleted (review round 1 minor finding; test rounds 3 and 4)",
+      "surface": "the printed count_dispatch check on real PostgreSQL holding a real Dispatch database: old on PGDG 16.15, new on PGDG 18.6 with pgvector 0.8.7; plus the printed lines replayed on two real clusters by dev-postgres.test.sh",
+      "command": "restore $TMPDIR/infra571-test/p3/dumpall.sql (52 tables, 120 migrations) into a 16 cluster (old) and an 18 cluster (whole), and its first 2383 lines (cut before the first COPY) into an 18 cluster (cut), each with a dispatch database as POSTGRES_DB makes; run the printed query on each; then (pgenv 18|16) bash packages/envoy/scripts/dev-postgres.test.sh",
+      "observed": "old 16: 52|134; whole 18: 52|134; cut 18: 52|8 (issues 0); each restore printed exactly the two expected errors. Test run: all cases PASS on 18.6 and 16.15, including 'tell a restore of an empty dump from a whole one' and 'tell a restore of a dump cut after its schema from a whole one', and 'no printed command removes the old container, the last line names its removal as text'",
+      "headSha": "bc8cf8ad0a24",
+      "negativeControl": "the dump cut before its first COPY: the printed count printed 52|8 against the old container's 52|134. At 469388f8 (table count only) the same input printed 52 for both, and the red case failed"
+    },
+    {
+      "criterion": "A run that migrates a Postgres 16 database, upgrades it to 18 with pg_upgrade, then starts the server and runs a search and an issue creation, passes (spec acceptance 3, P5)",
+      "surface": "Dispatch server and dispatch CLI on local PGDG PostgreSQL 16.15 / 18.6 clusters with pgvector 0.8.7",
+      "command": "round 2: OLD=dispatch-old (main 7c1290a4) NEW=dispatch-head2 (built at f843fd90) bash $TMPDIR/infra571-test/p5.sh; still valid because git diff --name-only 95693430..bc8cf8ad -- '*.go' prints nothing",
+      "observed": "pg_upgrade 0; 18 180006, vector 0.8.7; the head's boot applied 100..120 (schema_version 120); dispatch search lists PGUP-1; dispatch issue --force creates PGUP-4; <=> top-5 equal on 16 and 18",
+      "headSha": "95693430d97d",
+      "negativeControl": "pg_upgrade --check against a checksummed 18: exit 1 'old cluster does not use data checksums but the new one does'; against 18 without pgvector: could not load library \"$libdir/vector\""
+    },
+    {
+      "criterion": "The component test expects POSTGRES_18 when databaseVersion is unset, and the given value when it is set (spec acceptance 1)",
+      "surface": "envoy-infra gcp:Dispatch unit tests on Pulumi mocks",
+      "command": "round 2: cd packages/envoy/infra && go test ./gcp/ -count=1 -run 'TestDispatchSettingsApplyDefaults|TestDispatchInstanceRunsTheDatabaseVersion' -v (no Go change since)",
+      "observed": "both tests and both subtests PASS",
+      "headSha": "95693430d97d",
+      "negativeControl": "defaultDispatchDatabaseVersion = \"POSTGRES_16\" in a copy: both FAIL 'expected: \"POSTGRES_18\" actual: \"POSTGRES_16\"'"
+    },
+    {
+      "criterion": "The pinned pgvector-on-18 image starts with its data mount at /var/lib/postgresql and refuses /var/lib/postgresql/data",
+      "surface": "Kubernetes Jobs (gVisor, emptyDir medium Memory) of mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11",
+      "command": "round 2: kubectl create -f $TMPDIR/infra571-test/p4/job2-positive.yaml / job2-negative.yaml; kubectl logs; Jobs deleted (no image or mount change since)",
+      "observed": "PostgreSQL 18.6, 180006|0.8.7, create extension vector 0.8.7, data directory /var/lib/postgresql/18/docker",
+      "headSha": "95693430d97d",
+      "negativeControl": "mount at /var/lib/postgresql/data: the entrypoint's 'in 18+ … /var/lib/postgresql/data (unused mount/volume)' refusal, exit 1"
     }
-  ],
-  "failed": 1,
-  "ci": "At 469388f8 (2026-10-27T07:09Z) typecheck, test, lint, changes, build, pr-title and 'Daemon Go suite on production's Postgres 16' were queued; not waited for. e365a3b4's run was cancelled by the next push. The CI acceptance (service 1806xx|0.8.7, the Go suite and the three Postgres 16 lanes green) is still to be read on GitHub."
+  ]
 }
