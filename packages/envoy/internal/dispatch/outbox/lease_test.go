@@ -363,6 +363,60 @@ func TestAnOutboxWhoseNATSGoesSilentGivesThePublisherToTheOther(t *testing.T) {
 	}
 }
 
+// A standby waits for the publisher hold to be released or to lapse, or for its NATS connection to
+// change, and for nothing else: the events the holder writes and publishes do not make it try the
+// hold. 100 events written one after another while the holder holds send at most the few takes and
+// lapse reads the standby's timer to the holder's lapse makes over that span (each renewal moves the
+// lapse 6 s on), not one take and one read per event, which would put a write on duty_holds for
+// every event on every standby.
+func TestAStandbyDoesNotTryTheHoldForEveryEventTheHolderWrites(t *testing.T) {
+	_, url := testnats.Start(t)
+	database := storetest.Open(t)
+	seedIssue(t, database, "T-1", nil)
+	counter := &sendCounter{}
+	holder := startProcess(t, "holder", database, url, counter)
+	waitFor(t, 10*time.Second, "the holder taking the publisher hold", holder.outbox.Publishing)
+
+	client, err := bus.ConnectOwningStream([]string{url})
+	if err != nil {
+		t.Fatalf("connect the standby's NATS client: %v", err)
+	}
+	t.Cleanup(client.Close)
+	tracer := &statementTracer{}
+	standby := New(Deps{
+		Store:     tracedStore(t, storetest.SecondProcess(t, database), tracer),
+		Publisher: client,
+		Broker:    events.NewBroker(),
+		Listen:    database.Pool.Listener,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { standby.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitFor(t, 5*time.Second, "the standby trying the publisher hold once", func() bool {
+		return len(tracer.matching("insert into duty_holds")) > 0
+	})
+	// The standby's LISTEN connection's catch-up wake comes as it starts.
+	time.Sleep(time.Second)
+
+	takes, reads := len(tracer.matching("insert into duty_holds")), len(tracer.matching("from duty_holds where name"))
+	var last model.Event
+	for index := range 100 {
+		last = writeMessage(t, holder, fmt.Sprintf("message %d", index))
+	}
+	waitForPublished(t, 10*time.Second, database, counter, last)
+	if standby.Publishing() {
+		t.Fatal("the standby publishes while the holder holds the publisher hold")
+	}
+	takes = len(tracer.matching("insert into duty_holds")) - takes
+	reads = len(tracer.matching("from duty_holds where name")) - reads
+	t.Logf("while 100 events were written and published, the standby sent %d takes of the hold and %d reads of its lapse", takes, reads)
+	if takes > 3 || reads > 3 {
+		t.Fatalf("the standby sent %d takes of the publisher hold and %d reads of its lapse while the holder wrote 100 events, want at most 3 of each: its timer to the lapse alone",
+			takes, reads)
+	}
+}
+
 // fenceAfterFirstSend is a publisher hold whose deadline passes as the batch's first envelope is
 // sent, as a process that froze mid-batch past its deadline finds when it resumes.
 type fenceAfterFirstSend struct {
