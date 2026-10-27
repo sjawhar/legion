@@ -2,38 +2,39 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-529",
-  "completed": "2026-10-27T02:06:00Z",
-  "round": 2,
-  "testedHead": "1ade3f306d31505b7e4246191f298de6ee6f11e8",
-  "codeHead": "f213a0a6b23ee6552bc124c9ba28363d8cd8f292",
+  "completed": "2026-10-27T02:56:00Z",
+  "round": 3,
+  "testedHead": "aa697447115385954f823d0f0458e245ce5d1efe",
+  "codeHead": "65158f49ef623a9dfe0077694f4984ce3dc084a8",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command on the tester lane (port 28777, database dispatch_infra529_tester) at 1ade3f306d31: cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium -> '✓ 1 … :19:1 (4.0s)', '✓ 2 … :52:1 Conversation keeps every line of a typed block whose content breaks its rule, drawn as text (3.0s)', '2 passed (18.6s)'."
+    "how": "Re-ran the implementer's command on the tester lane (port 28777, database dispatch_infra529_tester) at aa6974471153: cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium -> '✓ 1 … :19:1 (5.5s)', '✓ 2 … :52:1 (2.6s)', '✓ 3 … :89:1 Conversation draws a message's lone-CR unknown block once, each line on its own (2.3s)'."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "A1: a comment, message and ask with bold text and a :::note block show the bold formatted and the note's lines as text",
+      "criterion": "A1: comment, message and ask bodies with bold text and a :::note block show the bold formatted and the note's lines as text",
       "surface": "Dispatch Conversation tab, Chromium, real Go Dispatch server and Postgres 17 + pgvector in the issue pod (tester lane, port 28777, database dispatch_infra529_tester)",
       "command": "cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium",
-      "observed": "✓ 1 [chromium] › e2e/unknown-directive.e2e.ts:19:1 › Conversation renders comment, message and ask bodies holding an unknown container directive as formatted markdown with the fence lines as text (4.0s)",
-      "headSha": "1ade3f306d31505b7e4246191f298de6ee6f11e8",
-      "negativeControl": "Round 1: the same spec on base 7f7edb8de3e3 fails (implementer's run, https://github.com/sjawhar/legion/pull/2303#issuecomment-6431409111); the default (not read-only) engine still throws 'unknown typed block \"note\"' for the A1 body."
+      "observed": "✓ 1 [chromium] › e2e/unknown-directive.e2e.ts:19:1 (5.5s); rows 2 and 3 ✓ too.",
+      "headSha": "aa697447115385954f823d0f0458e245ce5d1efe",
+      "negativeControl": "Base 7f7edb8de3e3 fails row 1 (implementer's run, https://github.com/sjawhar/legion/pull/2303#issuecomment-6431409111); the default (not read-only) engine still throws for every unknown-directive body probed this round."
     },
     {
-      "criterion": "The read-only engine never drops text: the round-1 defect (an ask holding a list then an unknown :::note) and a known ask holding a heading keep every line",
+      "criterion": "Review findings 1-3: lone-CR lines drawn once; a block-level dispatch mark span inside an ask does not drop the ask's text; a non-fence last line is not drawn as a closing fence",
       "surface": "Dispatch Conversation tab, Chromium, same lane",
-      "command": "Same command (row 2, e2e/unknown-directive.e2e.ts:52:1), plus a throwaway spec posting the round-1 body 'Lead **bold**\\n\\n::::ask\\nQ?\\n\\n- a\\n\\n:::note\\nx\\n:::\\n::::\\n' and a valid ':::callout{kind=\"warning\"}' body as comments, thread expanded",
-      "observed": "Row 2 ✓ (3.0s). Probe: the round-1 comment now shows 'Lead bold', '::::ask', 'Q?', 'a' (a <ul>), ':::note', 'x', ':::', '::::', no data-markdown-fallback (round 1 showed only 'Lead bold'); the valid callout still renders as <section class=\"proof-typed-block proof-typed-block-callout\" data-proof-block-attr-kind=\"warning\"> with 'body' strong.",
-      "headSha": "1ade3f306d31505b7e4246191f298de6ee6f11e8",
-      "negativeControl": "Fit check bypassed in packages/proof-editor/src/read-only-directives.ts:117 (condition reduced to '!refused'), SPA rebuilt, row 2 re-run: '✘ 2 … (17.8s)', 'Expected substring: \"::::ask\" Received string: \"Ssession:e2e-dire…just nowLead bold\"'. Source restored; jj status clean."
+      "command": "Row 3 of the command above, plus a throwaway spec posting three comments: 'Lead **bold**\\n\\n> :::a\\r> quoted body\\r> :::\\r'; 'Lead **bold**\\n\\n:::note\\nbody\\n\\n[x]: mailto:\\n'; 'Lead **bold**\\n\\n:::ask\\n<span data-dispatch=\"ask\" data-id=\"x\">\\n\\n# Heading words\\n\\n</span>\\n:::\\n', each thread expanded",
+      "observed": "Row 3 ✓ (2.3s). Probe blocks: [\"Lead bold\",\":::a\",\"quoted body\",\":::\"]; [\"Lead bold\",\":::note\",\"body\"] (no ':' fence); [\"Lead bold\",\":::ask\",\"Heading words\",\":::\"]; no data-markdown-fallback in any card.",
+      "headSha": "aa697447115385954f823d0f0458e245ce5d1efe",
+      "negativeControl": "Mark handling disabled in packages/proof-editor/src/read-only-directives.ts:56 (inner placeholders forced undefined, the round-2 behaviour), SPA rebuilt, probe re-run: the mark-wrapped ask card shows only [\"Lead bold\"], 'Heading words' lost. Source restored; jj status clean."
     }
   ],
   "probed": [
-    "Engine (read-only, server schema) inside an ask: thematic break, fenced code, blockquote, table, two lists, list then paragraph, label with heading, refused attribute with heading -> drawn as text with every word kept; reference definition, task list, only a list, empty ask, empty callout, inline HTML, callout in ask, ask in callout -> stay typed with every word kept; ask with heading inside a blockquote and inside a list item -> drawn, words kept; five-deep callout > ask > note -> words kept. No input lost a word or threw.",
-    "The tester's round-1 red test (ee272bb6d857) is unchanged: 0 removed lines in jj diff ee272bb6d857..1ade3f306d31 of tests/read-only-directives.test.ts.",
-    "Default mode: lib-headless.ts changes only the readOnly branch (passes the ProseMirror schema), so the pmdoc generators' refusals are unchanged."
+    "Engine (read-only, server schema): lone CR, mixed CRLF/CR, lone CR in a quote, unclosed CR; mark-wrapped heading in ask (drawn), in callout (typed), mark-wrapped paragraphs in ask (typed), mark around a note, mark in a note in an ask; '[x]: mailto:' and '…/a:::' last lines (no fence drawn); '::::note' closed by ':::' (not a fence); 4-space ':::' (code block, no fence); 2-space ':::' (fence); tab ':::' (paragraph text); ':::' in a nested quote; list in a quote; '::: y'; '::::::' closing ':::'. Every word kept, nothing thrown.",
+    "Timing: ':::a\\r:::\\r'.repeat(3555) read-only 790 ms (default 476 ms); LF version 585 ms (217 ms); long opening line 16 ms; 200 mark-wrapped asks 147 ms (default 182 ms).",
+    "Pre-existing, not this change: 2,000 nested unclosed ':::a' lines then a 21,000-char line (31,000 chars) take 66.3 s read-only and 64.3 s in the default engine; 1,000 nested closed directives take 15.9 s / 15.5 s. [INFERENCE] the cost is in the shared remark/micromark parse, since the default mode throws only after it. Sent to the architect.",
+    "Red test integrity: the two removed lines in tests/read-only-directives.test.ts since ee272bb6d857 belong to the implementer's direct-call test, not the tester's red test."
   ],
-  "ci": "Read on GitHub at code head f213a0a6b23e: build, changes, lint, test, typecheck and pr-title queued (not yet run); not waited for."
+  "ci": "Read on GitHub at code head 65158f49ef62: build, changes, lint, test, typecheck and pr-title queued (not yet run); not waited for."
 }
