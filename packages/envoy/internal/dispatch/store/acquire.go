@@ -54,8 +54,9 @@ const applicationNamePrefix = "dispatch-"
 // with ErrPoolBusy. Before them every wait was unbounded, so past capacity callers queued until
 // their clients gave up, and the queue only grew. A bound refuses the excess instead, and the
 // caller's own deadline wins whenever it is sooner (acquireTracer). Each bound is per acquire: a
-// request makes a dozen acquires one after another, so the request's own deadline, not these,
-// bounds their sum.
+// write makes an acquire per statement and transaction, one after another (a read pins one
+// connection and makes one, PinConnection), so the request's own deadline, not these, bounds
+// their sum.
 const (
 	// requestAcquireBound is the request pool's, and the room loads' and live readers' too: a
 	// request a client is waiting on that has waited three seconds for a connection is better

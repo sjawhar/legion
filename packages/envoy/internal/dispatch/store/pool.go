@@ -45,10 +45,13 @@ var ErrNestedAcquire = errors.New(
 )
 
 // holding records whether the context's caller holds a connection of this pool: its
-// transaction, or one it acquired directly. One writer sets it and one reader tests it, so a
-// flag is the whole state - a transaction never opens a second transaction of its own.
+// transaction, its open cursor, or one it acquired directly. One writer sets it and one reader
+// tests it, so a flag is the whole state - a transaction never opens a second transaction of its
+// own. A pinned request (PinConnection) also carries its pinned connection here, so a context
+// made with a mark of its own (ForConcurrentRead) pins nothing.
 type holding struct {
 	connection atomic.Bool
+	pin        *pinnedConnection
 }
 
 type holdingKey struct{}
@@ -92,22 +95,26 @@ func holdsConnection(ctx context.Context) bool {
 }
 
 // ConnectionHeld reports whether ctx's caller holds a pooled connection: its transaction, a
-// cursor, or a connection it acquired or marked (HoldsConnection). It is the test the pools refuse
-// a second acquire by (ErrNestedAcquire), for whatever else a connection holder must never wait
-// for - a document's writer gate, whose holder may be waiting for a connection itself.
+// cursor, a connection it acquired or marked (HoldsConnection), or its request's pinned connection
+// (PinConnection), idle between statements or not. Whatever a connection holder must never wait
+// for refuses the callers it reports - a document's writer gate, whose holder may be waiting for a
+// connection itself. The pools refuse a second acquire to the first three (ErrNestedAcquire); a
+// request-pool call under a pin runs on the pinned connection instead.
 func ConnectionHeld(ctx context.Context) bool {
-	return holdsConnection(ctx)
+	state, ok := ctx.Value(holdingKey{}).(*holding)
+	return ok && (state.connection.Load() || state.pin.held())
 }
 
 // ForConcurrentRead returns a context for one of a caller's reads that run side by side: ctx's
-// deadline, cancellation and values, with a hold mark of its own, so that read takes one
-// connection and the pool still refuses it a second. Reads sharing one mark would refuse each
-// other, since one read's open cursor marks the context they share. A caller already holding a
-// connection (its transaction, a cursor, an acquired connection) is refused with
-// ErrNestedAcquire, because each of its reads would be a second connection taken while it holds
-// one.
+// deadline, cancellation and values, with a hold mark of its own and no pinned connection, so that
+// read takes one connection and the pool still refuses it a second. Reads sharing one mark would
+// refuse each other, since one read's open cursor marks the context they share, and so would reads
+// sharing one pinned connection, which runs one call at a time. A caller already holding a
+// connection (its transaction, a cursor, an acquired connection, its pinned connection) is refused
+// with ErrNestedAcquire, because each of its reads would be a second connection taken while it
+// holds one.
 func ForConcurrentRead(ctx context.Context) (context.Context, error) {
-	if holdsConnection(ctx) {
+	if ConnectionHeld(ctx) {
 		logRefusal()
 		return nil, ErrNestedAcquire
 	}
@@ -182,11 +189,11 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // It is 48 of one connection budget of 82 that every pool of a process shares, partitioned rather
 // than grown: requests 48, background 6 (Background), live 4 (Live), settlements 4 (Settlements),
 // rooms 4, health 1, listen 1 with the three connections it hands over, leases leasePoolSize (10)
-// and outbox 1. A request takes a connection per statement one after another (an issue read is
-// about eleven), so under load the API holds every connection of this pool; the background loops,
-// the live-update readers and the settlements wait on pools of their own, so neither side can
-// starve the other, and an acquire here waits at most requestAcquireBound before it is refused
-// with ErrPoolBusy rather than queueing without end.
+// and outbox 1. A write takes a connection per statement one after another, and a read pins one
+// for its whole length (PinConnection), so under load the API holds every connection of this pool;
+// the background loops, the live-update readers and the settlements wait on pools of their own, so
+// neither side can starve the other, and an acquire here waits at most requestAcquireBound before
+// it is refused with ErrPoolBusy rather than queueing without end.
 const sharedPoolSize = 48
 
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
@@ -519,28 +526,91 @@ func (p *Pool) guard(ctx context.Context) error {
 	return ErrNestedAcquire
 }
 
+// connection is what one call runs its statement on: the pgx pool, which takes a connection for
+// the call, or the request's pinned connection (PinConnection). pgxpool's Pool and Conn share
+// these methods.
+type connection interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults
+	CopyFrom(ctx context.Context, table pgx.Identifier, columns []string, source pgx.CopyFromSource) (int64, error)
+	BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error)
+}
+
+// target is what one call runs on - ctx's pinned connection where it pins one on this pool, else
+// the pgx pool - and done, which gives the pinned connection back once the call is over, nil for
+// a call on the pgx pool. It refuses a caller already holding a connection, and a call while
+// another runs on the pinned connection, with ErrNestedAcquire. Every exported method that hands
+// out a connection calls it directly, as guard is called, so a refusal records that method's
+// caller.
+func (p *Pool) target(ctx context.Context) (connection, func(), error) {
+	if holdsConnection(ctx) {
+		logRefusal()
+		return nil, nil, ErrNestedAcquire
+	}
+	pin := p.pinned(ctx)
+	if pin == nil {
+		return p.pool, nil, nil
+	}
+	conn, done, err := pin.take(ctx, p)
+	if err != nil {
+		if errors.Is(err, ErrNestedAcquire) {
+			logRefusal()
+		}
+		return nil, nil, err
+	}
+	if conn == nil {
+		return p.pool, nil, nil
+	}
+	return conn, done, nil
+}
+
+// finished gives a call's pinned connection back (target); a call on the pgx pool has nothing to.
+func finished(done func()) {
+	if done != nil {
+		done()
+	}
+}
+
+// joined is release, then done where the call ran on a pinned connection.
+func joined(release, done func()) func() {
+	if done == nil {
+		return release
+	}
+	return func() {
+		release()
+		done()
+	}
+}
+
 // Query runs a query on a pooled connection. The rows hold that connection until they close,
 // so the caller counts as holding one for as long as they are open. A cursor is one of this
 // pool's three connection-holders - a transaction, an open cursor, and a connection taken
 // with Acquire (the durable append's withRoomLock, marked with HoldsConnection) - and work
 // done inside the loop - a publish, a follower lookup, a write per row - is exactly the shape
-// that wedges the pool.
+// that wedges the pool. On a pinned connection an open cursor is a call still running on it, so a
+// statement inside the loop is refused there too.
 //
 // Every method below that takes a connection returns ErrPoolBusy for an acquire that ran out the
-// pool's bound (acquireTracer), however it reports its errors.
+// pool's bound (acquireTracer), however it reports its errors, and runs on the request's pinned
+// connection where its context pins one (PinConnection).
 func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	if err := p.guard(ctx); err != nil {
+	on, done, err := p.target(ctx)
+	if err != nil {
 		return nil, err
 	}
-	rows, err := p.pool.Query(ctx, sql, args...)
+	rows, err := on.Query(ctx, sql, args...)
 	if err != nil {
+		finished(done)
 		return nil, p.busy(ctx, err)
 	}
+	// A context without a mark pins nothing, so done is nil whenever release is.
 	release := hold(ctx)
 	if release == nil {
 		return rows, nil
 	}
-	return &trackedRows{Rows: rows, release: release}, nil
+	return &trackedRows{Rows: rows, release: joined(release, done)}, nil
 }
 
 // trackedRows clears the caller's mark when pgx hands the cursor's connection back: an
@@ -583,35 +653,65 @@ func (r *trackedRows) Values() ([]any, error) {
 // QueryRow runs a single-row query on a pooled connection. pgxpool defers an acquire's error to
 // the row's Scan, so the row maps it there.
 func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	if err := p.guard(ctx); err != nil {
+	on, done, err := p.target(ctx)
+	if err != nil {
 		return errRow{err: err}
 	}
-	return busyRow{Row: p.pool.QueryRow(ctx, sql, args...), ctx: ctx, pool: p.name}
+	return busyRow{Row: on.QueryRow(ctx, sql, args...), ctx: ctx, pool: p.name, done: done}
 }
 
 // Exec runs a statement on a pooled connection.
 func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	if err := p.guard(ctx); err != nil {
+	on, done, err := p.target(ctx)
+	if err != nil {
 		return pgconn.CommandTag{}, err
 	}
-	tag, err := p.pool.Exec(ctx, sql, args...)
+	tag, err := on.Exec(ctx, sql, args...)
+	finished(done)
 	return tag, p.busy(ctx, err)
 }
 
-// Acquire takes a pooled connection the caller holds until it releases it.
+// Acquire takes a pooled connection the caller holds until it releases it. Under a pin it hands
+// over the request's pinned connection, if it holds one, rather than taking a second; the request's
+// next call takes another.
 func (p *Pool) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
-	if err := p.guard(ctx); err != nil {
-		return nil, err
+	conn, err := p.handOver(ctx)
+	if conn != nil || err != nil {
+		return conn, err
 	}
-	conn, err := p.pool.Acquire(ctx)
+	conn, err = p.pool.Acquire(ctx)
 	return conn, p.busy(ctx, err)
 }
 
-// AcquireFunc runs fn with a pooled connection. Only the acquire's error is mapped: fn's own is
-// returned as fn returned it.
+// handOver is Acquire's refusal and its pinned connection: ErrNestedAcquire for a caller holding a
+// connection or a pinned connection a call runs on, the pinned connection where ctx pins an idle
+// one on this pool, and nil otherwise.
+func (p *Pool) handOver(ctx context.Context) (*pgxpool.Conn, error) {
+	if holdsConnection(ctx) {
+		logRefusal()
+		return nil, ErrNestedAcquire
+	}
+	pin := p.pinned(ctx)
+	if pin == nil {
+		return nil, nil
+	}
+	conn, err := pin.handOver(p)
+	if err != nil {
+		logRefusal()
+	}
+	return conn, err
+}
+
+// AcquireFunc runs fn with a pooled connection - the pinned one under a pin. Only the acquire's
+// error is mapped: fn's own is returned as fn returned it.
 func (p *Pool) AcquireFunc(ctx context.Context, fn func(*pgxpool.Conn) error) error {
-	if err := p.guard(ctx); err != nil {
+	on, done, err := p.target(ctx)
+	if err != nil {
 		return err
+	}
+	if pinned, ok := on.(*pgxpool.Conn); ok {
+		defer done()
+		return fn(pinned)
 	}
 	conn, err := p.pool.Acquire(ctx)
 	if err != nil {
@@ -636,52 +736,58 @@ func (p *Pool) CopyFrom(
 	columns []string,
 	source pgx.CopyFromSource,
 ) (int64, error) {
-	if err := p.guard(ctx); err != nil {
+	on, done, err := p.target(ctx)
+	if err != nil {
 		return 0, err
 	}
-	copied, err := p.pool.CopyFrom(ctx, table, columns, source)
+	copied, err := on.CopyFrom(ctx, table, columns, source)
+	finished(done)
 	return copied, p.busy(ctx, err)
 }
 
 // SendBatch runs a batch on a pooled connection. pgxpool defers an acquire's error to the
 // results, so the results map it there.
 func (p *Pool) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
-	if err := p.guard(ctx); err != nil {
+	on, done, err := p.target(ctx)
+	if err != nil {
 		return errBatchResults{err: err}
 	}
-	return busyBatchResults{BatchResults: p.pool.SendBatch(ctx, batch), ctx: ctx, pool: p.name}
+	return busyBatchResults{BatchResults: on.SendBatch(ctx, batch), ctx: ctx, pool: p.name, done: done}
 }
 
 // Begin opens a transaction and marks the request as holding one.
 func (p *Pool) Begin(ctx context.Context) (pgx.Tx, error) {
-	if err := p.guard(ctx); err != nil {
+	on, done, err := p.target(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return p.begin(ctx, pgx.TxOptions{})
+	return p.begin(ctx, on, done, pgx.TxOptions{})
 }
 
 // BeginTx opens a transaction with options and marks the request as holding one.
 func (p *Pool) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
-	if err := p.guard(ctx); err != nil {
+	on, done, err := p.target(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return p.begin(ctx, options)
+	return p.begin(ctx, on, done, options)
 }
 
-// begin is the guarded body both transaction entry points share: guard runs in the exported
-// method, as it does in every exported method that hands out one of this pool's connections,
-// so a refusal records the caller that asked for the transaction rather than one of this
-// pool's own frames.
-func (p *Pool) begin(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
-	tx, err := p.pool.BeginTx(ctx, options)
+// begin is the body both transaction entry points share, on what target gave them: target runs in
+// the exported method, as it does in every exported method that hands out one of this pool's
+// connections, so a refusal records the caller that asked for the transaction rather than one of
+// this pool's own frames. A transaction on a pinned connection gives it back when it ends.
+func (p *Pool) begin(ctx context.Context, on connection, done func(), options pgx.TxOptions) (pgx.Tx, error) {
+	tx, err := on.BeginTx(ctx, options)
 	if err != nil {
+		finished(done)
 		return nil, p.busy(ctx, err)
 	}
 	release := hold(ctx)
 	if release == nil {
 		release = func() {}
 	}
-	return &trackedTx{Tx: tx, release: release}, nil
+	return &trackedTx{Tx: tx, release: joined(release, done)}, nil
 }
 
 // trackedTx commits apart from its caller's cancellation (CommitContext) and clears the caller's
@@ -736,20 +842,28 @@ func (b errBatchResults) Query() (pgx.Rows, error)         { return nil, b.err }
 func (b errBatchResults) QueryRow() pgx.Row                { return errRow{err: b.err} }
 func (b errBatchResults) Close() error                     { return b.err }
 
-// busyRow maps a deferred acquire error to ErrPoolBusy when the row is scanned.
+// busyRow maps a deferred acquire error to ErrPoolBusy when the row is scanned, and gives back the
+// pinned connection the row was read on, if any, once it is.
 type busyRow struct {
 	pgx.Row
 	ctx  context.Context
 	pool string
+	done func()
 }
 
-func (r busyRow) Scan(dest ...any) error { return poolBusy(r.ctx, r.pool, r.Row.Scan(dest...)) }
+func (r busyRow) Scan(dest ...any) error {
+	err := r.Row.Scan(dest...)
+	finished(r.done)
+	return poolBusy(r.ctx, r.pool, err)
+}
 
-// busyBatchResults maps a deferred acquire error to ErrPoolBusy in every result the caller reads.
+// busyBatchResults maps a deferred acquire error to ErrPoolBusy in every result the caller reads,
+// and gives back the pinned connection the batch ran on, if any, once it closes.
 type busyBatchResults struct {
 	pgx.BatchResults
 	ctx  context.Context
 	pool string
+	done func()
 }
 
 func (b busyBatchResults) Exec() (pgconn.CommandTag, error) {
@@ -766,4 +880,8 @@ func (b busyBatchResults) QueryRow() pgx.Row {
 	return busyRow{Row: b.BatchResults.QueryRow(), ctx: b.ctx, pool: b.pool}
 }
 
-func (b busyBatchResults) Close() error { return poolBusy(b.ctx, b.pool, b.BatchResults.Close()) }
+func (b busyBatchResults) Close() error {
+	err := b.BatchResults.Close()
+	finished(b.done)
+	return poolBusy(b.ctx, b.pool, err)
+}

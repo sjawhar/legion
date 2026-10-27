@@ -1171,6 +1171,22 @@ and `api/anchored_write_concurrency_test.go` hold the halves: the refusal on eve
 concurrent reads each holding one connection, concurrent anchored writes, and two settlements
 queued behind one held write on a four-connection pool.
 
+An admitted read of weight one runs on one connection (`store.PinConnection`, mounted by
+`api.serveRoute` where `apiRoute.pinsConnection`): its first request-pool statement takes it,
+every later call on the request pool runs on it, and it goes back when the handler returns. An
+issue read took twelve connections one after another before it, each a wait under load; pinned
+it takes one, which is the connection admission already counts the read as. The pinned
+connection runs one call at a time, so the guard still catches true nesting on it: a statement
+under the read's own open cursor, transaction or unscanned row, or from a goroutine sharing its
+context while another statement runs, is refused with `ErrNestedAcquire`. `store.ConnectionHeld`
+reports a pinned connection as held, so a document's writer gate refuses a pinned read; writes,
+weight-two reads (whose reads run side by side through `ForConcurrentRead`, which drops the pin)
+and the file downloads (`Deadline` set) are not pinned. Only the request pool pins: a call on
+any other pool takes its own connection as before. `store/pin_test.go` and
+`api/pinned_connection_test.go` hold it: one checkout per hot read, the refusals on the pinned
+connection, a one-connection request pool answering an issue read, and the writer gate admitting
+a write and refusing a pinned read.
+
 **Every pool's size is set in code.** `store.Open` fixes `MaxConns` at `store.sharedPoolSize`
 (64, from 16 since 2026-10-27), so neither the task's CPU allotment nor the DSN another
 repository's URL builder writes decides it, and a `DATABASE_URL` that carries `pool_max_conns`

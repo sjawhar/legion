@@ -395,12 +395,13 @@ func register(mux *http.ServeMux, deps Deps) *server {
 const defaultReadDeadline = 20 * time.Second
 
 // serveRoute is route's handler as register mounts it, inside the access log, its layers
-// outermost first: the transaction tracking, admission, a read's deadline, then the parameter
-// refusal every route has. Admission comes before the deadline so a request's wait for room is
-// bounded by admission's own wait, and the deadline counts only the work the read was admitted to
-// do. An event stream (Stream) and a test hook are neither admitted nor bounded: a stream runs for
-// as long as its client listens, holding no connection between events, and a test hook is a
-// test's own.
+// outermost first: the transaction tracking, admission, a read's deadline and pinned connection,
+// then the parameter refusal every route has. Admission comes before the deadline so a request's
+// wait for room is bounded by admission's own wait, and the deadline counts only the work the read
+// was admitted to do; the pinned connection comes inside both, so only an admitted read takes one
+// and it is back in the pool before the read's admission unit is. An event stream (Stream) and a
+// test hook are neither admitted nor bounded: a stream runs for as long as its client listens,
+// holding no connection between events, and a test hook is a test's own.
 func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline time.Duration) http.HandlerFunc {
 	handler := s.refuseUnstorableParameters(route.Pattern, route.Handler)
 	if route.Stream || route.TestHook {
@@ -410,7 +411,7 @@ func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline
 		if route.Deadline != 0 {
 			deadline = route.Deadline
 		}
-		handler = boundedBy(deadline, handler)
+		handler = servedAsRead(deadline, route.pinsConnection(), handler)
 	}
 	bodyLimit := route.BodyLimit
 	if bodyLimit == 0 {
@@ -439,12 +440,19 @@ func admitted(limiter *admission.Limiter, weight int, bodyLimit int64, handler h
 	}
 }
 
-// boundedBy runs a read's handler under deadline (admission.WithDeadline), whose passing
-// writeHandlerError answers 503 REQUEST_TIMEOUT.
-func boundedBy(deadline time.Duration, handler http.HandlerFunc) http.HandlerFunc {
+// servedAsRead runs a read's handler under deadline (admission.WithDeadline), whose passing
+// writeHandlerError answers 503 REQUEST_TIMEOUT, and, where pin is set, with every request-pool
+// statement it runs on the one connection its first statement takes, given back when the handler
+// returns (store.PinConnection, apiRoute.pinsConnection).
+func servedAsRead(deadline time.Duration, pin bool, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := admission.WithDeadline(r.Context(), deadline)
 		defer cancel()
+		if pin {
+			var unpin func()
+			ctx, unpin = store.PinConnection(ctx)
+			defer unpin()
+		}
 		handler(w, r.WithContext(ctx))
 	}
 }
