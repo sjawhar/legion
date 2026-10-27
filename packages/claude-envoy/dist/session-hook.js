@@ -46,8 +46,9 @@ var __export = (target, all) => {
 var __require = import.meta.require;
 
 // hooks/session-hook.ts
-import { appendFileSync, readFileSync as readFileSync5 } from "fs";
-import { join as join5 } from "path";
+import { appendFileSync as appendFileSync2, readFileSync as readFileSync7 } from "fs";
+import { join as join7 } from "path";
+import { isMainThread, parentPort, Worker, workerData } from "worker_threads";
 
 // ../envoy-client/src/dispatch-execute.ts
 import { resolve as resolvePath2 } from "path";
@@ -14342,7 +14343,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. " + "After the document it lists each open anchored comment under the passage it is anchored to, with its author, time and full text and every reply in its thread. " + "With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -14481,6 +14482,13 @@ var dispatchToolSpecs = [
     arguments: (z2) => ({
       project: z2.string().describe("Project key; when supplied, lists every open ask in the project instead of only this session's own.").optional()
     }),
+    strict: true
+  },
+  {
+    name: "dispatch_answers",
+    example: {},
+    description: "List every answer and comment a person wrote to this session in the last 72 hours, newest first, each in full: " + "answers to its asks, replies on its asks and in its comment threads, comments on its documents and on issues routed to it, " + "mentions of it, messages to it and replies to its messages. Each item names its time, its writer, what it is, its " + "dispatch:// reference and its issue or document, an answer's question and choices, and the words, never cut. " + "Run it when the list of people's answers on a model request says it left older items out. " + "It reads this session's id from CLAUDE_CODE_SESSION_ID under Claude Code and DISPATCH_SESSION_ID elsewhere, so a subagent reads its parent's.",
+    arguments: () => ({}),
     strict: true
   },
   {
@@ -15449,6 +15457,12 @@ class DispatchClient {
   async openAsksForProject(project) {
     return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
   }
+  async sessionAnswers(sessionID, options = {}) {
+    return this.#json("GET", ["api", "v1", "agents", sessionID, "answers"], undefined, {
+      ...options.since === undefined ? {} : { since: options.since },
+      ...options.maxChars === undefined ? {} : { max_chars: options.maxChars }
+    }, options.signal);
+  }
   async listAgents() {
     return this.#json("GET", ["api", "v1", "agents"]);
   }
@@ -15677,10 +15691,10 @@ class DispatchClient {
       throw error48;
     }
   }
-  async#json(method, path, body, query) {
-    return (await this.#jsonAnswer(method, path, body, query)).payload;
+  async#json(method, path, body, query, signal) {
+    return (await this.#jsonAnswer(method, path, body, query, signal)).payload;
   }
-  async#jsonAnswer(method, path, body, query) {
+  async#jsonAnswer(method, path, body, query, signal) {
     const headers = {
       Accept: "application/json",
       Authorization: `Bearer ${this.token}`
@@ -15691,7 +15705,7 @@ class DispatchClient {
     const response = await this.fetchImpl(url2, {
       method,
       headers,
-      signal: this.#signal,
+      signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
       ...body === undefined ? {} : { body: JSON.stringify(body) }
     });
     return { status: response.status, payload: await this.#response(method, url2, response) };
@@ -16426,6 +16440,254 @@ function searchAnswer(search, query, offset, configUrl) {
   };
 }
 
+// ../envoy-client/src/session-answers.ts
+import { randomUUID } from "crypto";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { join } from "path";
+var SESSION_ANSWERS_WINDOW_MS = 72 * 3600000;
+var SESSION_ANSWERS_MAX_CHARS = 8000;
+var SESSION_ANSWERS_DEADLINE_MS = 800;
+var READ_TIMEOUT_MS = 1e4;
+var NO_ROUTE_BACKOFF_MS = 5 * 60000;
+var QUESTION_MAX = 200;
+var SESSION_ANSWERS_MARKER = "[Dispatch: what people wrote to this session in the last 72 hours, newest first, word for word. Reference, not a new request.]";
+var FAILURE_MARKER = "[Dispatch: people's answers from the last 72 hours could not be read (";
+var NO_ANSWERS_ROUTE_REASON = "this Dispatch build has no answers route";
+var RELATION_PHRASES = {
+  answered_your_ask: "answered your ask",
+  replied_on_your_ask: "replied on your ask",
+  replied_in_a_comment_thread: "replied in a comment thread",
+  commented_on_a_document: "commented on a document",
+  commented_on_an_issue: "commented on an issue",
+  mentioned_you: "mentioned you",
+  sent_you_a_message: "sent you a message",
+  replied_to_your_message: "replied to your message"
+};
+function isNoAnswersRoute(error48) {
+  return error48 instanceof DispatchServiceError && error48.status === 404;
+}
+function renderSessionAnswerItem(item) {
+  const relation = `${RELATION_PHRASES[item.relation]}${item.replaced === true ? " (replaces an earlier answer)" : ""}`;
+  const head = [item.at, `user ${item.author.id}`, relation];
+  if (item.edited_at !== undefined)
+    head.push(`edited ${item.edited_at}`);
+  const owner = item.owner === null ? undefined : ("issue" in item.owner) ? `${item.owner.issue.key}: ${item.owner.issue.title}` : `${item.owner.document.project} / ${item.owner.document.name}`;
+  const where = item.ref === null ? `Direct message ${item.id}, on no issue` : owner === undefined ? item.ref : `${item.ref} \xB7 ${owner}`;
+  const lines = [head.join(" \xB7 "), where];
+  if (item.ask !== undefined) {
+    const question = item.ask.question.replace(/\s+/g, " ").trim();
+    lines.push(`Question: ${question.length > QUESTION_MAX ? `${question.slice(0, QUESTION_MAX)}\u2026` : question}`);
+  }
+  if (item.kind === "answer") {
+    const selected = item.selected ?? [];
+    lines.push(`Selected: ${selected.length === 0 ? "none" : selected.join(", ")}`);
+  }
+  if (item.text !== "")
+    lines.push(item.text);
+  return lines.join(`
+`);
+}
+function withinWindow(items, now) {
+  const start = now - SESSION_ANSWERS_WINDOW_MS;
+  return items.filter((item) => Date.parse(item.at) >= start);
+}
+function leftOutLine(count, maxChars) {
+  return `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${maxChars.toLocaleString("en-US")} characters: run \`dispatch answers\` to read every one in full.`;
+}
+function renderSessionAnswers(items, options) {
+  const maxChars = options.maxChars ?? SESSION_ANSWERS_MAX_CHARS;
+  const shown = withinWindow(items, Number(options.now));
+  const unsent = shown.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
+  const count = shown.length + unsent;
+  if (count === 0)
+    return;
+  const header = options.cachedAt === undefined ? SESSION_ANSWERS_MARKER : `${SESSION_ANSWERS_MARKER}
+As read at ${options.cachedAt}; Dispatch did not answer now.`;
+  const blocks = [];
+  let length = header.length;
+  for (const item of shown) {
+    const block = renderSessionAnswerItem(item);
+    const after = count - blocks.length - 1;
+    const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after, maxChars).length);
+    if (needed > maxChars)
+      break;
+    blocks.push(block);
+    length += 2 + block.length;
+  }
+  const leftOut = count - blocks.length;
+  return [header, ...blocks, ...leftOut === 0 ? [] : [leftOutLine(leftOut, maxChars)]].join(`
+
+`);
+}
+function renderSessionAnswersList(items, options) {
+  const shown = withinWindow(items, Number(options.now));
+  if (shown.length === 0)
+    return "No person wrote to this session in the last 72 hours.";
+  return [
+    `${shown.length} ${shown.length === 1 ? "item" : "items"} people wrote to this session in the last 72 hours, newest first, word for word:`,
+    ...shown.map(renderSessionAnswerItem)
+  ].join(`
+
+`);
+}
+function sessionAnswersFailureLine(reason) {
+  return `${FAILURE_MARKER}${reason.replace(/\s+/g, " ").trim()}); run \`dispatch answers\`.]`;
+}
+var STATE_KEY = Symbol.for("legion.pi-envoy.session-answers.v1");
+var processGlobal = globalThis;
+var state = processGlobal[STATE_KEY] ?? {
+  sessions: new Map,
+  noRouteUntil: new Map
+};
+processGlobal[STATE_KEY] = state;
+var CACHE_FILE = "answers.json";
+function readCacheFile(directory) {
+  let text;
+  try {
+    text = readFileSync(join(directory, CACHE_FILE), "utf-8");
+  } catch {
+    return;
+  }
+  try {
+    const value = JSON.parse(text);
+    if (typeof value === "object" && value !== null && "read_at" in value && typeof value.read_at === "string" && "total" in value && typeof value.total === "number" && "items" in value && Array.isArray(value.items)) {
+      return { read_at: value.read_at, total: value.total, items: value.items };
+    }
+  } catch {}
+  return;
+}
+function writeCacheFile(directory, cache) {
+  mkdirSync(directory, { recursive: true, mode: 448 });
+  const temporary = join(directory, `${CACHE_FILE}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    writeFileSync(temporary, JSON.stringify(cache), { mode: 384 });
+    renameSync(temporary, join(directory, CACHE_FILE));
+  } catch (error48) {
+    rmSync(temporary, { force: true });
+    throw error48;
+  }
+}
+async function settleWithin(promise2, ms, signal) {
+  if (signal?.aborted === true)
+    return "aborted";
+  let timer;
+  let onAbort;
+  const stop = new Promise((resolve) => {
+    timer = setTimeout(() => resolve("deadline"), ms);
+    onAbort = () => resolve("aborted");
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise2, stop]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort !== undefined)
+      signal?.removeEventListener("abort", onAbort);
+  }
+}
+async function readSessionAnswers(options) {
+  const now = options.now ?? Date.now;
+  const maxChars = options.maxChars ?? SESSION_ANSWERS_MAX_CHARS;
+  const { dispatch, session, stateDirectory } = options;
+  if (!dispatch.enabled && dispatch.error === null) {
+    return { text: undefined, source: "off", reason: dispatch.notice };
+  }
+  let entry = state.sessions.get(session);
+  if (entry === undefined) {
+    entry = { cache: undefined, inFlight: undefined, overdue: false };
+    state.sessions.set(session, entry);
+  }
+  if (entry.cache === undefined && stateDirectory !== undefined) {
+    entry.cache = readCacheFile(stateDirectory);
+  }
+  const current = entry;
+  const carry = (reason) => {
+    const { cache } = current;
+    if (cache === undefined) {
+      return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
+    }
+    return {
+      text: renderSessionAnswers(cache.items, {
+        now: now(),
+        maxChars,
+        total: cache.total,
+        cachedAt: cache.read_at
+      }),
+      source: "cache",
+      readAt: cache.read_at,
+      reason
+    };
+  };
+  if (!dispatch.enabled)
+    return carry(dispatch.error);
+  if ((state.noRouteUntil.get(dispatch.url) ?? 0) > now())
+    return carry(NO_ANSWERS_ROUTE_REASON);
+  if (current.inFlight !== undefined && current.overdue) {
+    return carry("an earlier read is still waiting on Dispatch");
+  }
+  let read = current.inFlight;
+  if (read === undefined) {
+    const client = new DispatchClient(dispatch.url, dispatch.token, options.fetchImpl ?? fetch);
+    const started = client.sessionAnswers(session, {
+      maxChars,
+      signal: AbortSignal.timeout(options.readTimeoutMs ?? READ_TIMEOUT_MS)
+    }).then((response) => {
+      if (!Array.isArray(response?.items) || typeof response.total !== "number") {
+        return { failure: "Dispatch answered with something that is not an answers list" };
+      }
+      const cache = {
+        read_at: new Date(now()).toISOString(),
+        total: response.total,
+        items: response.items
+      };
+      current.cache = cache;
+      if (stateDirectory !== undefined) {
+        try {
+          writeCacheFile(stateDirectory, cache);
+        } catch {}
+      }
+      return { cache };
+    }, (error48) => {
+      if (isNoAnswersRoute(error48)) {
+        state.noRouteUntil.set(dispatch.url, now() + NO_ROUTE_BACKOFF_MS);
+        return { failure: NO_ANSWERS_ROUTE_REASON };
+      }
+      return { failure: messageFor(error48) };
+    });
+    read = started.finally(() => {
+      if (current.inFlight === read) {
+        current.inFlight = undefined;
+        current.overdue = false;
+      }
+    });
+    current.inFlight = read;
+    current.overdue = false;
+  }
+  const deadlineMs = options.deadlineMs ?? SESSION_ANSWERS_DEADLINE_MS;
+  const outcome = await settleWithin(read, deadlineMs, options.signal);
+  if (outcome === "deadline") {
+    if (current.inFlight === read)
+      current.overdue = true;
+    return carry(`Dispatch did not answer within ${deadlineMs} ms`);
+  }
+  if (outcome === "aborted")
+    return carry("the request was cancelled before Dispatch answered");
+  if ("failure" in outcome)
+    return carry(outcome.failure);
+  return {
+    text: renderSessionAnswers(outcome.cache.items, {
+      now: now(),
+      maxChars,
+      total: outcome.cache.total
+    }),
+    source: "fresh",
+    readAt: outcome.cache.read_at
+  };
+}
+async function sessionAnswersSettled(session) {
+  await state.sessions.get(session)?.inFlight;
+}
+
 // ../envoy-client/src/dispatch-execute.ts
 function documentTopic(artifact) {
   return documentTopicOf(artifact.project, artifact.slug);
@@ -16566,6 +16828,7 @@ var issueFreeTools = {
   dispatch_project: true,
   dispatch_projects: true,
   dispatch_open_asks: true,
+  dispatch_answers: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true
 };
@@ -17669,23 +17932,49 @@ function messageSummary({ message, replies }, graph) {
 }
 async function openArtifactMarks(client, resolved) {
   const asksPromise = resolved.owner.kind === "project" ? client.getArtifactAsks(resolved.artifact.id) : Promise.resolve(resolved.issue?.open_asks ?? []);
-  const commentsPromise = resolved.owner.kind === "project" ? client.getArtifactComments(resolved.artifact.id) : client.getComments(resolved.issue?.key ?? "", resolved.artifact.id);
+  const commentsPromise = resolved.owner.kind === "project" ? client.getArtifactComments(resolved.artifact.id) : client.getComments(resolved.issue?.key ?? "");
   const commentsResultPromise = commentsPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
-  const asks = await asksPromise;
-  const marks = asks.filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id).map((ask) => `ask ${ask.id}`);
+  const asks = (await asksPromise).filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id).map((ask) => `ask ${ask.id}`);
   const commentsResult = await commentsResultPromise;
   if (commentsResult.status === "rejected") {
     if (dispatchAnswered(commentsResult.reason, 404))
-      return marks;
+      return { asks, threads: [] };
     throw commentsResult.reason;
   }
+  const comments = commentsResult.value;
+  const byId = new Map(comments.map((comment) => [comment.id, comment]));
+  const threads = new Map;
+  for (const comment of comments) {
+    if (!comment.reply_to && !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id) {
+      threads.set(comment.id, { comment, replies: [] });
+    }
+  }
+  for (const reply of comments) {
+    if (!reply.reply_to)
+      continue;
+    const seen = new Set([reply.id]);
+    let root = byId.get(reply.reply_to);
+    while (root?.reply_to && !seen.has(root.id)) {
+      seen.add(root.id);
+      root = byId.get(root.reply_to);
+    }
+    if (root !== undefined)
+      threads.get(root.id)?.replies.push(reply);
+  }
+  return { asks, threads: [...threads.values()] };
+}
+function commentThreadLines({ comment, replies }) {
+  const head = (kind, record2) => `${kind} ${record2.id} \xB7 ${actorText(record2.author)} \xB7 ${record2.created_at}${record2.edited_at ? ` \xB7 edited ${record2.edited_at}` : ""}`;
   return [
-    ...marks,
-    ...commentsResult.value.filter((comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id).map((comment) => `comment ${comment.id}`)
+    ...anchorLines(comment),
+    head("comment", comment),
+    comment.body,
+    ...comment.suggestion ? [`Suggests: ${comment.suggestion.replace_with}`] : [],
+    ...replies.flatMap((reply) => [head("reply", reply), reply.body])
   ];
 }
-async function blockAsks(client, resolved, state) {
-  const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id, state) : client.listIssueAsks(resolved.issue.key, state));
+async function blockAsks(client, resolved, state2) {
+  const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id, state2) : client.listIssueAsks(resolved.issue.key, state2));
   return asks.filter((ask) => typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id);
 }
 async function readUploadedFile(client, artifact, details, requested, owner, shown) {
@@ -17790,7 +18079,7 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
   const lines = version2.markdown.split(`
 `);
-  const stillOpen = (named, state) => state === "answered" ? `${named}, answered but still open in version ${latest}: it settles into a version on its own in about two seconds; wait for that version` : `${named}, ${state} but still open in version ${latest}: write the decision into the text with dispatch doc-edit, which writes a version that carries it`;
+  const stillOpen = (named, state2) => state2 === "answered" ? `${named}, answered but still open in version ${latest}: it settles into a version on its own in about two seconds; wait for that version` : `${named}, ${state2} but still open in version ${latest}: write the decision into the text with dispatch doc-edit, which writes a version that carries it`;
   const open = blocks.flatMap((block) => {
     const ask = asks.get(block.id);
     const openers = lines.filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`));
@@ -17798,7 +18087,7 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
     const named = ask === undefined ? `block ${block.id}` : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
     if (states.length === 0)
       return [`${named}, which version ${latest} does not hold yet`];
-    if (!states.includes("open") && states.some((state) => state !== undefined))
+    if (!states.includes("open") && states.some((state2) => state2 !== undefined))
       return [];
     if (ask !== undefined)
       return ask.state === "open" ? [named] : [stillOpen(named, ask.state)];
@@ -17947,6 +18236,24 @@ async function executeDispatchTool(input) {
       throw new Error("host session id is required for dispatch open-asks");
     const response = await client2.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
+  }
+  if (input.tool === "dispatch_answers") {
+    const sessionId = input.sessionId?.trim();
+    if (!sessionId)
+      throw new Error("host session id is required for dispatch answers");
+    let response;
+    try {
+      response = await dispatchClient().sessionAnswers(sessionId);
+    } catch (error48) {
+      if (isNoAnswersRoute(error48)) {
+        throw new Error(`This Dispatch (${configUrl}) has no answers route yet: its build predates INFRA-148.`);
+      }
+      throw error48;
+    }
+    return {
+      text: renderSessionAnswersList(response.items, { now: Date.now() }),
+      details: { session: sessionId, since: response.since, total: response.total }
+    };
   }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
@@ -18652,12 +18959,17 @@ Document token: ${listed.token}`,
       const marksResult = await marksResultPromise;
       if (marksResult.status === "rejected")
         throw marksResult.reason;
-      const marks = marksResult.value;
+      const { asks, threads } = marksResult.value;
       const approval = approvalLine(resolved.artifact);
+      const comments = threads.length === 0 ? [] : [
+        version2 === undefined ? "Open anchored comments:" : "Open anchored comments (on the live document):",
+        ...threads.flatMap((thread) => ["", ...commentThreadLines(thread)])
+      ];
       const trailer = [
         ..."token" in document && document.token !== undefined ? [`Document token: ${document.token}`] : [],
-        ...marks.length === 0 ? [] : [`Open anchored asks/comments: ${marks.join(", ")}`],
-        ...approval === undefined ? [] : [approval]
+        ...asks.length === 0 ? [] : [`Open anchored asks: ${asks.join(", ")}`],
+        ...comments,
+        ...approval === undefined ? [] : [...comments.length === 0 ? [] : [""], approval]
       ];
       return {
         text: trailer.length === 0 ? document.markdown : `${document.markdown}
@@ -18915,16 +19227,16 @@ function asObject(value) {
 }
 
 // ../envoy-client/src/dispatch-first.ts
-import { readFileSync } from "fs";
-import { join } from "path";
+import { readFileSync as readFileSync2 } from "fs";
+import { join as join2 } from "path";
 var DISPATCH_FIRST_MARKER = "<dispatch-first-skill>";
 function dispatchFirstSkillFile(skillsDirectory) {
-  return join(skillsDirectory, "dispatch-first", "SKILL.md");
+  return join2(skillsDirectory, "dispatch-first", "SKILL.md");
 }
 function readDispatchFirstContext(skillFile) {
   let skill;
   try {
-    skill = readFileSync(skillFile, "utf8");
+    skill = readFileSync2(skillFile, "utf8");
   } catch (error48) {
     throw new Error(`the dispatch-first skill ${skillFile} could not be read: ${messageFor(error48)}`);
   }
@@ -18939,20 +19251,186 @@ function readDispatchFirstContext(skillFile) {
 `);
 }
 
+// ../envoy-client/src/dispatch-session-state.ts
+import { createHash } from "crypto";
+import {
+  appendFileSync,
+  closeSync,
+  fstatSync,
+  mkdirSync as mkdirSync2,
+  openSync,
+  readdirSync,
+  readFileSync as readFileSync3,
+  readSync,
+  renameSync as renameSync2,
+  rmSync as rmSync2,
+  statSync,
+  writeFileSync as writeFileSync2
+} from "fs";
+import { homedir } from "os";
+import { join as join3 } from "path";
+var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
+var PRIVATE_DIR = 448;
+var PRIVATE_FILE = 384;
+var IDLE_SESSION_MS = 14 * 86400000;
+var PRUNE_INTERVAL_MS = 86400000;
+var PRUNED_STAMP = ".pruned";
+var PICTURE_EXTENSIONS = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp"
+};
+function sessionStateRoot(env) {
+  const stateDir = env["DISPATCH_STATE_DIR"];
+  if (stateDir)
+    return stateDir;
+  return join3(env["XDG_STATE_HOME"] || join3(homedir(), ".local", "state"), "dispatch");
+}
+function sessionDirectory(env, sessionId) {
+  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
+    throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
+  }
+  return join3(sessionStateRoot(env), "sessions", sessionId);
+}
+function ensureDirectory(dir) {
+  mkdirSync2(dir, { recursive: true, mode: PRIVATE_DIR });
+}
+function readIfPresent(path) {
+  try {
+    return readFileSync3(path, "utf-8");
+  } catch (error48) {
+    if (hasErrnoCode(error48, "ENOENT"))
+      return;
+    throw error48;
+  }
+}
+function writeAtomically(path, text) {
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync2(temporary, text, { mode: PRIVATE_FILE });
+  renameSync2(temporary, path);
+}
+function stringList(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+}
+function loadSessionMemory(dir, sessionId) {
+  const path = join3(dir, "state.json");
+  const text = readIfPresent(path);
+  if (text === undefined)
+    return new Set;
+  let state2;
+  try {
+    state2 = JSON.parse(text);
+  } catch (error48) {
+    throw new Error(`the session state ${path} is not JSON (${error48.message}); remove it to start this session's memory over`);
+  }
+  const advice = adviceMemory();
+  for (const key of stringList(state2.advice))
+    advice.add(key);
+  const pictures = shownPictures(sessionId);
+  for (const address of stringList(state2.pictures))
+    pictures.add(address);
+  return new Set(stringList(state2.follows));
+}
+function writeMemory(dir, sessionId, follows) {
+  const state2 = {
+    advice: [...adviceMemory()],
+    pictures: [...shownPictures(sessionId)],
+    follows: [...follows]
+  };
+  writeAtomically(join3(dir, "state.json"), `${JSON.stringify(state2)}
+`);
+}
+function appendResult(dir, entry) {
+  ensureDirectory(dir);
+  writeResult(dir, entry);
+}
+function writeResult(dir, entry) {
+  const line = { at: new Date().toISOString(), ...entry };
+  appendFileSync(join3(dir, "results.jsonl"), `${JSON.stringify(line)}
+`, { mode: PRIVATE_FILE });
+}
+function recordOutcome(dir, sessionId, follows, entry) {
+  ensureDirectory(dir);
+  writeResult(dir, entry);
+  writeMemory(dir, sessionId, follows);
+}
+function writePicture(dir, image) {
+  const bytes = Buffer.from(image.data, "base64");
+  const name = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
+  const pictures = join3(dir, "pictures");
+  const path = join3(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
+  ensureDirectory(pictures);
+  try {
+    writeFileSync2(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
+  } catch (error48) {
+    if (!hasErrnoCode(error48, "EEXIST"))
+      throw error48;
+  }
+  return { path, bytes: bytes.length };
+}
+function writeLongOutput(dir, text) {
+  const out = join3(dir, "out");
+  ensureDirectory(out);
+  const path = join3(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
+  writeFileSync2(path, text, { mode: PRIVATE_FILE });
+  return path;
+}
+function writeSessionTitle(dir, title) {
+  ensureDirectory(dir);
+  writeAtomically(join3(dir, "title"), title);
+}
+function readSessionTitle(dir) {
+  return readIfPresent(join3(dir, "title")) || undefined;
+}
+function pruneSessions(root, now) {
+  const stamp = join3(root, PRUNED_STAMP);
+  try {
+    if (now - statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS)
+      return;
+  } catch (error48) {
+    if (!hasErrnoCode(error48, "ENOENT"))
+      throw error48;
+  }
+  const sessions = join3(root, "sessions");
+  let entries = [];
+  try {
+    entries = readdirSync(sessions, { withFileTypes: true });
+  } catch (error48) {
+    if (!hasErrnoCode(error48, "ENOENT"))
+      throw error48;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory())
+      continue;
+    const dir = join3(sessions, entry.name);
+    try {
+      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS) {
+        rmSync2(dir, { recursive: true, force: true });
+      }
+    } catch (error48) {
+      if (!hasErrnoCode(error48, "ENOENT"))
+        throw error48;
+    }
+  }
+  ensureDirectory(root);
+  writeFileSync2(stamp, "", { mode: PRIVATE_FILE });
+}
+
 // ../envoy-client/src/envoy-config.ts
 import {
   chmodSync,
-  closeSync,
+  closeSync as closeSync2,
   existsSync,
   lstatSync,
   mkdtempSync,
-  openSync,
-  readFileSync as readFileSync3,
+  openSync as openSync2,
+  readFileSync as readFileSync5,
   readlinkSync,
-  rmSync,
-  statSync
+  rmSync as rmSync3,
+  statSync as statSync2
 } from "fs";
-import { homedir, tmpdir } from "os";
+import { homedir as homedir2, tmpdir } from "os";
 import * as path from "path";
 
 // ../envoy-client/src/json-position.ts
@@ -19042,14 +19520,14 @@ function jsonErrorPosition(text) {
 }
 
 // ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync2 } from "fs";
+import { readFileSync as readFileSync4 } from "fs";
 function sendable(value) {
   return !/[\s\p{Cc}]/u.test(value);
 }
 function readSecretFile(variable, filePath) {
   let contents;
   try {
-    contents = readFileSync2(filePath, "utf8");
+    contents = readFileSync4(filePath, "utf8");
   } catch (error48) {
     throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error48)}`);
   }
@@ -19078,7 +19556,7 @@ function neutralConfig(env) {
   if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
     return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
   }
-  const configHome = xdgConfigHome ?? path.join(nonEmpty(env.HOME) ?? homedir(), ".config");
+  const configHome = xdgConfigHome ?? path.join(nonEmpty(env.HOME) ?? homedir2(), ".config");
   return { path: path.resolve(configHome, "legion", "envoy.json") };
 }
 var HARNESS_DIRECTORY_VARIABLE = {
@@ -19183,7 +19661,7 @@ function danglingLink(filePath) {
 function parseFile(filePath, schema, checkout) {
   let raw;
   try {
-    raw = readFileSync3(filePath, "utf-8");
+    raw = readFileSync5(filePath, "utf-8");
   } catch (error48) {
     if (hasErrnoCode(error48, "ENOENT") || hasErrnoCode(error48, "ENOTDIR")) {
       return { kind: "absent", link: danglingLink(filePath) };
@@ -19214,9 +19692,9 @@ function parseFile(filePath, schema, checkout) {
 }
 var FAILURE_KEPT_MS = 60000;
 var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
-var processGlobal = globalThis;
-var commandOutcomes = processGlobal[COMMAND_OUTCOMES] ?? new Map;
-processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
+var processGlobal2 = globalThis;
+var commandOutcomes = processGlobal2[COMMAND_OUTCOMES] ?? new Map;
+processGlobal2[COMMAND_OUTCOMES] = commandOutcomes;
 function runCommand(command, env, cwd) {
   const childEnv = {};
   for (const [name, variable] of Object.entries(env)) {
@@ -19227,7 +19705,7 @@ function runCommand(command, env, cwd) {
   try {
     chmodSync(directory, 448);
     const output = path.join(directory, "stdout");
-    const fd = openSync(output, "wx", 384);
+    const fd = openSync2(output, "wx", 384);
     let result;
     try {
       result = Bun.spawnSync(["/bin/sh", "-c", command], {
@@ -19242,7 +19720,7 @@ function runCommand(command, env, cwd) {
     } catch (error48) {
       return { failure: `could not start: ${messageFor(error48)}`, timedOut: false };
     } finally {
-      closeSync(fd);
+      closeSync2(fd);
     }
     try {
       process.kill(-result.pid, "SIGKILL");
@@ -19259,7 +19737,7 @@ function runCommand(command, env, cwd) {
         timedOut: false
       };
     }
-    const value = readFileSync3(output, "utf-8").trim();
+    const value = readFileSync5(output, "utf-8").trim();
     if (value.length === 0)
       return { failure: "printed nothing", timedOut: false };
     if (!sendable(value)) {
@@ -19270,10 +19748,10 @@ function runCommand(command, env, cwd) {
     }
     return { value };
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    rmSync3(directory, { recursive: true, force: true });
   }
 }
-function fileValue(value, field, filePath, env) {
+function fileValue(value, field, filePath, env, commands = "run") {
   if (!value.startsWith("!")) {
     if (!sendable(value)) {
       throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
@@ -19284,7 +19762,11 @@ function fileValue(value, field, filePath, env) {
   const cwd = path.dirname(path.resolve(filePath));
   const key = JSON.stringify([command, filePath, cwd]);
   let outcome = commandOutcomes.get(key);
-  if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
+  if (commands === "kept") {
+    if (outcome === undefined) {
+      throw new Error(`${filePath}: ${field}'s command has not run in this process yet, and this read does not run it`);
+    }
+  } else if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
     outcome = { ...runCommand(command, env, cwd), at: Date.now() };
     commandOutcomes.set(key, outcome);
   }
@@ -19294,7 +19776,7 @@ function fileValue(value, field, filePath, env) {
 }
 function statDevice(directory) {
   try {
-    return statSync(directory).dev;
+    return statSync2(directory).dev;
   } catch {
     return;
   }
@@ -19313,7 +19795,7 @@ function moveNotice(oldFile, newFile, move, deviceOf) {
   return `${oldFile} is not read: ${move}`;
 }
 function oldUserFileNotice(filePath, env, deviceOf) {
-  const home = nonEmpty(env.HOME) ?? homedir();
+  const home = nonEmpty(env.HOME) ?? homedir2();
   const old = path.join(home, ".config", "opencode", "envoy.json");
   if (!existsSync(old))
     return;
@@ -19393,7 +19875,7 @@ function bearerSource(env, section, written) {
   const bearer = written();
   return bearer === undefined ? { kind: "none" } : { kind: "file", ...bearer };
 }
-function fileBearer(bearer, url2, section, env) {
+function fileBearer(bearer, url2, section, env, commands = "run") {
   const named = httpUrl2(url2)?.origin;
   const paired = httpUrl2(bearer.server)?.origin;
   if (named !== paired) {
@@ -19405,7 +19887,7 @@ function fileBearer(bearer, url2, section, env) {
   if (bearer.token === "") {
     throw new Error(`${bearer.field} in ${bearer.path} must be a non-empty bearer token`);
   }
-  return fileValue(bearer.token, bearer.field, bearer.path, env);
+  return fileValue(bearer.token, bearer.field, bearer.path, env, commands);
 }
 
 // ../envoy-client/src/dispatch-config.ts
@@ -19440,7 +19922,7 @@ function writtenToken(config2, checkout) {
     checkout: false
   };
 }
-function dispatchSettings(env, config2) {
+function dispatchSettings(env, config2, options = {}) {
   if (config2.kind === "failed")
     return offWithError(config2.error);
   const explicitUrl = nonEmpty(env.DISPATCH_URL);
@@ -19469,7 +19951,7 @@ function dispatchSettings(env, config2) {
       return offWithError(explicitUrl === undefined ? `${config2.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config2.path}`);
     }
     const url2 = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
-    const token = source.kind === "variable" ? source.token : fileBearer(source, url2, "DISPATCH", env);
+    const token = source.kind === "variable" ? source.token : fileBearer(source, url2, "DISPATCH", env, options.commands);
     const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
     const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
     if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
@@ -19669,7 +20151,7 @@ function sessionDispatchSettings(file2, env, options) {
     return { dispatch: offWithError(file2.error), warnings: [], missing: null };
   const config2 = readEnvoyConfig(file2.path, env, options);
   return {
-    dispatch: dispatchSettings(env, config2),
+    dispatch: dispatchSettings(env, config2, { commands: options.commands }),
     warnings: config2.kind === "read" ? config2.warnings : [],
     missing: config2.kind === "read" ? config2.missing : null
   };
@@ -19696,12 +20178,12 @@ function claudeProjectDirectory(environment, fallback) {
 
 // src/session-identity.ts
 import { readFile } from "fs/promises";
-import { basename as basename2, join as join4 } from "path";
+import { basename as basename2, join as join6 } from "path";
 
 // src/session-state.ts
-import { readFileSync as readFileSync4 } from "fs";
+import { readFileSync as readFileSync6 } from "fs";
 import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
-import { dirname as dirname2, join as join3 } from "path";
+import { dirname as dirname2, join as join5 } from "path";
 async function writeAtomicStateFile(file2, contents) {
   await mkdir(dirname2(file2), { recursive: true, mode: 448 });
   const temporary = `${file2}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -19719,7 +20201,7 @@ async function pruneStateDirectory(directory, isStale) {
     throw error48;
   });
   for (const entry of entries) {
-    const file2 = join3(directory, entry);
+    const file2 = join5(directory, entry);
     if (!await isStale(file2))
       continue;
     await rm(file2, { recursive: true, force: true });
@@ -19734,7 +20216,7 @@ async function writtenLongAgo(file2) {
 }
 var TITLES_DIRECTORY = "titles";
 function sessionTitleFile(stateDirectory, sessionId) {
-  return join3(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
+  return join5(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
 }
 async function writeChosenTitle(file2, title) {
   await writeAtomicStateFile(file2, `${title}
@@ -19745,7 +20227,7 @@ async function removeChosenTitle(file2) {
 }
 function readChosenTitleSync(file2) {
   try {
-    return readFileSync4(file2, "utf8");
+    return readFileSync6(file2, "utf8");
   } catch {
     return;
   }
@@ -19762,7 +20244,7 @@ async function recordChosenTitle(sessionId, title) {
     await writeChosenTitle(file2, chosen);
 }
 async function pruneStaleSessionTitles(stateDirectory) {
-  await pruneStateDirectory(join3(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
+  await pruneStateDirectory(join5(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
 }
 
 // src/session-identity.ts
@@ -19783,14 +20265,14 @@ class SessionIdentity {
   }
 }
 function sessionHandoffDirectory(stateDirectory, claudePid) {
-  return join4(stateDirectory, "sessions", String(claudePid));
+  return join6(stateDirectory, "sessions", String(claudePid));
 }
 function sessionHandoffFile(stateDirectory, claudePid) {
-  return join4(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
+  return join6(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
 }
 var ROLES_DIRECTORY = "roles";
 function roleStateFile(stateDirectory, sessionId) {
-  return join4(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
+  return join6(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
 }
 
 class UnparseableRoleRecordError extends Error {
@@ -19814,8 +20296,8 @@ async function readPersistedRole(roleFile) {
     throw new UnparseableRoleRecordError(roleFile, error48);
   }
 }
-async function writePersistedRole(roleFile, state) {
-  await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}
+async function writePersistedRole(roleFile, state2) {
+  await writeAtomicStateFile(roleFile, `${JSON.stringify(state2)}
 `);
 }
 async function writeSessionHandoff(file2, sessionId) {
@@ -19841,14 +20323,14 @@ function processExists(pid) {
   }
 }
 async function pruneStaleSessionHandoffs(stateDirectory) {
-  await pruneStateDirectory(join4(stateDirectory, "sessions"), (file2) => {
+  await pruneStateDirectory(join6(stateDirectory, "sessions"), (file2) => {
     const pid = basename2(file2);
     return /^\d+$/.test(pid) && !processExists(Number(pid));
   });
 }
 async function pruneStaleSessionRoles(stateDirectory, currentSessionId) {
   const own = roleStateFile(stateDirectory, currentSessionId);
-  await pruneStateDirectory(join4(stateDirectory, ROLES_DIRECTORY), async (file2) => file2 !== own && await writtenLongAgo(file2));
+  await pruneStateDirectory(join6(stateDirectory, ROLES_DIRECTORY), async (file2) => file2 !== own && await writtenLongAgo(file2));
 }
 
 // hooks/session-hook.ts
@@ -19862,11 +20344,18 @@ var DispatchFirstInput = exports_external.object({
   hook_event_name: exports_external.enum(["SessionStart", "SubagentStart"]),
   cwd: exports_external.string().optional()
 });
+var AnswersInput = exports_external.object({
+  session_id: exports_external.string().min(1),
+  hook_event_name: exports_external.enum(["SessionStart", "SubagentStart"]),
+  cwd: exports_external.string().optional()
+});
+var ANSWERS_BY_MS = SESSION_ANSWERS_DEADLINE_MS;
+var ANSWERS_SETTLED_BY_MS = ANSWERS_BY_MS + 50;
 var DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude";
 function appendOnce(envFile, line) {
   let written = "";
   try {
-    written = readFileSync5(envFile, "utf8");
+    written = readFileSync7(envFile, "utf8");
   } catch (error48) {
     if (!hasErrnoCode(error48, "ENOENT"))
       throw error48;
@@ -19877,7 +20366,7 @@ function appendOnce(envFile, line) {
   const separator = written === "" || written.endsWith(`
 `) ? "" : `
 `;
-  appendFileSync(envFile, `${separator}${line}
+  appendFileSync2(envFile, `${separator}${line}
 `);
 }
 async function openAsks(raw) {
@@ -19943,16 +20432,78 @@ function dispatchFirst(raw) {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: input.hook_event_name,
-      additionalContext: readDispatchFirstContext(dispatchFirstSkillFile(join5(pluginRoot, "skills")))
+      additionalContext: readDispatchFirstContext(dispatchFirstSkillFile(join7(pluginRoot, "skills")))
     }
   }));
 }
-var mode = process.argv[2];
-if (mode !== "open-asks" && mode !== "dispatch-first") {
-  throw new Error(`session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks or dispatch-first`);
+function remainingUntil(at) {
+  return Math.max(0, Math.round(at - performance.now()));
 }
-var input = JSON.parse(await Bun.stdin.text());
-if (mode === "open-asks")
-  await openAsks(input);
-else
-  dispatchFirst(input);
+async function answersDispatch(directory) {
+  const file2 = sessionConfigFile("claude", process.env);
+  const kept = sessionDispatchSettings(file2, process.env, { cwd: directory, commands: "kept" });
+  if (kept.dispatch.enabled || kept.dispatch.error === null)
+    return kept.dispatch;
+  const worker = new Worker(import.meta.url, { workerData: { cwd: directory } });
+  const resolved = await Promise.race([
+    new Promise((resolve2) => {
+      worker.once("message", resolve2);
+      worker.once("error", (error48) => resolve2(offWithError(messageFor(error48))));
+    }),
+    Bun.sleep(remainingUntil(ANSWERS_BY_MS)).then(() => {
+      return;
+    })
+  ]);
+  return resolved ?? offWithError(`a "!" command in envoy.json had not finished ${ANSWERS_BY_MS} ms after the hook started`);
+}
+async function answers(text) {
+  try {
+    const input = AnswersInput.parse(JSON.parse(text));
+    const directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
+    const dispatch = await answersDispatch(directory);
+    let stateDirectory;
+    try {
+      stateDirectory = sessionDirectory(process.env, input.session_id);
+    } catch {}
+    const read = await readSessionAnswers({
+      session: input.session_id,
+      dispatch,
+      stateDirectory,
+      deadlineMs: remainingUntil(ANSWERS_BY_MS)
+    });
+    if (read.text !== undefined) {
+      await Bun.write(Bun.stdout, JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: input.hook_event_name,
+          additionalContext: read.text
+        }
+      }));
+    }
+    await Promise.race([
+      sessionAnswersSettled(input.session_id),
+      Bun.sleep(remainingUntil(ANSWERS_SETTLED_BY_MS))
+    ]);
+  } catch (error48) {
+    process.stderr.write(`envoy: people's answers were not added \u2014 ${messageFor(error48)}
+`);
+  }
+  process.exit(0);
+}
+if (isMainThread) {
+  const mode = process.argv[2];
+  if (mode !== "open-asks" && mode !== "dispatch-first" && mode !== "answers") {
+    throw new Error(`session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks, dispatch-first or answers`);
+  }
+  const text = await Bun.stdin.text();
+  if (mode === "answers")
+    await answers(text);
+  const input = JSON.parse(text);
+  if (mode === "open-asks")
+    await openAsks(input);
+  else
+    dispatchFirst(input);
+} else {
+  const { cwd } = workerData;
+  const file2 = sessionConfigFile("claude", process.env);
+  parentPort?.postMessage(sessionDispatchSettings(file2, process.env, { cwd }).dispatch);
+}

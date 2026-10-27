@@ -44,6 +44,9 @@ on:
       - "go.work.sum"
       - ".omp-pin"
       - ".github/actions/install-omp/**"
+      # The Claude Code release claude-envoy's tests/answers-claude.test.ts runs.
+      - ".claude-code-pin"
+      - ".github/actions/install-claude-code/**"
       # The Pulumi CLI envoy-smoke's envoy-infra live tests run.
       - ".github/actions/install-pulumi/**"
       # The image pull envoy-go, envoy-infra-go, envoy-go-race and envoy-smoke run first.
@@ -94,6 +97,8 @@ on:
       - "go.work.sum"
       - ".omp-pin"
       - ".github/actions/install-omp/**"
+      - ".claude-code-pin"
+      - ".github/actions/install-claude-code/**"
       - ".github/actions/install-pulumi/**"
       - ".github/actions/pull-test-images/**"
       # Same entries the push list owes, for the same jobs.
@@ -296,6 +301,10 @@ jobs:
               - 'packages/pi-legion/agents/**'
               - 'skills/**'
               - 'scripts/pi-plugin-prepack.sh'
+              # tests/answers-claude.test.ts runs the Claude Code release .claude-code-pin pins,
+              # which install-claude-code installs.
+              - '.claude-code-pin'
+              - '.github/actions/install-claude-code/**'
             # The private workspace package both Oh My Pi plugins import. Its tests stage each
             # plugin's skills through the prepack script and hold the two lists to a partition of
             # skills/ and to the skill lists of release.yaml (test/skills-partition.test.ts).
@@ -760,6 +769,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
+      # tests/answers-claude.test.ts runs the pinned Claude Code against a stand-in Messages
+      # endpoint and Dispatch, and refuses on GitHub Actions without one. The pin is read from
+      # .claude-code-pin, the repository's one copy of it (.github/actions/install-claude-code).
+      - uses: ./.github/actions/install-claude-code
       - run: bun install --frozen-lockfile
       - name: Lint Claude Envoy plugin
         run: bun run lint

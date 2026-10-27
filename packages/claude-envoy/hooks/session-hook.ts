@@ -1,6 +1,7 @@
-// Claude Code hook commands, one bundle for both; hooks.json names the mode as the argument. Each
-// mode is a hook command of its own because Claude Code caps each hook's output at 10,000
-// characters, so a long open-asks summary sharing a command with the skill could push it out.
+// Claude Code hook commands, one bundle for all three; hooks.json names the mode as the argument.
+// Each mode is a hook command of its own because Claude Code caps each hook's output at 10,000
+// characters, so a long open-asks summary or answers list sharing a command with the skill could
+// push it out.
 //
 // open-asks (every SessionStart: startup, resume, clear, compact, fork). Three jobs:
 // 1. Name Claude Code as the `dispatch` command's host and hand on the session's envoy.json:
@@ -31,6 +32,21 @@
 // before this plugin version, or before Dispatch was configured) gets it. A plugin installed
 // without the skill file exits non-zero naming it, which Claude Code shows the user.
 //
+// answers (every SessionStart, and SubagentStart): puts what people wrote to the session in the
+// last 72 hours (dispatch://INFRA-148) into the model's context, as
+// `hookSpecificOutput.additionalContext` under the event that ran it: `readSessionAnswers`' list,
+// or its failure line when no list was ever read. The session is the hook input's `session_id`,
+// which at SubagentStart is the parent's, the session a subagent's `dispatch` command writes as.
+// The hook prints by `ANSWERS_BY_MS` after its process started (bun's start-up included), carrying
+// the last list read, from `answers.json` in the session's Dispatch state directory, when Dispatch
+// has not answered by then; it then gives a read still in flight until `ANSWERS_SETTLED_BY_MS` to
+// write that file for the next hook, and exits 0 whatever happened. Dispatch is resolved without
+// running a `!` token command first (`commands: "kept"`); a fresh process has kept none, so when
+// that resolution is off with an error the hook resolves again with commands run, in a worker
+// thread of this same bundle, and stops waiting for it at `ANSWERS_BY_MS`: the command's 10 s
+// synchronous run blocks the worker, never the hook. A command still running then is left to end
+// on its own, in the process group the shared config reader gave it.
+//
 // The name a person gave the session is recorded by a bundle of its own,
 // `hooks/session-title-hook.ts`: it runs before every user prompt, with the prompt blocked on it,
 // so it must not pay for this bundle's zod and Dispatch client. `open-asks` records it too, from
@@ -38,13 +54,22 @@
 
 import { appendFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
+import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads"
+import type { DispatchConfigResolution } from "@legion/envoy-client/dispatch-config"
 import { formatOpenAsksSummary } from "@legion/envoy-client/dispatch-execute"
 import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first"
 import { DispatchClient } from "@legion/envoy-client/dispatch-http"
+import { sessionDirectory } from "@legion/envoy-client/dispatch-session-state"
+import { offWithError } from "@legion/envoy-client/envoy-config"
 import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
+import {
+  readSessionAnswers,
+  SESSION_ANSWERS_DEADLINE_MS,
+  sessionAnswersSettled,
+} from "@legion/envoy-client/session-answers"
 import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings"
 import { z } from "zod"
 import { claudeProjectDirectory, configuredValue } from "../src/claude-session"
@@ -61,6 +86,20 @@ const DispatchFirstInput = z.object({
   hook_event_name: z.enum(["SessionStart", "SubagentStart"]),
   cwd: z.string().optional(),
 })
+const AnswersInput = z.object({
+  session_id: z.string().min(1),
+  hook_event_name: z.enum(["SessionStart", "SubagentStart"]),
+  cwd: z.string().optional(),
+})
+
+/** When the answers hook prints, in ms after its process started: the per-request deadline, with
+ *  bun's start-up and Dispatch's resolution inside it, so the session waits no longer on it than a
+ *  model request on Oh My Pi waits on the same read. */
+const ANSWERS_BY_MS = SESSION_ANSWERS_DEADLINE_MS
+/** Until when, in ms after its process started, the answers hook lets a read that answered past
+ *  `ANSWERS_BY_MS` write `answers.json` before it exits: 50 ms more, leaving the process's exit
+ *  room under 1 s. */
+const ANSWERS_SETTLED_BY_MS = ANSWERS_BY_MS + 50
 
 const DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude"
 
@@ -161,12 +200,94 @@ function dispatchFirst(raw: unknown): void {
   )
 }
 
-const mode = process.argv[2]
-if (mode !== "open-asks" && mode !== "dispatch-first") {
-  throw new Error(
-    `session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks or dispatch-first`,
+/** The ms left until `at`, counted from this process's start (`performance.now()`'s origin), in
+ *  whole ms because the failure line names the wait. */
+function remainingUntil(at: number): number {
+  return Math.max(0, Math.round(at - performance.now()))
+}
+
+/** Dispatch for the answers hook. Read first without running any `!` command; a fresh hook process
+ *  has kept none, so a resolution that is off with an error is made again with commands run, in a
+ *  worker running this bundle, waited on until `ANSWERS_BY_MS` at most. Off with an error saying so
+ *  when it has not answered by then: the read then carries the cached list or the failure line. */
+async function answersDispatch(directory: string): Promise<DispatchConfigResolution> {
+  const file = sessionConfigFile("claude", process.env)
+  const kept = sessionDispatchSettings(file, process.env, { cwd: directory, commands: "kept" })
+  if (kept.dispatch.enabled || kept.dispatch.error === null) return kept.dispatch
+  const worker = new Worker(import.meta.url, { workerData: { cwd: directory } })
+  const resolved = await Promise.race([
+    new Promise<DispatchConfigResolution>((resolve) => {
+      worker.once("message", resolve)
+      worker.once("error", (error) => resolve(offWithError(messageFor(error))))
+    }),
+    Bun.sleep(remainingUntil(ANSWERS_BY_MS)).then(() => undefined),
+  ])
+  return (
+    resolved ??
+    offWithError(
+      `a "!" command in envoy.json had not finished ${ANSWERS_BY_MS} ms after the hook started`,
+    )
   )
 }
-const input: unknown = JSON.parse(await Bun.stdin.text())
-if (mode === "open-asks") await openAsks(input)
-else dispatchFirst(input)
+
+/** The answers mode: never throws, and ends the process with status 0. */
+async function answers(text: string): Promise<never> {
+  try {
+    const input = AnswersInput.parse(JSON.parse(text))
+    const directory = claudeProjectDirectory(
+      { CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] },
+      input.cwd ?? process.cwd(),
+    )
+    const dispatch = await answersDispatch(directory)
+    let stateDirectory: string | undefined
+    try {
+      stateDirectory = sessionDirectory(process.env, input.session_id)
+    } catch {
+      // An id that is not one plain path segment keeps no answers.json; the read still runs.
+    }
+    const read = await readSessionAnswers({
+      session: input.session_id,
+      dispatch,
+      stateDirectory,
+      deadlineMs: remainingUntil(ANSWERS_BY_MS),
+    })
+    if (read.text !== undefined) {
+      await Bun.write(
+        Bun.stdout,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: input.hook_event_name,
+            additionalContext: read.text,
+          },
+        }),
+      )
+    }
+    await Promise.race([
+      sessionAnswersSettled(input.session_id),
+      Bun.sleep(remainingUntil(ANSWERS_SETTLED_BY_MS)),
+    ])
+  } catch (error) {
+    process.stderr.write(`envoy: people's answers were not added — ${messageFor(error)}\n`)
+  }
+  // Exits rather than returns: a read or a worker still running would hold the process open.
+  process.exit(0)
+}
+
+if (isMainThread) {
+  const mode = process.argv[2]
+  if (mode !== "open-asks" && mode !== "dispatch-first" && mode !== "answers") {
+    throw new Error(
+      `session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks, dispatch-first or answers`,
+    )
+  }
+  const text = await Bun.stdin.text()
+  if (mode === "answers") await answers(text)
+  const input: unknown = JSON.parse(text)
+  if (mode === "open-asks") await openAsks(input)
+  else dispatchFirst(input)
+} else {
+  // answersDispatch's worker: Dispatch resolved with `!` commands run, for the hook to wait on.
+  const { cwd } = workerData as { readonly cwd: string }
+  const file = sessionConfigFile("claude", process.env)
+  parentPort?.postMessage(sessionDispatchSettings(file, process.env, { cwd }).dispatch)
+}

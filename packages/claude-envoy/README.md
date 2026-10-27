@@ -21,9 +21,9 @@ events and sends them to the current Claude Code session as supported
   server. Omitting the key would not work — omp would fall through to `.mcp.json`. Skills are
   unaffected: both harnesses resolve them from `.claude-plugin/plugin.json`.
 - `hooks/hooks.json` runs `dist/session-hook.js open-asks` on every `SessionStart` (startup,
-  resume, clear, compact, fork). Each of its hooks has a 20 s `timeout` (Claude Code's field is in
-  seconds): every hook resolves Dispatch first, and a `!` `dispatch.token` may run for up to 10 s in
-  the hook's own process after Bun starts, so the hook outlasts it and says why rather than being
+  resume, clear, compact, fork). Each of its hooks that resolves Dispatch with commands run has a
+  20 s `timeout` (Claude Code's field is in seconds): a `!` `dispatch.token` may run for up to 10 s
+  in the hook's own process after Bun starts, so the hook outlasts it and says why rather than being
   killed silently. It writes `export DISPATCH_HOST=claude` and
   `export ENVOY_CONFIG_FILE='<path>'` (the session's envoy.json, below) to `CLAUDE_ENV_FILE` once
   each, which Claude Code sources into every later Bash command of the session, records the current
@@ -43,7 +43,19 @@ events and sends them to the current Claude Code session as supported
   session on the same `SessionStart` events and of each subagent (`SubagentStart`), as a hook of
   its own so neither output crowds the other past Claude Code's 10,000-character hook limit. On a
   resume or fork Claude Code adds it only when the transcript does not already hold the same text,
-  so a session keeps one copy, and one opened before the skill shipped gets it. On every
+  so a session keeps one copy, and one opened before the skill shipped gets it. On the same
+  `SessionStart` events and at each `SubagentStart`, `dist/session-hook.js answers`, a third hook of
+  its own, puts what people wrote to the session in the last 72 hours (answers to its asks, replies
+  to its comments, comments on documents it wrote, messages to it; dispatch://INFRA-148) into the
+  context, read from `GET /api/v1/agents/{session_id}/answers` for the hook input's `session_id`,
+  which at `SubagentStart` is the parent's: the same list, under 8,000 characters, that every
+  Oh My Pi model request carries (`@legion/envoy-client/session-answers`). It prints within 800 ms
+  of its start, Bun's start-up included, carrying the last list read (`answers.json` in the
+  session's Dispatch state directory) when Dispatch has not answered by then, or one line saying the
+  list could not be read and why when none ever was, and exits within 850 ms, always with status 0
+  and with no output when there is nothing to show; its `timeout` is 5 s. A `!` command in
+  envoy.json runs in a worker thread the hook stops waiting for at 800 ms, so a slow one costs the
+  list, never the bound. On every
   `UserPromptSubmit`, `dist/session-title-hook.js` records the name a person gave the session
   (below, "Session title"); its `timeout` is 5 s, and it is a bundle of its own because Claude
   Code holds the prompt until it returns.
@@ -497,4 +509,15 @@ bun run --cwd packages/claude-envoy lint
 bun run --cwd packages/claude-envoy typecheck
 bun run --cwd packages/claude-envoy test
 bun run --cwd packages/claude-envoy check-dist
+```
+
+`tests/answers-claude.test.ts` runs the real Claude Code, the release `.claude-code-pin` at the
+repository root pins, against a stand-in Messages endpoint and Dispatch: the list reaches the model
+at startup, on `--resume`, after `/compact` and in a subagent. It skips without `LEGION_TEST_CLAUDE`
+naming the binary, except on GitHub Actions, where `.github/actions/install-claude-code` installs
+the pin. Locally:
+
+```bash
+mkdir -p "$TMPDIR/claude-code" && bun add --cwd "$TMPDIR/claude-code" --exact --no-save "@anthropic-ai/claude-code@$(<.claude-code-pin)"
+cd packages/claude-envoy && LEGION_TEST_CLAUDE="$TMPDIR/claude-code/node_modules/.bin/claude" bun test tests/answers-claude.test.ts
 ```

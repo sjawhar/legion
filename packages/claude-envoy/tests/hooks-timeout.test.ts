@@ -1,14 +1,17 @@
 import { expect, test } from "bun:test"
 import hooks from "../hooks/hooks.json" with { type: "json" }
 
-// Each SessionStart hook resolves Dispatch before it writes anything, and a `!` dispatch.token runs
-// for up to 10 s (envoy-client's COMMAND_TIMEOUT_MS) in that hook's own process, after Bun has
-// started. Claude Code's `timeout` is in seconds; a hook it kills first loses the open-asks summary
-// or the dispatch-first context silently, so each of those outlasts the command with room for
-// start-up. The session-title hook resolves nothing and makes no network call while Claude Code
-// blocks the prompt on it, so it gets a far shorter bound, and a bundle of its own: the arguments
-// are pinned whole here, since which file each hook runs is half of what this row guards.
-test("each hook runs its own bundle, with the timeout its work needs: 20 s for the Dispatch hooks, 5 s for session-title", () => {
+// The open-asks and dispatch-first hooks resolve Dispatch before they write anything, and a `!`
+// dispatch.token runs for up to 10 s (envoy-client's COMMAND_TIMEOUT_MS) in that hook's own
+// process, after Bun has started. Claude Code's `timeout` is in seconds; a hook it kills first loses
+// the open-asks summary or the dispatch-first context silently, so each of those outlasts the
+// command with room for start-up. The answers hook prints and exits within its own bound, under
+// 1 s from its start (`ANSWERS_SETTLED_BY_MS` in hooks/session-hook.ts: a token command runs in a
+// worker it stops waiting for), so it gets the short bound, room for a slow start-up only. The
+// session-title hook resolves nothing and makes no network call while Claude Code blocks the
+// prompt on it, so it gets the short bound too, and a bundle of its own: the arguments are pinned
+// whole here, since which file each hook runs is half of what this row guards.
+test("each hook runs its own bundle, with the timeout its work needs: 20 s for the hooks that run a token command, 5 s for answers and session-title", () => {
   const commands = Object.values(hooks.hooks).flatMap((matchers) =>
     matchers.flatMap((matcher) => matcher.hooks.map((hook) => [hook.args, hook.timeout])),
   )
@@ -16,7 +19,9 @@ test("each hook runs its own bundle, with the timeout its work needs: 20 s for t
   expect(commands).toEqual([
     [[bundle("session-hook"), "open-asks"], 20],
     [[bundle("session-hook"), "dispatch-first"], 20],
+    [[bundle("session-hook"), "answers"], 5],
     [[bundle("session-hook"), "dispatch-first"], 20],
+    [[bundle("session-hook"), "answers"], 5],
     [[bundle("session-title-hook")], 5],
   ])
 })
