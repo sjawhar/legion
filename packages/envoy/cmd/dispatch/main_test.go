@@ -452,6 +452,27 @@ func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 	}
 }
 
+// untouchedFiles is a file store any call on which panics: its methods are the nil interface's.
+type untouchedFiles struct{ files.Store }
+
+// /livez answers 204 with no body and asks no dependency anything: with no database, no NATS
+// client and a file store any call on which panics, it still answers, and the router behind it is
+// never reached. It is what the liveness and startup probes ask, which must not wait on or fail
+// with a dependency.
+func TestDispatchHandlerLivezAnswersWithoutDependencies(t *testing.T) {
+	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("the router served %s %s", r.Method, r.URL.Path)
+	})
+	response := httptest.NewRecorder()
+	dispatchHandler(router, nil, nil, untouchedFiles{}, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("GET /livez status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	if response.Body.Len() != 0 {
+		t.Fatalf("GET /livez body = %q, want none", response.Body.String())
+	}
+}
+
 // /healthz reports the file store beside the database and NATS: null where no bucket is
 // configured, true where the bucket answers, and false where it does not, so a wrong grant shows
 // on the health page and not only as failed uploads. The bucket never decides `ok`: the load

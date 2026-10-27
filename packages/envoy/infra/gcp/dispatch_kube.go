@@ -148,16 +148,29 @@ func secretChecksum(secret *corev1.Secret) pulumi.StringOutput {
 }
 
 // answersProbe is a startup or liveness probe of the HTTP server on the container's loopback port:
-// it fails only when the process does not answer at all. curl without -f exits 0 whatever the
-// status, so a /healthz answering 503 while Postgres or NATS is down passes, and a dependency
-// outage never restarts every pod; --max-time 8 makes curl give up inside the probe's 9 s timeout.
+// it fails only when the process does not answer at all. It asks /livez, which runs no dependency
+// check: envoy-dispatch answers it 204 with no I/O, and envoy-listener, which has no such route,
+// answers it 404 from its mux, outside the /v1 routes its bearer guards, with no I/O either. curl
+// without -f exits 0 whatever the status, so any HTTP answer passes, and neither a dependency
+// outage nor a slow Postgres or NATS restarts every pod; --max-time 8 makes curl give up inside the
+// probe's 9 s timeout.
 func answersProbe(port, periodSeconds, failureThreshold int) *corev1.ProbeArgs {
 	return &corev1.ProbeArgs{
 		Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{
 			pulumi.String("curl"), pulumi.String("-sS"), pulumi.String("-o"), pulumi.String("/dev/null"), pulumi.String("--max-time"), pulumi.String("8"),
-			pulumi.String("http://127.0.0.1:" + strconv.Itoa(port) + "/healthz"),
+			pulumi.String("http://127.0.0.1:" + strconv.Itoa(port) + "/livez"),
 		}},
 		PeriodSeconds: pulumi.Int(periodSeconds), TimeoutSeconds: pulumi.Int(9), FailureThreshold: pulumi.Int(failureThreshold),
+	}
+}
+
+// readyProbe is a readiness probe of the HTTP server on the container's loopback port: curl -f of
+// its /healthz, which checks the process's dependencies, so a pod whose Postgres or NATS is
+// unreachable is taken out of its Service without being restarted.
+func readyProbe(port, periodSeconds, timeoutSeconds, failureThreshold int) *corev1.ProbeArgs {
+	return &corev1.ProbeArgs{
+		Exec:          &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:" + strconv.Itoa(port) + "/healthz")}},
+		PeriodSeconds: pulumi.Int(periodSeconds), TimeoutSeconds: pulumi.Int(timeoutSeconds), FailureThreshold: pulumi.Int(failureThreshold),
 	}
 }
 
@@ -389,7 +402,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// selects app=<hostname>, sends user traffic to the app's pods and to no other workload's.
 	// checksums names the component Secrets the pod's environment reads (secretChecksum). The
 	// template carries safe-to-evict only when no budget covers it (safeToEvictAnnotation).
-	deployment := func(name string, replicas int, strategy dispatchStrategy, pdbMinAvailable int, checksums map[string]*corev1.Secret, pod corev1.PodSpecArgs, opts ...pulumi.ResourceOption) (*appsv1.Deployment, error) {
+	deployment := func(name string, replicas int, pdbMinAvailable int, checksums map[string]*corev1.Secret, pod corev1.PodSpecArgs, opts ...pulumi.ResourceOption) (*appsv1.Deployment, error) {
 		selector := &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(name)}}
 		pod.Affinity, pod.TopologySpreadConstraints = dispatchSpread(selector)
 		annotations := pulumi.StringMap{}
@@ -407,7 +420,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			Metadata: metadata(name),
 			Spec: appsv1.DeploymentSpecArgs{
 				Replicas: pulumi.Int(replicas),
-				Strategy: deploymentStrategy(strategy),
+				Strategy: deploymentStrategy(dispatchStrategyFor(replicas)),
 				Selector: selector,
 				Template: corev1.PodTemplateSpecArgs{
 					Metadata: &metav1.ObjectMetaArgs{Labels: pulumi.StringMap{"app": pulumi.String(name)}, Annotations: annotations},
@@ -452,7 +465,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// reach the NATS hub through (newDispatchFrontDoor). Recreated at one pod and rolled above it, so
 	// by default a roll never leaves the name to a single pod. Only the auth key's checksum is on its
 	// template: a renewed certificate in its TLS Secret rolls no pod.
-	tailnet, err := deployment(tailnetName, s.frontDoorReplicas, s.frontDoorStrategy, s.disruption.frontDoorPDBMinAvailable, map[string]*corev1.Secret{authKeyName: authKeySecret}, frontDoorPod, frontDoorOpts...)
+	tailnet, err := deployment(tailnetName, s.frontDoorReplicas, s.disruption.frontDoorPDBMinAvailable, map[string]*corev1.Secret{authKeyName: authKeySecret}, frontDoorPod, frontDoorOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -481,16 +494,12 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// (answersProbe). The pre-stop wait keeps a stopping pod answering /v1 while its removal from
 	// the Service propagates, and the 35 s grace period covers those 5 s, the listener's own stop
 	// of about 26 s, and a margin.
-	listenerReady := &corev1.ProbeArgs{
-		Exec:          &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:" + listenerPort + "/healthz")}},
-		PeriodSeconds: pulumi.Int(5), TimeoutSeconds: pulumi.Int(6), FailureThreshold: pulumi.Int(2),
-	}
-	if _, err := deployment(listenerName, s.listenerReplicas, s.listenerStrategy, s.disruption.listenerPDBMinAvailable, map[string]*corev1.Secret{listenerName: listenerSecret}, corev1.PodSpecArgs{
+	if _, err := deployment(listenerName, s.listenerReplicas, s.disruption.listenerPDBMinAvailable, map[string]*corev1.Secret{listenerName: listenerSecret}, corev1.PodSpecArgs{
 		ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(35), EnableServiceLinks: pulumi.Bool(false),
 		Containers: corev1.ContainerArray{
 			corev1.ContainerArgs{
 				Name: pulumi.String("envoy-listener"), Image: pulumi.String(s.images.envoy), Resources: resources("500m", "512Mi"), Env: listenerEnv, VolumeMounts: seedMount,
-				Lifecycle: sleepPreStop(5), StartupProbe: answersProbe(core.DefaultListenerPort, 5, 60), LivenessProbe: answersProbe(core.DefaultListenerPort, 10, 3), ReadinessProbe: listenerReady,
+				Lifecycle: sleepPreStop(5), StartupProbe: answersProbe(core.DefaultListenerPort, 5, 60), LivenessProbe: answersProbe(core.DefaultListenerPort, 10, 3), ReadinessProbe: readyProbe(core.DefaultListenerPort, 5, 6, 2),
 			},
 		},
 		Volumes: seedVolume,
@@ -597,21 +606,22 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		HttpGet:       &corev1.HTTPGetActionArgs{Path: pulumi.String("/liveness"), Port: pulumi.Int(9801)},
 		PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(5), FailureThreshold: pulumi.Int(3),
 	}
+	appReady := readyProbe(8766, 10, 3, 3)
+	appReady.InitialDelaySeconds = pulumi.Int(5)
 	appPod := corev1.PodSpecArgs{
 		ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(35), EnableServiceLinks: pulumi.Bool(false),
 		InitContainers: corev1.ContainerArray{
 			corev1.ContainerArgs{
 				Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"),
 				Args:      pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), pulumi.String("--health-check"), pulumi.String("--http-address=0.0.0.0"), pulumi.String("--http-port=9801"), cloud.instance.ConnectionName},
-				Resources: resources(s.proxyCPU, s.proxyMemory), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)},
+				Resources: resources(s.appResources.proxyCPU, s.appResources.proxyMemory), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)},
 				StartupProbe: proxyStartup, LivenessProbe: proxyLiveness,
 			},
 		},
 		Containers: corev1.ContainerArray{
 			corev1.ContainerArgs{
-				Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources(s.appCPU, s.appMemory), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop,
-				StartupProbe: answersProbe(8766, 10, 180), LivenessProbe: answersProbe(8766, 10, 3),
-				ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)},
+				Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources(s.appResources.appCPU, s.appResources.appMemory), Env: appEnv, VolumeMounts: appMounts, Lifecycle: appPreStop,
+				StartupProbe: answersProbe(8766, 10, 180), LivenessProbe: answersProbe(8766, 10, 3), ReadinessProbe: appReady,
 			},
 		},
 		Volumes: appVolumes,
@@ -619,7 +629,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// envoy-dispatch reads the dispatch Secret and ENVOY_TOKEN from the listener's, so a change to
 	// either rolls the app.
 	appChecksums := map[string]*corev1.Secret{dispatchSecretName: dispatchSecret, listenerName: listenerSecret}
-	if _, err := deployment(s.hostname, s.replicas, s.strategy, s.disruption.appPDBMinAvailable, appChecksums, appPod, frontDoor, pulumi.DependsOn(appGrants)); err != nil {
+	if _, err := deployment(s.hostname, s.replicas, s.disruption.appPDBMinAvailable, appChecksums, appPod, frontDoor, pulumi.DependsOn(appGrants)); err != nil {
 		return nil, err
 	}
 	if _, err := service(s.hostname, 8766); err != nil {

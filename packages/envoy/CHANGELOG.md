@@ -4,6 +4,8 @@
 
 ### Added
 
+- `envoy-dispatch` serves `GET /livez`, answering 204 with no I/O, for liveness and startup probes
+  that must not wait on or fail with Postgres, NATS or the file store; `/healthz` is unchanged.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -865,11 +867,13 @@
   nodes on demand, could place two pods in one zone.
 - `envoy-infra:gcp:Dispatch` gives every serving container a startup and a liveness probe that
   fails only when the process does not answer: `envoy-dispatch` and `envoy-listener` run curl
-  without `-f` against their `/healthz`, so a 503 while Postgres or NATS is down restarts no pod,
-  and `envoy-dispatch`'s startup allows 30 minutes for its migrations; `cloud-sql-proxy` runs with
-  `--health-check` and is probed on `/startup` and `/liveness` on port 9801; and the front door's
-  `tailscale` container's liveness asks its LocalAPI. The listener's readiness probe allows 6 s,
-  and the listener waits 5 s before it stops, inside a 35 s grace period.
+  without `-f` against their `/livez`, which reads nothing (`envoy-dispatch` answers it 204, the
+  listener 404 from its router), so neither a dependency outage nor a slow Postgres or NATS
+  restarts a pod, and `envoy-dispatch`'s startup allows 30 minutes for its migrations;
+  `cloud-sql-proxy` runs with `--health-check` and is probed on `/startup` and `/liveness` on port
+  9801; and the front door's `tailscale` container's liveness asks its LocalAPI. The listener's
+  readiness probe allows 6 s, and the listener waits 5 s before it stops, inside a 35 s grace
+  period.
 - `envoy-infra:gcp:Dispatch` rolls the pods that read one of its own Secrets when that Secret
   changes: each pod template carries `checksum/<secret>`, the resourceVersion of
   `<hostname>-dispatch` and `<hostname>-listener` on the app, `<hostname>-listener` on the

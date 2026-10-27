@@ -24,16 +24,13 @@ const dispatchType = "envoy-infra:gcp:Dispatch"
 const (
 	defaultDispatchDatabaseVersion = "POSTGRES_16"
 	// defaultDispatchDatabaseTier is the Cloud SQL tier when databaseTier is unset: 4 vCPU and
-	// 15 GB, the size an operator already chose for this deployment. Cloud SQL's default
-	// max_connections follows the instance's memory, and from 15 to under 30 GB it is 500
-	// (https://cloud.google.com/sql/docs/postgres/flags, max_connections). Every server pod opens
-	// up to the sum of its pools (packages/envoy/internal/dispatch/store/pool.go): 16 shared, on
-	// which migrations run too, 4 rooms, 1 health, 8 leases, and the 3 LISTEN connections the
-	// listener pool dials and hands off, 32 in all; the listener's and the front door's pods open
-	// none. 32 connections x 15 pods is 480, inside 500 with 20 to spare, and a rolling update
-	// runs replicas plus one pod (maxSurge), so up to 14 replicas roll inside it. The previous
-	// default, db-custom-1-3840 (3.75 GB, 100 connections), held three pods, so two replicas
-	// rolling, with 4 connections to spare, and its one vCPU served every pod's queries.
+	// 15 GB. Cloud SQL's default max_connections follows the instance's memory, and from 15 to
+	// under 30 GB it is 500 (https://cloud.google.com/sql/docs/postgres/flags, max_connections).
+	// Every server pod opens up to the sum of its pools, 32 connections
+	// (packages/envoy/internal/dispatch/store/pool.go); the listener's and the front door's pods
+	// open none. A rolling update runs replicas plus one pod (maxSurge), so connections per pod x
+	// (replicas + 1) must stay under max_connections: 32 x 15 is 480, so up to 14 replicas roll
+	// inside 500.
 	defaultDispatchDatabaseTier = "db-custom-4-15360"
 	defaultDispatchNamespace    = "dispatch"
 	defaultDispatchReplicas     = 1
@@ -60,8 +57,8 @@ const (
 	dispatchStrategyRollingUpdate = "RollingUpdate"
 
 	// dispatchAvailabilityZonal and dispatchAvailabilityRegional are the two Cloud SQL
-	// availability types databaseAvailabilityType takes: one zone, the default and the instance's
-	// value before the input existed, or a standby in a second zone that Cloud SQL fails over to.
+	// availability types databaseAvailabilityType takes: one zone, the default, or a standby in a
+	// second zone that Cloud SQL fails over to.
 	dispatchAvailabilityZonal    = "ZONAL"
 	dispatchAvailabilityRegional = "REGIONAL"
 
@@ -356,14 +353,10 @@ type dispatchSettings struct {
 	deletionProtection, existingNamespace       bool
 	replicas                                    int
 	frontDoorReplicas, listenerReplicas         int
-	appCPU, appMemory                           string
-	proxyCPU, proxyMemory                       string
+	appResources                                dispatchAppResources
 	pprofPort                                   int
 	disruption                                  dispatchDisruption
-	// strategy is the app Deployment's update strategy; frontDoorStrategy and listenerStrategy
-	// are the front door's and the listener's, each from that Deployment's own replica count.
-	strategy, frontDoorStrategy, listenerStrategy dispatchStrategy
-	azure                                         dispatchAzure
+	azure                                       dispatchAzure
 }
 
 // dispatchAzure is the Azure embedder's plain configuration, the zero value when
@@ -631,10 +624,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if s.listenerReplicas, err = dispatchReplicas("listenerReplicas", args.ListenerReplicas, defaultDispatchListenerReplicas); err != nil {
 		return dispatchSettings{}, err
 	}
-	s.strategy = dispatchStrategyFor(s.replicas)
-	s.frontDoorStrategy = dispatchStrategyFor(s.frontDoorReplicas)
-	s.listenerStrategy = dispatchStrategyFor(s.listenerReplicas)
-	if s.appCPU, s.appMemory, s.proxyCPU, s.proxyMemory, err = newDispatchAppResources(args); err != nil {
+	if s.appResources, err = newDispatchAppResources(args); err != nil {
 		return dispatchSettings{}, err
 	}
 	if s.pprofPort, err = newDispatchPprofPort(args); err != nil {
@@ -761,54 +751,60 @@ func newDispatchDisruption(args *DispatchArgs, replicas, frontDoorReplicas, list
 	return d, nil
 }
 
+// dispatchAppResources is the app pod's resolved container sizes: envoy-dispatch's request and
+// limit, appCPU and appMemory, and the cloud-sql-proxy sidecar's, proxyCPU and proxyMemory.
+type dispatchAppResources struct {
+	appCPU, appMemory, proxyCPU, proxyMemory string
+}
+
 // newDispatchAppResources resolves appCpu and appMemory, the envoy-dispatch container's request
 // and limit, and proxyCpu and proxyMemory, the cloud-sql-proxy sidecar's, and refuses a size at
 // which Autopilot would not run the app pod as rendered: the two containers' total below
 // autopilotPodMinCPU or autopilotPodMinMemory or outside the memory-per-CPU ratio (Autopilot
 // raises it), or above autopilotPodMaxCPU or autopilotPodMaxMemory (Autopilot rejects it). Each
 // refusal names the inputs whose sum it judges.
-func newDispatchAppResources(args *DispatchArgs) (cpu, memory, proxyCPU, proxyMemory string, err error) {
+func newDispatchAppResources(args *DispatchArgs) (dispatchAppResources, error) {
 	cpu, appCPU, err := appQuantity("appCpu", args.AppCpu, defaultDispatchAppCPU, "1, 1500m or 2")
 	if err != nil {
-		return "", "", "", "", err
+		return dispatchAppResources{}, err
 	}
 	memory, appMemory, err := appQuantity("appMemory", args.AppMemory, defaultDispatchAppMemory, "4Gi or 6144Mi")
 	if err != nil {
-		return "", "", "", "", err
+		return dispatchAppResources{}, err
 	}
 	proxyCPU, proxyCPUValue, err := appQuantity("proxyCpu", args.ProxyCpu, defaultDispatchProxyCPU, "1, 1500m or 2")
 	if err != nil {
-		return "", "", "", "", err
+		return dispatchAppResources{}, err
 	}
 	proxyMemory, proxyMemoryValue, err := appQuantity("proxyMemory", args.ProxyMemory, defaultDispatchProxyMemory, "2Gi or 1536Mi")
 	if err != nil {
-		return "", "", "", "", err
+		return dispatchAppResources{}, err
 	}
 	podCPU := new(big.Rat).Add(appCPU, proxyCPUValue)
 	podMemory := new(big.Rat).Add(appMemory, proxyMemoryValue)
 	if podCPU.Cmp(autopilotPodMinCPU) < 0 {
-		return "", "", "", "", fmt.Errorf("appCpu %q and proxyCpu %q must make at least %s together: below it Autopilot raises the app pod's request, since the pod carries pod anti-affinity (and safe-to-evict when no budget covers it)",
+		return dispatchAppResources{}, fmt.Errorf("appCpu %q and proxyCpu %q must make at least %s together: below it Autopilot raises the app pod's request, since the pod carries pod anti-affinity (and safe-to-evict when no budget covers it)",
 			cpu, proxyCPU, milliCPU(autopilotPodMinCPU))
 	}
 	if podCPU.Cmp(autopilotPodMaxCPU) > 0 {
-		return "", "", "", "", fmt.Errorf("appCpu %q and proxyCpu %q must make at most %s CPU together: Autopilot rejects an app pod that requests more",
+		return dispatchAppResources{}, fmt.Errorf("appCpu %q and proxyCpu %q must make at most %s CPU together: Autopilot rejects an app pod that requests more",
 			cpu, proxyCPU, autopilotPodMaxCPU.RatString())
 	}
 	if podMemory.Cmp(autopilotPodMinMemory) < 0 {
-		return "", "", "", "", fmt.Errorf("appMemory %q and proxyMemory %q must make at least %s together: below it Autopilot raises the app pod's request, since the pod carries pod anti-affinity (and safe-to-evict when no budget covers it)",
+		return dispatchAppResources{}, fmt.Errorf("appMemory %q and proxyMemory %q must make at least %s together: below it Autopilot raises the app pod's request, since the pod carries pod anti-affinity (and safe-to-evict when no budget covers it)",
 			memory, proxyMemory, mebibytes(autopilotPodMinMemory))
 	}
 	if podMemory.Cmp(autopilotPodMaxMemory) > 0 {
-		return "", "", "", "", fmt.Errorf("appMemory %q and proxyMemory %q must make at most 110Gi together: Autopilot rejects an app pod that requests more",
+		return dispatchAppResources{}, fmt.Errorf("appMemory %q and proxyMemory %q must make at most 110Gi together: Autopilot rejects an app pod that requests more",
 			memory, proxyMemory)
 	}
 	gibPerCPU := new(big.Rat).Quo(podMemory, podCPU)
 	gibPerCPU.Quo(gibPerCPU, new(big.Rat).SetInt64(1<<30))
 	if gibPerCPU.Cmp(autopilotMinGiBPerCPU) < 0 || gibPerCPU.Cmp(autopilotMaxGiBPerCPU) > 0 {
-		return "", "", "", "", fmt.Errorf("appCpu %q, appMemory %q, proxyCpu %q and proxyMemory %q: the app pod must hold between 1 and 6.5 GiB of memory per CPU, or Autopilot raises the smaller of the two",
+		return dispatchAppResources{}, fmt.Errorf("appCpu %q, appMemory %q, proxyCpu %q and proxyMemory %q: the app pod must hold between 1 and 6.5 GiB of memory per CPU, or Autopilot raises the smaller of the two",
 			cpu, memory, proxyCPU, proxyMemory)
 	}
-	return cpu, memory, proxyCPU, proxyMemory, nil
+	return dispatchAppResources{appCPU: cpu, appMemory: memory, proxyCPU: proxyCPU, proxyMemory: proxyMemory}, nil
 }
 
 // appQuantity resolves one container size input of the app pod: fallback when it is unset, and

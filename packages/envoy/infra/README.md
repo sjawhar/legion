@@ -509,10 +509,13 @@ autoscaler move those pods as far as the budget allows.
 
 Every serving container has a startup and a liveness probe, and a liveness probe fails only when
 the process does not answer at all. `envoy-dispatch`'s and `envoy-listener`'s run
-`curl -sS -o /dev/null --max-time 8` against their own `/healthz` on loopback (ports 8766 and
-9020), with a 9-second timeout: without `-f`, curl exits 0 whatever the status, so a `/healthz`
-answering 503 while Postgres or NATS is down passes, and a dependency outage never restarts every
-pod. Liveness asks every 10 seconds, and three missed answers in a row restart the container.
+`curl -sS -o /dev/null --max-time 8` against their own `/livez` on loopback (ports 8766 and
+9020), with a 9-second timeout. `/livez` reads nothing: `envoy-dispatch` answers it `204`, and
+`envoy-listener`, which has no such route, answers it `404` from its router, outside the `/v1`
+routes its bearer guards. Without `-f`, curl exits 0 whatever the status, so any answer passes:
+unlike `/healthz`, which reads Postgres and NATS on every call, the probe neither fails during a
+dependency outage nor waits on a slow hub, so neither restarts every pod. Liveness asks every 10
+seconds, and three missed answers in a row restart the container.
 Startup asks the same question for longer before liveness takes over: 30 minutes for
 `envoy-dispatch` (180 tries 10 seconds apart), since it migrates the database before it listens
 and nothing bounds a migration's run time, and 5 minutes for `envoy-listener` (60 tries 5 seconds
@@ -660,7 +663,8 @@ its state directory and renews it at two thirds of its life, but a new pod start
   claim. Three leaves room under Let's Encrypt's five for an operator's own order or a retried
   apply. A pod that finds no claim left does not advertise, so orders nothing, and stays unready,
   asking again every 30 seconds. The gate also records each pod's node in the
-  `legion.dev/front-door-nodes` annotation;
+  `legion.dev/front-door-nodes` annotation. Its read every 30 seconds asks for the Secret's
+  metadata alone (`PartialObjectMetadata`), never its certificate key;
 - `cert-publish`'s loop, every 60 seconds, writes the pod's own cached certificate into the Secret
   when it ends later than the published one for the same name, so the next pod finds it.
 

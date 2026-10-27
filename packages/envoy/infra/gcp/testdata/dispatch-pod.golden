@@ -140,7 +140,7 @@
               "/dev/null",
               "--max-time",
               "8",
-              "http://127.0.0.1:8766/healthz"
+              "http://127.0.0.1:8766/livez"
             ]
           },
           "failureThreshold": 3,
@@ -180,7 +180,7 @@
               "/dev/null",
               "--max-time",
               "8",
-              "http://127.0.0.1:8766/healthz"
+              "http://127.0.0.1:8766/livez"
             ]
           },
           "failureThreshold": 180,

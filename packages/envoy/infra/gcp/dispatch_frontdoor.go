@@ -136,11 +136,10 @@ func dispatchScriptVars(vars [][2]string) string {
 // mkdir also creates the state directory itself, a subdirectory of the state volume
 // (tailnetServicePaths.stateDir says why), so the pod's uid owns it.
 func dispatchCertSeedScript(p dispatchCertPaths, fqdn string) string {
-	return dispatchScriptVars([][2]string{{"state", p.service.stateDir()}, {"secret", p.secret}, {"fqdn", fqdn}}) + dispatchCertSeedBody
+	return dispatchScriptVars([][2]string{{"cache", p.cache()}, {"secret", p.secret}, {"fqdn", fqdn}}) + dispatchCertSeedBody
 }
 
 const dispatchCertSeedBody = `set -eu
-cache=$state/certs
 mkdir -p "$cache"
 chmod 0700 "$cache"
 if [ -s "$secret/tls.crt" ] && [ -s "$secret/tls.key" ] && [ -s "$secret/acme-account.key.pem" ]; then
@@ -187,12 +186,11 @@ fi
 // restarts show it. An empty cache is normal until tailscaled's first order and is said once.
 func dispatchCertPublishScript(p dispatchCertPaths, fqdn string) string {
 	return dispatchScriptVars([][2]string{
-		{"state", p.service.stateDir()}, {"secret", p.secret}, {"fqdn", fqdn}, {"tokens", p.tokens}, {"url", p.secretURL},
+		{"state", p.service.stateDir()}, {"cache", p.cache()}, {"secret", p.secret}, {"fqdn", fqdn}, {"tokens", p.tokens}, {"url", p.secretURL},
 	}) + dispatchCertPublishBody
 }
 
 const dispatchCertPublishBody = `set -u
-cache=$state/certs
 crt=$cache/$fqdn.crt
 key=$cache/$fqdn.key
 account=$cache/acme-account.key.pem
@@ -272,6 +270,10 @@ done
 //     the Secret's dispatchCertificateClaimsAnnotation, of which one older than the claim window no
 //     longer counts. A pod already holding one (a restarted container) takes no other.
 //
+// Each pass reads the Secret as a PartialObjectMetadata (the Accept header asks for
+// as=PartialObjectMetadata;g=meta.k8s.io;v=v1), so it reads the resourceVersion and the two
+// annotations and never the certificate's private key, which the mounted Secret already holds.
+//
 // Every write carries the resourceVersion the pass read as its precondition, so of two pods that
 // read one version the API server answers the later 409, and two pods never take one claim. Every
 // path that sets the flag first writes this pod's entry in the node registry
@@ -288,7 +290,7 @@ done
 // apply removes only the fields its own manager set, so no apply strips them.
 func dispatchCertClaimScript(p dispatchCertPaths, fqdn string) string {
 	return dispatchScriptVars([][2]string{
-		{"state", p.service.stateDir()}, {"secret", p.secret}, {"fqdn", fqdn}, {"tokens", p.tokens}, {"url", p.secretURL},
+		{"cache", p.cache()}, {"secret", p.secret}, {"fqdn", fqdn}, {"tokens", p.tokens}, {"url", p.secretURL},
 		{"flag_file", p.service.advertiseFlag()}, {"node_file", p.service.nodeID()},
 		{"claims_max", strconv.Itoa(dispatchCertificateClaimsPerWeek)}, {"window", strconv.Itoa(dispatchCertificateClaimWindow)},
 		{"not_due", strconv.Itoa(dispatchCertNotDueSeconds)}, {"keep", strconv.Itoa(dispatchFrontDoorNodesKeepSeconds)},
@@ -300,7 +302,6 @@ const dispatchCertClaimBody = `(
   at() { date -u +%Y-%m-%dT%H:%M:%SZ; }
   log() { echo "$(at) $1 $2 | $3 | $4"; }
   me=${HOSTNAME:-$(hostname)}
-  cache=$state/certs
   # left prints the seconds until a PEM certificate's notAfter, and fails unless its
   # subjectAltName names $fqdn exactly.
   left() {
@@ -352,7 +353,8 @@ const dispatchCertClaimBody = `(
       why="published certificate, ${l}s left"
       log happened "certificate budget" "openssl x509 -enddate -in $secret/tls.crt" "the Secret holds the certificate with ${l}s left: copied into the cache, advertise, no claim"
     fi
-    if ! body=$(curl -sS -f --cacert "$tokens/ca.crt" -H "Authorization: Bearer $(cat "$tokens/token")" "$url" 2>/dev/null); then
+    if ! body=$(curl -sS -f --cacert "$tokens/ca.crt" -H "Authorization: Bearer $(cat "$tokens/token")" \
+      -H 'Accept: application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1' "$url" 2>/dev/null); then
       log happened "certificate budget" "GET $url" "the claim ledger could not be read: not advertising; again in 30s"
       return 1
     fi
@@ -473,11 +475,22 @@ func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettin
 		return corev1.PodSpecArgs{}, nil, err
 	}
 
+	host := tailnetServiceHost{
+		paths: paths.service, name: s.hostname,
+		authKeySecret: authKeySecret, authKeyKey: "TS_AUTHKEY",
+		tags: s.tags, serveConfig: dispatchServeConfig,
+		// Every front-door pod runs the SOCKS5 proxy the app and the listener reach the NATS hub
+		// through, on every address, since its callers are pods of their own.
+		socks5Server: "0.0.0.0:" + strconv.Itoa(dispatchSOCKS5Port),
+		graceSeconds: dispatchFrontDoorGraceSeconds,
+		certificate:  fqdn,
+	}
+
 	// The serve config is rendered from the resolved tailnetService, so a consumer passing its
 	// Tailscale Service's name output orders the ConfigMap after that Service. The value is checked
 	// first: the pods host svc:<hostname>, whose name the certificate and the URL carry, so any other
 	// value is refused, naming the input and never the value.
-	want := "svc:" + s.hostname
+	want := host.service()
 	serveJSON := tailnetService.ToStringOutput().ApplyT(func(service string) (string, error) {
 		if service != want {
 			return "", fmt.Errorf("%s: tailnetService must be %s, the Tailscale Service the front door hosts, as Tailscale's API names it (not echoed)", dispatch, want)
@@ -489,16 +502,6 @@ func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettin
 		return corev1.PodSpecArgs{}, nil, err
 	}
 
-	host := tailnetServiceHost{
-		paths: paths.service, name: s.hostname,
-		authKeySecret: authKeySecret, authKeyKey: "TS_AUTHKEY",
-		tags: s.tags, serveConfig: dispatchServeConfig,
-		// Every front-door pod runs the SOCKS5 proxy the app and the listener reach the NATS hub
-		// through, on every address, since its callers are pods of their own.
-		socks5Server: "0.0.0.0:" + strconv.Itoa(dispatchSOCKS5Port),
-		graceSeconds: dispatchFrontDoorGraceSeconds,
-		certificate:  fqdn,
-	}
 	shell := func(script string) (pulumi.StringArray, pulumi.StringArray) {
 		return pulumi.StringArray{pulumi.String("/bin/sh"), pulumi.String("-c")}, pulumi.StringArray{pulumi.String(script)}
 	}

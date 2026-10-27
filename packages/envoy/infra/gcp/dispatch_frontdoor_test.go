@@ -414,7 +414,10 @@ func TestDispatchCertPublishSaysOnceThatItIsWaitingForACertificate(t *testing.T)
 
 // frontDoorLedger is Secret <hostname>-tailnet-tls's claim annotation, its node registry and its
 // resourceVersion, behind a server that applies a merge patch only when its resourceVersion is the
-// current one, as the API server does, and changes only the annotations the patch names.
+// current one, as the API server does, and changes only the annotations the patch names. It
+// answers a GET only as the metadata-only PartialObjectMetadata the gate asks for
+// (partialMetadataAccept), and fails the test on a GET that does not ask for it, which would read
+// the Secret's private key.
 type frontDoorLedger struct {
 	mu                  sync.Mutex
 	rv                  int
@@ -443,17 +446,35 @@ func newFrontDoorLedger(t *testing.T, claims string) *frontDoorLedger {
 		l.requests++
 		switch r.Method {
 		case http.MethodGet:
+			if got := r.Header.Get("Accept"); got != partialMetadataAccept {
+				t.Errorf("the gate's GET sent Accept %q, want %q: it must read the Secret's metadata alone", got, partialMetadataAccept)
+				http.Error(w, "want PartialObjectMetadata", http.StatusNotAcceptable)
+				return
+			}
 			annotations := map[string]string{}
 			for key, field := range fields() {
 				if *field != "" {
 					annotations[key] = *field
 				}
 			}
-			// Indented, as the API server answers, with the managed fields naming the annotation
-			// keys, which the gate must not take for the annotations themselves.
-			body, _ := json.MarshalIndent(map[string]any{"metadata": map[string]any{
-				"name": "example-dispatch-tailnet-tls", "resourceVersion": strconv.Itoa(l.rv), "annotations": annotations,
-				"managedFields": []any{map[string]any{"fieldsV1": map[string]any{"f:metadata": map[string]any{"f:annotations": map[string]any{
+			// A PartialObjectMetadata, its fields in the API server's order, indented as it
+			// answers curl, with no data and with the managed fields naming the annotation keys,
+			// which the gate must not take for the annotations themselves.
+			body, _ := json.MarshalIndent(struct {
+				Kind       string `json:"kind"`
+				APIVersion string `json:"apiVersion"`
+				Metadata   any    `json:"metadata"`
+			}{"PartialObjectMetadata", "meta.k8s.io/v1", struct {
+				Name              string            `json:"name"`
+				Namespace         string            `json:"namespace"`
+				UID               string            `json:"uid"`
+				ResourceVersion   string            `json:"resourceVersion"`
+				CreationTimestamp string            `json:"creationTimestamp"`
+				Annotations       map[string]string `json:"annotations,omitempty"`
+				ManagedFields     []any             `json:"managedFields"`
+			}{
+				"example-dispatch-tailnet-tls", "dispatch", "00000000-0000-0000-0000-000000000000", strconv.Itoa(l.rv), "2026-01-01T00:00:00Z", annotations,
+				[]any{map[string]any{"fieldsV1": map[string]any{"f:metadata": map[string]any{"f:annotations": map[string]any{
 					"f:" + dispatchCertificateClaimsAnnotation: map[string]any{}, "f:" + dispatchFrontDoorNodesAnnotation: map[string]any{},
 				}}}}},
 			}}, "", "  ")
@@ -505,6 +526,10 @@ func newFrontDoorLedger(t *testing.T, claims string) *frontDoorLedger {
 	l.url = server.URL + "/api/v1/namespaces/dispatch/secrets/example-dispatch-tailnet-tls"
 	return l
 }
+
+// partialMetadataAccept is the Accept header that has the API server answer a GET with the
+// object's PartialObjectMetadata, its metadata alone.
+const partialMetadataAccept = "application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1"
 
 // gatePod is one front-door pod's view for the claim gate: its paths, rooted in the test's own
 // directories, and the files the tests read and write, taken from them.

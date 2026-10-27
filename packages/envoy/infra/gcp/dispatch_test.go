@@ -1560,13 +1560,15 @@ func podProbes(t *testing.T, m *pulumitest.Mocks, deployment string) map[string]
 }
 
 // A liveness probe restarts a container, so it fails only when the process does not answer at
-// all: Dispatch's and the listener's /healthz answer 503 while Postgres or NATS is down, and a
-// liveness or startup probe failing on that would turn a dependency outage into a restart of
-// every pod. So no liveness or startup command passes curl -f (any short-option cluster holding f,
-// or --fail) and none is an httpGet on /healthz. Every serving container of the app and the
-// listener has both probes; the listener's readiness allows the 6 s its /healthz may take to
-// answer; and the app's startup probe allows 30 minutes, since envoy-dispatch migrates the
-// database before it listens and nothing bounds a migration's run time.
+// all: Dispatch's and the listener's /healthz answer 503 while Postgres or NATS is down, and run
+// those checks on every call, so a liveness or startup probe failing on that, or waiting on it,
+// would turn a dependency outage or a slow hub into a restart of every pod. So no liveness or
+// startup command passes curl -f (any short-option cluster holding f, or --fail), none is an
+// httpGet on /healthz, and none of the app's or the listener's commands names /healthz: they ask
+// /livez, which runs no check. Every serving container of the app and the listener has both
+// probes; the listener's readiness allows the 6 s its /healthz may take to answer; and the app's
+// startup probe allows 30 minutes, since envoy-dispatch migrates the database before it listens
+// and nothing bounds a migration's run time.
 func TestDispatchLivenessFailsOnlyWhenAProcessDoesNotAnswer(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1600,6 +1602,16 @@ func TestDispatchLivenessFailsOnlyWhenAProcessDoesNotAnswer(t *testing.T) {
 		for _, name := range serving {
 			require.Contains(t, containers[name], "livenessProbe", "%s's %s", deployment, name)
 			require.Contains(t, containers[name], "startupProbe", "%s's %s", deployment, name)
+		}
+		for name, container := range containers {
+			for _, kind := range []string{"startupProbe", "livenessProbe"} {
+				probe, _ := container[kind].(map[string]any)
+				exec, _ := probe["exec"].(map[string]any)
+				command, _ := exec["command"].([]any)
+				for _, arg := range command {
+					require.NotContains(t, arg.(string), "/healthz", "%s's %s %s", deployment, name, kind)
+				}
+			}
 		}
 	}
 	ready := podProbes(t, m, "example-dispatch-listener")["envoy-listener"]["readinessProbe"].(map[string]any)

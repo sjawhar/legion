@@ -935,12 +935,15 @@ func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	return bucketStore, nil
 }
 
-// dispatchHandler mounts the one /healthz the process serves above every dashboard and API
-// route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
-// longer pattern, so "GET /healthz" wins over the router's "/".
+// dispatchHandler mounts the one /healthz the process serves, and /livez, above every dashboard
+// and API route, so each probe is answered whatever the router is doing. Go's ServeMux prefers
+// the longer pattern, so "GET /healthz" and "GET /livez" win over the router's "/". /livez
+// answers 204 and touches nothing: it says only that the process answers, for a liveness or
+// startup probe, which must not wait on or fail with Postgres, NATS or the file store.
 func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit))
+	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.Handle("/", handler)
 	return mux
 }
