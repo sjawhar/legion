@@ -2,35 +2,44 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-278",
-  "completed": "2026-10-26T22:29:54Z",
+  "completed": "2026-10-27T16:54:42Z",
   "generation": 3,
-  "round": 4,
-  "answersTest": "test.json generation 3 round 3 (fail): the 'only' in skills/dispatch/SKILL.md:48 and three CHANGELOG clauses (an agent's reply in an ask reaches its followers); the architect's scope: the tester's wording word for word, plus a merge of main only on a reported conflict",
+  "round": 5,
+  "scope": "The architect cancelled the skill split at 16:34Z: no skill pull request was opened, no ask was drafted or sent, and skills/dispatch/SKILL.md keeps its approved lines 46 and 48. The round is the forward merge of main after GitHub reported CONFLICTING.",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
-  "headSha": "73874ccb5a5c037e50301f87d58105a15a1a25d1",
-  "mergedMain": "ba9a24e2 after GitHub reported CONFLICTING (packages/pi-envoy/CHANGELOG.md, both sides kept); fingerprint 035fd5e7… → ec72728b…, PR comment 6428853595; MERGEABLE after the push",
+  "headSha": "b31c73a4447ec80e5198f8dcff303399e0a549ee",
+  "mergedMain": "2df3353c523c (merge commit b31c73a4); fingerprint ec72728b… → d5d5835f…, changed (PR comment 6448097510); main moved on to 2dbeca18 after that, and a trial merge with it was clean; MERGEABLE after the push",
   "proof": [
     {
-      "criterion": "Agent-facing text is true: the skill line and the three CHANGELOG clauses no longer say a subscription is the only way agents' activity arrives",
-      "surface": "repository text and the skills word guard",
-      "command": "sed -n 48p skills/dispatch/SKILL.md; grep -rn 'only a subscription to the issue brings' packages --include=CHANGELOG.md; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w; cd packages/pi-envoy && bun test src/skills-guard.test.ts; cd packages/pi-legion && bun test src/skills-guard.test.ts",
-      "observed": "line 48: 'A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.'; no 'only a subscription' clause left; changelogs read 'a subscription to the issue brings other agents' activity, beyond a reply in an ask the session follows'; 1997 words; guards 10 pass and 13 pass",
-      "headSha": "73874ccb5a5c037e50301f87d58105a15a1a25d1",
-      "negativeControl": "at bc62db61 the line said 'only `envoy_subscribe …` brings agents' activity', which the tester's live case agent-ask-reply-reaches-asker disproved ({adv-c:1, adv-p:1} with no subscription)"
-    },
-    {
-      "criterion": "Delivery unchanged at the merged head",
+      "criterion": "Claimant delivery holds after merging main's pipelined outbox (#2302)",
       "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener",
       "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
-      "observed": "summary: 9 ok, 0 FAIL, PASS in 55s",
-      "headSha": "73874ccb5a5c037e50301f87d58105a15a1a25d1",
-      "negativeControl": "a binary built from main fails the claimant cases (generation 3 round 1: 5 ok, 4 FAIL); no Go file of this PR changed since"
+      "observed": "summary: 9 ok, 0 FAIL (claimant cases, controls, delivered and failed mentions for the claimant and a follower)",
+      "headSha": "b31c73a4447ec80e5198f8dcff303399e0a549ee",
+      "negativeControl": "a binary built from main fails the claimant cases (generation 3 round 1: 5 ok, 4 FAIL)"
+    },
+    {
+      "criterion": "The Reaches panel holds after the merge",
+      "surface": "Dispatch browser suite, Chromium",
+      "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
+      "observed": "8 passed. Before the test fix, two scenarios failed at the merge (route_holder null): main's #2267 caches the listener roster for 5 s, so the test now polls the ask read until the newly live sessions show",
+      "headSha": "b31c73a4447ec80e5198f8dcff303399e0a549ee",
+      "negativeControl": "the same two scenarios fail with an immediate read under the roster cache, which is the failure the poll fixes; recipients-claim fails on a build of main (generation 3 round 1)"
+    },
+    {
+      "criterion": "Outbox rules, ask reads and skill guards at the merge",
+      "surface": "Go suites on real Postgres; skills guards",
+      "command": "go test -count=1 ./internal/dispatch/outbox/; go test -count=1 -timeout 30m -run 'Ask|Inbox|RouteStatus|Comment|Mention|Delivery' ./internal/dispatch/api/; bun test src/skills-guard.test.ts in pi-envoy and pi-legion",
+      "observed": "outbox ok (claimant, deferral, retry-follows-claim and mention tests pass, plus main's #2137 test); api ok; guards 10 and 13 pass at 1999 words",
+      "headSha": "b31c73a4447ec80e5198f8dcff303399e0a549ee",
+      "negativeControl": "the skill guard fails at 2002 words without the three-word trim"
     }
   ],
   "filesChanged": [
-    "c0701b8e: skills/dispatch/SKILL.md, packages/claude-envoy/CHANGELOG.md, packages/pi-envoy/CHANGELOG.md, packages/envoy/CHANGELOG.md",
-    "73874ccb: merge of main ba9a24e2 (packages/pi-envoy/CHANGELOG.md resolved)"
+    "b31c73a4: packages/envoy/internal/dispatch/outbox/publisher.go (this PR's routing, claimant route, leftToMention and deferral inside main's pipelined window; the deferral is a 'deferred' outcome in settle and recordBatch), publisher_test.go and publisher_document_authors_test.go (helper signatures), packages/envoy/AGENTS.md (the deferral description), packages/contracts/src/dispatch-api.ts, the CHANGELOGs, scripts/e2e/README.md and dispatch-claimant-delivery.sh, packages/dispatch/e2e/recipients-claim.e2e.ts (polls past the roster cache), and skills/dispatch/SKILL.md"
   ],
-  "deviations": [],
+  "deviations": [
+    "skills/dispatch/SKILL.md: main rewrote line 46. The approved 'or route' is now in main's wording ('never write its status or route it'), line 48 is the approved text, and three words were cut elsewhere with no change in meaning ('sends decisions to', 'Do not repeat it', 'that takes the tree') to stay under the 2,000-word guard, as the architect directed on 2026-10-27 03:08Z."
+  ],
   "openQuestions": []
 }
