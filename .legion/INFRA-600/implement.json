@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-600",
-  "completed": "2026-10-27T07:16:00Z",
-  "round": "answers the tester's fail (F1) and the architect's decisions: tests-closed.yaml at workflow level with a skipped job; the quick-reopen race documented, not fixed (dispatch://INFRA-600/comment/ca18a3dd-c8d5-42d8-8df9-2dbc3e178d0b)",
+  "completed": "2026-10-27T07:58:30Z",
+  "round": "answers review round 1 (head 20fa840c): the image-trigger check admits the draft term only under pull request triggers that list ready_for_review (Important, thread PRRT_kwDORFy7ds6wlia_), four comment-accuracy fixes, and the duplicated prose given one home each; all five threads answered and resolved",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2356",
-  "codeHead": "20fa840cbec2b62f1e36075376e8bbd5cf8f1065",
+  "codeHead": "32dd54588e03",
   "proof": [
     {
       "criterion": "1 Drafts: each test job skips on a draft and ready_for_review starts the run; lint/typecheck/test report skipped on a draft, which cannot merge",
@@ -54,6 +54,14 @@
       "observed": "Tests (closed pull request) run 40465747080 created 07:12:43Z, conclusion skipped, job cancel-tests skipped with no runner; Tests 40465690636 cancelled 07:12:44Z ('Canceling since a higher priority waiting request for tests-2380 exists'); Envoy 40465690660, Docs 40465690758, Worker Image 40465690559 cancelled likewise; check runs after the close: lint/typecheck/test cancelled (122060417763/122060417819/122060417497), cancel-tests skipped (122060610348), no new lint/typecheck/test. The race is written in tests-closed.yaml, the closed-trigger comments of envoy-and-contracts, docs and worker-image, pr-and-main's concurrency comment, docs/kubernetes.md and the PR body's residuals.",
       "headSha": "20fa840cbec2b62f1e36075376e8bbd5cf8f1065",
       "negativeControl": "At 4773bb61 the job-level cancel-tests waited for a runner after every close (P4 run 40452283161 queued; tester's #2375 runs likewise); at 20fa840c it is skipped and takes none."
+    },
+    {
+      "criterion": "Review round 1 Important: the image-trigger check refuses the draft term unless every pull request trigger that runs the holder lists ready_for_review",
+      "surface": "the required lint job's check, .github/scripts/check-image-trigger-paths.sh, on the real tree and on a scratch copy of it",
+      "command": "PATH=$TMPDIR/infra600-venv/bin:$PATH .github/scripts/check-image-trigger-paths.sh (real tree, and a tar copy under $TMPDIR with worker-image.yaml types set to [opened, synchronize, reopened, closed]); .github/scripts/check-image-trigger-paths.test.sh",
+      "observed": "Real tree: exit 0, 'every image trigger covers every input its build reads (4 image build(s))'. Scratch copy: exit 1, '::error file=.github/workflows/worker-image.yaml::... jobs.build builds or calls an image and its if: skips a draft with `!github.event.pull_request.draft`, but .github/workflows/worker-image.yaml on.pull_request, which runs it, does not list ready_for_review in its types'. Test suite 840 passed, 0 failed, including refused cases for default types, explicit types without ready_for_review, the build step, a workflow_call caller without it and the needed changes job, and passing cases with it, for != 'closed' alone and push-only.",
+      "headSha": "32dd54588e03",
+      "negativeControl": "At 20fa840c the same scratch edit (ready_for_review removed from worker-image.yaml) exited 0 (the reviewer's reproduction); at 32dd5458 it exits 1."
     }
   ],
   "filesChanged": [
@@ -82,7 +90,7 @@
   ],
   "deviations": [
     "Plan D1 replaced by the architect's option (b): tests-closed.yaml joins tests-<number> (workflow level since the review round, job cancel-tests skipped); Tests' key moved to the PR number.",
-    "The simplify pass ran before the scratch proofs, so P1-P5 ran at the first round's final code head 4773bb61; the review round changes only tests-closed.yaml's concurrency and job if plus comments and docs, proven by P6 at 20fa840c.",
+    "The simplify pass ran before the scratch proofs, so P1-P5 ran at the first round's final code head 4773bb61; the tester round changed only tests-closed.yaml's concurrency and job if plus comments and docs, proven by P6 at 20fa840c; review round 1 changed the image-trigger check (proven by the check and its tests) and comments only.",
     "P5's first caller run (40451991938) had its attest cancelled and re-run by another session acting as legion-implementer[bot]; its re-run attempt was cancelled by this implementer to stop a duplicate image build. Both builds had already ended success."
   ],
   "openQuestions": []
