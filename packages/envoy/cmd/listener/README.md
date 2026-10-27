@@ -59,21 +59,37 @@ wait only once the pod holding it has died or lost the lease.
   message in hand's grace and one standby poll. The tests bound it at 10 s. Per-session order is
   kept: the stopping pod NAKs what it has not handled before it releases the lease, and the durable
   redelivers those before newer messages.
-- **Hard stop** (SIGKILL, node or network loss): a standby takes the expired lease about 6 s after
-  the last renewal (the TTL, one poll and the subscribe). It subscribes at once but holds what it
-  receives for one ack wait and a second (`receiveHoldMargin`), 7 s, keeping it alive with
-  `InProgress`, then delivers the held batch in stream order before it goes on live. The messages
-  the dead pod had in hand, and those the server went on pushing to a lost node's connection, come
-  back within that ack wait, so a session keeps the order of its events. Messages reach their
-  sessions about 12 s after the last renewal; the tests bound it at 15 s. A durable still
-  push-bound when a pod takes an expired lease is counted as the dead holder's binding, and the
-  new holder receives beside it.
+- **Hard stop** (SIGKILL, node or network loss): a standby takes the expired lease about 5 to 6 s
+  after the last renewal (the TTL and one poll). Its term must settle: it subscribes at once,
+  beside the dead pod's push binding when the server still counts a lost node's connection, and
+  holds every message it receives, keeping it alive with `InProgress`, until every message the
+  durable has outstanding is in its hands. It reads the durable every 250 ms (`settlePoll`) and
+  ends the hold once `NumAckPending` is no more than the messages it holds, or at the cap of two ack
+  waits and a second (`settleMargin`), 13 s; then it delivers the held batch in stream order and
+  goes on live. The messages the dead pod had in hand, and those the server went on pushing to a
+  lost node's connection, come back once their ack wait runs out, so they land in the held batch
+  and a session keeps the order of its events. With nothing outstanding the hold ends at its first
+  read and messages reach their sessions about 5 to 6 s after the last renewal; otherwise once the
+  dead pod's messages are back, about 12 s after it. The tests bound it at 15 s. A message a
+  handler NAKed with a delay stays outstanding until its delay ends and holds the hold to its cap,
+  so messages can then take up to about 19 s.
+- **Graceful stop after a hard one.** The lease record carries two flags for the next holder.
+  `stale_binding` is set by a holder that subscribed beside a push binding it did not wait out (a
+  lost node's lingering connection), carried by every renewal, release and take-over, and cleared
+  by a holder that finds the durable not push-bound. `unsettled` is written from the acquiring
+  write of a term that must settle until its hold ends, and a release keeps it, so a pod stopped
+  mid-hold hands the hold on. A pod that takes a released record carrying either flag settles too,
+  subscribing at once beside any binding rather than waiting it out as a pre-lease build's. What
+  the stopping pod NAKed before the next one subscribed went to the lingering binding alone and
+  comes back one ack wait later, so the next pod delivers about 6 to 7 s after the stop.
 
-The lines to read are `listener lease acquired` (with `from`: `absent`, `released` or `expired`),
-`listener lease taken over an expired holder; receiving at once and delivering in stream order
-after one ack wait`, `held messages delivered in stream order`, `durable receiving` (with
-`lease`, `waited_ms` and `hold_ms`), `listener lease lost: another listener holds it` and
-`listener lease released`.
+The lines to read are `listener lease acquired` (with `from`: `absent`, `released` or `expired`,
+and `settle` and `stale_binding`), `listener lease term must settle; receiving at once and holding
+what arrives until the durable's outstanding messages are in hand`, `durable still push-bound by a
+lease holder that is gone; receiving beside it`, `settle hold ended; delivering the held messages
+in stream order` (with `outcome` `settled` or `cap`, `held_ms`, `messages` and `ack_pending`),
+`durable receiving` (with `lease`, `waited_ms` and `settle`), `listener lease lost: another
+listener holds it` and `listener lease released`.
 
 ### Graceful stop order
 
@@ -83,7 +99,8 @@ On SIGTERM or SIGINT, once `/v1` serves (`shutdownListener`):
 2. receiving stops, inside a 10 s budget the HTTP stop shares: the holder-only loops are told to
    stop, the subscription ends, the message in hand gets 3 s (`inflightGrace`) before its prompt is
    cancelled (a cancelled prompt is a retryable failure: its ledger attempt is cleared and the
-   message NAKed), every queued message is NAKed, and the lease is marked released;
+   message NAKed), every queued message is NAKed (during a settle hold, what it holds in stream
+   order, and the record keeps `unsettled`), and the lease is marked released;
 3. the HTTP server shuts down within what is left of the budget;
 4. the live topics lane drains (3 s), the cache watchers stop, and the NATS client drains (13 s).
 
@@ -162,10 +179,11 @@ During a roll two builds run for one machine id, and each must deliver what the 
 
 A build from before INFRA-557 binds the durable with `nats.Bind` and knows no lease. Run one beside
 this build only during a roll from the old build to this one: this build's lease holder, finding
-the durable push-bound by a subscriber without the lease, waits (`/healthz` 200 standby, `receive`
-`waiting for another subscriber's push binding to end`) and subscribes within a second of that
-binding's end. Past 135 s it logs `lease holder cannot deliver from the durable` at ERROR, and
-again every 5 min, which the AWS `subscribe-exhausted` alarm matches; it never exits for it.
+the durable push-bound when it took an absent record or a released one carrying neither
+`stale_binding` nor `unsettled`, waits (`/healthz` 200 standby, `receive` `waiting for another
+subscriber's push binding to end`) and subscribes within a second of that binding's end. Past
+135 s it logs `lease holder cannot deliver from the durable` at ERROR, and again every 5 min, which
+the AWS `subscribe-exhausted` alarm matches; it never exits for it.
 
 Rolling back to a build before this release works: that build corrects the durable's filter to its
 own list and binds once this build's pods have stopped. But a hard stop of this build's lease

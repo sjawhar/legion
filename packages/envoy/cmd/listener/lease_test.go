@@ -124,15 +124,15 @@ func TestLeaseTakesAnAbsentRecordAndStartsServiceSince(t *testing.T) {
 	}
 	after := time.Now()
 	status := a.Status()
-	if !status.Holding || status.Term != 1 || status.How != leaseTakenAbsent || status.ActiveInstance != "pod-a" {
-		t.Fatalf("status = %+v, want holding term 1 taken from an absent record by pod-a", status)
+	if !status.Holding || status.Term != 1 || status.How != leaseTakenAbsent || status.ActiveInstance != "pod-a" || status.Settle {
+		t.Fatalf("status = %+v, want holding term 1 taken from an absent record by pod-a, not settling", status)
 	}
 	if !drainChanges(a) {
 		t.Fatal("the acquisition signalled no change")
 	}
 	record, entry := readLease(t, kv)
-	if record.Holder != "pod-a" || record.Released || record.DeliverSubject != "_INBOX.listener-box-a" {
-		t.Fatalf("record = %+v, want pod-a's unreleased record naming its deliver subject", record.leaseFields)
+	if record.Holder != "pod-a" || record.Released || record.DeliverSubject != "_INBOX.listener-box-a" || record.Unsettled || record.StaleBinding {
+		t.Fatalf("record = %+v, want pod-a's unreleased record naming its deliver subject, neither unsettled nor with a stale binding", record.leaseFields)
 	}
 	if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(record.Boot) {
 		t.Fatalf("boot = %q, want 16 hex digits", record.Boot)
@@ -152,7 +152,8 @@ func TestLeaseTakesAnAbsentRecordAndStartsServiceSince(t *testing.T) {
 }
 
 // A standby takes an unreleased record nobody renews only once the revision it saw has stayed
-// unchanged for a full ttl on its own clock, and reports it taken over an expired record.
+// unchanged for a full ttl on its own clock, and reports it taken over an expired record, a term
+// that must settle, which its acquiring write marks unsettled.
 func TestLeaseStandbyTakesAnUnreleasedRecordOnlyAfterTheTTL(t *testing.T) {
 	kv := leaseBucket(t)
 	clock := newFakeLeaseClock()
@@ -176,11 +177,11 @@ func TestLeaseStandbyTakesAnUnreleasedRecordOnlyAfterTheTTL(t *testing.T) {
 	}
 	b.step()
 	status := b.Status()
-	if !status.Holding || status.How != leaseTakenExpired || status.ActiveInstance != "pod-b" {
-		t.Fatalf("status at the ttl = %+v, want pod-b holding over an expired record", status)
+	if !status.Holding || status.How != leaseTakenExpired || status.ActiveInstance != "pod-b" || !status.Settle {
+		t.Fatalf("status at the ttl = %+v, want pod-b holding over an expired record, a term that must settle", status)
 	}
-	if record, _ := readLease(t, kv); record.Holder != "pod-b" {
-		t.Fatalf("record holder = %q, want pod-b", record.Holder)
+	if record, _ := readLease(t, kv); record.Holder != "pod-b" || !record.Unsettled {
+		t.Fatalf("record = %+v, want pod-b's, unsettled", record.leaseFields)
 	}
 }
 
@@ -300,14 +301,114 @@ func TestLeaseReleasedRecordIsTakenAtTheNextPollKeepingServiceSince(t *testing.T
 
 	b.step() // the same instant: no time passes, let alone a ttl
 	status := b.Status()
-	if !status.Holding || status.How != leaseTakenReleased {
-		t.Fatalf("standby status after the release = %+v, want holding, taken from a released record", status)
+	if !status.Holding || status.How != leaseTakenReleased || status.Settle {
+		t.Fatalf("standby status after the release = %+v, want holding, taken from a released record, not settling", status)
 	}
 	if !status.ServiceSince.Equal(since) {
 		t.Fatalf("service_since after a graceful hand-over = %v, want the released record's %v", status.ServiceSince, since)
 	}
 	if record, _ := readLease(t, kv); record.Holder != "pod-b" || record.Released || !record.ServiceSince.Equal(since) {
 		t.Fatalf("record = %+v, want pod-b's unreleased record keeping service_since %v", record.leaseFields, since)
+	}
+}
+
+// stale_binding is set by a holder that subscribed beside a push binding it did not wait out;
+// every renewal, the release and the next take-over carry it, and that take-over's term must
+// settle though the record was released; a holder that finds the durable not push-bound clears
+// it. A call for a term that is no longer current changes nothing.
+func TestLeaseStaleBindingIsSetCarriedAndCleared(t *testing.T) {
+	kv := leaseBucket(t)
+	clock := newFakeLeaseClock()
+	a := testLease(kv, "pod-a", productionLeaseConfig(), clock.now)
+	b := testLease(kv, "pod-b", productionLeaseConfig(), clock.now)
+	a.step()
+	a.SetStaleBinding(a.Status().Term, true)
+	for renewal := range 2 {
+		clock.advance(leaseRenewEvery)
+		a.step()
+		if record, _ := readLease(t, kv); !record.StaleBinding || record.Unsettled {
+			t.Fatalf("record after renewal %d = %+v, want stale_binding set and not unsettled", renewal+1, record.leaseFields)
+		}
+	}
+	if err := a.Release(context.Background()); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if record, _ := readLease(t, kv); !record.Released || !record.StaleBinding || record.Unsettled {
+		t.Fatalf("released record = %+v, want released carrying stale_binding", record.leaseFields)
+	}
+
+	b.step()
+	status := b.Status()
+	if !status.Holding || status.How != leaseTakenReleased || !status.Settle {
+		t.Fatalf("status = %+v, want pod-b holding from a released record, a term that must settle for its stale binding", status)
+	}
+	if record, _ := readLease(t, kv); record.Holder != "pod-b" || !record.StaleBinding || !record.Unsettled {
+		t.Fatalf("record = %+v, want pod-b's carrying stale_binding, unsettled", record.leaseFields)
+	}
+	b.SetStaleBinding(status.Term-1, false)
+	b.Settled(status.Term - 1)
+	clock.advance(leaseRenewEvery)
+	b.step()
+	if record, _ := readLease(t, kv); !record.StaleBinding || !record.Unsettled {
+		t.Fatalf("record after calls for an earlier term = %+v, want both flags kept", record.leaseFields)
+	}
+	b.SetStaleBinding(status.Term, false)
+	b.Settled(status.Term)
+	clock.advance(leaseRenewEvery)
+	b.step()
+	if record, _ := readLease(t, kv); record.StaleBinding || record.Unsettled {
+		t.Fatalf("record after the durable read not push-bound and the hold ended = %+v, want both flags cleared", record.leaseFields)
+	}
+}
+
+// unsettled is written from the acquiring write of a term that must settle. A release before that
+// term's settle hold ends keeps it, so the next holder's term must settle too, though it takes a
+// released record; once the hold ends it is cleared, and a release then hands over a term that
+// need not settle.
+func TestLeaseUnsettledIsHandedOnByAReleaseBeforeTheHoldEnds(t *testing.T) {
+	kv := leaseBucket(t)
+	clock := newFakeLeaseClock()
+	putLease(t, kv, `{"holder":"pod-dead","boot":"0011223344556677","released":false}`)
+	a := testLease(kv, "pod-a", productionLeaseConfig(), clock.now)
+	b := testLease(kv, "pod-b", productionLeaseConfig(), clock.now)
+	c := testLease(kv, "pod-c", productionLeaseConfig(), clock.now)
+	a.step()
+	clock.advance(leaseTTL)
+	a.step()
+	if status := a.Status(); !status.Holding || status.How != leaseTakenExpired || !status.Settle {
+		t.Fatalf("pod-a status = %+v, want held over an expired record, settling", status)
+	}
+	if err := a.Release(context.Background()); err != nil {
+		t.Fatalf("release pod-a: %v", err)
+	}
+	if record, _ := readLease(t, kv); !record.Released || !record.Unsettled || record.StaleBinding {
+		t.Fatalf("record released mid-hold = %+v, want released, still unsettled", record.leaseFields)
+	}
+
+	b.step()
+	status := b.Status()
+	if !status.Holding || status.How != leaseTakenReleased || !status.Settle {
+		t.Fatalf("pod-b status = %+v, want held from a released record, settling for the unsettled term before it", status)
+	}
+	if record, _ := readLease(t, kv); record.Holder != "pod-b" || !record.Unsettled {
+		t.Fatalf("record = %+v, want pod-b's, unsettled", record.leaseFields)
+	}
+	b.Settled(status.Term)
+	clock.advance(leaseRenewEvery)
+	b.step()
+	if record, _ := readLease(t, kv); record.Unsettled {
+		t.Fatalf("record after pod-b's hold ended = %+v, want unsettled cleared", record.leaseFields)
+	}
+	if err := b.Release(context.Background()); err != nil {
+		t.Fatalf("release pod-b: %v", err)
+	}
+
+	c.step()
+	if status := c.Status(); !status.Holding || status.How != leaseTakenReleased || status.Settle {
+		t.Fatalf("pod-c status = %+v, want held from a released record, not settling", status)
+	}
+	if record, _ := readLease(t, kv); record.Holder != "pod-c" || record.Unsettled || record.StaleBinding {
+		t.Fatalf("record = %+v, want pod-c's with neither flag", record.leaseFields)
 	}
 }
 
@@ -444,8 +545,11 @@ func TestLeaseRenewalAfterAnOutageResumes(t *testing.T) {
 	clock.advance(leaseRenewEvery)
 	a.step()
 	status := a.Status()
-	if !status.Holding || status.Term != 2 || status.How != leaseTakenExpired || !drainChanges(a) {
-		t.Fatalf("after the outage: %+v, want term 2 held, taken over an expired record, and a change signalled", status)
+	if !status.Holding || status.Term != 2 || status.How != leaseTakenExpired || !status.Settle || !drainChanges(a) {
+		t.Fatalf("after the outage: %+v, want term 2 held, taken over an expired record, settling, and a change signalled", status)
+	}
+	if record, _ := readLease(t, kv); !record.Unsettled {
+		t.Fatalf("record after the resume = %+v, want unsettled", record.leaseFields)
 	}
 }
 

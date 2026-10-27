@@ -899,12 +899,19 @@
   hand gets 3 s before its prompt is cancelled, queued messages are NAKed, the lease is marked
   released) and then stops HTTP, so a standby delivers within about 1 to 3 s and keeps each
   session's order. A pod that takes the lease over a holder that was killed or lost its node
-  subscribes at once but holds what it receives for one ack wait and a second, then delivers it in
-  stream order, so a session's events stay in order there too; messages arrive about 12 s after
-  the dead holder's last renewal. A holder that finds the durable push-bound by a listener build
-  from before the lease waits for that binding to end and subscribes within a second of it; past
-  135 s it logs `lease holder cannot deliver from the durable` at ERROR, again every 5 minutes, and
-  never exits for it. `packages/envoy/cmd/listener/README.md` describes the run model.
+  subscribes at once and holds what it receives until every message the durable has outstanding
+  is in its hands (its `NumAckPending` no more than what it holds, read every 250 ms, capped at
+  two ack waits and a second, 13 s), then delivers it in stream order, so a session's events stay
+  in order there too: messages arrive about 5 to 6 s after the dead holder's last renewal when
+  nothing was outstanding, about 12 s after it otherwise, and up to about 19 s when a NAK-delayed
+  retry is outstanding and holds the hold to its cap. The lease record carries `stale_binding` (its
+  holder subscribed beside a lingering push binding) and `unsettled` (its term's hold had not
+  ended, kept by a release), and a pod that takes a released record carrying either settles the
+  same way. A holder that takes an absent record, or a released one with neither flag, and finds
+  the durable push-bound by a listener build from before the lease waits for that binding to end
+  and subscribes within a second of it; past 135 s it logs `lease holder cannot deliver from the
+  durable` at ERROR, again every 5 minutes, and never exits for it.
+  `packages/envoy/cmd/listener/README.md` describes the run model.
 - The listener's durable consumer acks within 6 s (`AckWait`, was 60 s): the holder sends
   `InProgress` every 2 s for every message it has received and not settled, so only a message
   whose holder died or lost the lease waits the ack wait out. The durable's filter is `>`, every

@@ -17,22 +17,28 @@ import (
 
 // The receive loop's timing.
 //
-// A pod that takes the lease over an expired record nobody released (its holder was killed or
-// lost its node) subscribes at once, holds every message it receives for one consumerAckWait and a
-// second (receiveHoldMargin), keeping them alive with InProgress, then hands them to the serial
-// handler in stream order before it goes on live. The messages the dead holder had received, and
-// the ones the server went on pushing to a lost node's connection until this pod subscribed, come
-// back within one ack wait of the subscribe, so they arrive in the held batch beside the newer
-// ones, and the sort puts them back before them: a session keeps the order of its events across a
-// hard take-over.
+// A term that must settle (leaseStatus.Settle: the lease was taken over an expired record nobody
+// released, its holder killed or its node lost, or this pod resumed after its renewals lapsed, or
+// from a record that says a pod of this build may still hold messages or a push binding) subscribes
+// at once, beside any push binding, and holds every message it receives, keeping them alive with
+// InProgress, until every message the durable has outstanding is in its hands: it reads the
+// durable every settlePoll and ends the hold once NumAckPending is no more than the messages it
+// holds, or at the cap of two consumerAckWait and settleMargin, 13 s. Then it hands the held batch
+// to the serial handler in stream order before it goes on live. The messages the dead holder had
+// received, and the ones the server went on pushing to a lost node's connection, come back once
+// their ack wait runs out, so they arrive in the held batch beside the newer ones, and the sort
+// puts them back before them: a session keeps the order of its events across a hard take-over.
+// With nothing outstanding the hold ends at its first read. A message a handler NAKed with a delay
+// stays outstanding until its delay ends, which holds the hold to its cap.
 //
-// A pod that takes the lease from an absent or released record and finds the durable push-bound
-// finds a listener build from before the lease bound to it with nats.Bind, during the first roll
-// onto this build: a released holder has already unsubscribed, and an absent record means no
-// holder of this build. It polls the durable every durableBindPoll, renewing its lease meanwhile,
-// and subscribes once the binding is gone. Waiting past durableTakeoverAlarmAfter, it logs
-// durableTakeoverAlarmLine at ERROR, which the deployed alarm matches, and again every
-// durableTakeoverAlarmEvery; it never exits for this, since a restart would wait the same.
+// A pod that takes the lease from an absent or released record with neither stale_binding nor
+// unsettled and finds the durable push-bound finds a listener build from before the lease bound to
+// it with nats.Bind, during the first roll onto this build: a released holder has already
+// unsubscribed, and an absent record means no holder of this build. It polls the durable every
+// durableBindPoll, renewing its lease meanwhile, and subscribes once the binding is gone. Waiting
+// past durableTakeoverAlarmAfter, it logs durableTakeoverAlarmLine at ERROR, which the deployed
+// alarm matches, and again every durableTakeoverAlarmEvery; it never exits for this, since a
+// restart would wait the same.
 //
 // The holder sends InProgress every inProgressEvery for every message it has received and not
 // settled, queued or in hand, so none waits out the ack wait while this pod is alive. On a
@@ -50,9 +56,14 @@ const (
 	// holderLoopsStopWait bounds how long the end of a term waits for a pass of the holder-only
 	// loops in flight, measured from when they were told to stop.
 	holderLoopsStopWait = 5 * time.Second
-	// receiveHoldMargin is how much longer than the ack wait a hard take-over holds what it
-	// receives, for a redelivery the server sends a moment after its ack wait runs out.
-	receiveHoldMargin = time.Second
+	// settlePoll is how often a settle hold reads the durable's outstanding messages.
+	settlePoll = 250 * time.Millisecond
+	// settleMargin is how much longer than two ack waits a settle hold lasts at most. A message
+	// a dead holder had in hand comes back one ack wait after its last InProgress; one the server
+	// redelivered before this pod subscribed went to a lost node's lingering connection alone and
+	// comes back one ack wait later again. The margin covers a redelivery the server sends a
+	// moment after its ack wait runs out.
+	settleMargin = time.Second
 	// receiveQueueCapacity is the local queue's: the durable sends no more than MaxAckPending
 	// messages the holder has not settled, so the queue never fills; twice that leaves room for a
 	// redelivery that lands as a NAK is being processed.
@@ -67,7 +78,9 @@ const listenerLeaseUnavailable = "unavailable: missing NATS grant for KV bucket 
 // receiveConfig carries the receive loop's timing, so a test of this package shortens it;
 // productionReceiveConfig is the only value the listener runs with.
 type receiveConfig struct {
-	ackWait         time.Duration
+	// settlePoll is how often a settle hold reads the durable, and settleCap the longest it lasts.
+	settlePoll      time.Duration
+	settleCap       time.Duration
 	bindPoll        time.Duration
 	alarmAfter      time.Duration
 	alarmEvery      time.Duration
@@ -77,7 +90,8 @@ type receiveConfig struct {
 
 func productionReceiveConfig() receiveConfig {
 	return receiveConfig{
-		ackWait:         consumerAckWait,
+		settlePoll:      settlePoll,
+		settleCap:       2*consumerAckWait + settleMargin,
 		bindPoll:        durableBindPoll,
 		alarmAfter:      durableTakeoverAlarmAfter,
 		alarmEvery:      durableTakeoverAlarmEvery,
@@ -160,7 +174,9 @@ type durableReceiver struct {
 	// binding without the lease and not yet subscribed. A term taken over an expired record then
 	// is this pod's own after its renewals lapsed (lease.go counts that resume as expired), and the
 	// binding is still the pre-lease build's, not a dead holder's: it is waited out again rather
-	// than received beside.
+	// than received beside, and the term does not settle. A term taken from a released record
+	// carrying stale_binding or unsettled is another holder's word that the binding is this
+	// build's, and settles regardless.
 	awaitedBinding bool
 
 	mu    sync.Mutex
@@ -262,7 +278,7 @@ func (r *durableReceiver) report() receiveReport {
 // of the lease this pod acquires, from the acquisition until the term ends.
 func (r *durableReceiver) run(ctx context.Context) {
 	if r.lease == nil {
-		r.serve(ctx, ctx, leaseTakenAbsent)
+		r.serve(ctx, ctx, leaseStatus{How: leaseTakenAbsent})
 		return
 	}
 	var served uint64
@@ -306,19 +322,23 @@ func (r *durableReceiver) serveTerm(ctx context.Context, status leaseStatus) boo
 		cancel()
 		<-watched
 	}()
-	return r.serve(ctx, termCtx, status.How)
+	return r.serve(ctx, termCtx, status)
 }
 
-// serve receives the durable for one term, which termCtx bounds: it reads the durable, waits out a
-// pre-lease build's binding when how the lease was taken requires, corrects the durable's policy,
-// subscribes, and delivers until termCtx ends; a term taken over an expired holder holds what it
-// receives for one ack wait and receiveHoldMargin first, and delivers that in stream order. ctx is
-// the receive loop's own, whose end is a shutdown. It reports whether the durable was refused.
+// serve receives the durable for one term, which termCtx bounds and status describes: it reads the
+// durable, waits out a pre-lease build's binding when the term does not settle, corrects the
+// durable's policy, subscribes, and delivers until termCtx ends; a term that settles subscribes at
+// once, beside any binding, and holds what it receives until every outstanding message is in hand
+// (receiveTerm.settle), then delivers that in stream order. ctx is the receive loop's own, whose
+// end is a shutdown. It reports whether the durable was refused.
+//
+// Before it subscribes it records stale_binding in the lease: set when it subscribes beside a
+// binding it did not wait out, cleared when it finds the durable not push-bound.
 //
 // The policy is written only once nothing but this pod will receive: a pre-lease build that still
 // holds the durable binds it again after a reconnect with nats.Bind, which refuses a durable whose
 // filter is not its own ("subject does not match consumer").
-func (r *durableReceiver) serve(ctx, termCtx context.Context, how leaseAcquisition) bool {
+func (r *durableReceiver) serve(ctx, termCtx context.Context, status leaseStatus) bool {
 	defer r.setState(receiveStandby)
 	start := time.Now()
 	r.setState(receivePreparing)
@@ -326,15 +346,20 @@ func (r *durableReceiver) serve(ctx, termCtx context.Context, how leaseAcquisiti
 	if err != nil {
 		return r.refuse(err)
 	}
-	expired := how == leaseTakenExpired && r.lease != nil && !r.awaitedBinding
-	var hold time.Duration
-	if expired {
-		hold = r.timing.ackWait + receiveHoldMargin
-		r.logger.Info("listener lease taken over an expired holder; receiving at once and delivering in stream order after one ack wait",
-			slog.String("consumer", r.consumer), slog.String("hold", hold.String()))
-	} else if info.PushBound {
-		if err = r.awaitUnbound(termCtx); err != nil {
-			return r.refuse(err)
+	settle := status.Settle && !(r.awaitedBinding && status.How == leaseTakenExpired)
+	var settleCap time.Duration
+	if settle {
+		settleCap = r.timing.settleCap
+		r.logger.Info("listener lease term must settle; receiving at once and holding what arrives until the durable's outstanding messages are in hand",
+			slog.String("consumer", r.consumer), slog.String("lease", status.How.String()), slog.String("cap", settleCap.String()))
+	} else {
+		if status.Settle {
+			r.lease.Settled(status.Term)
+		}
+		if info.PushBound {
+			if err = r.awaitUnbound(termCtx); err != nil {
+				return r.refuse(err)
+			}
 		}
 	}
 	r.setState(receivePreparing)
@@ -343,11 +368,18 @@ func (r *durableReceiver) serve(ctx, termCtx context.Context, how leaseAcquisiti
 		if info, err = r.prepare(termCtx, true); err != nil {
 			return r.refuse(err)
 		}
-		if expired && info.PushBound && !beside {
-			beside = true
-			r.logger.Info("durable still push-bound by the expired holder; receiving beside it", slog.String("consumer", r.consumer))
+		switch {
+		case r.lease == nil:
+		case !info.PushBound:
+			r.lease.SetStaleBinding(status.Term, false)
+		case settle:
+			r.lease.SetStaleBinding(status.Term, true)
+			if !beside {
+				beside = true
+				r.logger.Info("durable still push-bound by a lease holder that is gone; receiving beside it", slog.String("consumer", r.consumer))
+			}
 		}
-		err := r.begin(info.Config.DeliverSubject, hold)
+		err := r.begin(info.Config.DeliverSubject, settleCap, status.Term)
 		if err == nil {
 			r.awaitedBinding = false
 			break
@@ -359,14 +391,14 @@ func (r *durableReceiver) serve(ctx, termCtx context.Context, how leaseAcquisiti
 	}
 	taken := "unavailable"
 	if r.lease != nil {
-		taken = how.String()
+		taken = status.How.String()
 	}
 	r.logger.Info("durable receiving",
 		slog.String("consumer", r.consumer),
 		slog.String("deliver_subject", info.Config.DeliverSubject),
 		slog.String("lease", taken),
 		slog.Int64("waited_ms", time.Since(start).Milliseconds()),
-		slog.Int64("hold_ms", hold.Milliseconds()),
+		slog.Bool("settle", settle),
 	)
 	loopsCtx, stopLoops := context.WithCancel(context.Background())
 	var loops []<-chan struct{}
@@ -470,9 +502,11 @@ func (r *durableReceiver) awaitUnbound(ctx context.Context) error {
 }
 
 // begin starts a term's receiving: a core subscription on subject on the client's current
-// connection, the serial handler and the InProgress ticker. A hold above zero has the handler
-// hold what arrives for that long from now, then deliver it in stream order (receiveTerm.handle).
-func (r *durableReceiver) begin(subject string, hold time.Duration) error {
+// connection, the serial handler and the InProgress ticker. A settleCap above zero has the handler
+// first hold what arrives until the durable's outstanding messages are all in hand, or for
+// settleCap at most, then deliver it in stream order (receiveTerm.settle); term is the lease term
+// whose unsettled the hold's end clears.
+func (r *durableReceiver) begin(subject string, settleCap time.Duration, term uint64) error {
 	t := &receiveTerm{
 		subject:   subject,
 		queue:     make(chan *nats.Msg, receiveQueueCapacity),
@@ -481,9 +515,9 @@ func (r *durableReceiver) begin(subject string, hold time.Duration) error {
 		handled:   make(chan struct{}),
 		stopped:   make(chan struct{}),
 		logger:    r.logger,
-	}
-	if hold > 0 {
-		t.holdUntil = time.Now().Add(hold)
+		settleCap: settleCap,
+		leaseTerm: term,
+		holding:   settleCap > 0,
 	}
 	t.handling, t.cancel = context.WithCancel(context.Background())
 	r.mu.Lock()
@@ -510,7 +544,8 @@ func (r *durableReceiver) begin(subject string, hold time.Duration) error {
 // the ack wait to whoever holds the lease, and the message in hand finishes, unless a shutdown
 // comes meanwhile. On a shutdown (ctx ended) the message in hand gets inflightGrace, then its
 // handling is cancelled, and every queued message is NAKed for the next holder, in that order so
-// the durable redelivers them in the order they came.
+// the durable redelivers them in the order they came; during a settle hold, the held messages
+// are NAKed in stream order, and the lease's unsettled stays set for the next holder.
 func (r *durableReceiver) end(ctx context.Context) {
 	r.mu.Lock()
 	t := r.term
@@ -698,12 +733,16 @@ type receiveTerm struct {
 	handled chan struct{}
 	stopped chan struct{}
 	logger  *logging.Logger
-	// holdUntil, when set, is when the handler stops holding what the term received and delivers
-	// it in stream order: a term taken over an expired holder (begin's hold).
-	holdUntil time.Time
+	// settleCap, when above zero, is the longest the handler holds what the term receives before
+	// it delivers it in stream order (settle): a term that must settle. leaseTerm is the lease
+	// term the hold's end reports settled.
+	settleCap time.Duration
+	leaseTerm uint64
 
 	mu     sync.Mutex
 	closed bool
+	// holding is set while the settle hold lasts.
+	holding bool
 	// held is the batch the hold gathered, sorted by stream sequence, which the handler delivers
 	// before it reads the queue again.
 	held      []*nats.Msg
@@ -735,10 +774,14 @@ func (t *receiveTerm) close() {
 }
 
 // takeQueued empties the held batch and the queue and returns what they held, in the order the
-// handler would have taken it, no longer counted unsettled.
+// handler would have taken it, no longer counted unsettled: during a settle hold, all of it in
+// stream order.
 func (t *receiveTerm) takeQueued() []*nats.Msg {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.holding {
+		t.gatherLocked()
+	}
 	queued := t.held
 	t.held = nil
 	for {
@@ -760,19 +803,44 @@ func (t *receiveTerm) settled(m *nats.Msg) {
 	t.mu.Unlock()
 }
 
-// gather moves everything queued into the held batch, sorted by stream sequence.
-func (t *receiveTerm) gather() int {
+// gather moves everything queued into the held batch, sorted by stream sequence, and returns how
+// many distinct messages the batch holds; done ends the settle hold.
+func (t *receiveTerm) gather(done bool) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if done {
+		t.holding = false
+	}
+	return t.gatherLocked()
+}
+
+func (t *receiveTerm) gatherLocked() int {
 	for {
 		select {
 		case m := <-t.queue:
 			t.held = append(t.held, m)
 		default:
 			sortByStreamSequence(t.held)
-			return len(t.held)
+			return distinctMessages(t.held)
 		}
 	}
+}
+
+// distinctMessages counts messages by stream sequence, so a message the durable redelivered while
+// this pod already held it counts once; a message whose JetStream metadata cannot be read counts
+// on its own.
+func distinctMessages(messages []*nats.Msg) int {
+	sequences := make(map[uint64]struct{}, len(messages))
+	unreadable := 0
+	for _, m := range messages {
+		meta, err := m.Metadata()
+		if err != nil {
+			unreadable++
+			continue
+		}
+		sequences[meta.Sequence.Stream] = struct{}{}
+	}
+	return len(sequences) + unreadable
 }
 
 // nextHeld takes the held batch's next message, or nil once it is empty.
@@ -813,21 +881,12 @@ func sortByStreamSequence(messages []*nats.Msg) {
 // or a subscription nats.go sent again after a reconnect in place) is dropped with no ack and no
 // NAK, so the durable redelivers it after the ack wait to whoever holds the lease then.
 //
-// A term with a hold (holdUntil) first delivers nothing until the hold ends, while the InProgress
-// ticker keeps what arrives alive, then delivers that batch in stream order: what a dead holder
-// had received comes back within the hold, after newer messages pushed to this pod, and the sort
-// puts it back before them.
+// A term that must settle first holds what it receives (settle), then delivers that batch in
+// stream order before it reads the queue.
 func (t *receiveTerm) handle(r *durableReceiver) {
 	defer close(t.handled)
-	if !t.holdUntil.IsZero() {
-		hold := time.NewTimer(time.Until(t.holdUntil))
-		select {
-		case <-t.closing:
-			hold.Stop()
-			return
-		case <-hold.C:
-		}
-		r.logger.Info("held messages delivered in stream order", slog.String("consumer", r.consumer), slog.Int("messages", t.gather()))
+	if t.settleCap > 0 && !t.settle(r) {
+		return
 	}
 	for {
 		select {
@@ -848,6 +907,76 @@ func (t *receiveTerm) handle(r *durableReceiver) {
 		}
 		t.settled(m)
 	}
+}
+
+// settle is a term's settle hold. It delivers nothing while the InProgress ticker keeps what
+// arrives alive, and reads the durable every settlePoll until its NumAckPending is no more than
+// the distinct messages the term holds, which means every message outstanding is in this pod's
+// hands: what a dead holder had received, or the server pushed to a lost node's lingering
+// connection, comes back once its ack wait runs out, after newer messages pushed to this pod, and
+// the stream-order sort puts it back before them. The batch is gathered before each read, so
+// every message it counts was still outstanding at the read. A read that fails keeps the hold.
+// The hold ends at settleCap regardless, and its end clears the lease term's unsettled. It reports
+// false when the term closed first.
+func (t *receiveTerm) settle(r *durableReceiver) bool {
+	start := time.Now()
+	ctx, cancel := context.WithCancel(t.handling)
+	defer cancel()
+	go func() {
+		select {
+		case <-t.closing:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	limit := time.NewTimer(t.settleCap)
+	defer limit.Stop()
+	poll := time.NewTicker(r.timing.settlePoll)
+	defer poll.Stop()
+	outcome, pending, failing := "cap", -1, false
+read:
+	for {
+		held := t.gather(false)
+		info, err := listenerDurable(ctx, r.client, r.consumer)
+		switch {
+		case err == nil && info != nil:
+			if failing {
+				failing = false
+				r.logger.Info("settle hold: durable read recovered", slog.String("consumer", r.consumer))
+			}
+			pending = info.NumAckPending
+			if pending <= held {
+				outcome = "settled"
+				break read
+			}
+		case ctx.Err() == nil && !failing:
+			failing = true
+			reason := "the durable consumer does not exist"
+			if err != nil {
+				reason = err.Error()
+			}
+			r.logger.Warn("settle hold: durable read failed; holding on", slog.String("consumer", r.consumer), slog.String("error", reason))
+		}
+		select {
+		case <-t.closing:
+			return false
+		case <-limit.C:
+			break read
+		case <-poll.C:
+		}
+	}
+	held := t.gather(true)
+	if r.lease != nil {
+		r.lease.Settled(t.leaseTerm)
+	}
+	r.logger.Info("settle hold ended; delivering the held messages in stream order",
+		slog.String("consumer", r.consumer),
+		slog.String("outcome", outcome),
+		slog.Int64("held_ms", time.Since(start).Milliseconds()),
+		slog.Int("messages", held),
+		slog.Int("ack_pending", pending),
+	)
+	return true
 }
 
 // keepAlive sends InProgress every interval for each message the term has received and not

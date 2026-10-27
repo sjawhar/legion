@@ -130,6 +130,15 @@ func sameLastError(a, b error) (same bool) {
 // this machine's pods started serving without a gap, the server's timestamp of the write that
 // began it; acquired_at is the server's timestamp of the holder's acquiring write (informational);
 // released marks a record its holder gave up on a graceful stop.
+//
+// stale_binding and unsettled tell the next holder that a pod of this build may still hold
+// messages or a push binding, so that a binding it finds is not a pre-lease build's and its term
+// must settle (leaseAcquisition). stale_binding is set by a holder that subscribed while the
+// durable was push-bound by a binding it did not wait out (an expired holder's lingering
+// connection), and cleared by one that finds the durable not push-bound before it subscribes;
+// every other write carries it on. unsettled is set from the acquiring write of a term that must
+// settle until that term's settle hold ends, and a release keeps it as it stands, so a holder
+// stopped mid-hold hands the duty on.
 type leaseFields struct {
 	Holder         string    `json:"holder"`
 	Boot           string    `json:"boot"`
@@ -137,6 +146,8 @@ type leaseFields struct {
 	ServiceSince   time.Time `json:"service_since,omitzero"`
 	AcquiredAt     time.Time `json:"acquired_at,omitzero"`
 	Released       bool      `json:"released"`
+	StaleBinding   bool      `json:"stale_binding"`
+	Unsettled      bool      `json:"unsettled"`
 }
 
 // leaseRecordKeys are leaseFields' JSON keys; any other key a record carries is a newer build's,
@@ -166,12 +177,14 @@ func (r leaseRecord) encode() ([]byte, error) {
 }
 
 // leaseAcquisition is how a pod took the lease: what the record was when it wrote over it. The
-// receive loop acts on it: over an expired record that was not released (the holder was killed
-// or lost its node, or this pod's own renewals lapsed and then resumed) it subscribes at once but
-// holds what it receives for one AckWait, then delivers it in stream order, so the messages the old
-// holder had in hand, redelivered within that wait, go before newer ones; it counts a durable still
-// push-bound as the dead holder's binding. From an absent or released record it subscribes and
-// delivers at once, and counts a push-bound durable as a pre-lease build's.
+// receive loop acts on it through leaseStatus.Settle. A term taken over an expired record that was
+// not released (the holder was killed or lost its node, or this pod's own renewals lapsed and then
+// resumed) must settle: the receive loop subscribes at once, beside any push binding, which it
+// counts as the dead holder's, and holds what it receives until every message the durable has
+// outstanding is in its hands, then delivers it in stream order, so the messages the old holder
+// had in hand go before newer ones. So must a term taken from an absent or released record that
+// carries stale_binding or unsettled. A term taken from an absent or released record with neither
+// flag subscribes and delivers at once, and counts a push-bound durable as a pre-lease build's.
 type leaseAcquisition int
 
 const (
@@ -210,6 +223,10 @@ type leaseStatus struct {
 	// ServiceSince is the record's service_since as last written or read, zero when no record
 	// carried one.
 	ServiceSince time.Time
+	// Settle is whether Term must settle before it delivers (leaseAcquisition): it was taken over
+	// an expired record, resumed after a lapse, or taken from a record carrying stale_binding or
+	// unsettled.
+	Settle bool
 }
 
 // lease is one pod's view of its machine's delivery lease, the record lease.<durable> in the
@@ -239,10 +256,15 @@ type lease struct {
 	validUntil     time.Time
 	term           uint64
 	how            leaseAcquisition
+	settle         bool
 	record         leaseRecord
 	deliverSubject string
-	stop           context.CancelFunc
-	done           chan struct{}
+	// staleBinding and unsettled are the holder's stale_binding and unsettled, written into the
+	// record from the next renewal or release on (SetStaleBinding, Settled).
+	staleBinding bool
+	unsettled    bool
+	stop         context.CancelFunc
+	done         chan struct{}
 }
 
 // newLease makes machineID's lease over kv for this process, instance, with timing cfg and now
@@ -310,6 +332,7 @@ func (l *lease) Status() leaseStatus {
 		Term:         l.term,
 		How:          l.how,
 		ServiceSince: l.record.ServiceSince,
+		Settle:       l.settle,
 	}
 	if !l.record.Released {
 		status.ActiveInstance = l.record.Holder
@@ -325,8 +348,30 @@ func (l *lease) SetDeliverSubject(subject string) {
 	l.mu.Unlock()
 }
 
+// SetStaleBinding records whether term's holder subscribed while the durable was push-bound by a
+// binding it did not wait out (stale_binding), written into the record from the next renewal or
+// release on. A term that is no longer current changes nothing.
+func (l *lease) SetStaleBinding(term uint64, stale bool) {
+	l.mu.Lock()
+	if l.term == term {
+		l.staleBinding = stale
+	}
+	l.mu.Unlock()
+}
+
+// Settled records that term's settle hold ended, clearing unsettled from the next renewal or
+// release on. A term that is no longer current changes nothing.
+func (l *lease) Settled(term uint64) {
+	l.mu.Lock()
+	if l.term == term {
+		l.unsettled = false
+	}
+	l.mu.Unlock()
+}
+
 // Release stops the lease and, when this process holds the record, marks it released at its
-// revision, keeping service_since, so a standby takes it at its next poll with no TTL wait. A
+// revision, keeping service_since, stale_binding and unsettled as they stand, so a standby takes
+// it at its next poll with no TTL wait, and settles in its turn when this term had not settled. A
 // record another pod has already taken is left as it is, and that is no error. It returns
 // ctx.Err() when ctx ends before the loop has stopped, and the write's error when the record
 // could not be marked; either way this process no longer holds the lease, and a record left
@@ -345,6 +390,7 @@ func (l *lease) Release(ctx context.Context) error {
 	}
 	l.mu.Lock()
 	held, rev, record := l.held, l.rev, l.record
+	record.StaleBinding, record.Unsettled = l.staleBinding, l.unsettled
 	l.held, l.validUntil = false, time.Time{}
 	l.mu.Unlock()
 	if !held {
@@ -393,15 +439,16 @@ func (l *lease) step() time.Duration {
 
 // renew rewrites the holder's record at the revision it last wrote. A renewal that lands counts
 // from its own start; one that started after the validity ran out is a resume, a new term taken
-// as over an expired record. A wrong revision means another pod took the record, and this
-// process steps down; any other failure is retried every renewEvery, sooner when the validity
-// ends first, so its end is signalled.
+// as over an expired record, which must settle and so writes unsettled. A wrong revision means
+// another pod took the record, and this process steps down; any other failure is retried every
+// renewEvery, sooner when the validity ends first, so its end is signalled.
 func (l *lease) renew() time.Duration {
 	start := l.now()
 	l.mu.Lock()
 	lapsed := !start.Before(l.validUntil)
 	record, rev := l.record, l.rev
 	record.DeliverSubject = l.deliverSubject
+	record.StaleBinding, record.Unsettled = l.staleBinding, l.unsettled || lapsed
 	l.mu.Unlock()
 	if lapsed && !l.lapseSignalled {
 		l.lapseSignalled = true
@@ -450,6 +497,7 @@ func (l *lease) renew() time.Duration {
 	if lapsed {
 		l.term++
 		l.how = leaseTakenExpired
+		l.settle, l.unsettled = true, true
 	}
 	term := l.term
 	l.mu.Unlock()
@@ -538,15 +586,18 @@ func (l *lease) poll() time.Duration {
 // write's server timestamp, holds the lease from the write's start. service_since starts again
 // at that timestamp when no record was there, when it carried none, or when its last write is
 // more than two ttl older than this one, since then no pod of the machine was serving; otherwise
-// it is kept. The record is renewed at once to store service_since and acquired_at. A write
-// whose timestamp cannot be read back is not counted as held: the record then expires as any
-// unreleased one does, and a standby, this one included, takes it after the ttl.
+// it is kept. stale_binding is carried over, and unsettled is written when the term must settle
+// (leaseAcquisition). The record is renewed at once to store service_since and acquired_at. A
+// write whose timestamp cannot be read back is not counted as held: the record then expires as
+// any unreleased one does, and a standby, this one included, takes it after the ttl.
 func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how leaseAcquisition) time.Duration {
 	start := l.now()
 	l.mu.Lock()
 	record.DeliverSubject = l.deliverSubject
 	l.mu.Unlock()
 	record.Holder, record.Boot, record.Released, record.AcquiredAt = l.instance, l.boot, false, time.Time{}
+	settle := how == leaseTakenExpired || record.StaleBinding || record.Unsettled
+	record.Unsettled = settle
 	value, err := record.encode()
 	if err != nil {
 		l.noteFailure("encode", err)
@@ -584,11 +635,13 @@ func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how lea
 	l.validUntil = start.Add(l.cfg.ttl - l.cfg.margin)
 	l.term++
 	l.how = how
+	l.settle, l.staleBinding, l.unsettled = settle, record.StaleBinding, settle
 	term := l.term
 	l.mu.Unlock()
 	l.seenRev, l.lapseSignalled = 0, false
 	l.logger.Info("listener lease acquired", slog.String("lease", l.key), slog.String("from", how.String()),
-		slog.Uint64("term", term), slog.Uint64("revision", rev), slog.Time("service_since", record.ServiceSince))
+		slog.Uint64("term", term), slog.Uint64("revision", rev), slog.Time("service_since", record.ServiceSince),
+		slog.Bool("settle", settle), slog.Bool("stale_binding", record.StaleBinding))
 	l.signal()
 	return l.renew()
 }
