@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T02:43:11Z",
+  "completed": "2026-10-27T03:07:57Z",
   "pinnedCommit": "ad909178a0cbc43e0deef1a528051bc499ce1fb0",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2272",
   "documents": [
@@ -15,8 +15,8 @@
       "criterion": "R4 settled in code: Go and the browser read a mid-row escaped pipe in a table row the same way",
       "surface": "Dispatch's browser suite (packages/dispatch/e2e) against the real server and SPA with a rootless Postgres in the issue pod",
       "command": "cd packages/dispatch && PLAYWRIGHT_BROWSERS_PATH=$TMPDIR/ms-playwright DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra172_head?sslmode=disable bun run e2e editor-paste -g \"two backslashes|row is empty, pasted into\"",
-      "observed": "'a pipe after two backslashes ends a table cell in Go as in the editor' passes in chromium and iphone; 18 passed ($TMPDIR/infra172/e2e-head-20dedb36.txt)",
-      "headSha": "20dedb367e0853eada66d69eb1db5a6a7703d29c",
+      "observed": "'a pipe after two backslashes ends a table cell in Go as in the editor' passes in chromium and iphone; 18 passed ($TMPDIR/infra172/e2e-head-87fa023f.txt, main merged in)",
+      "headSha": "87fa023f9634e2c6b8d0cd7e1d593618e97990aa",
       "negativeControl": "The same test against a server and SPA built from ad909178 fails both projects on the cell assertion: the editor shows [\"a \\\\| b\", \"\"] where [\"a \\\\\", \"b\"] is expected; 16 passed, 2 failed ($TMPDIR/infra172/e2e-C.txt)"
     },
     {
@@ -58,10 +58,22 @@
       "observed": "replace refused naming row 1, column 1 under header 'Note'; upload of '| x | y \\\\| z |' refused as 3 cells under 2; '| x \\\\| y |' stored as cells 'x \\' and 'y'; bare row insert refused TABLE_WIDTH; the beside-browser-edit replace, delete and accept cases are refused (all 14 subtests pass)",
       "headSha": "20dedb367e0853eada66d69eb1db5a6a7703d29c",
       "negativeControl": "the same doc-edit with code '`ls | wc -l`' is accepted and stored as '`ls \\| wc -l`'; at 9f12932b the beside-browser-edit replace and delete returned nil (accepted)"
+    },
+    {
+      "criterion": "Round 4: the census's skill migration lands in main's new Dispatch layout (command help), and the merged head still holds",
+      "surface": "the workspace's dispatch command (packages/envoy-client/bin/dispatch.ts) and the claude-envoy bundle check",
+      "command": "bun packages/envoy-client/bin/dispatch.ts doc-edit --help; bun packages/envoy-client/bin/dispatch.ts artifact --help; bun run --cwd packages/claude-envoy check-dist; go test pmdoc (timing tests skipped) and the docs code-pipe tests on real Postgres at the merged head",
+      "observed": "doc-edit help: 'In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has a backslash right before a | cannot be stored in a cell and is INVALID_OP, naming the cell.'; artifact help: 'In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused.'; check-dist: dist/ and legion/ match a fresh build; pmdoc ok; docs ok",
+      "headSha": "87fa023f9634e2c6b8d0cd7e1d593618e97990aa",
+      "negativeControl": "check-dist with the new description and the old bundle reported 'generated files are stale (dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js)'"
     }
   ],
   "filesChanged": [
     ".dispatch/architecture/dispatch-pmdoc.md",
+    "packages/claude-envoy/dist/dispatch.js",
+    "packages/claude-envoy/dist/envoy-channel.js",
+    "packages/claude-envoy/dist/session-hook.js",
+    "packages/contracts/src/dispatch-tools.ts",
     "packages/dispatch/e2e/editor-paste.e2e.ts",
     "packages/envoy/AGENTS.md",
     "packages/envoy/CHANGELOG.md",
@@ -80,9 +92,7 @@
     "packages/envoy/internal/dispatch/pmdoc/table.go",
     "packages/envoy/internal/dispatch/pmdoc/table_test.go",
     "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/table-cell-pipes.md",
-    "packages/envoy/internal/dispatch/pmdoc/testdata/fixtures.json",
-    "skills/dispatch/references/document-edits.md",
-    "skills/dispatch/references/documents.md"
+    "packages/envoy/internal/dispatch/pmdoc/testdata/fixtures.json"
   ],
   "trickyParts": [
     "Code in a table cell whose text holds a | right after an odd run of backslashes has no GFM spelling once \\\\| ends a cell. API writes (replace, delete by quote, accepted suggestion) that leave it are refused with TableCodePipeError naming the table, cell and header; a browser edit holding it is rendered with that | as text after the code (codePipesOutOfCode). A table that already held the shape does not block later writes (replacementBroke).",
@@ -116,5 +126,11 @@
     "Minor: the refusal's header lookup comment no longer claims GET /blocks placement.",
     "Both review threads answered and resolved individually.",
     "The full docs package suite needs -timeout 50m on this pod (passes in 823 s); the default 10-minute timeout ends it."
+  ],
+  "round4": [
+    "GitHub reported #2272 CONFLICTING: merged main forward (87fa023f), no rebase. CHANGELOG conflict kept both entries; main's deletion of skills/dispatch/references/{documents,document-edits}.md taken. Fingerprint 666e2377… → 7498a1a2…, changed; posted on the PR.",
+    "The census's skill-line migration moved into the command help main's new skill points to (packages/contracts/src/dispatch-tools.ts: doc-edit and artifact descriptions), adding no words to the three Dispatch skills; claude-envoy dist rebuilt.",
+    "PR retitled to 'fix(dispatch): Go reads an escaped pipe in a table cell as the browser does' (pr-title check).",
+    "The pi-envoy skills-guard test 'the three Dispatch skills total fewer than 2,000 words' fails at the merged head with 2,057 words; main@origin alone measures 2,057 too (this PR changes no skill file there), so that red is main's."
   ]
 }
