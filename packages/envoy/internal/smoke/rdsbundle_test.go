@@ -44,6 +44,8 @@ func TestRDSBundle(t *testing.T) {
 	container, err := testcontainers.Run(ctx, image,
 		testcontainers.WithEntrypoint("sleep", "300"),
 		testcontainers.WithFiles(testcontainers.ContainerFile{HostFilePath: probe, ContainerFilePath: "/tmp/systemroots", FileMode: 0o755}),
+		// The image only sleeps while the probe reads its root pool.
+		capped(1, 256),
 	)
 	testcontainers.CleanupContainer(t, container)
 	if err != nil {

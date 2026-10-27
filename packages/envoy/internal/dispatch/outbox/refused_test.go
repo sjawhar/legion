@@ -36,6 +36,12 @@ func (p *refusingPublisher) Publish(item contracts.Envelope) error {
 	return nil
 }
 
+func (p *refusingPublisher) Window() bus.Sender { return p }
+
+func (p *refusingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
+}
+
 func (p *refusingPublisher) snapshot() (map[string]int, []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

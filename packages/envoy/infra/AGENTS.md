@@ -162,6 +162,17 @@ versions. Never add the module to the root `go.work`.
   `pulumi.WithMocks` never takes. The hub's cloud-config is built from plain inputs alone and holds
   no secret (`gcp/cloudconfig.go`, `vm`), so it is known at preview and never carries the auth key,
   which the VM fetches at boot.
+- **Integers.** Construct decodes a number into a Go `int` by conversion (Pulumi SDK v3.265.0
+  `go/pulumi/rpc.go`, `unmarshalOutput`: `SetInt(int64(v))`), so 2.5 would become 2 with no
+  error. `provider.New` therefore wraps every component's Construct with
+  `refuseFractionalIntegers` (`provider/integers.go`), which reads the served schema and refuses,
+  before the component's constructor runs, a number that is not a whole number within int64's
+  range wherever the schema types it `integer`: an input, an object type's property, an array
+  element or a map value. An integer input needs nothing more: `provider/integers_test.go` holds
+  the walk, and `TestConstructRefusesAFractionInEveryIntegerInput` (`provider/provider_test.go`)
+  sends a fraction to every integer input the served schema lists. Its refusal quotes the
+  component's name, so it leaves a name holding an nkey seed to the component's own refusal, which
+  stays first.
 - **Secrets.** Every input holding a secret carries `provider:"secret"`.
 - **Object types.** An object input type has an `Annotate` that sets its token
   (`a.SetToken("host", "Watchdog")`): generated SDKs append `Args` to an input type's name, so the

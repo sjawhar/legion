@@ -248,10 +248,19 @@ func TestConcurrentReadsEachHoldOneConnection(t *testing.T) {
 
 // Listener hands out a connection of its own, outside the shared pool: one taken while every shared
 // connection is held is still served, it receives notifications, and once it is closed the next
-// call is served too.
+// call is served too. The shared pool here holds four connections rather than sharedPoolSize's:
+// the property is the same at any size, and holding sixty-four server connections while the
+// other packages' tests share the server would push a default Postgres past its hundred.
 func TestListenerIsServedWhileTheSharedPoolIsFullyAcquired(t *testing.T) {
-	database := openTestStore(t)
 	ctx := context.Background()
+	config := openTestStore(t).Pool.Config().Copy()
+	config.MaxConns = 4
+	shared, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open a four-connection shared pool: %v", err)
+	}
+	database := &Store{Pool: NewPool(shared)}
+	t.Cleanup(database.Pool.Close)
 	held := make([]*pgxpool.Conn, 0, database.Pool.Config().MaxConns)
 	for range database.Pool.Config().MaxConns {
 		conn, err := database.Pool.Acquire(ctx)
