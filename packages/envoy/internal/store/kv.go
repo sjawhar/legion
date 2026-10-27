@@ -16,7 +16,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
-	"github.com/sjawhar/envoy/internal/routing"
 )
 
 // RoleClaim is the durable ownership record for a role lane. Role claims are
@@ -54,6 +53,9 @@ type Registry struct {
 	// including delete tombstones. It prevents a delayed local write-through
 	// from replacing a newer watcher update.
 	cacheRevisions map[string]uint64
+	// index indexes the cache's topic patterns by subject token (subjectIndex), for Match and
+	// MatchAny. Every change to cache changes it too; nil until the first one.
+	index *subjectIndex
 	// watcher feeds the cache from the interest bucket. Once it is ready the cache is consistent
 	// with the bucket, and Match answers every "is this session subscribed?" question without
 	// falling through.
@@ -251,6 +253,10 @@ func (r *Registry) cacheInterestLocked(sessionID string, item Interest, revision
 	}
 	r.cache[sessionID] = item
 	r.cacheRevisions[sessionID] = revision
+	if r.index == nil {
+		r.index = newSubjectIndex()
+	}
+	r.index.set(sessionID, item)
 }
 
 func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) {
@@ -258,6 +264,9 @@ func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) 
 		return
 	}
 	delete(r.cache, sessionID)
+	if r.index != nil {
+		r.index.remove(sessionID)
+	}
 	if r.cacheRevisions == nil {
 		r.cacheRevisions = map[string]uint64{}
 	}
@@ -344,6 +353,7 @@ func (r *Registry) resetCache() {
 	r.mu.Lock()
 	r.cache = map[string]Interest{}
 	r.cacheRevisions = map[string]uint64{}
+	r.index = nil
 	r.mu.Unlock()
 }
 
@@ -868,21 +878,35 @@ func (r *Registry) Get(sessionID string) (Interest, error) {
 	return fresh, err
 }
 
+// CachedInterest returns sessionID's interest from the cache alone, and whether the cache holds
+// one; it never reads the bucket.
+func (r *Registry) CachedInterest(sessionID string) (Interest, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	item, ok := r.cache[sessionID]
+	return item, ok
+}
+
+// Match returns, once each, the cached interests of machineID with a topic pattern that matches
+// topic (routing.Match's rules), looked up in the subject index.
 func (r *Registry) Match(machineID string, topic string) []Interest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := []Interest{}
-	for _, item := range r.cache {
-		if item.MachineID != machineID {
-			continue
-		}
-		for _, pattern := range item.Topics {
-			if routing.Match(pattern, topic) {
-				out = append(out, item)
-				break
-			}
-		}
+	if r.index == nil {
+		return out
 	}
+	var seen map[string]struct{}
+	r.index.match(machineID, topic, func(key string) {
+		if _, dup := seen[key]; dup {
+			return
+		}
+		if seen == nil {
+			seen = map[string]struct{}{}
+		}
+		seen[key] = struct{}{}
+		out = append(out, r.cache[key])
+	})
 	return out
 }
 

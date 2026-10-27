@@ -792,6 +792,10 @@ func main() {
 		messagesNAKed:     messagesNAKed,
 		deliveryDuration:  deliveryDuration,
 	}
+	// The durable path's pushes to serving-port sessions run off its handler, on one worker per
+	// session (servePortWorkers), so a port slow to accept holds up no other session's delivery.
+	servePorts := startServePortWorkers(deliveryConfig)
+	deliveryConfig.servePorts = servePorts
 	// The role lane's forwards run off its handler (roleForwarder): the handler resolves each role
 	// message's holder and hands the forward over, and the forwards to one holder are published in
 	// order while each waits for its outcome on its own.
@@ -905,7 +909,7 @@ func main() {
 				slog.Int64("waited_ms", bind.waited.Milliseconds()),
 			)
 		}
-		shutdownListener(logger, server, client, lane, live, delivery, relays, caches, listenerLoops{})
+		shutdownListener(logger, server, client, lane, live, delivery, relays, servePorts, caches, listenerLoops{})
 	}
 	deps.Store(ready)
 	logger.Info("envoy-listener ready (NATS connected)")
@@ -1001,7 +1005,7 @@ func main() {
 	case <-stopping.Done():
 		logger.Info("received signal, shutting down", slog.String("signal", context.Cause(stopping).Error()))
 	}
-	shutdownListener(logger, server, client, lane, live, delivery, relays, caches, listenerLoops{
+	shutdownListener(logger, server, client, lane, live, delivery, relays, servePorts, caches, listenerLoops{
 		stop: func() {
 			monitorCancel()
 			summaryCancel()
@@ -1026,19 +1030,22 @@ type listenerLoops struct {
 // signal, a fatal error or a bind that did not complete, and exits non-zero so the runtime's
 // restart policy restores the listener. lane is the role lane; live is the live topics lane's
 // client, nil when the lane is off; delivery holds the session-consumer connection, and relays
-// relays its consumers (nil when it does not run).
-func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.Client, lane roleLane, live *bus.Client, delivery *sessionDelivery, relays *sessionRelays, caches []listenerCache, loops listenerLoops) {
+// relays its consumers (nil when it does not run); servePorts pushes the durable path's messages to
+// serving ports.
+func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.Client, lane roleLane, live *bus.Client, delivery *sessionDelivery, relays *sessionRelays, servePorts *servePortWorkers, caches []listenerCache, loops listenerLoops) {
 	// Stop background loops before draining NATS.
 	if loops.stop != nil {
 		loops.stop()
 	}
 
 	// Ordered shutdown:
-	// 1. Session relays — publish no frame, push to no port and ack nothing more.
+	// 1. Session relays and serving-port workers — publish no frame, push to no port and ack nothing
+	//    more; the messages they hold are delivered again once their ack wait runs out.
 	// 2. HTTP server — stop accepting new requests, drain in-flight.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	relays.stop(shutdownCtx)
+	servePorts.stop(shutdownCtx)
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown error", slog.String("error", err.Error()))
 	}

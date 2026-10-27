@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,11 +22,15 @@ import (
 )
 
 // roleForwardDedupePrefix marks an envelope already sent from the role arbiter
-// to its selected agent subject. The durable agent-stream replay must ACK it
-// without re-entering the arbiter.
+// to its selected agent subject. The durable agent-stream replay must not
+// re-enter the arbiter with it: roleForwardCopyDelivery handles the stored copy.
 const roleForwardDedupePrefix = "envoy.role.forward."
 
 const roleReceiptTimeout = 2 * time.Second
+
+// exceptionPublishTimeout bounds the wait for the stream's acknowledgement of a stored exception
+// (publishStoredException), as the bus bounds every JetStream publish.
+const exceptionPublishTimeout = 5 * time.Second
 
 // exceptionPublishFailedLine is the line a delivery logs when its delivery exception could not be
 // published. The deployed publish-failure metric filter, which the deployment repository's
@@ -47,7 +53,11 @@ type listenerDeliveryHandlerConfig struct {
 	forwardRole func(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (wait func() error, err error)
 	// roleForwards runs the role lane's forwards off its handler (roleForwarder); nil runs each one
 	// inline, so a caller reads its outcome as soon as the handler returns.
-	roleForwards      *roleForwarder
+	roleForwards *roleForwarder
+	// servePorts pushes the durable path's messages to serving-port sessions off its handler, one
+	// worker per session (servePortWorkers); nil pushes each one inline, so a caller reads its
+	// outcome as soon as the handler returns.
+	servePorts        *servePortWorkers
 	registry          *store.Registry
 	sessions          *session.SessionRegistry
 	machineID         string
@@ -78,27 +88,83 @@ type deliveryMessage struct {
 	// msg is the NATS message: set for durableDelivery, which acknowledges it, and liveDelivery,
 	// which reads its subject.
 	msg *nats.Msg
+	// settle acknowledges a durable message once its handler and the pushes it handed to
+	// serving-port workers have ended.
+	settle *durableSettle
 }
 
 // finalize makes core delivery's loss-on-failure semantics explicit: only a
 // durable JetStream message receives an acknowledgement or retry request. A role-lane or live-lane
 // message is core NATS, sent once to whoever was subscribed, so nothing acknowledges or retries it.
+// A durable message is settled once the pushes its handler handed over have ended too.
 func (message deliveryMessage) finalize(retry bool) {
 	if message.mode != durableDelivery {
 		return
 	}
-	if retry {
-		_ = message.msg.NakWithDelay(30 * time.Second)
-		return
-	}
-	_ = message.msg.Ack()
+	message.settle.end(retry)
 }
 
+// jetStreamDeliveryHandler is the durable's handler. A message no session needs from the durable
+// (durableNeedsDelivery) is acknowledged before it is decoded, each session that takes it another
+// way counted as a skipped delivery, as the delivery paths count it.
 func jetStreamDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
 	handler := listenerDeliveryHandler(cfg)
 	return func(msg *nats.Msg) {
-		handler(deliveryMessage{data: msg.Data, mode: durableDelivery, msg: msg})
+		needed, skipped := durableNeedsDelivery(cfg, msg.Subject)
+		if !needed {
+			for range skipped {
+				cfg.messagesDelivered.Inc([2]string{"delivery_status", "skipped"})
+			}
+			_ = msg.Ack()
+			return
+		}
+		handler(deliveryMessage{data: msg.Data, mode: durableDelivery, msg: msg, settle: newDurableSettle(msg)})
 	}
+}
+
+// durableNeedsDelivery reports whether the stored message on subject may need this listener's
+// durable path, read from the subject alone, and when it does not, how many sessions of this
+// machine take it another way (takesStoredMessagesItself). A role lane's subject always needs it. A
+// session's agent subject does unless the session takes it another way or is another listener's
+// (agentSubjectNeedsDelivery). Any other subject does when it matches a topic of an interest of
+// this machine (the registry's subject index) whose session does not take it another way; with
+// none, the fan-out would deliver it to nobody and report nothing.
+func durableNeedsDelivery(cfg listenerDeliveryHandlerConfig, subject string) (needed bool, skipped int) {
+	if strings.HasPrefix(subject, contracts.RoleTopicPrefix) {
+		return true, 0
+	}
+	if sessionID, ok := strings.CutPrefix(subject, contracts.AgentTopicPrefix); ok {
+		return agentSubjectNeedsDelivery(cfg, sessionID)
+	}
+	for _, interest := range cfg.registry.Match(cfg.machineID, subject) {
+		entry, err := cfg.sessions.Get(interest.SessionID)
+		if err != nil || !takesStoredMessagesItself(entry) {
+			return true, 0
+		}
+		skipped++
+	}
+	return false, skipped
+}
+
+// takesStoredMessagesItself reports whether the session of entry takes a stored message without the
+// durable path: on consumer delivery its consumer holds every stored message for it, and with no
+// serving port a self-subscribed session's own subscription took it.
+func takesStoredMessagesItself(entry session.SessionEntry) bool {
+	return entry.Delivery == session.DeliveryConsumer || (entry.SelfSubscribed && entry.Port == 0)
+}
+
+// agentSubjectNeedsDelivery is durableNeedsDelivery for sessionID's agent subject: not needed when
+// the session's live entry takes it another way (takesStoredMessagesItself, one skipped delivery),
+// nor when its cached interest names another listener, which delivers it
+// (session.HandleAgentMessage's OwnedElsewhere). Everything else is decoded and delivered: a
+// serving-port or core-path session of this machine, and a session nobody has, for which the path
+// raises its no_holder exception.
+func agentSubjectNeedsDelivery(cfg listenerDeliveryHandlerConfig, sessionID string) (needed bool, skipped int) {
+	if entry, err := cfg.sessions.Get(sessionID); err == nil && takesStoredMessagesItself(entry) {
+		return false, 1
+	}
+	interest, cached := cfg.registry.CachedInterest(sessionID)
+	return !cached || interest.MachineID == "" || interest.MachineID == cfg.machineID, 0
 }
 
 func coreNATSDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
@@ -128,7 +194,11 @@ func isExceptionsTopic(topic string) bool {
 	return strings.HasPrefix(topic, bus.ExceptionTopicPrefix)
 }
 
-func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool) error {
+// publishDeliveryException publishes item's delivery exception for reason. origin, when not empty,
+// identifies the stored message the exception is about (exceptionOrigin): an exception the stream
+// stores then carries Nats-Msg-Id exception.<reason>.<origin>, so the stream keeps one copy
+// however many listeners raise it for that message, each from its own durable.
+func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool, origin string) error {
 	payload, err := json.Marshal(deliveryExceptionPayload{
 		OriginalTopic:    item.Topic,
 		EventID:          item.EventID,
@@ -164,10 +234,45 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 		}
 		return nil
 	}
+	if origin != "" && bus.StreamCaptures(exception.Topic) {
+		if err := publishStoredException(client, exception, "exception."+reason+"."+origin); err != nil {
+			return fmt.Errorf("publish delivery exception: %w", err)
+		}
+		return nil
+	}
 	if err := client.Publish(exception); err != nil {
 		return fmt.Errorf("publish delivery exception: %w", err)
 	}
 	return nil
+}
+
+// publishStoredException publishes exception to the stream under Nats-Msg-Id msgID, waiting up to
+// exceptionPublishTimeout for the stream's acknowledgement; a duplicate the stream drops counts as
+// published.
+func publishStoredException(client *bus.Client, exception contracts.Envelope, msgID string) error {
+	data, err := json.Marshal(exception)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), exceptionPublishTimeout)
+	defer cancel()
+	_, err = client.JS().Publish(exception.Topic, data, nats.MsgId(msgID), nats.Context(ctx))
+	return err
+}
+
+// exceptionOrigin identifies the durable message message for an exception's Nats-Msg-Id: its own
+// Nats-Msg-Id, else its stream sequence; "" for a message that is not durable.
+func exceptionOrigin(message deliveryMessage) string {
+	if message.mode != durableDelivery || message.msg == nil {
+		return ""
+	}
+	if msgID := message.msg.Header.Get(nats.MsgIdHdr); msgID != "" {
+		return msgID
+	}
+	if meta, err := message.msg.Metadata(); err == nil {
+		return strconv.FormatUint(meta.Sequence.Stream, 10)
+	}
+	return ""
 }
 
 // deliveryOutcome bundles one delivery attempt's bookkeeping: the metrics
@@ -194,6 +299,8 @@ type deliveryOutcome struct {
 	// core-NATS exception for this terminal fanout outcome.
 	exceptionReason string
 	fanoutRefusal   bool
+	// origin identifies the durable message an exception is about (exceptionOrigin), "" for none.
+	origin string
 	// exceptionFailureRetries: an exception-publish failure escalates this
 	// outcome's retry result to true.
 	exceptionFailureRetries bool
@@ -227,7 +334,7 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 	}
 	retry := outcome.retry
 	if outcome.exceptionReason != "" && !isExceptionsTopic(item.Topic) && (isControlTopic(item.Topic) || outcome.fanoutRefusal) {
-		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal); err != nil {
+		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal, outcome.origin); err != nil {
 			cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
 			if outcome.exceptionFailureClearsAttempt {
 				cfg.attemptCache.Clear(item.DedupeKey, outcome.sessionID)
@@ -257,7 +364,7 @@ func publishNoHolderExceptionOrNak(cfg listenerDeliveryHandlerConfig, message de
 	if !isControlTopic(item.Topic) || isExceptionsTopic(item.Topic) {
 		return true
 	}
-	if err := publishDeliveryException(cfg.client, item, "no_holder", sessionID, false); err != nil {
+	if err := publishDeliveryException(cfg.client, item, "no_holder", sessionID, false, exceptionOrigin(message)); err != nil {
 		if sessionID != "" {
 			cfg.attemptCache.Clear(item.DedupeKey, sessionID)
 		}
@@ -431,7 +538,7 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 // for the holder.
 func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	if strings.HasPrefix(item.DedupeKey, roleForwardDedupePrefix) {
-		message.finalize(false)
+		roleForwardCopyDelivery(cfg, message, item)
 		return
 	}
 	role := strings.TrimPrefix(item.Topic, contracts.RoleTopicPrefix)
@@ -497,12 +604,92 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 }
 
 // roleForwardStoredOnly reports whether holder answers no receipt for a role forward: a session on a
-// serving port has no NATS subscriber, and when its entry records consumer delivery its session
-// consumer holds the stored forward, which the listener's relay pushes to the port with
-// acknowledgement and redelivery. Its forward counts as delivered once the stream acknowledges
-// storing it. A serving-port session without consumer delivery keeps the receipt wait.
+// serving port has no NATS subscriber. The stream's copy of the forward reaches its port with
+// acknowledgement and redelivery: from its session consumer, which the listener's relay pushes,
+// when its entry records consumer delivery, else from the owning listener's durable
+// (roleForwardCopyDelivery). Its forward counts as delivered once the stream acknowledges storing it.
 func roleForwardStoredOnly(holder session.SessionEntry) bool {
-	return holder.Port > 0 && holder.Delivery == session.DeliveryConsumer
+	return holder.Port > 0
+}
+
+// roleForwardCopyDelivery handles the stored copy of a role forward (roleForward.forwarded), which
+// the durable reads on its holder's agent subject. A holder on NATS took the forward over its own
+// subscription, a holder on consumer delivery takes the copy from its consumer, and a holder another
+// listener owns is that listener's, so the copy is acknowledged. A serving-port holder this listener
+// owns has no subscriber: the copy is pushed to its port and acknowledged only on the port's 204,
+// by the holder's serving-port worker on the durable path, so its order behind the holder's earlier
+// messages holds; a copy the workers cannot take goes back to the durable.
+func roleForwardCopyDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
+	holder, ok := "", false
+	if message.mode == durableDelivery {
+		holder, ok = strings.CutPrefix(message.msg.Subject, contracts.AgentTopicPrefix)
+	}
+	if !ok {
+		message.finalize(false)
+		return
+	}
+	entry, err := cfg.sessions.Get(holder)
+	if err != nil || entry.Port <= 0 || entry.Delivery == session.DeliveryConsumer {
+		message.finalize(false)
+		return
+	}
+	interest, err := cfg.registry.Get(holder)
+	if err != nil {
+		interest = store.Interest{SessionID: holder}
+	}
+	if !cfg.deliverer.OwnsServingPort(interest, entry) || cfg.dedupeCache.Seen(item.DedupeKey, holder) || cfg.attemptCache.Seen(item.DedupeKey, holder) {
+		message.finalize(false)
+		return
+	}
+	cfg.attemptCache.Record(item.DedupeKey, holder)
+	if cfg.servePorts != nil {
+		if handOverPush(cfg, servePortPush{item: item, sessionID: holder, settle: message.settle, forward: true, logLine: "listener role forward pushed"}) {
+			message.finalize(false)
+			return
+		}
+		cfg.messagesNAKed.Inc()
+		message.finalize(true)
+		return
+	}
+	if err := cfg.deliverer.Push(context.Background(), item, holder, entry); err != nil {
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			sessionID: holder,
+			log: func(logger *logging.Logger) {
+				logger.DeliveryLog(slog.LevelWarn, "listener role forward push refused", holder, item.Topic, item.EventID, "retrying", slog.String("error", err.Error()))
+			},
+			clearAttempt: true,
+		})
+		cfg.messagesNAKed.Inc()
+		message.finalize(true)
+		return
+	}
+	applyDeliveryOutcome(cfg, item, deliveryOutcome{
+		sessionID: holder,
+		log: func(logger *logging.Logger) {
+			logger.DeliveryLog(slog.LevelInfo, "listener role forward pushed", holder, item.Topic, item.EventID, "delivered")
+		},
+		recordDedupe: true,
+	})
+	message.finalize(false)
+}
+
+// handOverPush hands push to its session's serving-port worker (servePortWorkers) and reports
+// true; the push's outcome is reported when it ends. When the workers cannot take it (they stopped,
+// or are full) it clears push's attempt and reports false: the caller gives the message back to the
+// durable for a retry.
+func handOverPush(cfg listenerDeliveryHandlerConfig, push servePortPush) bool {
+	if cfg.servePorts.enqueue(push) {
+		return true
+	}
+	applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
+		sessionID: push.sessionID,
+		log: func(logger *logging.Logger) {
+			logger.DeliveryLog(slog.LevelWarn, "listener serving-port workers cannot take the push; the message goes back to the durable", push.sessionID, push.item.Topic, push.item.EventID, "retrying",
+				slog.Int("worker_limit", servePortWorkerLimit), slog.Int("queue_limit", servePortQueueLimit))
+		},
+		clearAttempt: true,
+	})
+	return false
 }
 
 // finishRoleForward reports a role forward's outcome, err from its publish or its wait. A forward
@@ -551,7 +738,9 @@ func finishRoleForward(cfg listenerDeliveryHandlerConfig, forward roleForward, e
 // (notifications.agent.<session>), pushing over HTTP/WebSocket when the
 // session is live and falling back to whatever session.HandleAgentMessage
 // decides (e.g. queuing) otherwise. A session another listener owns is that
-// listener's to deliver, so this one acknowledges the message silently.
+// listener's to deliver, so this one acknowledges the message silently. On the
+// durable path a push to a serving port is handed to the session's worker
+// (servePortWorkers), which acknowledges the message once the port accepts it.
 func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 	if cfg.dedupeCache.Seen(item.DedupeKey, sessionID) {
@@ -583,7 +772,20 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	}
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
 	deliveryTimer := metrics.NewTimer()
-	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, cfg.deliverer)
+	handle := session.HandleAgentMessage
+	if message.mode == durableDelivery && cfg.servePorts != nil {
+		handle = session.ResolveAgentMessage
+	}
+	result := handle(item, sessionID, cfg.machineID, interestPtr, cfg.deliverer)
+	if result.Push {
+		if handOverPush(cfg, servePortPush{item: item, sessionID: sessionID, settle: message.settle, logLine: "listener agent delivered", timer: deliveryTimer}) {
+			message.finalize(false)
+			return
+		}
+		cfg.messagesNAKed.Inc()
+		message.finalize(true)
+		return
+	}
 	if result.OwnedElsewhere {
 		// Every listener on the bus reads each inbox message from its own durable, and the owner
 		// delivers it from its copy: a no_holder exception here would report a delivered message
@@ -601,6 +803,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 				logger.DeliveryLog(slog.LevelError, "listener agent delivery failed", sessionID, item.Topic, item.EventID, "failed", slog.String("error", result.Err.Error()))
 			},
 			exceptionReason: "delivery_failed",
+			origin:          exceptionOrigin(message),
 			clearAttempt:    result.ShouldNAK,
 		})
 	}
@@ -641,7 +844,9 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 
 // fanoutDelivery delivers a general-topic envelope to every session that
 // registered interest in it (registry.Match), aggregating per-recipient
-// failures into a single NAK/ACK decision for the underlying message.
+// failures into a single NAK/ACK decision for the underlying message. On the
+// durable path a push to a serving port is handed to the session's worker
+// (servePortWorkers), and the message is acknowledged once every push ends.
 func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	items := cfg.registry.Match(cfg.machineID, item.Topic)
 	if len(items) == 0 {
@@ -657,6 +862,10 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		itemPayload = &item.Payload
 	}
 	mode, deliveryErr := frameDeliveryMode(itemPayload)
+	resolve := cfg.deliverer.DeliverWithResultForEntry
+	if message.mode == durableDelivery && cfg.servePorts != nil {
+		resolve = cfg.deliverer.Resolve
+	}
 
 	var failed bool
 	var deadDeliveries int
@@ -727,7 +936,13 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		}
 		cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
 		deliveryTimer := metrics.NewTimer()
-		delivery, err := cfg.deliverer.DeliverWithResultForEntry(item, interest, target)
+		delivery, err := resolve(item, interest, target)
+		if err == nil && delivery.Push {
+			if !handOverPush(cfg, servePortPush{item: item, sessionID: interest.SessionID, settle: message.settle, timer: deliveryTimer}) {
+				failed = true
+			}
+			continue
+		}
 		if err != nil {
 			retryable := shouldNAKFanoutDelivery(targetLive, err)
 			if !retryable {

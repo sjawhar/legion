@@ -1,0 +1,323 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/metrics"
+	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
+)
+
+const (
+	// servePortWorkerLimit bounds the serving-port sessions with a worker at once; a push for one
+	// more session is handed back to the durable while the limit holds.
+	servePortWorkerLimit = 1024
+	// servePortQueueLimit bounds one session's pushes queued in its worker, its head included. Each
+	// holds its durable message unacknowledged, and the durable's MaxAckPending is shared by every
+	// session of the machine, so a push past it is handed back to the durable: one session whose
+	// port never accepts holds at most this many of the durable's pending messages.
+	servePortQueueLimit = 32
+	// servePortProgressInterval is how often a worker's queued messages are kept in progress, well
+	// inside the durable's AckWait (applyListenerConsumerPolicy), so none is delivered again while
+	// it waits for its port.
+	servePortProgressInterval = 20 * time.Second
+	// durableRetryDelay is how long the server waits to deliver again a durable message whose
+	// delivery asked for a retry.
+	durableRetryDelay = 30 * time.Second
+)
+
+// durableSettle settles one durable message once its handler and every push the handler handed to
+// a serving-port worker have ended: it acks the message, or NAKs it (durableRetryDelay) when any
+// of them asked for a retry. Every acknowledgement call on the message goes through it, under its
+// lock, so the worker that keeps the message in progress never races the one that settles it.
+type durableSettle struct {
+	mu      sync.Mutex
+	msg     *nats.Msg
+	open    int
+	retry   bool
+	settled bool
+}
+
+func newDurableSettle(msg *nats.Msg) *durableSettle {
+	return &durableSettle{msg: msg, open: 1}
+}
+
+// hold adds a party the message waits for: a push handed to a worker.
+func (s *durableSettle) hold() {
+	s.mu.Lock()
+	s.open++
+	s.mu.Unlock()
+}
+
+// end ends one party, asking for a retry when retry is set; the last one settles the message.
+func (s *durableSettle) end(retry bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retry = s.retry || retry
+	s.open--
+	if s.open > 0 || s.settled {
+		return
+	}
+	s.settled = true
+	if s.retry {
+		_ = s.msg.NakWithDelay(durableRetryDelay)
+		return
+	}
+	_ = s.msg.Ack()
+}
+
+// progress restarts the message's ack wait while it is unsettled.
+func (s *durableSettle) progress() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.settled {
+		_ = s.msg.InProgress()
+	}
+}
+
+// servePortPush is one durable message's push to one serving-port session, handed to the session's
+// worker. forward marks the stored copy of a role forward, whose delivery the role lane reported.
+type servePortPush struct {
+	item      contracts.Envelope
+	sessionID string
+	settle    *durableSettle
+	forward   bool
+	// logLine is the line a delivered push logs, "" for none.
+	logLine string
+	timer   metrics.Timer
+}
+
+// servePortWorkers pushes the durable path's messages to serving-port sessions off the durable's
+// handler: one FIFO worker per session with pushes queued, which pushes its head message until the
+// port answers 204, with a wait that doubles from pushRetryFirst to pushRetryMax between tries, and
+// only then takes the next. The handler hands a push over and returns, so a session slow to accept
+// holds up no other session, and its own messages reach it in stream order; the message is
+// acknowledged once its pushes are accepted (durableSettle) and kept in progress meanwhile, never
+// NAKed back to the shared durable while its session can take it, since a later message would then
+// pass it. A worker whose session is no longer a serving port this listener owns hands its pushes
+// back to the durable, which delivers them again under the rules of the session's new state. A
+// worker ends once its queue is empty.
+type servePortWorkers struct {
+	cfg    listenerDeliveryHandlerConfig
+	ctx    context.Context
+	cancel context.CancelFunc
+	runs   sync.WaitGroup
+
+	mu sync.Mutex
+	// queues holds each session's pushes in arrival order, its head the one being pushed. A session
+	// has a key exactly while its worker runs.
+	queues  map[string][]servePortPush
+	stopped bool
+}
+
+// startServePortWorkers starts the workers' progress loop. cfg is the delivery configuration the
+// pushes are made (deliverer, sessions, registry) and reported (applyDeliveryOutcome) through.
+func startServePortWorkers(cfg listenerDeliveryHandlerConfig) *servePortWorkers {
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &servePortWorkers{cfg: cfg, ctx: ctx, cancel: cancel, queues: map[string][]servePortPush{}}
+	w.runs.Go(w.keepInProgress)
+	return w
+}
+
+// enqueue queues push behind its session's earlier pushes, starting the session's worker when it
+// has none, and holds push's message until the push ends. It reports false, holding nothing, when
+// the workers stopped or are full: the caller hands the message back to the durable.
+func (w *servePortWorkers) enqueue(push servePortPush) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	queue, running := w.queues[push.sessionID]
+	if w.stopped || (!running && len(w.queues) >= servePortWorkerLimit) || len(queue) >= servePortQueueLimit {
+		return false
+	}
+	push.settle.hold()
+	w.queues[push.sessionID] = append(queue, push)
+	if !running {
+		w.runs.Go(func() { w.work(push.sessionID) })
+	}
+	return true
+}
+
+// stop ends every worker within ctx, leaving their messages unsettled: the server delivers each
+// again once its ack wait runs out.
+func (w *servePortWorkers) stop(ctx context.Context) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	w.stopped = true
+	w.mu.Unlock()
+	w.cancel()
+	done := make(chan struct{})
+	go func() {
+		w.runs.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		w.cfg.logger.Warn("serving-port workers still running at shutdown")
+	}
+}
+
+// work is sessionID's worker: it pushes the session's queued messages in order and ends once the
+// queue is empty, or when the workers stop.
+func (w *servePortWorkers) work(sessionID string) {
+	for {
+		w.mu.Lock()
+		queue := w.queues[sessionID]
+		if len(queue) == 0 {
+			delete(w.queues, sessionID)
+			w.mu.Unlock()
+			return
+		}
+		head := queue[0]
+		w.mu.Unlock()
+
+		retry, ended := w.pushUntilSettled(head)
+		if !ended {
+			return
+		}
+		w.mu.Lock()
+		queue = w.queues[sessionID]
+		queue[0] = servePortPush{}
+		w.queues[sessionID] = queue[1:]
+		w.mu.Unlock()
+		head.settle.end(retry)
+	}
+}
+
+// pushUntilSettled pushes push until its port answers 204, or until its session is no longer a
+// serving port this listener owns, and reports the outcome: whether the message needs a retry, and
+// whether the push ended at all (false when the workers stopped first).
+func (w *servePortWorkers) pushUntilSettled(push servePortPush) (retry, ended bool) {
+	cfg := w.cfg
+	wait := pushRetryFirst
+	for attempt := 1; ; attempt++ {
+		entry, verdict := w.target(push)
+		switch verdict {
+		case servePortSkip:
+			applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
+				sessionID:    push.sessionID,
+				metricStatus: push.metricStatus("skipped"),
+				recordDedupe: true,
+			})
+			return false, true
+		case servePortGone:
+			applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
+				sessionID: push.sessionID,
+				log: func(logger *logging.Logger) {
+					logger.DeliveryLog(slog.LevelWarn, "listener serving-port push handed back: the session is no longer a serving port this listener owns", push.sessionID, push.item.Topic, push.item.EventID, "retrying")
+				},
+				clearAttempt: true,
+			})
+			cfg.messagesNAKed.Inc()
+			return true, true
+		}
+		err := cfg.deliverer.Push(w.ctx, push.item, push.sessionID, entry)
+		if err == nil {
+			applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
+				sessionID:    push.sessionID,
+				metricStatus: push.metricStatus("delivered"),
+				duration:     push.duration(),
+				log: func(logger *logging.Logger) {
+					if push.logLine != "" {
+						logger.DeliveryLog(slog.LevelInfo, push.logLine, push.sessionID, push.item.Topic, push.item.EventID, "delivered", slog.Int("attempts", attempt))
+					}
+				},
+				recordDedupe: true,
+			})
+			return false, true
+		}
+		if w.ctx.Err() != nil {
+			return false, false
+		}
+		cfg.logger.DeliveryLog(slog.LevelWarn, "listener serving-port push refused; the message waits at the head of the session's queue", push.sessionID, push.item.Topic, push.item.EventID, "retrying",
+			slog.Int("attempt", attempt), slog.String("retry_in", wait.String()), slog.String("error", err.Error()))
+		if waitUnlessDone(w.ctx, wait) != nil {
+			return false, false
+		}
+		wait = min(wait*2, pushRetryMax)
+	}
+}
+
+// metricStatus is status for the delivery metrics, or "" for a role forward's stored copy, whose
+// delivery the role lane counted.
+func (p servePortPush) metricStatus(status string) string {
+	if p.forward {
+		return ""
+	}
+	return status
+}
+
+func (p servePortPush) duration() *metrics.Timer {
+	if p.forward {
+		return nil
+	}
+	return &p.timer
+}
+
+// servePortVerdict is what a worker does with its head push, read from the session's state at
+// each try.
+type servePortVerdict uint8
+
+const (
+	// servePortPushIt: the session is a serving port this listener owns; push to it.
+	servePortPushIt servePortVerdict = iota
+	// servePortSkip: the session takes the message without a push (its consumer holds it, or it
+	// subscribes on NATS itself); the message is delivered.
+	servePortSkip
+	// servePortGone: the session is gone, or no longer this listener's serving port; the message
+	// goes back to the durable.
+	servePortGone
+)
+
+// target reads push's session's current state: its entry, and what to do with the push. A message
+// on the durable path is stored, so a session that takes stored messages itself has it.
+func (w *servePortWorkers) target(push servePortPush) (session.SessionEntry, servePortVerdict) {
+	entry, err := w.cfg.sessions.Get(push.sessionID)
+	if err != nil {
+		return session.SessionEntry{}, servePortGone
+	}
+	if takesStoredMessagesItself(entry) {
+		return entry, servePortSkip
+	}
+	interest, err := w.cfg.registry.Get(push.sessionID)
+	if err != nil {
+		interest = store.Interest{SessionID: push.sessionID}
+	}
+	if entry.Port <= 0 || !w.cfg.deliverer.OwnsServingPort(interest, entry) {
+		return entry, servePortGone
+	}
+	return entry, servePortPushIt
+}
+
+// keepInProgress keeps every queued message in progress every servePortProgressInterval until the
+// workers stop.
+func (w *servePortWorkers) keepInProgress() {
+	ticker := time.NewTicker(servePortProgressInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		w.mu.Lock()
+		settles := make([]*durableSettle, 0, len(w.queues))
+		for _, queue := range w.queues {
+			for _, push := range queue {
+				settles = append(settles, push.settle)
+			}
+		}
+		w.mu.Unlock()
+		for _, settle := range settles {
+			settle.progress()
+		}
+	}
+}

@@ -547,7 +547,8 @@ func TestSessionConsumerOwnershipMovesWithTheSessionToOneRelayer(t *testing.T) {
 
 // scriptedPort is a serving-port session's serve process whose answers the test scripts: it
 // answers each prompt_async push with the next status of its script, 204 once the script is spent,
-// and can go down, refusing connections, and come back on the same port.
+// can hold every push unanswered until released (hold), and can go down, refusing connections, and
+// come back on the same port.
 type scriptedPort struct {
 	sessionID string
 	addr      string
@@ -557,6 +558,8 @@ type scriptedPort struct {
 	mu     sync.Mutex
 	script []int
 	server *http.Server
+	// held, while set, holds each push unanswered until it is closed.
+	held <-chan struct{}
 }
 
 // scriptedPush is one prompt_async push a scriptedPort answered.
@@ -602,6 +605,16 @@ func (p *scriptedPort) serve(t *testing.T, listener net.Listener) {
 			return
 		}
 		p.mu.Lock()
+		held := p.held
+		p.mu.Unlock()
+		if held != nil {
+			select {
+			case <-held:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		p.mu.Lock()
 		status := http.StatusNoContent
 		if len(p.script) > 0 {
 			status, p.script = p.script[0], p.script[1:]
@@ -625,6 +638,16 @@ func (p *scriptedPort) down() {
 	if server != nil {
 		_ = server.Close()
 	}
+}
+
+// hold holds every push unanswered, as a hanging serve process does, until the returned release
+// is called.
+func (p *scriptedPort) hold() (release func()) {
+	held := make(chan struct{})
+	p.mu.Lock()
+	p.held = held
+	p.mu.Unlock()
+	return sync.OnceFunc(func() { close(held) })
 }
 
 // up serves the port again on its address.

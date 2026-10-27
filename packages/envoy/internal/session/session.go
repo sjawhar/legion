@@ -40,6 +40,11 @@ type Deliverer struct {
 // DeliveryResult describes a completed delivery attempt.
 type DeliveryResult struct {
 	Skipped bool
+	// Push is set by Resolve for a serving-port session this listener owns: the caller pushes the
+	// message to the session's port (Push) at the address Entry gives. DeliverWithResultForEntry
+	// makes that push itself, and never sets it.
+	Push  bool
+	Entry SessionEntry
 }
 
 func (d Deliverer) Deliver(item contracts.Envelope, interest store.Interest) error {
@@ -62,11 +67,33 @@ func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Int
 // this attempt. A nil entry produces the same unavailable-session result as a
 // failed lookup, so a caller can avoid a second registry read.
 func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest store.Interest, entry *SessionEntry) (DeliveryResult, error) {
+	result, err := d.Resolve(item, interest, entry)
+	if err != nil || !result.Push {
+		return result, err
+	}
+	return DeliveryResult{}, d.prompt(context.Background(), result.Entry, interest.SessionID, d.Text(item))
+}
+
+// ResolveWithResult is Resolve for interest's session's current entry.
+func (d Deliverer) ResolveWithResult(item contracts.Envelope, interest store.Interest) (DeliveryResult, error) {
+	if d.Sessions == nil {
+		return DeliveryResult{}, fmt.Errorf("no session registry configured")
+	}
+	entry, err := d.Sessions.Get(interest.SessionID)
+	if err != nil {
+		return d.Resolve(item, interest, nil)
+	}
+	return d.Resolve(item, interest, &entry)
+}
+
+// Resolve decides DeliverWithResultForEntry's delivery of item to interest's session at entry
+// without making its push: a result with Push set is a serving-port session this listener owns,
+// for the caller to push to (Push); one with Skipped set needs nothing pushed; an error is the
+// delivery's failure, ErrWrongMachine included.
+func (d Deliverer) Resolve(item contracts.Envelope, interest store.Interest, entry *SessionEntry) (DeliveryResult, error) {
 	if entry == nil {
 		return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
 	}
-	text := d.Text(item)
-
 	if entry.Delivery == DeliveryConsumer && bus.StreamCaptures(item.Topic) {
 		// The session's consumer holds this stored message, and the listener that owns the session
 		// relays it from there, serving port or not: the durable path pushes nothing and reports
@@ -80,24 +107,31 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 	}
 	if entry.Port > 0 {
 		// Only the owning listener delivers to a session: every listener on the bus reads each
-		// inbox message from its own durable, so a second listener that could reach the session
-		// would deliver the same message again. The owner always has the message and reaches its
-		// sessions by hostFor's rule. The stored subscription names the owner before the entry
-		// does, so a session that re-registered through another listener stays with the one its
-		// topics are matched on (store.Registry.Match), which keeps the stored MachineID: the owner
-		// of a serving-port session is the listener its stored subscription names. A re-registration
-		// does not move that subscription (store's mergeForUpsert); dispatch://INFRA-429 moves it.
+		// inbox message from its own durable, and the owner delivers it from its copy: a second
+		// listener that could reach the session would deliver the same message again. The owner
+		// always has the message and reaches its sessions by hostFor's rule (OwnsServingPort).
 		// A non-owner acks silently: no delivery, no exception on any subject, no NAK.
-		owner := interest.MachineID
-		if owner == "" {
-			owner = entry.MachineID
-		}
-		if owner != "" && owner != d.MachineID {
+		if !d.OwnsServingPort(interest, *entry) {
 			return DeliveryResult{}, ErrWrongMachine
 		}
-		return DeliveryResult{}, d.prompt(context.Background(), *entry, interest.SessionID, text)
+		return DeliveryResult{Push: true, Entry: *entry}, nil
 	}
 	return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
+}
+
+// OwnsServingPort reports whether this listener delivers to the serving-port session of interest
+// and entry. The stored subscription names the owner before the entry does, so a session that
+// re-registered through another listener stays with the one its topics are matched on
+// (store.Registry.Match), which keeps the stored MachineID: the owner of a serving-port session is
+// the listener its stored subscription names, else the one its entry names; a session neither
+// names is every listener's. A re-registration does not move that subscription (store's
+// mergeForUpsert); dispatch://INFRA-429 moves it.
+func (d Deliverer) OwnsServingPort(interest store.Interest, entry SessionEntry) bool {
+	owner := interest.MachineID
+	if owner == "" {
+		owner = entry.MachineID
+	}
+	return owner == "" || owner == d.MachineID
 }
 
 func (d Deliverer) Text(item contracts.Envelope) string {

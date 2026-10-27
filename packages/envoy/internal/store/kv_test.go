@@ -30,11 +30,11 @@ import (
 // --- Unit Tests (no NATS needed — test Match() against pre-populated cache) ---
 
 func TestMatch_FiltersByMachineID(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := cachedRegistry(map[string]Interest{
 		"ses_a": {SessionID: "ses_a", MachineID: "machine-A", Topics: []string{"notifications.>"}},
 		"ses_b": {SessionID: "ses_b", MachineID: "machine-B", Topics: []string{"notifications.>"}},
 		"ses_c": {SessionID: "ses_c", MachineID: "machine-A", Topics: []string{"notifications.>"}},
-	}}
+	})
 
 	got := r.Match("machine-A", "notifications.test")
 	if len(got) != 2 {
@@ -58,12 +58,12 @@ func TestMatch_FiltersByMachineID(t *testing.T) {
 }
 
 func TestMatch_WildcardPatterns(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := cachedRegistry(map[string]Interest{
 		"ses_exact":   {SessionID: "ses_exact", MachineID: "m1", Topics: []string{"notifications.github.sjawhar.legion.pr"}},
 		"ses_star":    {SessionID: "ses_star", MachineID: "m1", Topics: []string{"notifications.github.*.*.pr"}},
 		"ses_chevron": {SessionID: "ses_chevron", MachineID: "m1", Topics: []string{"notifications.github.>"}},
 		"ses_slack":   {SessionID: "ses_slack", MachineID: "m1", Topics: []string{"notifications.slack.>"}},
-	}}
+	})
 
 	got := r.Match("m1", "notifications.github.sjawhar.legion.pr")
 	ids := make([]string, len(got))
@@ -92,7 +92,7 @@ func TestMatch_WildcardPatterns(t *testing.T) {
 }
 
 func TestMatch_SlackThreadIsolation(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := cachedRegistry(map[string]Interest{
 		"ses_thread_a": {SessionID: "ses_thread_a", MachineID: "m1", Topics: []string{
 			"notifications.slack.T123.C456.thread.1111111111_111111.>",
 		}},
@@ -102,7 +102,7 @@ func TestMatch_SlackThreadIsolation(t *testing.T) {
 		"ses_channel": {SessionID: "ses_channel", MachineID: "m1", Topics: []string{
 			"notifications.slack.T123.C456.>",
 		}},
-	}}
+	})
 
 	// Thread A message: only ses_thread_a and ses_channel
 	gotA := r.Match("m1", "notifications.slack.T123.C456.thread.1111111111_111111.message")
@@ -138,7 +138,7 @@ func TestMatch_SlackThreadIsolation(t *testing.T) {
 }
 
 func TestMatch_EmptyCache(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{}}
+	r := cachedRegistry(map[string]Interest{})
 	got := r.Match("m1", "notifications.test")
 	if len(got) != 0 {
 		t.Fatalf("expected 0 results from empty cache, got %d", len(got))
@@ -146,13 +146,13 @@ func TestMatch_EmptyCache(t *testing.T) {
 }
 
 func TestMatch_MultipleTopicsOnOneEntry(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := cachedRegistry(map[string]Interest{
 		"ses_multi": {
 			SessionID: "ses_multi",
 			MachineID: "m1",
 			Topics:    []string{"notifications.github.>", "notifications.slack.>"},
 		},
-	}}
+	})
 
 	// Matches first topic
 	got := r.Match("m1", "notifications.github.sjawhar.legion.pr")

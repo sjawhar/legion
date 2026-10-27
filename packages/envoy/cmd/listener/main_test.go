@@ -3214,7 +3214,7 @@ func TestListenerDeliveryHandler_FanoutRechecksCapabilitiesAtDelivery(t *testing
 		}
 		return listenerDeliveryResponse(http.StatusNoContent), nil
 	})}
-	handler := jetStreamDeliveryHandler(cfg)
+	handler := durableTestHandler(t, cfg)
 	item := listenerTestEnvelope(topic, "fanout-recheck-delivery-capability")
 	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
 	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
@@ -3541,10 +3541,28 @@ func newListenerDeliveryHarnessOn(t *testing.T, client *bus.Client, transport ht
 		registry:    registry,
 		sessions:    sessions,
 		metrics:     met,
-		handler:     jetStreamDeliveryHandler(deliveryConfig),
+		handler:     durableTestHandler(t, deliveryConfig),
 		coreHandler: coreNATSDeliveryHandler(deliveryConfig),
 		logs:        logs,
 		config:      deliveryConfig,
+	}
+}
+
+// durableTestHandler is the durable's handler for a test that hands it messages itself: a message
+// without a subject is given its envelope's topic as one, the subject a publisher stores it on.
+func durableTestHandler(t *testing.T, cfg listenerDeliveryHandlerConfig) natsgo.MsgHandler {
+	handler := jetStreamDeliveryHandler(cfg)
+	return func(msg *natsgo.Msg) {
+		if msg.Subject == "" {
+			var stored struct {
+				Topic string `json:"topic"`
+			}
+			if err := json.Unmarshal(msg.Data, &stored); err != nil {
+				t.Errorf("read the topic of the message handed to the durable: %v", err)
+			}
+			msg.Subject = stored.Topic
+		}
+		handler(msg)
 	}
 }
 
