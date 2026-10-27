@@ -77,7 +77,8 @@ export interface HeadlessProofOptions {
   /** Typed block schema fetched from the document service before construction. */
   blockSchema?: BlockSchema;
   /** Read-only parse, for display: a container directive the block schema refuses is drawn as
-   *  its literal fence lines around its formatted content, and the paragraph-line directive
+   *  its literal fence lines around its formatted content, as is a typed block whose content
+   *  breaks its content rule (see `remarkReadOnlyDirectives`), and the paragraph-line directive
    *  refusals are not applied. The default, false, keeps every refusal the document service
    *  applies, which the pmdoc fixture generators rely on. A general read-only mode, so later
    *  read-only rules hang on it too. */

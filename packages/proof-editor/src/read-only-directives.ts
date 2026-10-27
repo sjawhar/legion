@@ -1,5 +1,5 @@
 import {
-  Fragment,
+  MarkType,
   NodeType,
   type Node as ProseMirrorNode,
   type Schema,
@@ -19,62 +19,84 @@ type MdastNode = {
   };
 };
 
-type Context = { blockSchema?: BlockSchema; schema?: Schema; source: string };
+type Context = { blockSchema: BlockSchema | undefined; schema: Schema; source: string };
 
 /** The part of a Milkdown node or mark spec that names the markdown nodes it parses. */
 type ParseRule = { parseMarkdown?: { match(node: MdastNode): boolean } };
 
+/** A closing fence line: container prefixes, a run of three or more colons, trailing blanks. */
+const CLOSING_FENCE = /^[ \t>]*(:{3,})[ \t]*$/;
+
+/** The paragraph remark makes of a directive's `[label]`, which its opening line already shows. */
+function isLabel(node: MdastNode): boolean {
+  return node.type === "paragraph" && node.data?.directiveLabel === true;
+}
+
+/** Every attribute of `type` at its default, null where it has none. */
+function defaultAttrs(type: NodeType): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(type.spec.attrs ?? {}).map(([key, attr]) => [key, attr.default ?? null])
+  );
+}
+
 /**
- * Whether Milkdown can build the typed block `name` around `children`. Each child stands in as an
- * empty node of the type Milkdown's ParserState would match it to, and the block's content rule
- * is checked the way ProseMirror's `NodeType.createAndFill` checks it (prosemirror-model 1.25,
- * `createAndFill`: fill before the content, match it, fill to the end); a null there is the
- * `createNodeInParserFail` Milkdown logs while it drops the block. A child Milkdown matches to no
- * node, or to a mark, or one that cannot stand in as an empty node, leaves the block as it was.
+ * The block's children as Milkdown's ParserState would add them: each an empty node of the type
+ * it matches, and a mark node's children in its place, since the mark's runner opens the mark,
+ * runs its children into the same parent and closes it. Undefined when a child matches no node,
+ * or matches text, which this check does not model.
  */
-function fitsContentRule(schema: Schema, name: string, children: MdastNode[]): boolean {
-  const type = schema.nodes[name];
-  if (type === undefined) return true;
-  const targets = Object.values({ ...schema.nodes, ...schema.marks });
-  const placeholders: ProseMirrorNode[] = [];
+function placeholders(schema: Schema, children: MdastNode[]): ProseMirrorNode[] | undefined {
+  const targets = [...Object.values(schema.nodes), ...Object.values(schema.marks)];
+  const nodes: ProseMirrorNode[] = [];
   for (const child of children) {
     const target = targets.find((candidate) =>
       (candidate.spec as ParseRule).parseMarkdown?.match(child)
     );
-    if (!(target instanceof NodeType)) return true;
-    const attrs = Object.fromEntries(
-      Object.entries(target.spec.attrs ?? {}).map(([key, attr]) => [key, attr.default ?? null])
-    );
-    try {
-      placeholders.push(target.create(attrs));
-    } catch {
-      return true;
+    if (target instanceof MarkType) {
+      const inner = placeholders(schema, child.children ?? []);
+      if (inner === undefined) return undefined;
+      nodes.push(...inner);
+      continue;
     }
+    if (!(target instanceof NodeType) || target.isText) return undefined;
+    nodes.push(target.create(defaultAttrs(target)));
   }
-  let content = Fragment.from(placeholders);
-  if (content.size) {
-    const before = type.contentMatch.fillBefore(content);
-    if (!before) return false;
-    content = before.append(content);
-  }
-  const matched = type.contentMatch.matchFragment(content);
-  return Boolean(matched?.fillBefore(Fragment.empty, true));
+  return nodes;
+}
+
+/**
+ * Whether Milkdown can build the typed block `name` around `children`. Milkdown builds a node
+ * with `NodeType.createAndFill`, and a null there is the `createNodeInParserFail` it logs while
+ * it drops the block with all its text. Children that cannot stand in leave the block as it was.
+ */
+function fitsContentRule(schema: Schema, name: string, children: MdastNode[]): boolean {
+  const type = schema.nodes[name];
+  if (type === undefined) return true;
+  const content = placeholders(schema, children);
+  return content === undefined || type.createAndFill(defaultAttrs(type), content) !== null;
+}
+
+/**
+ * Where `node` ends in the source. A node a remark plugin made without a position, such as a
+ * block-level mark span, ends where its last child does.
+ */
+function sourceEnd(node: MdastNode): number | undefined {
+  const end = node.position?.end?.offset;
+  if (end !== undefined) return end;
+  const last = node.children?.at(-1);
+  return last === undefined ? undefined : sourceEnd(last);
 }
 
 /**
  * A directive drawn as its source: the opening fence line, its content (label paragraph dropped,
  * since the opening line already shows the label) and, when the source closes it, the closing
- * fence. The closing fence is the trailing colon run of the directive's last source line, and
- * only counts when it lies past `keptEnd`, where the last kept child ended in the source: an
- * unclosed directive ends where its content ends, and that content may itself end in a nested
- * directive's own closing fence.
+ * fence. Lines end at a "\r" or a "\n", as micromark ends them. The closing fence is the
+ * directive's last source line when that line holds only container prefixes and a colon run at
+ * least as long as the opening one, and only counts when it lies past the end of the last kept
+ * child: an unclosed directive ends where its content ends, and that content may itself end in
+ * a nested directive's own closing fence.
  */
-function drawDirective(
-  node: MdastNode,
-  children: MdastNode[],
-  keptEnd: number | undefined,
-  source: string
-): MdastNode[] {
+function drawDirective(node: MdastNode, children: MdastNode[], source: string): MdastNode[] {
   const start = node.position?.start?.offset;
   const end = node.position?.end?.offset;
   if (start === undefined || end === undefined) {
@@ -82,22 +104,34 @@ function drawDirective(
       `container directive ${JSON.stringify(node.name ?? "")} has no source position`
     );
   }
-  const lineBreak = source.indexOf("\n", start);
-  const openingEnd = lineBreak === -1 ? source.length : lineBreak;
-  const floor = keptEnd ?? openingEnd;
-  const lastLineStart = source.lastIndexOf("\n", end - 1) + 1;
-  const fence = /:+$/.exec(source.slice(lastLineStart, end).trimEnd());
+  let openingEnd = start;
+  while (openingEnd < source.length && source[openingEnd] !== "\n" && source[openingEnd] !== "\r") {
+    openingEnd++;
+  }
+  let lastLineStart = end;
+  while (
+    lastLineStart > 0 &&
+    source[lastLineStart - 1] !== "\n" &&
+    source[lastLineStart - 1] !== "\r"
+  ) {
+    lastLineStart--;
+  }
+  const opening = source.slice(start, openingEnd);
+  const openingRun = /^:*/.exec(opening)?.[0].length ?? 0;
+  const kept = node.children?.filter((child) => !isLabel(child)).at(-1);
+  const floor = (kept === undefined ? undefined : sourceEnd(kept)) ?? openingEnd;
+  const lastLine = source.slice(lastLineStart, end);
+  const fence = CLOSING_FENCE.exec(lastLine);
   const drawn: MdastNode[] = [
-    {
-      type: "paragraph",
-      children: [{ type: "text", value: source.slice(start, openingEnd).replaceAll("\r", "") }],
-    },
-    ...children.filter(
-      (child) => !(child.type === "paragraph" && child.data?.directiveLabel === true)
-    ),
+    { type: "paragraph", children: [{ type: "text", value: opening }] },
+    ...children.filter((child) => !isLabel(child)),
   ];
-  if (fence !== null && lastLineStart + fence.index >= floor) {
-    drawn.push({ type: "paragraph", children: [{ type: "text", value: fence[0] }] });
+  if (
+    fence !== null &&
+    fence[1].length >= openingRun &&
+    lastLineStart + lastLine.indexOf(":") >= floor
+  ) {
+    drawn.push({ type: "paragraph", children: [{ type: "text", value: fence[1] }] });
   }
   return drawn;
 }
@@ -110,15 +144,12 @@ function drawDirective(
 function readOnlyDirective(node: MdastNode, context: Context): MdastNode[] {
   const { blockSchema, schema } = context;
   const refused = blockSchema === undefined || typedBlockRefusal(blockSchema, node) !== undefined;
-  const keptEnd = (node.children ?? [])
-    .filter((child) => !(child.type === "paragraph" && child.data?.directiveLabel === true))
-    .at(-1)?.position?.end?.offset;
   const children = readOnlyChildren(node.children ?? [], context);
-  if (!refused && (schema === undefined || fitsContentRule(schema, node.name ?? "", children))) {
+  if (!refused && fitsContentRule(schema, node.name ?? "", children)) {
     node.children = children;
     return [node];
   }
-  return drawDirective(node, children, keptEnd, context.source);
+  return drawDirective(node, children, context.source);
 }
 
 function readOnlyChildren(nodes: MdastNode[], context: Context): MdastNode[] {
@@ -139,12 +170,12 @@ function readOnlyChildren(nodes: MdastNode[], context: Context): MdastNode[] {
  * the paragraph-line directive refusals are not applied, so those lines read as the text they
  * are. Accepted typed blocks stay typed, at any depth, as long as their content fits their
  * content rule: Milkdown drops a node whose content breaks its rule, silently and with all its
- * text, so given the ProseMirror `schema` the parse builds with, a typed block whose content
- * would not fit (a heading in a `paragraph+` block, or a drawn directive's paragraphs after
- * its list) is drawn as text too. Blocks are decided innermost first, so a drawn block's lines
- * are checked against its parent's rule in turn.
+ * text, so checked against the ProseMirror `schema` the parse builds with, a typed block whose
+ * content would not fit (a heading in a `paragraph+` block, or a drawn directive's paragraphs
+ * after its list) is drawn as text too. Blocks are decided innermost first, so a drawn block's
+ * lines are checked against its parent's rule in turn.
  */
-export function remarkReadOnlyDirectives(blockSchema?: BlockSchema, schema?: Schema) {
+export function remarkReadOnlyDirectives(blockSchema: BlockSchema | undefined, schema: Schema) {
   if (blockSchema !== undefined) validateBlockSchema(blockSchema);
   return (tree: MdastNode, file: { toString(): string }): void => {
     if (tree.children !== undefined) {

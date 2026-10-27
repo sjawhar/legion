@@ -6,6 +6,7 @@
  */
 
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import type { BlockSchema } from "../src/block-schema.js";
 import { createHeadlessProof, type SoftBreaks } from "../src/lib-headless.js";
@@ -200,8 +201,9 @@ test("read-only keeps every line of a typed block whose content a drawn directiv
   }
 });
 
-test("a refused directive without source offsets throws", () => {
-  const transform = remarkReadOnlyDirectives(blockSchema);
+test("a refused directive without source offsets throws", async () => {
+  const { schema } = await createHeadlessProof({ blockSchema });
+  const transform = remarkReadOnlyDirectives(blockSchema, schema);
   const tree = { type: "root", children: [{ type: "containerDirective", name: "note" }] };
   expect(() => transform(tree, { toString: () => "" })).toThrow(
     'container directive "note" has no source position'
@@ -273,5 +275,113 @@ test("read-only keeps an outer typed block typed when a drawn directive's lines 
     ["paragraph", ":::note"],
     ["paragraph", "inner"],
     ["paragraph", ":::"],
+  ]);
+});
+
+/** The document service's own block schema, the one Dispatch parses its bodies with. */
+const serverBlockSchema: BlockSchema = JSON.parse(
+  readFileSync(
+    new URL("../../envoy/internal/dispatch/pmdoc/schema/blocks.json", import.meta.url),
+    "utf8"
+  )
+);
+
+async function readOnlyServerParse(markdown: string) {
+  const proof = await createHeadlessProof({ blockSchema: serverBlockSchema, readOnly: true });
+  return proof.parseMarkdown(markdown);
+}
+
+test("read-only ends a drawn directive's lines at a lone carriage return", async () => {
+  const doc = await readOnlyServerParse("Intro\n\n:::a\rbody\r:::\n\nAfter");
+  expect(blocks(doc)).toEqual([
+    ["paragraph", "Intro"],
+    ["paragraph", ":::a"],
+    ["paragraph", "body"],
+    ["paragraph", ":::"],
+    ["paragraph", "After"],
+  ]);
+});
+
+test("read-only draws each carriage-return directive's own lines only", async () => {
+  const doc = await readOnlyServerParse(":::a\r:::\r".repeat(3));
+  expect(blocks(doc)).toEqual([
+    ["paragraph", ":::a"],
+    ["paragraph", ":::"],
+    ["paragraph", ":::a"],
+    ["paragraph", ":::"],
+    ["paragraph", ":::a"],
+    ["paragraph", ":::"],
+  ]);
+  // Each opening line used to run to the next "\n", here the end of the body, so the drawn text
+  // grew with the square of the body's length.
+  const source = ":::a\r:::\r".repeat(3555);
+  expect((await readOnlyServerParse(source)).textContent.length).toBeLessThan(2 * source.length);
+});
+
+test("read-only draws a carriage-return directive in a list item once", async () => {
+  const doc = await readOnlyServerParse("- :::a\r  body\r  :::\r");
+  expect(blocks(doc).map(([type]) => type)).toEqual(["bullet_list"]);
+  const item = doc.child(0).child(0);
+  expect(item.type.name).toBe("list_item");
+  expect(blocks(item)).toEqual([
+    ["paragraph", ":::a"],
+    ["paragraph", "body"],
+    ["paragraph", ":::"],
+  ]);
+});
+
+test("read-only draws a carriage-return directive in a blockquote once", async () => {
+  const doc = await readOnlyServerParse("> :::a\r> body\r> :::\r");
+  expect(blocks(doc)).toEqual([["blockquote", ":::abody:::"]]);
+  expect(blocks(doc.child(0))).toEqual([
+    ["paragraph", ":::a"],
+    ["paragraph", "body"],
+    ["paragraph", ":::"],
+  ]);
+});
+
+test("read-only checks the blocks inside a block-level mark span against the content rule", async () => {
+  // The span wraps the heading in a mark node; Milkdown runs the mark's children into the ask
+  // itself, so the heading breaks the ask's `paragraph+ bullet_list?` and the ask is drawn.
+  const doc = await readOnlyServerParse(
+    ':::ask\n<span data-dispatch="ask" data-id="x">\n\n# Heading words\n\n</span>\n:::'
+  );
+  expect(blocks(doc)).toEqual([
+    ["paragraph", ":::ask"],
+    ["heading", "Heading words"],
+    ["paragraph", ":::"],
+  ]);
+  expect(runs(doc.child(1))).toEqual([{ text: "Heading words", marks: ["dispatchAsk"] }]);
+});
+
+test("read-only draws no closing fence from a last line ending in one colon", async () => {
+  expect(blocks(await readOnlyServerParse(":::note\nbody\n\n[x]: mailto:"))).toEqual([
+    ["paragraph", ":::note"],
+    ["paragraph", "body"],
+  ]);
+});
+
+test("read-only draws no closing fence from a last line with text before its colons", async () => {
+  expect(blocks(await readOnlyServerParse(":::note\nbody\n\n[x]: https://e.x/a:::"))).toEqual([
+    ["paragraph", ":::note"],
+    ["paragraph", "body"],
+  ]);
+});
+
+test("read-only draws no closing fence from a colon run shorter than the opening one", async () => {
+  // `:::` is the definition's destination: a run shorter than `::::` does not close the block.
+  expect(blocks(await readOnlyServerParse("::::note\nbody\n\n[x]:\n:::"))).toEqual([
+    ["paragraph", "::::note"],
+    ["paragraph", "body"],
+  ]);
+});
+
+test("read-only draws no closing fence from a line inside a mark span's last block", async () => {
+  // The unclosed span wraps the blockquote in a mark node with no source position of its own;
+  // the `:::` is the quote's text, not the directive's fence.
+  const doc = await readOnlyServerParse(':::note\n<span data-dispatch="ask" data-id="x">\n\n> :::');
+  expect(blocks(doc)).toEqual([
+    ["paragraph", ":::note"],
+    ["blockquote", ":::"],
   ]);
 });
