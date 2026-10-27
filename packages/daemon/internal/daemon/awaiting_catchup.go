@@ -269,7 +269,9 @@ func retriable(refusal *dispatch.Error) bool {
 // event log's window — the events after its cursor, or after its last handout for a root with a
 // cursor of 0, and none at all for a root with no cursor — and then finishes it (finishCatchUp).
 // The request's read and the window are independent: one failing still runs the other, and the
-// root is finished only when both succeeded, so a failed read leaves its cursor where it was.
+// root is finished only when both succeeded, so a failed read leaves its cursor where it was. A
+// window with an event its handlers failed on finishes the root with the cursor just below that
+// event, so the next boot reads it again.
 func (w *workflowRuntime) catchUpRoot(ctx context.Context, root catchUpRoot) error {
 	current, err := w.dispatch.GetIssue(ctx, root.issue.Key)
 	if err != nil {
@@ -278,11 +280,14 @@ func (w *workflowRuntime) catchUpRoot(ctx context.Context, root catchUpRoot) err
 	through := current.LastSeq
 	bindErr := w.bindGateRequest(ctx, root, through)
 	if from, replay := catchUpFrom(root); replay && through > from {
-		applied, err := w.catchUpWindow(ctx, root, from)
+		read, failed, err := w.catchUpWindow(ctx, root, from)
 		if err != nil {
 			return errors.Join(bindErr, err)
 		}
-		through = max(through, applied)
+		through = max(through, read)
+		if failed > 0 {
+			through = failed - 1
+		}
 	}
 	if bindErr != nil {
 		return bindErr
@@ -334,26 +339,34 @@ func (w *workflowRuntime) bindGateRequest(ctx context.Context, root catchUpRoot,
 // root after from: it reads the root's event log past that point and applies each through the live
 // decoder and the live handlers, with its own sequence, so the asks' mirror and the architect's
 // hand-backs stand as the live events would have left them. It returns the highest sequence it
-// read. Each fact's id names the event's sequence and the root's generation, so a second catch-up
-// of the same event is dropped as processed. An event of a type the catch-up does not read is
-// passed over before it is decoded (an issue's own events are the boot listing's), and one the
-// decoder refuses or the handlers fail on is logged and passed over too, so one event never stops
-// the rest of a root's catch-up at every boot. Passing over loses nothing: every event the window
-// holds was either applied live before, or is still unacknowledged on the durable Dispatch
-// consumer, which retries it once the catch-up ends. Only the boot's own end (ctx) stops it.
-func (w *workflowRuntime) catchUpWindow(ctx context.Context, root catchUpRoot, from int64) (int64, error) {
+// read, and the lowest sequence of an event whose fact failed to apply (0 for none). Each fact's
+// id names the event's sequence and the root's generation, so a second catch-up of the same event
+// is dropped as processed.
+//
+// The catch-up treats each event as the live Dispatch consumer does. An event of a type the
+// catch-up does not read is passed over before it is decoded (an issue's own events are the boot
+// listing's), and one the decoder refuses is logged and passed over for good: the live consumer
+// terminates it as poison. An event whose fact fails to apply — a handler's error, or the
+// database's (its transaction or its commit) — is logged, and the rest of the window is still
+// applied, so one event never stops a root's catch-up, but the event is not passed over: the
+// live consumer retries such an event until it applies, and the cursor stops just below it
+// (catchUpRoot), so the next boot reads it again. That matters once an outage outlasts the
+// notification stream's retention, when the event log is the only place the event is still
+// held. An event that fails at every boot costs each boot a re-read of the window from it, and
+// nothing more: the root is still finished and decided. Only the boot's own end (ctx) stops the
+// window.
+func (w *workflowRuntime) catchUpWindow(ctx context.Context, root catchUpRoot, from int64) (read, failed int64, err error) {
 	events, err := w.dispatch.EventsAfter(ctx, root.issue.Key, from)
 	if err != nil {
-		return 0, fmt.Errorf("read the events of %s after %d: %w", root.issue.Key, from, err)
+		return 0, 0, fmt.Errorf("read the events of %s after %d: %w", root.issue.Key, from, err)
 	}
-	var read int64
 	for _, event := range events {
 		var header struct {
 			Seq  int64  `json:"seq"`
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(event, &header); err != nil {
-			return 0, fmt.Errorf("read the events of %s: %w", root.issue.Key, err)
+			return 0, 0, fmt.Errorf("read the events of %s: %w", root.issue.Key, err)
 		}
 		read = max(read, header.Seq)
 		switch header.Type {
@@ -375,12 +388,15 @@ func (w *workflowRuntime) catchUpWindow(ctx context.Context, root catchUpRoot, f
 		}
 		if err := w.applyCatchUp(ctx, fmt.Sprintf("event:%s:%d:%d", root.issue.Key, root.issue.Generation, header.Seq), fact); err != nil {
 			if ctx.Err() != nil {
-				return 0, err
+				return 0, 0, err
 			}
-			w.log.Error("boot catch-up passed over an event its handlers failed on", "issue", root.issue.Key, "seq", header.Seq, "type", header.Type, "error", err)
+			w.log.Error("boot catch-up failed to apply an event, and reads it again at the next boot", "issue", root.issue.Key, "seq", header.Seq, "type", header.Type, "error", err)
+			if failed == 0 || header.Seq < failed {
+				failed = header.Seq
+			}
 		}
 	}
-	return read, nil
+	return read, failed, nil
 }
 
 // finishCatchUp releases root's catch-up hold and applies intake.CatchUpApplied, which raises its

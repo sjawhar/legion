@@ -285,8 +285,10 @@ A daemon that was down catches each root at `admitted` or `awaiting_person` up a
 decides it: it reads the root's Dispatch event log after the root's cursor (`caught_up_seq`, else
 its last handout) and applies every ask, review and version event through the live handlers, with
 the root held out of admission's decision until its whole window is applied, then decides it once
-and moves the cursor to the sequence it read through. One event its handlers fail on is logged and
-passed over, not retried at every boot: the durable Dispatch consumer still holds it. A root
+and moves the cursor to the sequence it read through. An event the decoder refuses is passed over,
+as the durable consumer terminates it as poison; one whose fact fails to apply (a handler's or the
+database's error) is logged, the rest of the window is still applied, and the cursor stops just
+below it, so the next boot reads it again, as the durable consumer retries it live. A root
 recorded before the cursor existed has none until the daemon first gives it work (an admission, a
 re-admission or a resume sets the cursor to 0, so the next catch-up reads from that handout) or
 catches it up: a catch-up of a root with no cursor replays nothing and only sets the cursor, so the

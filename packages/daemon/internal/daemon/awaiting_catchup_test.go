@@ -1089,9 +1089,9 @@ func (f failingFact) Apply(_ context.Context, _ pgx.Tx, fact intake.Fact) (intak
 	return intake.Result{}, nil
 }
 
-// One event the handlers fail on is logged and passed over: the rest of the root's window is still
-// applied and its cursor moves past it, so the same event does not stop that root's catch-up at
-// every later boot. The durable consumer still holds the event, unacknowledged, for a live retry.
+// One event the handlers fail on is logged, and the rest of the root's window is still applied, so
+// the event does not stop that root's catch-up. The cursor stays below it, so the next boot reads
+// it again, as the durable consumer retries it live.
 func TestAnEventThatFailsToApplyDoesNotStopTheCatchUp(t *testing.T) {
 	client := &awaitingDispatch{issue: dispatch.Issue{Key: "CAPTURE-100", LastSeq: 11},
 		events: []json.RawMessage{askOpened(7, "ask-broken"), askOpened(9, "ask-q"), askClosed(11, "answered", "ask-q", "question", alice)}}
@@ -1111,8 +1111,47 @@ func TestAnEventThatFailsToApplyDoesNotStopTheCatchUp(t *testing.T) {
 			t.Fatalf("ask-q after the catch-up = %#v, want it mirrored closed by the answer after the failing event", ask)
 		}
 		got, set, err := records.CaughtUpSeq(ctx, tx, "CAPTURE-100")
+		if err != nil || !set || got != catchUpHandout {
+			t.Fatalf("catch-up cursor = %d (set %t, %v), want %d, below the failing event at 7", got, set, err, catchUpHandout)
+		}
+		return nil
+	})
+}
+
+// An event whose handlers fail once is read again at the next boot: the cursor stops below it, so
+// an event the notification stream no longer holds (an outage longer than its retention) is not
+// lost to one transient failure. The events after it are applied at the first boot all the same,
+// and the second boot drops them as processed.
+func TestAnEventThatFailedOnceIsAppliedAtTheNextBoot(t *testing.T) {
+	client := &awaitingDispatch{issue: dispatch.Issue{Key: "CAPTURE-100", LastSeq: 11},
+		events: []json.RawMessage{askOpened(7, "ask-lost"), askOpened(9, "ask-q"), askClosed(11, "answered", "ask-q", "question", alice)}}
+	pool, w := catchUpRig(t, client, 1)
+	healthy := w.handlers
+	w.handlers = append([]intake.Handler{failingFact{seq: 7}}, healthy...)
+	cursor := catchUpHandout
+	slottedCapture(t, pool, nil, &cursor)
+	if err := bootCatchUp(t, w); err != nil {
+		t.Fatalf("first boot's catch-up: %v", err)
+	}
+	// The daemon boots again, with the handlers healthy.
+	w.handlers, w.caughtUp, w.bootID = healthy, nil, "boot-2"
+	if err := bootCatchUp(t, w); err != nil {
+		t.Fatalf("second boot's catch-up: %v", err)
+	}
+	if !slices.Equal(client.afters, []int64{catchUpHandout, catchUpHandout}) {
+		t.Errorf("event log read after %v, want both boots to read after %d, below the failed event", client.afters, catchUpHandout)
+	}
+	seedCatchUp(t, pool, func(ctx context.Context, tx pgx.Tx, records *record.Postgres) error {
+		lost, err := records.RootAsk(ctx, tx, "CAPTURE-100", "ask-lost")
+		if err != nil {
+			return err
+		}
+		if lost == nil || !lost.Open {
+			t.Errorf("ask-lost after two boots = %#v, want it mirrored open by the second boot", lost)
+		}
+		got, set, err := records.CaughtUpSeq(ctx, tx, "CAPTURE-100")
 		if err != nil || !set || got != 11 {
-			t.Fatalf("catch-up cursor = %d (set %t, %v), want 11, past the failing event", got, set, err)
+			t.Errorf("catch-up cursor after the second boot = %d (set %t, %v), want 11", got, set, err)
 		}
 		return nil
 	})
