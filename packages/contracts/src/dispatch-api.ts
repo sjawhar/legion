@@ -2208,6 +2208,13 @@ export interface EditOp {
   readonly attributes?: Readonly<Record<string, unknown>>;
 }
 
+/** The code of the `401` Dispatch itself answers a caller it cannot resolve to a person - no
+ *  session cookie, one it cannot read, one whose generation it has revoked, or a membership the
+ *  sign-in issuer no longer confirms (`identity.WriteError`). A `401` without it came from
+ *  something in front of Dispatch, an authenticating proxy among them, and says nothing about
+ *  the session: a sign-out answered that way did not go through. */
+export const AUTH_NO_IDENTITY = "NO_IDENTITY";
+
 /** `GET /auth/whoami`'s answer for a person signed in to the dashboard. */
 export interface AuthenticatedUser {
   readonly kind: "user";

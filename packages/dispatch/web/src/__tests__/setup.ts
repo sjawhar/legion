@@ -1,4 +1,4 @@
-import { afterEach } from "bun:test";
+import { afterAll, afterEach } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 // happy-dom has no IndexedDB; the store of a document's unsent edits (`pending-edits.ts`) runs on
 // this in-memory one, which keeps IndexedDB's transaction ordering.
@@ -11,6 +11,7 @@ import { blockSchemaCache } from "../features/doc/schema";
 import { resetReplyDrafts } from "../features/inbox/reply-drafts";
 import { resetPinState } from "../features/issue/pin-write";
 import { resetWriteStorage } from "../features/writes/write-storage";
+import { guardWritesToNetwork, writesThatReachedNetwork } from "./network-guard";
 import { resetRouteAnswers } from "./send-answers";
 
 GlobalRegistrator.register();
@@ -25,27 +26,17 @@ void blockSchemaCache.load(async () => serverBlockSchema as unknown as BlockSche
 // A route a test answers (`answerRoute`) is that test's: the next test answers its own.
 afterEach(resetRouteAnswers);
 
-// A unit test has no Dispatch: a write that reaches the network was answered by nothing the test
-// set up, so whatever the page made of its failure - a write retried, a read mark dropped - passed
-// unchecked. Each one fails its test with its method and path. Reads still go to the network as
-// before: hundreds of tests leave incidental reads unanswered, which this guard does not yet cover.
-// A test that answers requests itself (`spyOn(globalThis, "fetch")`) replaces this for its own run.
-const reachedNetwork: string[] = [];
-const networkFetch = globalThis.fetch;
-const guardedFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-  const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
-  if (method === "GET" || method === "HEAD") return networkFetch(input, init);
-  const path = input instanceof Request ? input.url : String(input);
-  reachedNetwork.push(`${method} ${path}`);
-  throw new TypeError(`a unit test's write reached the network: ${method} ${path}`);
-};
-// `typeof fetch` also names Bun's `preconnect`, which nothing in a unit test calls.
-globalThis.fetch = Object.assign(guardedFetch, { preconnect: networkFetch.preconnect });
-afterEach(() => {
-  if (reachedNetwork.length === 0) return;
-  const reached = reachedNetwork.splice(0);
+// A unit test's write that reaches the network fails its test (`network-guard.ts`: `fetch` and
+// the uploads' `XMLHttpRequest` both), and one a write loop makes after the file's last test -
+// a retry no test is left to fail - fails the file.
+guardWritesToNetwork();
+const reportReachedNetwork = () => {
+  const reached = writesThatReachedNetwork();
+  if (reached.length === 0) return;
   throw new Error(`writes reached the network, answered by nothing: ${reached.join(", ")}`);
-});
+};
+afterEach(reportReachedNetwork);
+afterAll(reportReachedNetwork);
 
 class WebSocketStub {
   binaryType = "arraybuffer";

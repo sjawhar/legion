@@ -386,7 +386,7 @@ test("an upload throttled to take 30 s is one attempt and lands once", async ({
 
 // A repeat of an upload whose first request still runs is answered `409 KEY_IN_FLIGHT`, and each
 // engine must hand the page that answer rather than a failed connection, which the page would take
-// for a transport failure and back off from (FinalReview4 L2). WebKit and Firefox send the whole of
+// for a transport failure and back off from. WebKit and Firefox send the whole of
 // an upload before they read its answer: an answer Dispatch wrote with the body still coming reached
 // them as a reset connection, so Dispatch reads and discards the rest of the body first
 // (`drainBeforeAnswer`). The slow-write hook holds the first run 25 s once its key is claimed, so
@@ -467,10 +467,11 @@ test("a 20 MB upload repeated while its first request runs is answered 409 KEY_I
 // alice's, a status change is held at the network, out and never answered, and a label added
 // behind it on the same issue waits its turn. Tab 1 signs out and the person confirms the discard:
 // tab 1 drops its writes, and tab 2, told over the sign-in channel, drops alice's. Dropping the
-// held write must not start the one queued behind it (ProofRun4 D1, where the label went out at
-// the confirm and landed): neither tab makes another write after the confirm, and neither issue
-// changes. Both tabs are loaded before either write is pressed, so the sign-out comes seconds
-// after the held attempts, well inside the 15 s the page waits on a silent one before asking again.
+// held write must not start the one queued behind it - a page that advanced the line as it
+// dropped sent the label at the confirm, and it landed: neither tab makes another write after the
+// confirm, and neither issue changes. Both tabs are loaded before either write is pressed, so the
+// sign-out comes seconds after the held attempts, well inside the 15 s the page waits on a silent
+// one before asking again.
 test("a sign-out confirmed with a write queued behind a held one sends nothing after the confirm, in either tab", async ({
   browser,
 }, testInfo) => {

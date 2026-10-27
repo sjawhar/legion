@@ -1,4 +1,5 @@
 import {
+  AUTH_NO_IDENTITY,
   answerNotKept,
   DISPATCH_LOGIN_HEADER,
   IDEMPOTENCY_ANSWER_NOT_KEPT,
@@ -271,6 +272,16 @@ export function isKeyCommitted(error: unknown): error is ApiError {
 // affordance instead of bouncing the user to the sign-in page.
 export function isUnauthorized(error: unknown): boolean {
   return error instanceof ApiError && error.status === 401;
+}
+
+/** Whether `error` is Dispatch's own answer that the caller is signed in to nobody
+ *  (`401 AUTH_NO_IDENTITY`), rather than a 401 from something in front of Dispatch - an
+ *  authenticating proxy refusing the request, which says nothing about the Dispatch session. A
+ *  sign-out's landing turns on the difference: Dispatch's 401 means the session it was ending is
+ *  already gone, and a proxy's means the sign-out never reached Dispatch at all.
+ */
+export function isNoIdentity(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401 && error.code === AUTH_NO_IDENTITY;
 }
 
 // The architecture TREE read answers this 404 for a project with no source — definitive like an

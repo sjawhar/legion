@@ -199,7 +199,9 @@ not answer at once, it says it would also discard **any unsent changes in your o
 tabs**), and discards nothing until Dispatch has signed you out: meanwhile none of your changes
 goes out in any tab (another tab's read **Waiting for a sign-out in another tab**), and if the
 sign-out fails you stay signed in with every change, told **The sign-out did not go through.**
-If that tab closes before Dispatch answers, the others send your changes again within seconds.
+If that tab closes before it can say how the sign-out ended, the others ask Dispatch who is
+signed in: signed out, your changes go there too, as the sign-out said they would; still signed
+in, they go out again within seconds.
 One interrupted more
 than five minutes ago is not sent on its own: the corner lists it as **Not saved: …** with
 **Retry** and **Discard**. A Retry of a stopped or interrupted change asks again under its first

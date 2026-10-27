@@ -9,10 +9,20 @@ export const OTHER_TABS_ANSWER_MS = 300;
 export const SIGN_OUT_RENEW_MS = 2_000;
 
 /** How long a tab holds a person's writes for another tab's sign-out it has not heard say so
- *  again: past it, that tab is taken for gone without a word - crashed, killed, frozen or
- *  discarded - and the writes go on. Three renewals, so one late timer in a busy tab lifts
- *  nothing. */
+ *  again, where the browser has no `navigator.locks` (the lock below is how the hold ends
+ *  wherever it does): past it, that tab is taken for gone without a word - crashed, killed,
+ *  frozen or discarded - and the writes go on. Three renewals, so one late timer in a busy tab
+ *  lifts nothing. */
 export const SIGN_OUT_LEASE_MS = 6_000;
+
+/** The lock a tab takes for as long as its sign-out is out, named for the person it signs out.
+ *  The browser releases it when that tab goes - closed, crashed or discarded - and holds it
+ *  while the tab is frozen or its timers are throttled, which no lease of renewals can tell
+ *  apart from a tab that died. A tab holding that person's writes is granted the lock only once
+ *  the signing-out tab no longer holds it, which is what ends the hold (`holderGone`). */
+export function signOutLockName(login: string): string {
+  return `dispatch-sign-out:${login}`;
+}
 
 /** One write a sign-out would discard: its key, which a tab duplicated from another shares with
  *  it, and its name. */
@@ -29,9 +39,14 @@ export interface SignInListener {
   readonly signingOut: (login: string) => void;
   /** Dispatch signed `login` out in another tab: their writes go. */
   readonly signedOut: (login: string) => void;
-  /** No other tab's sign-out of `login` holds their writes any longer - it did not go through,
-   *  its tab went, or its tab stopped saying it is out: their writes go on. */
+  /** No other tab's sign-out of `login` holds their writes any longer, because the tab that
+   *  asked for it said how it ended: it did not go through, so their writes go on. */
   readonly stillSignedIn: (login: string) => void;
+  /** The last tab whose sign-out held `login`'s writes went without saying how it ended - it
+   *  closed, crashed or was discarded (`gone`, its lock released, or its lease unrenewed) - so
+   *  whether the sign-out landed is unknown here: the page reads who is signed in before it
+   *  either discards those writes or lets them go on. */
+  readonly holderGone: (login: string) => void;
   /** What of `login`'s a sign-out would discard in this tab. */
   readonly unsent: (login: string) => readonly UnsentChange[];
 }
@@ -61,11 +76,16 @@ function unsentIn(data: object): UnsentChange[] {
   });
 }
 
-/** Another tab's sign-out that holds a person's writes here: whose, and when the hold lapses
- *  unless that tab says so again. */
+/** Another tab's sign-out that holds a person's writes here: whose, how this tab learns the
+ *  signing-out tab is gone (its lock, where the browser has `navigator.locks`; the renewal lease
+ *  otherwise), and nothing else. */
 interface Hold {
   readonly login: string;
-  readonly lapse: ReturnType<typeof setTimeout>;
+  /** The lease, where there is no lock manager: when it lapses the hold ends. */
+  readonly lapse: ReturnType<typeof setTimeout> | undefined;
+  /** Calls off this hold's wait for the signing-out tab's lock, when the hold ends some other
+   *  way (that tab said how its sign-out ended, or it said it is gone). */
+  readonly waiting: AbortController | undefined;
 }
 
 /**
@@ -78,9 +98,11 @@ interface Hold {
  *   reads who is signed in again.
  * - `{ signingOut: login, tab }`: the person confirmed a sign-out there, which is out, said again
  *   every `SIGN_OUT_RENEW_MS` while it is. Every tab holds their writes for it, so nothing they
- *   chose to discard goes out meanwhile (`Writes.holdFor`): a hold is that tab's, a lease it lets
- *   lapse after `SIGN_OUT_LEASE_MS` unheard, so a tab that dies with its sign-out out holds
- *   nothing for good.
+ *   chose to discard goes out meanwhile (`Writes.holdFor`): a hold is that tab's, and it ends
+ *   when the browser releases that tab's lock (`signOutLockName`), or - where the browser has no
+ *   `navigator.locks` - when its lease lapses `SIGN_OUT_LEASE_MS` after the last renewal heard.
+ *   Either way a tab that dies with its sign-out out holds nothing for good, and a tab the
+ *   browser froze holds for as long as it lives (`holderGone`).
  * - `{ signedOut: login, tab }`: Dispatch signed them out; every tab drops their writes
  *   (`Writes.dropLogin`) and reads who is signed in again.
  * - `{ stillSignedIn: login, tab }`: the sign-out did not go through, or the tab that asked for it
@@ -105,17 +127,31 @@ export class SignInChannel {
   readonly #holds = new Map<string, Hold>();
   /** This tab's sign-out saying again that it is out, while it is. */
   #renewal: ReturnType<typeof setInterval> | undefined;
+  /** The browser's locks, where it has them (`navigator.locks`; a page outside a secure context
+   *  has none, and neither does a test that passes none). */
+  readonly #locks: LockManager | undefined;
+  /** Lets go of the lock this tab holds while its sign-out is out (`signOutLockName`). */
+  #releaseLock: (() => void) | undefined;
 
-  /** `page` is where this tab goes and comes back: its window. */
-  constructor(channel: BroadcastChannel | undefined, page: EventTarget | undefined) {
+  /** `page` is where this tab goes and comes back: its window. `locks` is the browser's lock
+   *  manager, `navigator.locks`. */
+  constructor(
+    channel: BroadcastChannel | undefined,
+    page: EventTarget | undefined,
+    locks?: LockManager
+  ) {
     this.#channel = channel;
+    this.#locks = locks;
     if (channel === undefined) return;
     channel.addEventListener("message", (event: MessageEvent) => this.#heard(event.data));
     // A tab that goes says so, which lifts its hold in every other tab, and renews nothing after:
-    // one the back/forward cache brings back holds no other tab's writes again.
+    // one the back/forward cache brings back holds no other tab's writes again. It lets go of its
+    // own sign-out's lock after saying it, since a page the cache keeps is not destroyed and
+    // would hold the lock while it sits there.
     page?.addEventListener("pagehide", () => {
       clearInterval(this.#renewal);
       this.#post({ gone: true, tab: this.#tab });
+      this.#letGoOfLock();
     });
     page?.addEventListener("pageshow", (event) => {
       if ((event as PageTransitionEvent).persisted) this.#post({ hello: true, tab: this.#tab });
@@ -129,24 +165,50 @@ export class SignInChannel {
   }
 
   /** Says `login` confirmed a sign-out here, which is out, and says it again every
-   *  `SIGN_OUT_RENEW_MS` until this tab says how it ended (`signedOut`, `stillSignedIn`). */
+   *  `SIGN_OUT_RENEW_MS` until this tab says how it ended (`signedOut`, `stillSignedIn`). It
+   *  takes the person's sign-out lock first, so a tab holding their writes waits on this tab's
+   *  life rather than on its timers; the lock is taken before the first word goes out, so a
+   *  holder's own request for it is always behind this one. */
   signingOut(login: string): void {
     clearInterval(this.#renewal);
+    this.#takeLock(login);
     const say = () => this.#post({ signingOut: login, tab: this.#tab });
     say();
     this.#renewal = setInterval(say, SIGN_OUT_RENEW_MS);
   }
 
-  /** Says Dispatch signed `login` out here. */
+  /** Says Dispatch signed `login` out here. The word goes out before the lock, so a tab holding
+   *  their writes hears how the sign-out ended rather than finding the lock free and asking
+   *  Dispatch itself; either way it ends with the same writes dropped. */
   signedOut(login: string): void {
     clearInterval(this.#renewal);
     this.#post({ signedOut: login, tab: this.#tab });
+    this.#letGoOfLock();
   }
 
   /** Says `login`'s sign-out here did not go through, or went with the page. */
   stillSignedIn(login: string): void {
     clearInterval(this.#renewal);
     this.#post({ stillSignedIn: login, tab: this.#tab });
+    this.#letGoOfLock();
+  }
+
+  /** Takes `login`'s sign-out lock for as long as this tab's sign-out is out. A lock another tab
+   *  of this browser holds - it is signing the same person out - is queued for and taken when
+   *  that tab lets go; this tab's own renewals hold the person's writes meanwhile. */
+  #takeLock(login: string): void {
+    this.#letGoOfLock();
+    const locks = this.#locks;
+    if (locks === undefined) return;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.#releaseLock = resolve;
+    void locks.request(signOutLockName(login), () => promise).catch(() => {});
+  }
+
+  /** Lets go of this tab's sign-out lock, if it has one: its sign-out is over, or its page is. */
+  #letGoOfLock(): void {
+    this.#releaseLock?.();
+    this.#releaseLock = undefined;
   }
 
   /** Asks every other tab what of `login`'s a sign-out would discard there, and answers once each
@@ -175,9 +237,16 @@ export class SignInChannel {
     return promise;
   }
 
-  /** Has `listener` act on what the other tabs say, until the returned function is called. */
+  /** Has `listener` act on what the other tabs say, until the returned function is called. Every
+   *  hold this tab already knows of is applied to `listener` at once: a page that loads, or
+   *  reloads, while another tab's sign-out is out hears of it before its app mounts, and the
+   *  writes that sign-out would discard must be held here as they are in every other tab rather
+   *  than resuming under a listener that never heard it. */
   listen(listener: SignInListener): () => void {
     this.#listener = listener;
+    for (const login of new Set([...this.#holds.values()].map((hold) => hold.login))) {
+      listener.signingOut(login);
+    }
     return () => {
       if (this.#listener === listener) this.#listener = undefined;
     };
@@ -187,25 +256,66 @@ export class SignInChannel {
     this.#channel?.postMessage(message);
   }
 
-  /** Holds `login`'s writes for `tab`'s sign-out, or renews that hold, until it lapses. */
+  /** Holds `login`'s writes for `tab`'s sign-out, or renews that hold. The hold ends when the
+   *  browser releases that tab's lock, or - with no lock manager - when its lease lapses
+   *  unrenewed. */
   #hold(tab: string, login: string): void {
     const before = this.#holds.get(tab);
-    if (before !== undefined) clearTimeout(before.lapse);
+    const locks = this.#locks;
+    // Where the browser has locks the hold ends with the signing-out tab's, so a renewal says
+    // nothing this tab does not know; where it has none, each renewal is another lease.
+    const lease =
+      locks !== undefined
+        ? undefined
+        : setTimeout(() => this.#lift(tab, "vanished"), SIGN_OUT_LEASE_MS);
+    if (before?.login === login) {
+      if (before.lapse === undefined) return;
+      clearTimeout(before.lapse);
+      this.#holds.set(tab, { ...before, lapse: lease });
+      return;
+    }
+    if (before !== undefined) this.#endWait(before);
     const held = this.#holding(login);
-    this.#holds.set(tab, { lapse: setTimeout(() => this.#lift(tab), SIGN_OUT_LEASE_MS), login });
+    const waiting = locks === undefined ? undefined : new AbortController();
+    this.#holds.set(tab, { lapse: lease, login, waiting });
+    if (locks !== undefined && waiting !== undefined) {
+      // The signing-out tab holds this lock while its sign-out is out, so this request is granted
+      // only once the browser takes it back: that tab said how the sign-out ended (and lifted the
+      // hold before this), or it closed, crashed or was discarded. A tab frozen or throttled with
+      // its sign-out out keeps the lock, and keeps the hold with it.
+      void locks
+        .request(signOutLockName(login), { signal: waiting.signal }, () => {
+          this.#lift(tab, "vanished");
+        })
+        .catch(() => {
+          // The wait was called off: the hold had already ended another way.
+        });
+    }
     if (before !== undefined && before.login !== login && !this.#holding(before.login)) {
-      this.#listener?.stillSignedIn(before.login);
+      this.#listener?.holderGone(before.login);
     }
     if (!held) this.#listener?.signingOut(login);
   }
 
-  /** Lifts `tab`'s hold, if it has one: once no tab's holds the person's writes, they go on. */
-  #lift(tab: string): void {
+  /** Stops watching for the end of `hold`: its lease, and its wait for the signing-out tab's
+   *  lock. */
+  #endWait(hold: Hold): void {
+    clearTimeout(hold.lapse);
+    hold.waiting?.abort();
+  }
+
+  /** Lifts `tab`'s hold, if it has one: once no tab's holds the person's writes, they go on - as
+   *  writes still the person's (`stillSignedIn`, the tab said its sign-out did not go through),
+   *  or as writes whose sign-out may have landed unheard (`holderGone`, the tab went). */
+  #lift(tab: string, ended: "said" | "vanished"): void {
     const hold = this.#holds.get(tab);
     if (hold === undefined) return;
-    clearTimeout(hold.lapse);
+    this.#endWait(hold);
     this.#holds.delete(tab);
-    if (!this.#holding(hold.login)) this.#listener?.stillSignedIn(hold.login);
+    if (this.#holding(hold.login)) return;
+    const listener = this.#listener;
+    if (ended === "said") listener?.stillSignedIn(hold.login);
+    else listener?.holderGone(hold.login);
   }
 
   /** Whether another tab's sign-out holds `login`'s writes here. */
@@ -225,7 +335,8 @@ export class SignInChannel {
     if (tab !== undefined) {
       if (Reflect.get(data, "gone") === true) {
         this.#others.delete(tab);
-        this.#lift(tab);
+        // The tab went with its page: whether its sign-out landed, nothing here heard.
+        this.#lift(tab, "vanished");
         return;
       }
       // A tab that speaks is one this tab knows of, again if an ask had taken it for gone.
@@ -254,7 +365,7 @@ export class SignInChannel {
     if (signedOut !== undefined) {
       for (const [holder, hold] of this.#holds) {
         if (hold.login !== signedOut) continue;
-        clearTimeout(hold.lapse);
+        this.#endWait(hold);
         this.#holds.delete(holder);
       }
       listener?.signedOut(signedOut);
@@ -262,7 +373,7 @@ export class SignInChannel {
     }
     const stillSignedIn = stringField(data, "stillSignedIn");
     if (stillSignedIn !== undefined && this.#holds.get(from)?.login === stillSignedIn) {
-      this.#lift(from);
+      this.#lift(from, "said");
     }
   }
 }

@@ -1,8 +1,8 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
 import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
-import { api, isUnauthorized } from "./api/client";
+import { api, isNoIdentity, isUnauthorized } from "./api/client";
 import { useEventFeed } from "./api/event-feed";
 import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
@@ -533,25 +533,22 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       writesOf(queryClient).clear();
       signIns.signedOut(login);
     },
-    // A 401 is Dispatch saying the session the sign-out would end is already gone - an earlier
-    // attempt ended it and its answer was lost, or a sign-out in another browser revoked it - so
-    // the sign-out has done what it was for, whatever the sign-in check can be read to say.
+    // Dispatch's own 401 (`NO_IDENTITY`) says the session the sign-out would end is already gone
+    // - an earlier attempt ended it and its answer was lost, or a sign-out in another browser
+    // revoked it - so the sign-out has done what it was for, whatever the sign-in check can be
+    // read to say. A 401 from something in front of Dispatch, an authenticating proxy among
+    // them, says nothing of the session: that sign-out did not go through, and is refused with
+    // Retry like any other refusal.
     write: () =>
       api
         .logout()
         .catch((error: unknown) =>
-          isUnauthorized(error) ? { ok: true as const } : Promise.reject(error)
+          isNoIdentity(error) ? { ok: true as const } : Promise.reject(error)
         ),
   });
-  // A page that goes while its sign-out is out never hears how it ended, so every other tab lets
-  // the person's writes go on: had the sign-out gone through, Dispatch refuses them (401) and
-  // each tab keeps them for the person's next sign-in.
-  useEffect(() => {
-    if (!signOut.isPending) return;
-    const gone = () => signIns.stillSignedIn(login);
-    window.addEventListener("pagehide", gone);
-    return () => window.removeEventListener("pagehide", gone);
-  }, [login, signOut.isPending]);
+  // A page that goes while its sign-out is out says nothing of how it ended, because it does not
+  // know: its `{gone}` leaves every other tab to read who is signed in and decide (`holderGone`).
+  //
   // Whether the page is asking the other tabs what a sign-out would discard there.
   const [askingTabs, setAskingTabs] = useState(false);
   // Tabs within the same issue manage their own focus (roving tabindex); only a
@@ -585,8 +582,8 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         // it asks for first (`SignInChannel.unsentElsewhere`), by key, since a tab duplicated
         // from another holds the same writes; Cancel keeps them signed in and their writes as
         // they are. Confirmed, nothing of theirs goes out in any tab until Dispatch answers the
-        // sign-out (`Writes.holdFor`), and only its landing discards them. A session that lapses
-        // instead keeps them (`Writes.signedIn`).
+        // sign-out (`Writes.holdFor`), and only its landing discards them - a session that lapses
+        // under it has ended as the sign-out asked, so that lands too (`endsWithSession`).
         if (askingTabs) return;
         setAskingTabs(true);
         void signIns.unsentElsewhere(login).then((elsewhere) => {
@@ -843,10 +840,13 @@ function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
 }
 
 /** Where the tabs of one browser tell each other who is signed in, and what a sign-out in one of
- *  them does to the person's writes in all of them (`SignInChannel`). */
+ *  them does to the person's writes in all of them (`SignInChannel`). A page outside a secure
+ *  context has no `navigator.locks` (`null` where nothing implements it at all), and holds a
+ *  sign-out on its renewal lease instead. */
 const signIns = new SignInChannel(
   typeof BroadcastChannel === "undefined" ? undefined : new BroadcastChannel("dispatch-sign-in"),
-  typeof window === "undefined" ? undefined : window
+  typeof window === "undefined" ? undefined : window,
+  typeof navigator === "undefined" ? undefined : (navigator.locks ?? undefined)
 );
 
 /** What of `login`'s a sign-out would discard here: every write of theirs they can see that
@@ -867,6 +867,29 @@ export function signOutQuestion(unsent: readonly string[], unanswered = false): 
   const count = unsent.length === 1 ? "1 unsent change" : `${unsent.length} unsent changes`;
   const what = unanswered ? `${count}, and ${elsewhere}` : count;
   return `Sign out and discard ${what}?\n\n${unsent.map((label) => `• ${label}`).join("\n")}`;
+}
+
+/** What becomes of the writes this tab held for another tab's sign-out, once that tab is gone
+ *  without having said how the sign-out ended (`SignInListener.holderGone`): Dispatch decides,
+ *  since only it knows whether the sign-out landed. This tab reads who is signed in - its own
+ *  cookie is that browser session's - and a `401 NO_IDENTITY` is the sign-out landed, so
+ *  `login`'s writes go, as the person chose when they confirmed it (`Writes.dropLogin`), rather
+ *  than waiting for a sign-in they already discarded them before. Any other answer is a sign-out
+ *  that did not land - a refusal from in front of Dispatch, a read that could not be made, or
+ *  the person still signed in - and their writes go on where they stood (`Writes.release`). An
+ *  answer naming anyone but `login` is the sign-in check's news too, so it is read again here,
+ *  and the gate drops their writes as it would any other login's; one that goes out before that
+ *  read lands carries their `Dispatch-Login` and is refused `409 LOGIN_CHANGED` before it runs.
+ */
+async function heldWritesOfGoneHolder(queryClient: QueryClient, login: string): Promise<void> {
+  const who = await api.whoAmI().then(
+    (user) => user.login,
+    (error: unknown) => (isNoIdentity(error) ? null : login)
+  );
+  const writes = writesOf(queryClient);
+  if (who === null) writes.dropLogin(login);
+  else writes.release(login);
+  if (who !== login) void queryClient.invalidateQueries({ queryKey: ["whoami"] });
 }
 
 export function AuthGate(): ReactNode {
@@ -898,6 +921,7 @@ export function AuthGate(): ReactNode {
     const writes = writesOf(queryClient);
     return signIns.listen({
       changed: () => void queryClient.invalidateQueries({ queryKey: ["whoami"] }),
+      holderGone: (gone) => void heldWritesOfGoneHolder(queryClient, gone),
       // The person signed out in another tab: every write they pressed goes here too, its file
       // with it, so no tab holds a write whose file another tab let go of.
       signedOut: (signedOut) => writes.dropLogin(signedOut),

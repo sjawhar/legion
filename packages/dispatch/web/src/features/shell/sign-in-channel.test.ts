@@ -28,15 +28,67 @@ function browser() {
   };
 }
 
+/** A browser's Web Locks, as `navigator.locks` grants them: one holder at a time per name, and
+ *  every other request for that name queued in the order it was made, granted as the holder
+ *  before it lets go. A request called off through its `signal` leaves the queue. */
+function browserLocks(): LockManager {
+  const queues = new Map<string, (() => void)[]>();
+  const held = new Set<string>();
+  const grant = (name: string) => {
+    if (held.has(name)) return;
+    const next = queues.get(name)?.shift();
+    if (next === undefined) return;
+    held.add(name);
+    next();
+  };
+  const request = (name: string, first: unknown, second?: unknown) => {
+    const options = (typeof first === "function" ? {} : (first ?? {})) as LockOptions;
+    const granted = (typeof first === "function" ? first : second) as (lock: Lock) => unknown;
+    const { promise, reject, resolve } = Promise.withResolvers<unknown>();
+    const run = () => {
+      const done = (end: () => void) => {
+        held.delete(name);
+        end();
+        grant(name);
+      };
+      void Promise.resolve(granted({ mode: "exclusive", name })).then(
+        (value) => done(() => resolve(value)),
+        (error: unknown) =>
+          done(() => reject(error instanceof Error ? error : new Error(String(error))))
+      );
+    };
+    options.signal?.addEventListener("abort", () => {
+      const queue = queues.get(name) ?? [];
+      const at = queue.indexOf(run);
+      if (at === -1) return;
+      queue.splice(at, 1);
+      reject(new Error("the lock request was called off"));
+    });
+    queues.set(name, [...(queues.get(name) ?? []), run]);
+    grant(name);
+    return promise;
+  };
+  return {
+    query: () => Promise.resolve({ held: [], pending: [] }),
+    request,
+  } as unknown as LockManager;
+}
+
 /** A tab on `open`'s browser: its channel, its page, and what its listener was told, each
- *  `[what, login]`; it answers a sign-out's question with `unsent`. */
-function tab(open: () => BroadcastChannel, unsent: readonly UnsentChange[] = []) {
+ *  `[what, login]`; it answers a sign-out's question with `unsent`. `locks` is the browser's lock
+ *  manager, as the page passes `navigator.locks`; with none, holds live on the renewal lease. */
+function tab(
+  open: () => BroadcastChannel,
+  unsent: readonly UnsentChange[] = [],
+  locks?: LockManager
+) {
   const page = new EventTarget();
   const channel = open();
-  const signIns = new SignInChannel(channel, page);
+  const signIns = new SignInChannel(channel, page, locks);
   const heard: [string, string][] = [];
   const listener: SignInListener = {
     changed: () => {},
+    holderGone: (login) => heard.push(["holderGone", login]),
     signedOut: (login) => heard.push(["signedOut", login]),
     signingOut: (login) => heard.push(["signingOut", login]),
     stillSignedIn: (login) => heard.push(["stillSignedIn", login]),
@@ -56,11 +108,13 @@ async function onFakeClock(body: () => Promise<void> | void): Promise<void> {
   }
 }
 
-// W51. A sign-out's hold on the person's writes in another tab is a lease: the signing-out tab
-// says so again every 2 s while its sign-out is out, and a holding tab lifts a hold it has not
-// heard renewed for 6 s, so a tab that crashes, is killed or is frozen with its sign-out out holds
-// nothing for good.
-test("a sign-out's hold lapses 6 s after its tab last said so, and renewing keeps it", async () => {
+// W51, W58. Where the browser has no `navigator.locks` - a page outside a secure context - a
+// sign-out's hold on the person's writes in another tab is a lease: the signing-out tab says so
+// again every 2 s while its sign-out is out, and a holding tab lifts a hold it has not heard
+// renewed for 6 s, so a tab that crashes or is killed with its sign-out out holds nothing for
+// good. A tab that went that way said nothing of how its sign-out ended, so the hold ends as a
+// holder gone (`holderGone`), not as a sign-out refused.
+test("with no lock manager a sign-out's hold lapses 6 s after its tab last said so", async () => {
   await onFakeClock(() => {
     const open = browser();
     const signer = tab(open);
@@ -85,6 +139,74 @@ test("a sign-out's hold lapses 6 s after its tab last said so, and renewing keep
     jest.advanceTimersByTime(1);
     expect(holder.heard).toEqual([
       ["signingOut", "alice"],
+      ["holderGone", "alice"],
+    ]);
+  });
+});
+
+// W58. Where the browser has locks, the hold is the signing-out tab's lock: it lives as long as
+// that tab does, however late its timers run. A tab frozen or throttled with its sign-out out -
+// Chrome wakes a tab hidden over five minutes about once a minute - says so again far too
+// rarely for the lease, and must hold the person's writes all the same; only the browser taking
+// its lock back, when the tab closes, crashes or is discarded, ends the hold.
+test("with the browser's locks a hold outlives the lease, and ends when the lock is released", async () => {
+  await onFakeClock(async () => {
+    const open = browser();
+    const locks = browserLocks();
+    const signer = tab(open, [], locks);
+    const holder = tab(open, [], locks);
+
+    signer.signIns.signingOut("alice");
+    await Promise.resolve();
+    expect(holder.heard).toEqual([["signingOut", "alice"]]);
+
+    // The tab is frozen with its sign-out out: it says nothing again for minutes, and its lock
+    // keeps the hold anyway.
+    Object.assign(signer.channel, { postMessage: () => {} });
+    jest.advanceTimersByTime(SIGN_OUT_LEASE_MS * 20);
+    await Promise.resolve();
+    expect(holder.heard).toEqual([["signingOut", "alice"]]);
+
+    // The browser takes the lock back, as it does when the tab goes: the hold ends, and what
+    // became of the writes it held is the whoami read's to decide (`holderGone`).
+    signer.leave();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(holder.heard).toEqual([
+      ["signingOut", "alice"],
+      ["holderGone", "alice"],
+    ]);
+  });
+});
+
+// W56. A tab that loads, or reloads, while another tab's sign-out is out hears of it on the
+// channel before its app mounts and its listener attaches. The hold must reach that listener all
+// the same: otherwise the tab resumes the very writes the person confirmed discarding.
+test("a listener attaching while a sign-out is out is told to hold at once", async () => {
+  await onFakeClock(() => {
+    const open = browser();
+    const signer = tab(open);
+    const page = new EventTarget();
+    const late = new SignInChannel(open(), page);
+
+    signer.signIns.signingOut("alice");
+    const heard: [string, string][] = [];
+    late.listen({
+      changed: () => {},
+      holderGone: (login) => heard.push(["holderGone", login]),
+      signedOut: (login) => heard.push(["signedOut", login]),
+      signingOut: (login) => heard.push(["signingOut", login]),
+      stillSignedIn: (login) => heard.push(["stillSignedIn", login]),
+      unsent: () => [],
+    });
+    expect(heard).toEqual([["signingOut", "alice"]]);
+
+    // The hold is the one it already had: it ends once, when that tab says how its sign-out
+    // ended, and is not held twice by the renewals in between.
+    jest.advanceTimersByTime(SIGN_OUT_RENEW_MS * 2);
+    signer.signIns.stillSignedIn("alice");
+    expect(heard).toEqual([
+      ["signingOut", "alice"],
       ["stillSignedIn", "alice"],
     ]);
   });
@@ -95,12 +217,13 @@ test("a hold lifts at once when its tab goes, or says how its sign-out ended", a
     const open = browser();
     const holder = tab(open);
 
+    // A tab that goes says nothing of how its sign-out ended: it does not know.
     const gone = tab(open);
     gone.signIns.signingOut("alice");
     gone.leave();
     expect(holder.heard).toEqual([
       ["signingOut", "alice"],
-      ["stillSignedIn", "alice"],
+      ["holderGone", "alice"],
     ]);
 
     const refused = tab(open);
@@ -136,7 +259,7 @@ test("a hold is its tab's: the person's writes go on once no tab's holds them", 
     second.leave();
     expect(holder.heard).toEqual([
       ["signingOut", "alice"],
-      ["stillSignedIn", "alice"],
+      ["holderGone", "alice"],
     ]);
   });
 });

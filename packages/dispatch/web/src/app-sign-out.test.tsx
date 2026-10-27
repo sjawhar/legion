@@ -214,19 +214,19 @@ test("a sign-out discards only once Dispatch answers it, and one that fails keep
   }
 }, 15_000);
 
-// W50. A sign-out Dispatch answers 401 has landed: the session it would end is already gone - its
-// answer was lost and the retry found the session ended, or a sign-out in another browser revoked
-// it. The changes the person chose to discard go, here and in every other tab: the sign-in page
-// keeps none of them, and none is sent once they sign in again.
+// W50, W60. A sign-out Dispatch answers `401 NO_IDENTITY` has landed: the session it would end is
+// already gone - its answer was lost and the retry found the session ended, or a sign-out in
+// another browser revoked it. The changes the person chose to discard go, here and in every other
+// tab: the sign-in page keeps none of them, and none is sent once they sign in again.
 test("a sign-out answered 401 discards what it said it would, and nothing goes out at the next sign-in", async () => {
   let signedIn = true;
   const app = renderApp({
     logout: async () => {
       signedIn = false;
-      throw new ApiError(401, { error: "unauthorized" });
+      throw new ApiError(401, { code: "NO_IDENTITY", error: "unauthorized" });
     },
     whoAmI: async () => {
-      if (!signedIn) throw new ApiError(401, { error: "unauthorized" });
+      if (!signedIn) throw new ApiError(401, { code: "NO_IDENTITY", error: "unauthorized" });
       return { event_head: "0", kind: "user", login: "alice" };
     },
   });
@@ -305,14 +305,15 @@ test("a session that ends under its sign-out discards, and keeps nothing for the
   }
 }, 15_000);
 
-// W50. The sign-out's own 401 is the verdict: it lands even while the sign-in check cannot be
-// read to say the session lapsed, rather than asking again for good with every write held.
+// W50, W60. Dispatch's own 401 is the verdict: the sign-out lands even while the sign-in check
+// cannot be read to say the session lapsed, rather than asking again for good with every write
+// held.
 test("a sign-out answered 401 lands while the sign-in check cannot be read", async () => {
   let checkable = true;
   const app = renderApp({
     logout: async () => {
       checkable = false;
-      throw new ApiError(401, { error: "unauthorized" });
+      throw new ApiError(401, { code: "NO_IDENTITY", error: "unauthorized" });
     },
     whoAmI: async () => {
       if (!checkable) throw new NetworkError("/auth/whoami", new TypeError("Failed to fetch"));
@@ -334,6 +335,123 @@ test("a sign-out answered 401 lands while the sign-in check cannot be read", asy
     expect(keptWrites()).toEqual([]);
   } finally {
     tab.close();
+    app.teardown();
+  }
+}, 15_000);
+
+// W60. A 401 that is not Dispatch's own - an authenticating proxy in front of it refusing the
+// request - says nothing about the session: the sign-out never reached Dispatch, so it did not
+// go through. The person stays signed in with every change, as they do after any other refusal,
+// rather than having their changes discarded by a 401 Dispatch never gave.
+test("a 401 that is not Dispatch's own is a sign-out that did not go through", async () => {
+  const app = renderApp({
+    logout: async () => {
+      throw new ApiError(401, { error: "Unauthorized" });
+    },
+    whoAmI: async () => ({ event_head: "0", kind: "user", login: "alice" }),
+  });
+  const tab = otherTab("tab-2");
+  try {
+    await screen.findByText("Signed in as alice");
+    await waitFor(() => expect(tab.told).toContainEqual(expect.objectContaining({ here: true })));
+    const attempts: string[] = [];
+    void aliceWrite(app.queryClient, attempts, "CORE-1 set to done");
+    await waitFor(() => expect(writesOf(app.queryClient).rows()).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    // The first 401 may be a session that rotated between the two reads, so the sign-out is
+    // asked once more, a second after; the second, with the check still naming alice, is the
+    // refusal.
+    const alert = await screen.findByRole("alert", {}, { timeout: 5_000 });
+    expect(alert.textContent).toContain("The sign-out did not go through.");
+    expect(app.logout).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Signed in as alice")).toBeTruthy();
+    expect(
+      writesOf(app.queryClient)
+        .rows()
+        .map((row) => row.label)
+    ).toEqual(["CORE-1 set to done"]);
+    expect(keptWrites()).toHaveLength(1);
+    await waitFor(() => expect(tab.told).toContainEqual(about("stillSignedIn", "alice")));
+    expect(tab.told).not.toContainEqual(about("signedOut", "alice"));
+  } finally {
+    tab.close();
+    app.teardown();
+  }
+}, 15_000);
+
+// W57. A tab whose sign-out held this tab's writes went without saying how it ended: it closed,
+// crashed or was discarded, so only Dispatch knows whether the sign-out landed. This tab reads
+// who is signed in before it decides. Dispatch's `401 NO_IDENTITY` says the sign-out landed, so
+// the changes the person chose to discard go here too - keeping them would send, at their next
+// sign-in, the very writes they discarded.
+test("the writes held for a tab that went are discarded once whoami says the sign-out landed", async () => {
+  let signedIn = true;
+  const app = renderApp({
+    whoAmI: async () => {
+      if (!signedIn) throw new ApiError(401, { code: "NO_IDENTITY", error: "unauthorized" });
+      return { event_head: "0", kind: "user", login: "alice" };
+    },
+  });
+  const signer = otherTab("tab-2");
+  try {
+    await screen.findByText("Signed in as alice");
+    await waitFor(() =>
+      expect(signer.told).toContainEqual(expect.objectContaining({ here: true }))
+    );
+    const attempts: string[] = [];
+    void aliceWrite(app.queryClient, attempts, "CORE-1 set to done");
+    await waitFor(() => expect(attempts.length).toBeGreaterThan(0));
+
+    signer.say({ signingOut: "alice" });
+    await screen.findByText("CORE-1 set to done — Waiting for a sign-out in another tab");
+    // Dispatch answers that tab's sign-out, and it goes before it can say so.
+    signedIn = false;
+    signer.close();
+
+    await screen.findByRole("link", { name: "Sign in with Google" });
+    expect(writesOf(app.queryClient).rows()).toEqual([]);
+    expect(keptWrites()).toEqual([]);
+    expect(screen.queryByRole("region", { name: "Kept changes" })).toBeNull();
+    const made = attempts.length;
+    await sleep(2_500);
+    expect(attempts).toHaveLength(made);
+  } finally {
+    app.teardown();
+  }
+}, 15_000);
+
+// W57. The same tab going while the person is still signed in - its sign-out was refused, or
+// never answered - leaves their writes exactly where they stood: whoami names them, so the hold
+// lifts and the writes go on.
+test("the writes held for a tab that went go on once whoami still names the person", async () => {
+  const app = renderApp({
+    whoAmI: async () => ({ event_head: "0", kind: "user", login: "alice" }),
+  });
+  const signer = otherTab("tab-2");
+  try {
+    await screen.findByText("Signed in as alice");
+    await waitFor(() =>
+      expect(signer.told).toContainEqual(expect.objectContaining({ here: true }))
+    );
+    const attempts: string[] = [];
+    void aliceWrite(app.queryClient, attempts, "CORE-1 set to done");
+    await waitFor(() => expect(attempts.length).toBeGreaterThan(0));
+
+    signer.say({ signingOut: "alice" });
+    await screen.findByText("CORE-1 set to done — Waiting for a sign-out in another tab");
+    const held = attempts.length;
+    signer.close();
+
+    await waitFor(() => expect(attempts.length).toBeGreaterThan(held));
+    expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull();
+    expect(
+      writesOf(app.queryClient)
+        .rows()
+        .map((row) => row.label)
+    ).toEqual(["CORE-1 set to done"]);
+    expect(screen.getByText("Signed in as alice")).toBeTruthy();
+  } finally {
     app.teardown();
   }
 }, 15_000);

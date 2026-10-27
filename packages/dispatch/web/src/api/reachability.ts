@@ -14,8 +14,10 @@ export type Reachable = "answer" | "online" | "socket";
 
 const listeners = new Set<(reachable: Reachable, route: string | undefined) => void>();
 
-/** The routes (`routeOf`) a request failed to reach Dispatch on or went silent on since Dispatch
- *  last answered one there. */
+/** The routes (`routeOf`) a write failed to reach Dispatch on or went silent on since Dispatch
+ *  last answered one there. Only a write's route: a write is the only thing that waits to learn
+ *  its route can be reached again (`onReachable`), and a read's route - one per query string -
+ *  would grow this set for a page's whole life without anything reading it. */
 const lostRoutes = new Set<string>();
 
 /** Whether the live socket was lost since it last opened. */
@@ -29,15 +31,20 @@ export function routeOf(method: string | undefined, path: string): string {
 
 /** Dispatch could not be reached: a request on `route` (`routeOf`) failed at the connection or
  *  went silent, or - with no route - the live socket was lost. The next answer on that route, or
- *  the next socket opening, says it can be again. */
+ *  the next socket opening, says it can be again. A read's route is not kept: nothing waits on
+ *  it. */
 export function unreachable(route?: string): void {
-  if (route === undefined) socketLost = true;
-  else lostRoutes.add(route);
+  if (route === undefined) {
+    socketLost = true;
+    return;
+  }
+  if (!route.startsWith("GET ") && !route.startsWith("HEAD ")) lostRoutes.add(route);
 }
 
 /** Tells every listener that Dispatch can be reached again, and how the page learned it: an answer
  *  on `route` only after a request there could not reach it, a socket opening only after the
- *  socket was lost (`unreachable`), the browser's `online` whenever it comes. */
+ *  socket was lost (`unreachable`), the browser's `online` whenever it comes. The route is
+ *  forgotten as it answers, so the set holds only the routes still unreachable. */
 export function reachable(how: Reachable, route?: string): void {
   if (how === "answer" && (route === undefined || !lostRoutes.delete(route))) return;
   if (how === "socket") {
