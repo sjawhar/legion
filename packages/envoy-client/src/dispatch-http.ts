@@ -372,8 +372,13 @@ export class DispatchClient {
     this.#signal = requestSignal(signal);
   }
 
-  async issue(input: CreateIssueInput): Promise<Advised<Issue>> {
-    return this.#json("POST", ["api", "v1", "issues"], input);
+  /**
+   * Creates an issue. `created` is whether this call made one (Dispatch's 201); false (its 200)
+   * means Dispatch already holds the issue `external` names and answered with that issue.
+   */
+  async issue(input: CreateIssueInput): Promise<Advised<Issue> & { created: boolean }> {
+    const answer = await this.#jsonAnswer<Advised<Issue>>("POST", ["api", "v1", "issues"], input);
+    return { ...answer.payload, created: answer.status === 201 };
   }
 
   /** Resolves an existing native key or external reference without creating an issue. */

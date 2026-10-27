@@ -23,7 +23,10 @@
   new decision blocks with no checks), maps to one of the forms, the not-made one when it says
   nothing; a result this client cannot read prints the not-made form, and advice that fails to
   render prints `Other advice could not be shown: <error>` in place of the rest, keeping the
-  `Created` line and the form.
+  `Created` line and the form. `dispatch issue` on an external issue Dispatch already holds says
+  it already holds it and that nothing was created (`Dispatch already holds <KEY>: <title> →
+  <link>; nothing was created`), instead of `Created`, and prints no related-item check
+  (`DispatchClient.issue` answers `created`, true only for Dispatch's 201).
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The

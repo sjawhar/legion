@@ -1823,7 +1823,7 @@ function repositoryFieldsWarnings(issue: {
  *  without the field: it did not save the repository, and that must not pass as a success. The
  *  error says what the server did do, so the agent does not repeat the rest of the write. */
 function refuseUnsavedRepository(
-  verb: "created" | "updated",
+  verb: "created" | "updated" | "already holds",
   issue: { readonly key: string; readonly repo?: string | null },
   repo: string | undefined
 ): void {
@@ -2935,7 +2935,7 @@ export async function executeDispatchTool(
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });
-        refuseUnsavedRepository("created", created, repo);
+        refuseUnsavedRepository(created.created ? "created" : "already holds", created, repo);
         const adviceLines = await otherAdviceLines(async () => {
           const componentGuidance = await architectureGuidance(
             client,
@@ -2959,14 +2959,22 @@ export async function executeDispatchTool(
             : created.assignee === null
               ? "; unassigned"
               : `; assigned to ${created.assignee}`;
+        const suffixes = `${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`;
+        // Dispatch answers an `external` reference it already holds with that issue and nothing
+        // new, so no related-item check was made and "search before you rely on this being new"
+        // does not apply: the first line says so instead.
         return {
           text: [
-            `Created ${created.key}: ${created.title} → ${href}${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`,
-            ...relatedCheckLines(created.advice?.suggestions, {
-              project: created.project,
-              text: title,
-              configUrl: linkBase,
-            }),
+            created.created
+              ? `Created ${created.key}: ${created.title} → ${href}${suffixes}`
+              : `Dispatch already holds ${created.key}: ${created.title} → ${href}; nothing was created${suffixes}`,
+            ...(created.created
+              ? relatedCheckLines(created.advice?.suggestions, {
+                  project: created.project,
+                  text: title,
+                  configUrl: linkBase,
+                })
+              : []),
             ...adviceLines,
           ].join("\n"),
           details: {

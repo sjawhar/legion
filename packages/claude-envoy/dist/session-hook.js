@@ -15418,7 +15418,8 @@ class DispatchClient {
     this.#signal = requestSignal(signal);
   }
   async issue(input) {
-    return this.#json("POST", ["api", "v1", "issues"], input);
+    const answer = await this.#jsonAnswer("POST", ["api", "v1", "issues"], input);
+    return { ...answer.payload, created: answer.status === 201 };
   }
   async resolveIssue(issueReference) {
     return this.#resolveIssue(issueReference);
@@ -18328,7 +18329,7 @@ async function executeDispatchTool(input) {
           ...Array.isArray(labels) ? { labels } : {},
           actor
         });
-        refuseUnsavedRepository("created", created, repo2);
+        refuseUnsavedRepository(created.created ? "created" : "already holds", created, repo2);
         const adviceLines = await otherAdviceLines(async () => {
           const componentGuidance = await architectureGuidance(client, created.project, created.components);
           return [
@@ -18340,14 +18341,15 @@ async function executeDispatchTool(input) {
         });
         const href = new URL(`/issues/${encodeURIComponent(created.key)}`, linkBase).toString();
         const assigned = created.assignee === undefined ? "" : created.assignee === null ? "; unassigned" : `; assigned to ${created.assignee}`;
+        const suffixes = `${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`;
         return {
           text: [
-            `Created ${created.key}: ${created.title} \u2192 ${href}${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`,
-            ...relatedCheckLines(created.advice?.suggestions, {
+            created.created ? `Created ${created.key}: ${created.title} \u2192 ${href}${suffixes}` : `Dispatch already holds ${created.key}: ${created.title} \u2192 ${href}; nothing was created${suffixes}`,
+            ...created.created ? relatedCheckLines(created.advice?.suggestions, {
               project: created.project,
               text: title,
               configUrl: linkBase
-            }),
+            }) : [],
             ...adviceLines
           ].join(`
 `),

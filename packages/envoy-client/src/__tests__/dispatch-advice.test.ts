@@ -11,8 +11,9 @@ const config = { enabled: true, url: "http://dispatch.test", token: "secret", er
 const issueSuffix =
   "(not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)";
 
-function response(body: unknown): Response {
+function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
+    status,
     headers: { "Content-Type": "application/json" },
   });
 }
@@ -55,7 +56,8 @@ async function executeWrite(tool: string, args: Record<string, unknown>, advice?
             },
           },
           advice
-        )
+        ),
+        201
       );
     }
     if (target.pathname === "/api/v1/projects/DSP/architecture-sources" && method === "GET") {
@@ -773,6 +775,59 @@ describe("the related-item check", () => {
 
     expect(result.text).toContain("DSP-42");
     expect(result.text).not.toMatch(/^Created DSP-42/m);
+  });
+
+  test.each([
+    ["ada@example.com", "; assigned to ada@example.com"],
+    [null, "; unassigned"],
+  ] as const)("an external issue Dispatch already holds (assignee %p) says nothing was created and prints no related-item check", async (assignee, said) => {
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      const method = init?.method ?? "GET";
+      if (target.pathname === "/api/v1/issues" && method === "POST") {
+        return response({
+          key: "DSP-42",
+          title: "External issue",
+          project: "DSP",
+          assignee,
+          components: {
+            mode: "inherit",
+            ids: [],
+            unknown: [],
+            reason: null,
+            inherited_from: null,
+          },
+          advice: advice({
+            suggestions: {
+              outcome: "not_made",
+              related: [],
+              missing: "Dispatch already holds this issue; nothing was created",
+            },
+          }),
+        });
+      }
+      if (target.pathname === "/api/v1/projects/DSP/architecture-sources" && method === "GET") {
+        return response([]);
+      }
+      throw new Error(`unexpected request: ${method} ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: "DSP", title: "External issue", external: "owner/repo#7" },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec(),
+      fetchImpl: fetchImpl as typeof fetch,
+      subscriptions: async () => [],
+    });
+
+    expect(result.text).toBe(
+      `Dispatch already holds DSP-42: External issue → http://dispatch.test/issues/DSP-42; nothing was created${said} ${issueSuffix}`
+    );
   });
 
   test("an ask item says where the ask stands", async () => {
