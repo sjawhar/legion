@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-568",
+  "completed": "2026-10-27T12:52:00Z",
+  "testedHead": "9cc3cd95ecb22621a0e3476cf39bb22c29007164",
+  "codeHead": "cdfddb65c5d6d6b366db7f53df096e6581b53c58",
+  "round": "full round after the second forward merge of main (fingerprint changed: renumbered migrations 0130/0131)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove every row the implementer proved (1a, 1b, 2a, 2b, 2c, 2d, 3, 4, 5, records route) independently on my own instances and fixtures: bun run dispatch:local on database dispatch_tester (port 8777), main c892b97d's server built from git archive (port 8787), and the head binary with DISPATCH_EMBEDDER=azure pointed at a local fake Azure embeddings endpoint over TLS (port 8790), so 2c ran on a real server rather than only in Go tests. Re-ran packages/envoy/scripts/related-recall.sh INFRA (9 pairs, 634 issues) and TestRelatedRecallOnDuplicates: old 4 of 9, the check 5 of 9, the implementer's numbers."
+  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "The check says what it did (issue title); plan task 7: an existing external issue answers not_made 'Dispatch already holds this issue; nothing was created'. The output of that write must not claim it created the issue.",
+      "evidence": "On dispatch:local, after mapping acme/widgets to CORE: `dispatch issue --project CORE --external acme/widgets#7 --title 'External widget seven armadillo'` run twice. The second run (server answers 200 with the existing CORE-54 and suggestions {outcome: not_made, missing: 'Dispatch already holds this issue; nothing was created'}) prints `Created CORE-54: External widget seven armadillo → …` and on the next line `No related-item check was made: Dispatch already holds this issue; nothing was created. …`: the two lines contradict each other. The `Created` wording is main's (main's server and the head client print `Created OLDB-4` twice too), but this change adds the line that says nothing was created, so the write's output now says both. Red test: `dispatch_issue naming an external issue Dispatch already holds does not say it created one` in packages/envoy-client/src/__tests__/dispatch-advice.test.ts (commit c1a975c1); its server body is the head server's exact answer (status 200, that suggestions object). Fails with `cd packages/envoy-client && bun test src/__tests__/dispatch-advice.test.ts -t 'already holds'`: Received \"Created DSP-42: External issue → … No related-item check was made: Dispatch already holds this issue; nothing was created. …\". A fix may key on the 200 status (a new issue is 201) or on that check result."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "1a: with the search made to fail, dispatch issue --force with an existing title prints that key and the no-check-was-made form",
+      "surface": "head dispatch CLI against bun run dispatch:local (8777)",
+      "command": "psql -c 'begin; lock table asks in access exclusive mode; select pg_sleep(9); commit;' & (lock confirmed granted in pg_locks), then dispatch issue --project CORE --title 'Armadillo cache eviction misses the porcupine index' --force",
+      "observed": "Created CORE-48, then `No related-item check was made: the search behind it did not answer within 5s. Search before you rely on this being new: dispatch search --project CORE --query 'Armadillo cache eviction'` and `Title overlaps you forced past:` CORE-47 and CORE-8; related_checks row CORE-48 not_made timeout total_ms 5000",
+      "headSha": "9cc3cd95ecb22621a0e3476cf39bb22c29007164",
+      "negativeControl": "the same --force without the lock (CORE-47) prints `Related items (searched by keywords only: meaning search is off on this server):` with CORE-8 first and the title overlap"
+    },
+    {
+      "criterion": "1b: a client of this release against a server that sends no check result prints the not-made form",
+      "surface": "head dispatch CLI against a Dispatch server built from main c892b97d (8787, its own database)",
+      "command": "dispatch issue --project OLDB --title 'Render queue drops tiles on cache eviction' --spec-file spec1b.md",
+      "observed": "`No related-item check was made: the server did not say whether it searched. Search before you rely on this being new: dispatch search --project OLDB --query 'Render queue drops'`; a title with apostrophes gives a shell-safe `--query 'Wombat quixotic xylograph'` that dispatch search runs and finds",
+      "headSha": "9cc3cd95ecb22621a0e3476cf39bb22c29007164",
+      "negativeControl": "a second filing whose words the old OR query matched prints `Related items:` with no search mode named; `dispatch related` against the old server exits 1 with `No route for POST /api/v1/projects/OLDB/related`"
+    },
+    {
+      "criterion": "2a: one common word shared with many items and rare words with one: the check lists that one and not the others",
+      "surface": "dispatch related and dispatch issue against bun run dispatch:local after the leased refresh at 12:31:18",
+      "command": "30 issues filed with 'Telemetry export batch N stalls'; CORE-55 'Ocelot ledger xanthan reconciliation drifts'; dispatch related --project CORE --title 'Telemetry ocelot xanthan zebu mismatch'; then dispatch issue --force with that title and read related_checks.terms",
+      "observed": "only CORE-55 listed; terms {ocelot,xanthan,zebu}; search_term_stats telemetri ndoc 61 of 129 items (over max(10, N/10)), not chosen",
+      "headSha": "9cc3cd95ecb22621a0e3476cf39bb22c29007164",
+      "negativeControl": "dispatch related --project CORE --title 'Telemetry' prints `Related-item check searched (keywords only: meaning search is off on this server) and found nothing.`"
+    },
+    {
+      "criterion": "2b: a 10,000-word spec gives a keyword search of at most 25 words",
+      "surface": "dispatch issue against bun run dispatch:local",
+      "command": "dispatch issue --project CORE --force --title 'Ten thousand word spec numbat' --spec-file spec10k.md (10,000 words: 147 project words and 800 invented ones)",
+      "observed": "related_checks: found, keywords_only, cardinality(terms) 25, keyword_ms 48; the write answered in 387 ms",
+      "headSha": "9cc3cd95ecb22621a0e3476cf39bb22c29007164",
+      "negativeControl": "a text of stopwords or operators only (`the and of it is`, `& | ! :* ( )`) answers not_made `the text holds no word to search for`"
+    },
+    {
+      "criterion": "2c: a same-meaning item sharing no rare word is listed; an embedder failing or slower than 3 s gives keywords only",
+      "surface": "head server binary with DISPATCH_EMBEDDER=azure and DISPATCH_AZURE_EMBED_ENDPOINT=https://127.0.0.1:9443/models (a local fake Azure endpoint mapping car words to one concept vector, SSL_CERT_FILE trusting its certificate), driven by the head dispatch CLI",
+      "command": "MEAN-1 'Sedan inventory sync drops vehicles after midnight'; dispatch related --project MEAN --title 'Truck fleet roster misplaces automobiles overnight' with the fake in ok, slow:4 and fail modes, and with --keywords-only",
+      "observed": "ok: `Related items (searched by meaning and keywords):` MEAN-1; slow: `searched (keywords only: meaning search did not answer within 3s) and found nothing` at 3226 ms; fail: `keywords only: the text could not be embedded for meaning search`; stage 2 held by a lock on embeddings: `meaning search did not answer within 3s`; issue embeddings carry title, blank line, spec, and a spec edit re-embedded MEAN-3; a done item sorts after open ones; another project's nearer item never appears",
+      "headSha": "9cc3cd95ecb22621a0e3476cf39bb22c29007164",
+      "negativeControl": "--keywords-only on the same title prints `searched (keywords only: keywords only was asked for) and found nothing`"
+    },
+    {
+      "criterion": "2d: a search slower than 300 ms but under 5 s completes; a check with no match prints the found-nothing form",
+      "surface": "dispatch issue against bun run dispatch:local",
+      "command": "psql 'lock table search_term_stats in access exclusive mode; select pg_sleep(1.5)' &, then dispatch issue --project CORE --force --title 'Kumquat compactor evicts armadillo entries'; then dispatch issue --project CORE --title 'Pelican umbrella xylophone'",
+      "observed": "the held check prints `Related items (searched by keywords only: …)` with CORE-8 first, related_checks keyword_ms 1053 outcome found; the unmatched title prints `Related-item check searched (keywords only: meaning search is off on this server) and found nothing.`",
+      "headSha": "9cc3cd95ecb22621a0e3476cf39bb22c29007164",
+      "negativeControl": "held past the allowance (asks locked, 1a) the check answers not_made reason timeout"
+    },
+    {
+      "criterion": "3: duplicate recall, the check's keyword search lists no fewer survivors than the old 40-word OR query, both counts quoted",
+      "surface": "production INFRA through Dispatch's API (GET only), loaded into a local database",
+      "command": "bash packages/envoy/scripts/related-recall.sh INFRA $TMPDIR/tester568/recall.jsonl; DISPATCH_RECALL_CORPUS=… go test ./internal/dispatch/api -run TestRelatedRecallOnDuplicates -v -count=1",
+      "observed": "243 done issues read, 9 pairs kept (4 forward, 5 reversed), 634 issues loaded; old 40-word OR query 4 of 9, the check's keyword query 5 of 9; INFRA-131 → INFRA-130 ranked 1",
+      "headSha": "9cc3cd95ecb22621a0e3476cf39bb22c29007164",
+      "negativeControl": "INFRA-459 → INFRA-366 (folded into) is listed by neither query, and INFRA-214 drops from rank 1 to rank 2, so the count is not a tautology"
+    },
+    {
+      "criterion": "4: a related ask whose answer replaced an earlier one shows the latest answer, who gave it and the options chosen",
+      "surface": "dispatch ask against bun run dispatch:local; answers through POST /api/v1/asks/{id}/answer as alice (cookie)",
+      "command": "ask on CORE-8 with options Honour/Drop; alice answers Drop, then re-answers Honour with new text; dispatch ask --issue CORE-50 --question '<same words>'",
+      "observed": "`A past decision may already answer this: CORE-8 … answered by alice on 2026-10-27T12:27:41.539830485Z`, `  Ask: answered by alice at …, chose \"Honour\"`, `  Answer text: Changed my mind: honour the pin, the index depends on it.`; an answer with no option shows `chose no option`; a retracted ask shows `closed with no answer: retracted`",
+      "headSha": "9cc3cd95ecb22621a0e3476cf39bb22c29007164",
+      "negativeControl": "the first answer `Drop` / `Drop them for now.` is nowhere in the output; bob's re-answer is refused with code `NOT_ANSWERER` (only the person who gave the current answer may change it)"
+    },
+    {
+      "criterion": "5: dispatch doc-edit writing a new decision block prints its related items",
+      "surface": "dispatch doc-edit against bun run dispatch:local",
+      "command": "dispatch doc-edit --issue CORE-8 --ops-json '[{\"op\":\"insert\",\"after\":\"still references.\",\"markdown\":\":::ask…Should the kumquat compactor pause while the porcupine index rebuilds?…\"}]'; six blocks in one edit; a plain edit started 0.7 s into a block check slowed by a lock on search_term_stats",
+      "observed": "`Decision block fa369089-…:` then `Related items (searched by keywords only: …)`; six blocks → five forms and `No related-item check was made: more than five new decision blocks in one edit`; the concurrent plain edit returned in 315 ms while the block check took 3.8 s",
+      "headSha": "9cc3cd95ecb22621a0e3476cf39bb22c29007164",
+      "negativeControl": "an edit inserting a plain paragraph prints no `Decision block` line"
+    },
+    {
+      "criterion": "Recorded outcomes are readable (P1's surface), and the no-write route writes nothing and refuses callers without an identity",
+      "surface": "GET /api/v1/related-checks and GET/POST /api/v1/projects/{key}/related on bun run dispatch:local",
+      "command": "curl -H 'Authorization: Bearer e2e-token' '…/api/v1/related-checks?project=CORE' (and source_kind, from/to filters); row counts of issues, asks, write_suggestions, related_checks, events before and after nine no-write calls",
+      "observed": "total 68, by_source_kind ask 9 / decision_block 8 / issue 51, completed 65, skipped_for_time 2, keyword_ms p50 10 p95 149 max 3451 over_300ms 2; counts 39|7|123|45|71 before and after",
+      "headSha": "9cc3cd95ecb22621a0e3476cf39bb22c29007164",
+      "negativeControl": "no bearer → 401 NO_IDENTITY, a wrong bearer → 401 UNAUTHORIZED, a cookie POST without Origin → 403; source_kind=comment, from=yesterday, from after to → 400 INVALID_QUERY"
+    }
+  ],
+  "observations": [
+    "CI at code head cdfddb65 was queued when read (build, typecheck, test, lint, changes); not waited for.",
+    "Statistics are as fresh as the last 10-minute refresh: a word written since then is probed and counts as df = 1 (plan decision 2), so right after a burst of filings a now-common word can be picked as rare. Before the 12:31 refresh 'Telemetry' (then in 30 issues) was chosen; after it, it was not.",
+    "A write whose write advice also times out takes the advice's ~1.5 s before the 5 s check (POST /api/v1/issues elapsed_ms 6518 with asks locked); the check itself stopped at 5000 ms.",
+    "A timed-out check's record is retried for 30 s; with asks locked for 40 s the CORE-52 record was lost and the server logged `related-item check not recorded … context deadline exceeded`.",
+    "Harness: Postgres 17 + pgvector already running on 127.0.0.1:5433 ($TMPDIR/pg); my databases dispatch_tester, dispatch_tester_base, dispatch_tester_meaning, dispatch_tester_go; scripts under $TMPDIR/tester568 (d.sh, p.sh, serve.sh, fake_embed.py)."
+  ]
+}
