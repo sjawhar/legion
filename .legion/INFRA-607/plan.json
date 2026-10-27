@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-607",
+  "completed": "2026-10-27T04:40:23Z",
+  "plan": "dispatch://INFRA-607/artifact/plan-md",
+  "summary": "Make Dispatch's background loops change-driven: one shared Postgres listener per process (pglisten.Hub) and a duty.RunWoken loop body; embedding queue woken by a NOTIFY from embeddings_enqueue with a due-time timer; coverage once at boot (identity re-runs only while foreign rows remain); task progress once at boot; reference excerpts woken by a refs trigger with per-document backoff; suggestion outcomes woken by dispatch_events with a stored cursor; one delivery settings cache refreshed by NOTIFY; GitHub intake handled per key (PR, run) with a subject check before decode; importer shared sync per source and redelivery pending.<GUID> index built on INFRA-562 after it merges; kept timers (reconcile, architecture ticker, redelivery) jittered every period with a counted constant cost; before/after statements per second and Dispatch CPU idle (two configurations) and at the 1x step.",
+  "workOrder": [
+    "1a duty.RunJittered per-period jitter; 1b duty.RunWoken; 1c pglisten.Hub (+ pglisten.Notification with PID); 1d migrations 0121-0124 (renumber on rebase) with census files",
+    "2a embedding queue; 2b coverage; 2c task progress; 2d reference excerpts; 2e suggestion outcomes; each with its section-3 test",
+    "2f delivery settings cache; 2g intake subject check and per-key handling (agree the stop hook with INFRA-558's implementer first; tell INFRA-556's implementer before pushing docs changes)",
+    "2j reconcile jitter; 2k main.go wiring and comments; section 5 docs and .dispatch/architecture (four new component files), architecture.Parse check, docs grep",
+    "2h importer and 2i redelivery after INFRA-562 merges, built on its Sync and decide; if it has not merged when the rest is proven, report to the architect",
+    "Section 4 measurements before (merge base) and after (head): idle A, idle B, 1x step, top statements by queryid, intake burst test; simplify pass; PR body"
+  ],
+  "acceptance": [
+    {"criterion": "Each loop is driven by the change it serves or, where a timer stays, does work proportional to what changed, with jitter; each with a test that it does nothing while nothing changes", "surface": "Dispatch Go tests on real Postgres and NATS, and the idle measurement on the running binary", "check": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/pglisten/... ./internal/dispatch/duty/... ./internal/dispatch/embedqueue/... ./internal/dispatch/docs/... ./internal/dispatch/api/... ./internal/dispatch/delivery/... ./internal/dispatch/architecture/... ./internal/dispatch/redeliver/... ./internal/dispatch/store/... -count=1; plus -race on docs/api/delivery/store and -tags multiprocess on cmd/dispatch; idle B top statements by queryid show the changed loops' statements gone"},
+    {"criterion": "The GitHub intake processes notifications concurrently where order does not matter and in order per pull request where it does; no lock is held across a GitHub call", "surface": "delivery package tests with real NATS and a fake GitHub that holds calls; importer tests", "check": "go test ./internal/dispatch/delivery/... ./internal/dispatch/architecture/... -run 'Intake|Sync' -count=1; the intake burst test (20 PRs, 200 ms per GitHub call) timed on merge base and head"},
+    {"criterion": "Before and after: database statements per second and Dispatch CPU with no load at all, and at tonight's step on the committed load reproduction", "surface": "INFRA-589's harness (committed if merged, else its archive) on this pod, with pg_stat_statements and /proc CPU", "check": "idle mode 20-minute window in configurations A and B, and run-step.sh <name> 1, each alternated before/after twice; runs/<name>/statements.tsv and cpu.txt; table in the PR body and as an issue artifact"},
+    {"criterion": ".dispatch/architecture/ files for the components it changes say what is now true", "surface": "the repository's architecture model as Dispatch imports it", "check": "throwaway program calling architecture.Parse on .dispatch/architecture succeeds; dispatch-docs, dispatch-api, dispatch-architecture, dispatch-store, dispatch-server updated; dispatch-embedqueue, dispatch-delivery, dispatch-redeliver, dispatch-duty added"}
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, push and handoff, PR body and proof shape (references/pr-body.md), simplify pass",
+      "envoy: agree the intake stop hook with INFRA-558's implementer, tell INFRA-556's implementer before pushing docs changes, keep the shared pglisten.Hub aligned with INFRA-556 and INFRA-605, follow INFRA-562 and INFRA-591 merges",
+      "dispatch: attach the measurement tables and the idle-measurement archive to INFRA-607",
+      "ce-simplify-code: the simplify pass over the settled change before testing"
+    ],
+    "test": [
+      "legion-worker: tester phase rules, proof entries with negative controls, CI read of the head",
+      "dispatch: attach the re-run measurement output to INFRA-607"
+    ],
+    "review": [
+      "legion-worker: review rules and the merge gate (references/merge-gate.md, references/review-threads.md)",
+      "ce-simplify-code: judge whether the new shared pieces (RunWoken, Hub, SettingsCache, per-key handling) are the simplest shape"
+    ]
+  },
+  "decisionsForArchitect": [
+    "Decision 10: the delivery reconcile's bounded attribution walk (up to 1,000 stored pull requests re-resolved every pass, delivery/attribution.go:181-224) is not a listed finding; recommendation: keep it as a named constant cost in this issue. The architect decides whether it is in scope.",
+    "2h (importer) and 2i (redelivery) are ordered after INFRA-562 merges by INFRA-63's architect; if INFRA-562 is late, the architect decides whether to split them out."
+  ],
+  "coordination": [
+    "INFRA-63 architect (Envoy 34f41ce1, 04:30Z): accepted; importer.go and sweep.go after INFRA-562 merges; agree intake stop hook with INFRA-558's implementer; one shared listener connection per process for all new channels",
+    "INFRA-591 planner (Envoy 4eb023af, 04:33Z): suggestion sweep added to its consumer list; use events.Horizon.Safe if 591 merges first",
+    "INFRA-605 planner (Envoy 2f18be1f, 04:37Z): Hub.Handle takes func(pglisten.Notification) with PID",
+    "INFRA-592 planner (Envoy ed1f35a6, 04:39Z): moves these loops to pool.Background() and makes lease names one list duty.Exclusive checks; this change adds no lease name",
+    "INFRA-556 implementer (Envoy e8d7c4b9, 04:39Z): builds pglisten.Hub now on legion/INFRA-556 with our names, adds OnDisconnected(func()) and a caller-supplied Dial (main.go dials store.Pool.Dedicated with application_name 'dispatch-listener <process uuid>'); if INFRA-556 merges first, use its Hub and register our channels on it"
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "1a INFRA-558 C6 freezes AckWait, MaxAckPending and FilterSubject; the old build reconciles them in place every 30 s", "answer": "Plan keeps all three (decision 6, 2g); concurrency is up to 4 keys, AckWait already covers 4 queued messages of one key"},
+      {"finding": "1b INFRA-558 C5 rewrites Intake.Run and the deliver path (holder lease, Nak on stop)", "answer": "2g: queued messages are Nak()ed at stop, in-flight finish and ack; the stop is exported for C5; placement agreed with INFRA-558's implementer before either pushes"},
+      {"finding": "1c INFRA-562 keeps the importer mutex and relies on the touch write", "answer": "2h is built on INFRA-562's merged Sync after it merges (INFRA-63 architect); touch stays; a per-project mutex stays around the DB projection only"},
+      {"finding": "1d INFRA-562 widens refusedUnlisted to in-flight records", "answer": "2i indexes every record the sweep may still act on (pending.<GUID>), refused and in-flight, built after INFRA-562 merges"},
+      {"finding": "1e leasePoolSize, INFRA-558 F2 comments, listener connections and INFRA-592", "answer": "No new lease (coverage unleased, decision 4); one shared listener per process agreed with INFRA-63 architect, INFRA-556, INFRA-605, INFRA-592 told; later merge rebases (section 7)"},
+      {"finding": "2a The reproduction runs with no embedder and no App, so most changed loops do not run; 1x is lock-saturated", "answer": "Section 4: idle configuration B with fake Azure embedder and fake GitHub; per-statement numbers by queryid as evidence; 1x aggregate reported as within noise if so; intake burst test as the EP-17 number; importer test-only"},
+      {"finding": "2b Event-driven wakes could raise statements under load", "answer": "Decision 3: wakes coalesced to no faster than today's period (embedding 5 s, suggestions 60 s, excerpts 2 s)"},
+      {"finding": "2c Harness distortions: boot passes in window, unembedded seed, sampler statements, window length, fake GitHub shapes, env -i", "answer": "Section 4: boot drain reported separately, 20-minute window, pre-embedded seed copy restored, sampler excluded by database/queryid, fake GitHub with real shapes, env vars added explicitly"},
+      {"finding": "2d The committed reproduction has no statements-per-second output or idle mode", "answer": "Section 4: pg_stat_statements (log_statement fallback) and an idle mode, committed into the harness if it is on main, else attached as idle-measurement.tar.gz"},
+      {"finding": "3a Kept timers do fixed work per period (freshness write, touch, listing)", "answer": "Decision 8 and section 3: each kept timer's constant cost is named and counted; no-change pass writes no data rows; statement count independent of table size"},
+      {"finding": "3b Whole-process statement counts include the listener keep-alive; tests must fail on main", "answer": "Section 3: filter keep-alive by SQL text or ListenIdle beyond the window; idle windows longer than the old periods (e.g. 7 s > 5 s)"},
+      {"finding": "4a Suggestions: lost cross-process wakes, late-committing suggestions, no refs.source_seq index, cursor start, event order, outcome shift", "answer": "2e: wake on cross-process dispatch_events, held-lease retry until own pass runs, new suggestions checked against all their events, citation rule via refs_to (no new index), first pass runs the full legacy sweep then sets cursors, events.Horizon per INFRA-591, 60 s MinGap keeps per-minute judging"},
+      {"finding": "4b Coverage-made rows wake nothing; 1 s floor polls faster than today", "answer": "2a: coverage signals the queue in process after changing rows; floors of at least 5 s for blocked, throttled and skip-locked scans"},
+      {"finding": "4c Coverage lease lets an old-identity pass skip a new identity; 15-minute recheck too early", "answer": "Decision 4 and 2b: no lease; identity re-runs every 10 min while foreign rows remain, and when the embedder first proves itself"},
+      {"finding": "4d Which intake messages need order, key sources, RecordEventAt and token mints under concurrency", "answer": "2g: order per PR and per run with the reason and a test; PR key from subject, run key from payload; RecordEventAt cost named; concurrency bounded at 4"},
+      {"finding": "4e Excerpt NOTIFY in Go misses old-binary clears; MarkStale-once justified only on the current tree", "answer": "1d/2d: a row trigger on refs sends the NOTIFY; MarkStaleExcerpts once at boot after the implementer confirms the production build records excerpts (git show of the running revision), else kept as due-time passes for the first hour"},
+      {"finding": "4f Startup order and listener outages", "answer": "1c: boot passes run at start regardless of the listener; reconnect signals every subscriber for catch-up; due-time timers continue"},
+      {"finding": "4g A new NOTIFY adds a commit-time notify-queue lock", "answer": "Decision 2: each new NOTIFY rides a transaction that already notifies; the PR lists each site; rebuild-refs named as the exception"},
+      {"finding": "5 Rollout: consumer config flapping, redelivery markers for old-build refusals and TTL, migrations", "answer": "Consumer config unchanged; pending.<GUID> rewritten on every write and a full replay at every boot; migrations keep the previous release working, census files, renumber on rebase"},
+      {"finding": "6.1 Meaning of 'no lock across a GitHub call'", "answer": "Decision 7: the intake and the importer mutex; leases stay"},
+      {"finding": "6.2 BG-9 expiry is a product choice", "answer": "Decision 5: resolve from events, no expiry, because expiry changes what the outcome measures; named in the summary for the architect"},
+      {"finding": "6.3 Outbox 5 s ticker and settlement resumption still poll", "answer": "Decision 9: out of scope (root outbox change, INFRA-592), named as the remaining idle floor"},
+      {"finding": "7 Missing checks: jitter, kept timers, run ordering, importer deadline and key, docs grep, contract tests to rewrite", "answer": "Section 3 table and list, 2h deadline and key, section 5 grep, 1a jitter only adds"}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": []
+}
