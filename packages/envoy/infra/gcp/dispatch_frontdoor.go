@@ -207,8 +207,15 @@ notafter() {
 
 // dispatchCertPublishLoop starts the claim gate's loop in the background, keeping its pid, then
 // runs the publishing loop, each pass of which first checks with kill -0 that the gate still runs
-// and ends the container when it does not (dispatchCertPublishScript says why).
-const dispatchCertPublishLoop = `( while :; do gate; sleep 30; done ) &
+// and ends the container when it does not (dispatchCertPublishScript says why). The script is
+// its container's PID 1 (/bin/sh -c), and Linux delivers a signal to a PID namespace's init only
+// when init handles it (pid_namespaces(7)), so without the trap the kubelet's SIGTERM would do
+// nothing and the pod would wait out its grace period for SIGKILL. Each sleep runs in the
+// background under wait, since a trapped signal ends wait at once, where a shell runs a trap only
+// after a foreground sleep returns. The gate's subshell needs no trap of its own: it is not init,
+// and it ends with the namespace when PID 1 exits.
+const dispatchCertPublishLoop = `trap 'exit 0' TERM
+( while :; do gate; sleep 30 & wait "$!"; done ) &
 gate_pid=$!
 while true; do
   if ! kill -0 "$gate_pid" 2>/dev/null; then
@@ -216,7 +223,7 @@ while true; do
     exit 1
   fi
   publish
-  sleep 60
+  sleep 60 & wait "$!"
 done
 `
 
