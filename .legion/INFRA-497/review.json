@@ -2,26 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-497",
-  "completed": "2026-10-27T01:20:22Z",
-  "round": 2,
+  "completed": "2026-10-27T02:37:15Z",
+  "round": 3,
   "decision": "changes_requested",
-  "reviewedCodeHead": "149e44bbf1d9bebc758f5a15b323794d67b9b834",
+  "reviewedCodeHead": "655b7ac05dc4",
   "critical": 0,
   "important": 3,
-  "minor": 6,
+  "minor": 2,
   "keyFindings": [
-    {"severity": "important", "file": "packages/pi-envoy/src/card-wake.ts", "description": "#runActive (203, set 289, cleared only at agentEnd 294) stays true after a run the host aborts behind #disconnectFromAgent: newSession/switchSession (agent-session.ts:10280-10282, 11906-11907) and manual /compact (session-maintenance.ts:1201-1202) disconnect first, so that run's agent_end never reaches extensions, and cancel() (310) leaves the flag set. The next prompt's setup card then gets no setup marker (232), and an Esc in that setup folds it under the latch with #interrupted false, so the wake starts the stopped turn: round-1 finding 1 returns in that state."},
-    {"severity": "important", "file": "packages/pi-envoy/extensions/envoy.ts", "description": "Wiring untested in the default suite: deleting the auto_compaction_end handler (1603), cardWake.cancel() on shutdown (2768), cardWake.messageEnd (1600) or cardWake.agentStart() (2881) leaves envoy.test.ts green (866/0, code-quality pass); auto_retry_end (1604) and the cancel on switch are covered nowhere, so a regression of the interrupt paths passes CI."},
-    {"severity": "important", "file": "packages/pi-envoy/src/card-wake.ts", "description": "Cleanup: targetedAside/startup/setup on the marker (117-135) answer one question split across deliveryFor and messageEnd; one `wake` value decided in deliveryFor removes two fields and the three-way branch."},
-    {"severity": "minor", "file": "packages/pi-envoy/src/card-wake.ts", "description": "Busy-check drop (349) unpinned: a no-op there leaves all 41 card-wake tests green."},
-    {"severity": "minor", "file": "packages/pi-envoy/src/card-wake.ts", "description": "Header: a setup card is read after the run's first model response, not 'at the first step' (51-52; tester saw it in request 2); the header omits the willContinue gap after agent_end that AGENTS.md accepts."},
-    {"severity": "minor", "file": "packages/pi-envoy/src/card-wake.ts", "description": "'RPC mode's alone' (70) and AGENTS.md:60: ACP also passes mode 'rpc' (acp-agent.ts:2732); harmless since ACP defers agent-initiated turns, but the docs are wrong."},
-    {"severity": "minor", "file": "packages/pi-envoy/extensions/card-delivery-omp.test.ts", "description": "Plain `bun test` in packages/pi-envoy (what root AGENTS.md names) with both variables set still loads envoy.test.ts's nats mock in the same process; only a comment points to `bun run test`."},
-    {"severity": "minor", "file": "packages/pi-shared/test/omp-harness.ts", "description": "call() (379) takes an intent no test reads; two INTENT constants exist for it."},
-    {"severity": "minor", "file": "packages/pi-envoy/extensions/envoy.ts", "description": "Nits: 2876-2877 describes CardWake's counter; card-wake.ts 345 computes pending before the busy return."}
+    {"severity": "important", "file": "packages/pi-envoy/src/card-wake.ts", "description": "Spec sentence: the #autoCompactions counter (214, 323-337) depends on event order; a mid-run automatic compaction emits session_compact and auto_compaction_end detached (session-maintenance.ts:2519-2524), so a slow session_compact handler of another extension lets the end land first, #runActive goes false mid-run, and a later card is marked setup; folded under a held latch or in plan mode it gets no turn where main's steer resumes past both (#canAutoContinueForFollowUp, agent-session.ts:8949). pi-envoy can close it alone: clear #runActive at session_compact and session_switch only when ctx.isIdle() is true (manual/extension compaction and new/resume switch find the host idle after abort, 10209-10227; every automatic compaction inside a run or prompt finds it busy), which removes the counter, the reason filter and the AGENTS.md limit."},
+    {"severity": "important", "file": "packages/pi-envoy/extensions/envoy.test.ts", "description": "The 11-row wiring table (9493-9599) never fires agent_end: deleting cardWake.agentEnd(context) (envoy.ts:2928) leaves envoy.test.ts green (877/0, code-quality pass)."},
+    {"severity": "important", "file": "packages/pi-envoy/extensions/envoy.ts", "description": "A3 edge (AGENTS.md:82-86): a run dropped with no session_switch/session_compact (a failed manual compaction or switch after its abort) leaves #runActive true until the host is seen idle, so an Esc in the next prompt's setup gets a wake. The existing input handler (974) runs before every RPC, terminal and sendUserInput prompt while the host is still idle; clearing #runActive there when ctx.isIdle() is true closes it."},
+    {"severity": "minor", "file": "packages/pi-envoy/AGENTS.md", "description": "Line 535 says the test script runs envoy.test.ts in a process of its own; package.json:27 runs extensions/card-delivery-omp.test.ts alone."},
+    {"severity": "minor", "file": ".github/workflows/envoy-and-contracts.yaml", "description": "Hardening: the nats:2.10 service (530) is pinned by tag; the pgvector services in the same file are pinned by digest (657, 794)."}
   ],
-  "roundOneThreads": "10 threads answered by the implementer at 149e44bb; 9 confirmed fixed by the reviewer; PRRT_kwDORFy7ds6wf2qw (setup interrupt) stands in the state above.",
-  "verification": "Reviewer ran `bun run test` in packages/pi-envoy at 149e44bb with the pinned omp v18.12.2-sami.20261026-135627 and nats-server 2.10.29: 979 pass 0 fail, then card-delivery-omp.test.ts in its own process 9 pass 0 fail.",
-  "ci": "All runs for 149e44bb were cancelled by an operator bot at ~01:05Z; the reviewer re-ran Tests (40428423115) and Legion Envoy and Contracts (40428423137) once; both queued at review time.",
-  "thermonuclear": "Both run once at 149e44bb: deep review CHANGES (runActive stuck, ACP doc, plain bun test), code quality CHANGES (marker flags, wiring tests, busy drop, header, call intent, nits). The reviewer's open question (a card marked setup between pi-envoy's agentEnd and the host going idle) was settled: only microtasks follow a terminal settle (agent-session.ts:5351 to #endInFlight), so no card can land there; the willContinue gap is a documented trade-off."
+  "specLimitsNotClosableByPiEnvoy": [
+    "AGENTS.md:80-82 (a setup card the host folds with no interrupt: plan mode, a prompt refused before its run) and AGENTS.md:50-52 (a card after a willContinue agent_end whose continuation is skipped): main's steer gives that card a turn past a held latch and plan mode (agent-session.ts:8949). The host folds only under a held latch or plan mode (1377-1398), otherwise it wakes itself (1399). At the pinned tag an Esc in that window and a refusal or skip leave the same extension-visible state: before_agent_start gets no setup signal (8164), agent.abort emits nothing with no loop (agent.ts:1554-1556), plan mode is not exposed to extensions. Waking would reopen round-1 finding 1. For the architect at acceptance."
+  ],
+  "verification": "Reviewer ran `bun run test` in packages/pi-envoy at 655b7ac0 with pinned omp v18.12.2-sami.20261026-135627 and nats-server 2.10.29: 999 pass 0 fail, then card-delivery-omp.test.ts alone 9 pass 0 fail.",
+  "ci": "At 655b7ac0: Tests, Legion Envoy and Contracts, Docs, Worker Image queued at review time.",
+  "thermonuclear": "Both run once at 655b7ac0: deep review APPROVE with Minors (counter order, input-handler idle clear, nats digest) and the limits table; code quality CHANGES (agent_end row, AGENTS.md:535, isIdle in place of the counter)."
 }
