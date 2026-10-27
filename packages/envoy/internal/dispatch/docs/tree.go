@@ -125,12 +125,14 @@ func opensDocument(tree *pmdoc.Node, position int) bool {
 }
 
 // parseReplacing parses markdown a caller writes over live, the document it replaces whole (nil
-// for none), refusing a block id the markdown repeats that live does not already carry
+// for none), refusing a block id the markdown repeats that live does not already repeat
 // (pmdoc.ParseForWrite).
 func parseReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, error) {
 	return uploadedInput(pmdoc.ParseForWrite(markdown, live))
 }
 
+// uploadedInput is a tree parsed from caller markdown as an upload is taken (asUploaded). A
+// refusal the schema makes of the markdown is ErrInvalidMarkdown, the caller's to fix.
 func uploadedInput(tree *pmdoc.Node, err error) (*pmdoc.Node, error) {
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {
@@ -222,8 +224,8 @@ func renderTree(tree *pmdoc.Node) (string, error) {
 }
 
 // renderTreeWithOffsets is renderTree with each identified block's byte range in the markdown,
-// which the same render records, so a write that stores the rendering cuts its mentions' excerpts
-// (recordTreeExcerpts) from it rather than rendering the tree again for them.
+// which the same render records, so a write that stores the rendering indexes its blocks and cuts
+// its mentions' excerpts (indexDocument) from it rather than rendering the tree again for them.
 func renderTreeWithOffsets(tree *pmdoc.Node) (string, []pmdoc.BlockOffset, error) {
 	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 	if err != nil {

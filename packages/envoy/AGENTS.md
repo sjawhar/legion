@@ -240,6 +240,27 @@ A block rewritten in place under its own id is one block, and neither the halves
 splice splits nor a repeat the live document already carries (a browser write can leave one until
 settlement repairs it) refuse anything. Only a typed block's markdown can name its id.
 
+The graph bounds a block id at `text.MaxBlockIDBytes`, 256 bytes of UTF-8 (`MAX_BLOCK_ID_BYTES` in
+`@legion/contracts`): it keys a block by its id, and a Postgres B-tree key holds at most 2704
+bytes. The bound decides only which blocks the graph keys, never whether a write is taken: a
+seeded spec, an upload, an `insert`, a rebuild from markdown, an accepted suggestion or a
+browser's edit naming a longer id is written, and the document stores, renders and versions it as
+any other; its block is no graph node (`refs.IndexBlocks`, below). A reference is bounded as a
+whole too: its target id (`text.TargetID`: an issue's key, a document's `<KEY or PROJECT>/<slug>`
+or `agent/<session id>/<slug>`, a block's `<KEY or PROJECT>/<slug>#<block id>`, an ask's, a
+comment's or a message's id, a component's `<project>/<id>`), which `refs.to_id` and
+`block_refs.to_id` hold in B-tree keys, is at most `text.MaxTargetBytes`, 2048 bytes
+(`MAX_REFERENCE_TARGET_BYTES`, `referenceTargetFits` in `@legion/contracts`), since neither a slug
+nor an item id has a bound of its own. Both bounds hold only what text cites: `text.Extract` drops
+a reference past either (`inBound`), so the text citing it is written with no edge. A request's
+reference is read whatever its length (`text.ParseRef`): `?to=`, `?from=` and
+`GET /api/v1/block-links` read a node of any name, a block whose id is past `text.MaxBlockIDBytes`
+is `404 NOT_FOUND`, no node, and no route answers `400` for a reference's length. At the target
+bound the widest such key, `block_refs_pkey` with a 256-byte source block id, is about 2360 bytes.
+An ask block's row and a comment's or an ask's anchor key their block id by `block_id_key`, its
+SHA-256 (migrations 0127 and 0128), so a block id of any length is written there, and a settlement
+never fails on one.
+
 Markdown a caller writes is stored as its rendering, so a write whose rendering reads back as
 another document is refused, naming what reads back (`pmdoc.RefuseMisreadDocument` for a whole
 document, `pmdoc.RefuseMisreadWrite` over the accept path's `pmdoc.NewMisread` for an insert):
@@ -1178,16 +1199,19 @@ concurrent reads each holding one connection, concurrent anchored writes, and tw
 queued behind one held write on a four-connection pool.
 
 **Every pool's size is set in code.** `store.Open` fixes `MaxConns` at `store.sharedPoolSize`
-(16), so neither the task's CPU allotment nor the DSN another repository's URL builder writes
-decides it, and a `DATABASE_URL` that carries `pool_max_conns` is **refused at open** rather
+(64, from 16 since 2026-10-27), so neither the task's CPU allotment nor the DSN another
+repository's URL builder writes decides it, and a `DATABASE_URL` that carries `pool_max_conns`
+is **refused at open** rather
 than silently overridden — the parameter is read from `pgx.ParseConfig`'s `RuntimeParams`,
 because `pgxpool.ParseConfig` is the layer that folds it into `MaxConns` and deletes it, so
 pgxpool's own parse cannot answer the question and a raw-string scan answers a different one.
 The other pool parameters are not refused, because the shared pool keeps whatever minimums the
 connection string sets. pgx's default, `max(4, NumCPU)`, is four on production's one Fargate
 task at `cpu="512"`, and four is a connection per blocked writer: with four writers parked on
-one issue's row lock, a read of an unrelated issue waits for as long as the lock is held. The
-shared Aurora cluster has thousands of connections spare, so 16 is deliberate headroom.
+one issue's row lock, a read of an unrelated issue waits for as long as the lock is held. Sixteen
+ran out too: under heavy agent load the API held all sixteen and every other caller, the events
+outbox included, waited behind them. The database has hundreds of connections spare, so 64 is
+deliberate headroom.
 
 Work that genuinely needs its own connection while a transaction is open does not take it from
 the shared one; it takes it from a pool of its own, opened on demand from a copy of the shared
@@ -1212,7 +1236,10 @@ context carries no deadline. Warm is production's normal state, so the unbounded
 one it runs. Both separate pools zero `MinConns` and `MinIdleConns`, so a floor meant for the
 shared pool cannot become a target a one- or four-connection pool can never reach, and both
 are deliberately unguarded — a load or a probe taken under an open transaction must be served,
-not refused, and a separate pool cannot close the cycle the guard prevents.
+not refused, and a separate pool cannot close the cycle the guard prevents. The events outbox
+claims, reads and records its batches on a pool of its own too (`store.Pool.Outbox`, one
+connection): it runs one statement at a time, and a full shared pool must not hold back
+publishing.
 
 The migration runner takes one more connection outside the shared pool. `pgmigrate.Exec`, which
 applies every migration, first sets the transaction's `lock_timeout` to `pgmigrate.LockTimeout`
@@ -1363,14 +1390,18 @@ and refuses the deletion; an unaccounted mark with no committed ask/comment row 
 
 References form one graph. Mentions (`dispatch://` refs and same-origin dashboard URLs in a
 document version, ask question, comment body, or issue message) are derived on every write into
-`refs` by `refs.ReplaceCounted`, which reconciles rather than rewrites: an edge that survives keeps its
+`refs` by `refs.ReplaceCounted`, or by `refs.ReplaceCountedRefs` for a document version whose
+mentions its index has already extracted. Both reconcile through the unexported `replaceRefs`
+rather than rewrite: an edge that survives keeps its
 `created_at` and `source_seq` (the `events.id` that introduced it, stamped by `refs.Stamp` right
 after the source's event is appended, in the same transaction). Structural relations stay in the
 columns that own them and the `graph_edges` view (migration 0032) unions both into one typed edge
 relation: `mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_links`),
 `attached_to` (`artifacts.issue_key`), `anchored_to` (ask/comment anchors), `owned_by`
 (project-document asks/comments), `replies_to` (comment and message threads), `followed_by`
-(`ask_followers`). An issue may wait only on issues in its own project through `blocked_by`.
+(`ask_followers`), and, since migration 0121, a block's `mentions` (`block_refs`) and its
+`part_of` edge to its document (`document_blocks`). An issue may wait only on issues in its own
+project through `blocked_by`.
 For cycle checks an issue has two halves: it starts after its `blocked_by` targets are done and
 after its parent starts, and it is done after it starts and after its children are done. A
 write that would make either half wait on itself is `409 DEPENDENCY_CYCLE`. One sibling may
@@ -1379,16 +1410,18 @@ descendant through `blocked_by`. Artifact targets are addressed by
 `ref_key`, artifact sources by uuid; each arm has the index its `to`/`from` predicate needs.
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
-exists, and refuses to run without `dispatch.server_url`. A document mention's backlink excerpt -
-the block holding the target's first mention, its id the `#b-<id>` jump and its markdown cut to
-480 characters - is stored on the `refs` row (`excerpt_block_id`, `excerpt_text`,
+exists, marks every document owed a block index (below), and refuses to run without
+`dispatch.server_url`. A document mention's backlink excerpt -
+the innermost block holding the target's first mention, its id the `#b-<id>` jump and its markdown
+cut to 480 characters - is stored on the `refs` row (`excerpt_block_id`, `excerpt_text`,
 `excerpt_version`, migration 0092) when the mention is indexed, cut from a render of the version's
 tree that the write already makes: every renderer of a version's tree takes the block offsets from
 its own render (`pmdoc.RenderWithBlockOffsets`; `renderTreeWithOffsets`,
 `documentMarkdownWithOffsets`), and a `docs.renderedTree` carries the tree, the markdown and the
-offsets together to `refs.MentionExcerpts` and `refs.RecordExcerpts` (`writeVersionTx`, and an
-upload's and a seeded spec's `docs.Service.IndexDocumentReferences`, which take the transaction's
-recorded rendering from the ledger), so the route reads no document and no write renders its tree
+offsets together to `docs.indexDocument` (`writeVersionTx`, and an upload's and a seeded spec's
+`docs.Service.IndexDocumentReferences`, which take the transaction's recorded rendering from the
+ledger), which indexes the version's references, excerpts and blocks from one
+`text.ExtractAt` of its markdown, so the route reads no document and no write renders its tree
 for the excerpts (LEGION-531). An edit, a named version, a seed, a rebuild and a settlement render
 the tree once; an upload that changes the document renders it twice, as it did before excerpts -
 `ReplaceText`'s render of the replacement, which is the stored markdown, and `applyLive`'s render
@@ -1412,6 +1445,95 @@ version the binary it replaces writes leaves the previous version's excerpt with
 marks it owed at the reconciliation's next tick, which starts within five minutes
 (`docs.ReferenceExcerptReconcileInterval`) of the last one ending. The deploy's overlap lies inside
 the hour after the new task starts, the only hour `MarkStaleExcerpts` runs.
+A `?to=` read lists a mention that one of the citing document's blocks holds from that block,
+with the block's own excerpt (below), so the excerpt on the `refs` row is what a document mention
+no block holds is shown with: one in a document the block index has not reached.
+
+Each identified block of a document is a graph node too: kind `block`, id
+`<document ref_key>#<block id>` (`text.TargetID`), its reference the document's with `#b-` and the id
+as `text.EncodeBlockID` writes it (`refs.BlockRef`). `refs.IndexBlocks` indexes a version's blocks
+in the version writer's transaction, from the same render and extraction as its references: the
+blocks the render's offsets name, which `GET /api/v1/artifacts/{id}/blocks` lists, the first
+holder of a repeated id being the node. A block whose id is longer than `text.MaxBlockIDBytes` is
+no node (`uniqueBlocks`): a mention inside it starts at the innermost node holding it, or at the
+document when none does, and `IndexBlocks` logs a warning naming the document, the version, how
+many such blocks it skipped, the longest one's id bytes and the bound. The version is still
+written. Its tables are migration 0121's: `document_blocks` holds
+each block the latest indexed version holds, with its text's sha256, its
+text cut to 480 runes as its excerpt, and `changed_version` and `changed_at`, the version its text
+last changed in, which an unchanged text keeps. `document_block_texts` records a block's whole
+text in each version that makes it new, changes it, restores it, or deletes it (a null text).
+`document_indexed_versions` names each version a block-aware build indexed, and
+`document_block_versions` the version a document's blocks stand at, null while the document is
+owed an index. `block_refs` holds each link a block holds, keyed on the block, its target and the
+link's `kind`. `document_blocks.node_id` and `block_refs.from_node` are hash indexed, never B-tree:
+a node id holds the document's ref_key, which no bound short of its own unique key limits, so a
+long-named document's node ids can pass the 2704 bytes a B-tree entry holds. A mention starts at the
+innermost block holding its start: a list item's
+paragraph, and the table for a mention in a cell, since rows and cells are not nodes.
+`docs.indexDocument` unions the targets whose block pairs moved with those the document's own
+`refs` moved before one `refs.CountedChanges`, so a version that goes from one citing block to
+two names the target in `references_changed`. A new pair takes the version and its time, and
+`refs.Stamp` gives it the version event's id; on a document's first indexing, a pair takes the
+`created_at` and `source_seq` of the document's own `refs` row for that target when there is one.
+
+The document keeps its own `refs` rows, which the closure and the older
+`GET /api/v1/artifacts/{id}/references` read, but a document's mention that one of its blocks
+holds with the same kind and target is listed and counted from that block alone
+(`heldByABlock`, in `refs.Edges` and `refs.BacklinkCounts`), so a node is counted once for each
+block citing it and each link shows once, where its block holds it. A document's own read
+(`?to=` or `?from=` a document reference) also lists the edges at its current blocks, each naming
+that block as the edge's `block`; its `part_of` edges are left out unless `?kind=` names them. A
+link to a block counts only while its block is a current `document_blocks` row: a deleted block
+has none, so `loadBlockNodes` (the `block` entry of `nodeLoaders`) resolves nothing and the edge
+drops out of `refs.Edges` and `refs.BacklinkCounts`, `refs.Outgoing` omits the target,
+`refs.Closure` does not follow it, and `refs.BlockLinks` drops the link. The mentions at it stay
+in their sources' `refs`, so a version holding the id again brings each link back. The older
+route keeps every source: `refs.ReferencedBy` lists each item and document that cites the
+document or one of its current blocks once, a document by its own row, and `refs.Outgoing` lists
+a block target with its document as the artifact.
+
+A block reference may be pinned to version N of its document, `#b-<id>@v<N>`, with N at most
+9223372036854775807 (Go's `int`; a larger N makes the text no reference); the pin is no part
+of the edge (`text.TargetID` drops it), and it is read when the reference is.
+`GET /api/v1/references?to=<block reference>` names the block node with `text`, its whole current text
+(`refs.CurrentBlockText`); a pinned reference adds `pin` (`model.BlockPin`), read by
+`refs.BlockTextAt`: the text of the latest `document_block_texts` row at or before N, read only
+when `document_indexed_versions` holds N. Its `state` is `unchanged` or `changed` by comparing that
+text with the current one, or `removed`, with `removed_version`, the node's text and changed
+version absent and no edges, when no current version holds the block. An unpinned reference to a
+block no current version holds is `404 NOT_FOUND` `no block "<id>" in <document ref>`, and a pin
+to a version the document lacks, to one with no record of its blocks, or to one that did not hold
+the block is `404 NOT_FOUND` saying which (`blockReferenceNode`, `api/references.go`). Versions
+are Postgres `integer`, so `refs.BlockTextAt` answers a pin above 2147483647 without a query as a
+version the document lacks: `404 NOT_FOUND` `no version <N> of <document ref>`.
+`GET /api/v1/block-links?from=<document>&to=<document>` (`refs.BlockLinks`) lists the links from
+blocks of one document to blocks of another, or of the same one, while both blocks are current.
+
+What no block-aware write indexed, the server indexes itself. Migration 0121 marks every document
+owed; 0122's trigger marks a document owed on every markdown version any build inserts, which a
+block-aware writer's own index settles later in the same transaction; and 0123-0125's triggers
+put each comment, ask and issue message (one with an `issue_key`) whose text holds `#b-` into
+`block_grammar_owed`, which 0126 seeds with those already stored, since a build that predates the
+block grammar indexes such a text without it. `cmd/dispatch` runs
+`docs.Service.RunBlockIndexReconciliation` under the lease `block-index`: each tick indexes up to
+20 owed documents, by a keyset cursor, and up to 200 owed items, oldest first, every 2 s while a
+batch is full and every 30 s after, and logs `dispatch: block index` with `documents=`, `items=`,
+`owed_documents=`, `owed_items=` and `live_ahead=`. It reads a document (`TextWithBlocks`) with no
+transaction held, then, under the document's owner lock, indexes it only while its latest version
+and its owed mark are the ones it listed, taking the version's time and the `source_seq` of the
+event that recorded the version (`stampVersionEvent`). A document that owes a settlement and whose
+live markdown differs from its latest version's is skipped, counted `live_ahead` and left owed; on
+a closed issue that lasts until the issue reopens. The loop remembers such a document and counts it
+again without reading it while its latest version and its pending settlement's `marked_at` (which
+every update append moves) stay as they were and this server holds no room for it. An item is
+re-read `for no key update` and re-indexed with this build's grammar (`refs.ReindexOwedItem`), a
+new edge taking the time its text was written and no `source_seq`; its owed row is deleted only
+while it holds the `enqueued_at` the tick listed, so an edit that lands meanwhile leaves the item
+owed.
+`rebuild-refs` marks every document owed and prints `blocks_owed=`; it leaves
+`block_grammar_owed` alone, since it has just re-read every item itself.
+
 Blocker-list and parent changes serialize per project through `lockProjectIssueDependencies`
 (`api/issue_parent.go`), using the two-key advisory-lock namespace `dispatch-issue-dependencies`.
 That transaction lock comes before any row or rank lock. A PATCH then locks every issue row it
@@ -1437,16 +1559,41 @@ PATCH naming the issue itself is `400 BLOCKED_BY_INPUT` too.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
-issue's own `child_of`, `blocked_by` and `affects` edges, and the cited node's `?to=` backlink names the spec.
+issue's own `child_of`, `blocked_by` and `affects` edges, and the cited node's `?to=` backlink names
+the spec's innermost block holding the citation (a `block` node whose `document` is the spec), or
+the spec itself while the block index has not reached it.
 Where a reference in text ends, and what it names, is one rule with two readers: `text.ExtractAt`,
 which every write indexes through, and the dashboard's `composerReferences` (`refs/routes.ts`,
-scanning with `referenceSpans` and parsing with `referenceRouteFromHref`), behind its reference
+scanning with `referenceSpans` from `refs/reference-spans.ts` and parsing with
+`referenceRouteFromHref`), behind its reference
 pills, unfurl cards and linked text. `DISPATCH_TEXT_REFERENCES` in `@legion/contracts`, whose
 JSON copy is `text/testdata/dispatch-text-references.json`, is the table both are tested against,
 so a change to the rule changes both readers and the table: `**dispatch://KEY**`,
 `` `dispatch://KEY` `` and `[dispatch://KEY](dispatch://KEY)` (how a document stores
 `<dispatch://KEY>`) all mention `KEY`, though the dashboard shows the code span as code, not a
-link. The Go reader parses a reference as the browser does: a query's pairs split on `&` alone,
+link. A `#b-<id>` fragment after an issue's spec or document, or a project's document, names that
+block (`text.parseBlock`, the dashboard's `parseBlockReference`), and so does one on a live
+document page (`documentPage`); a version page's fragment names no block. The id is read with any
+percent-encoding, and every writer writes it as `text.EncodeBlockID` and `encodeBlockId`
+(`@legion/contracts`) do: each UTF-8 byte but ASCII letters, digits and `-` percent-encoded in
+upper-case hex, so `@` is `%40` and a raw `@` in the fragment is only ever the `@v<N>` pin. A
+fragment whose pin is past 9223372036854775807 names no block: after `dispatch://` the text is no
+reference, and on a live document page it names the document. Text cites only within the bounds
+the graph keys (`text.inBound`; the dashboard's `routeInBound`, `refs/target-id.ts`): a block id
+that decodes to more than `text.MaxBlockIDBytes` (`MAX_BLOCK_ID_BYTES`), 256 bytes, or a target id
+(`text.TargetID`) past `text.MaxTargetBytes` (`MAX_REFERENCE_TARGET_BYTES`), 2048 bytes, cites
+nothing: after `dispatch://` the text is no reference, a live document page whose block is past
+them names the document (`pageInBound`), and one whose document or item is past them names
+nothing. A request's reference is read whatever its length: `text.ParseRef` for an API route, the
+dashboard's `parseNodeReference` and `nodeRouteFromHref` for what the server returned and for a
+picture or link target an author wrote, and the client's `parseDispatchRef` and
+`dispatchRefFromUrl`. A search hit for an ask links its typed block (`#b-`) only while that block
+is a graph node (`askBlockNodeSQL` in `api/search.go`), and otherwise `?ask=<id>`, so
+`dispatch read` of any hit's href resolves. `parseBlockFragment` carries
+a pin as its digits, so the browser never rounds one past 2^53. The two encoders are tested against
+`DISPATCH_BLOCK_ID_ENCODINGS`, whose JSON copy is
+`text/testdata/dispatch-block-id-encodings.json`. The Go reader parses a reference as the browser
+does: a query's pairs split on `&` alone,
 as `URLSearchParams` splits them (`searchParams`), an item id is decoded as `decodeURIComponent`
 decodes it, a slug is the whole segment, and a reference holding a control character, or an item
 id that decodes to one, names nothing; the index binds ids as `text[]`, where Postgres refuses a
@@ -1760,8 +1907,9 @@ owner (the same issue, or for a project document the same project's other docume
 under that id that asks, or once asked (its `ask.opened` and `ask.edited` events), exactly what the
 block asks - its question, options, `multiple` and urgency, which a copy carries unchanged
 (`copiedAskSources`, `docs/copied_asks.go`): a record copy of a spec uploaded beside it carries its
-blocks under their ids. Block ids are unique per document only (`asks_block_id_unique` is on
-`block_artifact_id` and `block_id`), so the text has to match as well, since an author-chosen id
+blocks under their ids. Block ids are unique per document only (`asks_block_id_unique` keeps
+`block_artifact_id` and `block_id` unique, keyed on `block_id_key(block_id)`, the id's SHA-256,
+since migration 0127), so the text has to match as well, since an author-chosen id
 such as `decision` can name unrelated questions on two documents. A match on an earlier wording
 counts only while the ask is open, or when its answer or resolution was given while that wording was
 current: its `ask.answered` or `ask.resolved` event comes after the event that made the wording
@@ -1932,8 +2080,8 @@ from and that ask's document.
 - A reply to an open ask (`ask_id` set on `POST /api/v1/issues/{key}/comments` or `POST /api/v1/artifacts/{id}/comments`) records `turn` (`comments.turn`, migration 0028): who holds the turn after it. A human author's reply always stores `agent` whatever the request says; a session author's stores `human` unless the request says `turn: "agent"` (a progress note - the agent still owes the next move). A reply under an answered or resolved ask records no turn (nothing is waiting; a requested `turn` is ignored there, as a human's is). `turn` on a comment that is not an ask reply is `400 TURN_REQUIRES_ASK`; any value but `human`/`agent` is `400 INVALID_COMMENT`. Comment objects carry `turn` (null under a closed ask and off ask replies). The column's only constraint is `turn requires ask_id`, so a pre-0028 server still draining during a deploy inserts its ask replies with a null turn; every reader coalesces a null newest-reply turn to `human`.
 - Every ask the API serves is read through one row shape: `docs.AskColumns` + `docs.ScanAsk` decode the ask row (the document settler uses the same pair for indexed blocks and anchor-refresh events), while `api/ask_rows.go` extends it with the block ask's document (`askRowColumns`) and, for reads, the newest comment in its thread (`askReadColumns`, a `lateral ... limit 1` join). `opened_event_id` is attached afterwards by `attachOpenedEventIDs`, one `events` query per read served by the partial index `events_ask_payload_id` (`store/migrations/0030_events_ask_payload_id.up.sql`; its `type in (...)` list mirrors that query and must change with it). `asks.options` is always a JSON array, never null.
 - Every open ask read carries `waiting_on` (`human` | `agent`), and `waitingOnExpression` (`api/ask_rows.go`) is the rule's one home: the ask reads (`askReadColumns`, which alias it `waiting_on` so the Inbox order names that column and evaluates the rule once a row), `listOpenAsks`, a document's awaiting approval (`attachApprovals`), and the approval route's hand-back decision (`askWaitingOn`) all embed it. A reply learns its `ask_waiting_on` with no second statement: the comment write reads the ask it joins with the rule's moved-request arm, `approvalMoved` (`describeAsk`), under the owner row every version write and hand-back takes first, and once inserted the reply is the thread's newest, so `commentThreadTarget.waitingOnAfter` applies the rule to it in Go - `agent` for a moved request, otherwise the reply's own `turn`. An approval request whose `requested_version` is below its current `version` is waiting on its agent. One whose newest thread reply is the reply its last hand-back answered (`handed_back_reply_id`) is waiting on the human, and so is one nobody has replied to; otherwise the newest comment's `turn` decides. The newest reply is the one that committed last: `comments.created_at` defaults to `clock_timestamp()` (migration 0065), the moment its insert runs, and both comment inserts (`createCommentFor`, `replyComment`) leave it to the default and run once their transaction holds the owner row. The old default, `now()`, was the transaction's start, which sorted a reply that began first but waited for the row before one that committed while it waited; an older binary still serving during a rollout names no `created_at` either, so the default orders its replies too. The hand-back reads that reply under the same owner row, so a reply that inserts after the hand-back sorts after the reply it recorded and decides the turn, however early its own transaction began. It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`; closed asks and every `ask.*` event payload omit it. A `comment.created` or `comment.answered` payload that replies to an open ask carries the resulting `ask_waiting_on`, and every route that writes a comment (`POST /api/v1/issues/{key}/comments`, `POST /api/v1/artifacts/{id}/comments`, and the delivery callback `POST /api/v1/comments/{id}/reply`) answers the same `ask_waiting_on` beside the comment row (`commentWriteResponse`, `api/comment_projection.go`; `model.Comment` is the stored row and carries no derived turn), so a stream consumer or the writing agent reports the value every ask read has without a refetch. A replayed delivery callback, which writes nothing, answers the stored reply alone.
-- Every ask read also carries `referenced_by_count`: how many `graph_edges` rows point at that ask from a node kind this build reads (`refs.BacklinkCounts` binds the kinds `nodeLoaders` resolves, so a newer build's row is left out of the count as it is out of the list), counted for the whole page in one grouped query (`attachAskBacklinkCounts`, `api/ask_rows.go`) rather than one request per card. It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`; mutation responses omit it, and so does an `ask.*` event off the live broker — `attachAskEventFields` (`api/events.go`) stamps the count only on replayed event reads, and nothing builds a card from an event payload. A card that needs the count reads one of the routes above. `GET /api/v1/issues/{key}` carries the issue's own `referenced_by_count` the same way, so the issue page renders its header count without a graph request; `GET /api/v1/artifacts/{id}` carries no backlinks at all — the graph is `GET /api/v1/references?to=` (or `GET /api/v1/artifacts/{id}/references` for agents). An ask's own `replies_to` edges — its clarification thread, which every ask surface already renders — are excluded from that count and from `?to=<ask>`; `?kind=replies_to` still returns them.
-- A write that moves the reference graph names what it moved. `refs.ReplaceCounted` is the one way to index a body: it reconciles that source's edges (`replace`, unexported, so no producer can reconcile without holding what moved) and keeps the targets whose readers carry a batched count — an issue and an ask — which the event carries as `references_changed` (`[{kind, id, issue_key?, artifact_id?}]`), with `references_changed_truncated: true` past `refs.CountedChangeLimit`. A consumer refreshes exactly those rows (the ask's lists, its thread and the Inbox, the issue's detail) instead of sweeping every list; a write that cited nothing counted carries neither field. `grep -rn 'refs\.ReplaceCounted(' --include=*.go internal` lists every write that indexes a body, and the reconcile half is callable only from inside `refs`.
+- Every ask read also carries `referenced_by_count`: how many `graph_edges` rows point at that ask from a node kind this build reads (`refs.BacklinkCounts` binds the kinds `nodeLoaders` resolves, so a newer build's row is left out of the count as it is out of the list; a document's mention that one of its blocks holds counts once for each citing block, in place of the document's own row, `heldByABlock`), counted for the whole page in one grouped query (`attachAskBacklinkCounts`, `api/ask_rows.go`) rather than one request per card. It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`; mutation responses omit it, and so does an `ask.*` event off the live broker — `attachAskEventFields` (`api/events.go`) stamps the count only on replayed event reads, and nothing builds a card from an event payload. A card that needs the count reads one of the routes above. `GET /api/v1/issues/{key}` carries the issue's own `referenced_by_count` the same way, so the issue page renders its header count without a graph request; `GET /api/v1/artifacts/{id}` carries no backlinks at all — the graph is `GET /api/v1/references?to=` (or `GET /api/v1/artifacts/{id}/references` for agents). An ask's own `replies_to` edges — its clarification thread, which every ask surface already renders — are excluded from that count and from `?to=<ask>`; `?kind=replies_to` still returns them.
+- A write that moves the reference graph names what it moved. `refs.ReplaceCounted`, or `refs.ReplaceCountedRefs` for a document version's index (`docs.indexDocument`), which hands it the references it extracted and the targets its blocks' mentions moved, is the one way to index a body: it reconciles that source's edges (`replaceRefs`, unexported, so no producer can reconcile without holding what moved) and keeps the targets whose readers carry a batched count — an issue and an ask — which the event carries as `references_changed` (`[{kind, id, issue_key?, artifact_id?}]`), with `references_changed_truncated: true` past `refs.CountedChangeLimit`. A consumer refreshes exactly those rows (the ask's lists, its thread and the Inbox, the issue's detail) instead of sweeping every list; a write that cited nothing counted carries neither field. `grep -rn 'refs\.ReplaceCounted' --include=*.go internal` lists every write that indexes a body, and the reconcile half is callable only from inside `refs`.
 - Every payload family that can carry reference changes is built by a helper that takes them, so a producer that forgets does not compile: `artifact.*` through `api.artifactCreatedEventPayload` and `docs.ArtifactVersionEventPayload` (`writeVersionTx` returns `model.ReferenceChanges`, `SnapshotVersion` and `NamedVersion` return them on a `docs.VersionResult`, and the six producers — a settle, an upload, `POST /artifacts/{id}/versions`, `POST /artifacts/{id}/edits` (the route `dispatch doc-edit` uses), accepting a suggestion, and an anchor snapshot on an ask or a comment — each pass what their write moved); `ask.*` through `model.NewAskEventPayload` / `model.NewAskEditEventPayload`; `message.*` through `messageReplyThread.payload`; `comment.*` through `s.commentEventPayload`; and `issue.*` through `model.NewIssueEventPayload`, which is how `POST /api/v1/issues` names what the spec it seeds cited. A transition that writes no text passes `model.ReferenceChanges{}` rather than omitting the argument. The guard is the required argument plus review, not the compiler alone: a struct literal (`model.AskEditEventPayload{Ask: …}`, as `outbox/publisher_test.go` builds) still compiles. Re-runnable inventory: `grep -rn 'NewAskEventPayload\|NewAskEditEventPayload\|NewIssueEventPayload\|commentEventPayload\|artifactCreatedEventPayload\|ArtifactVersionEventPayload\|thread.payload(' --include=*.go internal`.
 - The reference grammar accepts any segment as an id, so `dispatch://CORE-1/ask/hello` parses and is stored like any other target. Every lookup that resolves a stored target skips what resolves to nothing rather than failing the write: issue and artifact targets compare text (`key = any($1)`, `project_key || '/' || id = any($1)`) and ask targets are filtered to syntactically valid uuids in Go before `id = any($1)`, which keeps the `asks` primary key on a query that runs inside every body-indexing transaction. A uuid cast in SQL would turn one malformed citation into a 500 on the write, and — because such rows are already stored — into a comment that can never be edited again.
 - `GET /api/v1/inbox` rows carry the owning issue's nullable `priority` and `last_reply` (`{author, created_at}` of the newest comment with that `ask_id`, or null) beside `waiting_on`. It orders rows by the owning issue's priority first (`P0` on top, unset priorities last; a document ask has none), then by whose turn it is (`waiting_on: human` before `agent`), then by recency (newest reply, else the ask's creation), so a P0 ask an agent is still working on outranks a P2 ask nobody has answered; the SPA partitions by `waiting_on` and keeps this order inside each section. The client uses the same open-ask response to surface every `waiting_on: human` row under `Waiting on you` and its `Blocked on you` count; `waiting_on: agent` rows are `Waiting on agents`, whoever replied last. `GET /api/v1/issues/{key}` carries the same `last_reply` and `waiting_on` on every `open_asks` row (`issueOpenAsk`, `issue_queries.go`), so the issue header applies the inbox's whose-turn rule without the human-only inbox. A `comment.created` payload that replies to an ask carries `ask_state` (the ask's state at posting time) beside `ask_question`, so an agent can tell a clarification request on its open ask from discussion after the answer.
@@ -1972,7 +2120,7 @@ from and that ask's document.
 
 Dispatch and Envoy clients (`@legion/envoy-client`) treat an address and the credential written beside it as one trust-bound configuration, "same server only". A file's `dispatch.token` goes only to the origin of the `dispatch.serverUrl` written in that same file (`http://localhost:8766` when it names none), so a `DISPATCH_URL` at another origin needs `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`, and is otherwise refused with `DISPATCH_URL names <origin>, but <file>'s dispatch.token is for <origin>; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`. A file's `envoy.token` goes only to the origin of its `envoy.url` (the default listener, `http://127.0.0.1:9020`, when it names none), so an `ENVOY_URL` at another origin needs `ENVOY_TOKEN` or `ENVOY_TOKEN_FILE`, and is otherwise refused with `ENVOY_URL names <origin>, but <file>'s envoy.token is for <origin>; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`. A file's `envoy.natsSeed` goes only with its `envoy.natsUrls`, since a server that is not the real one can relay the real server's nonce and replay the signature, so an `ENVOY_NATS_URL` naming other servers (compared as a set of normalised URLs: scheme and host lower-cased, a trailing `/` dropped, the default port 4222 written) needs `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, and is otherwise refused with `ENVOY_NATS_URL names other servers than <file>'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`, which names the file variable alone. A refusal of an address's token turns its section off with that error and sends nothing; a refused seed turns off only the session's inbound messages (no NATS connection, the listener and its bearer kept), saying so in the start notice. A credential from a variable goes with whatever address resolves. A repository's `.envoy/envoy.json` is read only while `DISPATCH_URL` is unset (a set `DISPATCH_URL` replaces its server, its token and its `dispatch.enabled: false` together, which are then neither used nor refused), contributes only its `dispatch.enabled: false` or its own server with its own token (its `dispatch.enabled: true` alone turns nothing on, so it cannot select the default server and draw a variable's token to it), and is held to its own file both ways: its `dispatch.serverUrl` is used only with the `dispatch.token` beside it (refused with `<checkout file>: dispatch.serverUrl requires dispatch.token in the same file`), its `dispatch.token` only beside its own `dispatch.serverUrl` (refused with `<checkout file>: dispatch.token requires dispatch.serverUrl in the same file` unless `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE` replaces it), and a `!` token there is refused with `<checkout file>: dispatch.token is a command, which a checkout's envoy.json cannot run`. Its server with its own token points a session at that server as that token's holder, the user's own server included; what it cannot do is take the user's token, or a variable's, anywhere. It may hold no `envoy` section: the clients ignore one and say so in the session's start notice (`<checkout file>: envoy is not read from a checkout's envoy.json; put it in <file>`), and the server refuses to start on it, so a cloned repository never chooses where a session's deliveries come from or which NATS servers a process connects to.
 
-The deployed server's `DISPATCH_SERVER_URL` is separate: it overrides the merged `dispatch.serverUrl`, must be an absolute `http` or `https` URL with no path, and is the exact sign-in callback origin (Dispatch's client at the sign-in issuer, the sign-in pool's app client or the Google web client, must list `<DISPATCH_SERVER_URL>/auth/callback`). `NATS_URLS` likewise overrides the user file's `envoy.natsUrls` for the server. People sign in (`DISPATCH_SIGNIN_*`), through a Cognito sign-in pool for `DISPATCH_SIGNIN_GROUP` or with Google directly for `DISPATCH_SIGNIN_DOMAIN`, never both. Through the pool a person is named by the email their pool username carries (`<provider>_<email>`, the provider one the ID token's `identities` names), never by the `email` claim, which a person can write; with Google, by the verified `email` of an account whose `hd`, the token's Workspace domain and never the email's own domain, is `DISPATCH_SIGNIN_DOMAIN`, claims the code flow reads from the verified token in domain mode alone (the verifier pods' tokens and the listener share reads none of them), under Google's issuer alone, the only one whose tokens carry `hd`. A sign-in the issuer vouches for but Dispatch does not admit — a person outside `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN`, an email Google has not verified, or a sign-in that names nobody by email — is logged (`dispatch: sign-in refused username=<username> reason=<reason>`, or `email=<email> hd=<hd>` in place of the username under a domain) and answered with a 403 HTML page naming the email and the reason and linking back to `/auth/start`, so an administrator can find who to add. Dispatch keeps the issuer's refresh token server-side, sealed under a key derived from `DISPATCH_SIGNING_KEY` (`people.refresh_token`; the format is in `cmd/dispatch/README.md`, Identity); a stored value that does not open counts as none and the person signs in again. Every boot revokes each refresh token stored in plain text at the pool, then clears it, and a sign-in that replaces one revokes it first, so a database backup without the signing key holds no token the pool would accept only once a boot of this release has retired them all. Rotating the signing key leaves every stored token unopenable but revokes none at the issuer: after a key leak, sign people out at the issuer. It confirms a cookie's person with the issuer at least hourly (`identity.Membership`); a refresh the issuer refuses or cannot answer, or one whose ID token no longer passes the group or domain rule, ends every session they hold, which the API answers as 401. A person is their email, so under a domain `people.sub` records the Google account that last signed in to each address, and a sign-in or confirmation under another account ends every session of the address; under a group nothing does, so the old holder of a reassigned address keeps the cookies they hold until those expire. Browser sessions carry a server-side generation that logout advances, and unsafe cookie-authenticated requests must prove the configured same origin; bearer automation remains separate. JSON decoding is limited to 1 MiB, multipart uploads retain their explicit 26 MiB limit, and the GitHub proxy forwards no request body: it answers GET alone, for three read shapes, as the GitHub App. The event outbox retries each required issue, route, and author destination with exponential backoff, so a failed or poison delivery cannot be marked complete or starve later notifications. A destination NATS denies holds back none of the event's others; a connection or store failure ends the attempt at that destination, and the event is retried (`publish`). A core-NATS destination (a role lane) counts as published only once `bus.Client.PublishCoreTo` has shown the server accepted it, at the cost of one flush round trip (`bus.confirmPublished` holds how): one the server denies under Dispatch's grant (`bus.ErrPublishDenied`, naming the subject) or cannot be shown to have accepted is left unrecorded and retried, rather than recorded in `published_destinations` for a message nobody received. Each retry line (`dispatch outbox: publish event`) names the destination by label and target (`publish owner topic "<subject>"` for the event's own topic, `publish route "role:reviewer"` or `publish route "session:<id>"` for the issue's route, `publish author route to "<session>"`, `publish follower route to "<session>"`, `publish claim change to "<session>"`); a core denial, which only a `role:` route can be since of the outbox's destinations only the role lanes take core transport (`bus.UsesCoreTransport`), adds the subject and the server's violation. The listener's own core publishes (a role message's forward or an ad-hoc topic's publish through `/v1/messages/publish`, a fanout exception) fail the same way, the API publish answering 500 with the violation; a denied forward of an ad-hoc topic's copy to one of its recipients is named `delivery_failed` in the route's 504 instead. A destination NATS refuses (`bus.ErrRefused`: an event past the server's max payload, or a subject past NATS's limit or holding whitespace or an empty token, which an unbounded document slug or a bearer's session id such as `sess..x` can make) is refused the same way on every retry, so it is logged once (`dispatch outbox: destination refused`, naming the event and topic) and counted done, and the event goes on to its other destinations. The listener holds one line for both of the bearer kinds `/v1` accepts: the shared-token compare stays constant time and is skipped entirely when no shared token is configured, so no request authenticates against an empty one; a JWT-shaped bearer the verifier rejects is answered 401 and never falls back to the shared token or any other path; and the 401 is the same `unauthorized` in every case, so a rejected caller learns neither the reason class nor which credentials the listener is configured for.
+The deployed server's `DISPATCH_SERVER_URL` is separate: it overrides the merged `dispatch.serverUrl`, must be an absolute `http` or `https` URL with no path, and is the exact sign-in callback origin (Dispatch's client at the sign-in issuer, the sign-in pool's app client or the Google web client, must list `<DISPATCH_SERVER_URL>/auth/callback`). `NATS_URLS` likewise overrides the user file's `envoy.natsUrls` for the server. People sign in (`DISPATCH_SIGNIN_*`), through a Cognito sign-in pool for `DISPATCH_SIGNIN_GROUP` or with Google directly for `DISPATCH_SIGNIN_DOMAIN`, never both. Through the pool a person is named by the email their pool username carries (`<provider>_<email>`, the provider one the ID token's `identities` names), never by the `email` claim, which a person can write; with Google, by the verified `email` of an account whose `hd`, the token's Workspace domain and never the email's own domain, is `DISPATCH_SIGNIN_DOMAIN`, claims the code flow reads from the verified token in domain mode alone (the verifier pods' tokens and the listener share reads none of them), under Google's issuer alone, the only one whose tokens carry `hd`. A sign-in the issuer vouches for but Dispatch does not admit — a person outside `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN`, an email Google has not verified, or a sign-in that names nobody by email — is logged (`dispatch: sign-in refused username=<username> reason=<reason>`, or `email=<email> hd=<hd>` in place of the username under a domain) and answered with a 403 HTML page naming the email and the reason and linking back to `/auth/start`, so an administrator can find who to add. Dispatch keeps the issuer's refresh token server-side, sealed under a key derived from `DISPATCH_SIGNING_KEY` (`people.refresh_token`; the format is in `cmd/dispatch/README.md`, Identity); a stored value that does not open counts as none and the person signs in again. Every boot revokes each refresh token stored in plain text at the pool, then clears it, and a sign-in that replaces one revokes it first, so a database backup without the signing key holds no token the pool would accept only once a boot of this release has retired them all. Rotating the signing key leaves every stored token unopenable but revokes none at the issuer: after a key leak, sign people out at the issuer. It confirms a cookie's person with the issuer at least hourly (`identity.Membership`); a refresh the issuer refuses or cannot answer, or one whose ID token no longer passes the group or domain rule, ends every session they hold, which the API answers as 401. A person is their email, so under a domain `people.sub` records the Google account that last signed in to each address, and a sign-in or confirmation under another account ends every session of the address; under a group nothing does, so the old holder of a reassigned address keeps the cookies they hold until those expire. Browser sessions carry a server-side generation that logout advances, and unsafe cookie-authenticated requests must prove the configured same origin; bearer automation remains separate. JSON decoding is limited to 1 MiB, multipart uploads retain their explicit 26 MiB limit, and the GitHub proxy forwards no request body: it answers GET alone, for three read shapes, as the GitHub App. The event outbox publishes each claimed batch as one window (`scanBatch`): it sends every destination of every event, in id order, through one `bus.Client.Window` before it waits for any answer, so a batch costs one NATS round trip rather than one per destination and NATS takes the envelopes in the order they were sent; then it writes the whole batch's outcome in one statement (`recordBatch`), marking an event published only once NATS accepted each of its destinations. It claims, reads and records events on a pool of its own (`store.Pool.Outbox`), so the API's requests never queue ahead of it. It retries each required issue, route, and author destination with exponential backoff, so a failed or poison delivery cannot be marked complete or starve later notifications. A destination NATS denies holds back none of the event's others; a connection or store failure that comes back before anything was sent ends the attempt at that destination, and the event is retried. A failure of the connection rather than the envelope (`bus.ErrUnavailable`: no connection, one lost or reconnected mid-batch, no answer at all) is not the event's failure: the window sends nothing on a connection that came back, so what of the batch reached NATS is a prefix of it, and every event that met the failure or was not sent is released without an attempt counted, so the next scan sends them again in id order and the stream's MsgId drops the copies of those that had landed, rather than an issue's first events being backed off behind its later ones. A core-NATS destination (a role lane) counts as published only once its flush has shown the server accepted it, at the cost of one flush round trip (`bus.confirmFlushed` and `bus.confirmPublished` hold how): one the server denies under Dispatch's grant (`bus.ErrPublishDenied`, naming the subject) or cannot be shown to have accepted is left unrecorded and retried, rather than recorded in `published_destinations` for a message nobody received. Each retry line (`dispatch outbox: publish event`) names the destination by label and target (`publish owner topic "<subject>"` for the event's own topic, `publish route "role:reviewer"` or `publish route "session:<id>"` for the issue's route, `publish author route to "<session>"`, `publish follower route to "<session>"`, `publish claim change to "<session>"`); a core denial, which only a `role:` route can be since of the outbox's destinations only the role lanes take core transport (`bus.UsesCoreTransport`), adds the subject and the server's violation. The listener's own core publishes (a role message's forward or an ad-hoc topic's publish through `/v1/messages/publish`, a fanout exception) fail the same way, the API publish answering 500 with the violation; a denied forward of an ad-hoc topic's copy to one of its recipients is named `delivery_failed` in the route's 504 instead. A destination NATS refuses (`bus.ErrRefused`: an event past the server's max payload, or a subject past NATS's limit or holding whitespace or an empty token, which an unbounded document slug or a bearer's session id such as `sess..x` can make) is refused the same way on every retry, so it is logged once (`dispatch outbox: destination refused`, naming the event and topic) and counted done, and the event goes on to its other destinations. The listener holds one line for both of the bearer kinds `/v1` accepts: the shared-token compare stays constant time and is skipped entirely when no shared token is configured, so no request authenticates against an empty one; a JWT-shaped bearer the verifier rejects is answered 401 and never falls back to the shared token or any other path; and the 401 is the same `unauthorized` in every case, so a rejected caller learns neither the reason class nor which credentials the listener is configured for.
 
 ## Operational notes
 

@@ -4,6 +4,14 @@
 
 ### Added
 
+- The `dispatch` command this plugin ships reads one block of a document:
+  `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
+  `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
+  last changed in, its text, for a pinned reference its text at that version and whether it
+  changed or was removed since, and what cites it. `dispatch read --help` lists the block forms
+  and the id's percent-encoding, `dispatch ask --help` takes a block reference, and
+  `dispatch doc-edit --help` says a block id past 256 bytes is stored but its block is no graph
+  node.
 - A session shows once each Envoy message it missed while its NATS connection or a subscription
   was down, NATS was restarting or the session was not running. It asks its listener's new
   `POST /v1/replay` for what the notification stream (72 hours) stored on its own agent subject

@@ -67,7 +67,7 @@ export async function pasteFile(field: Locator, name: string, text: string): Pro
 }
 
 /** A 1x1 PNG, the smallest picture a browser draws. */
-const ONE_PIXEL_PNG =
+export const ONE_PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
 /** Pastes a PNG named `name` into `field`, as the clipboard hands a screenshot to it (the same

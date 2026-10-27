@@ -54,7 +54,7 @@ func testStore(t *testing.T) *store.Store {
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test the claim routes against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
+			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
 			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
 			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/api/")
 	}

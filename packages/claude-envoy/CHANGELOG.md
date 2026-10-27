@@ -4,6 +4,13 @@
 
 ### Added
 
+- The `dispatch` command (`dist/dispatch.js`) reads one block of a document:
+  `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
+  `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
+  last changed in, its text, for a pinned reference its text at that version and whether it
+  changed or was removed since, and what cites it; `dist/` was regenerated. The block forms, the
+  pin and the 256-byte bound past which a block is no graph node are in the commands' `--help`
+  (`dispatch read --help`, `dispatch ask --help`, `dispatch doc-edit --help`).
 - The channel server delivers once each Envoy message the session missed while its NATS
   subscriptions were down, NATS was restarting or Claude Code was not running. It asks the
   listener's new `POST /v1/replay` for what the notification stream (72 hours) stored on the
@@ -110,6 +117,10 @@
 
 ### Fixed
 
+- The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
+  daemon records. The daemon now refuses a completion of a run the issue has left before it applies
+  any fact and names the current run's queued task, so the worker ends the turn and calls
+  `handoff_complete` again at the same commit in that task's turn, which is applied.
 - A message the listener forwards to the session's agent subject is shown with the topic it was
   published to: the channel notification's `topic` meta is the envelope's `topic`, falling back to
   the NATS subject only when the envelope names none, where it was always the subject. A role
@@ -121,7 +132,6 @@
   minutes, each attempt with a fresh grant, until the MCP client cancels the request
   (`notifications/cancelled`), after which nothing more is sent. The retry notice goes to the MCP
   server's stderr only. Every answer the daemon gives is passed on at once.
-
 - `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
   record every request you accept in Dispatch and read that record back before a turn ends.
 - The plugin's `legion/` copy of the `legion-architect` skill is regenerated with the same

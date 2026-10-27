@@ -252,7 +252,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	if err != nil {
 		return nil, err
 	}
-	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
+	js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
 	if err != nil {
 		nc.Close()
 		return nil, err
@@ -737,7 +737,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
+		js, err := nc.JetStream(nats.MaxWait(10*time.Second), nats.PublishAsyncTimeout(publishAcknowledgementTimeout))
 		if err != nil {
 			nc.Close()
 			return err
@@ -904,7 +904,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(context.Background(), publishAcknowledgementTimeout)
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return false, err
@@ -938,16 +938,16 @@ func (c *Client) PublishCore(item contracts.Envelope) error {
 // of a per-client grant), a flush that fails and a publish the server cannot be shown to have
 // accepted all return an error. The subject can differ from item.Topic when an authoritative
 // router forwards an envelope while retaining its original topic for the recipient. It waits at
-// most 5 s, a reconnect included.
+// most publishAcknowledgementTimeout, a reconnect included.
 func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), publishAcknowledgementTimeout)
 	defer cancel()
 	return c.PublishCoreContext(ctx, subject, item)
 }
 
-// PublishCoreContext is PublishCoreTo bounded by ctx rather than by 5 s: the reconnect it waits
-// for and the server's confirmation both end with ctx, so a caller answering inside a deadline of
-// its own (the listener's confirmed publish) is never held past it.
+// PublishCoreContext is PublishCoreTo bounded by ctx rather than by publishAcknowledgementTimeout:
+// the reconnect it waits for and the server's confirmation both end with ctx, so a caller answering
+// inside a deadline of its own (the listener's confirmed publish) is never held past it.
 func (c *Client) PublishCoreContext(ctx context.Context, subject string, item contracts.Envelope) error {
 	if err := checkSubject(subject); err != nil {
 		return err
@@ -961,7 +961,7 @@ func (c *Client) PublishCoreContext(ctx context.Context, subject string, item co
 	}
 	deadline, ok := ctx.Deadline()
 	if !ok {
-		deadline = time.Now().Add(5 * time.Second)
+		deadline = time.Now().Add(publishAcknowledgementTimeout)
 	}
 	conn := c.Conn
 	return c.publishConfirmed(conn, &nats.Msg{Subject: subject, Data: data}, deadline, conn.PublishMsg)

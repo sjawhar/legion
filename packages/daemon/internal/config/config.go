@@ -37,11 +37,13 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
 
-// Runtime is the `runtime` block: its name, and under kubernetes the settled `runtime.kubernetes`
-// block (nil under tmux).
+// Runtime is the `runtime` block: its name, under kubernetes the settled `runtime.kubernetes` block
+// (nil under tmux), and under tmux the settled `runtime.tmux` block when the file names one (nil
+// otherwise).
 type Runtime struct {
 	Name       string
 	Kubernetes *Kubernetes
+	Tmux       *Tmux
 }
 
 // ControllerLaunch is who launches the project's controller (`controller`).
@@ -51,9 +53,10 @@ const (
 	// ControllerLaunchOperator is the default: the operator runs `legion controller start` on a
 	// machine of theirs, and the daemon launches no controller.
 	ControllerLaunchOperator ControllerLaunch = "operator"
-	// ControllerLaunchDaemon is the daemon launching the controller itself, as an Agent Sandbox pod
-	// it supervises like a root architect, minting its credential at every launch; the operator's
-	// controller secret route then refuses, since one controller per project runs.
+	// ControllerLaunchDaemon is the daemon launching the controller itself — an Agent Sandbox pod
+	// under kubernetes, a pane of its own window under tmux — and supervising it like a root
+	// architect, minting its credential at every launch; the operator's controller secret route then
+	// refuses, since one controller per project runs.
 	ControllerLaunchDaemon ControllerLaunch = "daemon"
 )
 
@@ -88,10 +91,11 @@ type Config struct {
 	// neither its config nor sops's age identity (ProviderKeys is how a provider key reaches OMP).
 	OmpLaunchPrefix []string
 	// ProviderKeys are the provider credentials every pane's or pod's OMP receives in its
-	// environment, in file order: the variable OMP reads, and the key that holds it. Under tmux the
-	// key is a secretsd key, which boot resolves once, as the daemon (MaterializeProviderKeys), into
-	// a daemon-held 0600 file, so a pane never holds the secret store itself; under kubernetes it is
-	// a key of the providers Secret, which every pod mounts as the file the shim exports.
+	// environment, in file order: the variable OMP reads, and where its value is held. Under tmux the
+	// source is a secretsd key, or a file (`file:/abs/path`), which boot reads once, as the daemon
+	// (MaterializeProviderKeys), into a daemon-held 0600 file, so a pane never holds the secret store
+	// itself; under kubernetes it is a key of the providers Secret, which every pod mounts as the
+	// file the shim exports.
 	ProviderKeys []ProviderKey
 	// InstructionsPath is the operator's deployment instructions, "" when none; boot copies it to
 	// `<state_dir>/deployment-instructions.md` (MaterializeDeploymentInstructions).
@@ -155,7 +159,7 @@ type Config struct {
 	// admission's rule (admit.Admission.wakeController and its callers).
 	ControllerWakeInterval time.Duration
 	// ControllerLaunch is who launches the project's controller (`controller`): the operator unless
-	// the file says the daemon does, which only `runtime: kubernetes` with Dispatch allows.
+	// the file says the daemon does.
 	ControllerLaunch ControllerLaunch
 	// Capabilities is the `capabilities` block; the zero value with none.
 	Capabilities Capabilities
@@ -245,6 +249,7 @@ type fileConfig struct {
 	StateDir          *string
 	AdmissionCap      *int
 	Kubernetes        *Kubernetes
+	Tmux              *Tmux
 	DaemonURL         *string
 	OmpInvocation     *string
 	OmpLaunchPrefix   []string
@@ -358,7 +363,7 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "admission_cap":
 			file.AdmissionCap, err = readInt(value, key)
 		case "runtime":
-			file.Kubernetes, err = readRuntime(value)
+			file.Kubernetes, file.Tmux, err = readRuntime(value)
 		case "daemon_url":
 			file.DaemonURL, err = readString(value, key)
 		case "omp_invocation":
@@ -472,28 +477,35 @@ func classify(key string) error {
 	return fmt.Errorf("unknown key %s", key)
 }
 
-// readRuntime reads `runtime`: the `tmux` scalar (nil), or the shipped one-key `{kubernetes: {...}}`
-// mapping, whose block it reads. A bare `kubernetes` scalar is refused: it carries no block, and
-// the block is the only source of what a pod needs.
-func readRuntime(value *yaml.Node) (*Kubernetes, error) {
+// readRuntime reads `runtime`: the `tmux` scalar (no block), or a one-key mapping, `{kubernetes:
+// {...}}` or `{tmux: {...}}`, whose block it reads. A bare `kubernetes` scalar is refused: it
+// carries no block, and the block is the only source of what a pod needs.
+func readRuntime(value *yaml.Node) (*Kubernetes, *Tmux, error) {
 	if value.Tag == "!!null" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if value.Kind == yaml.ScalarNode {
 		switch value.Value {
 		case "tmux":
-			return nil, nil
+			return nil, nil, nil
 		case "kubernetes":
-			return nil, errors.New("runtime.kubernetes is required when runtime is kubernetes")
+			return nil, nil, errors.New("runtime.kubernetes is required when runtime is kubernetes")
 		}
-		return nil, errors.New("runtime must be 'tmux' or 'kubernetes'")
+		return nil, nil, errors.New("runtime must be 'tmux' or 'kubernetes'")
 	}
-	if value.Kind != yaml.MappingNode ||
-		len(value.Content) != 2 ||
-		value.Content[0].Value != "kubernetes" {
-		return nil, errors.New("runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes")
+	shape := errors.New("runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes or tmux")
+	if value.Kind != yaml.MappingNode || len(value.Content) != 2 {
+		return nil, nil, shape
 	}
-	return readKubernetes(value.Content[1])
+	switch value.Content[0].Value {
+	case "kubernetes":
+		k, err := readKubernetes(value.Content[1])
+		return k, nil, err
+	case "tmux":
+		t, err := readTmux(value.Content[1])
+		return nil, t, err
+	}
+	return nil, nil, shape
 }
 
 // readString reads a string key; nil for an unset one (absent from its mapping, or null).
@@ -661,16 +673,22 @@ var envVarName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 const envNameRule = "must be an environment variable name (letters, digits, and underscores, not starting with a digit)"
 
 // ProviderKey is one `provider_keys` entry: Env, the variable Oh My Pi reads (GEMINI_API_KEY), and
-// Secret, the key that holds its value in this deployment (GEMINI_API_KEY_TESTS) — a secretsd key
-// under tmux, a key of the providers Secret under kubernetes — named apart because a deployment
-// names its secrets per environment while the provider's variable is fixed.
+// where its value is held in this deployment, named apart because a deployment names its secrets per
+// environment while the provider's variable is fixed. Secret is the key that holds it
+// (GEMINI_API_KEY_TESTS) — a secretsd key under tmux, a key of the providers Secret under
+// kubernetes — or File, set instead when the entry's value is `file:/abs/path`: the file the daemon
+// reads the value from at boot, under tmux alone. Exactly one of the two is set.
 type ProviderKey struct {
 	Env    string
 	Secret string
+	File   string
 }
 
+// providerKeyFilePrefix marks a `provider_keys` value that names a file rather than a key.
+const providerKeyFilePrefix = "file:"
+
 // providerKeysShape is the refusal for anything but the mapping.
-const providerKeysShape = "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}"
+const providerKeysShape = "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key, or file:/abs/path under runtime tmux; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}"
 
 // paneGitHubEnv are the gh variables the daemon sets on every pane and pod (tmux's panePairs, the
 // sandbox runtime's ghAgentEnv): LEGION_GH_OWNERS_DIR, the role's gh bundle (one directory of gh
@@ -685,8 +703,10 @@ const providerKeysShape = "provider_keys must be a mapping of the variable OMP r
 var paneGitHubEnv = []string{"GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "LEGION_GH_OWNERS_DIR", "LEGION_GH_PATH"}
 
 // readProviderKeys is `provider_keys`: a mapping of the variable OMP reads to the key that holds
-// it, both sides environment variable names, in file order. A variable named twice is refused
-// rather than one entry silently winning, as is one the daemon sets on every pane itself.
+// it, both sides environment variable names, or to `file:` and the absolute path of the file that
+// holds it, in file order. A variable named twice is refused rather than one entry silently
+// winning, as is one the daemon sets on every pane itself. Which runtime reads a file is resolve's
+// to check (checkProviderKeyFiles).
 func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 	if value.Tag == "!!null" {
 		return nil, nil
@@ -716,8 +736,15 @@ func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 		if secretNode.Kind != yaml.ScalarNode || secretNode.Decode(&secret) != nil {
 			return nil, fmt.Errorf("%s value for %s (the key that holds it) must be a string", key, env)
 		}
+		if path, isFile := strings.CutPrefix(secret, providerKeyFilePrefix); isFile {
+			if !filepath.IsAbs(path) {
+				return nil, fmt.Errorf("%s value %q for %s names a file by a path that is not absolute; write %s/abs/path", key, secret, env, providerKeyFilePrefix)
+			}
+			keys = append(keys, ProviderKey{Env: env, File: filepath.Clean(path)})
+			continue
+		}
 		if !envVarName.MatchString(secret) {
-			return nil, fmt.Errorf("%s value %q for %s (the key that holds it) %s", key, secret, env, envNameRule)
+			return nil, fmt.Errorf("%s value %q for %s (the key that holds it) %s, or %s and an absolute path", key, secret, env, envNameRule, providerKeyFilePrefix)
 		}
 		keys = append(keys, ProviderKey{Env: env, Secret: secret})
 	}
@@ -880,6 +907,10 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 			return Config{}, err
 		}
 	}
+	cfg.Runtime.Tmux = resolveTmux(file.Tmux, configDir)
+	if err := checkProviderKeyFiles(file); err != nil {
+		return Config{}, err
+	}
 
 	switch {
 	case file.AdmissionCap != nil:
@@ -934,19 +965,20 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 }
 
 // resolveControllerLaunch settles `controller`: the operator's launch unless the file names the
-// daemon's, which needs a cluster to run the pod in (and kubernetes already requires Dispatch).
-// runtime.kubernetes.resources.controller sizes that pod, so the operator's launch refuses the key
-// wherever the file names it, an entry setting no field included, rather than read a key that
-// sizes nothing. The file's own block is read: the settled one holds the controller's default
-// reservation whether or not the file named it.
+// daemon's — an Agent Sandbox pod of its own under kubernetes (which already requires Dispatch), a
+// pane in a window of its own under tmux, where the controller's Dispatch is dispatch_url, so the
+// daemon's launch needs it. runtime.kubernetes.resources.controller sizes that pod, so the
+// operator's launch refuses the key wherever the file names it, an entry setting no field included,
+// rather than read a key that sizes nothing. The file's own block is read: the settled one holds
+// the controller's default reservation whether or not the file named it.
 func resolveControllerLaunch(file fileConfig, cfg *Config) error {
 	cfg.ControllerLaunch = ControllerLaunchOperator
 	if file.Controller != nil {
 		switch launch := ControllerLaunch(*file.Controller); launch {
 		case ControllerLaunchOperator:
 		case ControllerLaunchDaemon:
-			if cfg.Runtime.Name != "kubernetes" {
-				return fmt.Errorf("controller: daemon needs runtime: kubernetes, where the daemon launches the controller as an Agent Sandbox pod; under %s the operator runs legion controller start", cfg.Runtime.Name)
+			if cfg.DispatchURL == "" {
+				return errors.New("controller: daemon needs dispatch_url: the controller the daemon launches works the project's Dispatch issues")
 			}
 			cfg.ControllerLaunch = launch
 		default:
@@ -955,6 +987,21 @@ func resolveControllerLaunch(file fileConfig, cfg *Config) error {
 	}
 	if k := file.Kubernetes; k != nil && cfg.ControllerLaunch != ControllerLaunchDaemon && k.controllerNamed {
 		return errors.New("runtime.kubernetes.resources.controller sizes the pod of the controller the daemon launches, and controller: operator launches none: set controller: daemon or drop the key")
+	}
+	return nil
+}
+
+// checkProviderKeyFiles refuses a `provider_keys` entry naming a file (`file:/abs/path`) under
+// runtime kubernetes: there a provider key is a key of the providers Secret, which every pod mounts,
+// and a file on the daemon's own disk reaches no pod.
+func checkProviderKeyFiles(file fileConfig) error {
+	if file.Kubernetes == nil {
+		return nil
+	}
+	for _, key := range file.ProviderKeys {
+		if key.File != "" {
+			return fmt.Errorf("provider_keys.%s names the file %s, which only runtime tmux reads: under runtime kubernetes a provider key is a key of the providers Secret", key.Env, key.File)
+		}
 	}
 	return nil
 }
