@@ -104,11 +104,14 @@ tq receipts --comments comments.csv --from "$FROM" > receipts.tsv 2> receipts-co
 # 3. The document.
 bun scripts/dispatch/comment-delivery/report.ts \
   --comments comments.csv --receipts receipts.tsv --counts receipts-counts.txt \
-  --trace trace-03207432.csv > human-comment-delivery-2026-10.md
+  --findings findings-bet-15.md --trace trace-03207432.csv > human-comment-delivery-2026-10.md
 ```
 
-`--trace` can be given more than one time. The document holds each trace file whole, under the
-file's name, in the order given. The same files give the same document, byte for byte.
+`--findings` and `--trace` can each be given more than one time. The document holds each findings
+file whole, as Markdown, in the order given, in its "Findings" section after the table of causes
+and their fixes. Start the headings of a findings file at `###`, because the section is a `##`
+heading. The document holds each trace file whole, in a code block under the file's name, in the
+order given. The same files give the same document, byte for byte.
 
 `report.ts` reads `receipts-counts.txt` as exactly these 15 lines, in this order. Each line is a
 key, a tab and a value, with no header. `from` and `to` are UTC times in the form
@@ -168,10 +171,13 @@ A pair is judged from its status in `receipts.tsv`:
   3. `mention-failed:<error>`: the newest attempt of a mention to the pair failed. The error is
      `session-not-live`, `receipt-timeout` or `other`.
   4. `not-running`: the comment's `published_at` is not between the session's
-     `target_started_at` and `target_ended_at`. An empty `target_ended_at` means that the session
-     still runs.
-  5. `running-no-row`: any other `not_received` pair. Dispatch sent the comment to a running
-     session, and the session's transcript does not have it.
+     `target_started_at` and `target_ended_at`. These are the transcript store's recorded start
+     and end of the session's transcript file, not the times that the session's process was up.
+     An empty `target_ended_at` means that the store records no end for the file.
+  5. `running-no-row`: any other `not_received` pair. Dispatch sent the comment to the session
+     within the store's recorded start and end of the session's file, and the transcript does
+     not have it. The process can still have been down inside that span; the loss is in the last
+     hop or in the plugin.
 
 `report.ts` puts each comment in one class. It checks the classes in this order and uses the
 first that applies:
@@ -206,10 +212,13 @@ An unknown is never counted as delivered or as not delivered.
 The document gives the counts of comments and of pairs with the identity
 `total = delivered + not delivered by cause + unknown`. `CAUSES` in `report.ts` maps each cause to
 its fix. The document has a row for each comment and a row for each pair, and it lists the
-unlisted rows.
+unlisted rows. No session was owed a comment with the cause `no-target`; give the cause of each
+such comment in a findings file.
 
 The report refuses its input (exit 1, each problem on stderr, nothing on stdout) in these cases:
 
+- A file that `--comments`, `--receipts`, `--counts`, `--findings` or `--trace` names cannot be
+  read.
 - A header is not the expected columns.
 - A row repeats: the same `comment_id` and `target` in `comments.csv`, in two listed rows of
   `receipts.tsv`, or in two unlisted rows.

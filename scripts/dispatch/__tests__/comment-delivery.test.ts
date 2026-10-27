@@ -71,7 +71,8 @@ interface Run {
 }
 
 let written = 0;
-async function cli(files: Partial<ReportInput> = {}, traces: readonly string[] = []): Promise<Run> {
+/** Runs report.ts on the fixtures, `files` put in their place, with `extra` arguments after. */
+async function cli(files: Partial<ReportInput> = {}, extra: readonly string[] = []): Promise<Run> {
   const paths: Record<string, string> = {};
   for (const name of ["comments", "receipts", "counts"] as const) {
     const text = files[name];
@@ -92,7 +93,7 @@ async function cli(files: Partial<ReportInput> = {}, traces: readonly string[] =
       paths.receipts ?? "",
       "--counts",
       paths.counts ?? "",
-      ...traces.flatMap((trace) => ["--trace", trace]),
+      ...extra,
     ],
     { stdout: "pipe", stderr: "pipe" }
   );
@@ -252,8 +253,8 @@ describe("the pairs and the comments", () => {
 describe("the document", () => {
   test("opens with the identity and the window, includes each trace verbatim, and is the same bytes on a re-run", async () => {
     const trace = join(FIXTURES, "trace.csv");
-    const first = await cli({}, [trace]);
-    const second = await cli({}, [trace]);
+    const first = await cli({}, ["--trace", trace]);
+    const second = await cli({}, ["--trace", trace]);
     expect(first.code).toBe(0);
     expect(first.stderr).toBe("");
     expect(second.stdout).toBe(first.stdout);
@@ -306,6 +307,47 @@ describe("the document", () => {
       `### trace.csv\n\n\`\`\`text\n${await fixture("trace.csv")}\`\`\``
     );
   });
+
+  test("puts each findings file in verbatim, in the order given, after the causes table", async () => {
+    const one = "### BET-15\n\nThe reply had *no* route:\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+    const two = "### INFRA-2\n\n```text\nas it is\n```";
+    const paths = [join(scratch, `${written++}-one.md`), join(scratch, `${written++}-two.md`)];
+    await writeFile(paths[0] ?? "", one);
+    await writeFile(paths[1] ?? "", two);
+    const run = await cli({}, ["--findings", paths[1] ?? "", "--findings", paths[0] ?? ""]);
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe("");
+    expect(run.stdout).toContain(
+      `|\n\n## Findings\n\n${two}\n\n${one}\n## What tq receipts counted\n`
+    );
+    expect(run.stdout.indexOf("## Causes and their fixes")).toBeLessThan(
+      run.stdout.indexOf("## Findings")
+    );
+    expect(
+      (await cli({}, ["--findings", paths[1] ?? "", "--findings", paths[0] ?? ""])).stdout
+    ).toBe(run.stdout);
+    expect((await cli()).stdout).toContain(
+      "## Findings\n\nNo findings file was given.\n\n## What tq receipts counted\n"
+    );
+  });
+
+  test("a cause's meaning and fix are the texts of CAUSES", () => {
+    expect(CAUSES["no-target"]?.fix).toBe(
+      "Partly: in this pull request a reply in a thread on a document goes to every session in " +
+        "the thread and to the document's session authors. A comment on an issue with no route " +
+        "and no session claim is owed to no session; the findings section gives each comment's " +
+        "cause."
+    );
+    expect(CAUSES["not-running"]?.meaning).toBe(
+      "Dispatch sent the comment to the session, and the transcript store's recorded start and " +
+        "end of the session's file do not include the time Dispatch published it."
+    );
+    expect(CAUSES["running-no-row"]?.meaning).toBe(
+      "Dispatch sent the comment to the session within the store's recorded start and end of " +
+        "the session's file, and the transcript has no record of it. The process can still have " +
+        "been down inside that span; the loss is in the last hop or in the plugin."
+    );
+  });
 });
 
 describe("refusals", () => {
@@ -325,6 +367,15 @@ describe("refusals", () => {
     expect(run.stderr).toContain(
       `receipts.tsv lines 2 and 3: comment ${BET15} and target "${BET15_LEAD}" twice`
     );
+  });
+
+  test("a findings or trace file that cannot be read is refused, and prints nothing", async () => {
+    for (const option of ["--findings", "--trace"]) {
+      const run = await cli({}, [option, join(scratch, "absent.md")]);
+      expect(run.code).toBe(1);
+      expect(run.stdout).toBe("");
+      expect(run.stderr).toContain("absent.md");
+    }
   });
 
   test("a duplicated unlisted row is refused: comment_id and target repeat", () => {

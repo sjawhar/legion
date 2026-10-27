@@ -771,8 +771,9 @@ export const CAUSES: Readonly<Record<string, CauseEntry>> = {
   "no-target": {
     meaning: "No session was owed the comment, and Dispatch sent it to no session or role.",
     fix:
-      "The Dispatch fan-out fix in this pull request: a comment on an issue with no route goes " +
-      `to the issue's claimant session. Its test is ${FAN_OUT_TEST}.`,
+      "Partly: in this pull request a reply in a thread on a document goes to every session in " +
+      "the thread and to the document's session authors. A comment on an issue with no route and " +
+      "no session claim is owed to no session; the findings section gives each comment's cause.",
   },
   "not-addressed:claimant": {
     meaning: "Dispatch did not send the comment to the issue's claimant session.",
@@ -821,14 +822,15 @@ export const CAUSES: Readonly<Record<string, CauseEntry>> = {
   },
   "not-running": {
     meaning:
-      "Dispatch sent the comment to the session, and the session was not running when Dispatch " +
-      "published it: the transcript store's times for the session do not include that time.",
+      "Dispatch sent the comment to the session, and the transcript store's recorded start and " +
+      "end of the session's file do not include the time Dispatch published it.",
     fix: LAST_HOP_FIX,
   },
   "running-no-row": {
     meaning:
-      "Dispatch sent the comment to the session while the session was running, and the " +
-      "session's transcript has no record of it. The loss is in the last hop or in the plugin.",
+      "Dispatch sent the comment to the session within the store's recorded start and end of " +
+      "the session's file, and the transcript has no record of it. The process can still have " +
+      "been down inside that span; the loss is in the last hop or in the plugin.",
     fix: LAST_HOP_FIX,
   },
 };
@@ -1185,10 +1187,17 @@ function owedText(pair: Pair): string {
   return pair.reasons.length === 0 ? "not owed, only sent" : pair.reasons.join(", ");
 }
 
+/** A file named on the command line: its name and its text. */
+interface NamedText {
+  readonly name: string;
+  readonly text: string;
+}
+
 /** The markdown document. Deterministic: the same files give the same bytes. */
 function renderReport(
   report: Report,
-  traces: readonly { readonly name: string; readonly text: string }[]
+  findings: readonly NamedText[],
+  traces: readonly NamedText[]
 ): string {
   const { commentCounts: counts, pairCounts, receiptCounts: tq } = report;
   const out: string[] = [];
@@ -1232,10 +1241,11 @@ function renderReport(
       "the pair was owed it: claimant, route, follower, asker or mention, joined with `+`.",
     "   - `mention-failed:<error>`: Dispatch tried to deliver a mention, and its newest attempt " +
       "failed. The error is `session-not-live`, `receipt-timeout` or `other`.",
-    "   - `not-running`: Dispatch sent the comment, and the session was not running when " +
-      "Dispatch published it. The transcript store gives the session's start and end.",
-    "   - `running-no-row`: Dispatch sent the comment to a running session, and the session's " +
-      "transcript does not have it.",
+    "   - `not-running`: Dispatch sent the comment to the session, and the transcript store's " +
+      "recorded start and end of the session's file do not include the time Dispatch published it.",
+    "   - `running-no-row`: Dispatch sent the comment to the session within the store's recorded " +
+      "start and end of the session's file, and the transcript does not have it. The process can " +
+      "still have been down inside that span.",
     "",
     "A pair is judged alone with the same rules: `received` is delivered, `unknown` is unknown, " +
       "and `not_received` gets its one cause.",
@@ -1267,6 +1277,11 @@ function renderReport(
     );
   }
   out.push("");
+  out.push("## Findings", "");
+  if (findings.length === 0) out.push("No findings file was given.", "");
+  // Each findings file is Markdown, put in as it is; only its last newline gives way to the
+  // blank line that ends it.
+  for (const finding of findings) out.push(finding.text.replace(/\n$/, ""), "");
   out.push("## What tq receipts counted", "");
   out.push(
     `- Listed pairs: ${tq.listed_pairs} = received ${tq.received} + not_received ` +
@@ -1350,6 +1365,7 @@ interface Options {
   readonly comments: string;
   readonly receipts: string;
   readonly counts: string;
+  readonly findings: readonly string[];
   readonly traces: readonly string[];
 }
 
@@ -1360,6 +1376,7 @@ function parseArguments(argv: readonly string[]): Options {
       comments: { type: "string" },
       receipts: { type: "string" },
       counts: { type: "string" },
+      findings: { type: "string", multiple: true },
       trace: { type: "string", multiple: true },
     },
     strict: true,
@@ -1368,26 +1385,37 @@ function parseArguments(argv: readonly string[]): Options {
   if (comments === undefined || receipts === undefined || counts === undefined) {
     throw new Error("--comments, --receipts and --counts are required");
   }
-  return { comments, receipts, counts, traces: values.trace ?? [] };
+  return {
+    comments,
+    receipts,
+    counts,
+    findings: values.findings ?? [],
+    traces: values.trace ?? [],
+  };
+}
+
+/** Each file's name and text, in the order given. A file that cannot be read rejects. */
+function readNamed(paths: readonly string[]): Promise<NamedText[]> {
+  return Promise.all(
+    paths.map(async (path) => ({ name: basename(path), text: await readFile(path, "utf8") }))
+  );
 }
 
 async function run(argv: readonly string[]): Promise<string> {
   const options = parseArguments(argv);
-  const [comments, receipts, counts, ...traceTexts] = await Promise.all(
-    [options.comments, options.receipts, options.counts, ...options.traces].map((path) =>
-      readFile(path, "utf8")
-    )
-  );
-  const traces = options.traces.map((path, index) => ({
-    name: basename(path),
-    text: traceTexts[index] ?? "",
-  }));
+  const [[comments, receipts, counts], findings, traces] = await Promise.all([
+    Promise.all(
+      [options.comments, options.receipts, options.counts].map((path) => readFile(path, "utf8"))
+    ),
+    readNamed(options.findings),
+    readNamed(options.traces),
+  ]);
   const report = judge({
     comments: comments ?? "",
     receipts: receipts ?? "",
     counts: counts ?? "",
   });
-  return renderReport(report, traces);
+  return renderReport(report, findings, traces);
 }
 
 if (import.meta.main) {
