@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tests for `check-ci-filters.sh`: every ci.yaml filter must match every file its job reads, the
-# Go closures recomputed with go list, and the table of go commands must say what ci.yaml says.
+# Go closures recomputed with go list, the table of go commands must say what ci.yaml says, and
+# ci-ok's SELECTED_BY and PULL_REQUEST_ONLY must say what each needed job's if: tests.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
 # module, a ci.yaml whose `changes` job gates one job, and a ci_job_reads.py describing it - and
@@ -22,7 +23,8 @@ source "$script_dir/test-lib.sh"
 
 # fixture <name>: a tree that passes. The app job runs `go test ./cmd/app ./lib`, whose closure is
 # cmd/app and lib (cmd/app imports lib); lib's test reads fixtures/data.json through `..`, which
-# RULES records; mod/other is a package nothing imports. Echoes the fixture root.
+# RULES records; mod/other is a package nothing imports. The image job runs only on a pull
+# request, and ci-ok needs both. Echoes the fixture root.
 fixture() {
   local root="$work/$1"
   if [ -e "$root" ]; then
@@ -103,11 +105,21 @@ jobs:
         working-directory: mod
   image:
     needs: changes
-    if: needs.changes.outputs.image == 'true'
+    if: github.event_name == 'pull_request' && needs.changes.outputs.image == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Build
         run: go build ./...
+  ci-ok:
+    needs: [changes, app, image]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Condense
+        env:
+          SELECTED_BY: '{"app": "app", "image": "image"}'
+          PULL_REQUEST_ONLY: '["image"]'
+        run: .github/scripts/ci-ok.sh
 YAML
   git -C "$root" init -q
   echo "$root"
@@ -231,5 +243,30 @@ printf 'go 1.21\n\nuse ./missing\n' > "$root/go.work"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "says the closure is unknown" "$(contains "$out" 'so the closure of .* is unknown')"
+
+echo "case: ci-ok's SELECTED_BY misses a job ci-ok needs"
+root=$(fixture ci-ok-missing)
+replace "$root/.github/workflows/ci.yaml" "SELECTED_BY: '{\"app\": \"app\", \"image\": \"image\"}'" \
+  "SELECTED_BY: '{\"image\": \"image\"}'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and the output to map it to" \
+  "$(contains "$out" "ci-ok's SELECTED_BY does not map app, which ci-ok needs, so ci-ok.sh fails it; add \"app\": \"app\"")"
+
+echo "case: ci-ok's SELECTED_BY maps a job to an output its if: does not test"
+root=$(fixture ci-ok-wrong)
+replace "$root/.github/workflows/ci.yaml" "SELECTED_BY: '{\"app\": \"app\", \"image\": \"image\"}'" \
+  "SELECTED_BY: '{\"app\": \"image\", \"image\": \"image\"}'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job, the wrong output and the right one" \
+  "$(contains "$out" "ci-ok's SELECTED_BY maps app to image, but its if: tests needs.changes.outputs.app")"
+
+echo "case: ci-ok's PULL_REQUEST_ONLY misses a job whose if: admits only pull_request"
+root=$(fixture ci-ok-pull-request-only)
+replace "$root/.github/workflows/ci.yaml" "PULL_REQUEST_ONLY: '[\"image\"]'" "PULL_REQUEST_ONLY: '[]'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job" "$(contains "$out" "ci-ok's PULL_REQUEST_ONLY lacks image, whose if: admits only pull_request")"
 
 summary "check-ci-filters.sh holds each filter to its job's Go closure, its rules and its table"

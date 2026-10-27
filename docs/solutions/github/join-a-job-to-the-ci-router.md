@@ -17,6 +17,8 @@ symptoms:
   - "a change merged without a job that reads one of its files, and nothing re-ran the job"
   - "a new job never runs on a pull request, or runs on every pull request"
   - "ci-ok fails on a draft pull request although no job failed"
+  - "ci-ok fails naming a job changes selected that ended skipped, after a re-run of failed jobs"
+  - "ci-ok fails saying it does not know what selects a job"
   - "a pull request run writes an Actions cache entry"
 ---
 
@@ -28,17 +30,42 @@ the change touched and selects jobs through one dorny/paths-filter filter per jo
 `ci-ok`, condenses every job's result into one check. The deployment repository keeps its own
 router guide for its own workflows; this page covers this repository only.
 
-## The five places a job joins
+## The six places a job joins
 
 1. **A filter in `changes`** that names every file the job reads (the method is below).
 2. **An output of `changes`** for that filter: `<filter>: ${{ steps.filter.outputs.<filter> }}`.
 3. **`needs: changes`** on the job, and `if: needs.changes.outputs.<filter> == 'true'`.
 4. **The job in `ci-ok`'s `needs:`.** A job that is not there can fail and still let `ci-ok`
    pass.
-5. **A gate in `.github/scripts/ci_job_reads.py`** that says what the job reads, which
+5. **The job in `ci-ok`'s `SELECTED_BY`**, mapped to the output its `if:` tests
+   (`"<job>": "<filter>"`), and in `PULL_REQUEST_ONLY` too when its `if:` also admits only
+   `github.event_name == 'pull_request'`. `ci-ok` fails a needed job `SELECTED_BY` does not name,
+   and `check-ci-filters.sh` fails when the map is not exactly what the `if:`s test (the section on
+   `ci-ok` below says why).
+6. **A gate in `.github/scripts/ci_job_reads.py`** that says what the job reads, which
    `.github/scripts/check-ci-filters.sh` holds the filter to (the section on the check below).
 
 A Go job also restores its caches the way the section on caches below says.
+
+## ci-ok fails a selected job that did not succeed
+
+`ci-ok` runs `.github/scripts/ci-ok.sh`. It passes only when `changes` succeeded, lint
+succeeded, every job `changes` selected succeeded, and every job it did not select succeeded or
+was skipped. A selected job that was skipped, cancelled or is absent from `ci-ok`'s `needs:`
+fails it, and it prints every job's result and whether `changes` selected it.
+
+A skipped job reports success, so accepting any skip is not enough. When `changes` fails, every
+job its filters gate is skipped. GitHub's "Re-run failed jobs" then re-runs `changes` and
+`ci-ok`, and `changes` can succeed while the jobs it now selects stay skipped: a `ci-ok` that
+accepted those skips would pass with nothing tested. So `ci-ok.sh` decides what `changes`
+selected from its outputs, through `SELECTED_BY`: a job is selected when the output it maps to is
+`'true'` and, for a job in `PULL_REQUEST_ONLY`, the run is a pull request's. A re-run that leaves
+a selected job skipped fails naming the job; re-run the whole workflow instead.
+
+`check-ci-filters.sh` fails when `SELECTED_BY` is not exactly {job: the output its `if:` tests}
+for every job in `ci-ok`'s `needs:` but `changes` and lint, or when `PULL_REQUEST_ONLY` is not
+exactly the jobs whose `if:` restricts to `github.event_name == 'pull_request'`. A wrong entry
+would fail a job its `if:` rightly skipped, or pass one a re-run left skipped.
 
 ## Build the filter by the method, not by guessing
 
@@ -155,10 +182,11 @@ ci.yaml triggers on `merge_group` (`checks_requested`). On a group, `changes` se
 group's `base_sha..head_sha` diff, what the queued change touches against the queue base, and
 `ci-ok` reports on the group's commit, so the required checks pass on the merged tree before
 anything lands. A new job needs nothing extra for it. But a job whose `if:` names
-`github.event_name` must admit `merge_group`, or it skips on the group and its skip passes `ci-ok`
-there. What skips a group does so on purpose: the cache saves and docs-deploy (push only), lint's
-pull-request text check (pr-title.yaml checks the text on the group), and worker-image (pull
-request only; main's image builds are release.yaml's).
+`github.event_name` must admit `merge_group`, or it skips on the group while its output selects
+it, and `ci-ok` fails there. What skips a group does so on purpose: the cache saves and
+docs-deploy (push only, and not in `ci-ok`), lint's pull-request text check (pr-title.yaml checks
+the text on the group), and worker-image (pull request only, so it is in `PULL_REQUEST_ONLY`;
+main's image builds are release.yaml's).
 
 ## Drafts run no test job
 

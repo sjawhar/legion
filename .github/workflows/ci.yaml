@@ -5,12 +5,14 @@ name: CI
 # dorny/paths-filter filter per job, the jobs that read those paths; each job runs only when its
 # filter matches (lint runs on every change, and typecheck and test also run when `changes` itself
 # failed). The last job, `ci-ok`, condenses every job's result into one check, the one main's
-# ruleset requires beside pr-title.
+# ruleset requires beside pr-title: it fails when a job `changes` selected did not succeed.
 #
-# A new job joins the router in five places: a filter in `changes` that names every file the job
+# A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
-# output, an entry in `ci-ok`'s `needs:`, and a gate in .github/scripts/ci_job_reads.py, which
-# the ci-filters job's .github/scripts/check-ci-filters.sh holds the filter to.
+# output, an entry in `ci-ok`'s `needs:`, an entry in `ci-ok`'s SELECTED_BY mapping the job to
+# that output (and in PULL_REQUEST_ONLY when its `if:` admits only pull_request), and a gate in
+# .github/scripts/ci_job_reads.py. The ci-filters job's .github/scripts/check-ci-filters.sh holds
+# the filter to that gate and SELECTED_BY to the `if:`s.
 # docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
 # Caches: no pull-request or merge-queue run writes an Actions cache entry. setup-go caches nothing
@@ -1214,6 +1216,9 @@ jobs:
       - name: Test the release credential check
         run: .github/scripts/check-release-credentials.test.sh
 
+      - name: Test ci-ok's verdict
+        run: .github/scripts/ci-ok.test.sh
+
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
 
@@ -2392,11 +2397,15 @@ jobs:
       id-token: write
       attestations: write
 
-  # The one check that condenses every job above into a verdict. A job its own `if:` skips reports
-  # success, and GitHub reads the newest check run of a name at a head, so ci-ok passes only when
-  # `changes` succeeded (it selected the jobs from this head's diff) and every other job succeeded
-  # or was skipped by that selection: a run whose selector did not succeed never posts a passing
-  # ci-ok at a head. docs-deploy publishes and tests nothing, so it is not here.
+  # The one check that condenses every job above into a verdict: .github/scripts/ci-ok.sh, whose
+  # header says what it decides and why. It passes only when `changes` succeeded (it selected the
+  # jobs from this head's diff), lint succeeded, every job `changes` selected succeeded, and every
+  # job it did not select succeeded or was skipped. A selected job's skip fails: a skipped job
+  # reports success, and a failed-only re-run of a run whose `changes` failed can make `changes`
+  # succeed and leave the jobs it selects skipped. SELECTED_BY maps every needed job but `changes`
+  # and lint to the output its `if:` tests, and PULL_REQUEST_ONLY lists the jobs whose `if:` also
+  # admits only pull_request; check-ci-filters.sh holds both to those `if:`s. docs-deploy
+  # publishes and tests nothing, so it is not here.
   ci-ok:
     needs:
       - changes
@@ -2425,25 +2434,37 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Condense the selected jobs' results
         env:
           NEEDS: ${{ toJSON(needs) }}
           DRAFT: ${{ github.event.pull_request.draft || false }}
-        run: |
-          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
-          if [ "$DRAFT" = "true" ]; then
-            echo "::error::Draft pull request: no test job runs. Mark it ready for review to start them."
-            exit 1
-          fi
-          offenders=$(jq -r '
-            to_entries[]
-            | select(if .key == "changes" then .value.result != "success"
-                     else .value.result != "success" and .value.result != "skipped" end)
-            | "\(.key) ended \(.value.result)"' <<<"$NEEDS")
-          if [ -n "$offenders" ]; then
-            while IFS= read -r offender; do
-              echo "::error::$offender; ci-ok passes only when changes succeeded and every other job succeeded or was skipped"
-            done <<<"$offenders"
-            exit 1
-          fi
-          echo "changes succeeded, and every job it selected passed"
+          EVENT: ${{ github.event_name }}
+          SELECTED_BY: |
+            {
+              "typecheck": "typecheck",
+              "test": "test",
+              "docs": "docs",
+              "contracts": "contracts",
+              "envoy-plugin": "envoy_plugin",
+              "envoy-client": "envoy_client",
+              "pi-shared": "pi_shared",
+              "pi-envoy": "pi_envoy",
+              "pi-legion": "pi_legion",
+              "dispatch": "dispatch",
+              "claude-envoy": "claude_envoy",
+              "envoy-go": "envoy_go",
+              "envoy-infra-go": "envoy_infra_go",
+              "envoy-go-race": "envoy_go_race",
+              "dispatch-memory": "dispatch_memory",
+              "dispatch-multiprocess": "dispatch_multiprocess",
+              "broker-multiprocess": "broker_multiprocess",
+              "envoy-smoke": "envoy_smoke",
+              "envoy-e2e-local": "envoy_e2e_local",
+              "ci-filters": "ci_filters",
+              "worker-image": "worker_image"
+            }
+          PULL_REQUEST_ONLY: '["worker-image"]'
+        run: .github/scripts/ci-ok.sh

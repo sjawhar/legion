@@ -32,7 +32,12 @@
 #   5. a Run whose pinned text its step or script no longer holds, a RULES source file that is
 #      gone, or a why citing a step the job no longer has,
 #   6. a go command that fails or a first-party package go list cannot load, since its closure
-#      is then unknown, and a `!` pattern under `some` or a brace in a gate's filter.
+#      is then unknown, and a `!` pattern under `some` or a brace in a gate's filter,
+#   7. a SELECTED_BY in ci-ok's step that is not exactly {job: the output its if: tests} for every
+#      job ci-ok needs but changes and lint, or a PULL_REQUEST_ONLY that is not exactly the jobs
+#      whose if: restricts to github.event_name == 'pull_request': ci-ok.sh fails a job that map
+#      says changes selected unless it succeeded, so a wrong entry fails a job that was rightly
+#      skipped or passes one a failed-only re-run left skipped.
 #
 # The go commands run with GOPROXY=off over an empty module cache: nothing is downloaded, no
 # go.work.sum is rewritten, and a cold runner gives the answer a warm machine does. Third-party

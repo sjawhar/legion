@@ -430,6 +430,73 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                             f"{job_id}, which {WORKFLOW} does not have")
 
 
+# The jobs ci-ok.sh holds to success on every run, so its SELECTED_BY maps neither.
+ALWAYS_RUN = ("changes", "lint")
+PULL_REQUEST_ONLY = re.compile(r"github\.event_name\s*==\s*'pull_request'")
+
+
+def check_ci_ok(document: dict, problems: list) -> None:
+    """ci-ok.sh fails a job its SELECTED_BY says `changes` selected unless the job succeeded, so
+    SELECTED_BY must be exactly {job: the output its if: tests} for every job ci-ok needs but
+    changes and lint, and PULL_REQUEST_ONLY exactly the jobs whose if: also admits only
+    pull_request."""
+    jobs = document.get("jobs") or {}
+    ci_ok = jobs.get("ci-ok")
+    if ci_ok is None:
+        problems.append(f"::error file={WORKFLOW}::no ci-ok job, whose SELECTED_BY this check holds to the jobs' if:s")
+        return
+    envs = [s["env"] for s in ci_ok.get("steps") or [] if "SELECTED_BY" in (s.get("env") or {})]
+    if len(envs) != 1:
+        problems.append(f"::error file={WORKFLOW}::ci-ok has {len(envs)} steps that set SELECTED_BY; ci-ok.sh reads "
+                        f"it from exactly one")
+        return
+    try:
+        selected_by = json.loads(str(envs[0]["SELECTED_BY"]))
+        pull_request_only = json.loads(str(envs[0].get("PULL_REQUEST_ONLY", "")))
+    except json.JSONDecodeError as error:
+        problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY or PULL_REQUEST_ONLY is not JSON: {error}")
+        return
+    if not (isinstance(selected_by, dict) and all(isinstance(v, str) for v in selected_by.values())):
+        problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY is not a JSON object of job to output name")
+        return
+    if not (isinstance(pull_request_only, list) and all(isinstance(j, str) for j in pull_request_only)):
+        problems.append(f"::error file={WORKFLOW}::ci-ok's PULL_REQUEST_ONLY is not a JSON array of job names")
+        return
+    needs = ci_ok.get("needs") or []
+    needed = [j for j in ([needs] if isinstance(needs, str) else needs) if j not in ALWAYS_RUN]
+    expected, pr_expected = {}, set()
+    for job_id in needed:
+        condition = str((jobs.get(job_id) or {}).get("if", ""))
+        outputs = sorted(set(GATE_REF.findall(condition)))
+        if len(outputs) != 1:
+            problems.append(f"::error file={WORKFLOW}::ci-ok needs {job_id}, whose if: tests "
+                            f"{len(outputs)} outputs of changes ({', '.join(outputs) or 'none'}), so ci-ok's "
+                            f"SELECTED_BY cannot say what selects it")
+            continue
+        expected[job_id] = outputs[0]
+        if PULL_REQUEST_ONLY.search(condition):
+            pr_expected.add(job_id)
+    for job_id in sorted(set(needed) | set(selected_by)):
+        want, have = expected.get(job_id), selected_by.get(job_id)
+        if job_id not in needed:
+            problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY maps {job_id}, which is not a job ci-ok "
+                            f"needs other than {' and '.join(ALWAYS_RUN)}; drop it")
+        elif want is None or want == have:
+            continue
+        elif have is None:
+            problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY does not map {job_id}, which ci-ok needs, "
+                            f"so ci-ok.sh fails it; add \"{job_id}\": \"{want}\", the output its if: tests")
+        else:
+            problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY maps {job_id} to {have}, but its if: tests "
+                            f"needs.changes.outputs.{want}")
+    for job_id in sorted(pr_expected - set(pull_request_only)):
+        problems.append(f"::error file={WORKFLOW}::ci-ok's PULL_REQUEST_ONLY lacks {job_id}, whose if: admits only "
+                        f"pull_request, so ci-ok.sh fails its skip on every other event")
+    for job_id in sorted(set(pull_request_only) - pr_expected):
+        problems.append(f"::error file={WORKFLOW}::ci-ok's PULL_REQUEST_ONLY lists {job_id}, whose if: does not "
+                        f"restrict it to github.event_name == 'pull_request', so ci-ok.sh accepts its skip there")
+
+
 def main() -> int:
     problems: list = []
     document = yaml.safe_load((REPO / WORKFLOW).read_text())
@@ -438,6 +505,7 @@ def main() -> int:
     filters, quantifiers = changes_filters(document, problems)
     files = repo_files()
     check_table(document, data, filters, set(files), problems)
+    check_ci_ok(document, problems)
     expander = Expander(files)
     session = Session()
     report = []
