@@ -72,6 +72,35 @@ func (s *Postgres) Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
 	return issues, nil
 }
 
+// slottedIssueColumns is issueColumns of the issues table under the alias the slot join gives it.
+const slottedIssueColumns = `i.key, i.tree, i.project, i.title, i.parent, i.phase, i.generation, i.status, i.rank, i.handed_over, i.taken_back, i.linger_until, i.held_from, i.last_dispatch_seq, i.ready_pending_version, coalesce(i.hold_reason, ''), i.dispatch_status, i.repo, i.default_branch, i.github_repo`
+
+// SlottedIssues is the record of each issue of project that holds an admission slot, in slot order
+// (index, then issue), in one read: what admission judges when it releases the slots a fact has
+// finished with (admit's releaseSlots), on every fact and under the one fact lock. The slots table
+// is shared by every project's daemon, so another project's slot is left out here rather than by
+// the caller, and no issue of another project, and no issue holding no slot, is read at all.
+func (s *Postgres) SlottedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	rows, err := tx.Query(ctx, `select `+slottedIssueColumns+` from slots s join issues i on i.key = s.issue
+		where i.project = $1 order by s.index, s.issue`, project)
+	if err != nil {
+		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
+	}
+	defer rows.Close()
+	issues := []Issue{}
+	for rows.Next() {
+		issue, err := scanIssue(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read a slotted issue of project %s: %w", project, err)
+		}
+		issues = append(issues, *issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
+	}
+	return issues, nil
+}
+
 func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	switch {
 	case issue.Repo == "":

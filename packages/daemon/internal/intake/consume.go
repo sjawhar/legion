@@ -252,10 +252,18 @@ func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, handlers ...Han
 	return group.Wait()
 }
 
+// consumeConsumer works one message at a time, and asks JetStream for one at a time
+// (jetstream.PullMaxMessages(1)). The acknowledgement window (AckWait) starts when JetStream
+// delivers a message, not when this loop reaches it, so a message the client library had already
+// fetched into its buffer spends that window queued behind the messages before it: with the
+// library's default batch of 500, a consumer working a backlog has JetStream redeliver the
+// messages it is holding, and each redelivery is prepared again (a Dispatch read) and takes the
+// fact lock again before it is found already processed. One message in flight costs one pull
+// request per message and leaves the window to the message's own work.
 func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec ConsumerSpec, repositories func() []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) error {
 	consuming, err := consumer.Consume(func(message jetstream.Msg) {
 		consumeMessage(ctx, message, spec, repositories(), pool, handlers)
-	})
+	}, jetstream.PullMaxMessages(1))
 	if err != nil {
 		return err
 	}

@@ -844,23 +844,17 @@ func releasesSlot(issue record.Issue) bool {
 // releaseSlots releases the slot of every issue of this project that release says is done with
 // it, and reports those issues in slot order; which describes such an issue in an error. Each
 // release is logged once the fact commits.
+//
+// It reads those issues in one query (record.Store.SlottedIssues), never a record per slot and
+// never the whole issues table: every fact applies this under the one fact lock
+// (intake.ApplyFact), twice for a Dispatch issue event, so a read per slot cost every fact of
+// every consumer, the API and the boot's replay a round trip to the database for each slot of the
+// shared table, and a read of every record would grow with every issue the project has ever
+// recorded. The read leaves out another project's slot, whose own daemon releases it.
 func (a *Admission) releaseSlots(ctx context.Context, tx pgx.Tx, which string, release func(record.Issue) bool) ([]string, error) {
-	slots, err := a.store.Slots(ctx, tx)
+	own, err := a.store.SlottedIssues(ctx, tx, a.project)
 	if err != nil {
-		return nil, fmt.Errorf("list admission slots: %w", err)
-	}
-	own := []record.Issue{}
-	for _, slot := range slots {
-		issue, err := a.store.Issue(ctx, tx, slot.Issue)
-		if err != nil {
-			return nil, fmt.Errorf("read slotted issue %s: %w", slot.Issue, err)
-		}
-		if issue == nil {
-			return nil, fmt.Errorf("slotted issue %s has no record", slot.Issue)
-		}
-		if issue.Project == a.project {
-			own = append(own, *issue)
-		}
+		return nil, fmt.Errorf("list this project's slotted issues: %w", err)
 	}
 	inUse := len(own)
 	var released []string
