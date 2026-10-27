@@ -54,7 +54,7 @@ func TestASessionRegistryOverKeysAnEarlierListenerStoredServesAndDeletesThem(t *
 		}
 	}
 	for _, sessionID := range []string{unreadable, readable} {
-		if err := reg.Delete(sessionID); err != nil {
+		if err := reg.Delete(context.Background(), sessionID); err != nil {
 			t.Fatalf("delete the %d-byte session: %v", len(sessionID), err)
 		}
 		if _, err := reg.Get(sessionID); !errors.Is(err, natsgo.ErrKeyNotFound) {

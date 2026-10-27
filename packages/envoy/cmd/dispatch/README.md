@@ -393,7 +393,7 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Eight periodic maintenance loops run once per period across the processes, not once per process.
+- Nine periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -866,7 +866,19 @@ is written. Its own migration, so its transaction holds `comments` alone: the dr
 `ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds. It
 refuses and rewrites no row; its census answers `0`.
 
-Migration `0129_related_checks` adds three tables for the related-item check, which INFRA-568 makes
+Migration `0129_document_edit_notices` creates `document_edit_notices`, one row per document
+holding a person's pending edit notice: the versions its quiet window spans, every person who
+wrote one, the actor the notice's event carries and when the window ends. A settlement of a
+person's browser edit opens or moves the row in its own transaction, and the leased edit-notice
+sweep deletes each due row and appends its `artifact.human_edited` event in the same
+transaction, so a notice still pending when a process stops is sent by either process's next
+sweep. It also adds `doc_settlements_pending.last_person`, the latest person sender of the
+document's pending edits, which names who edited last. The table is new and the column a plain
+nullable add, so no row is refused or rewritten and its census answers `0`; the foreign key
+takes `artifacts`' lock for the length of the migration, and the alter waits for
+`doc_settlements_pending` within the five-second lock bound.
+
+Migration `0130_related_checks` adds three tables for the related-item check, which INFRA-568 makes
 search by meaning first and by the project's rarest words. `related_checks` holds one row per
 check of an issue, an ask or a decision block a document edit adds, written by the check itself
 once it has answered (a check that ran out of time included; the no-write related route records
@@ -882,7 +894,7 @@ also cascades from its issue, document or ask. The tables are new, so the migrat
 refuses no row and its census answers `0`; its foreign keys take the referenced tables' locks for
 milliseconds, as `0070`'s did.
 
-Migration `0130_issue_embedding_spec` makes an issue's meaning-search text its title and its spec:
+Migration `0131_issue_embedding_spec` makes an issue's meaning-search text its title and its spec:
 `issue_embedding_text(title, spec)` is the title, a blank line and the markdown of the latest
 version of the issue's primary document, or the title alone when that markdown is empty or only
 white space. It replaces the function of `0073`'s issues trigger, which still fires on an insert or
@@ -1173,7 +1185,7 @@ embedder's identity in `embeddings.model`, `us.cohere.embed-v4:0` on Bedrock and
 vectors of its own identity. A write enqueues its text through its table's trigger (0073–0077) in
 the same transaction. An issue's text is its title and its spec, the latest version of its primary
 document (its title alone while that is blank), and a new version of the spec queues the issue
-again through `0130`'s trigger on `artifact_versions`, so meaning search, and the related-item
+again through `0131`'s trigger on `artifact_versions`, so meaning search, and the related-item
 check below, find an issue with a terse title by what its spec says. The server also runs a
 coverage pass (`embedqueue.Cover`) when it starts and every 10 minutes, so a deployment runs
 nothing by hand to embed what it already holds: the pass
@@ -1254,7 +1266,7 @@ made. It searches the write's own project in two stages started together:
   (searched by keywords only, with the reason). If stage 1 has not answered when the 5 s end, the
   check was not made.
 
-df and N come from `search_term_stats` and `search_term_totals` (`0129`), which the term-statistics
+df and N come from `search_term_stats` and `search_term_totals` (`0130`), which the term-statistics
 refresh (`api.RunSearchTermStatsRefresh`, lease `search-term-stats`) rebuilds for every project at
 boot and every 10 minutes; the check only reads them. A word written since the last refresh is
 counted live, at most 50 per check, and a project with no statistics yet starts a refresh of its
@@ -1280,7 +1292,7 @@ owner, since keyword search otherwise puts an issue already closed as a duplicat
 issue it was closed into. `GET` and `POST /api/v1/projects/{key}/related` (`dispatch related`) run
 the same check on a title and a text and write nothing.
 
-Every check of a write is recorded in `related_checks` (`0129`): its outcome, how it searched, the
+Every check of a write is recorded in `related_checks` (`0130`): its outcome, how it searched, the
 reason, the words, and its keyword, meaning and total milliseconds. `GET /api/v1/related-checks`
 counts them by source, outcome, search mode and reason, with the keyword and total times' p50, p95,
 maximum and how many took more than 300 ms, within `[from, to)` and, when given, one project and

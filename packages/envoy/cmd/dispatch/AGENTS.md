@@ -96,7 +96,7 @@ pass with none calls the embedder zero times), an `embedCanary` embed the pass s
 failed or throttled canary leaves those rows in place for the next pass and logs one WARN with the
 identity, the error and the counts left. `coverageSources` there is the one list of what meaning
 search covers, read by the pass and by `GET /api/v1/search/coverage` (`embedqueue.Coverage`); its
-texts are the triggers' (0073-0077; an issue's, since 0130, its title and its spec, the latest
+texts are the triggers' (0073-0077; an issue's, since 0131, its title and its spec, the latest
 version of its primary document, which a second trigger on `artifact_versions` re-queues on a spec
 edit) byte for byte, so a kind added to search changes both. There is no backfill subcommand: the
 pass is the only catch-up, and it takes no lease, so every process of a deployment takes the same
