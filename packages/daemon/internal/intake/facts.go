@@ -707,6 +707,18 @@ type ClaimReady struct {
 
 func (ClaimReady) isFact() {}
 
+// TaskConfirmed is a role's agent taking the work the daemon gave it: a turn of its pending
+// delivery started (supervise's confirm). The workflow changes nothing on it; admission takes it
+// as every other fact, so a root whose wait was held because its architect had not yet taken its
+// task is decided here rather than at the next tick (workflow's ReconcileAwaiting).
+type TaskConfirmed struct {
+	Issue      string
+	Role       claim.Role
+	Generation uint64
+}
+
+func (TaskConfirmed) isFact() {}
+
 // LingerExpired records the generation whose post-close linger elapsed.
 type LingerExpired struct {
 	Issue      string
@@ -947,6 +959,31 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 	committed = true
 	committedHooks()
 	return result, nil
+}
+
+// Applied is which of eventIDs from source ApplyFact has already applied, read in one query and
+// outside the fact lock. A fact's processed_events row commits with the fact and is never removed,
+// so an id read here as applied is one ApplyFact would only take the lock to skip. A caller that
+// replays many facts it has most likely applied before (the boot's terminal replay) applies only
+// the rest: the duplicates cost one read between them, not a transaction each queued on the lock
+// behind every live fact.
+func Applied(ctx context.Context, pool *pgxpool.Pool, source string, eventIDs []string) (map[string]bool, error) {
+	applied := make(map[string]bool, len(eventIDs))
+	if len(eventIDs) == 0 {
+		return applied, nil
+	}
+	rows, err := pool.Query(ctx, `select event_id from processed_events where source = $1 and event_id = any($2::text[])`, source, eventIDs)
+	if err != nil {
+		return nil, fmt.Errorf("read which %s facts are applied: %w", source, err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("read which %s facts are applied: %w", source, err)
+	}
+	for _, id := range ids {
+		applied[id] = true
+	}
+	return applied, nil
 }
 
 // settleObserved is the fact ApplyFact applies in fact's place, under the fact lock, and whether it

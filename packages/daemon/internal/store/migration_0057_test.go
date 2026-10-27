@@ -2,78 +2,98 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
-// A root an older daemon already made of a member of another tree stays its own tree after the
-// upgrade, as one this daemon makes does: the older daemon adopted nothing, and the first admission
-// sweep after 0057 would otherwise take it back into the tree it left once that tree is live. 0057
-// marks the rows that still show the tree they left: an outbox hand-over the daemon processed, or a
-// phase worker's claim still naming another tree. A root that only waited, a root that re-admitted
-// itself after a trip to backlog (INFRA-214's case), and a member still in its tree keep the
-// default, so each stays adoptable or unaffected as before.
-func TestTheTreeARootLeftIsBackfilledBy0057(t *testing.T) {
+// 0057 adds the awaiting_person phase, what a root waiting on a person waits on, and the two
+// sequences the decision rests on. Its backfill takes each issue's handout from the highest
+// sequence the record already holds of it — its last Dispatch observation, the claim the claims
+// mirror shows (with or without a mirrored row of the issue), every fence and person's act of its
+// mirrored asks and its gate's review marks — so no event the daemon applied before this release,
+// and none of the same work redelivered after it, declares a hand-back.
+func TestTheMigrationBackfillDeclaresNothingOld(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 56)
-	claim := func(token, tree, issue string) string {
-		return `insert into claims (token, project, tree, issue, role, generation, session, session_file, state,
-			launch_failures, prompt_failures, prompt_retires, uncertain_streak)
-			values ('` + token + `', 'LEGION', '` + tree + `', '` + issue + `', 'planner', 1, '', '', 'retired', 0, 0, 0, 0)`
-	}
-	for _, seed := range []string{
-		// The old tree a child was handed over from.
-		`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-920', 'LEGION-920', 'LEGION', 'a finished tree', 'done', 1, 'done', 'A', 1, true)`,
-		// A child the outbox handed over without its run, never started: no claim, no mark of a run.
-		`insert into issues (key, tree, project, title, parent, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-921', 'LEGION-921', 'LEGION', 'an uncarried hand-over', 'LEGION-920', 'admitted', 2, 'todo', 'B', 2, true)`,
-		`insert into processed_events (source, event_id) values ('outbox', 'handover:LEGION-921:77')`,
-		// Another outbox row's event whose key only starts like the first: not a hand-over of LEGION-92.
-		`insert into issues (key, tree, project, title, parent, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-92', 'LEGION-92', 'LEGION', 'a root whose key prefixes another', 'LEGION-920', 'admitted', 1, 'todo', 'C', 3, true)`,
-		// A child that ran a worker under the old tree, admitted as an orphan by a person, since gone
-		// to backlog: its planner's claim still names the old tree.
-		`insert into issues (key, tree, project, title, parent, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-922', 'LEGION-922', 'LEGION', 'an orphan that ran', 'LEGION-920', 'done', 2, 'backlog', 'D', 4, true)`,
-		claim("legion-LEGION-922-planner", "LEGION-920", "LEGION-922"),
-		// A root that re-admitted itself after a trip to backlog, its own worker's claim on its own tree.
-		`insert into issues (key, tree, project, title, parent, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-923', 'LEGION-923', 'LEGION', 'a root back from backlog', 'LEGION-930', 'admitted', 3, 'todo', 'E', 5, true)`,
-		claim("legion-LEGION-923-planner", "LEGION-923", "LEGION-923"),
-		// A member still in its tree, with a hand-over event the reopened root fenced off.
-		`insert into issues (key, tree, project, title, parent, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-924', 'LEGION-920', 'LEGION', 'a member still in its tree', 'LEGION-920', 'planning', 1, 'in_progress', 'F', 6, false)`,
-		`insert into processed_events (source, event_id) values ('outbox', 'handover:LEGION-924:78')`,
-		// A hand-over event recorded by another source does not count.
-		`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, handed_over)
-			values ('LEGION-925', 'LEGION-925', 'LEGION', 'a root that only waited', 'admitted', 1, 'todo', 'G', 7, true)`,
-		`insert into processed_events (source, event_id) values ('api', 'handover:LEGION-925:79')`,
-	} {
-		if _, err := store.Pool().Exec(ctx, seed); err != nil {
-			t.Fatalf("record before 0057: %v", err)
+	exec := func(statement string) {
+		t.Helper()
+		if _, err := store.Pool().Exec(ctx, statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
 		}
 	}
-
+	exec(`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+		values ('LEGION-208', 'LEGION-208', 'LEGION', 'admitted root', 'admitted', 1, 'in_progress', 'A', 4)`)
+	exec(`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+		values ('LEGION-300', 'LEGION-300', 'LEGION', 'waiting root', 'admitted', 1, 'todo', 'B', 2)`)
+	exec(`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+		values ('LEGION-400', 'LEGION-400', 'LEGION', 'claimed root', 'admitted', 1, 'in_progress', 'C', 1)`)
+	exec(`insert into dispatch_issues (key, project, status, blockers, dispatch_seq)
+		values ('LEGION-208', 'LEGION', 'in_progress', '{}', 4)`)
+	exec(`insert into dispatch_claims (key, claimed_by, claim_seq) values ('LEGION-208', 'session:ses_architect', 9)`)
+	// A claim seen before the issue's first mirrored row.
+	exec(`insert into dispatch_claims (key, claimed_by, claim_seq) values ('LEGION-400', 'session:ses_architect', 8)`)
+	exec(`insert into root_asks (issue, ask, kind, open, seq, waiting_on, waiting_on_seq, by_tree)
+		values ('LEGION-208', 'ask-q', 'question', true, 11, 'human', 11, true)`)
+	// A gate's request only a version's turn reached: its highest sequence is its turn's, not seq.
+	exec(`insert into root_asks (issue, ask, kind, artifact, open, seq, waiting_on, waiting_on_seq)
+		values ('LEGION-300', 'ask-approval', 'approval', '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26', false, 0, 'agent', 6)`)
+	exec(`insert into design_gates (issue, artifact_id, latest_version, told_changes_version, told_changes_reason, told_changes_seq)
+		values ('LEGION-208', '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26', 4, 4, 'say more', 14)`)
 	if _, err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	for key, want := range map[string]string{
-		"LEGION-920": "",
-		"LEGION-921": "LEGION-920",
-		"LEGION-92":  "",
-		"LEGION-922": "LEGION-920",
-		"LEGION-923": "",
-		"LEGION-924": "",
-		"LEGION-925": "",
+	for _, want := range []struct {
+		issue   string
+		handout int64
+	}{
+		// The gate's told review (14) is the highest the record holds of the admitted root.
+		{"LEGION-208", 14},
+		// The turn of its gate's request (6) is the highest the record holds of the waiting root.
+		{"LEGION-300", 6},
+		// The claim (8), kept with no mirrored row of the issue, is the highest of the claimed root.
+		{"LEGION-400", 8},
 	} {
-		var got string
-		if err := store.Pool().QueryRow(ctx, `select handed_over_from from issues where key = $1`, key).Scan(&got); err != nil {
-			t.Fatalf("read %s: %v", key, err)
+		var handout int64
+		var declared *int64
+		if err := store.Pool().QueryRow(ctx, `select handout_seq, declared_seq from issues where key = $1`, want.issue).Scan(&handout, &declared); err != nil {
+			t.Fatalf("read the handout of %s: %v", want.issue, err)
 		}
-		if got != want {
-			t.Errorf("%s handed_over_from = %q, want %q", key, got, want)
+		if handout != want.handout || declared != nil {
+			t.Fatalf("%s migrated with handout_seq %d and declared_seq %v, want %d and nothing declared", want.issue, handout, declared, want.handout)
 		}
+	}
+
+	// Every column of the wait is the phase's: a root in another phase holds none of them, and one
+	// in awaiting_person waits on exactly one of an ask and a spec version.
+	for _, refused := range []struct{ why, statement string }{
+		{"a wait outside the phase", `update issues set awaiting_ask = 'ask-q' where key = 'LEGION-208'`},
+		{"a phase with no wait", `update issues set phase = 'awaiting_person' where key = 'LEGION-208'`},
+		{"both an ask and a version", `update issues set phase = 'awaiting_person', awaiting_ask = 'ask-q', awaiting_gate_version = 3,
+			awaiting_artifact = '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26' where key = 'LEGION-208'`},
+		{"an answer with no time", `update issues set phase = 'awaiting_person', awaiting_ask = 'ask-q', awaiting_answered_by = 'ask' where key = 'LEGION-208'`},
+		{"an answer nothing names", `update issues set phase = 'awaiting_person', awaiting_ask = 'ask-q', awaiting_answered_at = now(),
+			awaiting_answered_by = 'whenever' where key = 'LEGION-208'`},
+		{"a detail with no answer", `update issues set phase = 'awaiting_person', awaiting_ask = 'ask-q', awaiting_answered_detail = 'ask-q' where key = 'LEGION-208'`},
+		{"a gate version with no document", `update issues set phase = 'awaiting_person', awaiting_gate_version = 3 where key = 'LEGION-208'`},
+		{"a declared sequence of zero", `update issues set declared_seq = 0 where key = 'LEGION-208'`},
+		{"a negative handout", `update issues set handout_seq = -1 where key = 'LEGION-208'`},
+		{"a hand-back time with no sequence", `update issues set declared_at = now() where key = 'LEGION-208'`},
+	} {
+		_, err := store.Pool().Exec(ctx, refused.statement)
+		if err == nil || !strings.Contains(err.Error(), "constraint") {
+			t.Fatalf("%s = %v, want a constraint to refuse it", refused.why, err)
+		}
+	}
+	// The shapes the phase allows: a question wait, and the gate wait the next release writes.
+	for _, accepted := range []string{
+		`update issues set phase = 'awaiting_person', awaiting_ask = 'ask-q', awaiting_since_seq = 11, awaiting_since = now() where key = 'LEGION-208'`,
+		`update issues set awaiting_answered_at = now(), awaiting_answered_by = 'ask', awaiting_answered_detail = 'ask-q' where key = 'LEGION-208'`,
+		`update issues set awaiting_ask = null, awaiting_gate_version = 4, awaiting_artifact = '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26' where key = 'LEGION-208'`,
+		`update issues set phase = 'admitted', awaiting_gate_version = null, awaiting_artifact = null, awaiting_answered_at = null,
+			awaiting_answered_by = null, awaiting_answered_detail = null, awaiting_since_seq = null, awaiting_since = null where key = 'LEGION-208'`,
+	} {
+		exec(accepted)
 	}
 }

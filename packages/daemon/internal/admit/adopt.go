@@ -22,15 +22,16 @@ type adoption struct {
 // adoptChildren applies an architect's release of children recorded outside its tree: each root
 // that queued in admission before a person made it a child of fact.Tree joins that tree with every
 // record of its own (workflow's Engine.Adopt), under the Dispatch parent the release read, and the
-// line is promoted as after any other fact. A child already recorded in fact.Tree needs nothing,
-// and a member of another child's queued tree joins with that child.
+// line is promoted as after any other fact; it reports the slots that promotion's roots returned.
+// A child already recorded in fact.Tree needs nothing, and a member of another child's queued tree
+// joins with that child.
 //
 // The wave is one decision: when any child cannot join (workflow's AdoptionRefusal), or the tree
 // is not live when the first child that could join is asked about, that refusal is the answer and
 // nothing is written, no adoption and no promotion, since intake commits a refused fact.
 // Reconcile's holds do not apply: the release's own Dispatch read just proved each child's parent
 // chain reaches the tree.
-func (a *Admission) adoptChildren(ctx context.Context, tx pgx.Tx, fact intake.ChildAdoption) (*intake.Refusal, error) {
+func (a *Admission) adoptChildren(ctx context.Context, tx pgx.Tx, fact intake.ChildAdoption) ([]string, *intake.Refusal, error) {
 	var outside []adoption
 	seen := make(map[string]bool, len(fact.Children))
 	for _, child := range fact.Children {
@@ -40,7 +41,7 @@ func (a *Admission) adoptChildren(ctx context.Context, tx pgx.Tx, fact intake.Ch
 		seen[child.Issue] = true
 		stored, err := a.store.Issue(ctx, tx, child.Issue)
 		if err != nil {
-			return nil, fmt.Errorf("read released child %s: %w", child.Issue, err)
+			return nil, nil, fmt.Errorf("read released child %s: %w", child.Issue, err)
 		}
 		if stored != nil && stored.Tree != fact.Tree {
 			outside = append(outside, adoption{issue: *stored, parent: child.Parent})
@@ -52,11 +53,11 @@ func (a *Admission) adoptChildren(ctx context.Context, tx pgx.Tx, fact intake.Ch
 	if len(outside) > 0 {
 		var err error
 		if root, err = a.store.Issue(ctx, tx, fact.Tree); err != nil {
-			return nil, fmt.Errorf("read the root of %s: %w", fact.Tree, err)
+			return nil, nil, fmt.Errorf("read the root of %s: %w", fact.Tree, err)
 		}
 		if root != nil {
 			if live, err = record.TreeLive(ctx, a.store, tx, *root); err != nil {
-				return nil, fmt.Errorf("read whether the tree of %s is live: %w", fact.Tree, err)
+				return nil, nil, fmt.Errorf("read whether the tree of %s is live: %w", fact.Tree, err)
 			}
 		}
 	}
@@ -73,13 +74,13 @@ func (a *Admission) adoptChildren(ctx context.Context, tx pgx.Tx, fact intake.Ch
 		}
 		refusal, err := a.engine.AdoptionRefusal(ctx, tx, child.issue, fact.Tree)
 		if err != nil {
-			return nil, fmt.Errorf("read whether %s joins the tree of %s: %w", child.issue.Key, fact.Tree, err)
+			return nil, nil, fmt.Errorf("read whether %s joins the tree of %s: %w", child.issue.Key, fact.Tree, err)
 		}
 		if refusal != nil {
-			return refusal, nil
+			return nil, refusal, nil
 		}
 		if !live {
-			return intake.ChildNotAdoptable(child.issue.Key, fact.Tree, fmt.Sprintf("the tree of %s is not live", fact.Tree)), nil
+			return nil, intake.ChildNotAdoptable(child.issue.Key, fact.Tree, fmt.Sprintf("the tree of %s is not live", fact.Tree)), nil
 		}
 		// A live tree's root is recorded.
 		child.target = *root
@@ -87,11 +88,11 @@ func (a *Admission) adoptChildren(ctx context.Context, tx pgx.Tx, fact intake.Ch
 	}
 	for _, child := range roots {
 		if err := a.engine.Adopt(ctx, tx, child.issue, child.target, child.parent); err != nil {
-			return nil, fmt.Errorf("adopt %s into the tree of %s: %w", child.issue.Key, fact.Tree, err)
+			return nil, nil, fmt.Errorf("adopt %s into the tree of %s: %w", child.issue.Key, fact.Tree, err)
 		}
 	}
-	_, err := a.promote(ctx, tx)
-	return nil, err
+	_, returned, err := a.promote(ctx, tx)
+	return returned, nil, err
 }
 
 // adoptQueuedRoots moves every todo root of this project, waiting in admission's queue or not yet

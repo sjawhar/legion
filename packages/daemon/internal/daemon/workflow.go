@@ -508,12 +508,48 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 	supervision.supervisor.OnTerminal(w.terminal)
 }
 
-func (w *workflowRuntime) replayTerminal(ctx context.Context, claims []supervise.Claim) error {
+// replayTerminal applies the ready or failure fact of every stored claim in either state that no
+// daemon applied: one whose live apply (terminal) failed, or whose fact a daemon's stop cut off
+// after the claim's state was written. Nearly all were applied when they happened, and ApplyFact
+// would take the fact lock only to find so, so the replay reads which are applied in one query
+// (intake.Applied) and applies only the rest, one at a time as every fact applies.
+//
+// The read and each fact get budget of their own, on ctx, the daemon's lifetime, rather than one
+// budget shared by the whole replay. A fact may wait its turn on the lock behind a live one (a
+// restored claim's failure, a daemon of another project on the same database), so a replay of
+// hundreds of facts takes as long as they take, and the boot never exits on their count; a
+// Postgres that never answers still ends the boot within one budget, and the daemon's stop ends
+// the replay. supervision.start runs it before any hello is admitted.
+func (w *workflowRuntime) replayTerminal(ctx context.Context, claims []supervise.Claim, budget time.Duration) error {
+	var terminal []supervise.Claim
+	var ids []string
 	for _, c := range claims {
-		if c.State != supervise.StateReady && c.State != supervise.StateFailed {
+		if (c.State != supervise.StateReady && c.State != supervise.StateFailed) || c.Role == claim.RoleController {
 			continue
 		}
-		if err := w.applyTerminal(ctx, c, c.State); err != nil {
+		terminal = append(terminal, c)
+		ids = append(ids, terminalEventID(c, c.State))
+	}
+	read, cancel := context.WithTimeout(ctx, budget)
+	applied, err := intake.Applied(read, w.pool, terminalSource, ids)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("replay the stored claims' terminal facts: %w", err)
+	}
+	var unapplied []supervise.Claim
+	for i, c := range terminal {
+		if !applied[ids[i]] {
+			unapplied = append(unapplied, c)
+		}
+	}
+	if len(unapplied) > 0 {
+		w.log.Info("legion daemon is replaying the terminal facts no daemon applied", "count", len(unapplied), "terminalClaims", len(terminal))
+	}
+	for _, c := range unapplied {
+		fact, cancel := context.WithTimeout(ctx, budget)
+		err := w.applyTerminal(fact, c, c.State)
+		cancel()
+		if err != nil {
 			return err
 		}
 	}
@@ -613,11 +649,20 @@ func (w *workflowRuntime) applyTerminal(ctx context.Context, c supervise.Claim, 
 	default:
 		return fmt.Errorf("claim %s has non-terminal workflow state %s", c.Token, state)
 	}
-	_, err := intake.ApplyFact(ctx, w.pool, "supervise", fmt.Sprintf("supervise:%s:%d:%s", c.Token, c.Generation, state), fact, w.handlers...)
+	_, err := intake.ApplyFact(ctx, w.pool, terminalSource, terminalEventID(c, state), fact, w.handlers...)
 	if err != nil {
 		return fmt.Errorf("apply %s for %s: %w", state, c.Token, err)
 	}
 	return nil
+}
+
+// terminalSource is the source a claim's ready or failure fact is applied under, and
+// terminalEventID its event: one per launch (the claim's generation) and state, so the live apply
+// and every boot's replay of the same terminal state are one fact.
+const terminalSource = "supervise"
+
+func terminalEventID(c supervise.Claim, state supervise.ClaimState) string {
+	return fmt.Sprintf("supervise:%s:%d:%s", c.Token, c.Generation, state)
 }
 
 // run drains intake and the outbox until ctx ends. Intake ending, or a terminal fact that could not
@@ -935,6 +980,30 @@ func (w *workflowRuntime) claimReady(c supervise.Claim) {
 	case w.readyWake <- struct{}{}:
 	default:
 	}
+}
+
+// taskConfirmed applies the fact that a role's agent took the work the daemon gave it
+// (supervise's Deps.TaskConfirmed): admission decides on it whether a root whose architect owed
+// that task now waits on a person (workflow's ReconcileAwaiting), which otherwise waits for the
+// next tick. The machine calls it inside its own decision, so the fact is applied on a goroutine
+// of its own, bounded like a terminal fact; a failure is logged and not the daemon's end, since
+// the tick decides the same thing again.
+func (w *workflowRuntime) taskConfirmed(c supervise.Claim) {
+	if c.Issue == "" || c.Role == claim.RoleController {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), readyReleaseTimeout)
+		defer cancel()
+		fact := intake.TaskConfirmed{Issue: c.Issue, Role: c.Role, Generation: c.Generation}
+		id := fmt.Sprintf("task-confirmed:%s:%d", c.Token, c.Generation)
+		if p := c.Pending; p != nil {
+			id = fmt.Sprintf("task-confirmed:%s:%s", c.Token, p.ID)
+		}
+		if _, err := intake.ApplyFact(ctx, w.pool, "supervise", id, fact, w.handlers...); err != nil {
+			w.log.Warn("apply the confirmation of a task", "claim", c.Token, "error", err)
+		}
+	}()
 }
 
 // releaseReadied releases, until ctx ends, the waiting notices of the architects claimReady
