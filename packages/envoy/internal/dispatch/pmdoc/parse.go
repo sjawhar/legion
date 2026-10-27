@@ -19,31 +19,40 @@ import (
 
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
-// markdownReader is the one goldmark configuration Dispatch reads markdown with. Its only way in
-// is parse. Front matter is read apart from it (parseFrontmatterBlock), so an unclosed opener is
+// markdownReader is a goldmark configuration Dispatch reads markdown with. Its only way in is
+// parse. Front matter is read apart from it (parseFrontmatterBlock), so an unclosed opener is
 // ordinary markdown. Its list parser opens no empty item that would interrupt a paragraph
 // (emptyItemGuard).
 type markdownReader struct {
 	md goldmark.Markdown
 }
 
-var blockReader = markdownReader{md: goldmark.New(
-	goldmark.WithParser(parser.NewParser(
-		parser.WithBlockParsers(blockParsers()...),
-		parser.WithInlineParsers(inlineParsers(emphasisParser{})...),
-		parser.WithParagraphTransformers(util.Prioritized(linkReferenceDefinitions{parser.LinkReferenceParagraphTransformer}, 100)),
-	)),
-	goldmark.WithExtensions(linkify{}, lazyAwareTable{}, strikethrough{}, taskList{}, footnotes{}),
-	goldmark.WithParserOptions(
-		parser.WithBlockParsers(
-			util.Prioritized(elementBlockCounter{}, -1),
-			util.Prioritized(nestingGuard{BlockParser: &typedDirectiveParser{}}, 950),
-			util.Prioritized(&unsupportedDirectiveParser{}, 900),
-			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
+// blockReader is the configuration every document is read with. goldmarkBlockReader reads the same
+// markdown with every delimiter run read by goldmark's rules (emphasisParser.goldmarkRules): the
+// renderer keeps an image's alt text as it wrote it only where it reads back under those rules too
+// (altReadsBack), as it keeps a textblock's runs (inlineWithEscapes).
+var blockReader, goldmarkBlockReader = newBlockReader(emphasisParser{}), newBlockReader(emphasisParser{goldmarkRules: true})
+
+// newBlockReader is the block reader whose delimiter runs are read by emphasis's rules.
+func newBlockReader(emphasis emphasisParser) markdownReader {
+	return markdownReader{md: goldmark.New(
+		goldmark.WithParser(parser.NewParser(
+			parser.WithBlockParsers(blockParsers()...),
+			parser.WithInlineParsers(inlineParsers(emphasis)...),
+			parser.WithParagraphTransformers(util.Prioritized(linkReferenceDefinitions{parser.LinkReferenceParagraphTransformer}, 100)),
+		)),
+		goldmark.WithExtensions(linkify{}, lazyAwareTable{}, strikethrough{goldmarkRules: emphasis.goldmarkRules}, taskList{}, footnotes{}),
+		goldmark.WithParserOptions(
+			parser.WithBlockParsers(
+				util.Prioritized(elementBlockCounter{}, -1),
+				util.Prioritized(nestingGuard{BlockParser: &typedDirectiveParser{}}, 950),
+				util.Prioritized(&unsupportedDirectiveParser{}, 900),
+				util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
+			),
+			parser.WithInlineParsers(util.Prioritized(elementInlineCounter{}, -1)),
 		),
-		parser.WithInlineParsers(util.Prioritized(elementInlineCounter{}, -1)),
-	),
-)}
+	)}
+}
 
 // blockParsers is goldmark's default block parsers with its list parser held off an empty item
 // that would interrupt a paragraph (emptyItemGuard), its list and quote parsers opening no
@@ -102,10 +111,17 @@ func parseStamped(markdown string, budget *WriteBudget) (*Node, error) {
 	return parseStampedAt(markdown, fromStart, budget)
 }
 
+// parseByGoldmarkRules is Parse read by goldmarkBlockReader, with no block ids stamped: what a
+// markdown means under the delimiter rules Dispatch read by before it read as the browser editor
+// does, which the renderer's alt text keeps reading back under (altReadsBack).
+func parseByGoldmarkRules(markdown string) (*Node, error) {
+	return parseUnstamped(goldmarkBlockReader, markdown, fromStart, true, NewWriteBudget())
+}
+
 // parseStampedAt is parseStamped of markdown that stands at at in what the caller wrote, so a
 // refusal names the caller's line and charges nothing for what the server wrote ahead of it.
 func parseStampedAt(markdown string, at origin, budget *WriteBudget) (*Node, error) {
-	doc, err := parseUnstamped(markdown, at, true, budget)
+	doc, err := parseUnstamped(blockReader, markdown, at, true, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +157,7 @@ func ParseFragment(markdown string, opensDocument bool, budget *WriteBudget) (*N
 }
 
 func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *WriteBudget) (*Node, error) {
-	doc, err := parseUnstamped(LineFeeds(markdown), fromStart, readFrontmatter, budget)
+	doc, err := parseUnstamped(blockReader, LineFeeds(markdown), fromStart, readFrontmatter, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -199,11 +215,11 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 	return out
 }
 
-// parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
-// block that names none has none yet. Without readFrontmatter a closed front-matter block is read
-// as the blocks its lines make. at is where markdown stands in what the caller wrote, which a
-// refusal's line number counts from.
-func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *WriteBudget) (doc *Node, err error) {
+// parseUnstamped is Parse before EnsureBlockIDs, read with reader: blocks keep the ids their
+// markdown names, and a block that names none has none yet. Without readFrontmatter a closed
+// front-matter block is read as the blocks its lines make. at is where markdown stands in what the
+// caller wrote, which a refusal's line number counts from.
+func parseUnstamped(reader markdownReader, markdown string, at origin, readFrontmatter bool, budget *WriteBudget) (doc *Node, err error) {
 	defer recoverPanic(&doc, &err, "reading markdown")
 	source := []byte(markdown)
 	var front *Node
@@ -215,7 +231,7 @@ func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *Wr
 		at.server = max(0, at.server-rest)
 		source = source[rest:]
 	}
-	root, err := blockReader.parse(source, unclosedFrontmatter, budget, at)
+	root, err := reader.parse(source, unclosedFrontmatter, budget, at)
 	if nesting := (nestingError{}); errors.As(err, &nesting) {
 		nesting.line += at.line - 1
 		return nil, nesting
@@ -245,7 +261,7 @@ func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *Wr
 
 // inlineParserOptions is how inline markdown is read: a paragraph is the only block, so a leading
 // list marker, heading marker, fence, or directive is text, and the inline syntax is Parse's, its
-// delimiter runs read by emphasis.
+// delimiter runs read by emphasis's rules, `~` runs among them (tildeParser).
 func inlineParserOptions(emphasis emphasisParser) []parser.Option {
 	return []parser.Option{
 		parser.WithBlockParsers(
@@ -255,7 +271,7 @@ func inlineParserOptions(emphasis emphasisParser) []parser.Option {
 		parser.WithInlineParsers(inlineParsers(emphasis)...),
 		parser.WithInlineParsers(
 			util.Prioritized(elementInlineCounter{}, -1),
-			util.Prioritized(newStrikethroughGuard(), 500),
+			util.Prioritized(tildeParser{goldmarkRules: emphasis.goldmarkRules}, 500),
 			util.Prioritized(newLinkifyGuard(), 999),
 		),
 	}
@@ -275,9 +291,9 @@ func newInlineReader(emphasis emphasisParser) inlineReader {
 	}
 }
 
-// inlineMarkdown reads inline markdown as Parse does; flankingOnlyMarkdown reads it with its
-// delimiter runs judged by CommonMark's flanking rules alone (emphasisParser.flankingOnly).
-var inlineMarkdown, flankingOnlyMarkdown = newInlineReader(emphasisParser{}), newInlineReader(emphasisParser{flankingOnly: true})
+// inlineMarkdown reads inline markdown as Parse does; goldmarkMarkdown reads it with every delimiter
+// run read by goldmark's rules (emphasisParser.goldmarkRules).
+var inlineMarkdown, goldmarkMarkdown = newInlineReader(emphasisParser{}), newInlineReader(emphasisParser{goldmarkRules: true})
 
 // parseInlineWithDefinitions reads one textblock's inline markdown with reader as ParseInline
 // does, after a definition for each of labels, the footnote labels it refers to. It is the
@@ -821,6 +837,10 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 	return &Node{Type: nodeType, Children: children}, nil
 }
 
+// parseImage converts image. Its alt text is its label's plain text as the browser editor's parser
+// takes it (mdast-util-to-string): every text in the label, marked or not, and the alt text of an
+// image in it. inlineNesting holds images within maxInlineNesting of one another, so each alt
+// text is copied into at most that many others.
 func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Node, error) {
 	alt, err := parseInline(image, source, nil, footnotes)
 	if err != nil {
@@ -828,8 +848,12 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 	}
 	var text strings.Builder
 	for _, child := range alt {
-		if child.Type == "text" {
+		switch child.Type {
+		case "text":
 			text.WriteString(child.Text)
+		case "image":
+			nested, _ := child.Attrs["alt"].(string)
+			text.WriteString(nested)
 		}
 	}
 	return &Node{Type: "image", Attrs: Attrs{

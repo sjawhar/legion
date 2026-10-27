@@ -100,11 +100,15 @@ type lineCandidate struct {
 // character reference, which is punctuation to the flanking rules, as the browser editor writes it
 // (flanking).
 //
-// A spelling is taken first where it reads back by CommonMark's flanking rules as well
-// (flankingOnlyMarkdown), the rules goldmark reads by, and only where none does by the browser
-// editor's alone, which also let a run beside another `*` or `_` open or close (emphasisParser):
-// the writer keeps the bytes it wrote while it read by CommonMark's rules, wherever they read back
-// by the editor's too.
+// A spelling is taken first where it reads back by goldmark's rules as well (goldmarkMarkdown): a
+// `*` or `_` run judged by CommonMark's flanking rules alone, a `~` run by goldmark's strikethrough,
+// which pairs runs of either length and refuses one after any `~`, and every run paired in
+// goldmark's one loop over them in order. Only where none does is it taken by the browser editor's
+// rules alone (emphasisParser, tildeParser, delimiterList), which also let a `*` or `_` run beside
+// another open or close, pair a `~` run only with one of its length, let one after an escaped `~`
+// open or close, and pair `~` runs apart from the others: Dispatch read by goldmark's rules when it
+// wrote most stored markdown, so the writer keeps the bytes it wrote then wherever they read back by
+// the editor's rules too.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
@@ -115,7 +119,7 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		return
 	}
 	firstReadsBack := r.runReadsBack(from, prefix, nodes, inlineMarkdown)
-	if firstReadsBack && r.runReadsBack(from, prefix, nodes, flankingOnlyMarkdown) {
+	if firstReadsBack && r.runReadsBack(from, prefix, nodes, goldmarkMarkdown) {
 		return
 	}
 	written := string(r.b.Bytes()[from:])
@@ -131,15 +135,15 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		}
 		spellings = append(spellings, flanked...)
 	}
-	for _, flankingToo := range []bool{true, false} {
-		if !flankingToo && firstReadsBack {
+	for _, goldmarkToo := range []bool{true, false} {
+		if !goldmarkToo && firstReadsBack {
 			break
 		}
 		for _, spelling := range spellings {
 			r.b.Truncate(from)
 			fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
 			if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBack(from, prefix, nodes, inlineMarkdown) &&
-				(!flankingToo || r.runReadsBack(from, prefix, nodes, flankingOnlyMarkdown)) {
+				(!goldmarkToo || r.runReadsBack(from, prefix, nodes, goldmarkMarkdown)) {
 				return
 			}
 		}

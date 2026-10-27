@@ -105,7 +105,18 @@ func inlineNesting(root ast.Node, source []byte, measured map[*ast.Image]int) (r
 // before parseSource checks either bound. An image whose marks nest past maxInlineNesting has its
 // children dropped as soon as it is made, so no later walk enters them, and its measure refuses its
 // textblock (inlineNesting).
-type imageNesting struct{ goldmarkLinkParser }
+//
+// It also pairs the delimiter runs of each label that forms a link or an image, by goldmarkRules
+// or micromark's rules (delimiterList.pairLabel), where goldmark's parser pairs its own list, which
+// pmdoc's runs never join (processLinkLabel). It keeps the bottoms goldmark's parser keeps, how many
+// runs were pushed when each label opened: one pushed at every `[` and `![`, popped at every `]`
+// that finds a label open, on every path the parser takes from there (parser/link.go:124-215). The
+// label's runs are paired once its nodes are the link's children, as goldmark pairs them just
+// before it moves them there, and before the image is measured, so the measure counts its marks.
+type imageNesting struct {
+	goldmarkLinkParser
+	goldmarkRules bool
+}
 
 // goldmarkLinkParser is goldmark's link parser: an inline parser that also closes the labels a
 // block leaves open.
@@ -119,7 +130,25 @@ type goldmarkLinkParser interface {
 var imageNestingKey = parser.NewContextKey()
 
 func (p imageNesting) Parse(parent ast.Node, block gmtext.Reader, pc parser.Context) ast.Node {
+	delimiters := delimitersOf(pc)
+	if line, _ := block.PeekLine(); line[0] != ']' {
+		bottom := delimiters.pushed
+		node := p.goldmarkLinkParser.Parse(parent, block, pc)
+		if node != nil {
+			delimiters.bottoms = append(delimiters.bottoms, bottom)
+		}
+		return node
+	}
+	if len(delimiters.bottoms) == 0 {
+		return p.goldmarkLinkParser.Parse(parent, block, pc)
+	}
+	bottom := delimiters.bottoms[len(delimiters.bottoms)-1]
+	delimiters.bottoms = delimiters.bottoms[:len(delimiters.bottoms)-1]
 	node := p.goldmarkLinkParser.Parse(parent, block, pc)
+	switch node.(type) {
+	case *ast.Link, *ast.Image:
+		delimiters.pairLabel(bottom, p.goldmarkRules)
+	}
 	image, ok := node.(*ast.Image)
 	if !ok {
 		return node

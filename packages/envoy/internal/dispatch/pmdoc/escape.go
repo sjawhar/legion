@@ -155,11 +155,14 @@ func escaped(char rune) string {
 	}
 }
 
-// textEscape is how the text writer spells an escaped character: a tilde as its numeric
-// reference, since the strikethrough parser refuses a delimiter run right after a tilde even when
-// a backslash escapes it, and anything else as escaped spells it - except the character that ends
-// a bare URL (endsBareURL), which is always a backslash, since linkify continues a URL through the
-// `&` that opens either reference.
+// textEscape is how the text writer spells an escaped character: a tilde as its numeric reference,
+// and anything else as escaped spells it - except the character that ends a bare URL
+// (endsBareURL), which is always a backslash, since linkify continues a URL through the `&` that
+// opens either reference. Both delimiter rules read a `~` run after the reference as they read one
+// after any punctuation, where a run right after `\~` may open or close by the browser editor's
+// rules and is text by goldmark's, and the writer takes first a spelling both read back
+// (inlineWithEscapes). The writer has also always written the reference, and writing anything else
+// would change the bytes of every stored document that holds an escaped tilde.
 func textEscape(char rune, endsBareURL bool) string {
 	if endsBareURL {
 		return "\\" + string(char)
@@ -824,7 +827,10 @@ func imageAlt(alt string, context inlineContext) string {
 // and a line ending ends the row; a heading, which a line ending ends; or a paragraph, where a
 // line of the label can open a block. In a table cell a label holding a `|` after an even run of
 // backslashes does not: Parse reads that pipe as escaped, while the browser editor's parser, which
-// pairs backslashes before a pipe, ends the cell there.
+// pairs backslashes before a pipe, ends the cell there. The label must read back by goldmark's
+// delimiter rules as well (parseByGoldmarkRules), as a textblock's runs must (inlineWithEscapes):
+// `![\~b\~\~](u)`, written while Dispatch read by those rules, stays as it was, where `![~b~~](u)`
+// reads back only by the browser editor's.
 func altReadsBack(written, alt string, context inlineContext) bool {
 	image := "![" + written + "](u)"
 	var markdown string
@@ -839,12 +845,18 @@ func altReadsBack(written, alt string, context inlineContext) bool {
 	default:
 		markdown = image + "\n"
 	}
-	doc, err := Parse(markdown)
+	return readsAsAlt(Parse, markdown, alt, context.tableCell) && readsAsAlt(parseByGoldmarkRules, markdown, alt, context.tableCell)
+}
+
+// readsAsAlt reports whether markdown, read with parse, is one block holding only an image whose
+// alt text is alt: in a table's one cell when tableCell says altReadsBack wrote it there.
+func readsAsAlt(parse func(string) (*Node, error), markdown, alt string, tableCell bool) bool {
+	doc, err := parse(markdown)
 	if err != nil || len(doc.Children) != 1 {
 		return false
 	}
 	block := doc.Children[0]
-	if context.tableCell {
+	if tableCell {
 		if block.Type != "table" || len(block.Children) != 2 {
 			return false
 		}
