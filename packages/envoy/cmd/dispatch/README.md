@@ -322,10 +322,10 @@ cd packages/envoy
 ```
 
 It prints the `DATABASE_URL` to use for development and tests. Run again, it starts or reuses the
-same `dispatch-pg` container. It refuses a `dispatch-pg` on any image but its pinned pgvector one,
-whose `vector` extension the migrations need, and prints the commands that move that container's
-data volume onto the pinned image. The database retains the migrated schema; tests only truncate
-rows they create.
+same `dispatch-pg` container, which runs its pinned image: pgvector on PostgreSQL 18, whose
+`vector` extension the migrations need. It refuses a `dispatch-pg` on any other image or major and
+prints the commands that dump that container's databases and restore them into a new container on
+the pinned image. The database retains the migrated schema; tests only truncate rows they create.
 
 
 ## Running locally

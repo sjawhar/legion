@@ -159,10 +159,10 @@ with Docker, Bun, and Go installed:
    packages/envoy/scripts/dev-postgres.sh
    ```
 
-   It runs a container named `dispatch-pg` on `127.0.0.1:55432` from a pgvector image, which
-   Dispatch's migrations need, and starts or reuses that container when it is already there. A
-   `dispatch-pg` made from another image is refused, with the commands that move its data onto the
-   right one.
+   It runs a container named `dispatch-pg` on `127.0.0.1:55432` from a pinned image, pgvector on
+   PostgreSQL 18, which Dispatch's migrations need, and starts or reuses that container when it is
+   already there. A `dispatch-pg` made from another image or PostgreSQL major is refused, with the
+   commands that dump its databases and restore them into a new container on the right one.
 
 2. Build the web app:
 

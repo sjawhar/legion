@@ -4,11 +4,13 @@
 # Proves dev-postgres.sh's reuse rule without Docker: a fake `docker` on PATH answers the inspects
 # the script makes from the scenario its environment describes, and records every invocation, so
 # each case asserts both what the script printed and every docker command it ran. A stale
-# `dispatch-pg` (any image but the pinned pgvector one) is refused naming the container, both
-# images and the commands that move its data volume onto the pinned image, and the script itself
-# never stops, renames, removes, starts or creates anything for it. Its `quote`, which prints those
-# commands, is held to fixtures/shell-quote.json, the table packages/dispatch's shellQuote test
-# reads too, so the two copies of the rule cannot drift apart.
+# `dispatch-pg` (any image but the pinned one, pgvector on PostgreSQL 18) is refused naming the
+# container, both images and, in order, the commands that dump its databases and restore them into
+# a new container on the pinned image, and the script itself never stops, renames, removes, starts
+# or creates anything for it. The printed dump, run and restore lines are replayed through bash to
+# prove they paste as they read. Its `quote`, which prints those commands, is held to
+# fixtures/shell-quote.json, the table packages/dispatch's shellQuote test reads too, so the two
+# copies of the rule cannot drift apart.
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -18,16 +20,17 @@ readonly temporary_dir
 trap 'rm -rf "$temporary_dir"' EXIT
 mkdir -p "${temporary_dir}/bin"
 
-readonly pinned="pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a"
-readonly pinned_id="sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a"
+readonly pinned="mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11"
+readonly pinned_id="sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11"
+# The image an older version of dev-postgres.sh pinned: pgvector on PostgreSQL 16.
+readonly old_pin="pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a"
+readonly old_pin_id="sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a"
 readonly stale_id="sha256:eb4759788a2182f08257135e61a34f2cfc3c2914079f3465d64ee62350f4d081"
 readonly url="DATABASE_URL=postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable"
 
 # The fake docker. FAKE_CONTAINER=absent makes `container inspect` fail; otherwise the container
-# runs image FAKE_IMAGE_ID (created as FAKE_CONFIG_IMAGE), is running when FAKE_RUNNING=true,
-# carries PG_MAJOR=FAKE_PG_MAJOR, and mounts FAKE_MOUNT ("<type>|<name>|<source>", the fields the
-# script's template prints) on the data directory. The pinned image is present when
-# FAKE_PINNED_PRESENT=true.
+# runs image FAKE_IMAGE_ID (created as FAKE_CONFIG_IMAGE) and is running when FAKE_RUNNING=true.
+# The pinned image is present when FAKE_PINNED_PRESENT=true.
 cat >"${temporary_dir}/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${FAKE_CALLS:?}"
@@ -38,8 +41,6 @@ case "$1 $2" in
       *"{{.Image}}"*) printf '%s\n' "$FAKE_IMAGE_ID" ;;
       *"{{.State.Running}}"*) printf '%s\n' "$FAKE_RUNNING" ;;
       *"{{.Config.Image}}"*) printf '%s\n' "$FAKE_CONFIG_IMAGE" ;;
-      *".Config.Env"*) printf 'POSTGRES_PASSWORD=dispatch\nPG_MAJOR=%s\n\n' "$FAKE_PG_MAJOR" ;;
-      *".Mounts"*) printf '%s\n' "$FAKE_MOUNT" ;;
       "container inspect dispatch-pg") printf '[{}]\n' ;;
       *) echo "fake docker: unexpected inspect: $*" >&2; exit 2 ;;
     esac
@@ -74,9 +75,8 @@ run_case() {
   : >"$calls"
   status=0
   env PATH="${temporary_dir}/bin:${PATH}" FAKE_CALLS="$calls" FAKE_PINNED_ID="$pinned_id" \
-    FAKE_CONTAINER=present FAKE_PINNED_PRESENT=true FAKE_RUNNING=true FAKE_PG_MAJOR=16 \
+    FAKE_CONTAINER=present FAKE_PINNED_PRESENT=true FAKE_RUNNING=true \
     FAKE_IMAGE_ID="$pinned_id" FAKE_CONFIG_IMAGE="$pinned" \
-    FAKE_MOUNT="volume|6383303ba5ac|/var/lib/docker/volumes/6383303ba5ac/_data" \
     "$@" bash "$script" >"$out" 2>"$err" || status=$?
 }
 # Fails the case unless the script ran no docker command that changes anything.
@@ -105,66 +105,118 @@ else
   printf 'PASS: a stopped dispatch-pg on the pinned image: started, not recreated\n'
 fi
 
-# The stale container this script's older version made: postgres:16 on an anonymous volume.
-run_case FAKE_IMAGE_ID="$stale_id" FAKE_CONFIG_IMAGE=postgres:16
-backup="dispatch-pg-${stale_id:7:12}"
+# The stale container this script's previous pin made: pgvector on PostgreSQL 16. Its dump goes
+# under a TMPDIR with a space in it, so the printed redirects must quote their targets to paste.
+readonly backup="dispatch-pg-${old_pin_id:7:12}"
+readonly spaced_tmp="${temporary_dir}/tmp dir"
+mkdir -p "$spaced_tmp"
+readonly dump="${spaced_tmp}/${backup}.sql"
+# The dump-and-restore sequence the refusal prints, every line in this order.
+readonly sequence=(
+  "docker exec dispatch-pg pg_dumpall -U postgres --clean --if-exists > '$dump'"
+  "docker stop dispatch-pg"
+  "docker rename dispatch-pg $backup"
+  "docker run -d --name dispatch-pg -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 $pinned"
+  "docker exec dispatch-pg pg_isready -h 127.0.0.1 -U postgres"
+  "docker exec -i dispatch-pg psql -h 127.0.0.1 -U postgres -q -f - < '$dump'"
+  "docker exec dispatch-pg psql -U postgres -Atc 'select 1 from pg_available_extensions where name = '\''vector'\'''"
+  "docker exec dispatch-pg psql -U postgres -Atc 'show server_version_num'"
+  "docker rm $backup"
+  "rm '$dump'"
+)
+# The line number of the refusal's command line "dev-postgres:   <$1>", or nothing.
+line_of() {
+  grep -nxF -- "dev-postgres:   $1" "$err" | head -n1 | cut -d: -f1 || true
+}
+# Fails unless every line of `sequence` is printed, each after the one before it.
+in_order() {
+  local previous=0 line want
+  for want in "${sequence[@]}"; do
+    line="$(line_of "$want")"
+    if [ -z "$line" ] || [ "$line" -le "$previous" ]; then
+      printf '  missing or out of order: %s\n' "$want"
+      return 1
+    fi
+    previous="$line"
+  done
+}
+
+run_case TMPDIR="$spaced_tmp" FAKE_IMAGE_ID="$old_pin_id" FAKE_CONFIG_IMAGE="$old_pin"
 for want in \
-  "dispatch-pg runs postgres:16 (image $stale_id), not the pinned $pinned, so it has no pgvector" \
-  "  docker stop dispatch-pg" \
-  "  docker rename dispatch-pg $backup" \
-  "  docker run -d --name dispatch-pg -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 -v 6383303ba5ac:/var/lib/postgresql/data $pinned" \
-  "  docker rm $backup"; do
+  "dev-postgres: dispatch-pg runs $old_pin (image $old_pin_id), not the pinned $pinned, which is pgvector on PostgreSQL 18. Dispatch needs the pinned image." \
+  "until it reports accepting connections" \
+  "over TCP" \
+  'role "postgres" already exists' \
+  "current user cannot be dropped" \
+  "print 1 and 18xxxx once the new container serves the restored data" \
+  "\`docker rename $backup dispatch-pg\` and \`docker start dispatch-pg\` put the old one back"; do
   if ! grep -qF -- "$want" "$err"; then
-    fail "a stale dispatch-pg: the refusal names \"$want\""
+    fail "a running dispatch-pg on the old pin: the refusal says \"$want\""
   fi
 done
-if [ "$status" -ne 1 ] || [ -s "$out" ] || ! read_only; then
-  fail "a stale dispatch-pg: refused (exit 1, no URL, nothing changed)"
+if [ "$status" -ne 1 ] || [ -s "$out" ] || ! read_only || grep -qF "no pgvector" "$err" \
+  || [ -n "$(line_of "docker start dispatch-pg")" ] || ! in_order; then
+  fail "a running dispatch-pg on the old pin: refused (exit 1, no URL, nothing changed), the dump-and-restore sequence in order with no start, no claim it lacks pgvector"
 else
-  printf 'PASS: a stale dispatch-pg: refused naming both images and the volume move, nothing changed\n'
+  printf 'PASS: a running dispatch-pg on the old pin: refused naming both images and the dump-and-restore sequence in order, nothing changed\n'
 fi
 
-# The stale image when the pinned one has never been pulled here: still refused.
+# The dump, run and restore lines replayed as printed, in a directory of their own, with `docker`
+# a function that prints its arguments one per line and then its stdin: the dump's `>` must
+# create the file at $dump, the run must pass the pinned image's flags word for word, and the
+# restore's `<` must feed that same file back.
+printed() {
+  grep -F -- "dev-postgres:   $1" "$err" | head -n1 | cut -c17- || true
+}
+# A line that fails to replay prints its error, which no expected answer holds. `docker` is called
+# only through the eval, which shellcheck cannot see.
+replay() {
+  # shellcheck disable=SC2317
+  (cd "${temporary_dir}/replay" && docker() { printf '%s\n' "$@"; cat; } && eval "$1") 2>&1 || true
+}
+mkdir -p "${temporary_dir}/replay"
+printed_dump="$(printed "docker exec dispatch-pg pg_dumpall ")"
+printed_run="$(printed "docker run ")"
+printed_restore="$(printed "docker exec -i dispatch-pg psql ")"
+rm -f "$dump"
+replayed_dump="$(replay "$printed_dump" </dev/null)"
+replayed_run="$(replay "$printed_run" </dev/null)"
+replayed_restore="$(replay "$printed_restore" </dev/null)"
+want_dump="$(printf '%s\n' exec dispatch-pg pg_dumpall -U postgres --clean --if-exists)"
+want_run="$(printf '%s\n' run -d --name dispatch-pg -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 "$pinned")"
+want_restore="$(printf '%s\n' exec -i dispatch-pg psql -h 127.0.0.1 -U postgres -q -f - "$want_dump")"
+if [ -z "$printed_dump" ] || [ -z "$printed_run" ] || [ -z "$printed_restore" ] || [ -n "$replayed_dump" ] \
+  || [ "$(cat "$dump" 2>/dev/null)" != "$want_dump" ] || [ "$replayed_run" != "$want_run" ] \
+  || [ "$replayed_restore" != "$want_restore" ]; then
+  fail "the printed dump, run and restore lines paste as they read"
+  printf '  dump: %s\n  replayed: %s\n  dump file: %s\n' "$printed_dump" "$(tr '\n' '|' <<<"$replayed_dump")" "$(tr '\n' '|' <"$dump" 2>/dev/null || true)"
+  printf '  run: %s\n  replayed: %s\n' "$printed_run" "$(tr '\n' '|' <<<"$replayed_run")"
+  printf '  restore: %s\n  replayed: %s\n' "$printed_restore" "$(tr '\n' '|' <<<"$replayed_restore")"
+else
+  printf 'PASS: the printed dump, run and restore lines paste as they read: the dump lands at its quoted path, the restore reads it back\n'
+fi
+
+# A stopped stale container: the sequence starts it first, since pg_dumpall needs a running
+# server, and the script itself still starts nothing.
+run_case TMPDIR="$spaced_tmp" FAKE_IMAGE_ID="$old_pin_id" FAKE_CONFIG_IMAGE="$old_pin" FAKE_RUNNING=false
+start_line="$(line_of "docker start dispatch-pg")"
+dump_line="$(line_of "${sequence[0]}")"
+if [ "$status" -ne 1 ] || [ -s "$out" ] || ! read_only || [ -z "$start_line" ] || [ -z "$dump_line" ] \
+  || [ "$start_line" -ge "$dump_line" ] || ! in_order; then
+  fail "a stopped dispatch-pg on the old pin: refused, the sequence starting it before the dump, nothing changed"
+else
+  printf 'PASS: a stopped dispatch-pg on the old pin: refused, the sequence starts it before the dump, nothing changed\n'
+fi
+
+# The container an older version made from postgres:16, when the pinned image has never been
+# pulled here: still refused, with the same sequence.
 run_case FAKE_IMAGE_ID="$stale_id" FAKE_CONFIG_IMAGE=postgres:16 FAKE_PINNED_PRESENT=false
-if [ "$status" -ne 1 ] || [ -s "$out" ] || ! read_only || ! grep -qF "not the pinned $pinned" "$err"; then
-  fail "a stale dispatch-pg with no pinned image pulled: refused"
+if [ "$status" -ne 1 ] || [ -s "$out" ] || ! read_only \
+  || ! grep -qF "dispatch-pg runs postgres:16 (image $stale_id), not the pinned $pinned, which is pgvector on PostgreSQL 18" "$err" \
+  || ! grep -qxF "dev-postgres:   docker rename dispatch-pg dispatch-pg-${stale_id:7:12}" "$err"; then
+  fail "a postgres:16 dispatch-pg with no pinned image pulled: refused"
 else
-  printf 'PASS: a stale dispatch-pg with the pinned image never pulled: refused, nothing changed\n'
-fi
-
-run_case FAKE_IMAGE_ID="$stale_id" FAKE_CONFIG_IMAGE=postgres:16 FAKE_MOUNT="bind||/srv/dispatch-pg"
-if [ "$status" -ne 1 ] || ! read_only || ! grep -qF -- "-v /srv/dispatch-pg:/var/lib/postgresql/data $pinned" "$err"; then
-  fail "a stale dispatch-pg on a bind mount: the move mounts the host path"
-else
-  printf 'PASS: a stale dispatch-pg on a bind mount: the move mounts its host path\n'
-fi
-
-# A bind mount whose host path holds a space: the printed move pastes as one command, its -v
-# argument one word. The `docker run` line is replayed through bash with `docker` as a function
-# that prints its arguments one per line.
-run_case FAKE_IMAGE_ID="$stale_id" FAKE_CONFIG_IMAGE=postgres:16 FAKE_MOUNT="bind||/srv/My Data"
-printed_run="$(sed -n 's/^dev-postgres:   \(docker run .*\)$/\1/p' "$err")"
-replayed="$(bash -c "docker() { printf '%s\n' \"\$@\"; }; $printed_run")"
-if [ "$status" -ne 1 ] || ! read_only || [ -z "$printed_run" ] \
-  || ! grep -qxF -- "/srv/My Data:/var/lib/postgresql/data" <<<"$replayed"; then
-  fail "a stale dispatch-pg on a bind mount with a space: the printed move pastes whole"
-  printf '  printed: %s\n  replayed: %s\n' "$printed_run" "$(tr '\n' '|' <<<"$replayed")"
-else
-  printf 'PASS: a stale dispatch-pg on a bind mount with a space: the printed move pastes as one command\n'
-fi
-
-run_case FAKE_IMAGE_ID="$stale_id" FAKE_CONFIG_IMAGE=postgres:16 FAKE_MOUNT=""
-if [ "$status" -ne 1 ] || ! read_only || ! grep -qF "is on no volume" "$err" || grep -qF "docker rename" "$err"; then
-  fail "a stale dispatch-pg with no data volume: refused with no move"
-else
-  printf 'PASS: a stale dispatch-pg with no data volume: refused, offering a dump and no move\n'
-fi
-
-run_case FAKE_IMAGE_ID="$stale_id" FAKE_CONFIG_IMAGE=postgres:15 FAKE_PG_MAJOR=15
-if [ "$status" -ne 1 ] || ! read_only || ! grep -qF "holds PostgreSQL 15" "$err" || grep -qF "docker rename" "$err"; then
-  fail "a stale dispatch-pg on another PostgreSQL major: refused with no move"
-else
-  printf 'PASS: a stale dispatch-pg on PostgreSQL 15: refused, offering a dump and no move\n'
+  printf 'PASS: a postgres:16 dispatch-pg with the pinned image never pulled: refused with the dump-and-restore sequence, nothing changed\n'
 fi
 
 # dev-postgres.sh's own `quote`, taken from the script as it ships (it runs on load, so it is not
