@@ -1,7 +1,10 @@
+import { type AddressInfo, createServer, type Socket } from "node:net";
+
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import type { Event } from "../web/src/api/types";
 import {
+  baseUrl,
   createAsk,
   createIssue,
   createMessage,
@@ -12,6 +15,7 @@ import {
   getIssueEvents,
   getMyState,
   slowWrites,
+  userHeaders,
 } from "./api";
 import {
   dropFirstAnswer,
@@ -21,9 +25,10 @@ import {
   watchAnswers,
   watchWrites,
 } from "./keyed-writes";
+import { httpsTarget, plainHttpSkipReason } from "./plain-http-origin";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
-import { asUser } from "./users";
+import { asPlainHttpUser, asUser } from "./users";
 
 // Every write the page makes goes under an `Idempotency-Key` minted for the person's one action,
 // and the page tries it again under that key until Dispatch answers it (`ApiClient.send`). These
@@ -54,9 +59,10 @@ async function eventsOf(issue: string, type: Event["type"]): Promise<Event[]> {
   return (await getIssueEvents(issue)).filter((event) => event.type === type);
 }
 
-/** The `issue.updated` events on `issue` that set its status to `status`. */
+/** The `issue.updated` events on `issue` that set its status to `status`, read with the agent
+ *  token, which a person's sign-out leaves working. */
 async function statusEvents(issue: string, status: string): Promise<Event[]> {
-  return (await getIssueEvents(issue)).filter(
+  return (await getIssueEvents(issue, {}, agent)).filter(
     (event) => event.type === "issue.updated" && event.payload.status === status
   );
 }
@@ -75,6 +81,28 @@ async function outage(page: Page, pattern: string, method: string): Promise<{ en
       down = false;
     },
   };
+}
+
+/** Holds `page`'s status changes to `issue` at the network - each goes out and is never answered -
+ *  and lets every other request through; then picks `backlog` and adds `label` behind it, which
+ *  waits its turn on the issue's line, never sent. */
+async function queueBehindAHeldStatus(page: Page, issue: string, label: string): Promise<void> {
+  await page.route(`**/api/v1/issues/${issue}`, (route) => {
+    const request = route.request();
+    if (request.method() === "PATCH" && request.postData()?.includes('"status"')) return;
+    return route.fallback();
+  });
+  await page.bringToFront();
+  await page.getByLabel("Status").selectOption("backlog");
+  await expect(pendingWrites(page).getByRole("status")).toHaveText("Saving 1 change…");
+  const editLabels = page.getByRole("button", { name: "Edit labels" });
+  await editLabels.click();
+  const labelSearch = page.getByRole("combobox", { name: "Search or create label" });
+  await labelSearch.fill(label);
+  await expect(page.getByRole("option", { name: `Create "${label}"` })).toBeVisible();
+  await labelSearch.press("Enter");
+  await editLabels.click();
+  await expect(pendingWrites(page)).toContainText(`Labels of ${issue} — Waiting to send`);
 }
 
 test("a comment whose answer is lost lands once, under one key", async ({ browser }) => {
@@ -471,10 +499,16 @@ test("a 20 MB upload repeated while its first request runs is answered 409 KEY_I
 // dropped sent the label at the confirm, and it landed: neither tab makes another write after the
 // confirm, and neither issue changes. Both tabs are loaded before either write is pressed, so the
 // sign-out comes seconds after the held attempts, well inside the 15 s the page waits on a silent
-// one before asking again.
+// one before asking again. The `chromium-plain-http-sign-out` project runs it on a page that is no
+// secure context, whose browser has no `navigator.locks`: there the other tab's hold is the lease
+// the signing-out tab renews, not its lock.
 test("a sign-out confirmed with a write queued behind a held one sends nothing after the confirm, in either tab", async ({
   browser,
 }, testInfo) => {
+  test.skip(
+    testInfo.project.name.startsWith("chromium-plain-http") && httpsTarget,
+    plainHttpSkipReason
+  );
   test.setTimeout(90_000);
   await createProject({ key: "KW", name: "Keyed writes" });
   const issues = [
@@ -482,7 +516,9 @@ test("a sign-out confirmed with a write queued behind a held one sends nothing a
     await createIssue({ project: "KW", title: "Tab two's change" }),
   ];
   const before = await Promise.all(issues.map((issue) => getIssue(issue.key)));
-  const alice = await asUser(browser, "alice");
+  const alice = testInfo.project.name.startsWith("chromium-plain-http")
+    ? await asPlainHttpUser(browser, "alice")
+    : await asUser(browser, "alice");
   try {
     let confirmedAt: number | undefined;
     const writes: { at: number; body: string }[] = [];
@@ -499,31 +535,12 @@ test("a sign-out confirmed with a write queued behind a held one sends nothing a
           writes.push({ at: Date.now(), body: request.postData() ?? "" });
         }
       });
-      // The status change reaches no one and is never answered; anything else goes to Dispatch.
-      await page.route(`**${path}`, (route) => {
-        const request = route.request();
-        if (request.method() === "PATCH" && request.postData()?.includes('"status"')) return;
-        return route.fallback();
-      });
       await page.goto(`/issues/${issue.key}`);
       await expect(page.getByRole("button", { name: "Edit labels" })).toBeVisible();
       tabs.push(page);
     }
     for (const [index, page] of tabs.entries()) {
-      const label = `discarded-${index + 1}`;
-      await page.bringToFront();
-      await page.getByLabel("Status").selectOption("backlog");
-      await expect(pendingWrites(page).getByRole("status")).toHaveText("Saving 1 change…");
-      const editLabels = page.getByRole("button", { name: "Edit labels" });
-      await editLabels.click();
-      const labelSearch = page.getByRole("combobox", { name: "Search or create label" });
-      await labelSearch.fill(label);
-      await expect(page.getByRole("option", { name: `Create "${label}"` })).toBeVisible();
-      await labelSearch.press("Enter");
-      await editLabels.click();
-      await expect(pendingWrites(page)).toContainText(
-        `Labels of ${issues[index]?.key} — Waiting to send`
-      );
+      await queueBehindAHeldStatus(page, issues[index]?.key ?? "", `discarded-${index + 1}`);
     }
     // The labels wait behind the held status changes: none has gone out.
     expect(writes.filter(({ body }) => body.includes('"labels"'))).toEqual([]);
@@ -549,6 +566,159 @@ test("a sign-out confirmed with a write queued behind a held one sends nothing a
     expect(after.map(({ labels, status }) => ({ labels, status }))).toEqual(
       before.map(({ labels, status }) => ({ labels, status }))
     );
+  } finally {
+    await alice.close();
+  }
+});
+
+// A sign-out whose tab goes before it hears how the sign-out ended leaves the other tabs to ask
+// Dispatch. Alice's status change in tab 2 is failing at the connection when tab 1 signs her out,
+// so tab 2 holds it, `Waiting for a sign-out in another tab`. Tab 1's `POST /auth/logout` goes to
+// a server that takes it and never answers, so the page never hears how it ended: a route left
+// unanswered is not enough, since Chromium sends a paused request on to Dispatch once its page
+// closes. Either nothing else ends alice's session (the sign-out did not land), or the test ends
+// it at Dispatch itself (it landed). Then tab 1 closes, with the network back. Tab 2 reads who is
+// signed in: still alice, and the change goes out and lands once; nobody, and it is discarded with
+// nothing sent. A page where a closing tab said its sign-out was still out let the change go out
+// under a session Dispatch had ended, and kept it for the next sign-in. The
+// `chromium-plain-http-sign-out` project runs these on the lease a page without `navigator.locks`
+// holds by.
+for (const landed of [false, true]) {
+  test(`a sign-out ${landed ? "that landed" : "that never reached Dispatch"}, its tab closed before the answer, ${landed ? "discards" : "lets go on"} the write another tab held for it`, async ({
+    browser,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name.startsWith("chromium-plain-http") && httpsTarget,
+      plainHttpSkipReason
+    );
+    test.setTimeout(90_000);
+    await createProject({ key: "KW", name: "Keyed writes" });
+    const issue = await createIssue({ project: "KW", title: "Held for a sign-out" });
+    const before = await getIssue(issue.key);
+    const path = `/api/v1/issues/${issue.key}`;
+    const alice = testInfo.project.name.startsWith("chromium-plain-http")
+      ? await asPlainHttpUser(browser, "alice")
+      : await asUser(browser, "alice");
+    // Where the page's sign-out goes in place of Dispatch: it takes the request and never answers.
+    const held: Socket[] = [];
+    const silent = createServer((socket) => held.push(socket));
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
+    const { port } = silent.address() as AddressInfo;
+    try {
+      const holding = await alice.newPage();
+      const writes: number[] = [];
+      holding.on("request", (request) => {
+        if (request.method() === "PATCH" && new URL(request.url()).pathname === path) {
+          writes.push(Date.now());
+        }
+      });
+      const network = await outage(holding, `**${path}`, "PATCH");
+      await holding.goto(`/issues/${issue.key}`);
+      const signingOut = await alice.newPage();
+      signingOut.on("dialog", (dialog) => void dialog.accept());
+      const sent = Promise.withResolvers<void>();
+      await signingOut.route("**/auth/logout", async (route) => {
+        sent.resolve();
+        await route.continue({ url: `http://127.0.0.1:${port}/auth/logout` });
+      });
+      await signingOut.goto("/");
+
+      await holding.bringToFront();
+      await holding.getByLabel("Status").selectOption("backlog");
+      await expect(pendingWrites(holding).getByRole("status")).toHaveText("Saving 1 change…");
+      await signingOut.bringToFront();
+      if (testInfo.project.name === "iphone") {
+        await signingOut.getByRole("button", { name: "Open navigation" }).click();
+      }
+      await signingOut.getByRole("button", { name: "Sign out" }).click();
+      await sent.promise;
+      if (landed) {
+        const ended = await fetch(new URL("/auth/logout", baseUrl), {
+          headers: await userHeaders("alice"),
+          method: "POST",
+        });
+        expect(ended.status).toBe(200);
+      }
+      await expect(pendingWrites(holding)).toContainText("Waiting for a sign-out in another tab");
+      network.end();
+      const closed = Date.now();
+      await signingOut.close();
+
+      if (landed) {
+        await expect(pendingWrites(holding)).toHaveCount(0, { timeout: 30_000 });
+        await expect.poll(() => keptWrites(holding)).toBe(0);
+        // A write the discard started would go out at once; give a straggler time to show.
+        await holding.waitForTimeout(3_000);
+        expect(writes.filter((at) => at >= closed)).toEqual([]);
+        expect((await getIssue(issue.key, agent)).status).toBe(before.status);
+        expect(await statusEvents(issue.key, "backlog")).toEqual([]);
+      } else {
+        await expect
+          .poll(async () => (await getIssue(issue.key, agent)).status, { timeout: 30_000 })
+          .toBe("backlog");
+        await expect(pendingWrites(holding)).toHaveCount(0);
+        await expect.poll(() => keptWrites(holding)).toBe(0);
+        expect(await statusEvents(issue.key, "backlog")).toHaveLength(1);
+      }
+    } finally {
+      await alice.close();
+      for (const socket of held) socket.destroy();
+      silent.close();
+    }
+  });
+}
+
+// A write belongs to the person who pressed it, and dropping a line of writes starts none of them.
+// Alice's status change is held at the network, out and never answered, and a label she added
+// waits behind it on the same issue; then bob signs in from another tab of the same browser. Both
+// of alice's writes are dropped, and nothing goes out after bob's sign-in: neither the label nor
+// another attempt of the held change. A page that advanced the line as it dropped it sent the
+// label under bob's cookie, which only Dispatch's `409 LOGIN_CHANGED` stopped.
+test("alice's write queued behind her held one sends nothing once bob signs in from another tab", async ({
+  browser,
+}) => {
+  test.setTimeout(90_000);
+  await createProject({ key: "KW", name: "Keyed writes" });
+  const issue = await createIssue({ project: "KW", title: "Alice's line" });
+  const before = await getIssue(issue.key);
+  const path = `/api/v1/issues/${issue.key}`;
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const writes: { at: number; body: string }[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "PATCH" && new URL(request.url()).pathname === path) {
+        writes.push({ at: Date.now(), body: request.postData() ?? "" });
+      }
+    });
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByRole("button", { name: "Edit labels" })).toBeVisible();
+    await queueBehindAHeldStatus(page, issue.key, "alice-only");
+
+    const other = await alice.newPage();
+    const bobSignedIn = Date.now();
+    await other.goto(devSignInPath("bob"));
+    await expect
+      .poll(() =>
+        other.evaluate(async () => {
+          const whoami: unknown = await (await fetch("/auth/whoami")).json();
+          return typeof whoami === "object" && whoami !== null && "login" in whoami
+            ? whoami.login
+            : null;
+        })
+      )
+      .toBe("bob");
+    await expect(pendingWrites(page)).toHaveCount(0);
+    await expect.poll(() => keptWrites(page)).toBe(0);
+    // A write the drop started would go out at once; give a straggler time to show.
+    await page.waitForTimeout(3_000);
+
+    expect(writes.filter(({ at }) => at >= bobSignedIn)).toEqual([]);
+    const after = await getIssue(issue.key, agent);
+    expect({ labels: after.labels, status: after.status }).toEqual({
+      labels: before.labels,
+      status: before.status,
+    });
   } finally {
     await alice.close();
   }

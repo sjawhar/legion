@@ -177,5 +177,19 @@ export default defineConfig({
         launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} 127.0.0.1`] },
       },
     },
+    // The keyed write path's sign-out rows on that same plain-HTTP origin, which is no secure
+    // context, so the browser has no `navigator.locks`: there a tab holds the person's writes for
+    // another tab's sign-out on the lease that tab renews (`SIGN_OUT_RENEW_MS`,
+    // `SIGN_OUT_LEASE_MS`), which a secure context never reaches.
+    {
+      name: "chromium-plain-http-sign-out",
+      testMatch: /keyed-writes\.e2e\.ts/,
+      grep: /a sign-out/,
+      use: {
+        ...devices["Desktop Chrome"],
+        baseURL: plainHttpOrigin,
+        launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} 127.0.0.1`] },
+      },
+    },
   ],
 });
