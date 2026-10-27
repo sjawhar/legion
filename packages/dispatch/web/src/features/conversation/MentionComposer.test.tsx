@@ -1883,10 +1883,10 @@ test("after Dispatch's refusal every Retry, edited or not, gets a key of its own
       rerender({
         owner: direct,
         replyTo: {
-          author: "Planner",
+          actor: { id: "A", kind: "session", origin: { session_title: "Planner" } },
           excerpt: "Question",
           id: "message-9",
-          thread: { delivery: "btw", target: "session:A", title: "Planner" },
+          thread: { delivery: "btw", target: "session:A" },
         },
       });
       fireEvent.change(field, { target: { value: "Status please, now" } });

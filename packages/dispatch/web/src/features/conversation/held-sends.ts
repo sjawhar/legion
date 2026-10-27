@@ -11,6 +11,7 @@ import { type Dispatch, type SetStateAction, useEffect, useRef, useState } from 
 
 import { api } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
+import type { Actor } from "../../api/types";
 import { pastDeadlineKey } from "../../hooks/useSending";
 import { SEND_DEADLINE_MS } from "../writes/keyed-write";
 import { type Shape, shape } from "../writes/write-storage";
@@ -141,6 +142,28 @@ const keptDraft = shape.record({
 
 const keptDelivery = shape.oneOf(...DELIVERY_CAPABILITIES);
 
+/** The parent's author a reply quotes (`ReplyTarget.actor`), as Dispatch recorded it. */
+const keptActor = shape.either(
+  shape.record({ id: shape.string, kind: shape.oneOf("user") }),
+  shape.record({
+    id: shape.string,
+    kind: shape.oneOf("session"),
+    origin: shape.optional(
+      shape.record({
+        cwd: shape.optional(shape.string),
+        host: shape.optional(shape.string),
+        machine: shape.optional(shape.string),
+        pane: shape.optional(shape.string),
+        session_title: shape.optional(shape.string),
+        tmux: shape.optional(shape.string),
+      })
+    ),
+    owner: shape.optional(shape.string),
+    service: shape.optional(shape.string),
+  }),
+  shape.record({ id: shape.string, kind: shape.oneOf("system") })
+) satisfies Shape<Actor>;
+
 const keptComposerSend = shape.record({
   draft: shape.record({ ask: keptAsk, draft: keptDraft }),
   mutationKey: shape.array(shape.string),
@@ -165,16 +188,14 @@ const keptComposerSend = shape.record({
     plainDelivery: keptDelivery,
     replyTo: shape.nullable(
       shape.record({
-        author: shape.string,
+        actor: keptActor,
         excerpt: shape.string,
         id: shape.string,
         mentions: shape.optional(
           shape.array(shape.record({ target: shape.string, title: shape.string }))
         ),
         parentKind: shape.oneOf("comment", "message"),
-        thread: shape.optional(
-          shape.record({ delivery: keptDelivery, target: shape.string, title: shape.string })
-        ),
+        thread: shape.optional(shape.record({ delivery: keptDelivery, target: shape.string })),
         to: shape.optional(shape.string),
       })
     ),
