@@ -626,10 +626,10 @@ export const LegionHandoffCompleteResponse = z.strictObject({
   note: nonEmptyString.optional(),
 });
 /** `api.WaveReleaseResponse`. A release is accepted whatever the children's links say, so
- * `released` is every issue the request named, unchanged, and the architect is never asked to
- * send the request again; `started` and `held` then say what the release did with each of them.
- * A child neither started nor held — one the daemon does not record, or one still admitted that
- * waits on nothing — is in neither list. */
+ * `released` is every issue the request named, each once, in the order the request first named it,
+ * and the architect is never asked to send the request again; `started` and `held` then say what
+ * the release did with each of them. A child neither started nor held — one the daemon does not
+ * record, or one still admitted that waits on nothing — is in neither list. */
 export const LegionWaveReleaseResponse = z.strictObject({
   released: z.array(nonEmptyString),
   started: z.array(issueKey),

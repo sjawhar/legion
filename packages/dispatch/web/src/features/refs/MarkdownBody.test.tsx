@@ -231,6 +231,156 @@ describe("Dispatch pictures", () => {
     }
   });
 
+  // A picture's source and a link's target are nodes an author named explicitly, so a document
+  // whose name is past the bound text is held to (2683 characters, which a new upload's reference
+  // key still holds) is drawn from its version's bytes and opened by its page, not left a
+  // `dispatch://` source the browser cannot fetch or a dead link.
+  test("a long-named picture is drawn and an explicit link to a long-named document opens it", async () => {
+    const slug = "a".repeat(2683);
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+      artifacts: [{ ...picture, kind: "doc", name: "design.md", slug }],
+      key: "CORE-1",
+      title: "Core one",
+    } as never);
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The design.",
+      token: "sha256:design",
+      version: 1,
+    });
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={`![shot](dispatch://CORE-1/artifact/${slug}@v1)\n\nSee [design](dispatch://CORE-1/artifact/${slug}).`}
+        />
+      )
+    );
+
+    try {
+      const shot = await within(view.container).findByRole("img", { name: "shot" });
+      expect(shot.getAttribute("src")).toBe(`/api/v1/issues/CORE-1/artifacts/${slug}/versions/1`);
+      expect(shot.closest("a")?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}?v=1`);
+      const link = await within(view.container).findByRole("link", { name: "design.md" });
+      expect(link.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
+      expect(link.getAttribute("data-dispatch-ref")).toBe(`dispatch://CORE-1/artifact/${slug}`);
+    } finally {
+      getArtifactText.mockRestore();
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
+  // A URL left as text is text to the server's `text.Extract`, which cites a dashboard page only
+  // within the bounds the graph keys: a document past them stays the URL it is, and a block past
+  // them (257 bytes) is its document. A link its author wrote names its target, so it opens the
+  // same long-named document.
+  test("a bare dashboard URL past the bounds stays a plain link; an author's link to it still opens the document", async () => {
+    const slug = "a".repeat(2683);
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+      artifacts: [
+        { ...picture, kind: "doc", name: "design.md", slug },
+        { ...picture, id: "artifact-plan", kind: "doc", name: "plan.md", slug: "plan-md" },
+      ],
+      key: "CORE-1",
+      title: "Core one",
+    } as never);
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The design.",
+      token: "sha256:design",
+      version: 1,
+    });
+    const page = `https://dispatch.test/issues/CORE-1/artifacts/${slug}`;
+    const plan = "https://dispatch.test/issues/CORE-1/artifacts/plan-md";
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={`Bare: ${page}\n\nSee [design](${page}) and [design](dispatch://CORE-1/artifact/${slug}).\n\nPlan: ${plan} and ${plan}#b-${"b".repeat(257)}`}
+        />
+      )
+    );
+
+    try {
+      const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
+      expect(designs).toHaveLength(2);
+      for (const link of designs) {
+        expect(link.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
+        expect(link.getAttribute("data-dispatch-ref")).toBe(`dispatch://CORE-1/artifact/${slug}`);
+      }
+      const plans = await within(view.container).findAllByRole("link", { name: "plan.md" });
+      expect(plans).toHaveLength(2);
+      for (const link of plans) {
+        expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/plan-md");
+        expect(link.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/artifact/plan-md");
+      }
+      const bare = within(view.container).getByRole("link", { name: page });
+      expect(bare.getAttribute("href")).toBe(page);
+      expect(bare.getAttribute("data-dispatch-ref")).toBeNull();
+    } finally {
+      getArtifactText.mockRestore();
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
+  // The `dispatch://` forms of a URL left as text: an angle-bracket autolink, and a Markdown link
+  // whose words are its own target, the form a document stores one in. Proof's serializer moves
+  // their target into `data-dispatch-href`; they are text to the server all the same, so past the
+  // bounds they stay plain, and within them they are references. A `dispatch://` link its author
+  // gave words of its own still opens the long-named document.
+  test("a dispatch:// URL left as text past the bounds stays plain; an author's dispatch:// link with its own words still opens", async () => {
+    const slug = "a".repeat(2683);
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+      artifacts: [
+        { ...picture, kind: "doc", name: "design.md", slug },
+        { ...picture, id: "artifact-plan", kind: "doc", name: "plan.md", slug: "plan-md" },
+      ],
+      key: "CORE-1",
+      title: "Core one",
+    } as never);
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The design.",
+      token: "sha256:design",
+      version: 1,
+    });
+    const long = `dispatch://CORE-1/artifact/${slug}`;
+    const plan = "dispatch://CORE-1/artifact/plan-md";
+    const block = `${plan}#b-${"b".repeat(257)}`;
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={`Angle: <${long}>\n\nSelf: [${long}](${long})\n\nBlock: <${block}>\n\nSee [design](${long}).\n\nPlan: <${plan}> and [${plan}](${plan})`}
+        />
+      )
+    );
+
+    try {
+      const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
+      expect(designs).toHaveLength(1);
+      expect(designs[0]?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
+      expect(designs[0]?.getAttribute("data-dispatch-ref")).toBe(long);
+      const plans = await within(view.container).findAllByRole("link", { name: "plan.md" });
+      expect(plans).toHaveLength(2);
+      for (const link of plans) {
+        expect(link.getAttribute("data-dispatch-ref")).toBe(plan);
+      }
+      // Past the bounds each is its words as plain text: no link to click, and no
+      // `data-dispatch-href` for the hover card (`RefPreview`'s trigger) to find.
+      for (const [label, words] of [
+        ["Angle:", long],
+        ["Self:", long],
+        ["Block:", block],
+      ] as const) {
+        const paragraph = within(view.container).getByText(label, { exact: false });
+        expect(paragraph.textContent).toBe(`${label} ${words}`);
+        expect(paragraph.querySelector("a")).toBeNull();
+        expect(paragraph.querySelector("[data-dispatch-href],[data-dispatch-ref]")).toBeNull();
+      }
+    } finally {
+      getArtifactText.mockRestore();
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
   test("a picture on another website renders as it always has", async () => {
     const view = render(
       withQueries(<MarkdownBody markdown="![chart](https://example.com/a.png)" />)
@@ -342,6 +492,60 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     expect(getAsk).toHaveBeenCalledWith("ask-1");
   } finally {
     getAsk.mockRestore();
+    view.unmount();
+  }
+});
+
+test("a block reference reads as the headline of its text: the pinned version's, opening that version, or the current one, opening the block", async () => {
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+    artifacts: [
+      { ...picture, id: "spec", kind: "doc", name: "Design.md", primary: true, slug: "design-md" },
+    ],
+    key: "CORE-1",
+    primary_artifact_id: "spec",
+    title: "Core one",
+  } as never);
+  const node = {
+    block_id: "p1",
+    changed_version: 3,
+    document: "dispatch://CORE-1/spec",
+    id: "CORE-1/spec#p1",
+    issue_key: "CORE-1",
+    kind: "block" as const,
+    project: "CORE",
+    ref: "dispatch://CORE-1/spec#b-p1",
+    text: "Ship it on **Monday**.",
+  };
+  const getReferences = spyOn(api, "getReferences").mockImplementation((reference) =>
+    Promise.resolve(
+      reference.endsWith("@v2")
+        ? {
+            edges: [],
+            node: {
+              ...node,
+              pin: { ref: reference, state: "changed", text: "Ship it on Friday.", version: 2 },
+            },
+          }
+        : { edges: [], node }
+    )
+  );
+  const view = render(
+    withQueries(
+      <MarkdownBody markdown="Now dispatch://CORE-1/spec#b-p1 and then dispatch://CORE-1/spec#b-p1@v2." />
+    )
+  );
+
+  try {
+    const current = await within(view.container).findByRole("link", { name: "Ship it on Monday." });
+    expect(current.getAttribute("href")).toBe("/issues/CORE-1/spec#b-p1");
+    const pinned = await within(view.container).findByRole("link", { name: "Ship it on Friday." });
+    await waitFor(() =>
+      expect(pinned.getAttribute("href")).toBe("/issues/CORE-1/artifacts/design-md?v=2")
+    );
+    expect(pinned.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/spec#b-p1@v2");
+  } finally {
+    getReferences.mockRestore();
+    getIssue.mockRestore();
     view.unmount();
   }
 });
