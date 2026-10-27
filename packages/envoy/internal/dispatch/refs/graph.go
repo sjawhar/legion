@@ -1,7 +1,9 @@
 package refs
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -295,8 +297,8 @@ type nodeLoader func(ctx context.Context, q Queryer, kind string, byRefKey bool,
 var nodeLoaders = map[string]nodeLoader{
 	"issue":     loadIssueNodes,
 	"artifact":  loadArtifactNodes,
-	"ask":       loadItemNodes,
-	"comment":   loadItemNodes,
+	"ask":       loadAskNodes,
+	"comment":   loadCommentNodes,
 	"message":   loadMessageNodes,
 	"component": loadComponentNodes,
 	"session":   loadSessionNodes,
@@ -335,41 +337,70 @@ func resolveNodes(ctx context.Context, q Queryer, byRefKey bool, rows []edgeRow)
 	return nodes, nil
 }
 
-// loadSessionNodes addresses a session node by its id alone.
+// loadSessionNodes addresses a session node by its id alone. Dispatch records no fact of a
+// session: it is made by nobody recorded, never changed and belongs to no node.
 func loadSessionNodes(_ context.Context, _ Queryer, kind string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	for _, id := range ids {
-		nodes[[2]string{kind, id}] = resolvedNode{GraphNode: model.GraphNode{Kind: kind, ID: id}}
+		nodes[[2]string{kind, id}] = resolvedNode{GraphNode: model.GraphNode{Kind: kind, ID: id, MadeBy: []model.Actor{}, ChangedBy: []model.Actor{}}}
 	}
 	return nil
 }
 
+// loadIssueNodes resolves issue nodes. An issue is made by its creator; its last change is the
+// latest event that wrote its own fields (issue.created, issue.updated, issue.closed: a claim, a
+// deploy notice or a comment is no change of it), by that event's actor. It belongs to its parent
+// issue, which has no versions.
 func loadIssueNodes(ctx context.Context, q Queryer, _ string, _ bool, keys []string, nodes map[[2]string]resolvedNode) error {
-	rows, err := q.Query(ctx, `select key, project_key, title from issues where key = any($1)`, keys)
+	rows, err := q.Query(ctx, `
+		select i.key, i.project_key, i.title, i.created_by, i.created_at, i.parent_key, change.actor, change.created_at
+		from issues i
+		left join lateral (
+			select e.actor, e.created_at from events e
+			where e.issue_key = i.key and e.type = any('{issue.created,issue.updated,issue.closed}')
+			order by e.seq desc limit 1
+		) change on true
+		where i.key = any($1)`, keys)
 	if err != nil {
 		return fmt.Errorf("load issue nodes: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var key, project, title string
-		if err := rows.Scan(&key, &project, &title); err != nil {
+		var createdBy, changedBy []byte
+		var createdAt time.Time
+		var changedAt *time.Time
+		var parentKey *string
+		if err := rows.Scan(&key, &project, &title, &createdBy, &createdAt, &parentKey, &changedBy, &changedAt); err != nil {
 			return fmt.Errorf("scan issue node: %w", err)
 		}
-		nodes[[2]string{"issue", key}] = resolvedNode{
-			GraphNode: model.GraphNode{Kind: "issue", ID: key, IssueKey: new(key), Project: project, Ref: "dispatch://" + key},
-			text:      title,
+		node := model.GraphNode{Kind: "issue", ID: key, IssueKey: new(key), Project: project, Ref: "dispatch://" + key, Parent: issueParent(parentKey)}
+		node.MadeBy, node.MadeAt = storedActors(createdBy), &createdAt
+		node.ChangedBy, node.ChangedAt = node.MadeBy, node.MadeAt
+		if changedAt != nil {
+			node.ChangedBy, node.ChangedAt = storedActors(changedBy), changedAt
 		}
+		nodes[[2]string{"issue", key}] = resolvedNode{GraphNode: node, text: title}
 	}
 	return rows.Err()
 }
 
+// loadArtifactNodes resolves artifact nodes. An artifact is made by its creator; its last change
+// is its latest version, by that version's authors. It belongs to its issue, else to the session
+// whose conversation owns it, else (a project document) to no node.
 func loadArtifactNodes(ctx context.Context, q Queryer, _ string, byRefKey bool, ids []string, nodes map[[2]string]resolvedNode) error {
-	predicate := `id::text = any($1)`
+	predicate := `a.id::text = any($1)`
 	if byRefKey {
-		predicate = `ref_key = any($1)`
+		predicate = `a.ref_key = any($1)`
 	}
 	rows, err := q.Query(ctx, `
-		select id::text, ref_key, issue_key, coalesce(project_key, ''), session_id, slug, name, kind, is_primary
-		from artifacts where `+predicate, ids)
+		select a.id::text, a.ref_key, a.issue_key, coalesce(a.project_key, ''), a.session_id, a.slug, a.name, a.kind, a.is_primary,
+		       a.created_by, a.created_at, latest.authors, latest.created_at
+		from artifacts a
+		left join lateral (
+			select v.authors, v.created_at from artifact_versions v
+			where v.artifact_id = a.id order by v.number desc limit 1
+		) latest on true
+		where `+predicate, ids)
 	if err != nil {
 		return fmt.Errorf("load artifact nodes: %w", err)
 	}
@@ -378,18 +409,29 @@ func loadArtifactNodes(ctx context.Context, q Queryer, _ string, byRefKey bool, 
 		var id, refKey, project, slug, name, kind string
 		var issueKey, session *string
 		var primary bool
-		if err := rows.Scan(&id, &refKey, &issueKey, &project, &session, &slug, &name, &kind, &primary); err != nil {
+		var createdBy, authors []byte
+		var createdAt time.Time
+		var versionAt *time.Time
+		if err := rows.Scan(&id, &refKey, &issueKey, &project, &session, &slug, &name, &kind, &primary, &createdBy, &createdAt, &authors, &versionAt); err != nil {
 			return fmt.Errorf("scan artifact node: %w", err)
 		}
 		lookup := id
 		if byRefKey {
 			lookup = refKey
 		}
-		nodes[[2]string{"artifact", lookup}] = resolvedNode{
-			GraphNode: model.GraphNode{Kind: "artifact", ID: id, IssueKey: issueKey, Project: project, Ref: ArtifactRef(issueKey, project, session, slug, kind, primary)},
-			text:      name,
-			refKey:    refKey,
+		node := model.GraphNode{Kind: "artifact", ID: id, IssueKey: issueKey, Project: project, Ref: ArtifactRef(issueKey, project, session, slug, kind, primary)}
+		node.MadeBy, node.MadeAt = storedActors(createdBy), &createdAt
+		node.ChangedBy, node.ChangedAt = node.MadeBy, node.MadeAt
+		if versionAt != nil {
+			node.ChangedBy, node.ChangedAt = storedActors(authors), versionAt
 		}
+		switch {
+		case issueKey != nil:
+			node.Parent = issueParent(issueKey)
+		case session != nil:
+			node.Parent = &model.NodeParent{Kind: "session", ID: *session}
+		}
+		nodes[[2]string{"artifact", lookup}] = resolvedNode{GraphNode: node, text: name, refKey: refKey}
 	}
 	return rows.Err()
 }
@@ -397,41 +439,49 @@ func loadArtifactNodes(ctx context.Context, q Queryer, _ string, byRefKey bool, 
 // loadBlockNodes resolves block nodes, addressed '<document ref_key>#<block id>', from the
 // current blocks of their documents' latest indexed versions. A block no current version holds
 // has no row and resolves to nothing, so every edge at it is omitted until a version holds its
-// id again.
+// id again. A block is made by the authors of the version that first held it, when Dispatch knows
+// that version (blockFirstVersion); its last change is its changed version, by that version's
+// authors. It belongs to its document at its changed version.
 func loadBlockNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	rows, err := q.Query(ctx, `
-		select d.node_id, d.block_id, d.excerpt, d.changed_version, d.changed_at,
-		       a.issue_key, coalesce(a.project_key, ''), a.session_id, a.slug, a.kind, a.is_primary
+		select d.node_id, d.block_id, d.excerpt, d.changed_version, d.changed_at, changed.authors,
+		       `+documentColumns("a")+`, `+blockFirstColumns("first")+`
 		from document_blocks d join artifacts a on a.id = d.artifact_id
+		left join artifact_versions changed on changed.artifact_id = d.artifact_id and changed.number = d.changed_version
+		`+blockFirstVersion("first", "d.artifact_id", "d.block_id")+`
 		where d.node_id = any($1)`, ids)
 	if err != nil {
 		return fmt.Errorf("load block nodes: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var nodeID, blockID, excerpt, project, slug, kind string
+		var nodeID, blockID, excerpt string
 		var changedVersion int
 		var changedAt time.Time
-		var issueKey, session *string
-		var primary bool
-		if err := rows.Scan(&nodeID, &blockID, &excerpt, &changedVersion, &changedAt, &issueKey, &project, &session, &slug, &kind, &primary); err != nil {
+		var changedBy []byte
+		var document documentParent
+		var first blockFirst
+		targets := append([]any{&nodeID, &blockID, &excerpt, &changedVersion, &changedAt, &changedBy}, document.targets()...)
+		if err := rows.Scan(append(targets, first.targets()...)...); err != nil {
 			return fmt.Errorf("scan block node: %w", err)
 		}
-		document := ArtifactRef(issueKey, project, session, slug, kind, primary)
-		nodes[[2]string{"block", nodeID}] = resolvedNode{
-			GraphNode: model.GraphNode{
-				Kind:           "block",
-				ID:             nodeID,
-				BlockID:        blockID,
-				IssueKey:       issueKey,
-				Project:        project,
-				Ref:            BlockRef(document, blockID),
-				Document:       document,
-				ChangedVersion: changedVersion,
-				ChangedAt:      &changedAt,
-			},
-			text: excerpt,
+		parent := document.parent()
+		node := model.GraphNode{
+			Kind:           "block",
+			ID:             nodeID,
+			BlockID:        blockID,
+			IssueKey:       document.issueKey,
+			Project:        document.project,
+			Ref:            BlockRef(parent.Ref, blockID),
+			Document:       parent.Ref,
+			ChangedVersion: changedVersion,
+			ChangedBy:      storedActors(changedBy),
+			ChangedAt:      &changedAt,
+			Parent:         parent,
+			ParentVersion:  &changedVersion,
 		}
+		node.MadeBy, node.MadeAt = first.maker()
+		nodes[[2]string{"block", nodeID}] = resolvedNode{GraphNode: node, text: excerpt}
 	}
 	return rows.Err()
 }
@@ -445,38 +495,141 @@ func BlockRef(document, blockID string) string {
 	return document + "#b-" + text.EncodeBlockID(blockID)
 }
 
-func loadItemNodes(ctx context.Context, q Queryer, kind string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
-	table, column := "asks", "question"
-	if kind == "comment" {
-		table, column = "comments", "body"
-	}
+// anchorVersion is the version an item's anchor (alias.anchor) names, null when it names none a
+// version number can be: the anchor is written by the server, and the read never fails on it.
+func anchorVersion(alias string) string {
+	return `case when ` + alias + `.anchor->>'version' ~ '^[1-9][0-9]{0,8}$' then (` + alias + `.anchor->>'version')::int end`
+}
+
+// loadAskNodes resolves ask nodes. An ask is made by its author. Its last change is its own edit
+// (edited_at: its wording, a block ask's settlement, an approval request's version move), by the
+// editor the latest ask.edited event names; an answer or a resolution is no change of it. It
+// belongs to the document it is written on: the one its anchor names, at the anchored version; a
+// block ask's document, at the version that first held its block when Dispatch knows it
+// (blockFirstVersion); an approval request's document, at the version it named when it opened
+// (written_version); the document that owns it, at the version current when it was written
+// (written_version). An ask written on no document belongs to its issue.
+//
+// The edit lookup repeats events_ask_payload_id's type list (migration 0030), so the planner can
+// prove the partial index serves it.
+func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	rows, err := q.Query(ctx, `
-		select k.id::text, k.issue_key, coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, ''), k.`+column+`
-		from `+table+` k
+		select k.id::text, k.issue_key, coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, ''), k.question,
+		       k.author, k.created_at, k.edited_at, edit.edited_by, `+documentColumns("doc")+`,
+		       case
+		         when k.anchor->>'artifact_id' is not null then `+anchorVersion("k")+`
+		         when k.block_artifact_id is not null then case when first.known then first.version end
+		         else k.written_version
+		       end
+		from asks k
 		left join issues i on i.key = k.issue_key
 		left join artifacts a on a.id = k.artifact_id
+		left join artifacts doc on doc.id = case
+		  when k.anchor->>'artifact_id' is not null then (k.anchor->>'artifact_id')::uuid
+		  when k.block_artifact_id is not null then k.block_artifact_id
+		  when k.kind = 'approval' then (k.approval->>'artifact_id')::uuid
+		  else k.artifact_id
+		end
+		left join lateral (
+			select e.payload->'edited_by' as edited_by from events e
+			where e.type in ('ask.opened', 'ask.answered', 'ask.resolved', 'ask.edited') and e.type = 'ask.edited'
+			  and e.payload->>'id' = k.id::text
+			order by e.id desc limit 1
+		) edit on k.edited_at is not null
+		`+blockFirstVersion("first", "k.block_artifact_id", "k.block_id")+`
 		where k.id::text = any($1)`, ids)
 	if err != nil {
-		return fmt.Errorf("load %s nodes: %w", kind, err)
+		return fmt.Errorf("load ask nodes: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, project, slug, body string
+		var id, project, slug, question string
 		var issueKey *string
-		if err := rows.Scan(&id, &issueKey, &project, &slug, &body); err != nil {
-			return fmt.Errorf("scan %s node: %w", kind, err)
+		var author, editedBy []byte
+		var createdAt time.Time
+		var editedAt *time.Time
+		var document documentParent
+		var version *int
+		targets := append([]any{&id, &issueKey, &project, &slug, &question, &author, &createdAt, &editedAt, &editedBy}, document.targets()...)
+		if err := rows.Scan(append(targets, &version)...); err != nil {
+			return fmt.Errorf("scan ask node: %w", err)
 		}
-		nodes[[2]string{kind, id}] = resolvedNode{
-			GraphNode: model.GraphNode{Kind: kind, ID: id, IssueKey: issueKey, Project: project, Ref: itemRef(kind, issueKey, project, slug, id)},
-			text:      body,
+		node := model.GraphNode{Kind: "ask", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("ask", issueKey, project, slug, id)}
+		node.MadeBy, node.MadeAt = storedActors(author), &createdAt
+		node.ChangedBy, node.ChangedAt = node.MadeBy, node.MadeAt
+		if editedAt != nil {
+			node.ChangedBy, node.ChangedAt = storedActors(editedBy), editedAt
 		}
+		node.Parent = issueParent(issueKey)
+		if parent := document.parent(); parent != nil {
+			node.Parent, node.ParentVersion = parent, version
+		}
+		nodes[[2]string{"ask", id}] = resolvedNode{GraphNode: node, text: question}
 	}
 	return rows.Err()
 }
 
+// loadCommentNodes resolves comment nodes. A comment is made by its author, and only its author
+// edits it, so its last change is its author at edited_at; a resolution is no change of it. A
+// reply belongs to its thread's head comment, a comment in an ask's thread to the ask, and
+// another comment to the document it is written on: the one its anchor names, at the anchored
+// version, else the document that owns it, at the version current when it was written
+// (written_version). A comment written on no document belongs to its issue. A reply shares its
+// head's owner, and so the owner its reference is written under.
+func loadCommentNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
+	rows, err := q.Query(ctx, `
+		select c.id::text, c.issue_key, coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, ''), c.body,
+		       c.author, c.created_at, c.edited_at, c.reply_to::text, c.ask_id::text, `+documentColumns("doc")+`,
+		       case when c.anchor->>'artifact_id' is not null then `+anchorVersion("c")+` else c.written_version end
+		from comments c
+		left join issues i on i.key = c.issue_key
+		left join artifacts a on a.id = c.artifact_id
+		left join artifacts doc on c.reply_to is null and c.ask_id is null
+		  and doc.id = coalesce((c.anchor->>'artifact_id')::uuid, c.artifact_id)
+		where c.id::text = any($1)`, ids)
+	if err != nil {
+		return fmt.Errorf("load comment nodes: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, project, slug, body string
+		var issueKey, replyTo, askID *string
+		var author []byte
+		var createdAt time.Time
+		var editedAt *time.Time
+		var document documentParent
+		var version *int
+		targets := append([]any{&id, &issueKey, &project, &slug, &body, &author, &createdAt, &editedAt, &replyTo, &askID}, document.targets()...)
+		if err := rows.Scan(append(targets, &version)...); err != nil {
+			return fmt.Errorf("scan comment node: %w", err)
+		}
+		node := model.GraphNode{Kind: "comment", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("comment", issueKey, project, slug, id)}
+		node.MadeBy, node.MadeAt = storedActors(author), &createdAt
+		node.ChangedBy, node.ChangedAt = node.MadeBy, node.MadeAt
+		if editedAt != nil {
+			node.ChangedAt = editedAt
+		}
+		switch parent := document.parent(); {
+		case replyTo != nil:
+			node.Parent = &model.NodeParent{Kind: "comment", ID: *replyTo, Ref: itemRef("comment", issueKey, project, slug, *replyTo)}
+		case askID != nil:
+			node.Parent = &model.NodeParent{Kind: "ask", ID: *askID, Ref: itemRef("ask", issueKey, project, slug, *askID)}
+		case parent != nil:
+			node.Parent, node.ParentVersion = parent, version
+		default:
+			node.Parent = issueParent(issueKey)
+		}
+		nodes[[2]string{"comment", id}] = resolvedNode{GraphNode: node, text: body}
+	}
+	return rows.Err()
+}
+
+// loadMessageNodes resolves message nodes. A message is made by its author and no route edits
+// it. A reply belongs to the message it answers, which shares its issue, and another message to
+// its issue; a direct message belongs to no node.
 func loadMessageNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	rows, err := q.Query(ctx, `
-		select m.id::text, m.issue_key, coalesce(i.project_key, ''), m.body
+		select m.id::text, m.issue_key, coalesce(i.project_key, ''), m.body, m.author, m.created_at, m.in_reply_to::text
 		from messages m
 		left join issues i on i.key = m.issue_key
 		where m.id::text = any($1)`, ids)
@@ -486,41 +639,122 @@ func loadMessageNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []st
 	defer rows.Close()
 	for rows.Next() {
 		var id, project, body string
-		var issueKey *string
-		if err := rows.Scan(&id, &issueKey, &project, &body); err != nil {
+		var issueKey, inReplyTo *string
+		var author []byte
+		var createdAt time.Time
+		if err := rows.Scan(&id, &issueKey, &project, &body, &author, &createdAt, &inReplyTo); err != nil {
 			return fmt.Errorf("scan message node: %w", err)
 		}
-		nodes[[2]string{"message", id}] = resolvedNode{
-			GraphNode: model.GraphNode{Kind: "message", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("message", issueKey, project, "", id)},
-			text:      body,
+		node := model.GraphNode{Kind: "message", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("message", issueKey, project, "", id)}
+		node.MadeBy, node.MadeAt = storedActors(author), &createdAt
+		node.ChangedBy, node.ChangedAt = node.MadeBy, node.MadeAt
+		node.Parent = issueParent(issueKey)
+		if inReplyTo != nil {
+			node.Parent = &model.NodeParent{Kind: "message", ID: *inReplyTo, Ref: itemRef("message", issueKey, project, "", *inReplyTo)}
 		}
+		nodes[[2]string{"message", id}] = resolvedNode{GraphNode: node, text: body}
 	}
 	return rows.Err()
 }
 
 // loadComponentNodes resolves component nodes addressed '<project>/<id>' from the current
 // model. A component a re-import retired resolves to nothing, so edges at it are omitted like
-// any edge whose other end no longer exists.
+// any edge whose other end no longer exists. Dispatch does not import who made or changed a
+// component; component_facts records when, and a component with no row there, or one whose
+// times were never recorded, has none. A component belongs to its parent component while the
+// model holds it.
 func loadComponentNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
 	rows, err := q.Query(ctx, `
-		select project_key, id, title from components
-		where project_key || '/' || id = any($1)`, ids)
+		select c.project_key, c.id, c.title, f.made_at, f.changed_at, p.id
+		from components c
+		left join component_facts f on f.project_key = c.project_key and f.id = c.id
+		left join components p on p.project_key = c.project_key and p.id = c.parent
+		where c.project_key || '/' || c.id = any($1)`, ids)
 	if err != nil {
 		return fmt.Errorf("load component nodes: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var project, id, title string
-		if err := rows.Scan(&project, &id, &title); err != nil {
+		var madeAt, changedAt *time.Time
+		var parent *string
+		if err := rows.Scan(&project, &id, &title, &madeAt, &changedAt, &parent); err != nil {
 			return fmt.Errorf("scan component node: %w", err)
 		}
 		address := project + "/" + id
-		nodes[[2]string{"component", address}] = resolvedNode{
-			GraphNode: model.GraphNode{Kind: "component", ID: address, Project: project, Ref: "dispatch://" + project + "/component/" + id},
-			text:      title,
+		node := model.GraphNode{
+			Kind: "component", ID: address, Project: project, Ref: componentRef(project, id),
+			MadeBy: []model.Actor{}, MadeAt: madeAt, ChangedBy: []model.Actor{}, ChangedAt: changedAt,
 		}
+		if parent != nil {
+			node.Parent = &model.NodeParent{Kind: "component", ID: project + "/" + *parent, Ref: componentRef(project, *parent)}
+		}
+		nodes[[2]string{"component", address}] = resolvedNode{GraphNode: node, text: title}
 	}
 	return rows.Err()
+}
+
+// componentRef is the reference to component id of project.
+func componentRef(project, id string) string {
+	return "dispatch://" + project + "/component/" + id
+}
+
+// issueParent is issue key as a node's parent, or nil for no issue.
+func issueParent(key *string) *model.NodeParent {
+	if key == nil {
+		return nil
+	}
+	return &model.NodeParent{Kind: "issue", ID: *key, Ref: "dispatch://" + *key}
+}
+
+// documentColumns selects, from the artifacts row aliased alias, what a document parent's node
+// id and reference are made of, in documentParent.targets' order.
+func documentColumns(alias string) string {
+	return alias + `.id::text, ` + alias + `.issue_key, coalesce(` + alias + `.project_key, ''), ` +
+		alias + `.session_id, ` + alias + `.slug, ` + alias + `.kind, ` + alias + `.is_primary`
+}
+
+// documentParent is the document a node belongs to, as documentColumns selects it; a left join
+// that found no document leaves id nil.
+type documentParent struct {
+	id, issueKey, session, slug, kind *string
+	project                           string
+	primary                           *bool
+}
+
+func (d *documentParent) targets() []any {
+	return []any{&d.id, &d.issueKey, &d.project, &d.session, &d.slug, &d.kind, &d.primary}
+}
+
+// parent is the document as a node's parent: its uuid and its reference, absent when it has
+// none; nil when there is no document.
+func (d documentParent) parent() *model.NodeParent {
+	if d.id == nil {
+		return nil
+	}
+	return &model.NodeParent{Kind: "artifact", ID: *d.id, Ref: ArtifactRef(d.issueKey, d.project, d.session, *d.slug, *d.kind, *d.primary)}
+}
+
+// storedActors decodes a stored actor column as a node's actors: one actor (an author, a creator,
+// an event's actor) is a list of one, and a list (a version's authors) is itself. SQL NULL, JSON
+// null, and any other shape an older row holds is the empty list, as is any element that is not
+// an actor with a kind and an id: a fact Dispatch never recorded, never a failed read.
+func storedActors(raw []byte) []model.Actor {
+	var elements []json.RawMessage
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 && trimmed[0] == '{' {
+		elements = []json.RawMessage{trimmed}
+	} else if json.Unmarshal(trimmed, &elements) != nil {
+		return []model.Actor{}
+	}
+	actors := make([]model.Actor, 0, len(elements))
+	for _, element := range elements {
+		var actor model.Actor
+		if json.Unmarshal(element, &actor) != nil || actor.Kind == "" || actor.ID == "" {
+			continue
+		}
+		actors = append(actors, actor)
+	}
+	return actors
 }
 
 // ArtifactRef is the address the dashboard copies for a document: an issue's primary document
