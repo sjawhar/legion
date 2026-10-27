@@ -47,7 +47,8 @@ the issue to `todo` again admits it. A repository whose installation GitHub does
 (any failure but a 404, a read longer than 5 seconds included) is left out for now the same way,
 its refusal naming the App, the repository and GitHub's failure, and the daemon reads the mapping
 again, 30 seconds doubling to 10 minutes between reads, until GitHub answers, then serves it with no
-restart; an issue handed to Legion on it meanwhile waits for that read rather than being refused.
+restart; an issue handed to Legion on it meanwhile, or one the boot finds waiting in `todo`, waits
+for that read rather than being refused, and is admitted then with no one moving it.
 A served repository whose read fails stays served on its last answer and is read again the same
 way. A project with no repository mapped does not boot; one whose every repository lacks an App
 boots serving none and admits nothing until an App is installed, and one whose every repository's

@@ -5355,7 +5355,8 @@ issue's pod (every role of it alike) and the image probe's.
   with the App it lacks; a repository whose installation read fails (any failure but GitHub's
   answer, an installation or a 404, a read longer than 5 s included) is left out for now, named
   under `repositories.refused` with the App, the repository and the failure, an issue handed to
-  Legion on it is held rather than refused, and the mapping is read again, 30 s doubling to 10
+  Legion on it, by a live event or in the boot's listing, is held rather than refused, and admitted
+  once the repository is served, and the mapping is read again, 30 s doubling to 10
   min, until GitHub answers, then the repository is served with no restart (a served repository
   whose read fails stays served on its last answer and is read again the same way); a project
   with no repository mapped does not boot, one whose every repository lacks an App boots serving

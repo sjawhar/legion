@@ -798,3 +798,52 @@ func TestANotInstalledRepositoryStaysLeftOutWithNoReadAgain(t *testing.T) {
 		t.Fatalf("acme/widgets read %d times more with only its 404 left, want no read again", got-reads)
 	}
 }
+
+// A labelled todo root the boot's listing shows on a repository whose installation read failed is
+// held as its live event is, not refused: no note is said on it, and once a read again serves the
+// repository the root is admitted on it with no person's move. A root on a repository GitHub says
+// lacks an App is refused at boot with its note, as before.
+func TestABootListingsRootOnARepositoryWhoseReadFailedIsAdmittedOnceItIsServed(t *testing.T) {
+	ctx := context.Background()
+	quickInstallReads(t)
+	installs := &installations{missing: map[string]bool{"review acme/widgets": true}}
+	installs.setFailing(errors.New("read whether the implement App is installed on zeta/tools failed (403)"), "implement zeta/tools")
+	w, client, installs, _ := mappingRigWith(t, installs)
+	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
+	admission := admit.New(w.records, engine, 2, "LEGION", quietLogger())
+	w.engine, w.admission, w.handlers, w.bootID = engine, admission, []intake.Handler{engine, admission}, "listing-boot"
+	client.mu.Lock()
+	client.listed = []dispatch.IssueSummary{
+		{Key: "LEGION-401", ResolvedRepo: "zeta/tools", Title: "on the unread repository", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1},
+		{Key: "LEGION-402", ResolvedRepo: "acme/widgets", Title: "on the repository missing an App", Status: "todo", Rank: "B", HandedOver: true, LastSeq: 1},
+	}
+	client.mu.Unlock()
+	client.issue = dispatch.Issue{Key: "LEGION-401", ResolvedRepo: "zeta/tools", Title: "on the unread repository", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 1}
+	if err := w.reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := recordedIssue(t, w, "LEGION-401"); got != nil {
+		t.Fatalf("LEGION-401 recorded as %+v while zeta/tools' read fails", got)
+	}
+	if notes := repositoryNotes(t, w, "LEGION-401"); len(notes) != 0 {
+		t.Fatalf("notes on LEGION-401 = %q while it is held, want none", notes)
+	}
+	if notes := repositoryNotes(t, w, "LEGION-402"); len(notes) != 1 || !strings.Contains(notes[0], "the review App is not installed on acme/widgets") {
+		t.Fatalf("notes on LEGION-402 = %q, want its refusal naming the App acme/widgets lacks", notes)
+	}
+
+	installs.setFailing(nil, "implement zeta/tools")
+	testwait.Eventually(t, "LEGION-401 admitted on zeta/tools", func() bool {
+		got := recordedIssue(t, w, "LEGION-401")
+		return got != nil && got.Repo == "zeta/tools"
+	})
+	if notes := repositoryNotes(t, w, "LEGION-401"); len(notes) != 0 {
+		t.Fatalf("notes on LEGION-401 = %q, want none: it was held, then admitted", notes)
+	}
+	if held := w.heldListed(); len(held) != 0 {
+		t.Fatalf("boot listing issues still held = %q, want none", held)
+	}
+	if got := recordedIssue(t, w, "LEGION-402"); got != nil {
+		t.Fatalf("LEGION-402 recorded as %+v, want it left refused", got)
+	}
+}

@@ -91,11 +91,13 @@ func (i *installations) reads(key string) int {
 	return count
 }
 
-// mappingDispatch is a Dispatch whose repository mapping is mappings.
+// mappingDispatch is a Dispatch whose repository mapping is mappings and whose project listing
+// is listed.
 type mappingDispatch struct {
 	outboxDispatch
 	mu       sync.Mutex
 	mappings []dispatch.RepoProject
+	listed   []dispatch.IssueSummary
 	err      error
 }
 
@@ -103,6 +105,12 @@ func (d *mappingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProj
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]dispatch.RepoProject{}, d.mappings...), d.err
+}
+
+func (d *mappingDispatch) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]dispatch.IssueSummary{}, d.listed...), nil
 }
 
 func (d *mappingDispatch) set(mappings ...dispatch.RepoProject) {

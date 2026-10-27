@@ -112,7 +112,9 @@ type workflowRuntime struct {
 	// request for a read to refreshOnMappingChange, one waiting at most. mappingRequested counts
 	// the reads asked for (requestMappingRead) and mappingApplied is the last request a finished
 	// read covers; awaiting is each held admission event's request (awaitMappingRead), by issue key
-	// and then the sequence it was delivered at, under awaitingMu.
+	// and then the sequence it was delivered at, under awaitingMu. listingHeld is each issue of the
+	// boot's listing held for a repository whose installation read failed (holdListed), by key,
+	// under awaitingMu, until a read of the mapping serves it (admitListingHeld).
 	repositories     *repositories
 	installs         appauth.Installations
 	mappingMu        sync.Mutex
@@ -121,6 +123,7 @@ type workflowRuntime struct {
 	mappingApplied   atomic.Uint64
 	awaitingMu       sync.Mutex
 	awaiting         map[string]map[int64]uint64
+	listingHeld      map[string]struct{}
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
@@ -463,13 +466,16 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	}
 	// The transaction performs no I/O: what admission reads of a todo issue's repository, and the
 	// Dispatch chain above its parent, are read now, up one walk over the whole listing
-	// (listingAncestry); each listed issue's fact carries that chain to admission.
-	listed := make([]intake.DispatchIssue, len(issues))
+	// (listingAncestry); each listed issue's fact carries that chain to admission. An issue coming
+	// up for admission on a repository a failed installation read leaves out is held out of the
+	// listing admission reads (holdListed) and admitted once a read of the mapping serves it.
+	listed := make([]intake.DispatchIssue, 0, len(issues))
 	var records map[string]*record.Issue
 	var walk ancestry
-	for i, summary := range issues {
-		listed[i] = intake.ListedIssue(summary)
+	for _, summary := range issues {
+		fact := intake.ListedIssue(summary)
 		if summary.Status != "todo" {
+			listed = append(listed, fact)
 			continue
 		}
 		if walk == nil {
@@ -477,11 +483,15 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 				return err
 			}
 		}
-		prepared, err := w.prepareListed(ctx, records, walk, listed[i])
+		prepared, err := w.prepareListed(ctx, records, walk, fact)
 		if err != nil {
 			return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
 		}
-		listed[i].Ancestry = prepared.Ancestry
+		if w.holdListed(records, prepared) {
+			continue
+		}
+		fact.Ancestry = prepared.Ancestry
+		listed = append(listed, fact)
 	}
 	target, err := w.consumers.DispatchTarget(ctx)
 	if err != nil {
