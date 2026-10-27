@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-600",
+  "completed": "2026-10-27T07:12:00Z",
+  "testedHead": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove the same surface independently on a new scratch pull request #2375 (heads 155eba5e, 26252d9d, cbf6e85b = 4773bb61 plus empty commits): P1 drafts skip (runs 40463414385/40463414406/40463414585/40463414395, every job skipped, no runner), P2 ready starts the run (check runs 122053198001/122053198256/122053198371 queued 2 s after the ready, ids above the skips), P3 newer head cancels the older Worker Image build (40463610232, annotation worker-image-2375), P4 close cancels waiting runs within 4-12 s (40463653644 and siblings, annotations tests-/worker-image-/docs-/envoy-and-contracts-2375; closed runs every job skipped). P5 re-read from its run ids 40451991938 and 40451999322: both callee builds success, neither cancelled."
+  },
+  "failures": [
+    {
+      "criterion": "2 Closed pull requests, with the spec's shared rule that no run posts skipped results at a head another run tests: closing cancels the pull request's waiting runs, and a reopen must still get its own full run",
+      "evidence": "A closed run GitHub creates after a quick reopen cancels the reopened pull request's runs. On #2375: `gh pr close 2375` (closed 06:54:46Z), `gh pr reopen 2375` (reopened 06:54:48Z). The reopened Legion Envoy and Contracts run 40463925526 was created 06:54:50Z; the Envoy closed run 40463967410 was created only at 06:55:14Z, entered envoy-and-contracts-2375 and cancelled 40463925526 at 06:55:15Z (annotation on job 122054715920: 'Canceling since a higher priority waiting request for envoy-and-contracts-2375 exists'). The open pull request's head cbf6e85b then shows changes/envoy-go and every Envoy job skipped (check runs 122054846993, 122054847519) and no Envoy run. Before this change a reopen always ran in full, because a close started no run. The same order for Tests (tests-closed.yaml's cancel-tests created after the reopened Tests run) would cancel the reopened lint/typecheck/test [INFERENCE: same group mechanism, not observed in this run; in all three cycles cancel-tests was created first]; that fails closed but blocks the merge until a push. Two cycles 5-8 s apart kept the right order. The PR body residual and the tests-closed.yaml comment ('On a reopen ... That is harmless') cover only the other order. No red test is committed: the defect is GitHub's run-creation order racing a reopen, which no suite in the repository can reproduce, and a test that reads the workflow text is a source-text test; the run ids above pin it. Fix shapes for the architect: (a) accept and document the race as a residual (PR body, tests-closed.yaml comment, docs); (b) replace the closed-event concurrency cancels with one closed-event job that cancels this pull request's pull_request runs created before github.event.pull_request.closed_at (race-free, needs actions: write and one runner job per close)."
+    }
+  ],
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "1 Drafts: each test job skips on a draft and ready_for_review starts the run",
+      "surface": "GitHub Actions in sjawhar/legion, scratch draft pull request https://github.com/sjawhar/legion/pull/2375",
+      "command": "gh pr create --draft (06:49:37Z); gh api repos/sjawhar/legion/actions/runs?head_sha=155eba5e... and /runs/<id>/jobs; gh pr ready 2375 (06:50:04Z); gh api repos/sjawhar/legion/commits/155eba5e.../check-runs; gh pr ready --undo then a push of 26252d9d",
+      "observed": "Draft runs Tests 40463414385, Envoy 40463414406, Docs 40463414585, Worker Image 40463414395 all skipped, every job skipped with no runner; lint/typecheck/test 122053066453/122053106206/122053065750 skipped. Ready: four runs created 06:50:06Z; typecheck/test/lint 122053198001/122053198256/122053198371 queued with higher ids. Converted to draft and pushed: the queued ready runs cancelled 06:50:41Z, the new head's runs and lint/typecheck/test skipped.",
+      "headSha": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
+      "negativeControl": "check-image-trigger-paths.sh with a positive draft gate on the build job (if: github.event.pull_request.draft) exits 1: 'is narrowed by `github.event.pull_request.draft`, which this check cannot evaluate'; also refused: draft == false, draft != true, !draft || false, !draftx, !merged, != 'closedx', != 'opened', != 'closed' == false."
+    },
+    {
+      "criterion": "3 Worker Image: a newer push cancels an older head's build",
+      "surface": "GitHub Actions in sjawhar/legion, scratch pull request #2375",
+      "command": "gh pr ready 2375 at 26252d9d (06:51:38Z); push cbf6e85b (06:52:02Z); gh api repos/sjawhar/legion/check-runs/122053696938/annotations",
+      "observed": "26252d9d's Worker Image 40463610232 build cancelled 06:52:07Z: 'Canceling since a higher priority waiting request for worker-image-2375 exists'; Tests, Envoy, Docs of that head cancelled at the same second.",
+      "headSha": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
+      "negativeControl": "P5 re-read: the push-triggered caller runs 40451991938 and 40451999322 (non-PR events) each ran worker_image / build to success, neither cancelled."
+    },
+    {
+      "criterion": "2 Closed pull requests: closing cancels the waiting runs, the closed runs skip every job",
+      "surface": "GitHub Actions in sjawhar/legion, scratch pull request #2375",
+      "command": "gh pr close 2375 (closed_at 06:53:17Z, and 07:03:08Z); gh api .../runs?head_sha=cbf6e85b..., /jobs, /check-runs/<job>/annotations; gh pr reopen 2375 (06:54:00Z)",
+      "observed": "Envoy, Docs, Worker Image cancelled 06:53:21Z and Tests 40463653644 06:53:29Z with annotations naming tests-2375, worker-image-2375, docs-2375, envoy-and-contracts-2375; closed runs 40463774120/40463774063/40463774058 every job skipped, no runner; cancel-tests waiting for a runner. Reopen at 06:54:00Z cancelled the waiting cancel-tests and queued fresh lint/typecheck/test. Final close: all four cancelled at 07:03:12Z. But see failure F1: a closed run created after a quick reopen cancels the reopened runs.",
+      "headSha": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
+      "negativeControl": "Measurement script over 06:45-07:00Z: Tests (closed pull request) 4 runs, 0 on a runner, all cancelled; D 8 runs, 0 jobs on a runner; W 0."
+    },
+    {
+      "criterion": "5 Docs and code-comment prose corrected",
+      "surface": "the repository at 4773bb61",
+      "command": "grep -rn -i -E \"cancel-in-progress: false|completes at both heads|at every push|at each push|serializes runs per pull request|serialize on the PR\" AGENTS.md README.md docs .github skills",
+      "observed": "Every hit outside docs/plans read and true: release, release-envoy-infra, release-envoy-listener and the Pages deploy job keep cancel-in-progress false by design; check-release-credentials tests assert that; the two dated solution notes keep the old setting as past tense; the lint/pr-title comments say 'not a draft and when a draft is marked ready'. Exception: tests-closed.yaml's reopen comment, covered by F1.",
+      "headSha": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
+      "negativeControl": "At main the same grep's AGENTS.md:149 hit said 'in the required lint job at every push', false after this change; at 4773bb61 it names drafts."
+    }
+  ],
+  "ciAtCodeHead": "Read on GitHub at 4773bb61 at 07:00Z: Tests 40451769178 success (lint, typecheck, test), Docs success, Worker Image success, PR Title success; Legion Envoy and Contracts 40451769206 still queued (envoy-smoke, pi-legion queued).",
+  "notes": [
+    "PR Title runs of a closed pull request still wait for a runner (e.g. 40464177394 pending after #2375 closed); pr-title.yaml is outside the four workflows the spec names.",
+    "Scratch branch scratch/infra-600-t1 deleted; #2375 closed."
+  ]
+}
