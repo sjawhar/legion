@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -446,6 +447,34 @@ func parseAsTheEngine(t *testing.T, markdowns []string) []*Node {
 	return trees
 }
 
+// rendersBackInBothParsers renders each tree and reads each rendering back with Parse and with the
+// engine (engineReadings), and reports, under the tree's name, each that does not read back as the
+// tree in either, with the rendering and both trees.
+func rendersBackInBothParsers(t *testing.T, names []string, trees []*Node) {
+	t.Helper()
+	rendered := make([]string, len(trees))
+	for index, doc := range trees {
+		markdown, err := Render(doc)
+		if err != nil {
+			t.Fatalf("%s: Render: %v", names[index], err)
+		}
+		rendered[index] = markdown
+	}
+	readings := engineReadings(t, rendered)
+	for index, doc := range trees {
+		if back, err := Parse(rendered[index]); err != nil || !back.Equal(doc) {
+			got, _ := back.JSON()
+			want, _ := doc.JSON()
+			t.Errorf("%s: Go reads the rendering %q back as %s (%v), want %s", names[index], rendered[index], got, err, want)
+		}
+		if engine := readings[index]; engine == nil || !engine.Equal(doc) {
+			got, _ := engine.JSON()
+			want, _ := doc.JSON()
+			t.Errorf("%s: the engine reads the rendering %q back as %s, want %s", names[index], rendered[index], got, want)
+		}
+	}
+}
+
 // An agent reads a document as Go reads its markdown, and the user sees it as the browser editor's
 // engine reads it, so where Go decodes an escape or a character reference otherwise the agent
 // quotes and writes back text the user never wrote: Go read `Plain \&amp; end.` as `Plain & end.`
@@ -473,37 +502,26 @@ func TestEveryEscapeAndReferenceReadsAsTheEngineReadsIt(t *testing.T) {
 		}},
 		{"table cell", func(row string) (string, bool) { return "| h |\n| - |\n| " + row + " |\n", true }},
 	}
-	type placed struct{ site, row, markdown string }
-	var cases []placed
+	var markdowns []string
 	for _, row := range referenceRows {
 		for _, site := range sites {
 			if markdown, ok := site.place(row); ok {
-				cases = append(cases, placed{site.name, row, markdown})
+				markdowns = append(markdowns, markdown)
 			}
 		}
 	}
-	markdowns := make([]string, len(cases))
-	for index, c := range cases {
-		markdowns[index] = c.markdown
+	trees := parseAsTheEngine(t, markdowns)
+	const plain = "Plain \\&amp; end.\n"
+	index := slices.Index(markdowns, plain)
+	if index < 0 {
+		t.Fatalf("no row places the paragraph %q", plain)
 	}
-	readings := engineReadings(t, markdowns)
-	for index, c := range cases {
-		doc, err := Parse(c.markdown)
-		if err != nil {
-			engine, _ := readings[index].JSON()
-			t.Errorf("%s %q: Parse(%q) = %v; the engine reads %s", c.site, c.row, c.markdown, err, engine)
-			continue
-		}
-		if readings[index] == nil || !doc.Equal(readings[index]) {
-			t.Errorf("%s %q in %q:\n%s", c.site, c.row, c.markdown, readingDiff(doc, readings[index]))
-		}
-		if c.site == "paragraph" && c.row == `Plain \&amp; end.` {
-			if text := doc.Children[0].Children; len(text) != 1 || text[0].Text != "Plain &amp; end." {
-				t.Errorf("Go reads %q as %s, want the text %q", c.markdown, inlineSummary(doc.Children[0]), "Plain &amp; end.")
-			}
+	if doc := trees[index]; doc != nil {
+		if text := doc.Children[0].Children; len(text) != 1 || text[0].Text != "Plain &amp; end." {
+			t.Errorf("Go reads %q as %s, want the text %q", plain, inlineSummary(doc.Children[0]), "Plain &amp; end.")
 		}
 	}
-	t.Logf("%d rows at %d sites: %d markdowns", len(referenceRows), len(sites), len(cases))
+	t.Logf("%d rows at %d sites: %d markdowns", len(referenceRows), len(sites), len(markdowns))
 }
 
 // The browser editor's import reads every line feed in text as a space, a decoded `&#10;` as much
@@ -630,11 +648,8 @@ func TestReferencesInEveryValueRenderAndReadBackInBothParsers(t *testing.T) {
 			doc.Children[len(doc.Children)-1].Attrs["label"] = value
 		}},
 	}
-	type tree struct {
-		name string
-		doc  *Node
-	}
-	var trees []tree
+	var names []string
+	var trees []*Node
 	for _, holder := range holders {
 		for _, value := range values {
 			// A footnote label ends at a space, so markdown has no label holding one.
@@ -644,37 +659,20 @@ func TestReferencesInEveryValueRenderAndReadBackInBothParsers(t *testing.T) {
 			for _, form := range []struct{ name, before, after string }{{"", "", "\n"}, {" in a table cell", "| h |\n| --- |\n| ", " |\n"}} {
 				doc := parsed(form.before + holder.content + form.after + holder.after)
 				holder.set(doc, value)
-				trees = append(trees, tree{holder.name + form.name + " holding " + value, doc})
+				names = append(names, holder.name+form.name+" holding "+value)
+				trees = append(trees, doc)
 			}
 		}
 	}
 	addressWithASpace := parsed("![a](u)\n")
 	addressWithASpace.Children[0].Children[0].Attrs["src"] = "u &amp; v"
-	trees = append(trees, tree{"image address holding a space and &amp;", addressWithASpace})
+	names = append(names, "image address holding a space and &amp;")
+	trees = append(trees, addressWithASpace)
 	for _, markdown := range []string{"[a](u \"\\&amp;\")\n", "![a](u\\&amp;v)\n"} {
-		trees = append(trees, tree{"the reading of " + markdown, parsed(markdown)})
+		names = append(names, "the reading of "+markdown)
+		trees = append(trees, parsed(markdown))
 	}
-	rendered := make([]string, len(trees))
-	for index, tree := range trees {
-		markdown, err := Render(tree.doc)
-		if err != nil {
-			t.Fatalf("%s: Render: %v", tree.name, err)
-		}
-		rendered[index] = markdown
-	}
-	readings := engineReadings(t, rendered)
-	for index, tree := range trees {
-		if back, err := Parse(rendered[index]); err != nil || !back.Equal(tree.doc) {
-			got, _ := back.JSON()
-			want, _ := tree.doc.JSON()
-			t.Errorf("%s: Go reads the rendering %q back as %s (%v), want %s", tree.name, rendered[index], got, err, want)
-		}
-		if engine := readings[index]; engine == nil || !engine.Equal(tree.doc) {
-			got, _ := engine.JSON()
-			want, _ := tree.doc.JSON()
-			t.Errorf("%s: the engine reads the rendering %q back as %s, want %s", tree.name, rendered[index], got, want)
-		}
-	}
+	rendersBackInBothParsers(t, names, trees)
 	t.Logf("%d trees rendered and read back", len(trees))
 }
 
@@ -694,12 +692,10 @@ func TestReferenceSpellingsThatReadBackRenderUnchanged(t *testing.T) {
 	}
 }
 
-// An image's address that ends in a backslash is written by escapeImageSource as it stands, so
-// the backslash escapes the `)` or `>` that closes the address: `![a](u\)` reads in Go and in the
-// engine as the text `![a](u)`, and a write of the CommonMark markdown `![a](u\\)` is refused as
-// a document that reads back otherwise. Each markdown holds such an address, outside a table and
-// in a cell, in the plain and the angle form; Go must read it as the engine does, a write of it
-// must be accepted, and its rendering must read back as its reading in both parsers.
+// An image's address that ends in a backslash is written with that backslash doubled, so it does
+// not escape the `)` or `>` that closes the address. Each markdown holds such an address, outside a
+// table and in a cell, in the plain and the angle form; Go must read it as the engine does, a write
+// of it must be accepted, and its rendering must read back as its reading in both parsers.
 func TestAnImageAddressEndingInABackslashRendersAndReadsBack(t *testing.T) {
 	markdowns := []string{
 		"![a](u\\\\)\n",
@@ -710,35 +706,17 @@ func TestAnImageAddressEndingInABackslashRendersAndReadsBack(t *testing.T) {
 		"| h |\n| --- |\n| ![a](<u v\\\\>) |\n",
 	}
 	trees := parseAsTheEngine(t, markdowns)
-	rendered := make([]string, len(markdowns))
+	var names []string
+	var read []*Node
 	for index, doc := range trees {
 		if doc == nil {
-			rendered[index] = markdowns[index]
 			continue
 		}
 		if err := RefuseMisreadDocument(doc); err != nil {
 			t.Errorf("a write of %q is refused: %v", markdowns[index], err)
 		}
-		markdown, err := Render(doc)
-		if err != nil {
-			t.Fatalf("Render(Parse(%q)): %v", markdowns[index], err)
-		}
-		rendered[index] = markdown
+		names = append(names, "the reading of "+markdowns[index])
+		read = append(read, doc)
 	}
-	readings := engineReadings(t, rendered)
-	for index, doc := range trees {
-		if doc == nil {
-			continue
-		}
-		if back, err := Parse(rendered[index]); err != nil || !back.Equal(doc) {
-			got, _ := back.JSON()
-			want, _ := doc.JSON()
-			t.Errorf("Go reads the rendering %q of %q back as %s (%v), want %s", rendered[index], markdowns[index], got, err, want)
-		}
-		if engine := readings[index]; engine == nil || !engine.Equal(doc) {
-			got, _ := engine.JSON()
-			want, _ := doc.JSON()
-			t.Errorf("the engine reads the rendering %q of %q back as %s, want %s", rendered[index], markdowns[index], got, want)
-		}
-	}
+	rendersBackInBothParsers(t, names, read)
 }
