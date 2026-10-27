@@ -993,7 +993,7 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 	if !errors.Is(err, runtime.ErrSessionFileMissing) {
 		return loc, err
 	}
-	m.log.Warn("supervise: the session of the process another runtime ran is found nowhere this runtime runs the agent; taking the claim over with a fresh session",
+	m.log.Warn("supervise: the recorded session is found nowhere this runtime runs the agent, and the operator's takeover is on, so the claim starts a fresh session; remove runtime.tmux.take_over once the move is done",
 		"session", m.claim.Session, "sessionFile", m.claim.SessionFile, "error", err)
 	m.forgetSession()
 	spec.ResumeSessionFile = ""
