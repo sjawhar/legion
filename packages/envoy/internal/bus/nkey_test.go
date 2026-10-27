@@ -439,3 +439,5 @@ func TestHoldsSeedAllocatesAtMostOneCopyPerDecoding(t *testing.T) {
 // allocsChildEnv marks the child process TestHoldsSeedAllocatesAtMostOneCopyPerDecoding measures
 // in: set, the test measures in its own process instead of starting one.
 const allocsChildEnv = "ENVOY_BUS_HOLDSSEED_ALLOCS_CHILD"
+
+// scratch INFRA-520 envoy-test-only
