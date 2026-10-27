@@ -2,10 +2,12 @@
 // question on the Inbox, an issue message, a reply under its comment - draws as the diagram the
 // document editor draws (an image named "Rendered Mermaid diagram"), with its source closed behind
 // a `Mermaid source` disclosure. A source the renderer refuses shows the reason and the source; a
-// label holding markup draws as text, never as an element; a block in another language stays
-// code. Every drawing row checks both halves: the image with its labels, and the source hidden
-// until the disclosure opens. At the commit before the change each body shows its source as code,
-// so every drawing row and the refusal row fail on their diagram or status assertion.
+// diagram the worker cannot draw within the time limit is refused the same way while the page
+// keeps responding; a label holding markup draws as text, never as an element; a block in another
+// language stays code. Every drawing row checks both halves: the image with its labels, and the
+// source hidden until the disclosure opens. At the commit before the change each body shows its
+// source as code, so every drawing row and both refusal rows fail on their diagram or status
+// assertion.
 import { expect, type Locator, type Page, type TestInfo, test } from "@playwright/test";
 import { createAsk, createComment, createIssue, createMessage, createProject } from "./api";
 import { resetDatabase } from "./seed";
@@ -180,6 +182,57 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
     // The disclosure opens on a refusal, so the source is readable without a click. The status
     // quotes the dangling line too, so the source is read from its code block.
     await expect(card.locator("pre code").filter({ hasText: "A -->" })).toBeVisible();
+    await expect(diagramIn(card)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// ELK's layout time grows faster than the diagram: a flowchart of 800 nodes with 2 edges each
+// takes over a minute. Drawn on the page's own thread it held every reader of the comment there;
+// in the worker the page keeps answering and the time limit refuses it.
+test("a diagram too large to draw in time shows the reason, and the page keeps responding", async ({
+  browser,
+}, testInfo) => {
+  const nodes = 800;
+  const edges = Array.from(
+    { length: nodes },
+    (_, node) => `  n${node} --> n${(node + 1) % nodes}\n  n${node} --> n${(node + 7) % nodes}`
+  );
+  const body = `Large:\n\n\`\`\`mermaid\ngraph TD\n${edges.join("\n")}\n\`\`\`\n`;
+  // Within Dispatch's 32,000-character body limit.
+  expect(body.length).toBeLessThan(32_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Large diagram" });
+  const comment = await createComment(issue.key, { body });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, comment.id);
+    await expect(card).toContainText("Large:");
+    const refusal = card
+      .getByRole("status")
+      .filter({ hasText: "Unable to render Mermaid diagram" });
+    // While it is being drawn, a 100 ms timer on the page's thread fires on time, give or take
+    // a scheduling hiccup; a layout on that thread would hold it for the whole layout.
+    for (let sample = 0; sample < 5; sample += 1) {
+      const elapsed = await page.evaluate(
+        () =>
+          new Promise<number>((resolve) => {
+            const start = performance.now();
+            setTimeout(() => resolve(performance.now() - start), 100);
+          })
+      );
+      expect(elapsed).toBeLessThan(1_000);
+    }
+    // The samples ran while the diagram was still being drawn.
+    await expect(refusal).toHaveCount(0);
+    await expect(refusal).toHaveText(
+      "Unable to render Mermaid diagram: it did not finish within 5 seconds"
+    );
+    await expect(card.locator("pre code").filter({ hasText: "n799 --> n0" })).toBeVisible();
     await expect(diagramIn(card)).toHaveCount(0);
   } finally {
     await alice.close();

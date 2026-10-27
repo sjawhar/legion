@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import * as mermaidRenderer from "@legion/proof-editor/mermaid";
+import * as mermaidRenderer from "@legion/proof-editor/mermaid-render";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
@@ -10,6 +10,11 @@ import type { Artifact, AskRead } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
 import { warmMarkdownRenderer } from "./markdown-engine";
 import { resetMermaidDiagrams } from "./mermaid-diagrams";
+import {
+  answerMermaidRequest,
+  type MermaidReply,
+  type MermaidRequest,
+} from "./mermaid-render.worker";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -521,16 +526,79 @@ test("a body re-renders when its text grows, formatting what has closed since", 
   }
 });
 
-// ELK, which lays out flowcharts, cannot be built under happy-dom, so these draw sequence
-// diagrams; a dangling edge is refused in validation, before any layout.
+/**
+ * Stands in for the page's `Worker`, so a test decides what the worker answers and when. Like the
+ * real one it posts `{ ready: true }` on a later task once started (or, while `startFails` is
+ * set, fires `error` as a worker whose module cannot load does), then answers each request on a
+ * later task with `answer`'s reply: the worker module's own `answerMermaidRequest` by default,
+ * run on the test's thread; a reply of `undefined` never arrives, as from a worker stuck in a
+ * layout. A terminated one posts nothing more.
+ */
+class FakeWorker {
+  static created: FakeWorker[] = [];
+  static answer: (request: MermaidRequest) => MermaidReply | undefined = answerMermaidRequest;
+  static startFails = false;
+
+  terminated = false;
+  private readonly listeners: Record<string, ((event: unknown) => void)[]> = {
+    error: [],
+    message: [],
+  };
+
+  constructor() {
+    FakeWorker.created.push(this);
+    const fails = FakeWorker.startFails;
+    setTimeout(() => {
+      if (fails) this.emit("error", new Event("error"));
+      else this.emit("message", { data: { ready: true } });
+    }, 0);
+  }
+
+  addEventListener(type: string, listener: (event: unknown) => void): void {
+    this.listeners[type]?.push(listener);
+  }
+
+  postMessage(request: MermaidRequest): void {
+    setTimeout(() => {
+      const reply = FakeWorker.answer(request);
+      if (reply !== undefined) this.emit("message", { data: reply });
+    }, 0);
+  }
+
+  terminate(): void {
+    this.terminated = true;
+  }
+
+  private emit(type: string, event: unknown): void {
+    if (this.terminated) return;
+    for (const listener of this.listeners[type] ?? []) listener(event);
+  }
+}
+
+// The worker's renderer runs on the test's thread here, under happy-dom, where ELK, which lays out
+// flowcharts, cannot be built; so these draw sequence diagrams, and a dangling edge is refused in
+// validation, before any layout.
 describe("Mermaid diagrams", () => {
-  // The loaded renderer and the drawn-source cache are module state that outlives every render,
-  // so each case starts from a page that has loaded and drawn nothing.
-  beforeEach(resetMermaidDiagrams);
+  const pageWorker = globalThis.Worker;
+
+  // The worker, the drawn-source cache and a failure are module state that outlives every render,
+  // so each case starts from a page that has started and drawn nothing.
+  beforeEach(() => {
+    FakeWorker.created = [];
+    FakeWorker.answer = answerMermaidRequest;
+    FakeWorker.startFails = false;
+    globalThis.Worker = FakeWorker as unknown as typeof Worker;
+    resetMermaidDiagrams();
+  });
+
+  afterEach(() => {
+    resetMermaidDiagrams();
+    globalThis.Worker = pageWorker;
+  });
 
   const fence = (source: string): string => `\`\`\`mermaid\n${source}\n\`\`\`\n`;
   const figuresIn = (container: HTMLElement): HTMLElement[] =>
-    Array.from(container.querySelectorAll<HTMLElement>("figure[data-mermaid-diagram]"));
+    Array.from(container.querySelectorAll<HTMLElement>("figure.dispatch-mermaid"));
   const diagramIn = (figure: Element): Element | null | undefined =>
     figure
       .querySelector(".dispatch-mermaid-preview")
@@ -679,25 +747,134 @@ describe("Mermaid diagrams", () => {
     }
   });
 
-  test("a body whose source changes while the renderer loads draws only the newest source", async () => {
-    // With the engine loaded the body paints in its layout effect, so only the renderer is late.
+  test("a body whose source changes or that unmounts before the worker answers draws only the newest source", async () => {
+    // With the engine loaded the body paints in its layout effect, so only the worker is late.
     await warmMarkdownRenderer();
-    const draw = spyOn(mermaidRenderer, "renderMermaidSvg");
     const view = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: First")} />);
-    // A body unmounted while the renderer loads keeps its code block in its own element, which
-    // only the cancel stops the late draw from reaching.
     const gone = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Erin->>Finn: Gone")} />);
+    // Each superseded code block stays in an element of its own, the one the re-paint replaced
+    // and the one the unmount removed; only the cancel keeps a late draw from wrapping it.
+    const first = view.container.querySelector("pre");
+    const gonePre = gone.container.querySelector("pre");
     try {
-      expect(view.container.querySelector("pre code")?.textContent).toContain("First");
+      expect(first?.textContent).toContain("First");
+      expect(gonePre?.textContent).toContain("Gone");
       expect(figuresIn(view.container)).toHaveLength(0);
       gone.unmount();
       view.rerender(<MarkdownBody markdown={fence("sequenceDiagram\n  Carol->>Dave: Second")} />);
       await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
       expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Second");
-      expect(draw).toHaveBeenCalledTimes(1);
-      expect(draw.mock.calls[0]?.[0]).toContain("Carol->>Dave: Second");
+      // The worker answers in the order the bodies asked, so both earlier answers have arrived.
+      expect(first?.closest("figure")).toBeNull();
+      expect(gonePre?.closest("figure")).toBeNull();
+      expect(FakeWorker.created).toHaveLength(1);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("a source drawn before draws in the layout effect that paints its body", async () => {
+    await warmMarkdownRenderer();
+    const source = fence("sequenceDiagram\n  Alice->>Bob: Again");
+    const first = render(<MarkdownBody markdown={source} />);
+    try {
+      await waitFor(() => expect(figuresIn(first.container)).toHaveLength(1));
+    } finally {
+      first.unmount();
+    }
+    const again = render(<MarkdownBody markdown={`Again:\n\n${source}`} />);
+    try {
+      expect(figuresIn(again.container)).toHaveLength(1);
+      expect(diagramIn(figuresIn(again.container)[0])?.textContent).toContain("Again");
+    } finally {
+      again.unmount();
+    }
+  });
+
+  test("a diagram draws from the worker's answer alone: the page never runs the renderer", async () => {
+    const draw = spyOn(mermaidRenderer, "renderMermaidMarkup");
+    FakeWorker.answer = ({ id }) => ({
+      id,
+      markup: '<svg xmlns="http://www.w3.org/2000/svg"><text>From the worker</text></svg>',
+    });
+    const view = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Hi")} />);
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toBe("From the worker");
+      expect(draw).not.toHaveBeenCalled();
     } finally {
       draw.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a source the worker has not drawn within the time limit is refused, and a fresh worker draws the next", async () => {
+    resetMermaidDiagrams(50);
+    const draw = spyOn(mermaidRenderer, "renderMermaidMarkup");
+    FakeWorker.answer = (request) =>
+      request.source.includes("Stuck") ? undefined : answerMermaidRequest(request);
+    const view = render(
+      <MarkdownBody markdown={`Big:\n\n${fence("sequenceDiagram\n  Stuck->>Bob: Hi")}`} />
+    );
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      const [figure] = figuresIn(view.container);
+      expect(figure.querySelector('[role="status"]')?.textContent).toBe(
+        "Unable to render Mermaid diagram: it did not finish within 0.05 seconds"
+      );
+      expect(figure.querySelector(".dispatch-mermaid-preview")).toBeNull();
+      const source = figure.querySelector<HTMLDetailsElement>("details.dispatch-mermaid-source");
+      expect(source?.open).toBe(true);
+      expect(source?.querySelector("pre code")?.textContent).toContain("Stuck->>Bob: Hi");
+      // Terminating the worker is what stops a real layout.
+      expect(FakeWorker.created.map((worker) => worker.terminated)).toEqual([true]);
+
+      view.rerender(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: After")} />);
+      await waitFor(() =>
+        expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("After")
+      );
+      expect(FakeWorker.created.map((worker) => worker.terminated)).toEqual([true, false]);
+      // The renderer ran for the next source, inside the stand-in worker; the refused source
+      // never reached it, on the page's thread or any other.
+      const drawn = draw.mock.calls.map(([drawnSource]) => drawnSource);
+      expect(drawn.some((drawnSource) => drawnSource.includes("After"))).toBe(true);
+      expect(drawn.some((drawnSource) => drawnSource.includes("Stuck"))).toBe(false);
+    } finally {
+      draw.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a worker that fails to start leaves every block as code, logs once, and is tried again once the window is online", async () => {
+    await warmMarkdownRenderer();
+    FakeWorker.startFails = true;
+    const logged = spyOn(console, "error").mockImplementation(() => {});
+    const failures = () =>
+      logged.mock.calls.filter(
+        ([message]) => typeof message === "string" && message.startsWith("Showing Mermaid source")
+      );
+    const view = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: One")} />);
+    try {
+      await waitFor(() => expect(failures()).toHaveLength(1));
+      // A streamed turn paints again on every frame; no paint starts a worker or logs again.
+      for (const word of ["Two", "Three", "Four"]) {
+        view.rerender(<MarkdownBody markdown={fence(`sequenceDiagram\n  Alice->>Bob: ${word}`)} />);
+        await Bun.sleep(10);
+      }
+      expect(failures()).toHaveLength(1);
+      expect(FakeWorker.created).toHaveLength(1);
+      expect(figuresIn(view.container)).toHaveLength(0);
+      expect(view.container.querySelector("pre code")?.textContent).toContain("Four");
+
+      FakeWorker.startFails = false;
+      window.dispatchEvent(new Event("online"));
+      view.rerender(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: Five")} />);
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Five");
+      expect(FakeWorker.created).toHaveLength(2);
+      expect(failures()).toHaveLength(1);
+    } finally {
+      logged.mockRestore();
       view.unmount();
     }
   });

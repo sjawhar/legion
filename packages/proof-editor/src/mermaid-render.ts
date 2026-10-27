@@ -7,8 +7,10 @@ import { renderProofMermaidSvg } from "proof-sdk-upstream/src/editor/plugins/mer
  *
  * It touches no DOM, so it runs in a Web Worker: Dispatch's Mermaid worker is its caller, which
  * keeps beautiful-mermaid and ELK, whose layout cost grows without bound with the diagram, off the
- * reader's main thread. The page turns the markup into an element with `mermaidSvgElement` from
- * `@legion/proof-editor/mermaid`, which sanitizes it.
+ * reader's main thread. In a browser worker the caller must hide `self` during the call, or ELK's
+ * bundled engine takes the worker for an ELK worker of its own and every flowchart is refused
+ * (Dispatch's `mermaid-render.worker.ts` says how). The page turns the markup into an element
+ * with `mermaidSvgElement` from `@legion/proof-editor/mermaid`, which sanitizes it.
  */
 export function renderMermaidMarkup(source: string): string {
   return renderProofMermaidSvg(source);

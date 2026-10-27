@@ -73,9 +73,9 @@ export interface RenderedMarkdownOptions {
  * placeholder is found after it, wherever it left one (`MarkdownPreview` puts an inert span in a
  * link's place), and gets a portal-mounted `DispatchPicture` in the shape `pictures` names.
  * On a painted body, each fenced `mermaid` block then draws as its diagram (`drawMermaidDiagrams`,
- * which may draw late, once its chunk arrives; the effect's cleanup cancels that). It runs after
- * every other pass, so a `dispatch://` in a diagram's label is never wrapped as a link or
- * collected as a reference.
+ * which draws a source it has not drawn before late, once its worker answers; the effect's cleanup
+ * cancels that). It runs after every other pass, so a `dispatch://` in a diagram's label is never
+ * wrapped as a link or collected as a reference.
  * `onRendered` fires after each render lands; the newest callback is the one called, and a new
  * callback alone re-renders nothing. `paint` and `decorate` are dependencies: a caller passes a
  * module-level function or memoises one on what it reads. The options object itself is not one,

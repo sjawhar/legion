@@ -1434,7 +1434,10 @@
   renderer refuses shows `Unable to render Mermaid diagram: <reason>` above its source. Before,
   every such block showed as its source code. The diagram's styles stay inside it, no reader's
   browser fetches Google Fonts or any address an author writes into the diagram, and a page with
-  no document open loads the renderer only once a body holds a diagram (INFRA-528).
+  no document open loads the renderer only once a body holds a diagram. The renderer runs off the
+  page's main thread, so the page keeps responding while a diagram draws, and a diagram that takes
+  longer than 5 seconds to draw shows `Unable to render Mermaid diagram: it did not finish within
+  5 seconds` above its source (INFRA-528).
 
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a

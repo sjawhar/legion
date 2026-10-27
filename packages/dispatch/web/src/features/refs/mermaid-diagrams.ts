@@ -1,11 +1,13 @@
 /**
  * Draws each fenced `mermaid` code block of a rendered Markdown body (`MarkdownBody`'s block
  * form; a one-line preview and the inline variant write no `<pre>`) as the diagram the document
- * editor draws: `renderMermaidSvg` from `@legion/proof-editor/mermaid`, upstream's validation and
- * renderer with a stricter sanitizer and the editor's accessible name. The block becomes a
- * `figure` holding the diagram, then (only for a source the renderer refuses) a status line
- * naming the reason, then the original code block inside a `Mermaid source` disclosure, closed
- * once the diagram drew and open on a refusal so the source is readable at once.
+ * editor draws: `renderMermaidMarkup` from `@legion/proof-editor/mermaid-render` (upstream's
+ * validation and renderer), run in a Web Worker, its markup turned into an element by
+ * `mermaidSvgElement` from `@legion/proof-editor/mermaid` (a stricter sanitizer and the editor's
+ * accessible name). The block becomes a `figure` holding the diagram, then (only for a source the
+ * renderer refuses) a status line naming the reason, then the original code block inside a
+ * `Mermaid source` disclosure, closed once the diagram drew and open on a refusal so the source is
+ * readable at once.
  *
  * The SVG goes in an open shadow root of the preview element, so the diagram's own `<style>`
  * styles that diagram alone rather than every SVG and `<text>` on the page, and its marker ids
@@ -21,31 +23,50 @@
  * again with a probe line after it, and the fence is open exactly when the probe lands inside the
  * block (`endsInOpenMermaidFence`).
  *
- * The renderer (beautiful-mermaid and ELK) is a lazy chunk, loaded only once a body holds a
- * mermaid block. Once it has loaded, a body draws in the same layout effect that painted it;
- * before, its blocks show as code and are replaced when the chunk arrives (unless the body
- * re-painted or unmounted first), so the first diagram a page load draws moves the content below
- * it once. A chunk that fails to load leaves every block as code and is tried again by the next
- * body. Drawn results are cached by source (the sanitized SVG, cloned per use, or the refusal),
- * the newest 32, so a body re-painted while text after a finished diagram streams does not run the
- * renderer again.
+ * The renderer (beautiful-mermaid and ELK) runs in one shared worker (`mermaid-render.worker.ts`),
+ * created only once a body holds a mermaid block not drawn before: ELK's layout time grows faster
+ * than the diagram (a flowchart of 400 nodes takes seconds), and any comment, ask or message
+ * reaches readers who did not choose it, so no source may hold the page's main thread. The worker
+ * draws one source at a time, in the order bodies asked; a source it has not answered
+ * `RENDER_TIME_LIMIT_MS` after it started on it is refused (`Unable to render Mermaid diagram: it
+ * did not finish within 5 seconds`), and the worker is terminated, which stops that layout, and a
+ * fresh one takes the sources still waiting. A worker that fails to start or load leaves every
+ * block as code, logs once, and none is started again until the window's next `online` event.
+ *
+ * Drawn results are cached by source (the sanitized SVG, cloned per use, or the refusal), the
+ * newest 32. A cached source draws in the layout effect that painted its body, so a body re-painted
+ * while text after a finished diagram streams draws it again at once; an uncached one shows as
+ * code and is replaced when the worker answers, unless the body re-painted or unmounted first, so
+ * a diagram's first draw moves the content below it once.
  */
-import type * as MermaidRenderer from "@legion/proof-editor/mermaid";
+import { mermaidSvgElement } from "@legion/proof-editor/mermaid";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
 import { dangerText } from "../../theme/classes";
-import { importWhenOnline } from "../shell/DeploymentResilience";
-
-type MermaidModule = typeof MermaidRenderer;
+import type { MermaidReply, MermaidRequest } from "./mermaid-render.worker";
 
 /** A drawn source: its sanitized SVG, or the status line a refusal shows. */
 type Drawing = { svg: SVGSVGElement } | { error: string };
-/** A body's blocks waiting for the renderer to load. */
-type PendingDraw = { element: HTMLElement; blocks: HTMLPreElement[] };
+/** Draws one block once its source's answer arrives. */
+type LateDraw = (drawn: Drawing) => void;
 /** Parses a source with the engine and soft-break policy that parsed the body; `undefined` for a
  *  source the engine refuses. */
 type Reparse = (source: string) => ProseMirrorNode | undefined;
 
+/** A started worker. */
+interface Renderer {
+  worker: Worker;
+  /** Its imports have loaded, so it starts on a request as soon as it gets one. */
+  ready: boolean;
+  /** The request it is drawing, and the timer that refuses it at the time limit. */
+  current: { id: number; source: string; timer: number } | undefined;
+}
+
+/** How long the worker may draw one source before it is refused and the worker terminated. In
+ *  Chromium's worker a flowchart of 50 edges draws in under 0.4 s and one of 100 nodes with 2
+ *  edges each in about 1.2 s; at 200 such nodes it takes about 3 s (5 s in WebKit and Firefox),
+ *  and at 400 about 10 s. */
+const RENDER_TIME_LIMIT_MS = 5000;
 /** How many drawn sources the cache keeps; the oldest insertion goes first. */
 const CACHE_LIMIT = 32;
 /** The line the open-fence check parses after a body. No author writes it: the words are wrapped
@@ -57,17 +78,25 @@ const CONTAINER_LEAD = /^(?:[ \t]*(?:>|(?:[-+*]|\d{1,9}[.)])(?=[ \t]|$)))*[ \t]*
 /** The one rule the diagram needs beside its own sheet: its natural width, up to the body's. */
 const PREVIEW_STYLE = "svg{max-width:100%;height:auto;display:block}";
 
-let loading: Promise<MermaidModule> | undefined;
-let loaded: MermaidModule | undefined;
 const drawings = new Map<string, Drawing>();
-/** The late draws not yet cancelled, in paint order: drawn when the renderer loads and dropped
- *  when it fails, so a cancelled draw holds none of its body's DOM while the chunk is awaited. */
-const pending = new Set<PendingDraw>();
+/** Each source asked for and not answered yet, oldest first, with the draws its answer feeds in
+ *  paint order. The first is the one the worker is drawing or starts on next. */
+const requests = new Map<string, LateDraw[]>();
+let renderer: Renderer | undefined;
+/** A worker failed to start or load; none is started until the window's next `online` event. */
+let failed = false;
+let lastRequestId = 0;
+/** `RENDER_TIME_LIMIT_MS`, unless a test shortened it through `resetMermaidDiagrams`. */
+let timeLimitMs = RENDER_TIME_LIMIT_MS;
 
 function noop(): void {}
 
-/** Upstream's `isMermaidCodeBlockLanguage` rule, restated so this module pulls none of the
- *  renderer's chunk until a body needs it. */
+function recover(): void {
+  failed = false;
+}
+
+/** Upstream's `isMermaidCodeBlockLanguage` rule, restated so the page imports none of the
+ *  renderer. */
 function isMermaidLanguage(language: unknown): boolean {
   return typeof language === "string" && language.trim().toLowerCase() === "mermaid";
 }
@@ -119,57 +148,116 @@ function endsInOpenMermaidFence(
   );
 }
 
-function loadMermaid(): void {
-  if (loading !== undefined) return;
-  const attempt = importWhenOnline(() => import("@legion/proof-editor/mermaid"));
-  loading = attempt;
-  attempt.then(
-    (module) => {
-      if (loading !== attempt) return;
-      loaded = module;
-      const draws = Array.from(pending);
-      pending.clear();
-      for (const { element, blocks } of draws) drawBlocks(module, element, blocks);
-    },
-    (error: unknown) => {
-      // The blocks stay code.
-      if (loading === attempt) {
-        loading = undefined;
-        pending.clear();
-      }
-      console.error("Showing Mermaid source as code, the diagram renderer is unavailable", error);
-    }
-  );
+function refusal(reason: string | null): Drawing {
+  return {
+    error:
+      reason === null
+        ? "Unable to render Mermaid diagram."
+        : `Unable to render Mermaid diagram: ${reason}`,
+  };
 }
 
-function drawing(module: MermaidModule, source: string, document: Document): Drawing {
-  const cached = drawings.get(source);
-  if (cached !== undefined) return cached;
-  let drawn: Drawing;
-  try {
-    drawn = { svg: module.renderMermaidSvg(source, document) };
-  } catch (error) {
-    drawn = {
-      error:
-        error instanceof Error
-          ? `Unable to render Mermaid diagram: ${error.message}`
-          : "Unable to render Mermaid diagram.",
-    };
-  }
+/** Caches `drawn` for `source` and runs the draws that waited on it. */
+function settle(source: string, drawn: Drawing): void {
   if (drawings.size >= CACHE_LIMIT) {
     const oldest = drawings.keys().next();
     if (oldest.done !== true) drawings.delete(oldest.value);
   }
   drawings.set(source, drawn);
-  return drawn;
+  const draws = requests.get(source) ?? [];
+  requests.delete(source);
+  for (const draw of draws) draw(drawn);
+}
+
+/** Leaves every block waiting, and every later one, as code until the window's next `online`. */
+function fail(error: unknown): void {
+  failed = true;
+  if (renderer !== undefined) {
+    window.clearTimeout(renderer.current?.timer);
+    renderer.worker.terminate();
+    renderer = undefined;
+  }
+  requests.clear();
+  window.addEventListener("online", recover, { once: true });
+  console.error("Showing Mermaid source as code, the diagram renderer is unavailable", error);
+}
+
+function answer(from: Renderer, reply: MermaidReply): void {
+  if ("ready" in reply) {
+    from.ready = true;
+    sendNext();
+    return;
+  }
+  const current = from.current;
+  // An answer to a request the time limit already refused (it was posted before the worker was
+  // terminated) is dropped.
+  if (current?.id !== reply.id) return;
+  window.clearTimeout(current.timer);
+  from.current = undefined;
+  let drawn: Drawing;
+  if ("markup" in reply) {
+    try {
+      drawn = { svg: mermaidSvgElement(reply.markup, document) };
+    } catch (error) {
+      drawn = refusal(error instanceof Error ? error.message : null);
+    }
+  } else {
+    drawn = refusal(reply.error);
+  }
+  settle(current.source, drawn);
+  sendNext();
+}
+
+/** Refuses the source `from` has not answered in time, and terminates it, which stops its
+ *  layout; the next request starts a fresh worker. */
+function refuseLate(from: Renderer, source: string): void {
+  from.worker.terminate();
+  from.current = undefined;
+  renderer = undefined;
+  settle(source, refusal(`it did not finish within ${timeLimitMs / 1000} seconds`));
+  sendNext();
+}
+
+function startRenderer(): void {
+  let worker: Worker;
+  try {
+    worker = new Worker(new URL("./mermaid-render.worker.ts", import.meta.url), {
+      type: "module",
+    });
+  } catch (error) {
+    fail(error);
+    return;
+  }
+  const started: Renderer = { worker, ready: false, current: undefined };
+  renderer = started;
+  worker.addEventListener("message", (event: MessageEvent<MermaidReply>) => {
+    answer(started, event.data);
+  });
+  worker.addEventListener("error", fail);
+}
+
+/** Hands the oldest waiting source to the worker, starting one when none runs, unless the worker
+ *  is still loading or busy. */
+function sendNext(): void {
+  const next = requests.keys().next();
+  if (failed || next.done === true) return;
+  if (renderer === undefined) {
+    startRenderer();
+    return;
+  }
+  if (!renderer.ready || renderer.current !== undefined) return;
+  const from = renderer;
+  const source = next.value;
+  const id = ++lastRequestId;
+  const timer = window.setTimeout(() => refuseLate(from, source), timeLimitMs);
+  from.current = { id, source, timer };
+  from.worker.postMessage({ id, source } satisfies MermaidRequest);
 }
 
 /** Replaces `pre` with its drawn figure, moving `pre` itself into the source disclosure. */
-function drawBlock(module: MermaidModule, pre: HTMLPreElement): void {
+function drawBlock(pre: HTMLPreElement, drawn: Drawing): void {
   const document = pre.ownerDocument;
-  const drawn = drawing(module, pre.textContent ?? "", document);
   const figure = document.createElement("figure");
-  figure.setAttribute("data-mermaid-diagram", "");
   figure.className = "dispatch-mermaid";
   const details = document.createElement("details");
   details.className = "dispatch-mermaid-source";
@@ -185,7 +273,7 @@ function drawBlock(module: MermaidModule, pre: HTMLPreElement): void {
   } else {
     const status = document.createElement("p");
     status.setAttribute("role", "status");
-    status.className = `dispatch-mermaid-status ${dangerText}`;
+    status.className = dangerText;
     status.textContent = drawn.error;
     figure.append(status);
     details.open = true;
@@ -195,19 +283,14 @@ function drawBlock(module: MermaidModule, pre: HTMLPreElement): void {
   figure.append(details);
 }
 
-function drawBlocks(module: MermaidModule, element: HTMLElement, blocks: HTMLPreElement[]): void {
-  for (const pre of blocks) {
-    if (element.contains(pre)) drawBlock(module, pre);
-  }
-}
-
 /**
  * Draws every mermaid code block `element` holds (painted from `parsed`, the parse of
- * `markdown`) but one whose fence is still open, loading the renderer when none has loaded.
- * `reparse` parses with the engine and soft-break policy that produced `parsed`; the open-fence
- * check runs it once, only when the body ends in a mermaid block. With the renderer loaded it
- * draws now; otherwise when the renderer arrives. Returns the cancel for that late draw; a
- * cancelled draw never runs.
+ * `markdown`) but one whose fence is still open. `reparse` parses with the engine and soft-break
+ * policy that produced `parsed`; the open-fence check runs it once, only when the body ends in a
+ * mermaid block. A block whose source is cached draws now; every other one when the worker
+ * answers, in the order the bodies were painted. Returns the cancel for those late draws: it
+ * empties this call's own list of blocks, so a cancelled draw never runs and holds none of the
+ * body's DOM while the worker draws.
  */
 export function drawMermaidDiagrams(
   element: HTMLElement,
@@ -219,24 +302,44 @@ export function drawMermaidDiagrams(
     (pre) => isMermaidLanguage(pre.getAttribute("data-language"))
   );
   if (blocks.length > 0 && endsInOpenMermaidFence(parsed, markdown, reparse)) blocks.pop();
-  if (blocks.length === 0) return noop;
-  if (loaded !== undefined) {
-    drawBlocks(loaded, element, blocks);
-    return noop;
+  const late: HTMLPreElement[] = [];
+  for (const pre of blocks) {
+    const drawn = drawings.get(pre.textContent ?? "");
+    if (drawn === undefined) late.push(pre);
+    else drawBlock(pre, drawn);
   }
-  const draw: PendingDraw = { element, blocks };
-  pending.add(draw);
-  loadMermaid();
+  if (late.length === 0 || failed) return noop;
+  const target: { blocks: readonly HTMLPreElement[] | undefined } = { blocks: late };
+  for (const [index, pre] of late.entries()) {
+    const source = pre.textContent ?? "";
+    const draw: LateDraw = (drawn) => {
+      const block = target.blocks?.[index];
+      if (block !== undefined) drawBlock(block, drawn);
+    };
+    const draws = requests.get(source);
+    if (draws === undefined) requests.set(source, [draw]);
+    else draws.push(draw);
+  }
+  sendNext();
   return () => {
-    pending.delete(draw);
+    target.blocks = undefined;
   };
 }
 
-/** Forgets the loaded renderer, every cached drawing and every pending draw, so a test starts
- *  from a page that has drawn nothing. */
-export function resetMermaidDiagrams(): void {
-  loading = undefined;
-  loaded = undefined;
+/**
+ * Terminates the worker and forgets it, every cached drawing, every waiting draw and a failure,
+ * so a test starts from a page that has drawn nothing. `timeLimitMs` replaces
+ * `RENDER_TIME_LIMIT_MS` until the next reset, so a test of the time limit need not wait 5 s.
+ */
+export function resetMermaidDiagrams(limitMs = RENDER_TIME_LIMIT_MS): void {
+  if (renderer !== undefined) {
+    window.clearTimeout(renderer.current?.timer);
+    renderer.worker.terminate();
+    renderer = undefined;
+  }
+  failed = false;
+  window.removeEventListener("online", recover);
   drawings.clear();
-  pending.clear();
+  requests.clear();
+  timeLimitMs = limitMs;
 }

@@ -25,29 +25,58 @@ const GENERATED_CODE: GeneratedCode[] = [
 /**
  * Writes dist/THIRD_PARTY_NOTICES.txt, which Dispatch serves at /THIRD_PARTY_NOTICES.txt as text:
  * the license of every third-party package the build copies into dist.
+ *
+ * A Web Worker (`new Worker(new URL(…), …)`) is a bundle of its own, built while the page's build
+ * transforms the module that creates it, so before the page's bundle is generated; the page's
+ * build then copies the worker's files in as assets that name no source. So `worker`, the plugin
+ * of each worker bundle, records that bundle's files and inputs, and `page` leaves those files
+ * out of the page's bundle and adds those inputs to its own.
  */
-function thirdPartyNoticesFile(): Plugin {
+function thirdPartyNoticesFile(): { page: Plugin; worker: () => Plugin } {
   let root = "";
+  const workerFiles = new Set<string>();
+  const workerInputs = new Set<string>();
   return {
-    name: "third-party-notices",
-    apply: "build",
-    configResolved(config) {
-      root = config.root;
+    page: {
+      name: "third-party-notices",
+      apply: "build",
+      configResolved(config) {
+        root = config.root;
+      },
+      async generateBundle(_options, bundle) {
+        const pageBundle = Object.fromEntries(
+          Object.entries(bundle).filter(([fileName]) => !workerFiles.has(fileName))
+        );
+        const inputs = await viteBundleInputs(this, pageBundle, root, GENERATED_CODE);
+        for (const input of workerInputs) inputs.add(input);
+        this.emitFile({
+          type: "asset",
+          fileName: "THIRD_PARTY_NOTICES.txt",
+          source: await thirdPartyNotices(inputs, root),
+        });
+      },
     },
-    async generateBundle(_options, bundle) {
-      const inputs = await viteBundleInputs(this, bundle, root, GENERATED_CODE);
-      this.emitFile({
-        type: "asset",
-        fileName: "THIRD_PARTY_NOTICES.txt",
-        source: await thirdPartyNotices(inputs, root),
-      });
-    },
+    worker: () => ({
+      name: "third-party-notices-worker",
+      apply: "build",
+      async generateBundle(_options, bundle) {
+        for (const fileName of Object.keys(bundle)) workerFiles.add(fileName);
+        for (const input of await viteBundleInputs(this, bundle, root, GENERATED_CODE)) {
+          workerInputs.add(input);
+        }
+      },
+    }),
   };
 }
 
+const notices = thirdPartyNoticesFile();
+
 export default defineConfig({
   root: "web",
-  plugins: [react(), tailwindcss(), thirdPartyNoticesFile()],
+  plugins: [react(), tailwindcss(), notices.page],
+  // The Mermaid worker (features/refs/mermaid-render.worker.ts) is created with
+  // `{ type: "module" }`, so it is bundled as an ES module.
+  worker: { format: "es", plugins: () => [notices.worker()] },
   define: {
     // Keep the entry chunk distinct across deployments, including no-source-change image rebuilds.
     __DISPATCH_BUILD__: JSON.stringify(
@@ -76,6 +105,9 @@ export default defineConfig({
       "@legion/proof-editor/mermaid": fileURLToPath(
         new URL("../../proof-editor/src/mermaid-svg.ts", import.meta.url)
       ),
+      "@legion/proof-editor/mermaid-render": fileURLToPath(
+        new URL("../../proof-editor/src/mermaid-render.ts", import.meta.url)
+      ),
       "@legion/proof-editor/style.css": fileURLToPath(
         new URL("../../proof-editor/src/lib.css", import.meta.url)
       ),
@@ -92,9 +124,10 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    // The editor (Milkdown) is a lazy chunk loaded only on the document tab. beautiful-mermaid and
-    // ELK (~1.9 MB raw) are a lazy chunk the editor and the body diagram module
-    // (features/refs/mermaid-diagrams.ts) share, loaded only where a diagram draws.
+    // The editor (Milkdown) is a lazy chunk loaded only on the document tab, and it carries
+    // beautiful-mermaid and ELK (~1.9 MB raw). A body's diagrams draw in the Mermaid worker
+    // (features/refs/mermaid-render.worker.ts), a bundle of its own with the same renderer,
+    // fetched only once a body holds a mermaid block.
     chunkSizeWarningLimit: 3000,
     emptyOutDir: true,
   },
