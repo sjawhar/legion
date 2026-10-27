@@ -1,18 +1,18 @@
--- 0133_asks_written_version_backfill.up.sql
+-- 0134_asks_written_version_backfill.up.sql
 --
--- Fills asks.written_version (0130) on the asks stored before 0130's trigger, with the trigger's
+-- Fills asks.written_version (0131) on the asks stored before 0131's trigger, with the trigger's
 -- predicates:
 --   - an approval ask: approval.version of its ask.opened event, the version the request named when
 --     it opened, which the row's approval.version no longer holds once a later version moved it. The
 --     lookup repeats the type list of events_ask_payload_id (0030), so the planner can read that
 --     partial index. An approval ask with no such event keeps null;
 --   - another ask with artifact_id set, anchor null and block_artifact_id null: the highest version
---     of its document created at or before the ask, as 0132 reads a comment's.
+--     of its document created at or before the ask, as 0133 reads a comment's.
 -- An ask the trigger already recorded keeps its value, and one with nothing to record keeps null
 -- and is not rewritten. Setting only this column fires no trigger: asks' update triggers read an
 -- update of the question, options or answer.
 --
--- It takes asks EXCLUSIVE before it writes a row, as 0132 takes comments and for the same reason
+-- It takes asks EXCLUSIVE before it writes a row, as 0133 takes comments and for the same reason
 -- (0089's): the table lock is taken while this holds nothing, so no write that locks two of these
 -- rows in another order deadlocks with it. Its own migration, so the transaction holds asks' lock
 -- alone.

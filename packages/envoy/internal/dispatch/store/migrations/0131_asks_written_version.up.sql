@@ -1,4 +1,4 @@
--- 0130_asks_written_version.up.sql
+-- 0131_asks_written_version.up.sql
 --
 -- An ask written on a document without an anchor belongs to the document's version current when it
 -- was written (its graph node's parent_version). asks.written_version records it: a `before insert`
@@ -12,7 +12,7 @@
 -- a block ask (its block's document), an issue-owned question and an ask on a document with no
 -- version yet keep null. An approval.version that is not a version number is left to
 -- asks_approval_kind_check, which refuses the row after the trigger runs, so the trigger records
--- nothing for it rather than failing the cast first. 0133 fills the asks stored before this one.
+-- nothing for it rather than failing the cast first. 0134 fills the asks stored before this one.
 --
 -- The column is nullable with no default, a catalog change that rewrites and scans no row, so the
 -- transaction holds asks' ACCESS EXCLUSIVE lock for milliseconds. Its own migration, so the

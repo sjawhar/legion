@@ -667,6 +667,35 @@ expect R12 "every link's two ends carry all six facts" true \
 expect R12 "the link to hold_line ends at the block as its own reference reads it" "[$hold_node]" \
   "$defs"'[.links[] | select(.to.block_id == "hold_line") | .to | same]'
 
+# component_node TIMES: reads component $component of $component_project and its part_of edge to
+# its parent $component_parent. TIMES is `recorded` when the import that projected it recorded its
+# times, and `unrecorded` when it may predate them.
+component_node() {
+  local component_ref="dispatch://$component_project/component/$component"
+  local component_parent_ref="dispatch://$component_project/component/$component_parent"
+  local component_parent_node of_parent
+  node_of R12 "$component_parent_ref"
+  component_parent_node="$node"
+  of_parent="$(parent_of component "$component_project/$component_parent" "$component_parent_ref")"
+  get "/api/v1/references?to=$(q "$component_ref")"
+  want_status 200 R12 "?to=$component_ref answers"
+  if [[ "$1" == recorded ]]; then
+    expect R12 "component $component carries its facts, its times recorded at the import" \
+      "$(wanted '[]' '[]' "$of_parent" null)" "$defs .node | facts"
+  else
+    # A component imported before its times were recorded has them null.
+    expect R12 "component $component carries its facts" \
+      "$(jq -cnS --argjson parent "$of_parent" '{made_by: [], changed_by: [], parent: $parent,
+        parent_version: null, times: [true, true]}')" \
+      '.node | {made_by, changed_by, parent, parent_version,
+        times: [has("made_at"), has("changed_at")]}'
+  fi
+  get "/api/v1/references?from=$(q "$component_ref")&kind=part_of"
+  want_status 200 R12 "?from=$component_ref&kind=part_of answers"
+  expect R12 "component $component is part of $component_parent as its own reference reads it" \
+    "[$component_parent_node]" "$defs"'[.edges[] | select(.kind == "part_of") | .node | same]'
+}
+
 # Components, from the source COMPONENT_SOURCE names.
 case "$component_source" in
   fixture)
@@ -691,6 +720,7 @@ case "$component_source" in
     component_project="$project"
     component=web
     component_parent=platform
+    component_node recorded
     ;;
   existing)
     get "/api/v1/settings/architecture-sources"
@@ -713,6 +743,7 @@ case "$component_source" in
     [[ -n "$pick" ]] || fail R12 component "no project with an architecture source has a \
 component with a parent: COMPONENT_SOURCE=existing needs one"
     read -r component component_parent <<<"$pick"
+    component_node unrecorded
     ;;
   none)
     get "/api/v1/settings/architecture-sources"
@@ -725,30 +756,6 @@ component with a parent: COMPONENT_SOURCE=existing needs one"
     printf 'SKIP: R12 component: COMPONENT_SOURCE is unset, so no component node is read; set it to fixture (with FAKE_GITHUB_PORT), existing or none to read one\n'
     ;;
 esac
-if [[ "$component_source" == fixture || "$component_source" == existing ]]; then
-  component_ref="dispatch://$component_project/component/$component"
-  component_parent_ref="dispatch://$component_project/component/$component_parent"
-  node_of R12 "$component_parent_ref"
-  component_parent_node="$node"
-  of_parent="$(parent_of component "$component_project/$component_parent" "$component_parent_ref")"
-  get "/api/v1/references?to=$(q "$component_ref")"
-  want_status 200 R12 "?to=$component_ref answers"
-  if [[ "$component_source" == fixture ]]; then
-    expect R12 "component $component carries its facts, its times recorded at the import" \
-      "$(wanted '[]' '[]' "$of_parent" null)" "$defs .node | facts"
-  else
-    # A component imported before its times were recorded has them null.
-    expect R12 "component $component carries its facts" \
-      "$(jq -cnS --argjson parent "$of_parent" '{made_by: [], changed_by: [], parent: $parent,
-        parent_version: null, times: [true, true]}')" \
-      '.node | {made_by, changed_by, parent, parent_version,
-        times: [has("made_at"), has("changed_at")]}'
-  fi
-  get "/api/v1/references?from=$(q "$component_ref")&kind=part_of"
-  want_status 200 R12 "?from=$component_ref&kind=part_of answers"
-  expect R12 "component $component is part of $component_parent as its own reference reads it" \
-    "[$component_parent_node]" "$defs"'[.edges[] | select(.kind == "part_of") | .node | same]'
-fi
 
 # The CLI prints the facts of the node it reads on its Node: line.
 run R12 "dispatch read --ref <anchored comment>" read --ref "$head_ref"

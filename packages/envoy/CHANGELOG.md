@@ -81,14 +81,14 @@
   node it belongs to (`{kind, id, ref?}`) and the version of that parent it belongs to. A fact
   Dispatch never recorded is `[]` for an actor list and `null` otherwise: a session has none, and
   a block's maker is known only when the block is in its document's first version or Dispatch
-  indexed the version before the one that first held it. Migrations `0129` and `0130` add
+  indexed the version before the one that first held it. Migrations `0130` and `0131` add
   `comments.written_version` and `asks.written_version`, the version current when a comment or
   an ask was written on a document without an anchor (an approval request's, the version it names
-  when it opens), which a `before insert` trigger records for every build's insert, and `0132` and
-  `0133` fill them on the rows stored before, from the latest version created at or before each
+  when it opens), which a `before insert` trigger records for every build's insert, and `0133` and
+  `0134` fill them on the rows stored before, from the latest version created at or before each
   item or, for an approval request, from its `ask.opened` event, holding `comments` and then
   `asks` `EXCLUSIVE` while they write, which every write of that table waits behind. Migration
-  `0131` creates `component_facts`, which each import keeps from this release on: a component's
+  `0132` creates `component_facts`, which each import keeps from this release on: a component's
   `made_at` and `changed_at`, judged by a digest of its own fields. A component stored before it
   has no `made_at`, and no `changed_at` until an import changes it.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app

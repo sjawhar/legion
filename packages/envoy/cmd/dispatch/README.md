@@ -866,7 +866,7 @@ is written. Its own migration, so its transaction holds `comments` alone: the dr
 `ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds. It
 refuses and rewrites no row; its census answers `0`.
 
-Migration `0129_comments_written_version` adds `comments.written_version`, the version of its
+Migration `0130_comments_written_version` adds `comments.written_version`, the version of its
 document current when a comment was written on it without an anchor (the comment's graph node's
 `parent_version`, [Reference graph](#reference-graph)), and a `before insert` trigger that sets
 it to the highest `artifact_versions.number` of the document on every comment with `artifact_id`
@@ -875,14 +875,14 @@ record it too. The column is nullable with no default, a catalog change that rew
 row; its own migration, so its transaction holds `comments` `ACCESS EXCLUSIVE` alone, for
 milliseconds. It refuses and rewrites no row; its census answers `0`.
 
-Migration `0130_asks_written_version` does the same for `asks`: its trigger sets an approval
+Migration `0131_asks_written_version` does the same for `asks`: its trigger sets an approval
 ask's `written_version` to `approval.version`, the version the request names when it opens, which
 stays while the row's `approval.version` moves with later versions, and that of an ask with
 `artifact_id` set, `anchor` null and `block_artifact_id` null to the highest version of its
 document. Its own migration, so its transaction holds `asks` `ACCESS EXCLUSIVE` alone, for
 milliseconds. It refuses and rewrites no row; its census answers `0`.
 
-Migration `0131_component_facts` creates `component_facts`, when each component was made and last
+Migration `0132_component_facts` creates `component_facts`, when each component was made and last
 changed and the digest of its own fields at its last recorded change, keyed `(project_key, id)`
 as `components` is, which every import keeps from then on (`packages/envoy/AGENTS.md`,
 "References form one graph"). Its foreign key to `projects` cascades, and it has none to
@@ -892,8 +892,8 @@ recorded. It reads `components` under `ACCESS SHARE`, and the foreign key takes
 `SHARE ROW EXCLUSIVE` on `projects` for the catalog change. It refuses and rewrites no existing
 row; its census answers `0`.
 
-Migration `0132_comments_written_version_backfill` fills `written_version` on the comments with
-`artifact_id` set and `anchor` null stored before `0129`'s trigger: each takes the highest version
+Migration `0133_comments_written_version_backfill` fills `written_version` on the comments with
+`artifact_id` set and `anchor` null stored before `0130`'s trigger: each takes the highest version
 of its document created at or before it, the only record those rows have, so a comment written
 while a version's transaction was still open can name that version. A comment the trigger
 recorded keeps its value, one on a document with no version that old keeps null, and no update
@@ -903,12 +903,12 @@ and every comment write waits until it commits. Its census answers `0`: it fills
 this release reads and changes no value any reader had, and it cannot name the column, which does
 not exist when the census is taken.
 
-Migration `0133_asks_written_version_backfill` does the same for `asks`, holding `asks`
+Migration `0134_asks_written_version_backfill` does the same for `asks`, holding `asks`
 `EXCLUSIVE`: an approval ask takes `approval.version` of its `ask.opened` event (the type list of
 `events_ask_payload_id`, `0030`, lets the lookup read that index), the version the request named
 when it opened, and keeps null without one; another ask with `artifact_id` set, `anchor` null and
 `block_artifact_id` null takes the highest version of its document created at or before it, as
-`0132` reads a comment's. Its census answers `0` for the same reasons.
+`0133` reads a comment's. Its census answers `0` for the same reasons.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -1164,7 +1164,7 @@ are never recorded and its times only from this release on, and a block's maker,
 ask's version, are known only when the block is in the document's first version or Dispatch
 indexed the version before the one that first held it (`packages/envoy/AGENTS.md`, "References
 form one graph", gives each kind's sources and what counts as a change). Migrations
-`0129`-`0133` (Database migrations above) add what the facts read: the version current when an
+`0130`-`0134` (Database migrations above) add what the facts read: the version current when an
 unanchored comment or ask is written on a document, recorded at insert and filled for the rows
 already stored, and `component_facts`, which every import keeps. `dispatch read` prints the facts
 of the node it reads on a `Node:` line, before `Referenced by:`.

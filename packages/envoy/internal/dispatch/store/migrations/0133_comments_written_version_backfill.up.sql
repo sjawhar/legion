@@ -1,6 +1,6 @@
--- 0132_comments_written_version_backfill.up.sql
+-- 0133_comments_written_version_backfill.up.sql
 --
--- Fills comments.written_version (0129) on the comments stored before 0129's trigger, with the
+-- Fills comments.written_version (0130) on the comments stored before 0130's trigger, with the
 -- trigger's predicate: artifact_id set, anchor null. Nothing recorded the version current when such
 -- a comment was written, so it takes the highest version of its document created at or before the
 -- comment: the only record for those rows. A version's created_at is its transaction's start, so a
@@ -15,7 +15,7 @@
 -- waits for completes first and no write waits for it while it holds a row that write needs.
 -- EXCLUSIVE blocks no read; it holds every comment write until this commits, which updates only the
 -- unanchored comments of documents. Its own migration, so the transaction holds comments' lock
--- alone; 0133 fills asks.
+-- alone; 0134 fills asks.
 lock table comments in exclusive mode;
 
 update comments c

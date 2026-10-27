@@ -1,4 +1,4 @@
--- 0131_component_facts.up.sql
+-- 0132_component_facts.up.sql
 --
 -- When a component was made and last changed (its graph node's made_at and changed_at). Every
 -- import deletes a source's components and inserts them again (architecture/importer.go), so no

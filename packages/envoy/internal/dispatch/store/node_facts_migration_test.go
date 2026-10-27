@@ -7,12 +7,12 @@ import (
 	"testing"
 )
 
-// beforeNodeFacts is the last migration before the node facts: 0129_comments_written_version
-// through 0133_asks_written_version_backfill apply after it. writtenVersionTriggers is the last of
-// the two triggers (0129, 0130) that the backfills (0132, 0133) run after.
+// beforeNodeFacts is the last migration before the node facts: 0130_comments_written_version
+// through 0134_asks_written_version_backfill apply after it. writtenVersionTriggers is the last of
+// the two triggers (0130, 0131) that the backfills (0133, 0134) run after.
 const (
-	beforeNodeFacts        = 128
-	writtenVersionTriggers = 130
+	beforeNodeFacts        = 129
+	writtenVersionTriggers = 131
 )
 
 // writtenVersion reads the written_version of a comment or an ask: nil when null.

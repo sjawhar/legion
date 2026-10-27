@@ -346,17 +346,19 @@ func (f blockFirst) maker() ([]model.Actor, *time.Time, error) {
 	return authors, f.createdAt, nil
 }
 
-// RemovedBlockFacts is a node carrying only the six facts of block blockID of the document whose
-// artifact id is documentID and whose reference is documentRef, which no current version holds
-// since version removedVersion deleted it: made as a current block is (blockFirstVersion), last
-// changed by that deletion, with its version's authors and time, and part of the document at the
-// latest version a block-aware build indexed below removedVersion, the last one known to hold it
-// (null when none is). Authors that do not decode (storedActors) fail the read.
-func RemovedBlockFacts(ctx context.Context, q Queryer, documentID, documentRef, blockID string, removedVersion int) (model.GraphNode, error) {
+// RemovedBlockNode is the node nodeID of block blockID of document (its resolved artifact node),
+// which no current version holds since version removedVersion deleted it, built as loadBlockNodes
+// builds a current block's but with no text or changed version: made as a current block is
+// (blockFirstVersion), last changed by that deletion, with its version's authors and time, and
+// part of the document at the latest version a block-aware build indexed below removedVersion, the
+// last one known to hold it (null when none is). The caller adds its pin. Authors that do not
+// decode (storedActors) fail the read.
+func RemovedBlockNode(ctx context.Context, q Queryer, document model.GraphNode, nodeID, blockID string, removedVersion int) (model.GraphNode, error) {
 	var first blockFirst
 	var removedBy []byte
 	var removedAt *time.Time
 	var held *int
+	documentID := document.ID
 	if err := q.QueryRow(ctx, `
 		select `+blockFirstColumns("first")+`, removed.authors, removed.created_at,
 		       (select max(i.version) from document_indexed_versions i where i.artifact_id = b.artifact_id and i.version < $3)
@@ -375,11 +377,18 @@ func RemovedBlockFacts(ctx context.Context, q Queryer, documentID, documentRef, 
 		return model.GraphNode{}, fmt.Errorf("decode the last change of removed block %q of %s: %w", blockID, documentID, err)
 	}
 	return model.GraphNode{
+		Kind:          "block",
+		ID:            nodeID,
+		BlockID:       blockID,
+		IssueKey:      document.IssueKey,
+		Project:       document.Project,
+		Ref:           BlockRef(document.Ref, blockID),
+		Document:      document.Ref,
 		MadeBy:        madeBy,
 		MadeAt:        madeAt,
 		ChangedBy:     changedBy,
 		ChangedAt:     removedAt,
-		Parent:        &model.NodeParent{Kind: "artifact", ID: documentID, Ref: documentRef},
+		Parent:        &model.NodeParent{Kind: "artifact", ID: documentID, Ref: document.Ref},
 		ParentVersion: held,
 	}, nil
 }

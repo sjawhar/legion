@@ -1,4 +1,4 @@
--- 0129_comments_written_version.up.sql
+-- 0130_comments_written_version.up.sql
 --
 -- A comment written on a document without an anchor belongs to the document's version current when
 -- it was written (its graph node's parent_version). comments.written_version records it: a
@@ -6,11 +6,11 @@
 -- highest artifact_versions.number of that document, so the insert of every build records it, the
 -- earlier release's during the roll included. An insert that names a written_version keeps it. An
 -- anchored comment (its version is anchor.version) and an issue-owned one keep null, as does a
--- comment on a document with no version yet. 0132 fills the comments stored before this one.
+-- comment on a document with no version yet. 0133 fills the comments stored before this one.
 --
 -- The column is nullable with no default, a catalog change that rewrites and scans no row, so the
 -- transaction holds comments' ACCESS EXCLUSIVE lock for milliseconds. Its own migration, so the
--- transaction holds comments' lock alone (0075's precedent); 0130 does the same for asks. The
+-- transaction holds comments' lock alone (0075's precedent); 0131 does the same for asks. The
 -- trigger reads artifact_versions only when it fires, which this transaction does not.
 alter table comments add column written_version integer;
 
