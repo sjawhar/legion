@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 
 import {
   createAsk,
@@ -22,6 +22,33 @@ import { asUser } from "./users";
 // only alice's browser needs to be real, since that is what proves the live update.
 const bob = { actor: { kind: "session" as const, id: "bob" }, as: "agent" as const };
 const eventStreamUrl = /\/api\/v1\/events(\?|$)/;
+let renames = 0;
+
+/**
+ * bob renames the open issue, again every 2 s, until its header shows the new name from a read
+ * of `GET /api/v1/issues/<key>` the page sent after the write (`reads` counts them). Only the
+ * page's event stream can bring either, so past this the stream is subscribed and every event
+ * written before the rename has been handled.
+ */
+async function renameUntilShown(
+  header: Locator,
+  key: string,
+  title: string,
+  reads: () => number
+): Promise<void> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    renames += 1;
+    const renamed = `${title} (rename ${renames})`;
+    const loads = reads();
+    await patchIssue(key, { title: renamed }, bob);
+    const shown = await expect(header)
+      .toHaveText(renamed, { timeout: 2_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (shown && reads() > loads) return;
+  }
+  throw new Error(`no rename of ${key} reached the page in 10 writes 2 s apart`);
+}
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -117,40 +144,53 @@ test("live: answering an ask updates the Inbox and project badges immediately", 
   await alice.close();
 });
 
-test("live: a message on another issue skips the Inbox refetch", async ({ browser }, testInfo) => {
+test("live: a message on another issue reads neither the Inbox nor the pinned list", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
+  const viewedIssue = await createIssue({ project: "CORE", title: "Viewed issue" });
   const otherIssue = await createIssue({ project: "CORE", title: "Unviewed issue" });
 
   const alice = await asUser(browser, "alice");
-  const inboxPage = await alice.newPage();
+  const page = await alice.newPage();
   let inboxReads = 0;
-  let issueReads = 0;
-  inboxPage.on("request", (request) => {
+  let pinnedReads = 0;
+  let viewedReads = 0;
+  page.on("request", (request) => {
     if (request.method() !== "GET") return;
-    const path = new URL(request.url()).pathname;
-    if (path === "/api/v1/inbox") inboxReads += 1;
-    if (path === "/api/v1/issues") issueReads += 1;
+    const url = new URL(request.url());
+    if (url.pathname === "/api/v1/inbox") inboxReads += 1;
+    if (url.pathname === "/api/v1/issues" && url.searchParams.get("pinned") === "true") {
+      pinnedReads += 1;
+    }
+    if (url.pathname === `/api/v1/issues/${viewedIssue.key}`) viewedReads += 1;
   });
 
   try {
-    await inboxPage.goto("/");
-    await expect(inboxPage.getByText("Nothing needs you")).toBeVisible();
+    await page.goto(`/issues/${viewedIssue.key}`);
     if (testInfo.project.name === "iphone") {
       // The pinned list lives in the drawer; open it so both projects measure the same queries.
-      await inboxPage.getByRole("button", { name: "Open navigation" }).click();
-      await expect(inboxPage.getByRole("navigation", { name: "Navigation" })).toBeVisible();
+      await page.getByRole("button", { name: "Open navigation" }).click();
     }
-    await inboxPage.waitForTimeout(250);
+    await expect(
+      page.getByRole("navigation", { name: "Navigation" }).locator('a[href="/projects/CORE"]')
+    ).toBeVisible();
+    const viewedHeader = page.getByTestId("issue-header").getByRole("heading", { level: 1 });
+    // The first rename proves the stream is subscribed, so the message below reaches this page.
+    await renameUntilShown(viewedHeader, viewedIssue.key, "Viewed issue", () => viewedReads);
+    await page.waitForTimeout(250);
     inboxReads = 0;
-    issueReads = 0;
+    pinnedReads = 0;
 
     await createMessage(otherIssue.key, { body: "Unviewed issue update" }, bob);
-    await expect.poll(() => issueReads).toBe(1);
-    // The debounce and any straggling refetch settle here, so a late Inbox read still counts.
-    await inboxPage.waitForTimeout(350);
+    // Events reach the page in order, so once a rename written after the message shows, the
+    // message's event has been handled too. A rename moves neither read: the issue has no pinned
+    // row and no Inbox row.
+    await renameUntilShown(viewedHeader, viewedIssue.key, "Viewed issue", () => viewedReads);
+    // The 100 ms batch and any straggling read settle here, so a late one still counts.
+    await page.waitForTimeout(1_200);
 
-    // The Inbox is the subtracted query; the issue lists stay on main's conservative refresh.
-    expect([inboxReads, issueReads]).toEqual([0, 1]);
+    expect([inboxReads, pinnedReads]).toEqual([0, 0]);
   } finally {
     await alice.close();
   }
@@ -561,27 +601,37 @@ test("live: the Reconnecting pill never covers the phone margin sheet toggle", a
   await alice.close();
 });
 
-test("live: an event during a project list's first load beats the response that predates it", async ({
+test("live: an event during a project list's first load fetches it again once that load lands, never beside it", async ({
   browser,
-}) => {
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "OLDTITLE" });
+  // Pinned, so the sidebar's pinned row shows each rename: the one sign on this page that the
+  // event was handled while the list's first load is still held.
+  await putIssueState(issue.key, { pinned: true });
 
   const alice = await asUser(browser, "alice");
+  const { promise: released, resolve: release } = Promise.withResolvers<void>();
   try {
     const page = await alice.newPage();
-    const { promise: released, resolve: release } = Promise.withResolvers<void>();
     const { promise: inFlight, resolve: reachedServer } = Promise.withResolvers<void>();
-    const { promise: streaming, resolve: streamOpened } = Promise.withResolvers<void>();
-    page.on("request", (request) => {
-      if (eventStreamUrl.test(request.url())) {
-        streamOpened();
-      }
-    });
+    const listUrl = /\/api\/v1\/issues\?project=CORE/;
     let listRequests = 0;
+    let listsInFlight = 0;
+    let mostInFlight = 0;
+    page.on("request", (request) => {
+      if (!listUrl.test(request.url())) return;
+      listsInFlight += 1;
+      mostInFlight = Math.max(mostInFlight, listsInFlight);
+    });
+    const settle = (request: { url(): string }) => {
+      if (listUrl.test(request.url())) listsInFlight -= 1;
+    };
+    page.on("requestfinished", settle);
+    page.on("requestfailed", settle);
     // The list's first request is answered by the server now and held on the wire, so the body
     // that eventually lands is genuinely older than the event below.
-    await page.route(/\/api\/v1\/issues\?project=CORE/, async (route) => {
+    await page.route(listUrl, async (route) => {
       listRequests += 1;
       if (listRequests > 1) {
         await route.continue();
@@ -594,20 +644,40 @@ test("live: an event during a project list's first load beats the response that 
     });
 
     await page.goto("/projects/CORE");
-    await Promise.all([inFlight, streaming]);
-    // The subscriber has to be registered server-side before the rename: the event reaches this
-    // tab only once the server has it on the stream.
-    await page.waitForTimeout(500);
-    await patchIssue(issue.key, { title: "NEWTITLE" });
-    // The held body must not be released until the event's own invalidation has issued its
-    // request: without that wait the stale body lands first, the list is filled from it and the
-    // test passes without exercising the cancel at all.
-    await expect.poll(() => listRequests).toBe(2);
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Open navigation" }).click();
+    }
+    const pinnedRow = page
+      .getByRole("navigation", { name: "Navigation" })
+      .getByRole("link", { name: issue.key });
+    await expect(pinnedRow).toContainText("OLDTITLE");
+    await inFlight;
+    // Renamed, again every 2 s, until the pinned row shows it: the stream is open and the event
+    // was handled while the held first load was still in flight.
+    let newTitle = "";
+    for (let attempt = 1; attempt <= 10 && newTitle === ""; attempt += 1) {
+      await patchIssue(issue.key, { title: `NEWTITLE ${attempt}` }, bob);
+      if (
+        await expect(pinnedRow)
+          .toContainText(`NEWTITLE ${attempt}`, { timeout: 2_000 })
+          .then(() => true)
+          .catch(() => false)
+      ) {
+        newTitle = `NEWTITLE ${attempt}`;
+      }
+    }
+    expect(newTitle).not.toBe("");
+    // The event did not start a second request beside the held one.
+    expect(listRequests).toBe(1);
     release();
 
-    await expect(page.getByLabel(`${issue.key} NEWTITLE`)).toBeVisible();
+    // The held body predates the rename; the list is fetched again once it lands.
+    await expect(page.getByLabel(`${issue.key} ${newTitle}`)).toBeVisible();
     await expect(page.getByLabel(`${issue.key} OLDTITLE`)).toHaveCount(0);
+    await page.waitForTimeout(1_500);
+    expect([listRequests, mostInFlight]).toEqual([2, 1]);
   } finally {
+    release();
     await alice.close();
   }
 });

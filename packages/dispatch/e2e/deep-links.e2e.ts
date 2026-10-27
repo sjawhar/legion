@@ -698,7 +698,7 @@ test("a resolving reference above a linked card does not end the hold", async ({
 
   try {
     const page = await context.newPage();
-    await page.route(new RegExp(`/api/v1/issues/${target.key}$`), async (route) => {
+    await page.route(new RegExp(`/api/v1/issues/${target.key}/summary$`), async (route) => {
       await referenceHeld.promise;
       await route.continue();
     });

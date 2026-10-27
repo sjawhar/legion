@@ -13,6 +13,7 @@ import {
   getIssue,
   getIssueEvents,
   patchIssue,
+  putIssueState,
   putProjectDefaultAssignee,
   replyToCommentDelivery,
 } from "./api";
@@ -264,7 +265,9 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
   }
 });
 
-test("a later Inbox response clears a hidden ask's pending refresh", async ({ browser }) => {
+test("a later Inbox response clears a hidden ask's pending refresh", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const visibleIssue = await createIssue({ project: "CORE", title: "Visible Inbox ask" });
   const hiddenIssue = await createIssue({ project: "CORE", title: "Hidden Inbox ask" });
@@ -309,23 +312,34 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
     // reaches the page, no pending marker is ever set, and everything below passes without
     // testing anything. Wait for the stream as the sibling above does.
     await Promise.all([listRequested.promise, streamResponse]);
+    const pinnedRead = (request: { method(): string; url(): string }) =>
+      request.method() === "GET" &&
+      new URL(request.url()).pathname === "/api/v1/issues" &&
+      new URL(request.url()).searchParams.get("pinned") === "true";
+    const isPhone = testInfo.project.name === "iphone";
+    if (isPhone) {
+      // The phone mounts the sidebar's reads, the pinned list among them, with its drawer.
+      const firstPinnedRead = page.waitForRequest(pinnedRead);
+      await page.getByRole("button", { name: "Open navigation" }).click();
+      await firstPinnedRead;
+    }
     await createComment(
       hiddenIssue.key,
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
       session
     );
     // The held Inbox response must not land until the browser has handled the hidden ask's
-    // event. A fixed delay is a race under load, and the hidden ask shows nothing to wait on;
-    // a reply posted after it on the visible ask does. Event ids are delivered in order, so
-    // the marker appearing proves the frame before it was processed.
-    await createComment(
-      visibleIssue.key,
-      { ask_id: visibleAsk.id, body: "Ordering marker." },
-      session
-    );
-    await expect(
-      page.getByTestId(`ask-${visibleAsk.id}`).getByText("Ordering marker.")
-    ).toBeVisible();
+    // event. A fixed delay is a race under load, and the hidden ask shows nothing to wait on.
+    // Nor can an Inbox card or the sidebar's rows, which wait for the held first load: it is
+    // never cancelled. alice's own pin, written after the reply, makes the page read the pinned
+    // list again, which the sidebar reads beside the held Inbox. Event ids are delivered in
+    // order, so that read proves the frame before it was processed.
+    const pinnedReadAgain = page.waitForRequest(pinnedRead);
+    await putIssueState(visibleIssue.key, { pinned: true });
+    await pinnedReadAgain;
+    if (isPhone) {
+      await page.getByRole("button", { name: "Close navigation" }).click();
+    }
     releaseList.resolve();
     await reloaded;
 
@@ -1521,10 +1535,10 @@ test("a mentioned session's callback reply reaches the open ask card", async ({ 
 });
 
 // The window #1207's freshness marker covers: a pre-event Inbox body that lands inside the
-// 100 ms debounce is committed and stamped fresh, so there is no request left for
-// `cancelRefetch` to restart, the flush's `["ask-thread", id]` invalidation matches a query that
-// does not exist yet, and a card mounting in the gap seeds its thread from the pre-event row
-// under `staleTime: Infinity` and never refetches.
+// 100 ms batch is committed and stamped fresh before the flush, the flush's
+// `["ask-thread", id]` refresh matches a query that does not exist yet, the Inbox's own fetch
+// after the flush is held here as a slow server's would be, and a card mounting in the gap seeds
+// its thread from the pre-event row under `staleTime: Infinity` and never refetches.
 test("a stale Inbox body landing inside the debounce seeds a later card's thread", async ({
   browser,
 }) => {
@@ -1576,8 +1590,8 @@ test("a stale Inbox body landing inside the debounce seeds a later card's thread
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
       session
     );
-    // ... and the pre-event body lands before the 100ms flush, so cancelRefetch never restarts
-    // it. This hold is shorter than INVALIDATION_DEBOUNCE_MS by design and has no client-visible
+    // ... and the pre-event body lands before the 100 ms flush. This hold is shorter than the
+    // batch window (`BATCH_WINDOW_MS` in `web/src/api/sse.ts`) by design and has no client-visible
     // signal to wait on: a failure here means the window slipped, not that the marker regressed.
     await page.waitForTimeout(30);
     releaseSecond.resolve();
