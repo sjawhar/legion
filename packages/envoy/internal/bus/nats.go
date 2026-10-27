@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -123,6 +124,10 @@ type recoverableSubscription struct {
 	// a refused subscription valid, so without it a lane the server will not deliver to would read
 	// as subscribed. Only the core registration is ever marked.
 	refused bool
+	// unlimitedPending switches the pending limits of a core subscription off on every bind, so
+	// nats.go queues whatever the server delivers rather than dropping it as a slow consumer
+	// (ConnectRoleLane).
+	unlimitedPending bool
 }
 
 // Client is a NATS connection that publishes notifications and holds at most one JetStream
@@ -167,6 +172,10 @@ type Client struct {
 	// before the drain from one during it (closeStopped). Once the client is stopped c.Conn never
 	// changes (ensureConnWithContext), so the count needs no connection beside it.
 	drainedReconnects uint64
+
+	// slowConsumers counts the slow-consumer errors the client's connections reported
+	// (SlowConsumers).
+	slowConsumers atomic.Uint64
 
 	// recovery state
 	recovering int32
@@ -304,22 +313,22 @@ func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats
 // subject and queue replaces it, unsubscribing the handle an earlier one returned, and any other
 // call is refused with ErrSubscriptionHeld.
 func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues ...string) (*nats.Subscription, error) {
-	if err := c.ensureConn(); err != nil {
-		return nil, err
-	}
 	queue := ""
 	if len(queues) > 0 {
 		queue = queues[0]
 	}
+	return c.subscribeCore(recoverableSubscription{transport: coreSubscription, subject: subject, queue: queue, handler: handler})
+}
+
+// subscribeCore registers next as the client's core subscription (SubscribeCore).
+func (c *Client) subscribeCore(next recoverableSubscription) (*nats.Subscription, error) {
+	if err := c.ensureConn(); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	conn, js := c.Conn, c.js
 	c.mu.Unlock()
-	return c.registerSubscription(recoverableSubscription{
-		transport: coreSubscription,
-		subject:   subject,
-		queue:     queue,
-		handler:   handler,
-	}, conn, js)
+	return c.registerSubscription(next, conn, js)
 }
 
 // registerSubscription makes next the transport's subscription and binds it. The registration
@@ -387,10 +396,21 @@ func bind(registration recoverableSubscription, conn *nats.Conn, js nats.JetStre
 	if registration.transport == jetStreamSubscription {
 		return js.Subscribe(registration.subject, registration.handler, registration.opts...)
 	}
+	var sub *nats.Subscription
+	var err error
 	if registration.queue == "" {
-		return conn.Subscribe(registration.subject, registration.handler)
+		sub, err = conn.Subscribe(registration.subject, registration.handler)
+	} else {
+		sub, err = conn.QueueSubscribe(registration.subject, registration.queue, registration.handler)
 	}
-	return conn.QueueSubscribe(registration.subject, registration.queue, registration.handler)
+	if err != nil || !registration.unlimitedPending {
+		return sub, err
+	}
+	if err := sub.SetPendingLimits(-1, -1); err != nil {
+		_ = sub.Unsubscribe()
+		return nil, err
+	}
+	return sub, nil
 }
 
 // endBind ends the bind in flight of the registration subscription holds. A bind that ends during
@@ -460,9 +480,10 @@ func (c *Client) subscriptionOK(transport subscriptionTransport) bool {
 var subscriptionRefusal = regexp.MustCompile(`Subscription to ("(?:[^"\\]|\\.)*")(?: using queue ("(?:[^"\\]|\\.)*"))?(?: \(sid ("(?:[^"\\]|\\.)*")\))?`)
 
 // onAsyncError is wired as the connection's async error callback, after the error is logged. A
-// server's refusal of the client's core subscription marks it refused for CoreSubOK. Any other
-// error, a refusal of a publish or of another subscription among them, changes nothing, and so
-// does one a connection the client has since replaced reports late.
+// slow-consumer error is counted (SlowConsumers). A server's refusal of the client's core
+// subscription marks it refused for CoreSubOK. Any other error, a refusal of a publish or of
+// another subscription among them, changes nothing, and so does one a connection the client has
+// since replaced reports late.
 //
 // A refusal of a subscription the client sent names its subject and, when it has one, its queue
 // group, and both must be the core registration's. A reload's revocation names the subject and the
@@ -476,24 +497,14 @@ var subscriptionRefusal = regexp.MustCompile(`Subscription to ("(?:[^"\\]|\\.)*"
 // only under that lock, and both callbacks run in order on one goroutine. c.mu is held across the
 // mark so a replacement connection cannot be installed between the check and the mark.
 func (c *Client) onAsyncError(nc *nats.Conn, err error) {
-	if !errors.Is(err, nats.ErrPermissionViolation) {
+	if errors.Is(err, nats.ErrSlowConsumer) {
+		c.slowConsumers.Add(1)
 		return
 	}
-	match := subscriptionRefusal.FindStringSubmatch(err.Error())
-	if match == nil {
+	refusal, ok := readSubscriptionRefusal(err)
+	if !ok {
 		return
 	}
-	subject, err := strconv.Unquote(match[1])
-	if err != nil {
-		return
-	}
-	queue := ""
-	if match[2] != "" {
-		if queue, err = strconv.Unquote(match[2]); err != nil {
-			return
-		}
-	}
-	revoked := match[2] == "" && match[3] != ""
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if nc != c.Conn {
@@ -502,9 +513,46 @@ func (c *Client) onAsyncError(nc *nats.Conn, err error) {
 	c.subscriptionsMu.Lock()
 	defer c.subscriptionsMu.Unlock()
 	core := &c.subscriptions[coreSubscription]
-	if core.handler != nil && core.subject == subject && (revoked || core.queue == queue) {
+	if core.handler != nil && core.subject == refusal.subject && (refusal.revoked || core.queue == refusal.queue) {
 		core.refused = true
 	}
+}
+
+// SlowConsumers is how many slow-consumer errors the client's connections have reported: one each
+// time a subscription fell past its pending limits and nats.go began dropping its messages. A
+// subscription whose pending limits are off (ConnectRoleLane) never reports one.
+func (c *Client) SlowConsumers() uint64 {
+	return c.slowConsumers.Load()
+}
+
+// subscriptionRefusalText is a server's refusal of a subscription, read by readSubscriptionRefusal.
+type subscriptionRefusalText struct {
+	subject, queue string
+	// revoked is set for a configuration reload's revocation, which names no queue group.
+	revoked bool
+}
+
+// readSubscriptionRefusal reads err as the server's refusal of a subscription
+// (subscriptionRefusal), reporting false for any other error.
+func readSubscriptionRefusal(err error) (subscriptionRefusalText, bool) {
+	if !errors.Is(err, nats.ErrPermissionViolation) {
+		return subscriptionRefusalText{}, false
+	}
+	match := subscriptionRefusal.FindStringSubmatch(err.Error())
+	if match == nil {
+		return subscriptionRefusalText{}, false
+	}
+	subject, unquoteErr := strconv.Unquote(match[1])
+	if unquoteErr != nil {
+		return subscriptionRefusalText{}, false
+	}
+	queue := ""
+	if match[2] != "" {
+		if queue, unquoteErr = strconv.Unquote(match[2]); unquoteErr != nil {
+			return subscriptionRefusalText{}, false
+		}
+	}
+	return subscriptionRefusalText{subject: subject, queue: queue, revoked: match[2] == "" && match[3] != ""}, true
 }
 
 // SubSubject is the subject the subscription this client holds on the JetStream transport actually
@@ -967,14 +1015,29 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 // the connection dropped, since either may have hidden its denial.
 var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 
-// RequestCoreTo delivers item directly to subject and waits for an empty
-// receiver receipt. Agent subjects are captured by the notification stream,
-// whose non-empty JetStream publish acknowledgement is not a receiver receipt.
-// The flush is bounded by the same window as the receipt wait, so the call
-// never outlives timeout by the client's default 10 s flush. A forward the
-// server denied returns at once; one publishConfirmed cannot confirm for
-// another reason still waits, since a receipt proves it was delivered, and
-// returns that reason instead of ErrReceiptTimeout if none arrives.
+// ErrForwardNotStored is returned by RequestCoreTo when the holder's empty receipt arrived but the
+// stream's acknowledgement that it stored the forward did not, before the deadline, or came back as
+// the stream's error: the holder saw the forward live, but the forward's one lasting copy, which the
+// holder's session consumer delivers after any break, is missing. The forward does not count as
+// delivered; the listener reports it delivery_failed.
+var ErrForwardNotStored = errors.New("bus: the stream did not acknowledge storing the forward")
+
+// RequestCoreTo delivers item directly to subject and succeeds only once two replies arrived: the
+// notification stream's acknowledgement that it stored the forward (agent subjects are captured by
+// the stream, which answers a core publish with a reply subject as it answers a JetStream publish)
+// and the holder's empty receipt, a reply with no data and no header field. The server's
+// no-responders answer carries a Status header, so it is neither. The forward carries a
+// Nats-Msg-Id of item's dedupe key and subject, so a sender that forwards one envelope again until
+// a receipt arrives leaves the stream one copy per message and recipient, however many attempts it
+// makes, and the stream acknowledges each repeat as a duplicate, which counts as stored; every
+// attempt still reaches the core subscribers on subject. Because the forward has headers, the
+// server hands its replies to this client with a header block, empty for a receipt, so the receipt
+// is told by its header holding no field rather than by its having none. No receipt by the deadline
+// is ErrReceiptTimeout; a receipt without the stream's acknowledgement is ErrForwardNotStored. The
+// flush is bounded by the same window as the receipt wait, so the call never outlives timeout by
+// the client's default 10 s flush. A forward the server denied returns at once; one
+// publishConfirmed cannot confirm for another reason still waits, since its replies prove it was
+// delivered, and returns that reason instead of ErrReceiptTimeout if no receipt arrives.
 func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) error {
 	if err := checkSubject(subject); err != nil {
 		return err
@@ -996,25 +1059,64 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 		return err
 	}
 	defer receipt.Unsubscribe()
-	err = c.publishConfirmed(conn, &nats.Msg{Subject: subject, Reply: inbox, Data: data}, deadline, conn.PublishMsg)
+	forward := &nats.Msg{Subject: subject, Reply: inbox, Data: data, Header: nats.Header{}}
+	forward.Header.Set(nats.MsgIdHdr, item.DedupeKey+":"+subject)
+	err = c.publishConfirmed(conn, forward, deadline, conn.PublishMsg)
 	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
 		return err
 	}
 	timedOut := cmp.Or(err, ErrReceiptTimeout)
+	received, stored := false, false
+	// refused is the stream's error answer to the forward, which no later reply changes.
+	var refused error
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return timedOut
+			break
 		}
 		response, err := receipt.NextMsg(remaining)
+		if errors.Is(err, nats.ErrTimeout) {
+			break
+		}
 		if err != nil {
-			if errors.Is(err, nats.ErrTimeout) {
-				return timedOut
-			}
 			return err
 		}
-		if len(response.Data) == 0 && response.Header == nil {
+		if len(response.Data) == 0 && len(response.Header) == 0 {
+			received = true
+		} else if ack, ok := readPublishAcknowledgement(response.Data); ok {
+			if ack.Error != nil {
+				refused = ack.Error
+			} else {
+				stored = true
+			}
+		}
+		if received && stored {
 			return nil
 		}
+		if received && refused != nil {
+			return fmt.Errorf("%w: %w", ErrForwardNotStored, refused)
+		}
 	}
+	if !received {
+		return timedOut
+	}
+	return ErrForwardNotStored
+}
+
+// publishAcknowledgement is a stream's answer to a publish it captured: the stream and the sequence
+// it stored the message at (a duplicate's earlier sequence), or its error.
+type publishAcknowledgement struct {
+	Stream string         `json:"stream"`
+	Seq    uint64         `json:"seq"`
+	Error  *nats.APIError `json:"error"`
+}
+
+// readPublishAcknowledgement reads data as a stream's publish acknowledgement, reporting false for
+// any other reply: one that is not JSON, or JSON naming neither a stored sequence nor an error.
+func readPublishAcknowledgement(data []byte) (publishAcknowledgement, bool) {
+	var ack publishAcknowledgement
+	if json.Unmarshal(data, &ack) != nil {
+		return publishAcknowledgement{}, false
+	}
+	return ack, ack.Error != nil || (ack.Stream != "" && ack.Seq > 0)
 }

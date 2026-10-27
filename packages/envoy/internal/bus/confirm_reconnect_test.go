@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -166,7 +168,10 @@ func TestSameErrorTreatsAValueThatCannotBeComparedAsChanged(t *testing.T) {
 
 // answeringServer serves one NATS client and stays up: it answers every flush that follows a
 // publish with the permissions violation for deny, when deny is not empty, and then the PONG, and,
-// when receipt is true, then sends an empty receipt to the publish's reply subject.
+// when receipt is true, then sends the notification stream's acknowledgement and an empty receipt
+// to the publish's reply subject, as a stored agent subject with a live holder answers a forward.
+// A publish with headers (HPUB, as RequestCoreTo's forward with its Nats-Msg-Id is) is read whole
+// by its length, since its header block spans lines.
 func answeringServer(t *testing.T, deny string, receipt bool) *nats.Conn {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -201,12 +206,26 @@ func answeringServer(t *testing.T, deny string, receipt bool) *nats.Conn {
 				if len(fields) == 4 {
 					reply = fields[2]
 				}
+			case len(fields) >= 4 && fields[0] == "HPUB":
+				total, err := strconv.Atoi(fields[len(fields)-1])
+				if err != nil {
+					return
+				}
+				if _, err := io.ReadFull(lines, make([]byte, total+len("\r\n"))); err != nil {
+					return
+				}
+				published, reply = true, ""
+				if len(fields) == 5 {
+					reply = fields[2]
+				}
 			case len(fields) == 1 && fields[0] == "PING" && published:
 				if deny != "" {
 					fmt.Fprintf(conn, "-ERR 'Permissions Violation for Publish to %q'\r\n", deny)
 				}
 				fmt.Fprint(conn, "PONG\r\n")
 				if sid, ok := sids[reply]; ok && receipt {
+					const stored = `{"stream":"ENVOY_NOTIFICATIONS","seq":1}`
+					fmt.Fprintf(conn, "MSG %s %s %d\r\n%s\r\n", reply, sid, len(stored), stored)
 					fmt.Fprintf(conn, "MSG %s %s 0\r\n\r\n", reply, sid)
 				}
 				published = false
@@ -244,7 +263,8 @@ func TestPublishConfirmedReadsTheStateBeforeThePublish(t *testing.T) {
 }
 
 // A forward publishConfirmed cannot confirm - the server reported another subject's violation
-// during it - still counts as delivered when its receipt arrives, since the receipt proves it.
+// during it - still counts as delivered when the stream's acknowledgement and its receipt arrive,
+// since they prove it.
 func TestAnUnconfirmedForwardWithAReceiptIsDelivered(t *testing.T) {
 	conn := answeringServer(t, "notifications.other", true)
 	client := &Client{Conn: conn}

@@ -73,6 +73,24 @@ func ListenerQueue(machineID string) string {
 	return "envoy-listener-" + strings.ReplaceAll(machineID, " ", "-")
 }
 
+// RoleLaneQueue is the queue group every listener subscribes the role lanes in, whatever its
+// machine, so NATS hands each role message to one listener and the holder's stream copy is
+// forwarded once. A listener whose NATS user may not subscribe in it (a hub whose grant predates
+// it) subscribes in its machine's group, ListenerQueue, instead (ConnectRoleLane).
+const RoleLaneQueue = "envoy-roles"
+
+// DeliverSubjectPrefix begins the relay subject a listener publishes a session's consumer
+// messages on, DeliverSubject. No stream subject captures it (StreamCaptures), so a relay frame
+// travels over core NATS and the stream stores nothing twice.
+const DeliverSubjectPrefix = NotificationTopicPrefix + "envoy.deliver."
+
+// DeliverSubject is the relay subject of session sessionID: the subject the listener that owns the
+// session publishes each message of its consumer (SessionConsumerName) on, and the session
+// subscribes to.
+func DeliverSubject(sessionID string) string {
+	return DeliverSubjectPrefix + sessionID
+}
+
 // ListenerLiveQueue is the queue group the listener of machine machineID subscribes its live lane in
 // (every notifications topic, over core NATS), so NATS hands each message to one of the machine's
 // listeners while a rolling deploy runs two. It must differ from ListenerQueue: NATS merges

@@ -34,7 +34,8 @@ func TestDrainLetsTheDeliveriesOfABindEndingAfterTheStopFinish(t *testing.T) {
 				t.Fatalf("connect: %v", err)
 			}
 			defer client.Close()
-			const holderSubject = "test.drain-late-bind.holder"
+			// The holder's agent subject, which the stream stores and acknowledges as a forward needs.
+			holderSubject := contracts.AgentSubject("drain-late-bind-holder")
 			holder := testnats.Connect(t, uri)
 			defer holder.Close()
 			if _, err := holder.Subscribe(holderSubject, func(msg *nats.Msg) { _ = msg.Respond(nil) }); err != nil {

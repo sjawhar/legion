@@ -96,12 +96,14 @@ func TestDrainDoesNotReconnect(t *testing.T) {
 // message to the holder with RequestCoreTo, which opens a receipt subscription per forward; a
 // connection that is already draining refuses new subscriptions, so the delivery subscriptions
 // drain first, while the connection still accepts them. One message is in the handler when the
-// drain starts and one is queued behind it; both forwards reach the holder.
+// drain starts and one is queued behind it; both forwards reach the holder, on its agent subject,
+// which the stream stores and acknowledges as a forward needs.
 func TestDrainLetsARoleForwardInItsHandlerFinish(t *testing.T) {
 	_, uri := startNATS(t)
 	holder := testnats.Connect(t, uri)
 	t.Cleanup(holder.Close)
-	if _, err := holder.Subscribe("drain.holder", func(message *natsgo.Msg) {
+	holderSubject := contracts.AgentSubject("drain-holder")
+	if _, err := holder.Subscribe(holderSubject, func(message *natsgo.Msg) {
 		time.Sleep(150 * time.Millisecond)
 		_ = message.Respond(nil)
 	}); err != nil {
@@ -120,7 +122,7 @@ func TestDrainLetsARoleForwardInItsHandlerFinish(t *testing.T) {
 	started := make(chan struct{}, 2)
 	if _, err := client.SubscribeCore("notifications.role.drain-test", func(message *natsgo.Msg) {
 		started <- struct{}{}
-		forwards <- client.RequestCoreTo("drain.holder", contracts.Envelope{
+		forwards <- client.RequestCoreTo(holderSubject, contracts.Envelope{
 			EventID:       "evt-" + string(message.Data),
 			Source:        "agent",
 			SourceEventID: "source-" + string(message.Data),
