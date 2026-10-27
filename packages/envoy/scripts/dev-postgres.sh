@@ -76,17 +76,18 @@ if [ "$running" != "true" ]; then
   )
 fi
 # The same listing runs against the old container before the dump and the new one after the
-# restore, so the two outputs compare line for line. The same count of the tables in the dispatch
-# database (the one POSTGRES_DB in run_flags names) runs on both too: after an empty dump restores
-# nothing, the new container still lists postgres and dispatch, which it creates itself, but its
-# dispatch database holds no table.
+# restore, so the two outputs compare line for line. The same count runs on both too, of the tables
+# in the dispatch database (the one POSTGRES_DB in run_flags names) and of the rows they hold,
+# printed as <tables>|<rows>: after an empty dump restores nothing, the new container still lists
+# postgres and dispatch, which it creates itself, but its dispatch database holds no table, and
+# after a dump that stopped once its schema was written, it holds every table and none of their rows.
 list_databases=(docker exec "$container" psql -U postgres -Atc 'select datname from pg_database where not datistemplate order by 1')
-count_tables=(docker exec "$container" psql -U postgres -d dispatch -Atc "select count(*) from pg_class where relkind = 'r' and relnamespace = 'public'::regnamespace")
+count_dispatch=(docker exec "$container" psql -U postgres -d dispatch -Atc "select count(*), coalesce(sum((xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint), 0) from pg_tables where schemaname = 'public'")
 steps+=(
   "Keep the output of this: the databases the old container holds, every one of which the new container must list after the restore."
   "  $(quote "${list_databases[@]}")"
-  "Keep the output of this too: the number of tables in the old container's dispatch database."
-  "  $(quote "${count_tables[@]}")"
+  "Keep the output of this too: the number of tables in the old container's dispatch database and the rows they hold."
+  "  $(quote "${count_dispatch[@]}")"
   "Then dump them and move the old container aside:"
   "  $(quote docker exec "$container" pg_dumpall -U postgres --clean --if-exists) > $(quote "$dump")"
   "  $(quote docker stop "$container")"
@@ -98,16 +99,16 @@ steps+=(
   "  $(quote docker exec -i "$container" psql -h 127.0.0.1 -U postgres -q -f -) < $(quote "$dump")"
   "This lists the new container's databases. It must list every database the old container's listing printed; if one is missing, the dump is incomplete, so stop here and keep the old container and the dump:"
   "  $(quote "${list_databases[@]}")"
-  "This counts the tables in the new container's dispatch database. It must print the same number as the old container did; if it differs (an empty dump restores none), stop here, before \`$(quote docker rm -v "$backup")\`, and keep the old container and the dump:"
-  "  $(quote "${count_tables[@]}")"
+  "This counts the tables in the new container's dispatch database and the rows they hold. It must print the same two numbers as the old container did; if either differs (a dump that failed or stopped partway), stop here and keep the old container and the dump:"
+  "  $(quote "${count_dispatch[@]}")"
   "These print 1 and 18xxxx once the new container serves the restored data:"
   "  $(quote docker exec "$container" psql -U postgres -Atc "select 1 from pg_available_extensions where name = 'vector'")"
   "  $(quote docker exec "$container" psql -U postgres -Atc 'show server_version_num')"
-  "Then remove the old container, with its anonymous data volume, and the dump:"
-  "  $(quote docker rm -v "$backup")"
+  "Once the checks match, the dump can go:"
   "  $(quote rm "$dump")"
 )
 refuse "$container runs $container_image (image $container_image_id), not the pinned $image, which is pgvector on PostgreSQL 18, the version Dispatch's tests and dev databases run." \
   "To move every database in it to a new $container on the pinned image, from any image or PostgreSQL major and with no volume needed, run these in order; the old container stays, stopped, as $backup:" \
   "${steps[@]}" \
-  "Until \`$(quote docker rm -v "$backup")\`, the old one can come back: once it is renamed, \`$(quote docker rm -f -v "$container")\` removes the new one, with its anonymous data volume, if you created it, then \`$(quote docker rename "$backup" "$container")\` and \`$(quote docker start "$container")\` put the old one back."
+  "The old one can come back: once it is renamed, \`$(quote docker rm -f -v "$container")\` removes the new one, with its anonymous data volume, if you created it, then \`$(quote docker rename "$backup" "$container")\` and \`$(quote docker start "$container")\` put the old one back." \
+  "The old container stays, stopped, as $backup; once Dispatch works on the new container, \`$(quote docker rm -v "$backup")\` deletes it and its data."

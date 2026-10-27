@@ -6,10 +6,11 @@
 # each case asserts both what the script printed and every docker command it ran. A stale
 # `dispatch-pg` (any image but the pinned one, pgvector on PostgreSQL 18) is refused naming the
 # container, both images and, in order, the commands that list its databases, count the tables in
-# its dispatch database, dump them, restore them into a new container on the pinned image, list
-# and count them again there, and remove the old container with its anonymous volume, and the
-# script itself never stops, renames, removes, starts or creates anything for it. The printed
-# listing, dump, run and restore lines are replayed through bash to prove they paste as they read.
+# its dispatch database and their rows, dump them, restore them into a new container on the pinned
+# image, list and count them again there, and remove the dump, while the old container stays,
+# stopped and renamed, its removal named only as text; the script itself never stops, renames,
+# removes, starts or creates anything for it. The printed listing, dump, run and restore lines are
+# replayed through bash to prove they paste as they read.
 # Its `quote`, which prints those commands, is held to fixtures/shell-quote.json, the table
 # packages/dispatch's shellQuote test reads too, so the two copies of the rule cannot drift apart.
 set -euo pipefail
@@ -113,14 +114,14 @@ readonly spaced_tmp="${temporary_dir}/tmp dir"
 mkdir -p "$spaced_tmp"
 readonly dump="${spaced_tmp}/${backup}.sql"
 readonly list_databases="docker exec dispatch-pg psql -U postgres -Atc 'select datname from pg_database where not datistemplate order by 1'"
-readonly count_tables="docker exec dispatch-pg psql -U postgres -d dispatch -Atc 'select count(*) from pg_class where relkind = '\''r'\'' and relnamespace = '\''public'\''::regnamespace'"
+readonly count_dispatch="docker exec dispatch-pg psql -U postgres -d dispatch -Atc 'select count(*), coalesce(sum((xpath('\''/row/c/text()'\'', query_to_xml(format('\''select count(*) as c from %I.%I'\'', schemaname, tablename), false, true, '\'''\'')))[1]::text::bigint), 0) from pg_tables where schemaname = '\''public'\'''"
 readonly wait_ready="docker exec dispatch-pg pg_isready -h 127.0.0.1 -U postgres"
 # The dump-and-restore sequence the refusal prints, every line in this order. The listing and the
-# table count run twice, against the old container before the dump and the new one after the
-# restore.
+# count of tables and rows run twice, against the old container before the dump and the new one
+# after the restore.
 readonly sequence=(
   "$list_databases"
-  "$count_tables"
+  "$count_dispatch"
   "docker exec dispatch-pg pg_dumpall -U postgres --clean --if-exists > '$dump'"
   "docker stop dispatch-pg"
   "docker rename dispatch-pg $backup"
@@ -128,10 +129,9 @@ readonly sequence=(
   "$wait_ready"
   "docker exec -i dispatch-pg psql -h 127.0.0.1 -U postgres -q -f - < '$dump'"
   "$list_databases"
-  "$count_tables"
+  "$count_dispatch"
   "docker exec dispatch-pg psql -U postgres -Atc 'select 1 from pg_available_extensions where name = '\''vector'\'''"
   "docker exec dispatch-pg psql -U postgres -Atc 'show server_version_num'"
-  "docker rm -v $backup"
   "rm '$dump'"
 )
 # The line number of the refusal's first command line "dev-postgres:   <$1>" after line $2 (0 when
@@ -162,7 +162,7 @@ for want in \
   'role "postgres" already exists' \
   "current user cannot be dropped" \
   "print 1 and 18xxxx once the new container serves the restored data" \
-  "Until \`docker rm -v $backup\`, the old one can come back" \
+  "The old one can come back: once it is renamed" \
   "\`docker rm -f -v dispatch-pg\` removes the new one" \
   "\`docker rename $backup dispatch-pg\` and \`docker start dispatch-pg\` put the old one back"; do
   if ! grep -qF -- "$want" "$err"; then
@@ -175,6 +175,15 @@ if [ "$status" -ne 1 ] || [ -s "$out" ] || ! read_only || grep -qF "no pgvector"
   fail "a running dispatch-pg on the old pin: refused (exit 1, no URL, nothing changed), the dump-and-restore sequence in order with no start and one readiness wait, no claim it lacks pgvector"
 else
   printf 'PASS: a running dispatch-pg on the old pin: refused naming both images and the dump-and-restore sequence in order, nothing changed\n'
+fi
+
+# No printed command removes the old container: it stays, stopped, as $backup, and the refusal's
+# last line names its removal only as text, for once Dispatch works on the new container.
+if grep -qE "^dev-postgres:   docker rm .*${backup}" "$err" \
+  || [ "$(tail -n1 "$err")" != "dev-postgres: The old container stays, stopped, as $backup; once Dispatch works on the new container, \`docker rm -v $backup\` deletes it and its data." ]; then
+  fail "a running dispatch-pg on the old pin: no printed command removes $backup, and the last line names \`docker rm -v $backup\` as text"
+else
+  printf 'PASS: a running dispatch-pg on the old pin: no printed command removes the old container, the last line names its removal as text\n'
 fi
 
 # The listing, dump, run and restore lines replayed as printed, in a directory of their own, with
