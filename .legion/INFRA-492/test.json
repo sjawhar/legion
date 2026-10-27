@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-492",
+  "completed": "2026-10-27T05:06:30Z",
+  "headTested": "24451453a2d60c260e3a4dbafa12832bbd0fb520 (code head 0df2c9e6a3edac1e490d7c0bbfe8f2750b0176a9)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's command myself, on my own Postgres database (dispatch_e2e_tester) and harness ports (18777/19021/19022/19023/19024), with the SPA rebuilt from the workspace at 24451453: `bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refetch-budget.e2e.ts` gave 10 passed (1.6m), with 6 project-board list reads for 20 writes. Then I ran the same file (sha256 253c18d8...7290) in my own `git archive 16e4bb0f758e` export ($TMPDIR/tester-base, bun install, build:web), chromium, -g 'budget:|sidebar:'. Both tests failed on their counts and not on setup: budget 'GETs under /api/ in the window: 1120; reads of an issue no write touched: 1020' against <= 5; sidebar 'inbox 2, pinned 2, projects 2' against 1 each."
+  },
+  "failed": 7,
+  "failures": [
+    {
+      "criterion": "Spec item 1 (an event fetches again the reads whose answer it can change): a document's open 'Referenced by' panel shows a new citation",
+      "evidence": "Red test 'document panel: a new comment citing a project document shows in its open Referenced by panel within 2 s' in packages/dispatch/e2e/refresh-freshness.e2e.ts (commit f454e5b1ef47). It fails at head on chromium and iphone: the panel still reads 'Referenced by (1) ... First cite of dispatch://CORE/artifact/runbook.' 2 s after a second comment cites the document. It passes at base 16e4bb0f758e, which refreshed every ['references'] panel. Cause found by reading: event-refresh.ts appendDocumentPanel (177-193) reaches only the anchored or owning document, changedReferenceTargets (771-827) handles only issue and ask targets, and the server leaves document targets out of references_changed (refs.go CountedChanges). Command: cd packages/dispatch && DATABASE_URL=<own db> bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refresh-freshness.e2e.ts -g 'document panel'."
+    },
+    {
+      "criterion": "Spec item 4 (an event during a fetch fetches it again once that fetch settles, so the answer composed after the event is the one shown)",
+      "evidence": "Red test 'reference: a title written while the reference's read is in flight shows after leaving the page and coming back' in refresh-freshness.e2e.ts (f454e5b1ef47). It fails at head on chromium and iphone, and on 2 of 2 repeats: back on the page, the reference still shows 'Target v2' while the server holds 'Target v3', and no further summary read is sent. Also red unit test 'a read left inside the second after a fetch an event landed in still owes that event when it is rendered again' in packages/dispatch/web/src/api/query-refresh.test.ts (commit cbcf7310c171): isInvalidated is false where true is expected (`cd packages/dispatch && bun test web/src/api/query-refresh.test.ts`). Cause found by reading: query-refresh.ts drive() (167-172) drops the debt for a query that went inactive during the wait, after the settled fetch cleared its stale flag. A summary read has staleTime Infinity, so it stays wrong until the next event for that issue."
+    },
+    {
+      "criterion": "Spec item 4 and item 2: a conditional refresh decided while a fetch is out must judge the response that lands",
+      "evidence": "Red test 'inbox: an issue closed while the Inbox read is in flight drops its ask from the Inbox' in refresh-freshness.e2e.ts (f454e5b1ef47). It fails at head on chromium and iphone: the ask of the closed issue stays in the Inbox ([data-inbox-row] count 1, expected 0). It passes at base on both projects. Also red unit test 'a test of a read's data while a fetch is out runs on the response that lands, not the data it replaces' in query-refresh.test.ts (cbcf7310c171): starts [0, 1500] where [0, 1500, 2500] is expected. Cause found by reading: query-refresh.ts refreshQueries (222-233) runs `when` on the data being replaced whenever a fetch is out and data exists, so inboxRowsOf, pinnedRow, referencePanels and the document-summary rule can skip a refresh for good."
+    },
+    {
+      "criterion": "Spec item 1: the Architecture page's component work list follows the issues it shows",
+      "evidence": "Red test 'architecture: an attached issue's new title shows in its component's open work list within 2 s' in refresh-freshness.e2e.ts (f454e5b1ef47). It fails at head on chromium and iphone: the row still reads 'CORE-1 · Web login' after the rename. It passes at base. Cause found by reading: event-refresh.ts:445-447 refreshes ['architecture', P] only on status, parent or components. The work list also shows updated_at, GitHub links and priority order."
+    },
+    {
+      "criterion": "Architect's ruling (Envoy, 04:43Z): a write that changes what one person sees without emitting an event, such as an Inbox snooze, must reach that person's other tabs through a person-scoped event, not through a broad refresh",
+      "evidence": "Red test 'inbox: a snooze from alice's other tab moves the row to Later in this tab within 2 s' in refresh-freshness.e2e.ts (f454e5b1ef47). It fails at head on chromium and iphone: no 'Later (1)' button within 2 s. It also fails at base: base caught a snooze only by accident, on the next issue event or reconnect. ask_snooze.go writes no event. Reading the code, the implementer should check the other no-event writes the same way (issue subscriber adds, route roster)."
+    },
+    {
+      "criterion": "Spec item 1: the Replies page shows each thread's issue title",
+      "evidence": "Red test 'replies: an issue's new title shows on the open Replies page within 2 s' in refresh-freshness.e2e.ts (f454e5b1ef47). It fails at head on chromium and iphone: the row still reads 'CORE-1 Release train'. It passes at base. Cause found by reading: event-refresh.ts movesReplies (304-321) is false for an issue.updated whose changed list lacks status."
+    },
+    {
+      "criterion": "Spec item 1: the open parent's Children tab shows each child's active time (the newest updated_at in its subtree)",
+      "evidence": "Red test 'children: a child's priority write moves its active time in the open parent's Children tab within 2 s' in refresh-freshness.e2e.ts (f454e5b1ef47). It fails at head on chromium and iphone: time[datetime] stays at '2026-10-27T04:53:56.763275Z' after a priority write 1.1 s later. It passes at base. Cause found by reading: event-refresh.ts:393-401 refreshes no ancestor for priority, assignee, labels, rank, route or blocked_by writes, and refreshes only the parent, not the grandparents, for a title or link change."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "Spec acceptance 1 and 2 (budget, freshness, sidebar first responses) and the three task-17 checks, verified independently at the merged head",
+      "surface": "Dispatch in Chromium and iPhone (Playwright), production SPA bundle built from the workspace, against the branch's Go server, fake Envoy and a loopback Postgres 17 + pgvector",
+      "command": "cd packages/dispatch && bun run build:web && DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022 FAKE_BROKER_PORT=19024 PLAIN_HTTP_PORT=19023 DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e_tester?sslmode=disable bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refetch-budget.e2e.ts",
+      "observed": "10 passed (1.6m); REFETCH-BOARD [iphone] project list reads: 6",
+      "headSha": "24451453a2d60c260e3a4dbafa12832bbd0fb520",
+      "negativeControl": "The same file in a git archive of base 16e4bb0f758e, chromium: budget fails 'Received: 1120' against '<= 5' (1020 untouched-issue reads), and sidebar fails with inbox 2, pinned 2, projects 2 against 1 each."
+    },
+    {
+      "criterion": "Server: summary routes' auth and errors, issue event fields, replay header",
+      "surface": "The branch's Go Dispatch server over HTTP (Playwright harness), with a signed-in user cookie and the agent bearer token",
+      "command": "Throwaway probe spec (deleted): fetch of /api/v1/issues/{key}/summary and /api/v1/projects/CORE/artifacts/{slug}/summary as anonymous, agent and user; getIssueEvents after a title+priority write, a child status move, a close and a reopen; GET /api/v1/events with no since, since=0, since=999999, Last-Event-ID: 3 and since=-1",
+      "observed": "Summaries: 200 for agent and user, with {key, project, title, status, documents[{id, slug, name, kind, latest_version}]}; 404 NOT_FOUND for CORE-999, for a lower-case key and for an external ref; project document 404 ARTIFACT_NOT_FOUND for a missing slug and for another project. Events: retitle changed [title, priority]; child status changed [status] with ancestors [CORE-2]; close and reopen changed [status, closed_at] with thread_logins [alice, bob]; a pin made user_state.updated with changed [pinned] and issue_key null. Stream: 'X-Dispatch-Event-Replay: complete' for since=0, for Last-Event-ID 3, and for the agent's since=0; no header for a cold connect or for since above the head.",
+      "headSha": "24451453a2d60c260e3a4dbafa12832bbd0fb520",
+      "negativeControl": "Anonymous summary and document-summary reads: 401 NO_IDENTITY. since=-1: 400 with no stream."
+    }
+  ],
+  "ciAtHead": "Read at 05:05Z on 0df2c9e6a3ed (the code head; 24451453 is handoff-only): build, changes, lint, test and typecheck queued or pending, none settled. Not waited on.",
+  "notes": [
+    "The PR merged main twice (6436d90f, 0df2c9e6). Its first CI run at 6436d90f was cancelled by the second push, so no CI result exists yet for any code head of this branch.",
+    "The architect will add 'honour Retry-After on 503 retries' (packages/dispatch/web/src/main.tsx retry/retryDelay; dispatch://INFRA-592) to the implementing round this failure starts.",
+    "My first try at the reference test navigated away by clicking the reference itself, and it passed at head. I infer, without having checked, that the target issue's own page renders something that reads that summary and so keeps it active. The committed test leaves through the sidebar's Inbox link instead, and fails at head."
+  ]
+}
