@@ -2,14 +2,23 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T01:01:30Z",
-  "testedHead": "647724175d3c155dce009933b29b527a1f8e75c0 (round 2). Runtime code is a6ecbc12's: a6ecbc12..2e326959 changes only .legion/ and three _test.go files (case renames to a made-up grep command), so the real-surface runs of round 1 at a6ecbc12 hold.",
+  "completed": "2026-10-27T02:52:36Z",
+  "testedHead": "3b340b735fa14c647798781a7f6dfd655e167f04 (round 3; code head 20dedb367e08, runtime change 969762065d66: refuseCodePipeInTableCell compares TableCodePipes before and after, by code text, counted)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's browser test ('a pipe after two backslashes ends a table cell in Go as in the editor') at the head: passes in chromium and iphone ($TMPDIR/infra172-test/e2e-head.txt). Drove the same surfaces independently: the real dispatch CLI and the live editor against the harness server, a 20,000-document Go-against-engine differential at the base and the head, and differential.sh over the implementer's 2,050-document corpus plus the 20,000 generated documents, whose stored-document result equals the implementer's (1 fixed, 4 lost fixed points of the since-rewritten documents, 0 on every gate). The base failure the implementer quoted is confirmed independently by the base run of the generated differential (4,177 disagreements on a \\\\|). Round 2: the implementer's re-run at 2e326959 changes no runtime file; its A2 and A4 proof entries were checked on Dispatch (below)."
+    "how": "Round 3: drove the implementer's round-3 proof and every contract-change-census entry independently through the real dispatch CLI and the browser against the harness server built from the workspace at 3b340b73 (throwaway spec $TMPDIR/infra172-test/harness/zz-tester-pipes.e2e.ts, test 'tester r3'; output $TMPDIR/infra172-test/r3/e2e-r3.txt); re-ran the 20,000-document generated differential at the head (stored markdown byte-identical to a6ecbc12). Round 1 and 2 verification of the reading itself stands."
   },
-  "failed": 0,
-  "failures": [],
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "CI at the head (read on GitHub): the pull request must be mergeable for its required checks to run; round 3's code (969762065d66, 20dedb36) has no CI run at all",
+      "evidence": "gh api repos/sjawhar/legion/pulls/2272 at 02:50Z: mergeable false, mergeable_state 'dirty' (gh pr view: CONFLICTING). gh api actions/runs?head_sha=3b340b73 and ?head_sha=20dedb36: no workflow runs. git merge-tree --write-tree main@origin 3b340b73 (read-only): CONFLICT (content) packages/envoy/CHANGELOG.md; CONFLICT (modify/delete) skills/dispatch/references/document-edits.md and skills/dispatch/references/documents.md, deleted on main by ea460e50f 'feat(skills): three Dispatch skills under 2,000 words' and modified by this PR's 20dedb36. So the census's 'migrated' skill entry has to land in main's new Dispatch skill layout, and the code needs its required checks (lint, typecheck, test) read green after the base is brought in. A real conflict: the sanctioned case for reintegrating the base."
+    },
+    {
+      "criterion": "Required check pr-title (rulesets on main require lint, typecheck, test, pr-title)",
+      "evidence": "Workflow 'PR Title' completed failure at e4fea036 (00:40Z), 64772417 (01:01Z) and 9f12932b (01:27Z, run log at 02:04Z): '::error::PR title must be a conventional commit subject (type(scope): summary)'. The title is 'Go reads an escaped pipe in a table row as the browser editor does', which does not match '^[a-z]+(\\([^)]+\\))?!?: .+'. Retitle to a conventional subject, e.g. 'fix(pmdoc): a table cell ends at a pipe after two backslashes, as the browser editor reads it' (no private names)."
+    }
+  ],
   "verifiedCriteria": [
     {
       "criterion": "A1",
@@ -48,9 +57,8 @@
     }
   ],
   "observations": [
-    "Round 1's production-text observation is resolved: commit 2e326959 replaces the git command from a stored document with a made-up grep command in edits_test.go, render_readback_test.go and render_table_test.go.",
-    "aa.md:791 still backs the browser's backslash rule with Go's comment rather than browser code (weak citation, not wrong).",
-    "CI at 64772417, read 01:00Z: required lint, typecheck, test and pr-title pending; the runs at 2e326959 were cancelled by the newer push."
+    "Adjacent code merges into one span: beside browser-left `a\\|b` followed by text 'three', replacing 'three' with `ls | wc -l` is refused, and the refusal quotes the merged span 'a\\|bls | wc -l' rather than what the caller wrote. Conservative (storing it would take a | out of the merged code); the caller sees a span text it did not write. The reviewer judges whether the message needs a word on merged spans.",
+    "aa.md:791 still backs the browser's backslash rule with Go's comment rather than browser code (weak citation, not wrong)."
   ],
   "proof": [
     {
@@ -84,6 +92,14 @@
       "observed": "62/62 links resolve; 20 rows, the three new ones linking INFRA-534, INFRA-535, INFRA-536, children of INFRA-138; INFRA-531's spec names the '<http://e.test/a\\\\b' case; census v2: fx3 mid=3, fx4 mid=3 (nested containers), fenced block and paragraph in a blockquote not counted.",
       "headSha": "647724175d3c155dce009933b29b527a1f8e75c0",
       "negativeControl": "dispatch read --issue INFRA-99999 exits 1 'not found'; census v2 over fx.md (one mid-row \\\\|, one closing \\\\|, one \\| and one \\\\| in a code fence) reports exactly mid=1 closing=1."
+    },
+    {
+      "criterion": "Review round 1 finding 1 and the contract change census: an API write that adds code with a | after an odd backslash run to a table cell is refused, also beside such code a browser edit left; a suggestion accepted in the browser is refused the same way; bare rows and headers follow the browser's cell rule",
+      "surface": "the real dispatch command and Dispatch's SPA (conversation view, Accept suggestion) against the harness server on a rootless Postgres in the issue pod",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra172_tester?sslmode=disable bunx playwright test --config e2e/playwright.config.ts zz-tester-pipes -g \"tester r3\" --project chromium (after bun run e2e built the SPA and server at 3b340b73; throwaway spec in $TMPDIR/infra172-test/harness)",
+      "observed": "beside-browser-edit replace exits 1 naming row 2, column 1; duplicate and in-span delete refused; plain text, `ls | wc -l` and the rewrite to `a|b` stored; browser accept of `git log \\| wc -l` HTTP 400 INVALID_OP, page shows the refusal, document unchanged, suggestion open; wide bare row TABLE_WIDTH 'got 3 cells, table has 2', fitting row stored as 'new \\' | 'b'; widened header stored as no table in Go and the engine.",
+      "headSha": "3b340b735fa14c647798781a7f6dfd655e167f04",
+      "negativeControl": "`ls | wc -l` added to the other cell of the same table is accepted and stored as `ls \\| wc -l` while `c\\|d` there is refused; a fitting bare row '| new \\\\| b |' is stored while '| new | a \\\\| b |' is refused."
     }
   ],
   "round1Failures": [
@@ -95,5 +111,13 @@
       "criterion": "A4 (the escaped-pipe rule and the count): the census matcher, the method the count and the production check's re-run rest on, does not implement its stated rule for a table inside a blockquote.",
       "resolution": "Fixed: escaped-pipe-census.ts v2 on Dispatch (byte-equal to the implementer's copy) reports mid=3 on fx3.md (blockquoted, list-item and plain rows; v1 reported mid=2), all three rows of fx4.md (list in blockquote, blockquote in blockquote, blockquote in list) and skips a fenced block and a paragraph inside a blockquote; fx.md still gives exactly mid=1 closing=1. refactor-order.md v5 states the container rule (line 245) and the --projects and --latest-only flags (line 246). The six projects' every-version count (13,898 versions, 55 with a hit, all LINUX) is in refactor-order.md line 238 and the PR's Production line."
     }
+  ],
+  "round3Verified": [
+    "Review finding 1 fixed on the real surface: with browser-left code `a\\|b` in a cell (stored `` `a\\`\\|`b` ``), dispatch doc-edit replacing another cell's text with `c\\|d` exits 1 naming 'row 2, column 1 (under the header \"Note\")'; plain text beside it and `ls | wc -l` in the other cell are stored; a second `a\\|b` added to another cell is refused (counted); a delete inside the browser-left code leaving `a\\|` is refused; rewriting the browser-left code to `a|b` is stored.",
+    "Census 1 (accepted suggestion): dispatch suggest with replace-with `git log \\| wc -l`, accepted by the person in the browser's conversation view: HTTP 400 INVALID_OP on replace_with, the refusal shown on the page, document unchanged, suggestion still open.",
+    "Census 2 (widened refusal): bare row insert '| new | a \\\\| b |' -> 'table row exceeds table width: got 3 cells, table has 2'; '| new \\\\| b |' stored as cells 'new \\' and 'b'; round 1's upload refusal of '| a \\\\| b | c |' stands.",
+    "Census 3 (changed reading): upload '| a \\\\| b |\\n| --- |\\n| c |' is stored as a paragraph; doc-read and the engine show no table, as the engine reads the input.",
+    "Skill text: a replace with bare `ls | wc -l` into a cell is stored as `ls \\| wc -l` (documents the 'write a | bare' rule correctly).",
+    "Runtime reading unchanged: the 20,000 generated table documents render byte-identically to a6ecbc12; 0 pipe disagreements against the engine. Image alt text with 1-4 backslashes before a | in a cell reads back unchanged in Go with the cell count the engine reads (the removed altReadsBack guard)."
   ]
 }
