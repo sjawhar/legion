@@ -22,6 +22,7 @@ var (
 	emSignTLSSite  = tlsSite{name: "emSign", url: "https://dv-g3b-emudhra.we-have-a-problem.com/", root: "/usr/share/legion/tls-roots/emsign-ecc-root-ca-g3.pem"}
 	aaaTLSSite     = tlsSite{name: "AAA", url: "https://dv-g3b-aaa-emudhra.we-have-a-problem.com/", root: "/usr/share/legion/tls-roots/aaa-certificate-services.pem"}
 	controlTLSSite = tlsSite{name: "control", url: "https://example.com/", control: true}
+	isolationTLSSite = tlsSite{name: "isolation", url: "https://letsencrypt.org/"}
 	tlsSites       = []tlsSite{emSignTLSSite, aaaTLSSite, controlTLSSite}
 )
 
@@ -52,7 +53,8 @@ type tlsObservation struct {
 // The root paths and fingerprints below are CA-published records from
 // repository.emsign.com/certs/emSignECCRootCAG3.crt (86:A1:EC:BA:08:9C:4A:8D:3B:BE:27:34:C6:12:BA:34:1D:81:3E:04:3C:F9:E8:A8:62:CD:5C:57:A3:6B:BE:6B)
 // and crt.sectigo.com/AAACertificateServices.crt
-// (D7:A7:A0:FB:5D:7E:27:31:D7:71:E9:48:4E:BC:DE:F7:1D:5F:0C:3E:0A:29:48:78:2B:C8:3E:E0:EA:69:9E:F4).
+// (D7:A7:A0:FB:5D:7E:27:31:D7:71:E9:48:4E:BC:DE:F7:1D:5F:0C:3E:0A:29:48:78:2B:C8:3E:E0:EA:69:9E:F4). example.com cannot prove
+// isolation because its observed SSL.com chain is cross-signed by AAA Certificate Services.
 func compromisedTLSSites() []tlsSite {
 	var sites []tlsSite
 	for _, site := range tlsSites {
@@ -69,7 +71,7 @@ func verifyTLSPositiveControls(sites []tlsSite, probe func(tlsSite) tlsOutcome) 
 		if outcome := probe(site); outcome.status != tlsConnectionAccepted {
 			failures = append(failures, fmt.Sprintf("%s positive control at %s did not accept its pinned root: %s", site.name, site.url, outcome.detail))
 		}
-		negative := controlTLSSite
+		negative := isolationTLSSite
 		negative.root = site.root
 		if outcome := probe(negative); outcome.status == tlsConnectionAccepted {
 			failures = append(failures, fmt.Sprintf("%s positive control is not isolated: its pinned root accepted %s", site.name, negative.url))
