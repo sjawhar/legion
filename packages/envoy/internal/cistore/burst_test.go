@@ -377,7 +377,7 @@ func requireGenerationFencesSnapshots(t *testing.T, kv *writeKV, key string) {
 	}
 }
 
-// settle makes the head's record quiet and runs one summary tick, returning what it published.
+// settle makes the head's record quiet and runs one summary pass, returning what it published.
 func settle(t *testing.T, s *Store, h head, pub *recPub) []Summary {
 	t.Helper()
 	before := pub.count()

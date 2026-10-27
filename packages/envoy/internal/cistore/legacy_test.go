@@ -146,7 +146,7 @@ var legacyHead = head{"example-org", "example-repo", "42", "1e9ac100000000000000
 
 // The backlog a head-gated listener leaves - commits it never settled because they were not their
 // pull request's head, some days old - is not published when this listener takes over, including a
-// record whose claim the old listener left behind, which the tick must not reclaim into a
+// record whose claim the old listener left behind, which a pass must not reclaim into a
 // settlement either.
 func TestAHeadGatedListenersUnsettledRecordPastTheGraceIsNotSettled(t *testing.T) {
 	conn, cleanup := connectNATS(t)
@@ -300,8 +300,8 @@ func TestASettledRecordIsNotPublishedAgain(t *testing.T) {
 	}
 }
 
-// The summary loop reports the backlog it holds back: its gauge carries each tick's count of held
-// records, settled ones excluded, and the first tick that holds any logs that count once.
+// The summary loop reports the backlog it holds back: its gauge carries each pass's count of held
+// records, settled ones excluded, and the first pass that holds any logs that count once.
 func TestTheHeldBacklogIsCountedAndLoggedOnce(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()

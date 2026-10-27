@@ -391,7 +391,8 @@ var githubWebhookEnv = []string{"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_S
 
 // seedDueCIRecord creates the CI bucket as the listener creates it and stores one commit whose
 // checks finished a minute ago and have not settled, so any summary loop reading the bucket settles
-// it on its next tick. It returns the bucket and the record's key.
+// it at its first pass after the record reaches its cache, on the next tick of the loop's grid. It
+// returns the bucket and the record's key.
 func seedDueCIRecord(t *testing.T, client *bus.Client) (natsgo.KeyValue, string) {
 	t.Helper()
 	kv, err := client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.CIStateBucket, Replicas: 1, Storage: natsgo.FileStorage, TTL: 7 * 24 * time.Hour})

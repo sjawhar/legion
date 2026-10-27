@@ -117,10 +117,10 @@ func (p *refusingPub) count() int {
 	return p.attempts
 }
 
-// NATS refuses a settlement the same way on every tick, so a refused one is terminal: the record is
-// marked overflowed and the commit is not published again, where a publish that merely failed is
-// retried on the next tick. A server whose max payload is set below the store's bound refuses one
-// the store accepted.
+// NATS refuses a settlement the same way at every attempt, so a refused one is terminal: the record
+// is marked overflowed and the commit is not published again, where a publish that merely failed is
+// retried at the next pass, on the next tick of the loop's grid. A server whose max payload is set
+// below the store's bound refuses one the store accepted.
 func TestASettlementNATSRefusesIsNotPublishedAgain(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
