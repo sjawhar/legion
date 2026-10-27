@@ -62,13 +62,16 @@
 # with any subcommand but those on NPM_ALLOWED (view, and publish of a `.tgz` named right after
 # it), is `docker` with one of DOCKER_DEPENDENCY (build, run, compose, exec) or a long form on
 # DOCKER_DEPENDENCY_LONG (`docker container run`, `docker image build`, `docker buildx build`, …),
-# past docker's global options (`--config /tmp/c`, `-H tcp://x`, `-D`), or is a path with a
+# past docker's global options (`--config /tmp/c`, `-H tcp://x`, `-D`), is a path with a
 # `scripts/` or `out/` component (`./scripts/x`, `../../scripts/x`, `out/x`,
-# `"$GITHUB_WORKSPACE/out/x"`), other than .github/scripts/release-push.sh itself. Command position
-# is found by one quote-aware scan of the `run:` (its `${{ … }}` expressions elided first), as bash
-# reads it: a `#` starts a comment only at word start — the start of the run, after unquoted
-# whitespace or a newline, or after an unquoted `;`, `&`, `|`, `(`, `)`, `<`, `>` or backtick, not
-# `{` (`${#x}`, `$#` and `a#b` are words) — and the comment runs to the real newline, so a
+# `"$GITHUB_WORKSPACE/out/x"`), other than .github/scripts/release-push.sh itself, or is
+# `release-push.sh fold-notes`, at any path or none (`.github/scripts/release-push.sh
+# fold-notes`), which runs changie: release-push.sh's other commands are not dependency code, and
+# fold-notes is. Command position is found by one quote-aware scan of the `run:` (its `${{ … }}`
+# expressions elided first), as bash reads it: a `#` starts a comment only at word start — the
+# start of the run, after unquoted whitespace or a newline, or after an unquoted `;`, `&`, `|`,
+# `(`, `)`, `<`, `>` or backtick, not `{` (`${#x}`, `$#` and `a#b` are words) — and the comment
+# runs to the real newline, so a
 # backslash inside it continues nothing; escaped whitespace and an escaped `#` are word characters
 # (`echo a\ #` has no comment); a backslash-newline joins lines outside single quotes, whatever the
 # number of backslashes before it (an escaped backslash is a character: `printf 'x' \\` ends its
@@ -405,6 +408,8 @@ def dependency_command(words: list[str]) -> str | None:
             return f"'docker {rest[0]} {rest[1]}'"
         return None
     path = PATH_PREFIX.sub("", command)
+    if path.rsplit("/", 1)[-1] == "release-push.sh" and words[1:2] == ["fold-notes"]:
+        return f"'{command} fold-notes' (it runs changie)"
     if DEPENDENCY_PATH.search(path) and path != RELEASE_PUSH:
         return f"'{command}'"
     return None

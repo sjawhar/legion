@@ -366,17 +366,13 @@ jobs:
     permissions:
       contents: read
     outputs:
-      base: ${{ steps.base.outputs.base }}
       fold: ${{ steps.plan.outputs.fold }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Record the base
-        id: base
-        run: echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Plan the fold
         id: plan
         run: |
@@ -403,7 +399,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.fold_build.outputs.base }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -412,7 +408,7 @@ jobs:
           path: ${{ runner.temp }}/changelog-notes
       - name: Fold and push
         env:
-          BASE: ${{ needs.fold_build.outputs.base }}
+          BASE: ${{ github.sha }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/release-push.sh push-fold "$BASE" "$RUNNER_TEMP/changelog-notes" $CHANGELOG_PACKAGES
@@ -1200,6 +1196,35 @@ check "and, the job now running dependency code, that it holds actions: write as
 echo "case: changie in the fold's build job"
 root=$(fixture fold-build-changie)
 mutate "$root/$FOLD" $'      - name: Render the fragments with changie\n' $'      - name: Check changie\n        run: changie --version\n      - name: Render the fragments with changie\n'
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+
+echo "case: release-push.sh fold-notes in the fold's publish job"
+root=$(fixture fold-publish-fold-notes)
+mutate "$root/$FOLD" $'      - name: Fold and push\n' $'      - name: Render notes\n        run: .github/scripts/release-push.sh fold-notes "$RUNNER_TEMP/n" $CHANGELOG_PACKAGES\n      - name: Fold and push\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the job, the step and release-push.sh fold-notes at the step's line" \
+  "$(contains "$out" "^::error::$FOLD:$(line_of "$root/$FOLD" '^      - name: Render notes$'): job 'fold_publish' holds a credential, but step 'Render notes' runs '.github/scripts/release-push.sh fold-notes' (it runs changie); dependency code runs only in a job that holds none$")"
+
+echo "case: release-push.sh fold-notes with no path, behind bash, in the fold's publish job"
+root=$(fixture fold-publish-bare-fold-notes)
+mutate "$root/$FOLD" $'      - name: Fold and push\n' $'      - name: Render notes\n        run: bash release-push.sh fold-notes "$RUNNER_TEMP/n"\n      - name: Fold and push\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names release-push.sh fold-notes" "$(contains "$out" "job 'fold_publish' holds a credential, but step 'Render notes' runs 'release-push.sh fold-notes' (it runs changie);")"
+
+echo "case: release-push.sh fold-notes in the fold's build job, with no changie install step"
+root=$(fixture fold-build-fold-notes)
+mutate "$root/$FOLD" $'      - uses: ./.github/actions/install-changie\n' ''
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "fold-notes alone makes the fold's build job a build job: still 4 of them" \
+  "$(contains "$out" 'check-release-credentials: 5 credentialed job(s) and 4 build job(s) across ')"
+
+echo "case: release-push.sh push-fold through ./ in the fold's publish job"
+root=$(fixture fold-publish-push-fold)
+mutate "$root/$FOLD" '        run: .github/scripts/release-push.sh push-fold ' '        run: ./.github/scripts/release-push.sh push-fold '
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 

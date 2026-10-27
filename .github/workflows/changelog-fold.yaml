@@ -21,10 +21,12 @@ name: Fold Changelog Fragments
 # fragments with changie, which is dependency code, and so holds no write scope and no secret and
 # ends in the tripwire. fold_publish holds the deploy key and runs no dependency code: only
 # release-push.sh push-fold, which writes the build's notes into the CHANGELOG.md files and lands
-# the commit with git, jq and gh. check-release-credentials.sh pins this shape. A pull request
-# that changes the fold runs fold_build on its own merge commit, so changie, the plan and the
-# notes run on GitHub before the merge; fold_publish runs on main alone, so nothing lands from a
-# pull request.
+# the commit with git and gh and the base text tools (coreutils, find, awk, sed and grep). Both
+# jobs check out github.sha, which the event fixes, so fold_build never chooses the commit whose
+# code fold_publish runs.
+# check-release-credentials.sh pins this shape. A pull request that changes the fold runs
+# fold_build on its own merge commit, so changie, the plan and the notes run on GitHub before the
+# merge; fold_publish runs on main alone, so nothing lands from a pull request.
 on:
   workflow_run:
     workflows: ["Release Packages", "Release Envoy Listener"]
@@ -73,22 +75,17 @@ jobs:
     permissions:
       contents: read
     outputs:
-      base: ${{ steps.base.outputs.base }}
       fold: ${{ steps.plan.outputs.fold }}
     steps:
-      # main's tip with every tag, which the plan's labels are read from; on a pull request, the
-      # event's own merge commit (github.sha) with every tag instead, which nothing lands from.
+      # github.sha with every tag, which the plan's labels are read from: main's tip when the event
+      # fired for a run on main (workflow_run, schedule, workflow_dispatch), and on a pull request
+      # the event's own merge commit, which nothing lands from. fold_publish checks out the same
+      # commit, the base it lands the fold over only while main is still there.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.sha || 'main' }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-
-      # The commit this run folds; fold_publish checks it out and lands the fold over it only while
-      # main is still there.
-      - name: Record the base
-        id: base
-        run: echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       # First, before changie is installed: the plan reads only git.
       - name: Plan the fold
@@ -123,12 +120,14 @@ jobs:
         run: .github/scripts/release-push.sh no-credential
 
   # Writes fold_build's notes into the CHANGELOG.md files and lands the fold on main. It runs no
-  # changie, no bun and no go, only release-push.sh push-fold (git, jq and gh) and the pinned
-  # actions below, so the deploy key never meets the code fold_build runs. push-fold computes the
-  # plan again from git and takes from the notes only their text. Only main lands a fold: a
-  # workflow_dispatch from another branch builds and stops there, and so does a pull request,
-  # whose github.ref is refs/pull/<number>/merge. fold_build has no if: of its own, so this
-  # condition needs no always().
+  # changie, no bun and no go, only release-push.sh push-fold (git and gh, with coreutils, find,
+  # awk, sed and grep) and the pinned actions below, all from github.sha, which the event fixed and
+  # fold_build cannot change: so the deploy key never meets changie or any commit fold_build could
+  # name. From fold_build it takes only `fold` (a forged true only runs push-fold, which computes
+  # the plan again from git) and the notes, of which push-fold takes only their text. Only main
+  # lands a fold: a workflow_dispatch from another branch builds and stops there, and so does a
+  # pull request, whose github.ref is refs/pull/<number>/merge. fold_build has no if: of its own,
+  # so this condition needs no always().
   fold_publish:
     needs: fold_build
     if: github.ref == 'refs/heads/main' && needs.fold_build.outputs.fold == 'true'
@@ -142,11 +141,12 @@ jobs:
     # No cache is restored in a job that holds a credential.
     cache-mode: none
     steps:
-      # The base fold_build built, with every tag. No credential is left in the checkout: the
-      # deploy key reaches the "Fold and push" step alone.
+      # github.sha, the commit fold_build checked out and built, with every tag; never a commit
+      # fold_build names. No credential is left in the checkout: the deploy key reaches the "Fold
+      # and push" step alone.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.fold_build.outputs.base }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -161,7 +161,7 @@ jobs:
       # still at the base; when main moved, it starts a new run on main with GH_TOKEN and exits 0.
       - name: Fold and push
         env:
-          BASE: ${{ needs.fold_build.outputs.base }}
+          BASE: ${{ github.sha }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: |

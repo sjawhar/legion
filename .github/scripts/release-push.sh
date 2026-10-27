@@ -181,16 +181,21 @@
 #            package in the order of the specs, then by label as versions
 #            (`sort -V`), then by path; nothing printed means nothing to fold.
 #            Each <spec> is <package-dir>[=<tag-prefix>], and the package must
-#            hold a CHANGELOG.md at HEAD. The fragments are the files
-#            <package-dir>/.changes/unreleased/*.yaml HEAD holds (git's tree,
-#            never the working tree; other names are not fragments). With a tag
-#            prefix (a package with releases of its own), a fragment's label is
-#            X.Y.Z of the lowest <tag-prefix>X.Y.Z tag that contains the commit
-#            which added it: the release that first shipped the entry, whether
-#            the tag sits on the bump commit `tag` makes over the built commit
-#            (the npm plugins) or on the built commit itself (the listener);
-#            other names under the prefix are not releases and are skipped. A
-#            fragment no such tag contains waits for a later run, unprinted.
+#            hold a CHANGELOG.md at HEAD. The fragments are the entries directly
+#            in <package-dir>/.changes/unreleased/ that HEAD holds (git's tree,
+#            never the working tree). Each must be a regular file (mode 100644
+#            or 100755) whose name ends in .yaml: any other entry there, such as
+#            a subdirectory, a symlink, a submodule or a .yml file, would never
+#            be folded, so fold-plan fails with one ::error:: that names every
+#            such entry of every spec, sorted, and prints no plan. With a tag
+#            prefix (a package with releases of its own), a fragment's label
+#            is X.Y.Z of the lowest <tag-prefix>X.Y.Z tag that contains the
+#            commit which added it: the release that first shipped the entry,
+#            whether the tag sits on the bump commit `tag` makes over the built
+#            commit (the npm plugins) or on the built commit itself (the
+#            listener); other names under the prefix are not releases and are
+#            skipped. A fragment no such tag contains waits for a later run,
+#            unprinted.
 #            The date is the tag's commit's committer date. Without a prefix (a
 #            package with no release of its own), every fragment is folded under
 #            main@<HEAD's first 12 hex digits>, dated by HEAD's committer date.
@@ -212,13 +217,14 @@
 #            an ::error:: naming the package, the label, each fragment changie
 #            refuses on its own and changie's output.
 # push-fold: the publish job's half: write the build job's notes into the
-#            CHANGELOG.md files and land the result on main, with git, jq and
-#            gh only. HEAD must be <base-sha>, the commit the build job built,
-#            with a clean working tree and index; $DEPLOY_KEY and
-#            $GITHUB_REPOSITORY must be set before anything is written. The
-#            plan is computed again from git, never taken from the build job;
-#            an empty one prints "Nothing to fold" and exits 0. A group
-#            labelled X.Y.Z whose notes file does not exist at all is deferred:
+#            CHANGELOG.md files and land the result on main, with git and gh
+#            and the base text tools only (coreutils, find, awk, sed and grep).
+#            HEAD must be <base-sha>, the commit the build job built, with a
+#            clean working tree and index; $DEPLOY_KEY and $GITHUB_REPOSITORY
+#            must be set before anything is written. The plan is computed again
+#            from git, never taken from the build job; an empty one prints
+#            "Nothing to fold" and exits 0. A group labelled X.Y.Z whose notes
+#            file does not exist at all is deferred:
 #            its release tag was pushed after the build job computed its plan,
 #            so the build rendered no notes for it. Its fragments stay on main,
 #            a ::notice titled "Fold deferred" names its package and label, and
@@ -255,19 +261,23 @@
 #            chore subject bumps no release. The commit lands by land_on_main
 #            (below), which never rebases: a fold is of main's tip, so when main
 #            moved since the build, a new run folds the new tip, fragments and
-#            all, and is the retry.
+#            all, and is the retry. push-fold ends with land_on_main, so it
+#            exits 0 whenever land_on_main returns.
 #
 #            land_on_main <base-sha> <workflow-file>, shared with the other
-#            commands that land one commit built from a base, pushes HEAD to
-#            main through the deploy key (deploy_key_env) when HEAD is exactly
-#            one commit whose one parent is <base-sha> and main's fetched tip is
-#            still <base-sha>, writing pushed=true to $GITHUB_OUTPUT when that
-#            is set. When main moved, before the push or by a push it rejected,
-#            it pushes nothing and starts a run of <workflow-file> on main with
-#            gh ($GH_TOKEN), which builds main's tip: a ::notice:: names both
-#            commits and the command exits 0. A rejected push while main stays
-#            at the base, a failed fetch or a failed `gh workflow run` fails
-#            with an ::error::.
+#            commands that land one commit built from a base, never forces and
+#            never rebases. It refuses a <base-sha> that is not 40 lower-case
+#            hex and a HEAD that is not exactly one commit whose one parent is
+#            <base-sha>, then fetches main with the deploy key (deploy_key_env,
+#            as push-tag does). When main's tip is <base-sha> it pushes HEAD
+#            there and appends pushed=true to $GITHUB_OUTPUT when that is set.
+#            When main's tip is another commit, before the push or after a
+#            rejected push, it pushes nothing: it starts a fresh run of
+#            <workflow-file> on main (`gh workflow run`, with $GH_TOKEN), which
+#            builds main's tip, and a ::notice names both commits. In both
+#            cases it returns 0. A failed fetch, a push rejected while main's
+#            tip is still <base-sha>, or a failed `gh workflow run` is an
+#            ::error:: and exit 1.
 set -euo pipefail
 
 command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-notes <notes-dir> <spec>... | release-push.sh push-fold <base-sha> <notes-dir> <spec>... | release-push.sh no-credential}
@@ -281,6 +291,10 @@ bot_email='41898282+github-actions[bot]@users.noreply.github.com'
 # without leading zeros (release-bump.sh does arithmetic on the fields, where a
 # leading zero reads as octal).
 is_plain_version() { [[ $1 =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; }
+
+# is_commit_sha <value>: true when <value> is a full commit sha, 40 lower-case
+# hex.
+is_commit_sha() { [[ $1 =~ ^[0-9a-f]{40}$ ]]; }
 
 # quote_all <value>...: the values, each %q-quoted, separated by spaces.
 quote_all() {
@@ -395,12 +409,9 @@ check_hand_over() {
     fi
   done
   # Everything under <dir>, at any depth, sorted so a refusal names it the same
-  # way every time. The list is removed here, and by the trap on a failure, as
-  # a later command may set a trap of its own.
-  listing=$(mktemp)
-  trap 'rm -f "$listing"' EXIT
-  find "$dir" -mindepth 1 -print0 > "$listing"
-  sort -z -o "$listing" "$listing"
+  # way every time. Read through a process substitution, not a temporary file,
+  # so nothing is left to remove and no EXIT trap is needed; wait gives the
+  # status of find and sort (pipefail holds in the substitution too).
   while IFS= read -r -d '' entry; do
     entry=${entry#"$dir"/}
     listed=false
@@ -408,8 +419,8 @@ check_hand_over() {
       [ "$file" != "$entry" ] || listed=true
     done
     "$listed" || unlisted+=("$entry")
-  done < "$listing"
-  rm -f "$listing"
+  done < <(find "$dir" -mindepth 1 -print0 | sort -z)
+  wait "$!" || fail_error "listing $(quote_all "$dir") failed"
 
   if [ ${#missing[@]} -gt 0 ]; then
     echo "::error::release-push.sh $command: $(quote_all "$dir") lacks $(quote_all "${missing[@]}")" >&2
@@ -439,6 +450,7 @@ fold_plan() {
   [ $# -gt 0 ] || fail_error "no package spec given; each is <package-dir>[=<tag-prefix>]"
   local spec dir prefix index=0 names=' ' head head_label head_date entry meta path commit candidate tag version label date lines=''
   local package_dir_re='^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$'
+  local unexpected=()
   head=$(git rev-parse HEAD)
   head_label="main@${head:0:12}"
   head_date=$(commit_date HEAD)
@@ -457,10 +469,13 @@ fold_plan() {
     names+="${dir##*/} "
     git cat-file -e "HEAD:$dir/CHANGELOG.md" 2>/dev/null || fail_error "$dir holds no CHANGELOG.md at HEAD to fold its fragments into"
     index=$((index + 1))
-    # Regular files directly in the unreleased directory, as HEAD's tree holds them.
+    # Every entry directly in the unreleased directory, as HEAD's tree holds
+    # them (no -r, so a subdirectory is one tree entry): a regular .yaml file
+    # is a fragment, and anything else is refused below.
     while IFS= read -r -d '' entry; do
       meta=${entry%%$'\t'*} path=${entry#*$'\t'}
       if ! [[ $meta == 100644\ blob\ * || $meta == 100755\ blob\ * ]] || [[ $path != *.yaml ]]; then
+        unexpected+=("$path")
         continue
       fi
       [[ $path != *[$'\t\n']* ]] || fail_error "fragment $(quote_all "$path") has a tab or a newline in its name; rename it"
@@ -482,6 +497,10 @@ fold_plan() {
       lines+="$index"$'\t'"$dir"$'\t'"$label"$'\t'"$date"$'\t'"$path"$'\n'
     done < <(git ls-tree -z HEAD -- "$dir/.changes/unreleased/")
   done
+  if [ ${#unexpected[@]} -gt 0 ]; then
+    mapfile -d '' -t unexpected < <(printf '%s\0' "${unexpected[@]}" | LC_ALL=C sort -z)
+    fail_error "$(quote_all "${unexpected[@]}") at HEAD: each entry in a package's .changes/unreleased/ must be a regular file whose name ends in .yaml, a changie fragment, or the fold never folds it; move it, rename it or remove it"
+  fi
   set_plan "$(printf '%s' "$lines" | LC_ALL=C sort -t $'\t' -k1,1n -k3,3V -k5,5 | cut -f2-)"
 }
 
@@ -566,34 +585,47 @@ insert_block() {
   rm "$changelog.fold"
 }
 
-# land_on_main <base-sha> <workflow-file>: push HEAD, one commit over
-# <base-sha>, to main, or start a run of <workflow-file> on main when main moved
-# since <base-sha> (the header's land_on_main paragraph, under push-fold).
-# Exits the command.
+# land_on_main <base-sha> <workflow-file>: land HEAD, exactly one commit whose
+# one parent is <base-sha>, on main with the deploy key when main's tip is still
+# <base-sha>, and otherwise push nothing and start a fresh run of
+# <workflow-file> on main (the header's land_on_main paragraph, under
+# push-fold). Never forces, never rebases. Returns 0 when it pushed or started a
+# run; every other outcome is an ::error:: and exit 1.
 land_on_main() {
-  local base=$1 workflow=$2 head tip
-  [[ $base =~ ^[0-9a-f]{40}$ ]] || fail_error "the base $(quote_all "$base") is not a commit's 40 lower-case hex digits"
-  head=$(git rev-parse HEAD)
-  [ "$(git log -1 --format=%P HEAD)" = "$base" ] || fail_error "HEAD $head is not exactly one commit whose one parent is the base $base; only that commit lands on main"
+  local base=$1 workflow=$2 shas head parents tip started
+  if ! is_commit_sha "$base"; then
+    fail_error "the base commit $(quote_all "$base") is not 40 lower-case hex; refusing it"
+  fi
+  # HEAD's sha, then its parents, space-separated: exactly one, the base.
+  shas=$(git rev-list --parents -n 1 HEAD) || fail_error "reading HEAD failed"
+  head=${shas%% *}
+  parents=${shas#"$head"}
+  parents=${parents# }
+  if [ "$parents" != "$base" ]; then
+    fail_error "HEAD $head has the parents '$parents', not exactly the one parent $base; only one commit on the commit it was built from lands on main"
+  fi
   deploy_key_env
-  git fetch "$remote" main || fail_error "fetching main failed; nothing was pushed"
-  tip=$(git rev-parse FETCH_HEAD)
+  git fetch "$remote" main || fail_error "fetching main failed"
+  tip=$(git rev-parse FETCH_HEAD) || fail_error "reading main's fetched tip failed"
   if [ "$tip" = "$base" ]; then
     if git push "$remote" HEAD:refs/heads/main; then
-      [ -z "${GITHUB_OUTPUT:-}" ] || echo "pushed=true" >> "$GITHUB_OUTPUT"
-      echo "Pushed $head to main over $base"
-      exit 0
+      if [ -n "${GITHUB_OUTPUT:-}" ]; then
+        echo "pushed=true" >> "$GITHUB_OUTPUT"
+      fi
+      return 0
     fi
-    git fetch "$remote" main || fail_error "the push of $head to main was rejected, and fetching main again failed"
-    tip=$(git rev-parse FETCH_HEAD)
-    [ "$tip" != "$base" ] || fail_error "the push of $head to main was rejected while main stayed at the base $base"
+    git fetch "$remote" main || fail_error "the push to main was rejected, and fetching main again failed"
+    tip=$(git rev-parse FETCH_HEAD) || fail_error "reading main's fetched tip failed"
+    if [ "$tip" = "$base" ]; then
+      fail_error "the push of $head to main was rejected while main's tip is still $base, the commit it was built on, so no newer commit beat it; the push itself failed"
+    fi
   fi
-  # main moved since the build: what this run built is not of main's tip, and
-  # a new run builds that tip.
-  gh workflow run "$workflow" --ref main --repo "$GITHUB_REPOSITORY" ||
-    fail_error "main moved from $base to $tip since this run built, and starting a new run of $workflow on main failed; nothing was pushed"
-  echo "::notice title=Nothing pushed::main moved from $base to $tip since this run built $head on $base, so nothing was pushed; a new run of $workflow on main builds main's tip" >&2
-  exit 0
+  # main moved past the base: what HEAD holds was made from an older main, so a
+  # fresh run builds main's tip instead. gh prints the new run's URL (restart's
+  # note), or nothing on an older gh.
+  started=$(gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref main) ||
+    fail_error "main moved from $base to $tip, and starting a fresh run of $workflow on main failed; start one by hand: gh workflow run $workflow --repo $GITHUB_REPOSITORY --ref main"
+  echo "::notice title=Nothing pushed; a fresh run started::main moved from $base, the commit this run built from, to $tip, so $head was not pushed; a fresh run of $workflow on main, ${started:-the newest run of $workflow}, builds main's tip" >&2
 }
 
 case "$command" in
@@ -1023,7 +1055,7 @@ case "$command" in
     [ $# -ge 4 ] || fail_error "usage: release-push.sh push-fold <base-sha> <notes-dir> <spec>..."
     base=$2 notes_dir=${3%/}
     shift 3
-    [[ $base =~ ^[0-9a-f]{40}$ ]] || fail_error "the base $(quote_all "$base") is not a commit's 40 lower-case hex digits"
+    is_commit_sha "$base" || fail_error "the base $(quote_all "$base") is not a commit's 40 lower-case hex digits"
     head=$(git rev-parse HEAD)
     [ "$head" = "$base" ] || fail_error "HEAD is $head, not the base $base the build job built"
     [ -z "$(git status --porcelain --untracked-files=no)" ] || fail_error "the working tree or the index differs from HEAD; the fold is written onto a clean checkout of the base"

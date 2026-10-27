@@ -1418,7 +1418,6 @@ fragment rel INFRA-1-first Added "the first entry"
 fragment rel INFRA-1-another Added "another entry"
 fragment side INFRA-1-side Changed "a side entry"
 fragment nolog INFRA-1-nolog Added "never folded"
-printf 'not a fragment\n' > "$ft/a/packages/rel/.changes/unreleased/README.md"
 commit_at 2026-02-10T12:00:00+00:00 "feat: first"
 # The bump-shaped release tag: on a child of the built commit that main never holds, committed
 # at 23:30 on March 1 in UTC-5, which is March 2 in UTC.
@@ -1480,6 +1479,43 @@ check "fold-plan: two specs of one basename are refused" "$(is "$rc|$(contains "
 fold_plan_run packages/rel=rel-v packages/nolog
 check "fold-plan: a package without CHANGELOG.md is refused, printing no plan" \
   "$(is "$rc|$out|$(contains "$err" '^::error::release-push.sh fold-plan: packages/nolog holds no CHANGELOG.md at HEAD')" "1||true")"
+
+# Anything directly in an unreleased directory but a regular file whose name ends in .yaml is
+# refused, by name, with no plan printed: the fold would never fold it. Each package of this
+# repository holds one fragment and one such entry: a subdirectory, a .yml file, a README.md and
+# a symlink.
+rt="$work/fold-refuse"
+git init -q -b main "$rt"
+identity "$rt"
+for package in sub yml readme link; do
+  mkdir -p "$rt/packages/$package/$u"
+  printf '# Changelog\n' > "$rt/packages/$package/CHANGELOG.md"
+  printf 'kind: Added\nbody: fine\n' > "$rt/packages/$package/$u/INFRA-1-fine.yaml"
+done
+mkdir -p "$rt/packages/sub/$u/sjawhar"
+printf 'kind: Added\nbody: nested\n' > "$rt/packages/sub/$u/sjawhar/fix-thing.yaml"
+printf 'kind: Added\nbody: yml\n' > "$rt/packages/yml/$u/INFRA-1-a.yml"
+printf 'not a fragment\n' > "$rt/packages/readme/$u/README.md"
+ln -s INFRA-1-fine.yaml "$rt/packages/link/$u/link.yaml"
+git -C "$rt" add -A
+git -C "$rt" commit -q -m "feat: odd entries"
+# refuse_run <spec>...: runs fold-plan in that repository; leaves rc, out and err.
+refuse_run() {
+  set +e
+  out=$(cd "$rt" && "$release_push" fold-plan "$@" 2>"$work/fold-refuse.err")
+  rc=$?
+  set -e
+  err=$(<"$work/fold-refuse.err")
+}
+refused='at HEAD: each entry in a package.s \.changes/unreleased/ must be a regular file whose name ends in \.yaml'
+for entry in sub/sjawhar yml/INFRA-1-a.yml readme/README.md link/link.yaml; do
+  refuse_run "packages/${entry%%/*}"
+  check "fold-plan: packages/${entry%%/*}/$u/${entry#*/} is refused by name, with no plan" \
+    "$(is "$rc|$out|$(contains "$err" "^::error::release-push\.sh fold-plan: packages/${entry%%/*}/$u/${entry#*/} $refused")" "1||true")"
+done
+refuse_run packages/sub packages/yml packages/readme packages/link
+check "fold-plan: one error names every refused entry of every spec, sorted, with no plan" \
+  "$(is "$rc|$out|$(grep -c '^::error::' <<<"$err")|$(contains "$err" "^::error::release-push\.sh fold-plan: packages/link/$u/link\.yaml packages/readme/$u/README\.md packages/sub/$u/sjawhar packages/yml/$u/INFRA-1-a\.yml $refused")" "1||1|true")"
 
 # A fragment name holding a glob character is still one file: fold-plan finds the commit that
 # added that file, never one that added another file the name matches as a pattern. Here
@@ -1563,7 +1599,8 @@ kept() { is "$(contains "$(diff <(printf '%s\n' "$1") <(printf '%s\n' "$2") || t
 fold_case fold-accepted
 push_fold
 check "push-fold: exits 0, leaving nothing in TMPDIR" "$(is "$rc|$left" "0|0")"
-check "push-fold: says it pushed" "$(contains "$out" '^Pushed [0-9a-f]\{40\} to main over')"
+check "push-fold: says what it folded, and gives no notice" \
+  "$(is "$(contains "$out" '^Folded 6 fragments into packages/rel/CHANGELOG.md packages/side/CHANGELOG.md packages/plain/CHANGELOG.md$')|$(contains "$out" '::notice')" "true|false")"
 check "push-fold: writes pushed=true to GITHUB_OUTPUT" "$(is "$output" "pushed=true")"
 check "push-fold: calls no gh" "$(is "$calls" "")"
 o="$fc/origin.git"
@@ -1655,23 +1692,23 @@ push_fold
 check "push-fold, main moved: exits 0" "$(is "$rc" 0)"
 check "push-fold, main moved: origin's main is left where it moved" "$(is "$(git -C "$fc/origin.git" rev-parse main)" "$moved")"
 check "push-fold, main moved: starts a run of changelog-fold.yaml on main" \
-  "$(is "$calls" "$(argv workflow run changelog-fold.yaml --ref main --repo example/repo)")"
+  "$(is "$calls" "$(argv workflow run changelog-fold.yaml --repo example/repo --ref main)")"
 check "push-fold, main moved: the notice names both commits" \
-  "$(contains "$out" "^::notice title=Nothing pushed::main moved from $base to $moved since this run built")"
+  "$(contains "$out" "^::notice title=Nothing pushed; a fresh run started::main moved from $base, the commit this run built from, to $moved, so ")"
 check "push-fold, main moved: writes no pushed=" "$(is "$output" "")"
 fold_case fold-moved-gh
 moved=$(git -C "$fc/a" commit-tree -p "$base" -m "fix: landed meanwhile" "$base^{tree}")
 git -C "$fc/a" push -q "$fc/origin.git" "$moved:refs/heads/main"
 push_fold GH_TEST_FAIL=1
 check "push-fold, main moved, gh fails: exits 1 with an ::error::" \
-  "$(is "$rc|$(contains "$out" '^::error::release-push.sh push-fold: main moved .* starting a new run of changelog-fold.yaml on main failed')" "1|true")"
+  "$(is "$rc|$(contains "$out" '^::error::release-push.sh push-fold: main moved .* starting a fresh run of changelog-fold.yaml on main failed')" "1|true")"
 
 fold_case fold-rejected
 printf '#!/usr/bin/env bash\necho "rejected by the test"\nexit 1\n' > "$fc/origin.git/hooks/pre-receive"
 chmod +x "$fc/origin.git/hooks/pre-receive"
 push_fold
 check "push-fold, push rejected while main stays: exits 1 with an ::error::" \
-  "$(is "$rc|$(contains "$out" '^::error::release-push.sh push-fold: the push of [0-9a-f]* to main was rejected while main stayed at the base')" "1|true")"
+  "$(is "$rc|$(contains "$out" "^::error::release-push.sh push-fold: the push of [0-9a-f]* to main was rejected while main's tip is still $base")" "1|true")"
 check "push-fold, push rejected while main stays: origin untouched, gh not called" \
   "$(is "$(git -C "$fc/origin.git" rev-parse main)|$calls" "$base|")"
 
@@ -1747,8 +1784,8 @@ check "push-fold, a release tag pushed between the jobs: exits 0 and keeps the f
 # above), and names the group it defers.
 o="$fc/origin.git"
 accepted="$work/fold-accepted/origin.git"
-check "push-fold, a release tag pushed between the jobs: says it pushed, writing pushed=true" \
-  "$(is "$(contains "$out" '^Pushed [0-9a-f]\{40\} to main over')|$output" "true|pushed=true")"
+check "push-fold, a release tag pushed between the jobs: origin's main is one commit over the base, and pushed=true is written" \
+  "$(is "$(git -C "$o" rev-list --count "$base..main")|$(git -C "$o" log -1 --format=%P main)|$output" "1|$base|pushed=true")"
 check "push-fold, a release tag pushed between the jobs: the groups the notes hold land, their fragments gone and nothing else changed" \
   "$(is "$(git -C "$o" diff --name-status "$base" main)" "$(git -C "$accepted" diff --name-status "$base" main)")"
 check "push-fold, a release tag pushed between the jobs: their blocks are in the changelogs, and the deferred version's is not" \

@@ -111,11 +111,13 @@ chmod +x "$work/bin/gh"
 spec=packages/pi-legion=pi-legion-v
 
 # run <command> <arg>...: runs `release-push.sh <command> <arg>... $spec` in clone a with the deploy
-# key, the GitHub URL rewritten to the local origin and the stub gh; leaves rc and out (combined).
+# key, the GitHub URL rewritten to the local origin, GITHUB_OUTPUT at $work/output and the stub gh;
+# leaves rc and out (combined).
 run() {
   set +e
+  : > "$work/output"
   out=$(cd "$a" && env GITHUB_REPOSITORY=example/repo DEPLOY_KEY="$(<"$work/deploy")" GH_TEST_DIR="$work" \
-    PATH="$work/bin:$PATH" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.$work/origin.git.insteadOf" \
+    GITHUB_OUTPUT="$work/output" PATH="$work/bin:$PATH" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.$work/origin.git.insteadOf" \
     GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" "$release_push" "$@" "$spec" 2>&1)
   rc=$?
   set -e
@@ -131,7 +133,8 @@ run fold-notes "$work/notes"
 check "fold-notes: exits 0" "$(is "$rc" 0)"
 check "fold-notes: writes the one notes file of the release" "$(is "$(ls "$work/notes")" "pi-legion_1.2.3.md")"
 run push-fold "$base" "$work/notes"
-check "push-fold: exits 0, pushing" "$(is "$rc|$(contains "$out" '^Pushed ')" "0|true")"
+check "push-fold: exits 0, origin's main one commit over the base, pushed=true written" \
+  "$(is "$rc|$(git -C "$work/origin.git" rev-list --count "$base..main")|$(git -C "$work/origin.git" log -1 --format=%P main)|$(<"$work/output")" "0|1|$base|pushed=true")"
 check "push-fold: calls no gh" "$(is "$(<"$work/calls")" "")"
 git -C "$work/origin.git" show main:packages/pi-legion/CHANGELOG.md > "$work/new-CHANGELOG.md"
 first=$(grep -n -m 1 '^## ' "$work/old-CHANGELOG.md" | cut -d: -f1)
