@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-220",
-  "completed": "2026-10-27T04:48:00Z",
+  "completed": "2026-10-27T04:50:00Z",
   "round": 7,
   "testedHead": "036a7ffae8379032442104d7018255d2c5c29602 (code head; bb5d34f7 above it changes only .legion/). Red test committed above it at ed9e878998f30d5f37b73cb06f20063562683a86.",
   "implementerProof": {
@@ -61,5 +61,6 @@
   "risks": [
     "sjawhar/legion#2304 (approved, auto-merge armed, not merged at 04:47Z) rewrites the same lines of claude-backend-tmux.sh and lib/github-apps.sh and moves the default Apps to 5341240/5341243 through agent-secrets. This branch's runner input and the resolve_app_keys path will conflict with it. #2304 also hard-wires `agent-secrets` in the tool list, which overlaps LEGION_E2E_APP_KEY_RUNNER.",
     "The 7a93f98f sandbox transcript shows two 'command terminated with exit code 1' lines inside passing checks (kubectl exec polls). They are not a defect, but a reader can take them for failures."
-  ]
+  ],
+  "completionNote": "Re-recorded at a new handoff-only commit: the first handoff_complete at e723c440 was refused 409 HANDOFF_STALE_GENERATION (turn began before the daemon recorded the task). Content unchanged; red test still ed9e8789."
 }
