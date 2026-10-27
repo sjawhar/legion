@@ -1191,6 +1191,98 @@ func TestAClosedDocumentsCrossedEditsKeepTheirRowsHistory(t *testing.T) {
 	}
 }
 
+// A block pasted in the browser keeps its source's id until a settlement stamps a new one. Version
+// 1 holds "Foo." twice, indexed while the issue was open as two rows. An unsettled paste puts a
+// copy of the first, under the first's id, between them; the issue closes and a rebuild-refs marks
+// the document owed. The closed tick gives the version's two "Foo." blocks the two rows' ids, each
+// once: the second stays dated version 1 with its version 1 text, is not recorded deleted at the
+// version that holds it, and resolves by its #b- reference.
+func TestAClosedDocumentsPasteKeepingItsSourcesIDTakesNoRow(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	spec := createOwedDocument(t, database, service, "", "spec", "Foo.\n\nFoo.\n", "")
+	if tick := reconcileBlockIndex(t, service, ""); tick.Documents != 1 || tick.OwedDocuments != 0 {
+		t.Fatalf("indexing version 1 while CORE-1 is open: tick = %#v", tick)
+	}
+	paragraphs := func() []string {
+		t.Helper()
+		_, blocks, err := service.TextWithBlocks(ctx, spec)
+		if err != nil {
+			t.Fatalf("read the live document: %v", err)
+		}
+		var ids []string
+		for _, block := range blocks {
+			if block.Type == "paragraph" {
+				ids = append(ids, block.ID)
+			}
+		}
+		return ids
+	}
+	held := paragraphs()
+	if len(held) != 2 {
+		t.Fatalf("version 1's paragraphs %v, want 2", held)
+	}
+	source, second := held[0], held[1]
+	var secondText string
+	if err := database.Pool.QueryRow(ctx, `
+		select text from document_block_texts where artifact_id = $1 and block_id = $2 and version = 1
+	`, spec, second).Scan(&secondText); err != nil {
+		t.Fatalf("read block %s's text at version 1 while CORE-1 is open: %v", second, err)
+	}
+	editLiveTree(t, service, spec, func(tree *pmdoc.Node) *pmdoc.Node {
+		for index, child := range tree.Children {
+			if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); id == source {
+				paste := &pmdoc.Node{Type: "paragraph", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: source}, Children: []*pmdoc.Node{{Type: "text", Text: "Foo."}}}
+				tree.Children = slices.Insert(tree.Children, index+1, paste)
+				return tree
+			}
+		}
+		t.Fatalf("no paragraph %s in the live tree", source)
+		return tree
+	})
+	waitForLandedAppends(t, service, spec)
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'CORE-1'`); err != nil {
+		t.Fatalf("close CORE-1: %v", err)
+	}
+	closeDocumentRoom(t, service, spec)
+	if _, err := database.Pool.Exec(ctx, `update document_block_versions set version = null where artifact_id = $1`, spec); err != nil {
+		t.Fatalf("mark the document owed: %v", err)
+	}
+	if order, want := paragraphs(), []string{source, source, second}; !slices.Equal(order, want) {
+		t.Fatalf("live paragraphs %v, want %v", order, want)
+	}
+
+	if tick := reconcileBlockIndex(t, service, ""); tick.Documents != 1 || tick.OwedDocuments != 0 {
+		t.Fatalf("tick = %#v, want the closed document indexed and nothing owed", tick)
+	}
+	var changed int
+	var kept string
+	var deleted bool
+	if err := database.Pool.QueryRow(ctx, `
+		select coalesce((select changed_version from document_blocks where artifact_id = t.artifact_id and block_id = t.block_id), 0),
+		       coalesce(t.text, ''), t.text is null
+		from document_block_texts t
+		where t.artifact_id = $1 and t.block_id = $2 and t.version = 1
+	`, spec, second).Scan(&changed, &kept, &deleted); err != nil {
+		t.Fatalf("read block %s at version 1 after the closed tick: %v", second, err)
+	}
+	if changed != 1 || deleted || kept != secondText {
+		t.Fatalf("after the closed tick, block %s is dated %d with text %q (deleted %v) at version 1, want version 1 with version 1's text %q", second, changed, kept, deleted, secondText)
+	}
+	document, found, err := refs.Node(ctx, database.Pool, "artifact", spec, false)
+	if err != nil || !found {
+		t.Fatalf("resolve the spec: found %v (%v)", found, err)
+	}
+	reference := refs.BlockRef(document.Ref, second)
+	ref, ok := text.ParseRef(reference, "https://dispatch.example")
+	if !ok {
+		t.Fatalf("%s is no reference", reference)
+	}
+	if node, found, err := refs.Node(ctx, database.Pool, "block", text.TargetID(ref), true); err != nil || !found || node.BlockID != second {
+		t.Fatalf("%s resolves to %#v, found %v (%v), want block %s", reference, node, found, err, second)
+	}
+}
+
 // Twenty-five documents of an open issue whose ids sort first are skipped as live ahead, owed a
 // settlement that has not run. The keyset moves past them, so the document that sorts last is
 // indexed in the second batch rather than waiting behind them; they stay owed, and the next tick
@@ -1319,6 +1411,35 @@ func TestBlockIndexDoesNotRereadALiveAheadDocumentUntilItMoves(t *testing.T) {
 	}
 	if len(liveAhead) != 0 {
 		t.Fatalf("the loop still remembers %v, want nothing", liveAhead)
+	}
+}
+
+// The loop's memory of a live-ahead document holds whether its issue was open: a close can leave
+// the document's version, settlement mark and room as they were. An open issue's document is
+// found live ahead and remembered; its issue then closes with no new mark, and the next tick of
+// the same loop reads it again and indexes it as a closed issue's document.
+func TestBlockIndexRereadsALiveAheadDocumentWhoseIssueCloses(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	spec := createOwedDocument(t, database, service, "", "spec", "Live text.\n", "Earlier text.\n")
+	closeDocumentRoom(t, service, spec)
+	liveAhead := liveAheadDocuments{}
+	first, err := service.ReconcileBlockIndex(ctx, "", liveAhead)
+	if err != nil {
+		t.Fatalf("block index tick: %v", err)
+	}
+	if _, remembered := liveAhead[spec]; first.LiveAhead != 1 || first.Documents != 0 || !remembered {
+		t.Fatalf("first tick = %#v (remembered %v), want the open issue's document live ahead and remembered", first, remembered)
+	}
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'CORE-1'`); err != nil {
+		t.Fatalf("close CORE-1: %v", err)
+	}
+	second, err := service.ReconcileBlockIndex(ctx, "", liveAhead)
+	if err != nil {
+		t.Fatalf("block index tick: %v", err)
+	}
+	if second.Documents != 1 || second.LiveAhead != 0 || second.OwedDocuments != 0 {
+		t.Fatalf("second tick = %#v, want the closed issue's document read again and indexed", second)
 	}
 }
 

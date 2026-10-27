@@ -1536,19 +1536,22 @@ took, a live id first, else by id. Only then are the version blocks no row claim
 and live text with the live blocks whose id no row claimed, within the gaps between first-step
 matches (every block of a document the index holds none of yet), so a paragraph an edit deleted
 and retyped with the same text keeps the deleted block's row and the retyped one gets none. A text
-either side still holds more than once takes no part in that alignment: its copies are paired in
-order only where the version and the live document hold equally many, and otherwise none is
-matched until a settlement, so a copy typed after the close is never dated to the version (an
-original left unmatched is dated to the reopen's version). Last, a version block and a live block
-both still unmatched take each other where each is the only one left on its side holding that
-text, so a block an edit moved in a document with no row yet keeps its version. A
-stored row whose text the version does not hold (indexed at an older version this one changed)
-and whose live text it does not hold either is still recorded deleted at it. A live block only an
-unsettled edit made is not indexed until the reopen's settlement writes the version that holds it,
-so block history names only versions that hold a block's text. The loop remembers a skipped
-document and counts it
-again without reading it while its latest version and its pending settlement's `marked_at` (which
-every update append moves) stay as they were and this server holds no room for it. An item is
+either side still holds more than once takes no part in that alignment. Last, the version blocks
+and live blocks of each text both still unmatched are paired in order wherever the two sides hold
+equally many: a text held more than once is matched only so, and otherwise not until a settlement,
+so a copy typed after the close is never dated to the version (an original left unmatched is dated
+to the reopen's version), and a text held once on each side keeps the version of a block an edit
+moved in a document with no row yet. A live block that repeats an earlier block's id (a paste
+keeps its source's id until a settlement stamps a new one) takes part in no step, since
+`refs.IndexBlocks` indexes only the first holder of an id, and no step gives an id a block has
+taken. A stored row whose text the version does not hold (indexed at an older version this one
+changed) and whose live text it does not hold either is still recorded deleted at it. A live block
+only an unsettled edit made is not indexed until the reopen's settlement writes the version that
+holds it, so block history names only versions that hold a block's text. The loop remembers a
+skipped document and counts it again without reading it while its latest version, its pending
+settlement's `marked_at` (which every update append moves) and whether its issue is open stay as
+they were and this server holds no room for it: a close can leave the version, the mark and the
+room as they were, and a closed issue's document is indexed, not skipped. An item is
 re-read `for no key update` and re-indexed with this build's grammar (`refs.ReindexOwedItem`), a
 new edge taking the time its text was written and no `source_seq`; its owed row is deleted only
 while it holds the `enqueued_at` the tick listed, so an edit that lands meanwhile leaves the item
