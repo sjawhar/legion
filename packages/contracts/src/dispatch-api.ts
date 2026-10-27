@@ -433,7 +433,8 @@ export interface IssueSummaryPage {
 /**
  * One artifact of an `IssueReferenceSummary`: what a reference to an issue's document shows.
  * `latest_version` is its greatest version number, null only for an artifact with no version,
- * which no committed write leaves.
+ * which no committed write leaves. `primary` marks the issue's spec, the document a reference to
+ * a block of the spec (`dispatch://<issue>/spec#b-…`) names.
  */
 export interface IssueReferenceSummaryDocument {
   readonly id: string;
@@ -441,6 +442,7 @@ export interface IssueReferenceSummaryDocument {
   readonly name: string;
   readonly kind: Artifact["kind"];
   readonly latest_version: number | null;
+  readonly primary: boolean;
 }
 
 /**
@@ -462,7 +464,7 @@ export interface IssueReferenceSummary {
  * shows, read without its versions. The slug or unambiguous filename resolves as the project
  * document read resolves it (404 `ARTIFACT_NOT_FOUND`, 400 `ARTIFACT_REFERENCE_AMBIGUOUS`).
  */
-export interface DocumentReferenceSummary extends IssueReferenceSummaryDocument {
+export interface DocumentReferenceSummary extends Omit<IssueReferenceSummaryDocument, "primary"> {
   readonly project: string;
 }
 
@@ -1413,12 +1415,15 @@ export interface Message {
  * `GET /api/v1/references` read reports) and its `ref`, the dispatch:// address its Referenced by
  * panel is opened on (`dispatch://CORE/artifact/runbook`, `dispatch://CORE-1/spec`,
  * `dispatch://CORE-1/artifact/notes-md`). An `artifact` entry carries neither `issue_key` nor
- * `artifact_id`; `ref` is absent for one whose owner names no address. A citation of a comment
- * or message changes no row read by name and the graph query covers it. An event written before
- * `artifact` entries existed names none.
+ * `artifact_id`; `ref` is absent for one whose owner names no address. A block of a document
+ * (`block`) is named by its node id (`<document ref_key>#<block id>`, as its read reports it), its
+ * `ref` (`dispatch://CORE-1/spec#b-intro`) and its document's uuid as `artifact_id`, whose panel
+ * lists the edges at its blocks; a write names one whose inbound edges or whose text it moved. A
+ * citation of a comment or message changes no row read by name and the graph query covers it. An
+ * event written before `artifact` or `block` entries existed names none.
  */
 export interface ChangedReference {
-  readonly kind: "issue" | "ask" | "artifact";
+  readonly kind: "issue" | "ask" | "artifact" | "block";
   readonly id: string;
   readonly issue_key?: string | null;
   readonly artifact_id?: string | null;
@@ -1696,6 +1701,10 @@ export interface IssueReferences {
   readonly truncated: boolean;
 }
 
+// OutgoingReference is one Dispatch mention a document writes, by its target's kind and id.
+// `artifact` is the target document when it resolves; a block target (`kind: "block"`, `to_id`
+// `<document ref_key>#<block id>`) carries its document, and is listed only while a current
+// version of that document holds the block.
 export interface OutgoingReference {
   readonly kind: string;
   readonly to_id: string;
@@ -1722,12 +1731,45 @@ export type GraphEdgeKind =
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
 // session node has none. A component node's id is `<project>/<component id>`.
+//
+// A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
+// its document's reference as `document`, and `changed_version` and `changed_at`, the document
+// version in which its text last changed. `text` and `pin` are set only on the node a reference
+// read names: `text` is the block's whole current text, and `pin` answers a reference pinned to
+// a version.
 export interface GraphNode {
-  readonly kind: "issue" | "artifact" | "ask" | "comment" | "message" | "session" | "component";
+  readonly kind:
+    | "issue"
+    | "artifact"
+    | "block"
+    | "ask"
+    | "comment"
+    | "message"
+    | "session"
+    | "component";
   readonly id: string;
+  readonly block_id?: string;
   readonly issue_key?: string;
   readonly project?: string;
   readonly ref?: string;
+  readonly document?: string;
+  readonly changed_version?: number;
+  readonly changed_at?: string;
+  readonly text?: string;
+  readonly pin?: BlockPin;
+}
+
+// BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the
+// pinned reference, the block's whole text at that version, and how the block stands now.
+// `state` is "unchanged" when its current text equals `text`, "changed" when it differs, and
+// "removed" when no current version holds the block; `removed_version` is then the version that
+// deleted it.
+export interface BlockPin {
+  readonly version: number;
+  readonly ref: string;
+  readonly text: string;
+  readonly state: "unchanged" | "changed" | "removed";
+  readonly removed_version?: number;
 }
 
 // GraphExcerpt is the text shown beside an edge: the block containing a document mention
@@ -1740,10 +1782,13 @@ export interface GraphExcerpt {
 // GraphEdge is one typed, timestamped edge seen from the queried node: `node` is the other
 // end, `direction` is "in" for edges pointing at the queried node and "out" for edges it
 // writes, and `source_seq` is the events.id that introduced a mention (null for structure).
+// `block`, on a document's read, names the document's block at the queried end: the block an
+// inbound edge points at, or the block that holds an outbound link.
 export interface GraphEdge {
   readonly kind: GraphEdgeKind;
   readonly direction: "in" | "out";
   readonly node: GraphNode;
+  readonly block?: GraphNode;
   readonly excerpt?: GraphExcerpt;
   readonly created_at: string;
   readonly source_seq: number | null;
@@ -1753,6 +1798,26 @@ export interface GraphEdge {
 export interface GraphReferences {
   readonly node: GraphNode;
   readonly edges: GraphEdge[];
+}
+
+// BlockLink is one link from a block of one document to a block of a document: its edge kind,
+// both block nodes, and when and in which version of its document the source block first held
+// it.
+export interface BlockLink {
+  readonly kind: GraphEdgeKind;
+  readonly from: GraphNode;
+  readonly to: GraphNode;
+  readonly created_at: string;
+  readonly created_version: number;
+}
+
+// BlockLinks is GET /api/v1/block-links?from=<document ref>&to=<document ref>: the two documents
+// and the links from blocks of `from` to blocks of `to`, newest first, then by `from.id`, then by
+// `to.id`. A link is listed only while both of its blocks are current blocks of their documents.
+export interface BlockLinks {
+  readonly from: GraphNode;
+  readonly to: GraphNode;
+  readonly links: BlockLink[];
 }
 
 export interface ArtifactCreatedEventPayload extends ReferenceChangesPayload {

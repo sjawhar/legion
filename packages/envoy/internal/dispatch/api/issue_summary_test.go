@@ -46,7 +46,8 @@ func uploadDocument(t *testing.T, handler http.Handler, owner, name, content str
 
 // The issue summary is what a reference to an issue or to one of its documents shows: the issue's
 // key, project, title and status, and every artifact it has, in the order the full read lists them,
-// each with its greatest version - a picture's and a document's with several versions too.
+// each with its greatest version - a picture's and a document's with several versions too - and
+// whether it is the issue's spec, which a reference to a block of the spec names.
 func TestIssueSummaryCarriesTheIssueAndEveryDocumentsLatestVersion(t *testing.T) {
 	handler, _, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
 	issue := createInteractionIssue(t, handler, "TEST", "Summarised", "A spec")
@@ -76,7 +77,7 @@ func TestIssueSummaryCarriesTheIssueAndEveryDocumentsLatestVersion(t *testing.T)
 	want := make([]issueSummaryDocument, len(read.Artifacts))
 	for index, artifact := range read.Artifacts {
 		latest := artifact.Versions[len(artifact.Versions)-1].Number
-		want[index] = issueSummaryDocument{ID: artifact.ID, Slug: artifact.Slug, Name: artifact.Name, Kind: artifact.Kind, LatestVersion: &latest}
+		want[index] = issueSummaryDocument{ID: artifact.ID, Slug: artifact.Slug, Name: artifact.Name, Kind: artifact.Kind, LatestVersion: &latest, Primary: artifact.Primary}
 	}
 
 	for caller, response := range summaryRead(t, handler, owner+"/summary") {
@@ -93,16 +94,23 @@ func TestIssueSummaryCarriesTheIssueAndEveryDocumentsLatestVersion(t *testing.T)
 		for index, document := range summary.Documents {
 			expected := want[index]
 			if document.ID != expected.ID || document.Slug != expected.Slug || document.Name != expected.Name || document.Kind != expected.Kind ||
-				document.LatestVersion == nil || *document.LatestVersion != *expected.LatestVersion {
+				document.Primary != expected.Primary || document.LatestVersion == nil || *document.LatestVersion != *expected.LatestVersion {
 				t.Fatalf("%s summary document %d = %#v (latest %v), want %#v (latest %d)", caller, index, document, document.LatestVersion, expected, *expected.LatestVersion)
 			}
 		}
 		byID := map[string]int{}
+		var primary []string
 		for _, document := range summary.Documents {
 			byID[document.ID] = *document.LatestVersion
+			if document.Primary {
+				primary = append(primary, document.Slug)
+			}
 		}
 		if byID[image.Artifact.ID] != 2 || byID[notes.Artifact.ID] != 3 {
 			t.Fatalf("%s summary latest versions = %#v, want the picture at 2 and the notes at 3", caller, byID)
+		}
+		if len(primary) != 1 || primary[0] == notes.Artifact.Slug || primary[0] == image.Artifact.Slug {
+			t.Fatalf("%s summary marks %v primary, want the spec alone", caller, primary)
 		}
 		// The summary carries no versions, approvals, children or asks: only what a reference shows.
 		for _, absent := range []string{`"versions"`, `"approval"`, `"children"`, `"open_asks"`, `"route_status"`} {

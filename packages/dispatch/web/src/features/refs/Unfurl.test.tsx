@@ -37,7 +37,14 @@ test("Unfurl trims terminal punctuation before resolving a GitHub reference", as
 /** CORE-1's summary read, with its spec `design`. */
 const coreSummary: IssueReferenceSummary = {
   documents: [
-    { id: "artifact-1", kind: "doc", latest_version: 3, name: "design.md", slug: "design" },
+    {
+      id: "artifact-1",
+      kind: "doc",
+      latest_version: 3,
+      name: "design.md",
+      primary: true,
+      slug: "design",
+    },
   ],
   key: "CORE-1",
   project: "CORE",

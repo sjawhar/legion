@@ -21,7 +21,16 @@ afterEach(() => {
  *  network. */
 function spyReads() {
   const summary: IssueReferenceSummary = {
-    documents: [{ id: "doc-1", kind: "doc", latest_version: 2, name: "design.md", slug: "design" }],
+    documents: [
+      {
+        id: "doc-1",
+        kind: "doc",
+        latest_version: 2,
+        name: "design.md",
+        primary: true,
+        slug: "design",
+      },
+    ],
     key: "CORE-1",
     project: "CORE",
     status: "in_progress",

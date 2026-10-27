@@ -828,8 +828,10 @@ function changedReferences(event: Event): readonly ChangedReference[] {
  * The reads that carry a changed target's backlinks, which `refs.ReplaceCounted` names in the
  * transaction that appends the event: an issue's detail (its count), its references tab and its
  * panel; an ask's read, its thread, the list its row lives in (its issue's asks, or its
- * document's), the Inbox row showing its count, and its panel; a document's panel. Past the
- * server's cap an event names no targets, so every read that holds a count or a panel refreshes.
+ * document's), the Inbox row showing its count, and its panel; a document's panel; a block's
+ * graph read, which its panel and every link to it share (pinned or not), and its document's
+ * panel, which lists the edges at its blocks. Past the server's cap an event names no targets, so
+ * every read that holds a count or a panel refreshes.
  */
 function changedReferenceTargets(event: Event): RefreshTarget[] {
   if (payloadValue(event, "references_changed_truncated") === true) {
@@ -861,6 +863,22 @@ function changedReferenceTargets(event: Event): RefreshTarget[] {
       }
       const id = target.id;
       targets.push(referencePanels(({ node }) => node.kind === "artifact" && node.id === id));
+      continue;
+    }
+    if (target.kind === "block") {
+      // The read opened on the address the server names, and every read of the same block node
+      // (a pinned reference's, or another spelling), found by the node its read reports.
+      if (target.ref !== undefined) {
+        targets.push(referencePanel(target.ref));
+      }
+      const id = target.id;
+      targets.push(referencePanels(({ node }) => node.kind === "block" && node.id === id));
+      const document = target.artifact_id;
+      if (document !== undefined && document !== null) {
+        targets.push(
+          referencePanels(({ node }) => node.kind === "artifact" && node.id === document)
+        );
+      }
       continue;
     }
     const id = target.id;

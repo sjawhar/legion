@@ -16,6 +16,7 @@ import { mergeEventPages, prependEventToLog } from "../api/sse";
 import type { Event, EventType } from "../api/types";
 import {
   askQuery,
+  blockQuery,
   commentQuery,
   documentSummaryQuery,
   issueQuery,
@@ -72,6 +73,11 @@ const READS = {
   otherDocumentPage: { data: { id: "artifact-2" }, key: ["artifact-ref", "CORE/notes-md"] },
   otherIssueMessage: { key: messageQuery("CORE-9", "message-9").queryKey },
   otherProjectList: { key: projectIssuesQuery("OTHER", []).queryKey },
+  // Another block of CORE-1's spec, which a link elsewhere on the page names.
+  otherSpecBlock: {
+    data: { edges: [], node: { id: "CORE-1/spec#outro", kind: "block" } },
+    key: blockQuery("dispatch://CORE-1/spec#b-outro").queryKey,
+  },
   parent: { key: issueQuery("CORE-0").queryKey },
   // CORE-1 is CORE-0's child: CORE-0's panel lists the `child_of` edge from it.
   parentPanel: {
@@ -92,6 +98,16 @@ const READS = {
   repliesPage: { key: ["me", "replies", "page"] },
   rootComment: { key: commentQuery("root-1").queryKey },
   rootMessage: { key: messageQuery("CORE-1", "message-0").queryKey },
+  // A block of CORE-1's spec, read by a link to it (its panel shares the key) and, pinned to
+  // version 2, by another link.
+  specBlock: {
+    data: { edges: [], node: { id: "CORE-1/spec#intro", kind: "block" } },
+    key: blockQuery("dispatch://CORE-1/spec#b-intro").queryKey,
+  },
+  specBlockPinned: {
+    data: { edges: [], node: { id: "CORE-1/spec#intro", kind: "block" } },
+    key: blockQuery("dispatch://CORE-1/spec#b-intro@v2").queryKey,
+  },
   // CORE-1's spec, one document, opened on two spellings of its address.
   specPanel: {
     data: { edges: [], node: { id: "artifact-3", kind: "artifact" } },
@@ -607,6 +623,42 @@ const rules: Record<string, Rule> = {
       refreshes: ["documentPanel"],
       spares: ["specPanel", "docAskPanel"],
     },
+  "a citation of a block refreshes every read of that block and its document's panel": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed: [
+        {
+          artifact_id: "artifact-3",
+          id: "CORE-1/spec#intro",
+          kind: "block",
+          ref: "dispatch://CORE-1/spec#b-intro",
+        },
+      ],
+    }),
+    refreshes: ["specBlock", "specBlockPinned", "specPanel", "specPanelBySlug"],
+    spares: ["otherSpecBlock", "documentPanel", "issuePanel", "summary", "unrelatedDetail"],
+  },
+  "a version of a document that changes a cited block refreshes the reads of that block": {
+    event: event("artifact.version", {
+      artifact_id: "artifact-3",
+      name: "Plan",
+      references_changed: [
+        {
+          artifact_id: "artifact-3",
+          id: "CORE-1/spec#intro",
+          kind: "block",
+          ref: "dispatch://CORE-1/spec#b-intro",
+        },
+      ],
+    }),
+    refreshes: ["specBlock", "specBlockPinned", "specPanel", "summary"],
+    spares: ["otherSpecBlock", "documentPanel"],
+  },
+  "a version of a document that names none of its blocks leaves every block read alone": {
+    event: event("artifact.version", { artifact_id: "artifact-3", name: "Plan" }),
+    refreshes: ["summary"],
+    spares: ["specBlock", "specBlockPinned", "otherSpecBlock"],
+  },
   "past the server's cap, every count and every panel refreshes": {
     event: event("message.created", { id: "message-2", references_changed_truncated: true }),
     refreshes: [
@@ -615,6 +667,7 @@ const rules: Record<string, Rule> = {
       "issuePanel",
       "unrelatedPanel",
       "documentPanel",
+      "specBlock",
       "inbox",
     ],
     spares: ["projects"],

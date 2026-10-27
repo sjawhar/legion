@@ -4,12 +4,12 @@ import { useLayoutEffect, useState } from "react";
 
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
+import { referenceSpans } from "./reference-spans";
 import {
   buildDispatchReference,
   buildReferencePath,
   parseDispatchReference,
   pictureReference,
-  referenceSpans,
   shortForm,
 } from "./routes";
 

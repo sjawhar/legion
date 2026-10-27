@@ -25,13 +25,15 @@ type issueSummary struct {
 }
 
 // issueSummaryDocument is one artifact of an issue summary. LatestVersion is its greatest version
-// number, null only for an artifact with no version, which no committed write leaves.
+// number, null only for an artifact with no version, which no committed write leaves. Primary
+// marks the issue's spec, which a reference to a block of the spec (`<issue>/spec#b-…`) names.
 type issueSummaryDocument struct {
 	ID            string `json:"id"`
 	Slug          string `json:"slug"`
 	Name          string `json:"name"`
 	Kind          string `json:"kind"`
 	LatestVersion *int   `json:"latest_version"`
+	Primary       bool   `json:"primary"`
 }
 
 // documentSummary is GET /api/v1/projects/{key}/artifacts/{slug}/summary: the project document
@@ -63,7 +65,7 @@ func (s *server) getIssueSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select a.id::text, a.slug, a.name, a.kind, `+summaryLatestVersion+`
+		select a.id::text, a.slug, a.name, a.kind, `+summaryLatestVersion+`, a.is_primary
 		from artifacts a where a.issue_key = $1 order by a.created_at, a.id
 	`, summary.Key)
 	if err != nil {

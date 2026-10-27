@@ -388,14 +388,18 @@ test("models a snooze's state event and a document named in references_changed",
   } satisfies DispatchEvent;
   const references_changed = [
     { kind: "issue", id: "CORE-1" },
-    { kind: "artifact", id: "a4cf7999-cab2-4326-939d-cb1e76733cc3", ref: "dispatch://CORE/artifact/runbook" },
+    {
+      kind: "artifact",
+      id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+      ref: "dispatch://CORE/artifact/runbook",
+    },
   ] satisfies ChangedReference[];
 
   expect(DispatchEventSchema.safeParse(event)).toMatchObject({ success: true });
   // A reader that declares no references_changed still reads the comment around a document entry.
-  expect(
-    CommentEventPayloadSchema.parse({ id: "comment-1", references_changed })
-  ).toMatchObject({ id: "comment-1" });
+  expect(CommentEventPayloadSchema.parse({ id: "comment-1", references_changed })).toMatchObject({
+    id: "comment-1",
+  });
   expect([event.payload.changed, references_changed[1]?.ref]).toEqual([
     ["snoozed"],
     "dispatch://CORE/artifact/runbook",

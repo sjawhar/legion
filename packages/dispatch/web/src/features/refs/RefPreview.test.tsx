@@ -6,7 +6,14 @@ import { Link, MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
-import type { AskRead, CommentRead, IssueDetails } from "../../api/types";
+import type {
+  AskRead,
+  BlockPin,
+  CommentRead,
+  GraphReferences,
+  IssueDetails,
+  IssueReferenceSummary,
+} from "../../api/types";
 import { closeRefPreview, RefPreviewHost, referenceTriggerProps } from "./RefPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 
@@ -645,6 +652,142 @@ test("a document's card shows its owner, name, latest version and text from its 
     getArtifactText.mockRestore();
     getProjectDocumentSummary.mockRestore();
     getIssue.mockRestore();
+  }
+});
+
+/** CORE-1's summary with its spec, `design-md`, the document a block reference to
+ *  `dispatch://CORE-1/spec` names. */
+function summaryWithSpec(): IssueReferenceSummary {
+  return {
+    documents: [
+      {
+        id: "spec",
+        kind: "doc",
+        latest_version: 3,
+        name: "Design.md",
+        primary: true,
+        slug: "design-md",
+      },
+    ],
+    key: "CORE-1",
+    project: "CORE",
+    status: "in_progress",
+    title: "Design decision",
+  };
+}
+
+function pinnedRead(pin: Omit<BlockPin, "ref" | "version">): GraphReferences {
+  return {
+    edges: [],
+    node: {
+      block_id: "p1",
+      changed_version: pin.state === "removed" ? undefined : 3,
+      document: "dispatch://CORE-1/spec",
+      id: "CORE-1/spec#p1",
+      issue_key: "CORE-1",
+      kind: "block",
+      pin: { ...pin, ref: "dispatch://CORE-1/spec#b-p1@v2", version: 2 },
+      project: "CORE",
+      ref: "dispatch://CORE-1/spec#b-p1",
+      text: pin.state === "removed" ? undefined : "Ship it on Monday.",
+    },
+  };
+}
+
+test.each([
+  ["changed", pinnedRead({ state: "changed", text: "Ship it on Friday." }), "Changed in version 3"],
+  [
+    "unchanged",
+    pinnedRead({ state: "unchanged", text: "Ship it on Friday." }),
+    "Unchanged since version 2",
+  ],
+  [
+    "removed",
+    pinnedRead({ removed_version: 4, state: "removed", text: "Ship it on Friday." }),
+    "Removed in version 4",
+  ],
+] as const)("a pinned block's card names its document, the version it pins, how it stands since (%s), and that version's text", async (_state, read, standing) => {
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(summaryWithSpec());
+  const getIssue = spyOn(api, "getIssue");
+  const getReferences = spyOn(api, "getReferences").mockResolvedValue(read);
+  const route = { block: { id: "p1", pin: "2" }, key: "CORE-1", kind: "spec" as const };
+  const view = render(
+    <Harness>
+      <Link to="/issues/CORE-1/spec" {...referenceTriggerProps(route)}>
+        the block
+      </Link>
+    </Harness>
+  );
+  try {
+    act(() => {
+      screen.getByRole("link", { name: "the block" }).focus();
+    });
+    const card = screen.getByRole("tooltip");
+    await waitFor(() => expect(card.textContent).toContain("Design.md"));
+    expect(getReferences).toHaveBeenCalledWith("dispatch://CORE-1/spec#b-p1@v2");
+    expect(card.textContent).toContain("CORE-1 · Design.md");
+    expect(card.textContent).toContain("Version 2");
+    expect(card.textContent).toContain(standing);
+    await waitFor(() => expect(card.textContent).toContain("Ship it on Friday."));
+    expect(card.textContent).not.toContain("Monday");
+    // The card names the document from the issue's summary, never the full issue read.
+    expect(getIssueSummary).toHaveBeenCalledWith("CORE-1");
+    expect(getIssue).not.toHaveBeenCalled();
+    // The card opens the version it pins, under the spec's own slug.
+    expect(card.querySelector("a")?.getAttribute("href")).toBe(
+      "/issues/CORE-1/artifacts/design-md?v=2"
+    );
+  } finally {
+    view.unmount();
+    getReferences.mockRestore();
+    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
+  }
+});
+
+test("an unpinned block's card shows its current text, and a block that cannot be read its short form", async () => {
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(summaryWithSpec());
+  const current = pinnedRead({ state: "changed", text: "unused" });
+  const getReferences = spyOn(api, "getReferences").mockImplementation((reference) =>
+    reference === "dispatch://CORE-1/spec#b-p1"
+      ? Promise.resolve({ ...current, node: { ...current.node, pin: undefined } })
+      : Promise.reject(new Error("no block"))
+  );
+  const view = render(
+    <Harness>
+      <Link to="/" {...referenceTriggerProps({ block: { id: "p1" }, key: "CORE-1", kind: "spec" })}>
+        the block
+      </Link>
+      <Link
+        to="/"
+        {...referenceTriggerProps({ block: { id: "gone" }, key: "CORE-1", kind: "spec" })}
+      >
+        the deleted block
+      </Link>
+    </Harness>
+  );
+  try {
+    act(() => {
+      screen.getByRole("link", { name: "the block" }).focus();
+    });
+    const card = screen.getByRole("tooltip");
+    await waitFor(() => expect(card.textContent).toContain("Ship it on Monday."));
+    expect(card.textContent).toContain("CORE-1 · Design.md");
+    expect(card.textContent).not.toContain("Version");
+    expect(card.querySelector("a")?.getAttribute("href")).toBe("/issues/CORE-1/spec#b-p1");
+
+    act(() => {
+      screen.getByRole("link", { name: "the deleted block" }).focus();
+    });
+    await waitFor(() =>
+      expect(getReferences).toHaveBeenCalledWith("dispatch://CORE-1/spec#b-gone")
+    );
+    await act(async () => {});
+    expect(screen.getByRole("tooltip").textContent).toBe("CORE-1 spec block");
+  } finally {
+    view.unmount();
+    getReferences.mockRestore();
+    getIssueSummary.mockRestore();
   }
 });
 

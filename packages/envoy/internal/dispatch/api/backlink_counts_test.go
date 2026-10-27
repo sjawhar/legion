@@ -768,3 +768,39 @@ func TestReferenceWritesNameTheDocumentsTheyCite(t *testing.T) {
 	edit("Waiting on", "Still waiting on")
 	requireArtifactEventNames(t, handler, events, document.ID, []model.ChangedReference{runbookNamed})
 }
+
+// A block's own read - its Referenced by panel and every link to it, which show its text - and its
+// document's panel, which lists the edges at its blocks, move when a citation of the block is added
+// or removed and when a version of its document changes or deletes the block. Each of those writes
+// names the block by its node id, its reference and its document's uuid; a version that changes
+// only a block nothing cites names nothing.
+func TestReferenceWritesNameTheBlocksTheyCite(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue, blockRef := createShipItSpec(t, handler, "CORE")
+	spec := issue.PrimaryArtifactID
+	blockNamed := model.ChangedReference{Kind: "block", ID: issue.Key + "/spec#ship_it", ArtifactID: &spec, Ref: blockRef}
+
+	// The entry matches the read it moves: its reference reads the block's node, whose id is the
+	// entry's.
+	if node := graphEdges(t, handler, url.Values{"to": {blockRef}}).Node; node.Kind != "block" || node.ID != blockNamed.ID {
+		t.Fatalf("the read of %s reads node %#v, want the block %s", blockRef, node, blockNamed.ID)
+	}
+
+	comment := createReferenceAPIComment(t, handler, issue.Key, "Decided in "+blockRef+".")
+	requireReferencesChanged(t, handler, issue.Key, "comment.created", comment.ID, []model.ChangedReference{blockNamed})
+
+	// The spec's events are its issue's.
+	events := "/api/v1/issues/" + issue.Key + "/events"
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "replace", "find": "Other paragraph.", "with": "Another paragraph."}})
+	requireArtifactEventNames(t, handler, events, spec, nil)
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "replace", "find": "Ship it.", "with": "Ship it today."}})
+	requireArtifactEventNames(t, handler, events, spec, []model.ChangedReference{blockNamed})
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "delete", "block": "ship_it"}})
+	requireArtifactEventNames(t, handler, events, spec, []model.ChangedReference{blockNamed})
+
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/comments/"+comment.ID, map[string]any{"body": "Decided elsewhere."}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("edit comment: status=%d body=%s", response.Code, response.Body.String())
+	}
+	requireReferencesChanged(t, handler, issue.Key, "comment.edited", comment.ID, []model.ChangedReference{blockNamed})
+}

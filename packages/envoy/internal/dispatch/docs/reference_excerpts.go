@@ -3,50 +3,99 @@ package docs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-// IndexDocumentReferences indexes the mentions of version's markdown, which the calling
-// transaction has just stored as the document's version (refs.ReplaceDocumentCounted), and
-// stores each mention's excerpt from the rendering of the tree that transaction wrote: an
-// upload's replacement, or a seeded spec. A seed renders its tree once. An upload that changes the
-// document renders it twice - ReplaceText's render of the replacement, which is the version's
-// markdown, and applyLive's render of the fork, which the ledger records - so the excerpts are cut
+// IndexDocumentReferences indexes version's markdown, which the calling transaction has just
+// stored as the document's version (indexDocument): its references, each mention's excerpt and
+// its blocks, all from the rendering of the tree that transaction wrote: an upload's replacement,
+// or a seeded spec. A seed renders its tree once. An upload that changes the document renders it
+// twice - ReplaceText's render of the replacement, which is the version's markdown, and
+// applyLive's render of the fork, which the ledger records - so the excerpts and blocks are cut
 // from applyLive's render only when the two agree. It refuses a context that was not joined.
 func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string, version int, markdown string) (model.ReferenceChanges, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
 		return model.ReferenceChanges{}, errUnjoined
 	}
+	var versionAt time.Time
+	if err := tx.QueryRow(ctx, `select created_at from artifact_versions where artifact_id = $1 and number = $2`,
+		artifactID, version).Scan(&versionAt); err != nil {
+		return model.ReferenceChanges{}, fmt.Errorf("read version %d of %s: %w", version, artifactID, err)
+	}
 	rendered := ledgerFrom(ctx).writtenRendering(artifactID)
 	if rendered.tree != nil && rendered.markdown != markdown {
-		slog.Warn("dispatch: a document version left its reference excerpts to the reconciliation: the tree its transaction wrote does not render as the version's markdown",
+		slog.Warn("dispatch: a document version left its reference excerpts and blocks to the reconciliation: the tree its transaction wrote does not render as the version's markdown",
 			"artifact", artifactID, "version", version)
 		rendered = renderedTree{}
 	}
-	return refs.ReplaceDocumentCounted(ctx, tx, artifactID, version, markdown, s.treeExcerpts(rendered), s.serverURL)
+	return s.indexDocument(ctx, tx, artifactID, version, versionAt, markdown, rendered)
 }
 
-// treeExcerpts is the excerpt of every mention a document's version writes, cut from rendered, the
-// render the version's markdown came from, so the block ids are the ones the document carries. A
+// indexDocument indexes one document version, written at versionAt, in its writer's transaction,
+// which holds the document's owner row, from the render the version's markdown came from:
+// indexRenderedVersion with rendered's blocks. The blocks are rendered.offsets; GET …/blocks lists
+// one block per offset of the same renderer (renderedBlocks), so both list one set of blocks. A
 // version with no rendering - an upload whose replacement changed nothing, which writes no tree -
-// has none (nil), and refs.ReplaceDocumentCounted marks its mentions owed (refs.ClearExcerpts) for
-// the reconciliation, which reads the document itself.
-func (s *Service) treeExcerpts(rendered renderedTree) map[refs.Target]model.GraphExcerpt {
+// is indexUnrenderedVersion, which indexes no blocks: migration 0122's trigger left the document
+// owed when the version's row was inserted, for the block-index reconciliation, which reads the
+// document itself.
+func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, rendered renderedTree) (model.ReferenceChanges, error) {
 	if rendered.tree == nil {
-		return nil
+		return s.indexUnrenderedVersion(ctx, tx, artifactID, version, versionAt, markdown)
 	}
 	blocks := make([]model.ArtifactBlock, len(rendered.offsets))
 	for index, offset := range rendered.offsets {
 		blocks[index] = model.ArtifactBlock{ID: offset.ID, Type: offset.Type, From: offset.From, To: offset.To}
 	}
-	return refs.MentionExcerpts(rendered.markdown, blocks, s.serverURL)
+	return s.indexRenderedVersion(ctx, tx, artifactID, version, versionAt, markdown, blocks)
+}
+
+// indexRenderedVersion indexes one document version, written at versionAt, in a transaction
+// holding the document's owner row: its references, the excerpt of each mention, and its blocks
+// with the mentions each holds (refs.IndexBlocks), all from one extraction of markdown. blocks
+// index into markdown, the render they came from. The event the caller appends names the counted
+// targets the document's references and their excerpts, its blocks and its blocks' mentions moved
+// (refs.ReplaceDocumentCounted), since a node is counted once for each block citing it.
+func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, blocks []model.ArtifactBlock) (model.ReferenceChanges, error) {
+	located := text.ExtractAt(markdown, s.serverURL)
+	// The blocks are indexed before the document's own references are reconciled: a first
+	// indexing dates a block's mention from the document's refs row for its target, which a
+	// surviving target already holds and a new one gets with this same time.
+	moved, err := refs.IndexBlocks(ctx, tx, artifactID, version, versionAt, markdown, blocks, located)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return replaceVersionRefs(ctx, tx, artifactID, version, versionAt, located, moved, refs.MentionExcerpts(markdown, blocks, located))
+}
+
+// indexUnrenderedVersion indexes one document version with no rendering, written at versionAt, in
+// a transaction holding the document's owner row: its references alone. It indexes no blocks and
+// marks the document's mentions owed an excerpt (refs.ClearExcerpts) for the excerpt
+// reconciliation, which reads the document itself.
+func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string) (model.ReferenceChanges, error) {
+	return replaceVersionRefs(ctx, tx, artifactID, version, versionAt, text.ExtractAt(markdown, s.serverURL), nil, nil)
+}
+
+// replaceVersionRefs reconciles the document's references, dated versionAt, to the mentions
+// located in its version, stores excerpts on them (nil: marks them owed), and counts the targets
+// moved, which its blocks and their mentions moved, as well (refs.ReplaceDocumentCounted).
+func replaceVersionRefs(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, located []text.Located, moved []refs.Target, excerpts map[refs.Target]model.GraphExcerpt) (model.ReferenceChanges, error) {
+	found := make([]text.Ref, len(located))
+	for i, mention := range located {
+		found[i] = mention.Ref
+	}
+	return refs.ReplaceDocumentCounted(ctx, tx, artifactID, version, versionAt, found, moved, excerpts)
 }
 
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep
@@ -158,7 +207,7 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 				"artifact", document.FromID, "error", err)
 			continue
 		default:
-			excerpts = refs.MentionExcerpts(markdown, blocks, s.serverURL)
+			excerpts = refs.MentionExcerpts(markdown, blocks, text.ExtractAt(markdown, s.serverURL))
 		}
 		// The reconciliation appends no event, so what it moved is named nowhere: until it stores
 		// an excerpt, the route answers a mention owed one with the document's name.

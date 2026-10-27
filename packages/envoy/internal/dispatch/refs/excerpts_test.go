@@ -8,6 +8,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // A document's mentions are owed an excerpt until one is recorded at its latest version; once
@@ -27,7 +28,7 @@ func TestOwedExcerptsAreFoundThroughTheDriftIndexAndRecordedOnce(t *testing.T) {
 	if _, err := tx.Exec(ctx, `insert into artifact_versions (artifact_id, number, markdown, authors) values ($1, 1, 'v1', '[]')`, document); err != nil {
 		t.Fatalf("write version 1: %v", err)
 	}
-	if _, err := replace(ctx, tx, "artifact", document, "see dispatch://CORE-1 and dispatch://CORE-2", "https://dispatch.example"); err != nil {
+	if _, err := replaceRefs(ctx, tx, "artifact", document, text.Extract("see dispatch://CORE-1 and dispatch://CORE-2", "https://dispatch.example"), nil); err != nil {
 		t.Fatalf("index mentions: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -117,7 +118,7 @@ func TestRecordExcerptsReportsTheMentionsWhoseExcerptMoved(t *testing.T) {
 	}
 	createReferenceProject(t, tx, "CORE")
 	document, _ := createReferenceArtifact(t, tx, "", "CORE", "design")
-	if _, err := replace(ctx, tx, "artifact", document, "see dispatch://CORE-1, later dispatch://CORE-2", "https://dispatch.example"); err != nil {
+	if _, err := replaceRefs(ctx, tx, "artifact", document, text.Extract("see dispatch://CORE-1, later dispatch://CORE-2", "https://dispatch.example"), nil); err != nil {
 		t.Fatalf("index mentions: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
