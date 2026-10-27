@@ -878,11 +878,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   role claim or the subscription), the warning says the start message was sent and the start turn
   has the registration, and that command claims the role and its wakes again, sending nothing
   more. Run again after a successful claim, or in any other session, the command says there is
-  nothing to do; run again after a claim that failed past the send, it names
-  `/legion-claim-controller` and claims nothing. A claim that has to wait for one in flight says so
+  nothing to do; run again once the start message is sent while the last claim that registered
+  (the one that sent it, or a later one) did not finish, it names `/legion-claim-controller` and
+  claims nothing. A `/new` while the command's claim runs stops that claim at its registration,
+  before the send, with an info notice and no warning: the session change's re-claim registers the
+  new session and sends the start message there. A claim that has to wait for one in flight says so
   in one notice. A claim from `/legion-claim-controller` or a re-claim after a session change sends
   the start message the same way when it is still unsent, and the message still goes out once per
-  process. The session's first `agent_start` and its `session_shutdown` clear the mark. The
+  process. A re-claim after a session change refused past its own registration warns that the
+  session keeps that registration; one refused before it warns that the session has no controller
+  grant. The session's first `agent_start` and its `session_shutdown` clear the mark. The
   daemon-launched controller still claims at `session_start`, sends no start message of its own and
   sets the mark, with `sentAt` now, right before `claims/ready`, after which the daemon delivers its
   start prompt. `legion controller start` refuses a stdin that is not a terminal, right after the

@@ -25,6 +25,12 @@ type PersistedTranscript = (
   context: CommandContext | SessionContext
 ) => Promise<{ readonly sessionFile: string; readonly agentId: string }>;
 
+/** How far one claim got, which its caller's notice reports. */
+interface ClaimProgress {
+  /** The daemon holds this claim's registration, and the session's grants mint with its secret. */
+  registered: boolean;
+}
+
 export interface ControllerSession {
   readonly claim: (context: CommandContext | SessionContext) => Promise<void>;
   readonly handleSessionStart: (context: SessionContext) => Promise<void>;
@@ -124,12 +130,14 @@ export function createControllerSession(deps: {
    * command line, which Oh My Pi runs after its startup and once the TUI listens, so the role's
    * lane and the controller topic open only once the start message is queued. A claim from
    * `/legion-claim-controller`, or a re-claim after a session change, sends a message still
-   * unsent the same way. A send to an idle session marks the session current at the send in the
-   * Envoy plugin interface's `startupTurn` right before it; a send queued behind a turn the
-   * operator already started marks nothing, since that run, the session's first, has already
-   * started. `startMessageSent` keeps this process from sending it twice: a retried claim after a
-   * failure past the send, and a later `/legion-claim-controller` in the same session, send
-   * nothing more.
+   * unsent the same way. A send to an idle session marks the registered session in the Envoy
+   * plugin interface's `startupTurn` right before it; a send queued behind a turn the operator
+   * already started marks nothing, since that run, the session's first, has already started. A
+   * claim that finds, once registered, that the session changed since it began (a `/new` while it
+   * ran) sends nothing and stops there, unfinished, with a notice: the session change's re-claim
+   * registers the new session and sends the start message there. `startMessageSent` keeps this
+   * process from sending it twice: a retried claim after a failure past the send, and a later
+   * `/legion-claim-controller` in the same session, send nothing more.
    *
    * The subscription is a live wake only: an Oh My Pi session subscribes over core NATS, so a
    * notice published while no controller runs never reaches one, and the controller skill reads
@@ -160,21 +168,36 @@ export function createControllerSession(deps: {
    * command itself can be typed before it ends. A claim that has to wait says so once, since the
    * daemon client sets no request timeout and a hung claim would otherwise hold it silently.
    */
-  const claim = (context: CommandContext | SessionContext): Promise<void> => {
+  const claim = (context: CommandContext | SessionContext): Promise<void> =>
+    queueClaim(context, { registered: false });
+
+  // Says so when the claim or command about to queue has to wait for one already running: the
+  // daemon client sets no request timeout, so a hung claim would otherwise hold it silently.
+  const noteWait = (context: CommandContext | SessionContext): void => {
     if (claimsQueued > 0) {
       context.ui.notify(
         "legion: waiting for the controller claim already running to finish.",
         "info"
       );
     }
-    return serialised(() => claimOnce(context));
   };
 
-  const claimOnce = async (context: CommandContext | SessionContext): Promise<void> => {
+  const queueClaim = (
+    context: CommandContext | SessionContext,
+    progress: ClaimProgress
+  ): Promise<void> => {
+    noteWait(context);
+    return serialised(() => claimOnce(context, progress));
+  };
+
+  const claimOnce = async (
+    context: CommandContext | SessionContext,
+    progress: ClaimProgress
+  ): Promise<void> => {
     const supervised = daemonLaunchedController(process.env);
-    if (!supervised) return claimWith(context, false);
+    if (!supervised) return claimWith(context, false, progress);
     try {
-      await claimWith(context, true);
+      await claimWith(context, true, progress);
     } catch (error) {
       logger.error(
         `[legion] the daemon-launched controller's claim failed; exiting so the daemon launches it again: ${messageFor(error)}`
@@ -185,7 +208,8 @@ export function createControllerSession(deps: {
 
   const claimWith = async (
     context: CommandContext | SessionContext,
-    supervised: boolean
+    supervised: boolean,
+    progress: ClaimProgress
   ): Promise<void> => {
     const sessionID = context.sessionManager.getSessionId();
     const capability =
@@ -249,22 +273,34 @@ export function createControllerSession(deps: {
       client.controllerGrant({ sessionId: sessionID, secret: registration.secret });
     controllerSessionID = sessionID;
     controllerTranscript = launched ? sessionFile : undefined;
+    progress.registered = true;
     const envoyContext = "setInterval" in context ? context : undefined;
     // Once per process, ever, and before the role claim and the subscription below, so no card on
     // the role's lane and no wake on the controller topic can race the start turn for the one
     // first-turn slot (LEGION-392): a card the listener forwards as soon as it records the role can
     // arrive before the role claim resolves here. The session's first turn when it is idle, marked
-    // as the startup turn of the session current at the send (a `/new` may have run since the
-    // registration). When the operator already started a turn, queued behind it as a follow-up,
-    // which starts no turn of its own and runs inside that run, whose `agent_start` has already
-    // fired, so nothing is marked. A hand-started takeover (`startMessage` undefined) sends
+    // as its startup turn. When the operator already started a turn, queued behind it as a
+    // follow-up, which starts no turn of its own and runs inside that run, whose `agent_start` has
+    // already fired, so nothing is marked. A hand-started takeover (`startMessage` undefined) sends
     // nothing: the operator's own session speaks for itself. Nor does the daemon's own controller,
     // whose start message the daemon delivers once it reports ready below.
     if (startMessage !== undefined && !startMessageSent) {
+      // A `/new`, `/resume`, or `/fork` since this claim read its session leaves the start message
+      // nowhere to go: the session current now is not the one registered, and Envoy refuses a role
+      // claim for the replaced one. The session change starts a re-claim
+      // (`reclaimAfterSessionChange`, which claims again as this claim stops unfinished), which
+      // registers the new session and sends the start message there.
+      if (context.sessionManager.getSessionId() !== sessionID) {
+        context.ui.notify(
+          "legion: the session changed while the controller claim ran; the claim for the new session follows and sends the start message there.",
+          "info"
+        );
+        return;
+      }
       if ("isIdle" in context && !context.isIdle()) {
         pi.sendUserMessage(startMessage, { deliverAs: "followUp" });
       } else {
-        markStartupTurnSent(context.sessionManager.getSessionId());
+        markStartupTurnSent(sessionID);
         pi.sendUserMessage(startMessage);
       }
       startMessageSent = true;
@@ -324,15 +360,19 @@ export function createControllerSession(deps: {
    * claims again and sends the start message once that claim succeeds; refused after it (the role
    * claim or the subscription), the start turn runs holding the registration, and
    * `/legion-claim-controller` claims the role and its wakes again. The command itself never fails
-   * past that notice. Run again once the start message is sent — after a claim that succeeded, or
-   * one that failed past the send — it claims nothing: there is nothing to do, or, while the claim
-   * is unfinished, a warning naming `/legion-claim-controller`. A hand-started takeover and the
-   * controller the daemon launched (which claimed at `session_start`) have nothing to do either,
-   * and the command says so. Oh My Pi reads the terminal while the claim runs, so the operator can
-   * run the command again before it ends: that run decides after the claim in flight.
+   * past that notice. Run again once the start message is sent, it claims nothing: there is
+   * nothing to do once a claim succeeded, and while the last claim that registered (the one that
+   * sent it, or a later one) did not finish, a warning names `/legion-claim-controller`. A `/new`
+   * while its claim runs stops that claim at its registration, before the send, with a notice that
+   * the re-claim the session change starts claims the new session and sends the start message
+   * there; no warning, as nothing failed. A hand-started takeover and the controller the daemon
+   * launched (which claimed at `session_start`) have nothing to do either, and the command says
+   * so. Oh My Pi reads the terminal while the claim runs, so the operator can run the command
+   * again before it ends: that run says it is waiting and decides after the claim in flight.
    */
-  const startCommand = (context: CommandContext): Promise<void> =>
-    serialised(async () => {
+  const startCommand = (context: CommandContext): Promise<void> => {
+    noteWait(context);
+    return serialised(async () => {
       if (!operatorLaunchedController(process.env) || claimComplete) {
         context.ui.notify(
           "legion: nothing to do: the controller claim already succeeded in this process, or this session claims no controller from this command (a hand-started takeover, or the controller the daemon launched).",
@@ -348,7 +388,7 @@ export function createControllerSession(deps: {
         return;
       }
       try {
-        await claimOnce(context);
+        await claimOnce(context, { registered: false });
       } catch (error) {
         const message = messageFor(error);
         logger.error(`[legion] the controller claim failed: ${message}`);
@@ -360,6 +400,7 @@ export function createControllerSession(deps: {
         );
       }
     });
+  };
 
   /**
    * `/new`, `/resume`, or `/fork` can replace the controller session and its transcript in place.
@@ -376,13 +417,14 @@ export function createControllerSession(deps: {
     ) {
       return;
     }
+    // Whether this claim reached its registration: one refused after it left this session
+    // registered, so its grants mint; one refused before it registered nothing for it.
+    const progress: ClaimProgress = { registered: false };
     try {
-      await claim(context);
+      await queueClaim(context, progress);
     } catch (error) {
-      // A claim refused after its registration left this session registered: its grants mint.
-      const registered = controllerSessionID === context.sessionManager.getSessionId();
       context.ui.notify(
-        registered
+        progress.registered
           ? `legion: re-claiming the controller for this session failed (${messageFor(error)}). The session keeps its controller registration, so the \`legion\` tool's set_status still works, but until a re-claim succeeds controller wakes and merges will not reach this session.`
           : `legion: re-claiming the controller for this session failed (${messageFor(error)}). Until a re-claim succeeds, controller wakes and merges will not reach this session, and the \`legion\` tool's set_status and its other operations that call the daemon have no controller grant to mint and fail.`,
         "warning"

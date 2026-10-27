@@ -2723,7 +2723,13 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     held.resolve();
 
     expect(await first).toEqual([]);
-    expect(await second).toEqual([NOTHING_TO_DO]);
+    expect(await second).toEqual([
+      {
+        message: "legion: waiting for the controller claim already running to finish.",
+        level: "info",
+      },
+      NOTHING_TO_DO,
+    ]);
     expect(registrations).toBe(1);
     expect(controller.sentUserMessages).toEqual([
       "Legion controller start: follow skill://legion-controller",
@@ -3119,6 +3125,43 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     ]);
   });
 
+  // A re-claim refused at its registration (a later `legion controller start` revoked the
+  // capability) registered nothing, though the session id is still the one the last claim
+  // registered: the warning says the session has no controller grant, not that it keeps a
+  // registration.
+  test("a re-claim refused at its registration warns without saying the session keeps its registration, even for the session last registered", async () => {
+    let refuseRegister = false;
+    const controller = await launchedController({
+      sessionId: "ses_controller_reclaim_revoked",
+      register: () =>
+        refuseRegister
+          ? Response.json({ error: "capability revoked" }, { status: 403 })
+          : undefined,
+    });
+    await startOperatorController(controller, controller.context("ses_controller_reclaim_revoked"));
+    const notices: CommandNotice[] = [];
+    // The same session id on a moved transcript, so the navigation claims again.
+    const moved: SessionContext = {
+      ...controller.context("ses_controller_reclaim_revoked", "/tmp/moved/revoked.jsonl"),
+      ui: { notify: (message, level) => notices.push({ message, level }) },
+    };
+    const roleClaims = () =>
+      controller.requests.filter((request) => request.path === "/v1/roles/set").length;
+    const roleClaimsBefore = roleClaims();
+
+    refuseRegister = true;
+    await controller.handlers.get("session_tree")?.({}, moved);
+
+    expect(notices).toEqual([
+      {
+        message:
+          "legion: re-claiming the controller for this session failed (POST /legion/v1/claims/register failed with 403: capability revoked). Until a re-claim succeeds, controller wakes and merges will not reach this session, and the `legion` tool's set_status and its other operations that call the daemon have no controller grant to mint and fail.",
+        level: "warning",
+      },
+    ]);
+    expect(roleClaims()).toBe(roleClaimsBefore);
+  });
+
   // The operator's own first turn started before the command ran: that run's one `agent_start` has
   // fired, and the follow-up runs inside it (Oh My Pi drains follow-ups in the same run), so no
   // later `agent_start` would clear a mark. None is set.
@@ -3137,44 +3180,77 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     expect(envoyPluginInterface().startupTurn).toBeUndefined();
   });
 
-  // A `/new` while the command's claim runs leaves the start message to land in the new session:
-  // the mark names the session current at the send, which that session's first run clears, not the
-  // one the claim registered. The role claim for the replaced session then fails, as Envoy has
-  // moved on to the new one (the switch's own re-claim takes the role there), and the warning says
-  // the start message was already sent.
-  test("the startup-turn mark names the session current at the send when the session changed during the claim", async () => {
-    let current = "ses_controller_before_new";
+  // A `/new` while the command's claim runs: the claim registered the replaced session, and the
+  // start message sent there would mark a session Envoy holds no role claim for, the role claim
+  // for it would fail, and the warning would say the start message was sent. The claim stops at its
+  // registration instead, sending nothing, and the session change's re-claim registers the new
+  // session and sends the one start message there, marking it.
+  test("a /new during the start command's claim sends nothing from that claim, and the session change's re-claim registers the new session and sends the one start message there", async () => {
+    const before = "ses_controller_before_new";
+    const after = "ses_controller_after_new";
+    const message = "Legion controller start: follow skill://legion-controller";
+    let current = before;
+    const firstRegistration = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<void>();
+    const sentAtRegister: { session: string; sent: string[] }[] = [];
     const controller = await launchedController({
-      sessionId: "ses_controller_before_new",
-      register: () => {
-        current = "ses_controller_after_new";
+      sessionId: before,
+      register: async (body) => {
+        sentAtRegister.push({
+          session: String(body.sessionId),
+          sent: [...controller.sentUserMessages],
+        });
+        if (sentAtRegister.length === 1) {
+          firstRegistration.resolve();
+          await held.promise;
+        }
         return undefined;
       },
     });
-    const base = controller.context("ses_controller_before_new");
+    const base = controller.context(before);
     const context: SessionContext = {
       ...base,
       sessionManager: { ...base.sessionManager, getSessionId: () => current },
     };
+    await controller.handlers.get("session_start")?.({}, context);
 
-    const { notices } = await startRefusedController(controller, context);
+    const started = loggedErrors(() => runStartCommand(controller, context));
+    await firstRegistration.promise;
+    // The `/new`: the session changes in place, and its session_switch re-claims.
+    current = after;
+    const switchNotices: CommandNotice[] = [];
+    const switchContext: SessionContext = {
+      ...controller.context(after),
+      ui: { notify: (notice, level) => switchNotices.push({ message: notice, level }) },
+    };
+    const switched = controller.handlers.get("session_switch")?.({}, switchContext);
+    held.resolve();
+    const { value: notices, errors } = await started;
+    await switched;
+
     expect(notices).toEqual([
-      claimRefusedAfterSend(
-        "Envoy has no active session for Legion role claim: ses_controller_before_new"
-      ),
+      {
+        message:
+          "legion: the session changed while the controller claim ran; the claim for the new session follows and sends the start message there.",
+        level: "info",
+      },
     ]);
-
-    expect(
-      controller.requests.find((request) => request.path === "/legion/v1/claims/register")?.body
-    ).toMatchObject({ sessionId: "ses_controller_before_new" });
+    expect(errors).toEqual([]);
+    expect(switchNotices.filter((notice) => notice.level === "warning")).toEqual([]);
+    // The start claim registered the replaced session and sent nothing; the re-claim registered
+    // the new one, then sent the start message into it.
+    expect(sentAtRegister).toEqual([
+      { session: before, sent: [] },
+      { session: after, sent: [] },
+    ]);
+    expect(controller.sentUserMessages).toEqual([message]);
     expect(envoyPluginInterface().startupTurn).toEqual({
-      session: "ses_controller_after_new",
+      session: after,
       sentAt: expect.any(Number),
     });
-    await controller.handlers.get("agent_start")?.(
-      {},
-      controller.context("ses_controller_after_new")
-    );
+    expect(controller.holder()).toBe(after);
+    expect(await runStartCommand(controller, controller.context(after))).toEqual([NOTHING_TO_DO]);
+    await controller.handlers.get("agent_start")?.({}, controller.context(after));
     expect(envoyPluginInterface().startupTurn).toBeUndefined();
   });
 
