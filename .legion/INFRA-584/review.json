@@ -2,32 +2,19 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-584",
-  "completed": "2026-10-27T10:57:00Z",
-  "round": 2,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "d317a9a5b79908b0615680e51c0eb621fc88d84e",
+  "completed": "2026-10-27T12:25:30Z",
+  "round": 3,
+  "decision": "approved",
+  "reviewedCodeHead": "8e0352b99ae9cb5c2b540118c394efbd5d4227cf",
   "critical": 0,
   "important": 0,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": ".github/scripts/check-bun-version.sh:32",
-      "description": "Rule 8's new text says no-cache is an input 'which caches but cannot change the version'; no-cache turns setup-bun's cache off (setup-bun@0c5077e action.yml 'Disable caching of bun executable'). This is the only written statement of rule 8 and it is prose this pull request wrote (AC5)."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/scripts/check-bun-version.sh:339 and .github/scripts/check-bun-version.test.sh:165",
-      "description": "Round 2 made two lines contradict rule 8: the script comment guards against a wrapper 'given a second input' and the test label says 'any extra input on the wrapper fails', while the shipped wrapper passes no-cache as a second input and line 361 admits it."
-    }
+  "minor": 0,
+  "keyFindings": [],
+  "ci": "Required lint, typecheck, test and pr-title completed success at 8e0352b9 (CI head of the newest pull_request run); compare 8e0352b9...6424f18e changes only .legion/ (2 files). Caches API: 0 entries under refs/pull/2328/merge.",
+  "threads": "All five reviewer threads answered by the reviewer and accepted: PRRT_kwDORFy7ds6wk0MZ, PRRT_kwDORFy7ds6wk0Mc, PRRT_kwDORFy7ds6wk0Mf (round 1, fixed in d317a9a5), PRRT_kwDORFy7ds6wpqzY, PRRT_kwDORFy7ds6wpqzh (round 2, fixed in 8e0352b9). No bot threads.",
+  "notFindings": [
+    "thermonuclear-code-quality minor at 8e0352b9: 'since setup-bun prefers them' and 'while CI installed something else' overstate the reason for refusing inputs such as registries or token. Not a defect: that reasoning predates this pull request (the unchanged error text at check-bun-version.sh:373-374 says the same), and rule 8 is a deliberate allowlist that refuses every unknown input.",
+    "thermonuclear-deep-review minor: the PR body's Not proven / risk bullet about the two wording fixes was stale; the reviewer owns that line and removed it."
   ],
-  "round1Findings": {
-    "testRed": "fixed: lint, typecheck and test green at d317a9a5 in Tests 40463123255, on a merge ref with #2317",
-    "noCacheHalfGate": "fixed in d317a9a5 (value pin removed); thread PRRT_kwDORFy7ds6wk0MZ accepted",
-    "overstatedProof": "fixed: envoy-infra-go 122143396749, envoy-e2e-local 122143396501 and pi-legion 122143397168 completed with restore success and save skipped; the tester's corrections field records it",
-    "workerImageComment": "fixed in d317a9a5; thread PRRT_kwDORFy7ds6wk0Mc accepted",
-    "setupBunComment": "fixed in d317a9a5; thread PRRT_kwDORFy7ds6wk0Mf accepted"
-  },
-  "deferralNote": "The two findings are wording only, but the deployment's rules allow no deferral and no later work owns check-bun-version.sh, so they are fixed in this pull request rather than put on a Fast-follow line.",
-  "thermonuclear": "deep-review APPROVE (0 critical, 0 important, 2 minor: the rule-8 wording and stale PR-body risk bullets, which the reviewer owns and updated) and code-quality CHANGES (0 critical, 0 important, 2 minor) at d317a9a5"
+  "thermonuclear": "deep-review APPROVE (0 critical, 0 important, 1 minor, PR text) and code-quality (0 critical, 0 important, 1 minor, judged not a defect) at 8e0352b9"
 }
