@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 )
 
 // detailReach reads one issue's detail and answers its reach as reachText writes it.
@@ -30,11 +28,12 @@ func sreReach(roster routeRoster) string {
 	return reachText(reach.RouteStatus, reach.RouteHolder)
 }
 
-// heldRosterServer is a server register builds whose listener's GET /v1/sessions lists ses-sre
-// holding sre, but only once release is called: until then every call waits, so a test can hold
-// one fetch open while other reads arrive. calls counts the requests that reached it. The fetch's
-// bound, the listener client's window and the TTL are each a minute, so however long a loaded
-// machine takes to release the fetch, it reads no timeout as unknown and no expiry calls again.
+// heldRosterServer is a test server on a database of its own whose listener's GET /v1/sessions
+// lists ses-sre holding sre, but only once release is called: until then every call waits, so a
+// test can hold one fetch open while other reads arrive. calls counts the requests that reached
+// it. The fetch's bound, the listener client's window and the TTL are each a minute, so however
+// long a loaded machine takes to release the fetch, it reads no timeout as unknown and no expiry
+// calls again.
 func heldRosterServer(t *testing.T) (served *server, calls *atomic.Int32, release func()) {
 	t.Helper()
 	calls = &atomic.Int32{}
@@ -53,7 +52,7 @@ func heldRosterServer(t *testing.T) (served *server, calls *atomic.Int32, releas
 	// Release before the close, which waits for every request in flight to finish.
 	t.Cleanup(listener.Close)
 	t.Cleanup(release)
-	served = register(http.NewServeMux(), Deps{Envoy: envoy.New(listener.URL, envoy.WithTimeout(time.Minute))})
+	_, _, _, served = newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL, envoyTimeout: time.Minute})
 	served.rosters.ttl, served.rosters.timeout = time.Minute, time.Minute
 	return served, calls, release
 }
@@ -210,11 +209,12 @@ func TestAListenerThatDoesNotAnswerHoldsAReadOnlyForTheFetchBound(t *testing.T) 
 	}
 }
 
-// timedRosterServer is a server register builds whose listener answers GET /v1/sessions with
-// ses-sre holding sre after delay, or, when hang is set, not until the test ends. calls counts the
-// requests that reached it. The listener client's own window is a minute, so only the fetch's
-// bound ends a call early.
-func timedRosterServer(t *testing.T, delay time.Duration, hang bool) (*server, *atomic.Int32) {
+// timedRosterServer is a test server on a database of its own whose listener answers GET
+// /v1/sessions with ses-sre holding sre after delay, or, when hang is set, not until the test
+// ends. calls counts the requests that reached it. The listener client's own window is a minute,
+// so only the fetch's bound ends a call early. lifetime is the server's Deps.Lifetime, nil for the
+// test's own context.
+func timedRosterServer(t *testing.T, delay time.Duration, hang bool, lifetime context.Context) (*server, *atomic.Int32) {
 	t.Helper()
 	calls := &atomic.Int32{}
 	gate := make(chan struct{})
@@ -229,7 +229,8 @@ func timedRosterServer(t *testing.T, delay time.Duration, hang bool) (*server, *
 	// Cleanups run last first: the gate opens, then the close waits for the requests it freed.
 	t.Cleanup(listener.Close)
 	t.Cleanup(func() { close(gate) })
-	return register(http.NewServeMux(), Deps{Envoy: envoy.New(listener.URL, envoy.WithTimeout(time.Minute))}), calls
+	_, _, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL, envoyTimeout: time.Minute, lifetime: lifetime})
+	return served, calls
 }
 
 // An answer's TTL counts from the moment its call was sent, so a slow listener cannot stretch the
@@ -237,7 +238,7 @@ func timedRosterServer(t *testing.T, delay time.Duration, hang bool) (*server, *
 // after it was sent: a read 2.2 s in asks again, where a TTL counted from the answer would serve
 // it until 2.5 s.
 func TestAnAnswersTTLCountsFromWhenItsCallWasSent(t *testing.T) {
-	served, calls := timedRosterServer(t, time.Second, false)
+	served, calls := timedRosterServer(t, time.Second, false, nil)
 	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = 1500*time.Millisecond, time.Minute, time.Minute
 	started := time.Now()
 	if !served.readRouteRoster(context.Background()).answered {
@@ -255,7 +256,7 @@ func TestAnAnswersTTLCountsFromWhenItsCallWasSent(t *testing.T) {
 // leaves the listener alone until 2.5 s: a read 2 s in asks nothing, where a window counted from
 // the send would have ended at 1.5 s.
 func TestAFailuresWindowCountsFromWhenTheFailureIsKnown(t *testing.T) {
-	served, calls := timedRosterServer(t, 0, true)
+	served, calls := timedRosterServer(t, 0, true, nil)
 	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = time.Minute, 1500*time.Millisecond, time.Second
 	started := time.Now()
 	if served.readRouteRoster(context.Background()).answered {
@@ -276,11 +277,9 @@ func TestAFailuresWindowCountsFromWhenTheFailureIsKnown(t *testing.T) {
 // listener that hangs returns unknown once the lifetime ends, not when the fetch's bound (a minute
 // here) runs out.
 func TestAShutdownEndsAFetchInFlight(t *testing.T) {
-	served, _ := timedRosterServer(t, 0, true)
-	lifetime, shutdown := context.WithCancel(context.Background())
+	lifetime, shutdown := context.WithCancel(t.Context())
 	defer shutdown()
-	// Set after register, which with a Lifetime would also build the delivery hub on a nil store.
-	served.deps.Lifetime = lifetime
+	served, _ := timedRosterServer(t, 0, true, lifetime)
 	served.rosters.timeout = time.Minute
 	answer := make(chan routeRoster, 1)
 	go func() { answer <- served.readRouteRoster(context.Background()) }()

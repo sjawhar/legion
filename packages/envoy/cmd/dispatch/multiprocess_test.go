@@ -1501,11 +1501,12 @@ func requireAbandoned(t *testing.T, held ...heldRequest) {
 }
 
 // fakeListener is the Envoy listener both processes of a pair deliver through (ENVOY_URL): an
-// httptest server in the test process that knows a fixed set of live sessions, serves the three
-// routes a delivery calls (the registry read, the live list and the send) and records every send
-// it answers. A send whose key and recipient it has already answered is answered as a duplicate,
-// as the real listener answers a repeat inside contracts.DeliveryDuplicateWindow, and recorded
-// as one. A row holds a route (hold) to keep a request unanswered while it acts on the processes;
+// httptest server in the test process that knows a set of live sessions (a row may replace it,
+// setSessions), serves the three routes a delivery calls (the registry read, the live list and
+// the send), counts every live-list read it answers, and records every send it answers. A send
+// whose key and recipient it has already answered is answered as a duplicate, as the real
+// listener answers a repeat inside contracts.DeliveryDuplicateWindow, and recorded as one. A row
+// holds a route (hold) to keep a request unanswered while it acts on the processes;
 // a held request whose caller goes away is never answered and never recorded, so a send a killed
 // process made is not one that reached the session. Every hold is released when the test ends,
 // before the server closes, since a close waits for every request still in flight.
@@ -1517,12 +1518,14 @@ func requireAbandoned(t *testing.T, held ...heldRequest) {
 // send still meets that 503, and for its fourth it holds no session yet - the registry read and
 // the send answer "no live session", the live list is empty - and after that it answers as before.
 type fakeListener struct {
-	server   *httptest.Server
-	sessions []listenerSession
+	server *httptest.Server
 
 	mu       sync.Mutex
-	answered []listenerSendRecord
-	holds    map[listenerRoute]*listenerHold
+	sessions []listenerSession
+	// sessionLists counts the GET /v1/sessions reads the listener answered.
+	sessionLists int
+	answered     []listenerSendRecord
+	holds        map[listenerRoute]*listenerHold
 	// takeOverFrom is when the take-over began, zero when there is none; takeOverPhases is how
 	// long it refuses connections, answers 503 on every route, answers 503 on the send alone, and
 	// holds no session, in that order.
@@ -1562,6 +1565,21 @@ func (f *fakeListener) processEnv(resumeInterval time.Duration) map[string]strin
 		"ENVOY_URL":                              f.server.URL,
 		"DISPATCH_TEST_DELIVERY_RESUME_INTERVAL": resumeInterval.String(),
 	}
+}
+
+// setSessions replaces the sessions the listener knows: from now on its registry read, its live
+// list and its send answer as though exactly these were live.
+func (f *fakeListener) setSessions(sessions ...listenerSession) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sessions = sessions
+}
+
+// sessionListings is how many GET /v1/sessions reads the listener has answered.
+func (f *fakeListener) sessionListings() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sessionLists
 }
 
 // hold keeps every request on route unanswered from now until the returned hold is released. A
@@ -1720,11 +1738,14 @@ func (f *fakeListener) serve(w http.ResponseWriter, r *http.Request) {
 		if !f.await(listenerSessions, "", r) {
 			return
 		}
-		if phase == takeOverUnknown {
-			_ = json.NewEncoder(w).Encode([]listenerSession{})
-			return
+		f.mu.Lock()
+		f.sessionLists++
+		sessions := f.sessions
+		f.mu.Unlock()
+		if phase == takeOverUnknown || sessions == nil {
+			sessions = []listenerSession{}
 		}
-		_ = json.NewEncoder(w).Encode(f.sessions)
+		_ = json.NewEncoder(w).Encode(sessions)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 		var send struct {
 			TargetSession  string `json:"target_session"`
@@ -1780,6 +1801,8 @@ func (f *fakeListener) await(route listenerRoute, subject string, r *http.Reques
 }
 
 func (f *fakeListener) session(sessionID string) (listenerSession, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, session := range f.sessions {
 		if session.SessionID == sessionID {
 			return session, true
@@ -2534,4 +2557,134 @@ func TestTwoProcessesSyncingOneProjectNeverWriteTheOlderCommit(t *testing.T) {
 	if want := []string{newer}; !slices.Equal(synced, want) {
 		t.Errorf("architecture.synced events name %v, want %v once", synced, want)
 	}
+}
+
+// ───── route status from one stored listener answer ────────────────────────
+
+// rosterEnv is what both processes of a route-status row are started with: the fake listener as
+// ENVOY_URL, the resume loop an hour out (no row here sends anything), and a listener answer that
+// serves issue reads for a minute (DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks every
+// process here runs with), so the row reads both processes inside one answer's life however slow
+// the machine, with no timing window.
+func rosterEnv(listener *fakeListener) map[string]string {
+	env := listener.processEnv(time.Hour)
+	env["DISPATCH_TEST_ROUTE_ROSTER_TTL"] = time.Minute.String()
+	return env
+}
+
+// routeIssue creates an issue in project titled title and routes it to route, returning its key.
+func (p *dispatchProcess) routeIssue(t *testing.T, project, title, route string) string {
+	t.Helper()
+	created := p.call(t, http.MethodPost, "/api/v1/issues",
+		fmt.Sprintf(`{"project":%q,"title":%q,"force":true}`, project, title), http.StatusCreated)
+	var issue struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(created, &issue); err != nil || issue.Key == "" {
+		t.Fatalf("create issue: %v: %s", err, created)
+	}
+	p.call(t, http.MethodPatch, "/api/v1/issues/"+issue.Key, fmt.Sprintf(`{"route":%q}`, route), http.StatusOK)
+	return issue.Key
+}
+
+// issueReach is the issue's route_status and route_holder as GET /api/v1/issues/{key} on this
+// process answers them, "<status> <holder>", each "null" when absent.
+func (p *dispatchProcess) issueReach(t *testing.T, key string) string {
+	t.Helper()
+	var issue struct {
+		RouteStatus *string `json:"route_status"`
+		RouteHolder *string `json:"route_holder"`
+	}
+	answer := p.call(t, http.MethodGet, "/api/v1/issues/"+key, "", http.StatusOK)
+	if err := json.Unmarshal(answer, &issue); err != nil {
+		t.Fatalf("decode %s: %v: %s", key, err, answer)
+	}
+	orNull := func(value *string) string {
+		if value == nil {
+			return "null"
+		}
+		return *value
+	}
+	return orNull(issue.RouteStatus) + " " + orNull(issue.RouteHolder)
+}
+
+// liveRoutesPage is one page of project's open issues whose route reaches a live session, as GET
+// /api/v1/issues?route_status=live on this process answers it: the page's keys and its total.
+func (p *dispatchProcess) liveRoutesPage(t *testing.T, project string, limit, offset int) (keys []string, total int) {
+	t.Helper()
+	var page struct {
+		Issues []struct {
+			Key string `json:"key"`
+		} `json:"issues"`
+		Total int `json:"total"`
+	}
+	answer := p.call(t, http.MethodGet,
+		fmt.Sprintf("/api/v1/issues?project=%s&route_status=live&limit=%d&offset=%d", project, limit, offset), "", http.StatusOK)
+	if err := json.Unmarshal(answer, &page); err != nil {
+		t.Fatalf("decode the page at offset %d: %v: %s", offset, err, answer)
+	}
+	for _, issue := range page.Issues {
+		keys = append(keys, issue.Key)
+	}
+	return keys, page.Total
+}
+
+// Both processes judge a route against one stored listener answer. A route A reads live reads the
+// same on B, and again on A, after the listener stops listing its holder, inside the answer's life:
+// B does not ask the listener for a copy of its own, so the listener answers one live-list read
+// in all. A filtered listing paged across the two processes is cut from that one answer too: a
+// page read on B after the listener's list has flipped holds the rest of the issues A's page was
+// cut from, never issues judged against B's own later copy.
+func TestBothProcessesJudgeARouteAgainstOneRoster(t *testing.T) {
+	sre := listenerSession{SessionID: "sre-holder", Title: "sre", Roles: []string{"sre"}, Capabilities: []string{}}
+	reviewer := listenerSession{SessionID: "reviewer-holder", Title: "reviewer", Roles: []string{"reviewer"}, Capabilities: []string{}}
+
+	t.Run("an issue's route", func(t *testing.T) {
+		listener := startFakeListener(t, sre)
+		pair := startPair(t, rosterEnv(listener))
+		project := uniqueProjectKey(t, "RST")
+		pair.a.createProject(t, project, "One roster")
+		key := pair.a.routeIssue(t, project, "Routed to sre", "role:sre")
+
+		if got := pair.a.issueReach(t, key); got != "live sre-holder" {
+			t.Fatalf("A reads %s while the listener lists the holder, want live sre-holder", got)
+		}
+		listener.setSessions()
+		for _, reader := range []*dispatchProcess{pair.b, pair.a} {
+			if got := reader.issueReach(t, key); got != "live sre-holder" {
+				t.Fatalf("%s reads %s after the listener stopped listing the holder, want the stored live sre-holder",
+					pair.name(reader), got)
+			}
+		}
+		if calls := listener.sessionListings(); calls != 1 {
+			t.Fatalf("the listener answered %d live-list reads, want 1: both processes judge against one stored answer", calls)
+		}
+	})
+
+	t.Run("a filtered page", func(t *testing.T) {
+		listener := startFakeListener(t, sre)
+		pair := startPair(t, rosterEnv(listener))
+		project := uniqueProjectKey(t, "RSP")
+		pair.a.createProject(t, project, "One roster, paged")
+		routedToSRE := make([]string, 0, 6)
+		for index := range 6 {
+			routedToSRE = append(routedToSRE, pair.a.routeIssue(t, project, fmt.Sprintf("SRE work %d", index), "role:sre"))
+			pair.a.routeIssue(t, project, fmt.Sprintf("Review work %d", index), "role:reviewer")
+		}
+
+		first, firstTotal := pair.a.liveRoutesPage(t, project, 3, 0)
+		listener.setSessions(reviewer)
+		second, secondTotal := pair.b.liveRoutesPage(t, project, 3, 3)
+		if firstTotal != 6 || secondTotal != 6 {
+			t.Errorf("total reads %d on A and %d on B, want 6 on both", firstTotal, secondTotal)
+		}
+		paged := slices.Concat(first, second)
+		slices.Sort(paged)
+		want := slices.Clone(routedToSRE)
+		slices.Sort(want)
+		if !slices.Equal(paged, want) {
+			t.Fatalf("page 1 on A holds %v and page 2 on B holds %v, want together exactly the issues routed to sre %v",
+				first, second, routedToSRE)
+		}
+	})
 }
