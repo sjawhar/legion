@@ -96,19 +96,20 @@ func writeClaudeMCPConfig(configDir string, launch ClaudeLaunch) (string, error)
 }
 
 // claudeInnerCommand is the command the shim runs for a Claude Code role: `legion claude-bridge`
-// around `claude -p` in stream-json both ways, with every permission granted (a headless worker has
-// no one to ask), only the MCP server mcpConfig names (an operator's own servers never load), the
-// claude-envoy plugin and the generated Legion plugin for their skills, agents and the `dispatch`
-// command, the session — `--session-id` for a fresh one, `--resume` to continue one — and the one
-// system prompt word every pane gets.
+// around `claude -p` in stream-json both ways, re-emitting each user message it takes from stdin
+// (--replay-user-messages: the bridge answers an Envoy delivery once Claude Code has taken it), with
+// every permission granted (a headless worker has no one to ask), only the MCP server mcpConfig
+// names (an operator's own servers never load), the claude-envoy plugin and the generated Legion
+// plugin for their skills, agents and the `dispatch` command, the session — `--session-id` for a
+// fresh one, `--resume` to continue one — and the one system prompt word every pane gets.
 func claudeInnerCommand(legion string, launch ClaudeLaunch, mcpConfig, session string, resume bool, parts runtime.PromptParts) string {
 	flag := "--session-id"
 	if resume {
 		flag = "--resume"
 	}
 	return shellprefix.Word(legion) + " claude-bridge -- " + shellprefix.Word(launch.Binary) +
-		" -p --input-format stream-json --output-format stream-json --verbose --permission-mode bypassPermissions" +
-		" --strict-mcp-config --mcp-config " + shellprefix.Word(mcpConfig) +
+		" -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages" +
+		" --permission-mode bypassPermissions --strict-mcp-config --mcp-config " + shellprefix.Word(mcpConfig) +
 		" --plugin-dir " + shellprefix.Word(launch.PluginDir) +
 		" --plugin-dir " + shellprefix.Word(filepath.Join(launch.PluginDir, "legion")) +
 		" " + flag + " " + session + " " + omplaunch.SystemPromptArgument(parts)
