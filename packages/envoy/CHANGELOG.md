@@ -1418,6 +1418,18 @@
 
 ### Fixed
 
+- A document now strikes tilde runs as a comment does. A run of `~` pairs only with a run of its
+  own length, so `Plain ~a~~ text.` and `Plain ~~a~ text.` keep their tildes where a document
+  written through the API struck `a`; a run directly after an escaped tilde may open or close, so
+  `Plain ~\~~ end.` strikes the tilde where a document showed `~~~`; and `~` runs pair apart from
+  `*` and `_` runs, in the browser editor's order, so `x* ~~a*b~~c*` is emphasis `b~~c` in both.
+  Reading a paragraph of mixed `~` and `*` runs is now linear in its length: a mebibyte of
+  `~~a ` then `a* ` took over a minute. A rendering stored correctly keeps its bytes; one the
+  browser misread, such as text `~~~x~~` stored as `\~~~x~~`, which the browser strikes, is written
+  anew (`&#126;&#126;&#126;x&#126;&#126;`) when its document is next rendered, and no stored
+  document is rewritten. An image inside an image's label now adds its own alt text to the outer
+  alt text, as the browser editor reads it (INFRA-534).
+
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
   Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no

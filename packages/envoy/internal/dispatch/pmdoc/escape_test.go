@@ -168,7 +168,9 @@ func TestRenderEscapesBlockFormsInAListNestedInABlockquote(t *testing.T) {
 // GFM reads a single tilde as strikethrough too, and refuses a delimiter run of three: text
 // `~a~` came back struck, and struck text ending or starting with a tilde lost its strike. Such a
 // paragraph writes its tildes as references; a paragraph whose tildes pair with nothing - "about
-// ~200ms" - and an ordinary strikethrough keep the bytes they have always had.
+// ~200ms" - and an ordinary strikethrough keep the bytes they have always had. Runs of different
+// lengths pair by goldmark's rules though not the browser editor's, so they are written as
+// references too, which both read back.
 func TestRenderKeepsTildesAsTheyWereWritten(t *testing.T) {
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	struck := Mark{Type: "strike_through"}

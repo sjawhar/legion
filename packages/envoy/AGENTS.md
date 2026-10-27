@@ -1534,12 +1534,18 @@ is text. A run of `*` or `_` can also open where another `*` or `_` follows it a
 precedes it, as that parser's attention markers let it (`emphasisParser`), where goldmark's
 flanking rules alone decide, so in `b_*a**` the `*` can both open and close, the rule of three
 keeps it from the `**`, and the line is text. That parser counts `~` as such a marker too, and Go
-does not: beside a `~` its strikethrough resolver pairs runs apart from and sometimes before the
-`*` and `_` runs, which goldmark's one delimiter stack does not model, so the `~` half alone would
-misread `[**~~**d**~~**](u)`, which both parsers read as strong struck `d` under the flanking rules.
-The writer takes a spelling that reads back under CommonMark's flanking rules as well before one
-that reads back under that parser's alone (`inlineWithEscapes`), so it keeps the bytes it wrote
-before the marker rule. A code span keeps the whitespace that
+does not yet (INFRA-535). A run of `~` pairs only with a run of its own length, one or two, and a
+run directly after a `~` is text unless a backslash escapes that `~` (`tildeParser`), as the
+browser editor's strikethrough reads them. pmdoc pairs the runs itself (`delimiterList`), never on
+goldmark's delimiter stack: `~` runs and `*`/`_` runs in separate passes, as that parser's two
+resolvers do, the kind whose run the textblock tokenized first going first, `~` first inside a
+link or image label, and the runs a pair encloses paired inside it; and a closer looks back only
+at runs of its own kind, so pairing is linear in the runs. The writer takes a spelling that reads
+back under goldmark's rules as well (`goldmarkMarkdown`: flanking alone, `~` runs of either length
+paired, a run after any `~` refused, every run in one loop) before one that reads back under that
+parser's alone (`inlineWithEscapes`), and an image's alt text must read back under both
+(`altReadsBack`), so it keeps the bytes it wrote while Dispatch read by goldmark's rules. A code
+span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
