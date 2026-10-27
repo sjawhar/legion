@@ -106,8 +106,9 @@
 # server, and a Dispatch bearer cannot be limited to one project, so a shared server would show
 # each run the other runs' issues and asks. Each run records its Dispatch in <run>/dispatch.json,
 # and score.ts does not score two runs that name one database. Docker assigns the containers' host
-# ports, the listener and each Dispatch bind ports scripts/e2e/lib/rig.sh picks, and the kernel
-# assigns each run's daemon stand-in its port.
+# ports, the listener serves on a port the kernel chose and scripts/e2e/lib/rig.sh holds for it
+# until it serves (start_held), each run's Dispatch on its own run-server.sh holds the same way and
+# reports, and the kernel assigns each run's daemon stand-in its port.
 #
 # Operator input (no default in this repository), for `profile`, `judge` and `judge-omp`:
 #   LEGION_E2E_MODEL_ROUTE        gateway (the default) or key-file: how the agents reach Anthropic;
@@ -230,7 +231,7 @@ superpowers_skills=(writing-plans brainstorming)
 
 mkdir -p "$work"
 
-# scripts/e2e/lib/rig.sh's bounded waits, port picks, and process start and stop. Each command
+# scripts/e2e/lib/rig.sh's bounded waits, held ports, and process start and stop. Each command
 # points `evidence` at the directory its processes log under ($evidence/logs/<name>.log).
 evidence=$work
 timeout_hook=
@@ -608,52 +609,33 @@ cmd_live_read() {
 
 services_env=$work/services/env
 
-# start_listener and start_dispatch pick a port for their service and start it there, picking again
-# when another process binds that port first (await_start's 2).
+# start_listener serves the Envoy listener on a port the kernel chose, held from that choice until
+# the listener serves on it (lib/rig.sh's start_held), and sets envoy_port.
 start_listener() {
-  local attempt offset result
-  for attempt in 1 2 3 4 5; do
-    pick_port envoy_port
-    offset=$(log_size listener)
-    ENVOY_API_TOKEN="$(<"$S/envoy-token")" PORT=$envoy_port ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_HOST_BRIDGE=127.0.0.1 \
-      ENVOY_MACHINE_ID="$tag" NATS_URLS="nats://127.0.0.1:$nats_port" start_process listener "$S/envoy-listener"
-    result=0
-    await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
-      curl -fsS -o /dev/null -H "Authorization: Bearer $(<"$S/envoy-token")" "http://127.0.0.1:$envoy_port/v1/sessions" || result=$?
-    [ "$result" != 0 ] || return 0
-    note "the Envoy listener lost port $envoy_port to another process (attempt $attempt); picking another"
-  done
-  fail "the Envoy listener lost its picked port five times"
-}
-
-# dispatch_answers is whether the server this run started answers on dispatch_port. The runs of a
-# batch pick their ports at once, each in a shell of its own, so two can pick one port. The second
-# server to bind it exits, but until it does, another run's server answers there, on that run's
-# database. So the server must answer, and the process that listens on the port must be the one
-# this run started: run-server.sh execs the server, so its pid is dispatch_pid.
-# shellcheck disable=SC2329 # start_dispatch's await_start runs it
-dispatch_answers() {
-  local listening
-  curl -fsS -o /dev/null -H 'Authorization: Bearer e2e-token' "http://127.0.0.1:$dispatch_port/api/v1/whoami" &&
-    listening=$(ss -ltnpH "sport = :$dispatch_port") && [[ $listening == *"pid=$dispatch_pid,"* ]]
+  ENVOY_API_TOKEN="$(<"$S/envoy-token")" ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_HOST_BRIDGE=127.0.0.1 \
+    ENVOY_MACHINE_ID="$tag" NATS_URLS="nats://127.0.0.1:$nats_port" \
+    start_held listener envoy_port ENVOY_LISTEN_FD --env 'PORT={port}' -- "$S/envoy-listener"
+  await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
+    curl -fsS -o /dev/null -H "Authorization: Bearer $(<"$S/envoy-token")" "http://127.0.0.1:$envoy_port/v1/sessions"
 }
 
 # start_dispatch DATABASE_URL starts the e2e harness's Dispatch server on that database. The
 # harness's fake Envoy and GitHub, which run-server.sh names and this rig does not run, are port 1,
 # where nothing listens; its broker switch is empty, so the server has no secrets broker.
+# With no DISPATCH_E2E_PORT, run-server.sh serves Dispatch on a port the kernel chose, held until
+# the server serves on it, and the server reports it (`msg="dispatch: listening"
+# addr=127.0.0.1:<port>`), which sets dispatch_port. Each run has an evidence directory of its own,
+# and the log is emptied first, so the line read is this run's own start.
 start_dispatch() {
-  local url=$1 attempt offset result
-  for attempt in 1 2 3 4 5; do
-    pick_port dispatch_port
-    offset=$(log_size dispatch)
-    DATABASE_URL=$url DISPATCH_E2E_PORT=$dispatch_port FAKE_ENVOY_PORT=1 FAKE_GITHUB_PORT=1 DISPATCH_E2E_AGENT_SECRETS_URL='' \
-      start_process dispatch bash "$root/packages/dispatch/e2e/run-server.sh"
-    result=0
-    await_start dispatch "$dispatch_pid" "$offset" 300 "Dispatch to answer /api/v1/whoami" dispatch_answers || result=$?
-    [ "$result" != 0 ] || return 0
-    note "Dispatch lost port $dispatch_port to another process (attempt $attempt); picking another"
-  done
-  fail "Dispatch lost its picked port five times"
+  local url=$1 log=$evidence/logs/dispatch.log
+  : >"$log"
+  DATABASE_URL=$url FAKE_ENVOY_PORT=1 FAKE_GITHUB_PORT=1 DISPATCH_E2E_AGENT_SECRETS_URL='' \
+    start_process dispatch bash "$root/packages/dispatch/e2e/run-server.sh"
+  await_start dispatch "$dispatch_pid" 300 "Dispatch to report its port" \
+    report_port "$log" 'msg="dispatch: listening" addr=127\.0\.0\.1:'
+  dispatch_port=$(report_port "$log" 'msg="dispatch: listening" addr=127\.0\.0\.1:')
+  await_start dispatch "$dispatch_pid" 60 "Dispatch to answer /api/v1/whoami" \
+    curl -fsS -o /dev/null -H 'Authorization: Bearer e2e-token' "http://127.0.0.1:$dispatch_port/api/v1/whoami"
 }
 
 # One batch at a time per work directory: $work/services/up is its lock, taken before the batch
@@ -1309,7 +1291,7 @@ run_tester_proof() {
   printf '[user]\nname = "Rig Worker"\nemail = "rig@example.invalid"\n[ui]\npaginate = "never"\n' >"$R/jj.toml"
   # Port 0: the kernel assigns the stand-in's port, which it prints, so concurrent runs never race.
   start_process daemon bun "$here/daemon-standin.ts" 0 "$R/daemon.log" "$state/secrets/boot" "$project" "$worker_key" tester
-  await_start daemon "$daemon_pid" 0 30 "the daemon stand-in to listen" grep -q '^listening on ' "$R/logs/daemon.log"
+  await_start daemon "$daemon_pid" 30 "the daemon stand-in to listen" grep -q '^listening on ' "$R/logs/daemon.log"
   port=$(sed -n 's|^listening on http://127\.0\.0\.1:||p' "$R/logs/daemon.log")
   base_env
   standins

@@ -4,6 +4,19 @@
 
 ### Added
 
+- A person's browser edit of a spec a session wrote reaches that session's channel as one card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block.
+- The `dispatch` command (`dist/dispatch.js`) reads one block of a document:
+  `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
+  `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
+  last changed in, its text, for a pinned reference its text at that version and whether it
+  changed or was removed since, and what cites it; `dist/` was regenerated. The block forms, the
+  pin and the 256-byte bound past which a block is no graph node are in the commands' `--help`
+  (`dispatch read --help`, `dispatch ask --help`, `dispatch doc-edit --help`).
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line; `dist/` was
+  regenerated.
 - The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
   filtered issue listing in one request rather than a page, for a caller that must not miss or
   repeat a row while the list changes under it. `--all` with `--limit` or `--offset` is a usage
@@ -85,6 +98,12 @@
   (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`; the shared hub's listener does not), where they said such a
   session received none. A session of this plugin holds its own NATS connection and receives such
   a topic as before (INFRA-122).
+
+- `scripts/smoke-session-title.sh` starts nats-server (`-p -1`) and the Envoy listener (`PORT=0`)
+  on ports the kernel chooses and reads each back from the server's own log, instead of picking a
+  port that was free a moment earlier, which another program could take before the server bound
+  it; the Dispatch address its session is configured with, which nothing serves, is
+  `http://127.0.0.1:1` (INFRA-253).
 
 ### Fixed
 

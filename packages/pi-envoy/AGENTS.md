@@ -246,16 +246,16 @@ sends an upload's bytes from that same read, and, when the session chose block, 
 with no matching marker (`gatedWrite`, the one predicate both sides use); a file that changed after
 the review matches none and gets the advice to send the call again in a later message. In warn mode,
 the default for these checks, the CLI writes the ledger line before it posts. The gate writes the
-checks' mode into the store for the CLI (`checkMode`: block only when the session chose it, and a
-store with no mode is warn), apart from the verdict's mode (`sessionMode`, block by default);
-`envoy.ts` turns each write the CLI logged as unmarked into an `unmarked` entry, and the gate
-appends a cause note (`nonLiteralCause`, `causeNote`) to the result of a call outside the literal
-form that the CLI refused. A gate that did not load mints nothing and writes no mode, so the CLI
-posts such a write with its warning, unless the session set `OMP_ASKGATE=block`, which
-`bindDispatchSession` writes into the store before the record; `loadFailureGate` refuses each
-literal call either way. Precision
-comes first: the gate refuses no call that holds no Dispatch write.
-Every other way a write passes
+checks' mode into the session's own record for the CLI (`checkMode`: block only when the session
+chose it; `setRecordMode` keys it per session, so a switch never changes another session's mode),
+apart from the verdict's mode (`sessionMode`, block by default); `envoy.ts` turns each write the
+CLI logged as unmarked into an `unmarked` entry, and the gate appends a cause note
+(`nonLiteralCause`, `causeNote`) to the result of a call outside the literal form that the CLI
+refused. A gate that did not load refuses each literal call at the hook (`loadFailureGate`) and
+mints nothing; it writes no mode, so a write that reaches the CLI — one outside the literal form,
+or a subagent's literal one — posts with its warning, unless the session set `OMP_ASKGATE=block`,
+which `bindDispatchSession` writes into the record at the bind. Precision comes first: the gate
+refuses no call that holds no Dispatch write. Every other way a write passes
 unreviewed records its outcome and tells the agent so (`renderUnreviewed`), and each one runs the
 agent's own command as written (`UNREVIEWED_OUTCOMES`): a gate that fails breaks no valid write.
 The model walk (`askModel` in `createAskGate`) is the one path a review takes to the

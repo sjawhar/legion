@@ -53,7 +53,7 @@ console.log("ready");
 await stdin.read();
 let dropped = 0;
 for (let write = 0; write < ${WRITES}; write += 1) {
-  writeAskgateRecord(dir, owner);
+  writeAskgateRecord(dir, owner, "warn");
   const state = askgateState(dir);
   if (state.kind !== "on" || !state.stores.includes(owner.store)) dropped += 1;
 }

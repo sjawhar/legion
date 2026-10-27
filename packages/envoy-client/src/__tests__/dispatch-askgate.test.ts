@@ -96,9 +96,10 @@ function ownerFile(id: string, owner: { pid: number; start: string | null }): st
 }
 
 /**
- * The record a live gate writes for session `id`: this test process stands in for Oh My Pi.
- * `mode` is what the gate records for the CLI's marker checks: `block`, as a session that chose
- * block does (most tests here), `warn`, or null for none recorded, which the CLI reads as warn.
+ * The record a live gate writes for session `id`: this test process stands in for Oh My Pi. `mode`
+ * is the check mode the owner file carries for the CLI's marker checks: `block`, as a session that
+ * chose block does (most tests here), `warn`, or null for a record whose owner file carries no
+ * mode, which the CLI reads as warn.
  */
 function writeRecord(
   id = "ses-1",
@@ -111,9 +112,8 @@ function writeRecord(
 ): void {
   const file = ownerFile(id, owner);
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify({ v: 1, ...owner }));
+  writeFileSync(file, JSON.stringify({ v: 2, ...owner, ...(mode === null ? {} : { mode }) }));
   mkdirSync(join(owner.store, "markers"), { recursive: true });
-  if (mode !== null) writeFileSync(join(owner.store, "mode"), mode);
 }
 
 /** The sha256 of a file's bytes, as a marker binds each file it names. */
@@ -552,7 +552,10 @@ describe("AskGate at the dispatch CLI", () => {
     expect(broken.code).toBe(1);
     expect(broken.stdout).toStartWith("dispatch message was not called: AskGate's record");
     expect(broken.stdout).toContain(file);
-    writeFileSync(file, JSON.stringify({ v: 1, ...self, store: join(stateDir, "gone") }));
+    writeFileSync(
+      file,
+      JSON.stringify({ v: 2, ...self, store: join(stateDir, "gone"), mode: "warn" })
+    );
     const missing = await run(MESSAGE);
     expect(missing.code).toBe(1);
     expect(missing.stdout).toContain(join(stateDir, "gone"));

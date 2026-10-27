@@ -22,7 +22,6 @@ import {
   dropAskgateRecord,
   openStore,
   selfOwner,
-  setStoreMode,
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
 import {
@@ -630,11 +629,12 @@ export default function envoyExtension(pi: PiApi): void {
   // (`@legion/envoy-client/askgate-marker`): written, while the gate is bound, for each session id
   // this top-level instance binds (`bindDispatchSession`; a subagent's instance binds none), and
   // kept for every one of them until shutdown, since a shell or kernel started before a switch
-  // still acts as the session it started in. A gate that did not load mints no marker and records
-  // no mode, so the CLI refuses each gated write it would have reviewed only where the mode is
-  // block: `OMP_ASKGATE=block`, which `bindDispatchSession` writes beside the record. At the warn
-  // default the CLI posts such a write with a warning and an `unmarked` entry, and `loadFailureGate`
-  // refuses each literal call either way.
+  // still acts as the session it started in. A gate that did not load refuses each literal call at
+  // the hook (`loadFailureGate`), so those never reach the CLI; it mints no marker and records no
+  // mode, so every gated write that does reach the CLI — one outside the literal form, and a
+  // subagent's literal one — is refused where the session chose block (`OMP_ASKGATE=block`, which
+  // `bindDispatchSession` writes beside the record), and at the warn default posts with a warning
+  // and an `unmarked` entry.
   const askgateOwner: AskgateOwner | undefined =
     askgateFile === null ? undefined : selfOwner(sessionStateRoot(process.env));
   const askgateRecords = new Set<string>();
@@ -948,11 +948,15 @@ export default function envoyExtension(pi: PiApi): void {
       const dir = dispatchSessionDirectory(process.env, id);
       try {
         openStore(askgateOwner.store);
-        // A session that chose block keeps the CLI's checks at block when its gate does not load
-        // and so records no mode itself; written before the record, so the CLI never reads a live
-        // record without it.
-        if (process.env.OMP_ASKGATE?.trim() === "block") setStoreMode(askgateOwner.store, "block");
-        writeAskgateRecord(dir, askgateOwner);
+        // The session's own check mode at the bind: block only when it chose block through
+        // OMP_ASKGATE, which survives a gate that does not load (the gate reads an arm per call, so
+        // an arm-only block session records its mode on its first main-agent call, not here). Kept
+        // per session in its owner file, so a switch never changes another session's mode.
+        writeAskgateRecord(
+          dir,
+          askgateOwner,
+          process.env.OMP_ASKGATE?.trim() === "block" ? "block" : "warn"
+        );
         askgateRecords.add(dir);
       } catch (error) {
         const notice = `AskGate could not write its record for session ${id} (${messageFor(error)}), so the dispatch CLI does not ask for AskGate's marker there: a Dispatch write AskGate cannot read posts unreviewed.`;
@@ -2160,8 +2164,11 @@ export default function envoyExtension(pi: PiApi): void {
     claimedRoleSessionID = id;
     // The transcript is the one thing `omp --resume` guarantees, so it is
     // the durable record of the claim: the listener reaps a dead session's
-    // interest row (role claim included) after its ten-minute stale-interest
-    // grace window, and this process's memory dies with it.
+    // interest row 15 minutes after the row's last write and releases the
+    // role claim separately, one session TTL after heartbeats stop (a role
+    // claim is not an interest: see `ReapRoleClaims` in
+    // packages/envoy/internal/store/kv.go), and this process's memory dies
+    // with it.
     pi.appendEntry(ROLE_CLAIM_ENTRY, { role });
     if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
     // The role it moved off is handed back under the id its hold was under (a fork's parent,

@@ -42,7 +42,7 @@ const co = path.join(scratch, "checkout");
 const rig = path.join(co, "packages/pi-legion/scripts/skill-scenarios/rig.sh");
 mkdirSync(path.dirname(rig), { recursive: true });
 copyFileSync(path.join(import.meta.dir, "rig.sh"), rig);
-for (const lib of ["rig.sh", "free-port.sh"]) {
+for (const lib of ["rig.sh", "port-file.sh", "held-port.py"]) {
   mkdirSync(path.join(co, "scripts/e2e/lib"), { recursive: true });
   copyFileSync(path.join(root, "scripts/e2e/lib", lib), path.join(co, "scripts/e2e/lib", lib));
 }
@@ -52,28 +52,30 @@ put(
   path.join(co, "packages/dispatch/e2e/run-server.sh"),
   [
     "#!/usr/bin/env bash",
-    'printf \'%s %s %s\\n\' "$$" "$DISPATCH_E2E_PORT" "$DATABASE_URL" >>"$STUB_DIR/servers.log"',
     'exec bun "$STUB_DIR/server.ts"',
     "",
   ].join("\n"),
   0o755
 );
-// A port another process took first ends the stub as it ends the Go server, with "address already
-// in use", which start_dispatch answers by picking another port.
+// No DISPATCH_E2E_PORT: the server takes a port of the kernel's choosing and reports it as the Go
+// server does (`msg="dispatch: listening" addr=127.0.0.1:<port>`), which start_dispatch reads from
+// the run's own log.
 put(
   path.join(stub, "server.ts"),
   [
+    'import { appendFileSync } from "node:fs";',
+    'import path from "node:path";',
     'const database = new URL(process.env.DATABASE_URL ?? "").pathname.slice(1);',
-    "try {",
-    "  Bun.serve({",
-    '    hostname: "127.0.0.1",',
-    "    port: Number(process.env.DISPATCH_E2E_PORT),",
-    "    fetch: () => Response.json({ database }),",
-    "  });",
-    "} catch {",
-    '  console.error("listen: bind: address already in use");',
-    "  process.exit(1);",
-    "}",
+    "const server = Bun.serve({",
+    '  hostname: "127.0.0.1",',
+    "  port: 0,",
+    "  fetch: () => Response.json({ database }),",
+    "});",
+    "appendFileSync(",
+    '  path.join(process.env.STUB_DIR ?? "", "servers.log"),',
+    '  `${process.pid} ${server.port} ${process.env.DATABASE_URL}\\n`',
+    ");",
+    'console.log(`msg="dispatch: listening" addr=127.0.0.1:${server.port}`);',
     "",
   ].join("\n")
 );

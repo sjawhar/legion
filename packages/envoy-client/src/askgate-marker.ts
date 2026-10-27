@@ -58,7 +58,6 @@ export const MARKER_MAX_AGE_MS = 2 * 60 * 60_000;
 const PRIVATE_DIR = 0o700;
 const PRIVATE_FILE = 0o600;
 const MARKERS = "markers";
-const MODE_FILE = "mode";
 
 export type AskgateMode = "warn" | "block";
 
@@ -223,17 +222,24 @@ function isOwner(value: unknown): value is AskgateOwner {
   );
 }
 
-/** The owner an owner file's text names, or undefined when it is no owner file. */
-function parseOwner(text: string): AskgateOwner | undefined {
+/**
+ * The owner and the check mode an owner file's text names, or undefined when it is no owner file.
+ * The mode is per session per owner: a session this process bound in block keeps block whatever a
+ * later session of the same process records for itself. A missing or unknown mode is warn.
+ */
+function parseOwner(text: string): { owner: AskgateOwner; mode: AskgateMode } | undefined {
   let data: unknown;
   try {
     data = JSON.parse(text);
   } catch {
     return undefined;
   }
-  if (!isOwner(data) || !("v" in data) || data.v !== 1) return undefined;
-  const { pid, start, store } = data;
-  return { pid, start, store };
+  if (!isOwner(data) || !("v" in data) || data.v !== 2) return undefined;
+  const { pid, start, store, mode } = data as Record<string, unknown>;
+  return {
+    owner: { pid, start, store } as AskgateOwner,
+    mode: mode === "block" ? "block" : "warn",
+  };
 }
 
 /** Writes `text` to `file` through an exclusive owner-only temporary file and `rename`. */
@@ -251,31 +257,42 @@ function ownerFile(dir: string, owner: AskgateOwner): string {
 }
 
 /**
- * Makes `owner` an owner of session directory `dir`'s record by writing its own file, and removes
- * the files of owners whose process is gone. A gone owner with a start time never writes again,
- * since no later process has its pid and start time; one with none is left, as its pid can return.
+ * Makes `owner` an owner of session directory `dir`'s record, carrying `mode` for the CLI's marker
+ * check of that session, and removes the files of owners whose process is gone. A gone owner with a
+ * start time never writes again, since no later process has its pid and start time; one with none
+ * is left, as its pid can return.
  */
-export function writeAskgateRecord(dir: string, owner: AskgateOwner): void {
+export function writeAskgateRecord(dir: string, owner: AskgateOwner, mode: AskgateMode): void {
   const record = join(dir, ASKGATE_RECORD);
   mkdirSync(record, { recursive: true, mode: PRIVATE_DIR });
   const own = ownerFile(dir, owner);
-  writeAtomically(
-    own,
-    JSON.stringify({ v: 1, pid: owner.pid, start: owner.start, store: owner.store })
-  );
+  writeAtomically(own, ownerText(owner, mode));
   for (const name of readdirSync(record)) {
     const file = join(record, name);
     if (file === own || !name.endsWith(OWNER_FILE)) continue;
-    let other: AskgateOwner | undefined;
+    let other: { owner: AskgateOwner } | undefined;
     try {
       other = parseOwner(readFileSync(file, "utf-8"));
     } catch {
       continue;
     }
-    if (other !== undefined && other.start !== null && !ownerLive(other)) {
+    if (other !== undefined && other.owner.start !== null && !ownerLive(other.owner)) {
       rmSync(file, { force: true });
     }
   }
+}
+
+/**
+ * Rewrites `owner`'s own file in session directory `dir`'s record with `mode`, for the gate to set
+ * the current session's check mode on each main-agent call. It touches no other owner's file, so a
+ * session this process also bound keeps the mode its own calls recorded.
+ */
+export function setRecordMode(dir: string, owner: AskgateOwner, mode: AskgateMode): void {
+  writeAtomically(ownerFile(dir, owner), ownerText(owner, mode));
+}
+
+function ownerText(owner: AskgateOwner, mode: AskgateMode): string {
+  return JSON.stringify({ v: 2, pid: owner.pid, start: owner.start, store: owner.store, mode });
 }
 
 /**
@@ -338,25 +355,6 @@ export function sweepStores(root: string, now: number): void {
   }
 }
 
-/**
- * Records in the gate's store how the CLI treats a gated write whose marker check fails (no
- * matching marker, a file changed after review): `block` only when the session chose block
- * explicitly, `warn` otherwise. A model's revise verdict is the gate's, and keeps its own default.
- */
-export function setStoreMode(store: string, mode: AskgateMode): void {
-  openStore(store);
-  writeAtomically(join(store, MODE_FILE), mode);
-}
-
-/** A store's recorded mode: `block` only when it says so; no mode recorded is the default, warn. */
-function storeMode(store: string): AskgateMode {
-  try {
-    return readFileSync(join(store, MODE_FILE), "utf-8") === "block" ? "block" : "warn";
-  } catch {
-    return "warn";
-  }
-}
-
 /** What the record of a session's state directory requires of a gated write. */
 export type AskgateState =
   | { readonly kind: "off" }
@@ -377,7 +375,7 @@ export function askgateState(dir: string): AskgateState {
     if (hasErrnoCode(error, "ENOENT")) return { kind: "off" };
     return { kind: "broken", problem: `${record}, could not be read: ${messageFor(error)}` };
   }
-  const live: { readonly file: string; readonly store: string }[] = [];
+  const live: { readonly file: string; readonly store: string; readonly mode: AskgateMode }[] = [];
   for (const name of names) {
     // Not an owner file: a temporary file that its write's `rename` has yet to make one.
     if (!name.endsWith(OWNER_FILE)) continue;
@@ -390,10 +388,10 @@ export function askgateState(dir: string): AskgateState {
       if (hasErrnoCode(error, "ENOENT")) continue;
       return { kind: "broken", problem: `${file}, could not be read: ${messageFor(error)}` };
     }
-    const owner = parseOwner(text);
-    if (owner === undefined)
+    const parsed = parseOwner(text);
+    if (parsed === undefined)
       return { kind: "broken", problem: `${file}, is not an AskGate record` };
-    if (ownerLive(owner)) live.push({ file, store: owner.store });
+    if (ownerLive(parsed.owner)) live.push({ file, store: parsed.owner.store, mode: parsed.mode });
   }
   if (live.length === 0) return { kind: "off" };
   for (const { file, store } of live) {
@@ -409,7 +407,7 @@ export function askgateState(dir: string): AskgateState {
   return {
     kind: "on",
     stores: live.map(({ store }) => store),
-    mode: live.some(({ store }) => storeMode(store) === "block") ? "block" : "warn",
+    mode: live.some(({ mode }) => mode === "block") ? "block" : "warn",
   };
 }
 

@@ -30,7 +30,7 @@
 # to start otherwise (require_proof_human, lib/workflow.sh).
 # Legion's two role Apps are this deployment's own by default, and four inputs for another
 # deployment's: LEGION_E2E_IMPLEMENT_APP_ID and LEGION_E2E_REVIEW_APP_ID, each App's numeric id, and
-# LEGION_E2E_IMPLEMENT_APP_KEY_NAME and LEGION_E2E_REVIEW_APP_KEY_NAME, the secret-store keys holding
+# LEGION_E2E_IMPLEMENT_APP_KEY_NAME and LEGION_E2E_REVIEW_APP_KEY_NAME, the secrets broker keys holding
 # their private keys (lib/github-apps.sh). `prerequisites` proves each key is its id's App before the
 # run writes anything, whichever pair it took. The App private keys are resolved through
 # private_key_command by the daemon, and by lib/app-logins.ts once to prove each App and read its bot
@@ -105,6 +105,8 @@ nats_container="legion-e2e3-nats-$$"
 daemon_pid=
 dispatch_pid=
 listener_pid=
+daemon_keeper_pid=
+dispatch_keeper_pid=
 bridge_pid=
 watcher_pid=
 port_daemon=
@@ -115,7 +117,6 @@ dispatch_actor=
 # The person every proof-human Dispatch write is: the X-Dispatch-User the scratch Dispatch trusts
 # (dispatch-human-header), and so the actor of each review it records in his name.
 proof_human_user=smoke
-port_worker_stream=
 port_pg=
 port_nats=
 pr_number=
@@ -180,6 +181,8 @@ cleanup() {
   stop_pid "$daemon_pid"
   stop_pid "$dispatch_pid"
   stop_pid "$listener_pid"
+  stop_pid "$daemon_keeper_pid"
+  stop_pid "$dispatch_keeper_pid"
   stop_pid "$bridge_pid"
   # Under box-login the panes share the operator's login database: each gets SIGTERM and up to
   # box_login_stop_grace seconds to finish a token refresh before anything is killed, and the
@@ -225,64 +228,52 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# The host helpers below own only this run's isolated resources. Each service
-# binds a port the rig picked. A first start that loses its port to another process picks again; a
-# restart keeps its port, which the rest of the rig already names.
+# The host helpers below own only this run's isolated resources. Each service serves on a port the
+# kernel chose, held from that choice until the service serves on it (lib/rig.sh's start_held). The
+# daemon and Dispatch restart on their ports, which the rest of the rig already names, so a keeper
+# holds each of those for the whole run (keep_port, start_kept), and every poll of them carries a
+# timeout: between two servers a kept port queues a request unanswered instead of refusing it.
 start_listener() {
-  local token attempt offset result
+  local token
   token=$(cat "$work/envoy-token")
-  for attempt in 1 2 3 4 5; do
-    pick_port port_listener
-    offset=$(log_size listener)
-    ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
-      ENVOY_MACHINE_ID="legion-e2e3-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
-    result=0
-    await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
-      curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions" || result=$?
-    [ "$result" != 0 ] || return 0
-    note "the Envoy listener lost port $port_listener to another process (attempt $attempt); picking another"
-  done
-  fail "the Envoy listener lost its picked port five times"
+  ENVOY_API_TOKEN="$token" ENVOY_LISTEN_HOST=127.0.0.1 \
+    ENVOY_MACHINE_ID="legion-e2e3-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
+    start_held listener port_listener ENVOY_LISTEN_FD --env 'PORT={port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-listener"
+  await_start listener "$listener_pid" 60 "the Envoy listener to answer /v1/sessions" \
+    curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$port_listener/v1/sessions"
 }
 
 # start_dispatch [keep] — keep restarts the scratch Dispatch on the port the daemon already names.
 start_dispatch() {
-  local keep=${1:-} dispatch_token envoy_token pg_password attempt offset result
+  local keep=${1:-} dispatch_token envoy_token pg_password
   dispatch_token=$(cat "$work/dispatch-token")
   envoy_token=$(cat "$work/envoy-token")
   pg_password=$(cat "$work/postgres-password")
   mkdir -p "$work/dispatch-home"
   chmod 0700 "$work/dispatch-home"
-  for attempt in 1 2 3 4 5; do
-    [ -n "$keep" ] || pick_port port_dispatch
-    offset=$(log_size dispatch)
-    # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
-    # operator's: make_omp_home exports the operator's XDG_CONFIG_HOME.
-    DATABASE_URL="postgres://legion:$pg_password@127.0.0.1:$port_pg/dispatch?sslmode=disable" \
-      DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" HOME="$work/dispatch-home" \
-      XDG_CONFIG_HOME="$work/dispatch-home/.config" \
-      DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
-      DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
-      DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" "$work/envoy-dispatch"
-    result=0
-    await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
-      curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
-    dispatch_base="http://127.0.0.1:$port_dispatch"
-    [ "$result" != 0 ] || return 0
-    [ -z "$keep" ] || fail "the restarted scratch Dispatch lost port $port_dispatch to another process"
-    note "the scratch Dispatch lost port $port_dispatch to another process (attempt $attempt); picking another"
-  done
-  fail "the scratch Dispatch lost its picked port five times"
+  [ -n "$keep" ] || keep_port dispatch_keeper port_dispatch
+  # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
+  # operator's: make_omp_home exports the operator's XDG_CONFIG_HOME. They are the server's alone,
+  # set by its env, not the held-port helper's that runs it.
+  DATABASE_URL="postgres://legion:$pg_password@127.0.0.1:$port_pg/dispatch?sslmode=disable" \
+    DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" \
+    DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
+    DISPATCH_LISTEN_HOST=127.0.0.1 NATS_URLS="nats://127.0.0.1:$port_nats" \
+    ENVOY_URL="http://127.0.0.1:$port_listener" \
+    start_kept dispatch dispatch_keeper DISPATCH_LISTEN_FD \
+    --env 'DISPATCH_PORT={port}' --env 'DISPATCH_SERVER_URL=http://127.0.0.1:{port}' -- \
+    env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
+    HOME="$work/dispatch-home" XDG_CONFIG_HOME="$work/dispatch-home/.config" "$work/envoy-dispatch"
+  await_start dispatch "$dispatch_pid" 60 "the scratch Dispatch server" \
+    curl -fsS --max-time 5 "http://127.0.0.1:$port_dispatch/api/v1"
+  dispatch_base="http://127.0.0.1:$port_dispatch"
 }
 
 write_legion_config() {
   cat >"$work/legion.yaml" <<EOF
 project: $project
 port: $port_daemon
-worker_stream_port: $port_worker_stream
 postgres_dsn: postgres://legion:$(cat "$work/postgres-password")@127.0.0.1:$port_pg/legion?sslmode=disable
 state_dir: $state
 operator_token_file: $work/operator-token
@@ -312,37 +303,29 @@ $(<"$work/github-apps.yaml")
 EOF
 }
 
-# start_daemon [keep] — keep restarts the Go daemon on the ports every pane already names.
+# start_daemon [keep] — keep restarts the Go daemon on the port every pane already names.
 start_daemon() {
-  local keep=${1:-} attempt offset result
-  for attempt in 1 2 3 4 5; do
-    if [ -z "$keep" ]; then
-      pick_port port_daemon
-      pick_port port_worker_stream
-      write_legion_config
-    fi
-    offset=$(log_size daemon)
-    # Every pane's gh and jj are the daemon's PATH's (the pane inherits it, environment.go's
-    # paneEnvAllowList), so the real binaries' directory goes first, ahead of this box's own
-    # shims for both (prerequisites, real_bin_path).
-    # LEGION_OMP_PATH would outrank omp_invocation's build (packages/daemon/internal/omplaunch), so
-    # the daemon runs without it, as Stage 2's does, and daemon_runs_the_pinned_omp checks the
-    # binary it resolved.
-    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" env -u LEGION_OMP_PATH -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
-      -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
-      "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
-    daemon_pid=$!
-    result=0
-    await_start daemon "$daemon_pid" "$offset" 180 "the Go daemon to answer /healthz" \
-      curl -fsS "http://127.0.0.1:$port_daemon/healthz" || result=$?
-    if [ "$result" = 0 ]; then
-      daemon_runs_the_pinned_omp "$offset"
-      return 0
-    fi
-    [ -z "$keep" ] || fail "the restarted Go daemon lost port $port_daemon or $port_worker_stream to another process"
-    note "the Go daemon lost port $port_daemon or $port_worker_stream to another process (attempt $attempt); picking again"
-  done
-  fail "the Go daemon lost a picked port five times"
+  local keep=${1:-}
+  if [ -z "$keep" ]; then
+    keep_port daemon_keeper port_daemon
+    write_legion_config
+  fi
+  # Every pane's gh and jj are the daemon's PATH's (the pane inherits it, environment.go's
+  # paneEnvAllowList), so the real binaries' directory goes first, ahead of this box's own
+  # shims for both (prerequisites, real_bin_path). HOME, OMP_PROFILE and PATH are the daemon's
+  # alone, set by its env, not the held-port helper's that runs it. LEGION_OMP_PATH would outrank
+  # omp_invocation's build (packages/daemon/internal/omplaunch), so the daemon runs without it, as
+  # Stage 2's does, and daemon_runs_the_pinned_omp checks the binary it resolved, in the part of the
+  # daemon's log this start writes (from offset).
+  local offset=0
+  [ ! -f "$evidence/logs/daemon.log" ] || offset=$(wc -c <"$evidence/logs/daemon.log")
+  start_kept daemon daemon_keeper LEGION_LISTEN_FD -- \
+    env -u LEGION_OMP_PATH -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
+    -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
+    "$work/legion" start --config "$work/legion.yaml"
+  await_start daemon "$daemon_pid" 180 "the Go daemon to answer /healthz" \
+    curl -fsS --max-time 5 "http://127.0.0.1:$port_daemon/healthz"
+  daemon_runs_the_pinned_omp "$offset"
 }
 
 # daemon_runs_the_pinned_omp OFFSET fails the current check unless the daemon start whose log
@@ -630,7 +613,7 @@ approval_requests_in() { jq '[.[] | select(.type == "ask.opened" and .payload.ki
 
 begin prerequisites
 refuse_leftovers legion-e2e3
-for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl python3 tmux bun mise secrets agent-secrets gh shellcheck jj pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 # Legion's two role Apps, this deployment's own unless the App inputs name another's, proved
 # against GitHub here, before the run writes anything (lib/github-apps.sh); legion.yaml's
 # github_apps is the block proved.
@@ -1390,7 +1373,9 @@ restart_scenarios() {
   # completes the phase only once it sees Dispatch gone: every instruction reaches a pane through
   # Dispatch, so none can follow the stop. testing's status write is then durably pending rather than
   # silently lost, and the board (left at the human's needs_review) catches up once Dispatch returns.
-  send_agent "$restart_issue" implementer "Stage 3 outbox proof: make the smallest one-file smoke change for this issue, commit it and open pull request legion/$restart_issue in $repo, and write the implementation handoff. Before you call the legion tool's handoff_complete, wait for the proof to stop the Dispatch server: run curl -fsS \"\$DISPATCH_URL/api/v1\" every 5 seconds until it fails (for up to 15 minutes), and only once it has failed call the legion tool's handoff_complete. Do not post anything to Dispatch."
+  # The agent's check carries a timeout: Dispatch's port is kept (start_dispatch), so while it is down
+  # a request waits unanswered, and the timeout is what fails.
+  send_agent "$restart_issue" implementer "Stage 3 outbox proof: make the smallest one-file smoke change for this issue, commit it and open pull request legion/$restart_issue in $repo, and write the implementation handoff. Before you call the legion tool's handoff_complete, wait for the proof to stop the Dispatch server: run curl -fsS --max-time 5 \"\$DISPATCH_URL/api/v1\" every 5 seconds until it fails (for up to 15 minutes), and only once it has failed call the legion tool's handoff_complete. Do not post anything to Dispatch."
   until_true 900 "restart-tree pull request to open" sh -c \
     "gh -R '$repo' pr list --head 'legion/$restart_issue' --state open --json number | jq -e 'length == 1' >/dev/null"
   stop_dispatch
@@ -1464,6 +1449,8 @@ stop_tree "$watcher_pid"; watcher_pid=
 stop_pid "$daemon_pid"; daemon_pid=
 stop_dispatch
 stop_pid "$listener_pid"; listener_pid=
+stop_pid "$daemon_keeper_pid"; daemon_keeper_pid=
+stop_pid "$dispatch_keeper_pid"; dispatch_keeper_pid=
 stop_pid "$bridge_pid"; bridge_pid=
 # Under box-login the panes get SIGTERM and a bounded grace before the kills below, as cleanup
 # gives them (lib/box-login.sh); the profile's link to the operator's database goes with them.
@@ -1478,7 +1465,7 @@ for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
 [ "$(docker ps -aq --filter "name=^/$pg_container$" --filter "name=^/$nats_container$")" = "" ] || fail "a proof container remains"
 TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" has-session 2>/dev/null && fail "the proof tmux server remains"
 [ -z "$(run_processes)" ] || fail "a proof process remains"
-note "the watcher, daemon, Dispatch, listener, bridge, private tmux server and every proof process stopped; both containers removed"
+note "the watcher, the daemon and Dispatch with their port keepers, the listener, bridge, private tmux server and every proof process stopped; both containers removed"
 pass
 
 begin model-turns-through-the-route

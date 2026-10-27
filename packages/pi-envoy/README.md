@@ -324,10 +324,10 @@ marker. So a pipe to a program other than one trailing `head` or `tail`, a loop,
 its gated write is refused by the CLI in `block` mode with the form to send; a call that holds no
 Dispatch write, such as a commit message or a search pattern that names one, runs and posts
 nothing. A literal call whose last command gives no argument vector is refused in `block` mode. A
-gate that did not load still writes the record and mints nothing, so the CLI refuses every gated
-write it would have reviewed where the session set `OMP_ASKGATE=block`; at the warn default it
-posts them with a warning and an `unmarked` entry, and the gate refuses each literal call either
-way.
+gate that did not load refuses each literal call at the hook, so those never reach the CLI; it
+writes the record and mints nothing, so every gated write that does reach the CLI — one outside the
+literal form, and a subagent's literal one — is refused where the session set `OMP_ASKGATE=block`,
+and at the warn default posts with a warning and an `unmarked` entry.
 
 **Where the gate binds.** AskGate binds only in a session that has Dispatch, judged at load from
 the session's own envoy.json and the variables over it (`DISPATCH_URL` and the other Dispatch
@@ -357,14 +357,19 @@ review, and a file missing when the gate ran each post with a warning and an `un
 `unreadable` entry that the report counts. They refuse only when the session chose block
 explicitly: `OMP_ASKGATE=block`, or, with no such variable, an `experiments` entry whose arm is on.
 AskGate ignores any other value of `OMP_ASKGATE`, `off` included, and the first review shows one
-notice that names `askgate.enabled` as the switch. The gate writes the checks' mode into its store
-at each main-agent `bash` or `eval` call, where the CLI reads it, and a store with no mode is warn.
-pi-envoy also writes `OMP_ASKGATE=block` into the store with the session's record, so a session
-that chose block that way stays at block when its gate does not load. An `experiments` arm does
-not: the gate reads the arm, so a session that chose block through it alone has no mode on disk
-until the gate's first main-agent `bash` or `eval` call, and none at all when the gate does not
-load. Two other refusals follow neither mode: no model role, and a gate that did not load, which
-refuses each literal call it would review in both modes, since neither can review anything.
+notice that names `askgate.enabled` as the switch. The gate writes the checks' mode into the
+session's own record (not a process-wide file, so a process that binds two sessions keeps each
+one's mode, and a switch never changes another session's) at each main-agent `bash` or `eval`
+call, where the CLI reads it, and a record with no mode is warn. pi-envoy also writes
+`OMP_ASKGATE=block` into the record at the bind, so a session that chose block that way stays at
+block even when its gate does not load. An `experiments` arm does not: only the loaded gate reads
+the arm, so a session that chose block through the arm alone has no mode on disk until the gate's
+first main-agent `bash` or `eval` call, and none at all when the gate does not load — a write
+outside the literal form there posts with a warning. **An operator who selects block through the
+arm should also set `OMP_ASKGATE=block` for a hard guarantee**, which holds from the session's
+start and through a failed load. Two other refusals follow neither mode: no model role, and a gate
+that did not load, which refuses each literal call it would review in both modes, since neither can
+review anything.
 
 **The model.** The gate asks the session's `askgate` model role (`modelRoles.askgate`). When that
 role is not set, it asks the `default` role. A model that answers with an error passes the request

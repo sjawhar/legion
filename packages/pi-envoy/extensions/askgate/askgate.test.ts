@@ -4,11 +4,14 @@ import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import {
+  type AskgateOwner,
   argsDigest,
   argvDigest,
+  askgateState,
   consumeMarker,
   openStore,
   processStart,
+  setRecordMode,
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
@@ -156,6 +159,8 @@ interface BindOptions {
   hasUI?: boolean;
   /** The gate's marker store: a fresh directory under the suite's TMPDIR unless a test says otherwise. */
   store?: string;
+  /** The session directory whose record the gate writes its mode into; a fresh one unless shared. */
+  sessionDir?: string;
 }
 
 /** One session binding of the gate, driven through a fake `pi` and `ctx`. */
@@ -168,8 +173,12 @@ interface BoundGate {
   calls: CompleteRequest[];
   fallbackRoles: string[];
   dryRuns: Array<{ script: string; cwd: string; timeoutMs: number }>;
-  /** The marker store the gate mints into and records its mode in. */
+  /** The marker store the gate mints into. */
   store: string;
+  /** The session directory whose record carries this binding's check mode. */
+  sessionDir: string;
+  /** The check mode the session's record now shows the CLI, or undefined when the record is off. */
+  recordedMode(): "warn" | "block" | undefined;
   write(toolCallId: string, path: string, content: string): Promise<Result>;
   device(toolCallId: string, toolName: string, input: Record<string, unknown>): Promise<Result>;
   bash(toolCallId: string, command: string, extra?: Record<string, unknown>): Promise<Result>;
@@ -189,6 +198,21 @@ function bind(opts: BindOptions = {}): BoundGate {
   /** Every dry-run the gate started: its script, working directory and time limit. */
   const dryRuns: Array<{ script: string; cwd: string; timeoutMs: number }> = [];
   const store = opts.store ?? fs.mkdtempSync(path.join(SUITE_TMP, "store-"));
+  // The session directory the gate records its mode into (one real process keeps a record per
+  // session it binds). A test may share a store and a session across binds to drive the switch case.
+  const sessionDir = opts.sessionDir ?? fs.mkdtempSync(path.join(SUITE_TMP, "session-"));
+  const self: AskgateOwner = { pid: process.pid, start: processStart(process.pid), store };
+  try {
+    openStore(store);
+    // The bind, as envoy.ts does it: the mode from OMP_ASKGATE, which an arm does not change here.
+    writeAskgateRecord(
+      sessionDir,
+      self,
+      opts.env?.OMP_ASKGATE?.trim() === "block" ? "block" : "warn"
+    );
+  } catch {
+    // A broken store, as envoy.ts catches and notifies: the gate's own mint then fails for the call.
+  }
   const pi = {
     on: (event: string, handler: Handler) => handlers.set(event, handler),
     appendEntry: (customType: string, data: GateEntry) => {
@@ -220,6 +244,7 @@ function bind(opts: BindOptions = {}): BoundGate {
       return (opts.dryRun ?? core.spawnDryRun)(script, runOpts);
     },
     markerStore: store,
+    recordCheckMode: (mode) => setRecordMode(sessionDir, self, mode),
   })(pi as never);
   const roles = opts.roles ?? { askgate: MODEL };
   const sessionEntries = opts.entries ?? [experimentsEntry(false)];
@@ -265,6 +290,11 @@ function bind(opts: BindOptions = {}): BoundGate {
     fallbackRoles,
     dryRuns,
     store,
+    sessionDir,
+    recordedMode: () => {
+      const state = askgateState(sessionDir);
+      return state.kind === "on" ? state.mode : undefined;
+    },
     write: (toolCallId: string, path: string, content: string) =>
       emit({ toolName: "write", toolCallId, input: { path, content } }),
     device: (toolCallId: string, toolName: string, input: Record<string, unknown>) =>
@@ -2632,24 +2662,57 @@ console.log(JSON.stringify(args, null, 2));
       expect(markersIn(g.store)).toEqual([]);
     });
 
-    test("the gate records the check mode in the store for the CLI, on every main-agent bash or eval call", async () => {
+    test("the gate records the check mode in the session's record for the CLI, on every main-agent bash or eval call", async () => {
       const warn = bind({ env: STUB, cwd: work });
       await warn.bash("n", "ls");
-      expect(fs.readFileSync(path.join(warn.store, "mode"), "utf8")).toBe("warn");
+      expect(warn.recordedMode()).toBe("warn");
       let arm = false;
       const switching = bind({ env: STUB, cwd: work, entries: () => [experimentsEntry(arm)] });
       await switching.device("e", "eval", { language: "js", code: "1" });
-      expect(fs.readFileSync(path.join(switching.store, "mode"), "utf8")).toBe("warn");
+      expect(switching.recordedMode()).toBe("warn");
       arm = true;
       await switching.bash("n", "ls");
-      expect(fs.readFileSync(path.join(switching.store, "mode"), "utf8")).toBe("block");
+      expect(switching.recordedMode()).toBe("block");
       // No entry: the revise verdict blocks, but the CLI's checks warn, since block was not chosen.
       const none = bind({ env: STUB, cwd: work, entries: [] });
       await none.bash("n", "ls");
-      expect(fs.readFileSync(path.join(none.store, "mode"), "utf8")).toBe("warn");
+      expect(none.recordedMode()).toBe("warn");
       const chosen = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work, entries: [] });
       await chosen.bash("n", "ls");
-      expect(fs.readFileSync(path.join(chosen.store, "mode"), "utf8")).toBe("block");
+      expect(chosen.recordedMode()).toBe("block");
+    });
+
+    // D2: the check mode is keyed to the session, not the process, so one process binding two
+    // sessions keeps each one's mode, and a switch to a session in the other arm never changes the
+    // first session's mode. Both bindings share one store (one process), as a real process does.
+    test("two sessions of one process keep their own check modes across a switch", async () => {
+      const store = fs.mkdtempSync(path.join(SUITE_TMP, "shared-store-"));
+      const blockSession = fs.mkdtempSync(path.join(SUITE_TMP, "block-session-"));
+      const warnSession = fs.mkdtempSync(path.join(SUITE_TMP, "warn-session-"));
+      // The arm-on session's first main-agent call records block in its own record.
+      const armOn = bind({
+        env: STUB,
+        cwd: work,
+        store,
+        sessionDir: blockSession,
+        entries: [experimentsEntry(true)],
+      });
+      await armOn.bash("a", "ls");
+      expect(armOn.recordedMode()).toBe("block");
+      // The same process switches to an arm-off session. Its call records warn in that session's
+      // record only; the block session's record still shows block.
+      const armOff = bind({
+        env: STUB,
+        cwd: work,
+        store,
+        sessionDir: warnSession,
+        entries: [experimentsEntry(false)],
+      });
+      await armOff.bash("b", "ls");
+      expect(armOff.recordedMode()).toBe("warn");
+      expect(armOn.recordedMode()).toBe("block");
+      // The two sessions share one store (one process): the marker directory is the same.
+      expect(armOn.store).toBe(armOff.store);
     });
 
     // The mint comes once, after every check and after the record: a write no review stands
@@ -4173,11 +4236,12 @@ describe("a marker the gate mints, checked by the real dispatch CLI", () => {
   async function post(command: string, store: string) {
     // This test process stands in for Oh My Pi, whose record makes the CLI ask for a marker.
     openStore(store);
-    writeAskgateRecord(sessionDirectory(env, env.DISPATCH_SESSION_ID), {
-      pid: process.pid,
-      start: processStart(process.pid),
-      store,
-    });
+    // The session chose block (gateEnv), so the CLI refuses a write that spends no marker.
+    writeAskgateRecord(
+      sessionDirectory(env, env.DISPATCH_SESSION_ID),
+      { pid: process.pid, start: processStart(process.pid), store },
+      "block"
+    );
     const sent: Array<{ path: string; body: unknown }> = [];
     const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
       const route = new URL(String(url)).pathname;

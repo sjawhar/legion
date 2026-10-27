@@ -176,7 +176,6 @@ import {
   gatedWrite,
   mintMarker,
   operandPath,
-  setStoreMode,
   uploadIsDocument,
 } from "@legion/envoy-client/askgate-marker";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
@@ -387,10 +386,16 @@ interface Deps {
   dryRun: (script: string, opts: DryRunOptions) => Promise<DryRunResult>;
   /**
    * This process's AskGate marker store (`@legion/envoy-client/askgate-marker`): the directory
-   * the session's record names, where the gate mints a marker for each literal call it lets run
-   * and records its mode, and where the CLI consumes the marker.
+   * the session's record names, where the gate mints a marker for each literal call it lets run,
+   * and where the CLI consumes the marker.
    */
   markerStore: string;
+  /**
+   * Records the check mode of the session the process is bound to now, into that session's own
+   * record, for the CLI. Keyed to the session, not the process, so a switch to a session in the
+   * other arm never changes a session's mode (`setRecordMode` in the entry).
+   */
+  recordCheckMode: (mode: Mode) => void;
 }
 // Handlers of any event shape register here (`never` parameters accept every typed handler), so the
 // fork's ExtensionAPI is assignable to it.
@@ -1973,13 +1978,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       markers.delete(toolCallId);
       fs.rmSync(file, { force: true });
     };
-    /** The mode last written to the store, so the file is rewritten only when it changes. */
-    let storeMode: Mode | undefined;
-    const recordMode = (mode: Mode) => {
-      if (storeMode === mode) return;
-      setStoreMode(deps.markerStore, mode);
-      storeMode = mode;
-    };
+    // The gate records the current session's check mode on each main-agent bash or eval call, into
+    // that session's own record (`recordCheckMode`). No per-binding cache: one binding serves every
+    // session the process switches to, and a cache keyed on the mode alone would keep the previous
+    // session's value after a switch to a session in the other arm.
+    const recordMode = (mode: Mode) => deps.recordCheckMode(mode);
     /**
      * What each gated call is owed back: the note of a write that went out unreviewed, a warn
      * mode revise, a rebuttal or a breaker trip, by tool call id. The `tool_call` result's

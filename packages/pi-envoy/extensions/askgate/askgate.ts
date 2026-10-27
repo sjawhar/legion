@@ -17,8 +17,8 @@
 // model only.
 import * as fs from "node:fs";
 import * as os from "node:os";
-import { selfOwner } from "@legion/envoy-client/askgate-marker";
-import { sessionStateRoot } from "@legion/envoy-client/dispatch-session-state";
+import { selfOwner, setRecordMode } from "@legion/envoy-client/askgate-marker";
+import { sessionDirectory, sessionStateRoot } from "@legion/envoy-client/dispatch-session-state";
 import type { PiApi, PiEventContract } from "@legion/pi-shared/pi-types";
 import type { ApiKeyResolver, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import type { ModelLookupRegistry } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -246,6 +246,9 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
     },
     appendEntry: (customType, data) => pi.appendEntry(customType, data),
   };
+  // This process as the owner of each session's record (`selfOwner`): its marker store, and the
+  // owner file setRecordMode rewrites with the current session's mode.
+  const self = selfOwner(sessionStateRoot(process.env));
   createAskGate({
     env: process.env,
     home: os.homedir(),
@@ -265,7 +268,15 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
     },
     dryRun: spawnDryRun,
     // The store envoy.ts names in the session's record: the CLI state root's, for this process.
-    markerStore: selfOwner(sessionStateRoot(process.env)).store,
+    markerStore: self.store,
+    // Records the check mode into the record of the session this process is bound to now, which
+    // envoy.ts named in DISPATCH_SESSION_ID. Keyed to the session, so a switch never changes
+    // another session's mode; a process with no bound session (none to check) records nothing.
+    recordCheckMode: (mode) => {
+      const id = process.env.DISPATCH_SESSION_ID;
+      if (id === undefined || id === "") return;
+      setRecordMode(sessionDirectory(process.env, id), self, mode);
+    },
     contextMessages: (ctx) => {
       const { sessionManager } = ctx as unknown as Ctx;
       return buildSessionContext([...sessionManager.getEntries()], sessionManager.getLeafId())

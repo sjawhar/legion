@@ -3976,7 +3976,7 @@ console.log(JSON.stringify(args));
       const notifications: string[] = [];
       await fixture.handlers.get("session_start")?.({}, gateContext(notifications));
       const first = recordOf("ses_askgate");
-      expect(first).toMatchObject([{ v: 1, pid: process.pid }]);
+      expect(first).toMatchObject([{ v: 2, pid: process.pid, mode: "warn" }]);
       const store = first?.[0]?.store ?? "";
       expect(store.startsWith(join(process.env.DISPATCH_STATE_DIR ?? "", "askgate"))).toBe(true);
       expect(statSync(join(store, "markers")).mode & 0o777).toBe(0o700);
