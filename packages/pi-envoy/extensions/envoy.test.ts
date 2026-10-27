@@ -15,11 +15,8 @@ import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
 import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
-import {
-  appendResult,
-  readSessionTitle,
-  sessionDirectory,
-} from "@legion/envoy-client/dispatch-session-state";
+import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
+import { appendResult, readSessionTitle } from "@legion/envoy-client/dispatch-session-state";
 import { machineID } from "@legion/envoy-client/machine";
 import { renderSessionAnswers } from "@legion/envoy-client/session-answers";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";

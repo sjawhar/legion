@@ -1,5 +1,32 @@
 import { isSessionAnswersText } from "@legion/envoy-client/session-answers";
-import { leadingUserText, userTextMessage } from "./dispatch-first";
+import { leadingText, userTextMessage } from "./context-message";
+
+/** The first line of Oh My Pi's side-turn notice (`side-channel-no-tools.md`): the `developer`
+ *  message `AgentSession.runEphemeralTurn` puts after the conversation, before the side prompt. */
+const SIDE_TURN_NOTICE = "Ephemeral side-channel turn; reuses current conversation context.";
+
+/** How Oh My Pi's handoff prompt (`handoff-document.md`) begins. */
+const HANDOFF_PROMPT = "<critical>\nWrite a handoff document for another instance of yourself.";
+
+/** The requests a copy of this extension already decided the list for: the messages array the
+ *  host hands each `context` handler of one request in turn, which a handler that returns nothing
+ *  passes on as it is. It lives on `globalThis` under a registered symbol, as the read state of
+ *  `@legion/envoy-client/session-answers` does, because Oh My Pi loads each copy of this extension
+ *  as a module of its own. A change to its shape takes a new key (`.v2`). */
+const DECIDED_KEY: unique symbol = Symbol.for("legion.pi-envoy.session-answers-requests.v1");
+const processGlobal = globalThis as typeof globalThis & { [DECIDED_KEY]?: WeakSet<object> };
+const decided = processGlobal[DECIDED_KEY] ?? new WeakSet<object>();
+processGlobal[DECIDED_KEY] = decided;
+
+/** The text of `message` when the host wrote it (`attribution: "agent"`) with `role`. */
+function hostText(message: unknown, role: string): string | undefined {
+  return typeof message === "object" &&
+    message !== null &&
+    "attribution" in message &&
+    message.attribution === "agent"
+    ? leadingText(message, role)
+    : undefined;
+}
 
 /**
  * Whether the request's last message is the list of people's answers as `withSessionAnswers`
@@ -9,15 +36,86 @@ import { leadingUserText, userTextMessage } from "./dispatch-first";
  * marker earlier in the conversation is conversation, which must not switch the list off.
  */
 function endsWithSessionAnswers(messages: readonly unknown[]): boolean {
-  const text = leadingUserText(messages.at(-1));
+  const text = leadingText(messages.at(-1), "user");
   return text !== undefined && isSessionAnswersText(text);
 }
 
 /**
- * The messages one provider request carries, with what people wrote to the session (`read`'s
- * text) appended as a separate user message after the last one; undefined when the last message
- * already is that list (another copy of this extension appended it first, and `read` is not
- * called) or `read` gives no text.
+ * Whether the request is a side turn: Oh My Pi's `runEphemeralTurn` (a Dispatch BTW, the stop-time
+ * self-check, `/btw`, the idle recap) converts `[...conversation, notice, ...history, prompt]`,
+ * where the notice is a host `developer` message, the history `/btw`'s earlier questions and
+ * answers, and the prompt a host user message.
+ */
+function isSideTurn(messages: readonly unknown[]): boolean {
+  if (hostText(messages.at(-1), "user") === undefined) return false;
+  for (let index = messages.length - 2; index >= 0; index -= 1) {
+    const message = messages[index];
+    const role =
+      typeof message === "object" && message !== null && "role" in message
+        ? message.role
+        : undefined;
+    if (role !== "user" && role !== "assistant") {
+      return hostText(message, "developer")?.includes(SIDE_TURN_NOTICE) === true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether the request ends at a message the session's branch holds with a later one after it.
+ * Oh My Pi's Anthropic remote compaction (`buildLiveProviderContext`) converts the conversation up
+ * to its cut alone, counts the result, and keeps that many messages of the whole conversation's
+ * conversion: a list on the first would make it keep one message past the cut. A main-loop request
+ * ends at a message not yet written, or at the branch's last; a failed or aborted reply, which a
+ * retry drops from the context but not from the branch, does not count as later.
+ */
+function endsBeforeBranch(messages: readonly unknown[], branch: () => readonly unknown[]): boolean {
+  const last = messages.at(-1);
+  if (typeof last !== "object" || last === null || !("timestamp" in last) || !("role" in last)) {
+    return false;
+  }
+  const entries = branch();
+  let later = false;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      !("type" in entry) ||
+      entry.type !== "message" ||
+      !("message" in entry) ||
+      typeof entry.message !== "object" ||
+      entry.message === null
+    ) {
+      continue;
+    }
+    const message: { role?: unknown; timestamp?: unknown; stopReason?: unknown } = entry.message;
+    if (message.role === last.role && message.timestamp === last.timestamp) return later;
+    const failed =
+      message.role === "assistant" &&
+      (message.stopReason === "error" || message.stopReason === "aborted");
+    if (!failed) later = true;
+  }
+  return false;
+}
+
+export interface SessionAnswersRequest {
+  /** The session's branch entries (`sessionManager.getBranch`). */
+  readonly branch: () => readonly unknown[];
+  /** The list to carry, or undefined for none. */
+  readonly read: () => Promise<string | undefined>;
+}
+
+/**
+ * The messages one main-loop provider request carries, with what people wrote to the session
+ * (`request.read`'s text) appended as a separate user message after the last one; undefined when
+ * `read` gives no text or the request carries no list, in which case `read` is not called:
+ *
+ * - another copy of this extension already decided this request: it appended the list, or it
+ *   read and found no text, or the request is one of those below;
+ * - a side turn, whose last message must stay its prompt and which must not wait on a read;
+ * - the handoff prompt, whose last message must stay that prompt;
+ * - a conversion of the conversation up to a remote compaction's cut (`endsBeforeBranch`).
  *
  * It sits at the tail, never at the head, so a change in the list costs only its own tokens:
  * Oh My Pi marks a message a `context` handler adds as per-call, and its Anthropic placement puts
@@ -27,10 +125,18 @@ function endsWithSessionAnswers(messages: readonly unknown[]): boolean {
  */
 export async function withSessionAnswers(
   messages: readonly unknown[],
-  read: () => Promise<string | undefined>
+  request: SessionAnswersRequest
 ): Promise<unknown[] | undefined> {
-  if (endsWithSessionAnswers(messages)) return undefined;
-  const text = await read();
+  if (decided.has(messages) || endsWithSessionAnswers(messages)) return undefined;
+  decided.add(messages);
+  if (
+    isSideTurn(messages) ||
+    hostText(messages.at(-1), "user")?.startsWith(HANDOFF_PROMPT) === true ||
+    endsBeforeBranch(messages, request.branch)
+  ) {
+    return undefined;
+  }
+  const text = await request.read();
   if (text === undefined) return undefined;
   return [...messages, userTextMessage(text)];
 }

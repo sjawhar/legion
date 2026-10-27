@@ -38,8 +38,8 @@ import {
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { forgetShownPictures, shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures";
+import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import {
-  sessionDirectory as dispatchSessionDirectory,
   readResultsSince,
   resultsEnd,
   writeSessionTitle,
@@ -2815,22 +2815,15 @@ export default function envoyExtension(pi: PiApi): void {
   }
 
   // What people wrote to the session in the last 72 hours, as the list of
-  // `@legion/envoy-client/session-answers` renders it: the top-level session's own list, and for a
-  // `task` subagent its parent's, the session it writes to Dispatch as (`DISPATCH_SESSION_ID`).
-  // Dispatch is resolved with `commands: "kept"`, so no `!` token command runs on the request path,
-  // and the read waits at most `SESSION_ANSWERS_DEADLINE_MS` before the last list read stands in.
-  // A subagent this process cannot place carries no list rather than another session's.
+  // `@legion/envoy-client/session-answers` renders it: the session `replyAddress` names, which is
+  // the top-level session's own and for a `task` subagent its parent's, the session it writes to
+  // Dispatch as (`DISPATCH_SESSION_ID`). Dispatch is resolved with `commands: "kept"`, so no `!`
+  // token command runs on the request path, and the read waits at most
+  // `SESSION_ANSWERS_DEADLINE_MS` before the last list read stands in. A subagent this process
+  // cannot place carries no list rather than another session's.
   const sessionAnswersText = async (context: SessionContext): Promise<string | undefined> => {
-    const session = (await isSubagent(context))
-      ? resolveEnvoySession(context.sessionManager.getSessionFile())
-      : context.sessionManager.getSessionId();
+    const session = await replyAddress(context, context.sessionManager.getSessionId());
     if (session === "") return undefined;
-    let stateDirectory: string | undefined;
-    try {
-      stateDirectory = dispatchSessionDirectory(process.env, session);
-    } catch {
-      // An id that is no path segment keeps the cache in memory; the route says what is wrong.
-    }
     try {
       const read = await readSessionAnswers({
         session,
@@ -2838,7 +2831,7 @@ export default function envoyExtension(pi: PiApi): void {
           cwd: process.cwd(),
           commands: "kept",
         }).dispatch,
-        stateDirectory,
+        env: process.env,
       });
       return read.text;
     } catch (error) {
@@ -2853,14 +2846,18 @@ export default function envoyExtension(pi: PiApi): void {
   if (atStart.dispatch.enabled) {
     // Every session that reaches Dispatch, Legion panes and `task` subagents included, carries
     // the dispatch-first skill on every request at the head, where its bytes never change, and
-    // what people wrote to it at the tail, where a change in the list re-reads no cached prefix.
-    // Oh My Pi hands this handler no abort signal: it races the handler against the run's own and
-    // drops what an aborted handler returns, and the read it shares goes on to fill the cache.
+    // on every request of its main loop what people wrote to it at the tail, where a change in
+    // the list re-reads no cached prefix. The host runs this handler on its side turns, its
+    // handoff prompt and a remote compaction's conversions too; `withSessionAnswers` leaves the
+    // list off those. Oh My Pi hands this handler no abort signal: it races the handler against
+    // the run's own and drops what an aborted handler returns, and the read it shares goes on to
+    // fill the cache.
     pi.on("context", async (event, context) => {
       const withSkill = withDispatchFirst(event.messages, DISPATCH_FIRST_CONTEXT);
-      const messages = await withSessionAnswers(withSkill ?? event.messages, () =>
-        sessionAnswersText(context)
-      );
+      const messages = await withSessionAnswers(withSkill ?? event.messages, {
+        branch: () => context.sessionManager.getBranch?.() ?? [],
+        read: () => sessionAnswersText(context),
+      });
       const result = messages ?? withSkill;
       return result === undefined ? undefined : { messages: result };
     });

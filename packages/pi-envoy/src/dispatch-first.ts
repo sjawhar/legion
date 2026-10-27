@@ -1,34 +1,5 @@
 import { DISPATCH_FIRST_MARKER } from "@legion/envoy-client/dispatch-first";
-
-/** The text of `message`'s first content block when it is a user message whose first block has
- *  text: where `withDispatchFirst` and `withSessionAnswers` each look for a copy of their own. */
-export function leadingUserText(message: unknown): string | undefined {
-  if (
-    typeof message !== "object" ||
-    message === null ||
-    !("role" in message) ||
-    message.role !== "user" ||
-    !("content" in message) ||
-    !Array.isArray(message.content)
-  ) {
-    return undefined;
-  }
-  const [first]: unknown[] = message.content;
-  if (
-    typeof first === "object" &&
-    first !== null &&
-    "text" in first &&
-    typeof first.text === "string"
-  ) {
-    return first.text;
-  }
-  return undefined;
-}
-
-/** A user message of one text block, as `withDispatchFirst` and `withSessionAnswers` add it. */
-export function userTextMessage(text: string): unknown {
-  return { role: "user", content: [{ type: "text", text }], timestamp: 0 };
-}
+import { leadingText, userTextMessage } from "./context-message";
 
 /**
  * The messages one provider request carries, with the dispatch-first skill as a user message
@@ -54,7 +25,7 @@ export function withDispatchFirst(
     if (!summary) break;
     index += 1;
   }
-  if (leadingUserText(messages[index])?.startsWith(DISPATCH_FIRST_MARKER) === true) {
+  if (leadingText(messages[index], "user")?.startsWith(DISPATCH_FIRST_MARKER) === true) {
     return undefined;
   }
   return [...messages.slice(0, index), userTextMessage(context), ...messages.slice(index)];

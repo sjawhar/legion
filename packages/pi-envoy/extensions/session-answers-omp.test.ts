@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
+import { appendFile, symlink } from "node:fs/promises";
 import * as path from "node:path";
 import type { SessionAnswer } from "@legion/contracts";
+import { DISPATCH_FIRST_MARKER } from "@legion/envoy-client/dispatch-first";
 import {
   isSessionAnswersText,
   NO_ANSWERS_ROUTE_REASON,
@@ -19,26 +21,36 @@ import {
   writeStandinProfile,
 } from "@legion/pi-shared/test/omp-harness";
 
-// What people wrote to a session, on every model request of the real Oh My Pi
-// (src/session-answers-context.ts, dispatch://INFRA-148): Oh My Pi keeps nothing a `context`
-// handler returns, so what reaches the model, where the list sits and where the binary puts its
-// cache anchors can only be read off the requests it sends. One stand-in is the model gateway, the
-// Envoy listener and Dispatch, whose answers route serves a list each case controls. LEGION_TEST_OMP
-// names the binary, as in dispatch-first-omp.test.ts. A run without one skips, except on GitHub
-// Actions.
+// What people wrote to a session, on every request of the real Oh My Pi's main loop
+// (src/session-answers-context.ts, dispatch://INFRA-148), and on none of the other requests its
+// `context` handler runs for: a side turn, the handoff prompt and a remote compaction's request.
+// Oh My Pi keeps nothing a `context` handler returns, so what reaches the model, where the list
+// sits and where the binary puts its cache anchors can only be read off the requests it sends. One
+// stand-in is the model gateway, the Envoy listener and Dispatch, whose answers route serves a list
+// each case controls. LEGION_TEST_OMP names the binary, as in dispatch-first-omp.test.ts. A run
+// without one skips, except on GitHub Actions.
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
 
-/** What the stand-in's answers route does: list `items`, accept and never answer, or answer as a
- *  Dispatch build older than the route does. */
+/** What the stand-in's answers route does: list `items` (after `delayMs`, at once when unset),
+ *  accept and never answer, or answer as a Dispatch build older than the route does. */
 type Route =
-  | { readonly kind: "list"; readonly items: readonly SessionAnswer[] }
+  | {
+      readonly kind: "list";
+      readonly items: readonly SessionAnswer[];
+      readonly delayMs?: number;
+    }
   | { readonly kind: "hang" }
   | { readonly kind: "missing" };
 
 /** One thing the session is told over RPC, in order, or a change in the answers route before the
- *  next one. */
-type Step = { readonly prompt: string } | { readonly compact: true } | { readonly route: Route };
+ *  next one: a prompt, a manual compaction, a `/btw` side question, or a handoff. */
+type Step =
+  | { readonly prompt: string }
+  | { readonly compact: true }
+  | { readonly btw: string }
+  | { readonly handoff: true }
+  | { readonly route: Route };
 
 /** A request the stand-in served, with when it arrived (`performance.now()`). */
 interface Seen extends Request {
@@ -73,6 +85,33 @@ function isTurn(request: Request): boolean {
 function isSubagentTurn(request: Request): boolean {
   const messages = JSON.stringify(request.body.messages);
   return messages.includes(ASSIGNMENT) && !messages.includes("First question.");
+}
+
+/** Whether a Messages request is a `/btw` side turn: one of its messages is the /btw prompt, which
+ *  never enters the conversation. Not only the last, so a list put after it fails the case's
+ *  assertions rather than its wait for the side turn. */
+function isSideTurn(request: Request): boolean {
+  return messagesOf(request).some((message) => textOf(message).includes("<btw>"));
+}
+
+/** Whether a Messages request is Anthropic remote compaction's: it carries `compaction`. */
+function isRemoteCompaction(request: Request): boolean {
+  return "compaction" in request.body;
+}
+
+/** Whether a Messages request is the handoff's: one of its messages is the host's handoff prompt,
+ *  which never enters the conversation. */
+function isHandoff(request: Request): boolean {
+  return messagesOf(request).some((message) =>
+    textOf(message).includes("Write a handoff document for another instance of yourself.")
+  );
+}
+
+/** Whether a Messages request is a turn of the main loop: a turn that is none of the above. */
+function isMainTurn(request: Request): boolean {
+  return (
+    isTurn(request) && !isSideTurn(request) && !isRemoteCompaction(request) && !isHandoff(request)
+  );
 }
 
 function messagesOf(request: Request): unknown[] {
@@ -112,11 +151,13 @@ function carriesList(request: Request): boolean {
   return messagesOf(request).some((message) => isSessionAnswersText(textOf(message)));
 }
 
-/** A cached list's read time, from its header's second line. */
-function cachedAt(text: string): string {
-  const match = /^As read at (\S+); Dispatch did not answer now\.$/m.exec(text);
-  if (match?.[1] === undefined) throw new Error(`not a cached list:\n${text}`);
-  return match[1];
+/** A cached list's read time and the reason its header gives, from the header's second line. */
+function cachedOf(text: string): { readonly readAt: string; readonly reason: string } {
+  const match = /^As read at (\S+); this read failed: (.+)\.$/m.exec(text);
+  if (match?.[1] === undefined || match[2] === undefined) {
+    throw new Error(`not a cached list:\n${text}`);
+  }
+  return { readAt: match[1], reason: match[2] };
 }
 
 const MINUTE = 60_000;
@@ -150,10 +191,13 @@ function answersBefore(seen: readonly Seen[], request: Seen): Seen {
  * Runs an ordinary session (the Envoy extension from this checkout, Dispatch configured, no Legion
  * environment) through `steps` on the real Oh My Pi. Each turn is answered by `reply`, or `Answer
  * N.`; each compaction summary call with a fixed summary; every other side call with a label.
- * `reply` may change the answers route as the stand-in answers a turn. With `warm`, the profile's
- * model catalog is built before the session starts. Once the steps have settled, `until` is
- * awaited before omp's stdin closes. Returns every request the stand-in served, in order of
- * arrival.
+ * `reply` may change the answers route as the stand-in answers a turn. `methodOrder` is the
+ * compaction's (`[soft]` by default) and `model` lines go on the stand-in model's entry in
+ * models.yml. With `twoCopies`, omp loads the extension twice: from this checkout and through a
+ * symlink to it, which it takes for another extension. With `warm`, the profile's model catalog is
+ * built before the session starts. Once the steps have settled, `until` is awaited before omp's
+ * stdin closes. Returns every request the stand-in served, in order of arrival, the main loop's
+ * turns among them, and when each step was sent (`performance.now()`, route changes left out).
  */
 async function runSession(
   binary: string,
@@ -161,6 +205,9 @@ async function runSession(
   options: {
     readonly reply?: (request: Request, setRoute: (route: Route) => void) => readonly Block[];
     readonly config?: readonly string[];
+    readonly methodOrder?: string;
+    readonly model?: readonly string[];
+    readonly twoCopies?: boolean;
     readonly until?: Promise<unknown>;
     readonly warm?: boolean;
   } = {}
@@ -168,9 +215,14 @@ async function runSession(
   readonly seen: Seen[];
   readonly turns: Seen[];
   readonly answers: Seen[];
+  readonly sentAt: number[];
   readonly summary: string;
 }> {
-  const { home, workspace, sessions } = await ompRoot(binary, "session-answers-omp-", cleanup);
+  const { home, workspace, sessions, root } = await ompRoot(
+    binary,
+    "session-answers-omp-",
+    cleanup
+  );
   const summary = "SUMMARY-OF-THE-EARLIER-TURNS";
   let route: Route = { kind: "list", items: [] };
   const setRoute = (next: Route) => {
@@ -182,11 +234,15 @@ async function runSession(
 
   const seen: Seen[] = [];
   let answered = 0;
-  const { base } = serveStandin(cleanup, (url, body) => {
+  // A /btw step has settled once the stand-in serves its side turn: omp answers the RPC command
+  // before it sends the side turn's request.
+  let sideTurnServed = Promise.withResolvers<void>();
+  const { base } = serveStandin(cleanup, async (url, body) => {
     const request: Seen = { path: url.pathname, body, at: performance.now() };
     seen.push(request);
     if (url.pathname === "/anthropic/v1/messages") {
       answered += 1;
+      if (isSideTurn(request)) sideTurnServed.resolve();
       const blocks: readonly Block[] = isSummarization(request)
         ? [{ type: "text", text: summary }]
         : !isTurn(request)
@@ -217,6 +273,9 @@ async function runSession(
           { status: 404 }
         );
       }
+      // A slow Dispatch answers after a real delay: the case times the request against the read's
+      // own deadline, a platform timer inside the binary's process.
+      if (current.delayMs !== undefined) await Bun.sleep(current.delayMs);
       return Response.json({
         session_id: decodeURIComponent(answers[1] ?? ""),
         since: new Date(Date.now() - 72 * 60 * MINUTE).toISOString(),
@@ -237,9 +296,16 @@ async function runSession(
     "compaction:",
     // Keep only the newest turn, so a short conversation still has something to summarize.
     "  keepRecentTokens: 1",
-    "  methodOrder: [soft]",
+    `  methodOrder: ${options.methodOrder ?? "[soft]"}`,
     ...(options.config ?? []),
   ]);
+  if (options.model !== undefined) {
+    // The stand-in model is the last entry models.yml lists.
+    await appendFile(
+      path.join(home, ".omp", "agent", "models.yml"),
+      options.model.map((line) => `        ${line}\n`).join("")
+    );
+  }
   if (options.warm === true) {
     // A fresh profile has no model catalog, so the binary builds one beside its first turn, and
     // that work holds its event loop for one to two seconds (measured with --cpu-prof: the model
@@ -256,14 +322,22 @@ async function runSession(
       throw new Error(`omp models refresh failed:\n${await new Response(built.stderr).text()}`);
     }
   }
+  const extension = path.join(import.meta.dir, "envoy.ts");
+  const extensions = [extension];
+  if (options.twoCopies === true) {
+    const copy = path.join(root, "envoy-copy.ts");
+    await symlink(extension, copy);
+    extensions.push(copy);
+  }
 
-  // A prompt has settled at its terminal agent_end, a compaction at its RPC response.
+  // A prompt has settled at its terminal agent_end, a compaction and a handoff at their RPC
+  // response, a /btw once its side turn was served.
   let settle: ((frame: object) => boolean) | undefined;
   let settled = Promise.withResolvers<void>();
   const rpc = spawnRpc(
     binary,
     {
-      extensions: [path.join(import.meta.dir, "envoy.ts")],
+      extensions,
       home,
       workspace,
       sessions,
@@ -277,20 +351,29 @@ async function runSession(
     },
     cleanup
   );
+  const sentAt: number[] = [];
   for (const step of steps) {
     if ("route" in step) {
       route = step.route;
       continue;
     }
+    if ("btw" in step) {
+      sideTurnServed = Promise.withResolvers<void>();
+      sentAt.push(performance.now());
+      rpc.send({ type: "btw", question: step.btw });
+      await Promise.race([sideTurnServed.promise, rpc.closed]);
+      continue;
+    }
     settled = Promise.withResolvers<void>();
-    let compactError: unknown;
+    const command = "compact" in step ? "compact" : "handoff" in step ? "handoff" : undefined;
+    let commandError: unknown;
     settle =
-      "compact" in step
+      command !== undefined
         ? (frame) => {
             if (!("type" in frame && frame.type === "response")) return false;
-            if (!("command" in frame && frame.command === "compact")) return false;
+            if (!("command" in frame && frame.command === command)) return false;
             if (!("success" in frame && frame.success === true)) {
-              compactError = "error" in frame ? frame.error : "no error given";
+              commandError = "error" in frame ? frame.error : "no error given";
             }
             return true;
           }
@@ -298,17 +381,21 @@ async function runSession(
             "type" in frame &&
             frame.type === "agent_end" &&
             !("isTerminal" in frame && frame.isTerminal === false);
-    rpc.send("compact" in step ? { type: "compact" } : { type: "prompt", message: step.prompt });
+    sentAt.push(performance.now());
+    rpc.send("prompt" in step ? { type: "prompt", message: step.prompt } : { type: command });
     await Promise.race([settled.promise, rpc.closed]);
-    if (compactError !== undefined) throw new Error(`omp refused the compaction: ${compactError}`);
+    if (commandError !== undefined) throw new Error(`omp refused the ${command}: ${commandError}`);
   }
   if (options.until !== undefined) await Promise.race([options.until, rpc.closed]);
   await rpc.end();
 
   return {
     seen,
-    turns: seen.filter((request) => request.path === "/anthropic/v1/messages" && isTurn(request)),
+    turns: seen.filter(
+      (request) => request.path === "/anthropic/v1/messages" && isMainTurn(request)
+    ),
     answers: seen.filter((request) => request.path.endsWith("/answers")),
+    sentAt,
     summary,
   };
 }
@@ -552,9 +639,9 @@ test.skipIf(skipped)(
     expect(listOf(cachedFirst)).toBe(renderSessionAnswers([item], { now: Date.now() }));
     waited(cached, cachedSecond, "turn 2 after a good read");
     const earlier = listOf(cachedSecond);
-    expect(earlier).toBe(
-      renderSessionAnswers([item], { now: Date.now(), cachedAt: cachedAt(earlier) })
-    );
+    const earlierCache = cachedOf(earlier);
+    expect(earlierCache.reason).toBe(deadline);
+    expect(earlier).toBe(renderSessionAnswers([item], { now: Date.now(), cached: earlierCache }));
 
     // The subagent's first request: Dispatch hangs from the parent's delegating turn on, so the
     // subagent's read is the first to hang. `task` runs in the foreground here, so no read of the
@@ -573,9 +660,9 @@ test.skipIf(skipped)(
     expect(answersBefore(sub.seen, subFirst)).toBe(sub.answers[1] as Seen);
     waited(sub, subFirst, "the subagent's first request");
     const carried = listOf(subFirst);
-    expect(carried).toBe(
-      renderSessionAnswers([item], { now: Date.now(), cachedAt: cachedAt(carried) })
-    );
+    const carriedCache = cachedOf(carried);
+    expect(carriedCache.reason).toBe(deadline);
+    expect(carried).toBe(renderSessionAnswers([item], { now: Date.now(), cached: carriedCache }));
   },
   300_000
 );
@@ -631,6 +718,177 @@ test.skipIf(skipped)(
     console.log(
       `(h) request N+1's last two messages: ${JSON.stringify(messagesOf(next).slice(-2))}`
     );
+  },
+  180_000
+);
+
+/** A request's messages as role and text, cache anchors aside. */
+function shapeOf(messages: readonly unknown[]): [unknown, string][] {
+  return messages.map((message) => [
+    typeof message === "object" && message !== null && "role" in message ? message.role : null,
+    textOf(message),
+  ]);
+}
+
+// Oh My Pi runs a `context` handler on every conversion of messages for a model, not only on the
+// main loop's requests. A side turn (`AgentSession.runEphemeralTurn`, which a Dispatch BTW, the
+// stop-time self-check and `/btw` all reach) converts
+// `[...this.messages, {role: "developer", content: [{type: "text", text: ND}], attribution:
+// "agent"}, ...history, {role: "user", content: [{type: "text", text: promptText}], attribution:
+// "agent"}]` (`#jr`), and must end with its prompt.
+test.skipIf(skipped)(
+  "(i) a /btw side turn keeps its prompt last, carries no list and starts no read; the turns around it carry the list",
+  async () => {
+    const item = answer("ask_i", "Side turns stay as they were.", 1);
+    const session = await runSession(
+      binary(),
+      [
+        { route: { kind: "list", items: [item] } },
+        { prompt: "First question." },
+        // A read for the side turn would hang here, and hold its request for the whole deadline.
+        { route: { kind: "hang" } },
+        { btw: "What is up?" },
+        { route: { kind: "list", items: [item] } },
+        { prompt: "Second question." },
+      ],
+      { warm: true }
+    );
+
+    const sides = session.seen.filter(
+      (request) => request.path === "/anthropic/v1/messages" && isSideTurn(request)
+    );
+    expect(sides).toHaveLength(1);
+    const side = sides[0] as Seen;
+    const messages = messagesOf(side);
+    expect(textOf(messages.at(-1))).toContain("Question:\nWhat is up?\n</btw>");
+    expect(textOf(messages.at(-2))).toContain("Ephemeral side-channel turn");
+    expect(carriesList(side)).toBe(false);
+    // The dispatch-first skill is on it as on every request.
+    expect(JSON.stringify(messages)).toContain(DISPATCH_FIRST_MARKER);
+    // No answers request between the /btw and its side turn: it read nothing and waited on nothing.
+    const btwSent = session.sentAt[1] as number;
+    expect(session.answers.filter((read) => read.at >= btwSent && read.at <= side.at)).toEqual([]);
+    console.log(
+      `(i) the side turn's request came ${(side.at - btwSent).toFixed(0)} ms after the /btw command`
+    );
+    expect(side.at - btwSent).toBeLessThan(SESSION_ANSWERS_DEADLINE_MS);
+
+    // The main loop's turns on both sides carry the list, read fresh: no read was left hanging.
+    const [first, second, ...rest] = session.turns;
+    expect(rest).toEqual([]);
+    expect(listOf(first as Seen)).toBe(renderSessionAnswers([item], { now: Date.now() }));
+    expect(listOf(second as Seen)).toBe(renderSessionAnswers([item], { now: Date.now() }));
+  },
+  180_000
+);
+
+// The handoff converts `[...this.#e.agent.state.messages, {role: "user", content: [{type: "text",
+// text: b}], attribution: "agent", ...}]`, `b` the host's handoff prompt, and must end with it.
+test.skipIf(skipped)(
+  "(j) the handoff prompt stays last and carries no list; the turn after the handoff carries it",
+  async () => {
+    const item = answer("ask_j", "Hand it over as it is.", 1);
+    const session = await runSession(binary(), [
+      { route: { kind: "list", items: [item] } },
+      { prompt: "First question." },
+      { handoff: true },
+      { prompt: "Second question." },
+    ]);
+
+    const handoffs = session.seen.filter(
+      (request) => request.path === "/anthropic/v1/messages" && isHandoff(request)
+    );
+    expect(handoffs).toHaveLength(1);
+    const handoff = handoffs[0] as Seen;
+    expect(textOf(messagesOf(handoff).at(-1))).toStartWith(
+      "<critical>\nWrite a handoff document for another instance of yourself."
+    );
+    expect(carriesList(handoff)).toBe(false);
+    const answersBetween = session.answers.filter(
+      (read) => read.at >= (session.sentAt[1] as number) && read.at <= handoff.at
+    );
+    expect(answersBetween).toEqual([]);
+
+    const [first, second, ...rest] = session.turns;
+    expect(rest).toEqual([]);
+    expect(listOf(first as Seen)).toBe(renderSessionAnswers([item], { now: Date.now() }));
+    expect(listOf(second as Seen)).toBe(renderSessionAnswers([item], { now: Date.now() }));
+  },
+  180_000
+);
+
+// Anthropic remote compaction (`buildLiveProviderContext`) converts the conversation up to its cut,
+// counts the result, and keeps that many messages of the whole conversation's conversion:
+//   const ve = (await this.convertMessagesToLlm(Se, ce, pe)).length;
+//   const Re = await this.agent.buildSideRequestContext(await this.convertMessagesToLlm([...Se, ...le], ce, pe));
+//   ... return { ...Re, messages: Re.messages.slice(0, Le) };
+// A list on the first conversion would make the request keep the first message past the cut. The
+// binary runs it for a model with `compat.supportsServerCompaction` that it takes for a
+// first-party endpoint (`i4`): `if (e.compat.bedrockMessagesApi === true && (jre(r) || r ===
+// _f(e.baseUrl))) return true;`, so the stand-in model sets both, and its compaction request is
+// the Messages request that carries `compaction`. The stand-in answers it with no compaction
+// block, so the binary goes on to summarize locally, as on a failed remote compaction.
+test.skipIf(skipped)(
+  "(k) a remote compaction's request ends at its cut with no list, and the turn after it carries the list",
+  async () => {
+    const item = answer("ask_k", "Compact it remotely.", 1);
+    const session = await runSession(
+      binary(),
+      [
+        { route: { kind: "list", items: [item] } },
+        { prompt: "First question." },
+        { prompt: "Second question." },
+        { prompt: "Third question." },
+        { compact: true },
+        { prompt: "Fourth question." },
+      ],
+      {
+        methodOrder: "[remote, soft]",
+        model: ["compat: {supportsServerCompaction: true, bedrockMessagesApi: true}"],
+      }
+    );
+
+    const compactions = session.seen.filter(isRemoteCompaction);
+    expect(compactions).toHaveLength(1);
+    const compaction = compactions[0] as Seen;
+    const [, , third, fourth, ...rest] = session.turns;
+    if (third === undefined || fourth === undefined) throw new Error("want four turns");
+    expect(rest).toEqual([]);
+    // The cut falls between the third question and its answer: the compaction request is the third
+    // turn's request without its list, message for message, and carries none.
+    const compacted = messagesOf(compaction);
+    expect(textOf(compacted.at(-1))).toBe("Third question.");
+    expect(shapeOf(compacted)).toEqual(shapeOf(messagesOf(third).slice(0, -1)));
+    expect(carriesList(compaction)).toBe(false);
+    expect(listOf(third)).toBe(renderSessionAnswers([item], { now: Date.now() }));
+    expect(listOf(fourth)).toBe(renderSessionAnswers([item], { now: Date.now() }));
+  },
+  180_000
+);
+
+// Two copies of this extension (a checkout's and an installed one, say) each run their own
+// `context` handler on one request. When the first reads an empty list it appends nothing, so the
+// second must still see that the request was decided, or it reads Dispatch again and the request
+// waits on both reads.
+test.skipIf(skipped)(
+  "(l) two copies and an empty list: one answers request, and the request waits under a second",
+  async () => {
+    const session = await runSession(
+      binary(),
+      [{ route: { kind: "list", items: [], delayMs: 600 } }, { prompt: "First question." }],
+      { twoCopies: true, warm: true }
+    );
+
+    // Both copies ran: each asked for the open asks as its turn started.
+    expect(session.seen.filter((request) => request.path === "/api/v1/asks/open")).toHaveLength(2);
+    const [first, ...rest] = session.turns;
+    if (first === undefined) throw new Error("no turn 1");
+    expect(rest).toEqual([]);
+    expect(session.answers).toHaveLength(1);
+    const ms = first.at - (session.answers[0] as Seen).at;
+    console.log(`(l) the Messages request came ${ms.toFixed(0)} ms after the answers request`);
+    expect(ms).toBeLessThan(1_000);
+    expect(carriesList(first)).toBe(false);
   },
   180_000
 );
