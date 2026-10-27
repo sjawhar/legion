@@ -2,24 +2,58 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-591",
-  "completed": "2026-10-27T11:22:30Z",
-  "headTested": "3d97fd8db22d84034e86622c4ad4cc038aa39da1",
+  "completed": "2026-10-27T14:34:00Z",
+  "headTested": "6e43fff92baaca9bb4d19711b53a0ce2636f4e9d (code 26a15dcf333e; 6e43fff9 adds only .legion/)",
   "implementerProof": {
-    "verdict": "rejected",
-    "how": "Re-ran the implementer's smoke (plan 6.1, /legion/scratch/tmp/infra591/smoke.sh) on envoy-dispatch built by the tester from the head's code (48cb088a6556, identical to 3d97fd8d outside .legion/), on the harness stack (Postgres 16.2, 1 ms proxy, NATS, listener): with a cold SSE stream open and a psql transaction holding a lower event id 33261 on LGA-12, POST /api/v1/issues/LGA-22/comments answered 201 in 137 ms (id 33262); the stream sent nothing for 3 s; after commit it sent 33261 then 33262; a fresh stream with Last-Event-ID 33260 sent 33261 then 33262 (/legion/scratch/tmp/infra591/tester/smoke1/). That reproduces proof entry 2. The proof as a whole is rejected for two reasons: the head cannot merge (GitHub reports PR #2392 CONFLICTING, so no CI run exists at any commit of the branch and the head that merges will carry a code merge), and the 1x/2x load proof (entry 4) is biased by the harness's 20 ms lock sampler, as the implementer reported on Envoy at 2026-10-27T11:21Z and INFRA-514's architect confirmed."
+    "verdict": "verified",
+    "how": "I drove the same surface myself: INFRA-589's committed harness (#2369's packages/envoy/loadtest; Postgres 16.2, 1 ms proxy, NATS, listener). envoy-dispatch was built by the tester from the workspace at 26a15dcf (head) and from lt-before at c892b97d (base). (1) The smoke steps, out-of-order commit: on head, an open psql write held id 10005, the comment POST got 201 in 123 ms as id 10006, and the open stream sent nothing until the commit. Then it sent 10005 and 10006, and a resume sent the same. On base, the stream sent 10006 at once and never 10005. (2) The lock check: with pg_advisory_xact_lock(0x4449535041544348) held, the comment POST on head got 201 in 174 ms. On base it got no answer in 8 s. (3) One 1x load pair on the committed harness. The commit-order lock was held 100% on base and 0% on head. Committed went from 1.90 to 2.48 events/s. Comment p50 went from 26.3 s to 9.3 s. These agree in direction with the implementer's medians (1.18 to 2.88, 28.0 s to 10.7 s). Requests 2xx went from 54% to 45% in my single pair, against 38% to 58% in the implementer's medians. That is a single-run spread, and no acceptance line sets a threshold on it."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "The head that merges is the head tested, and CI is green on it.",
-      "evidence": "gh pr view 2392 --repo sjawhar/legion --json mergeable -> CONFLICTING at 3d97fd8db22d. gh api repos/sjawhar/legion/commits/<sha>/check-runs -> total_count 0 for 3d97fd8d (handoff-only, skip-checks), 48cb088a6556 and 9380c4a0b8ce: GitHub runs no pull-request workflow on a conflicting head, so no lane has ever run on this branch. git merge-tree --write-tree 3d97fd8d c892b97df887 (main@origin) conflicts in five files: packages/envoy/internal/dispatch/api/references.go, packages/envoy/internal/dispatch/refs/graph.go (Query.Through against main's WholeDocuments, and the source_seq <= Through clause against main's new order by other_kind, other_id, at_block), packages/envoy/internal/dispatch/api/routes_table.go, packages/envoy/cmd/dispatch/AGENTS.md and packages/envoy/cmd/dispatch/README.md. The conflicting main commit is b69f636f2ca1 (#2210, block nodes in the link graph). The Through bound must be applied to main's rewritten graph query, including its block edges, so GET /api/v1/references?since= (acceptance line 3, T7) is new code after the merge and must be proven again there. Fix: forward-merge main into legion/INFRA-591 (skill://legion-worker/references/conflicts-and-rewrites.md), resolve the five files, and prove T7 on the merged code."
+      "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
+      "surface": "Local Dispatch (envoy-dispatch built from the head's code) on INFRA-589's committed harness, through the REST API, and the harness's 1 s ungranted-lock sampler under the 1x load",
+      "command": "python3 lockcheck.py (psql holds pg_advisory_xact_lock(0x4449535041544348), and a psql write stays open on LGC-19 with its owner row locked; then POST /api/v1/issues/LGC-190/comments and POST /api/v1/issues/LGC-19/comments); run-step.sh tester-after-1x --events 4 --sessions 400 --requests 60",
+      "observed": "The POST on LGC-190 got 201 in 174 ms. The POST on LGC-19 waited for the open write on that issue's row, as per-issue order requires. Under 1x load the commit-order lock was held in 0% of samples. The waits sampled were transactionid row_wait on issues rows (select ... from issues where key = $1 for no key update), tuple locks on issues, and the NOTIFY commit lock in 1% of samples (kept by decision D1).",
+      "headSha": "26a15dcf333e106a33078a4524e8558608be7e6a",
+      "negativeControl": "Base c892b97d, same lockcheck: the POST on LGC-190 got no answer within 8 s while the old lock was held. In the base 1x step the commit-order lock was held in 100% of samples, with 45 writers waiting at the median (51 at most)."
+    },
+    {
+      "criterion": "A reader resuming from a cursor never misses an event that commits later with a lower id; a test commits two writes out of id order and a resuming reader gets both in a defined order.",
+      "surface": "GET /api/v1/events (SSE) cold and with Last-Event-ID, on one and on two envoy-dispatch processes sharing one Postgres",
+      "command": "adv.py rollback commit; adv.py rollback; adv.py concurrent; STREAM_PORT=18778 adv.py concurrent (streams on a second process); adv.py stall; adv.py lastid",
+      "observed": "Open lower id 10005, committed higher id 10006: the stream sent nothing for 2 s, then 10005 and 10006 in that order, and a resume from 10004 sent the same. When the lower write rolled back, the stream sent 10006 70 ms after the rollback. Concurrency: 80 POSTs ran beside 16 psql writes that each stayed open for 0.2 to 3 s, 4 of which rolled back. Each of 3 cold streams got exactly the 92 committed ids in increasing order, and a resume mid-run got every later id. The run with the streams on the second process gave the same result. A transaction holding a transaction id in another database held the stream back; the event arrived 117 ms after that transaction committed, and the stall warning named the holder. Last-Event-ID 0 replayed all 10,007 rows, equal to the database. An id above the newest still carries a later event. Non-numeric and out-of-range values are refused 400 INVALID_QUERY.",
+      "headSha": "26a15dcf333e106a33078a4524e8558608be7e6a",
+      "negativeControl": "Base c892b97d: the open stream sent 10006 at once and never 10005. In the concurrency run, each of the 3 base streams missed 10 committed ids ([10011, 10012, 10014, 10018, 10021, 10022, 10025, 10028, 10029, 10072]), and so did the mid-run resume."
+    },
+    {
+      "criterion": "Every consumer of the event stream keeps the order it relies on; the plan lists each and the test covers each.",
+      "surface": "SSE handler and resume, the relay across two processes, GET /api/v1/references?since= on the merged graph query, the outbox's per-issue NATS subject, an event log reset",
+      "command": "adv.py concurrent (one and two processes); adv.py refs; a raw NATS subscriber on notifications.dispatch.issue.<key>.> during 30 concurrent POSTs on one issue and 30 on ten others; adv.py reset (truncate events restart identity cascade under an open stream)",
+      "observed": "SSE and relay: as in the criterion above. References: a mention at 10006 stayed out of 3 since=10004 reads while 10005 was open, and appeared once 10005 committed. The Through bound sits on the outer select over every arm, block_refs included (refs/graph.go:241-258). NATS: LGB-28's subject carried seqs 11 to 40, in the order of the database's ids. Reset: after the next commit the relay logged 'the event log was reset' and ended its open streams, and a resume with the old id went on with the new log. The delivery hub has no reachable surface on this stack, since it needs delivery_settings proven against the GitHub App, so it rests on test T6, which CI's Go lanes run.",
+      "headSha": "26a15dcf333e106a33078a4524e8558608be7e6a",
+      "negativeControl": "Base c892b97d, the same references read: the mention at 10102 was listed on every since read while the lower id 10101 was open, uncapped, so a poller moving its since to 10102 would never see a mention at 10101."
     },
     {
       "criterion": "Before and after on the committed load reproduction at tonight's step and twice it: lock hold samples, committed vs offered, write latency p50/p99, delivery latency from the write's arrival.",
-      "evidence": "The implementer reported (Envoy, 2026-10-27T11:21:30Z) and INFRA-514's architect confirmed (11:21:38Z) that the harness's 20 ms lock sampler loaded Postgres during the 1x and 2x runs, more on the base side (one pg_blocking_pids per waiter, 33-49 waiters before against 1-4 after; 630-1,271 probe samples before against 1,834-2,082 after, where an unloaded run collects about 3,000), so the 1x/2x rows of dispatch://INFRA-591/artifact/load-before-after-md and of the PR body (0.69 -> 3.07 events/s committed) are overstated by an unknown amount; the 0.5x rows and the smoke are unaffected. Required, as the architect directs: re-measure 1x and 2x on PR #2369's harness at a7b5f467 (1 s lock sampling), 3 runs per side, alone on the pod, and correct load-before-after-md and the PR body. Measure the after side at the merged head (failure 1), since that is the code that merges."
+      "surface": "INFRA-589's committed harness (#2369, ungranted locks sampled once a second), started in the tester's namespace, one 2-vCPU pod with nothing else running",
+      "command": "LOADTEST_SRC=<lt-before|lt-after> run-step.sh tester-{before,after}-1x --events 4 --sessions 400 --requests 60 (runs/tester-*-1x/TABLES.md in dispatch://INFRA-591/artifact/infra591-tester-evidence-tar-gz)",
+      "observed": "before -> after at 1x: commit-order lock held 100% -> 0%; committed 1.90 -> 2.48 events/s (offered 3.99); comment write p50/p99 26.3/29.3 s -> 9.3/24.5 s; NATS delivery from arrival p50 27.7 s -> 18.7 s; SSE frame from write response p50 14.4 s -> 38.7 s; SSE order violations 0 and 0; requests 2xx 54% -> 45%. The implementer's 18-run medians agree in direction, apart from the 2xx share, and so does the live-frame slowdown the PR body records as accepted with dispatch://INFRA-636.",
+      "headSha": "26a15dcf333e106a33078a4524e8558608be7e6a",
+      "negativeControl": "The base step reproduces the knee: the lock is held in 100% of samples, 45 writers wait at the median, and 1.90 of 3.99 offered events/s commit."
+    },
+    {
+      "criterion": ".dispatch/architecture/dispatch-events.md says what is now true.",
+      "surface": "The architecture doc at the head",
+      "command": "grep -n -i 'advisory lock\\|horizon\\|primary' .dispatch/architecture/dispatch-events.md",
+      "observed": "No advisory-lock sentence remains. Line 9 names the global-id readers, the horizon rule and the writer invariants. Line 11 names the instance-wide cost, the stall warning, the transaction-id cost, the horizon's own pool and the primary-only constraint. All of it matches horizon.go and broker.go as read.",
+      "headSha": "26a15dcf333e106a33078a4524e8558608be7e6a",
+      "negativeControl": "The base c892b97d copy, line 7: 'orders commits with a global advisory lock'."
     }
   ],
-  "failed": 2,
-  "notStarted": [
-    "Adversarial real-surface round (stall by a transaction in another database and its warning, rollback of an open lower id, Last-Event-ID and since boundary inputs, full replay from 0 against the database, concurrent out-of-order writers with three streams and a mid-run resume, idle xid consumption, first stream on a fresh process while a transaction holds the horizon): the driver is ready at /legion/scratch/tmp/infra591/tester/adv.py but was not run, because the harness Postgres went down at 11:21Z and the architect asked the tester not to load the pod while the load is re-measured. It runs in the next round, at the merged head."
+  "ci": "Read on GitHub at 26a15dcf at 2026-10-27T14:33Z, recorded here only. dispatch-multiprocess, envoy-smoke, lint, typecheck, test and build are green. envoy-go, envoy-go-race, envoy-infra-go and dispatch-memory are in progress; broker-multiprocess and envoy-e2e-local are queued. The dispatch lane is red on one dashboard unit test, web/src/features/refs/AgentName.test.tsx 'names mounted at staggered times plus a polled useAgents caller fetch at most once per 15 s', which timed out at 5 s. The PR changes no file under packages/dispatch, and the same file passes locally at the head (15 pass). The implementer re-runs the failed job once the run completes.",
+  "risks": [
+    "Shown on the real surface: on a newly started process, the first SSE connection gets no response headers and no ': open' line while any transaction holds a transaction id anywhere on the Postgres instance. The relay's start waits in Horizon.Await (event_stream_relay.go:190, awaitEventCursor). In the test a transaction in database postgres held it 6 s and more; the base build opened in 49 ms. Every browser reconnect after a deploy waits that long, and the stall warning names the holder. It is the cost the PR already records (live readers wait for open writers), but at connection open rather than per frame."
   ]
 }
