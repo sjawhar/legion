@@ -603,37 +603,38 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the records of the children to release")
 		return
 	}
-	// Every child the release writes todo is written first, so no child of the wave holds back
-	// another's release. Then each written child is recorded from its own write in this request
-	// (recordOwnStatusWrite), not when the write's event comes back through the Dispatch consumer.
-	// A written child under none of the wave's todo children is recorded first. The rest go in one
-	// pass in releaseOrder, which takes a parent the wave releases before its child (the workflow
-	// records a child only under a recorded parent): each child Dispatch already showed todo is
-	// recorded from Dispatch's view of it (enterTodoChild), which answers the request when it
-	// cannot record one (CHILD_NOT_RECORDED and the like), and each written child under one of
-	// those, directly or through written children of the wave, after its parent. Applied before its
-	// parent is recorded, a child would be recorded by no handler of the workflow, and admission,
-	// which applies after it, would take one carrying the legion label for an orphan and record it
-	// as a root of its own. A written child the record does not take still stands released:
-	// Dispatch shows it todo, and its write's event records it when the consumer delivers it, so
-	// that failure is logged and does not fail the release.
+	// A child the release writes todo under none of the wave's todo children is written, then
+	// recorded from its own write in this request (recordOwnStatusWrite), not when the write's event
+	// comes back through the Dispatch consumer; all of these are written before any is recorded, so
+	// none holds back another's release. The rest go in one pass in releaseOrder, which takes a
+	// parent the wave releases before its child (the workflow records a child only under a recorded
+	// parent): each child Dispatch already showed todo is recorded from Dispatch's view of it
+	// (enterTodoChild), which answers the request when it cannot record one (CHILD_NOT_RECORDED and
+	// the like), and each child to write under one of those, directly or through other children to
+	// write, is written and recorded after its parent. Neither its record nor its write goes before
+	// that parent is recorded: a child applied then, from the request or from its write's event
+	// delivered by a consumer that keeps up, would be recorded by no handler of the workflow, and
+	// admission, which applies after it, would take one carrying the legion label for an orphan and
+	// record it as a root of its own. A written child the record does not take still stands
+	// released: Dispatch shows it todo, and its write's event records it when the consumer delivers
+	// it, so that failure is logged and does not fail the release.
 	ordered := releaseOrder(children)
-	written := make(map[string]dispatch.Issue, len(ordered))
-	for _, child := range ordered {
-		if !child.write {
-			continue
-		}
-		issue, ok := s.setDispatchStatus(w, r, child.view.Key, "todo")
-		if !ok {
-			return
-		}
-		written[child.view.Key] = issue
-	}
 	underTodo := underTodoChild(children)
+	written := make(map[string]dispatch.Issue, len(ordered))
+	write := func(child releasedChild) bool {
+		issue, ok := s.setDispatchStatus(w, r, child.view.Key, "todo")
+		written[child.view.Key] = issue
+		return ok
+	}
 	record := func(child releasedChild) {
 		if failure := s.recordOwnStatusWrite(r.Context(), written[child.view.Key]); failure != nil {
 			s.log.Warn("api: release_children wrote a child todo, but the record did not take the write; the write's event will record it",
 				"issue", child.view.Key, "code", failure.code, "reason", failure.message)
+		}
+	}
+	for _, child := range ordered {
+		if child.write && !underTodo[child.view.Key] && !write(child) {
+			return
 		}
 	}
 	for _, child := range ordered {
@@ -648,6 +649,9 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case underTodo[child.view.Key]:
+			if !write(child) {
+				return
+			}
 			record(child)
 		}
 	}

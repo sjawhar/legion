@@ -472,8 +472,8 @@ func TestWaveReleaseStandsWhenTheRecordDoesNotTakeALandedWrite(t *testing.T) {
 
 // A todo child the release cannot record yet (its parent is outside the wave and unrecorded, so
 // the answer is CHILD_NOT_RECORDED) does not hold back the rest of the wave: every child the release
-// writes todo is written first, and one under none of the wave's todo children is recorded from its
-// own write before the stuck child answers.
+// writes todo under none of the wave's todo children is written, and recorded from its own write,
+// before the stuck child answers.
 func TestWaveReleaseWritesAndRecordsTheWaveBeforeAStuckTodoChildAnswers(t *testing.T) {
 	h, statuses := releaseHarness(t, true)
 	stuck, unrecordedParent, free := "LEGION-209", "LEGION-299", "LEGION-210"
@@ -496,6 +496,33 @@ func TestWaveReleaseWritesAndRecordsTheWaveBeforeAStuckTodoChildAnswers(t *testi
 	}
 	if recorded := recordedChild(t, h, stuck); recorded != nil {
 		t.Fatalf("the record of %s = %#v, want none while its parent is unrecorded", stuck, recorded)
+	}
+}
+
+// A child to write under a todo child of the wave is not written until that todo child is
+// recorded: written first, its own todo event, delivered by a consumer that keeps up, would reach a
+// daemon with no record of its parent, and a labelled one would be recorded as a root of its own.
+// When the todo child cannot be recorded (CHILD_NOT_RECORDED), the child under it is neither
+// written nor recorded, and the architect's retry releases both once the parent is recorded.
+func TestWaveReleaseWritesNoChildUnderATodoChildItCannotRecord(t *testing.T) {
+	h, statuses := releaseHarness(t, true)
+	stuck, unrecordedParent, under := "LEGION-209", "LEGION-299", "LEGION-210"
+	parent := releaseRoot
+	statuses.issues[unrecordedParent] = dispatch.Issue{Key: unrecordedParent, ResolvedRepo: "acme/widgets", Title: unrecordedParent, Status: "triage", Parent: &parent, LastSeq: 3}
+	child := todoChild(stuck)
+	child.Parent = &unrecordedParent
+	statuses.issues[stuck] = child
+	statuses.issues[under] = labelledChild(under, stuck, "backlog")
+	architect := newLiveClaim(t, h, releaseRoot, claim.RoleArchitect)
+
+	recorder := h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": []string{under, stuck}}, nil)
+
+	assertFailure(t, recorder, http.StatusConflict, "CHILD_NOT_RECORDED")
+	if len(statuses.writes) != 0 {
+		t.Fatalf("Dispatch writes = %#v, want none: %s waits for %s to be recorded", statuses.writes, under, stuck)
+	}
+	if recorded := recordedChild(t, h, under); recorded != nil {
+		t.Fatalf("the record of %s = %#v, want none", under, recorded)
 	}
 }
 
