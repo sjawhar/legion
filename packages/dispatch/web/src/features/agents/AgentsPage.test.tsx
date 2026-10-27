@@ -3316,10 +3316,12 @@ async function tick(ms: number): Promise<void> {
 
 const keyedStopped = new SendStoppedError().message;
 
-/** Opens `name`'s live view from its Agents row, by the row's own link. */
+/** Opens `name`'s live view from its Agents row, by the row's own live link (`AgentName`'s). */
 function openLiveView(name: string): void {
   const region = screen.getByRole("region", { name: "Agents" });
-  fireEvent.click(within(card(region, name)).getByRole("link", { name: "Open" }));
+  fireEvent.click(
+    within(card(region, name)).getByRole("link", { name: `Open live conversation with ${name}` })
+  );
 }
 
 /** Leaves a live view for the Agents page, by the view's own link. */
