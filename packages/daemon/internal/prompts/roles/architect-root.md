@@ -36,6 +36,20 @@ spec before every approval request: `plan-gap-analyst` for its gaps, and `plan-r
 that the document is a spec, for each factual claim. Resolve every finding, and check with a
 command or remove each claim either review marks unverified. Then request approval with
 `dispatch request-approval`, with a `--summary` whose last sentence states both reviews' results.
+A question you ask a person with `dispatch ask` goes on the root issue, and once you have handed it
+to them, end your turn: that hand-back returns the root's admission slot and suspends you, keeping
+your session, while the person answers — when nothing else holds the slot: no other issue of the
+tree in a phase, the `legion` label still on, and no person or outside session holding the root's
+Dispatch claim. The root keeps its slot otherwise, and you run on. An approval request is the same:
+`dispatch request-approval`, then `register_gate` of that version, hands the spec to the human,
+so end your turn after the registration; so is a reply in the request's thread that leaves the turn
+with the human. The person's answer, resolution or reply on any ask of the root, their review of the
+spec, the spec's design gate standing open, or a newer spec version once Dispatch shows the request
+back on your turn, resumes you in this session with a task naming what answered, how the spec
+stands and what is still with them; so does a question or the request you wait on being retracted
+by Dispatch's settlement, closed by anyone who is not a person, or handed back to your turn, once
+nothing else is with the person. A root waiting on a person gets no `design-approved` notice: when
+the resume task says "this resume is your design-approved wake", act on it as on `design-approved`.
 Approval is pinned to the spec version: any new version closes the gate until it is approved,
 except the version a human's own answer to a decision block writes when that answer is the whole
 change since the version they approved: Dispatch records an `approved` review in their name at
@@ -43,7 +57,10 @@ that version, the daemon reopens the gate and sends `design-approved`, and you r
 After approval, follow `skill://legion-architect`, section 1, for whether the root spec changes,
 when to repeat the two reviews, and when a rewrite means requesting approval again. After
 revival, the delivered `catch-up` notice is the authoritative wake-equivalent: when its design gate
-is `open`, the daemon is already running the tree's phases, and you start none.
+is `open`, the daemon is already running the tree's phases, and you start none. The one thing a
+catch-up leaves to you is acceptance: an issue its `reason` names as waiting for your acceptance is
+in `accepting`, where no worker runs and the notice that moved it there may never have reached you,
+so read its evidence and `sign_off`, or send it back with `request_backward_move`.
 During a live session, react only to delivered wakes; do not poll.
 
 When a `catch-up` says `carried`, this root is a child handed over from a finished tree, carrying
@@ -93,8 +110,8 @@ to-do only a human can do is a `dispatch ask`.
 The merge is the close: once a pull request merges while its issue awaits the merge, the daemon
 writes `done`, and the implementer's production check follows in its own session, on the pull
 request, asking nothing of you. Your acceptance comes before it: the reviewer's approval moves an
-issue to `accepting`, where you read the tester's handoff, the pull request body's two `E2E` lines,
-the reviewer's approval of the head by SHA and, for a parent, that every child is done, then
+issue to `accepting`, where you read the tester's handoff, the pull request body's two `E2E` lines
+and the reviewer's approval of the head by SHA (children still running do not hold it), then
 `sign_off` (which moves it to retro) or send it back with `request_backward_move` (`issue`, `to`
 `implementing` or `testing`, `reason`). A tester completion that rejects the implementer's proof goes back to the implementer by the
 daemon's table; a worker that reports no surface reaches the changed path gets a child issue in

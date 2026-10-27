@@ -90,13 +90,15 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 39's one-container issue pod
-(INFRA-208: a sandbox locator of an issue pod's role names container `roles`, and `settings` on
-`GET /legion/v1/state` gives `runtime.kubernetes.resources` as `{issue, controller}`), after
-contract 38's blocked issues on `GET /legion/v1/state` (INFRA-225: `admission.blocked` lists every
-root and child Legion is waiting to start behind an unfinished Dispatch issue, and
-`release_children` answers `started` and `held` beside `released`), after contract 37's pod-owned
-issue disk
+number is the one `DaemonAPIVersion` declares, last bumped by contract 40's `awaiting_person`
+phase and strict `waitingOn` issue view on `GET /legion/v1/state` (a root that gave its admission
+slot up while its architect waits on a person, and what it waits on; a 39 plugin rejects both),
+after contract 39's one-container issue pod (INFRA-208: a sandbox locator of an issue pod's role
+names container `roles`, and `settings` on `GET /legion/v1/state` gives
+`runtime.kubernetes.resources` as `{issue, controller}`), after contract 38's blocked issues on
+`GET /legion/v1/state` (INFRA-225: `admission.blocked` lists every root and child Legion is waiting
+to start behind an unfinished Dispatch issue, and `release_children` answers `started` and `held`
+beside `released`), after contract 37's pod-owned issue disk
 (INFRA-80: an issue's disk is a generic ephemeral volume its pod owns, created with the pod and
 deleted with it, so the init container above is no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the
 lost-disk machinery that variable drove — `workspace-init`'s exit code 3, its recovery marker, the
@@ -196,8 +198,13 @@ steps — the task whose turn is running; or, once that turn ends and retires it
 is left serving, which is what answers for a worker woken by a notice; or, for a claim that has
 served no run at all, a task it holds that the agent may have read. A task the agent refused is
 not one it read, so it answers for none of them. `POST /legion/v1/handoff/complete` answers 409
-`HANDOFF_NO_RUN` to a claim that has taken no task at all, and the workflow refuses
-`HANDOFF_STALE_GENERATION` for a run the issue has left. The pane's `LEGION_GENERATION` is the
+`HANDOFF_NO_RUN` to a claim that has taken no task at all, and `HANDOFF_STALE_GENERATION` to a
+completion of a run the issue has left, naming the current run's queued task when the claim holds
+one. Both are refused before the fact is applied, so neither is recorded: the same call in that
+task's turn is applied. The workflow's own stale refusal, for an issue that moves between the
+route's read and the fact's transaction, is still recorded, and blocks no later call: its key
+carries the issue generation the route read, which the issue has left, so a retry is refused at the
+route and the new run's completion has another key. The pane's `LEGION_GENERATION` is the
 claim's launch counter and says nothing about the run; nothing reads it for this.
 Contract 7 adds `holdReason` to an issue on `/legion/v1/state`: `escalated` while an issue its
 architect escalated stays held in a tree that runs, absent otherwise (a tree that lingers or is

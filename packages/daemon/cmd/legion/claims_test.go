@@ -541,6 +541,51 @@ func TestClaimsRetryPostsToTheClaimsRetryRoute(t *testing.T) {
 	}
 }
 
+// retry --failed lists the claims and retries every one the daemon holds failed, in its token
+// order, printing each retried claim as --claim prints it, and asks nothing of a claim that has not
+// failed; with none failed it retries nothing and exits 0. --claim and --failed name what to retry,
+// so the command takes exactly one of them.
+func TestClaimsRetryFailedRetriesEveryFailedClaim(t *testing.T) {
+	d := newOperatorDaemon(t)
+	refused := fake.SpawnResult{Err: errors.New("the runtime refused the launch")}
+	d.runtime.ScriptSpawn(refused, refused, refused)
+	if code, _, _ := d.claims(d.spawnArgs()...); code != 1 {
+		t.Fatalf("spawn whose every launch the runtime refused exited %d, want 1", code)
+	}
+	worker := append(append([]string{"spawn"}, d.reach()...), "--tree", "LEGION-208", "--issue", "LEGION-209",
+		"--role", "implementer", "--prompt-file", writeFile(t, "implementer.md", "Implement."))
+	d.succeed(worker...)
+	before := len(d.operatorRequests())
+
+	out := d.succeed(append(append([]string{"retry"}, d.reach()...), "--failed")...)
+
+	var asked []string
+	for _, seen := range d.operatorRequests()[before:] {
+		asked = append(asked, seen.method+" "+seen.path)
+	}
+	if want := []string{"GET /legion/v1/operator/claims", "POST /legion/v1/operator/claims/" + string(architectClaim) + "/retry"}; !slices.Equal(asked, want) {
+		t.Fatalf("retry --failed asked %q, want %q", asked, want)
+	}
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 4 0\n"; out != want {
+		t.Fatalf("retry --failed stdout = %q, want %q", out, want)
+	}
+
+	before = len(d.operatorRequests())
+	if out := d.succeed(append(append([]string{"retry"}, d.reach()...), "--failed")...); out != "" {
+		t.Fatalf("retry --failed with nothing failed printed %q, want nothing", out)
+	}
+	if asked := d.operatorRequests()[before:]; len(asked) != 1 || asked[0].method != http.MethodGet {
+		t.Fatalf("retry --failed with nothing failed asked %v, want the list alone", asked)
+	}
+
+	for _, args := range [][]string{{"--failed", "--claim", string(architectClaim)}, {}} {
+		code, out, errb := d.claims(append(append([]string{"retry"}, d.reach()...), args...)...)
+		if code != 2 || out != "" || !strings.Contains(errb, "--claim") {
+			t.Errorf("retry %q: exit %d, stdout %q, stderr %q; want 2 naming --claim", args, code, out, errb)
+		}
+	}
+}
+
 // list prints one line per claim — token, role, issue, state, generation, plugin contract — in the
 // daemon's token order, and --json prints the daemon's answer byte for byte.
 func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {

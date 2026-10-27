@@ -24,11 +24,11 @@ you may conclude from the head afterwards.
 
 - **`skip-checks: true` suppresses the runs a push starts, and nothing else.** A workflow that
   triggers on something other than the push still runs and still attaches its check run to that
-  head. In this repository `.github/workflows/pr-title.yaml` triggers on `issue_comment`,
-  `pull_request_review` and `pull_request_review_comment` as well as on `pull_request`, so any
-  review traffic puts a required check on a head no push ever built.
+  head. In this repository `.github/workflows/pr-title.yaml` triggers on `pull_request_review` as
+  well as on `pull_request`, so any review (an inline comment posted alone included) puts a
+  required check on a head no push ever built.
 - **So "the head has no check runs" is the wrong diagnostic.** It is wrong in exactly the case you
-  will meet — a blocked pull request someone has commented on — and a reader who finds runs there
+  will meet — a blocked pull request someone has reviewed — and a reader who finds runs there
   concludes CI is merely slow and waits.
 - **Ask instead whether the checks the base requires *from a push* are present.** Read the base's
   required set live (`gh api repos/<o>/<r>/rules/branches/<base>`, plus

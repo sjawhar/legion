@@ -44,7 +44,10 @@ mapped repository both the implement and the review App are installed on, and le
 App is missing from: the boot logs it, `legion state --json` lists it under `repositories.refused`
 with the App it lacks, and an issue on it is not admitted until the App is installed, when moving
 the issue to `todo` again admits it. A project with no repository mapped does not boot; one whose
-every repository lacks an App boots serving none and admits nothing until an App is installed.
+every repository lacks an App boots serving none and admits nothing until an App is installed. A
+Dispatch that does not answer the boot's read of the mapping delays the boot rather than ending it:
+the daemon reads it again, one second doubling to one minute between reads, for as long as Dispatch
+stays unreachable, logs each wait, and serves nothing until the read passes.
 
 ## The GitHub Apps
 
@@ -62,7 +65,9 @@ The implement App cannot create a check run, and a review never comes from the A
 change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
 GitHub with the implement App too: every two minutes it reads each open pull request's base branch
 and the checks that branch requires (its rulesets and its branch protection), since only those
-decide whether CI is red at a head, and so where Legion sends the issue. Whether the merge happens
+decide whether CI is red at a head, and so where Legion sends the issue. The same read follows a
+pull request's head when its push webhook is lost or late, and the daemon looks up the open pull
+request of an issue whose implementer completed with none recorded. Whether the merge happens
 is GitHub's to decide, under those same rules.
 
 `scripts/github-apps/create.ts` registers all three from the manifests beside it:
@@ -442,7 +447,9 @@ pod the daemon launches and keeps running (`controller: daemon`).
 
 ### In the cluster
 
-Set `controller: daemon` in `legion.yaml` (it needs `runtime: kubernetes`) and restart the daemon.
+Set `controller: daemon` in `legion.yaml` (it needs `dispatch_url`) and restart the daemon. Under
+`runtime: tmux` the daemon launches the controller as a pane in a window of its own, `controller`,
+and supervises it the same way; the rest of this section is the Kubernetes runtime's.
 It launches the controller at boot as an Agent Sandbox pod, `legion-<project>-controller`, with the
 same model access as the workers and a volume of its own, which its Sandbox owns, relaunches it when it
 dies, and resumes the same session. You start nothing, and `legion controller start` against this
@@ -597,8 +604,9 @@ Closing the terminal leaves the project without one, and the daemon logs
    the new daemon is up: that records the suspension as yours. Act only on the claims the state
    names as nothing will wake (`legion state`'s `claims nothing will wake` line, or
    `strandedClaims` in `--json`), and skip those you drained on purpose: resume a suspended
-   architect, retry a failed one (`legion claims retry`, which relaunches its session with fresh
-   budgets), and bring a suspended phase worker back as
+   architect, retry a failed one (`legion claims retry --claim <token>`, which relaunches its
+   session with fresh budgets; `legion claims retry --failed` retries every failed claim, and a
+   failed phase worker whose issue is held for its own role retries that phase), and bring a suspended phase worker back as
    [A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)
    shows for its `suspendedBy`. Never resume or retry by hand a claim of a lingering tree or of an
    issue parked out of the workflow: re-admission or the issue's return to `todo` starts it.
@@ -632,11 +640,18 @@ Closing the terminal leaves the project without one, and the daemon logs
   ```text
   legion WIDGETS on http://192.0.2.10:13370 — schema 12, boot 7 started 2026-10-03T09:12:40Z (first boot 2026-09-20T15:02:11Z)
   admission: 3 active, 1 waiting, cap 4; 9 issues
+  roots waiting on a person: 1, 0 answered and waiting for a slot — WIDGETS-9 waits on ask 7f3c2a10, unanswered
   open production checks: 1; the oldest, WIDGETS-12 #42 at 4b7d2a1, look 1 woken by merge at 2026-10-03T10:15:02Z, bound 2026-10-17T10:15:02Z
   pending Dispatch status writes: none
   held lifecycle rows: none
   claims nothing will wake: none
   ```
+
+  The `roots waiting on a person` line counts the roots that gave their admission slot back to
+  wait on a person (phase `awaiting_person`), how many have been answered — each first in line for
+  the next free slot — and each by key with what it waits on (`none` when no root waits). An
+  unanswered one is in neither admission list, so without this line the capacity it freed looks
+  idle.
 
   The `open production checks` line counts the closed issues whose production check is still
   open and names the oldest: its pull request, merge commit, which look it is on, what woke that
@@ -646,7 +661,10 @@ Closing the terminal leaves the project without one, and the daemon logs
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,
   `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`,
-  `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`) and, for a closed issue whose
+  `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`), for a root in `awaiting_person`
+  `waitingOn` (`kind` `ask` with its `ask`, or `gate` with `gateVersion` and `artifactId`; `since`; and
+  `answeredAt` with `answeredBy` once it was answered) and, for a closed
+  issue whose
   production check is open, `check` (`repo`, `pullRequest`, `mergeCommit`, `openedAt`, `looks`,
   `lookOpen`, `lastWake` with its `kind`, `detail` and `at`, `nextWakeAt`, `last`), the
   `controllerLocator`, `pendingStatusWrites`,
