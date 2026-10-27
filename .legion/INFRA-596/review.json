@@ -2,30 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-596",
-  "completed": "2026-10-27T12:04:32Z",
-  "round": 2,
+  "completed": "2026-10-27T12:47:00Z",
+  "round": 3,
   "decision": "changes_requested",
-  "reviewedHead": "a8377334b667e6e463bbcc4b92659c6d73d62cc3",
-  "codeHead": "9ac93a9703a08a11a746a98c747099e5087fb7e8",
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; no branch protection. CI head 9ac93a97 (newest pull_request run); compare to a8377334 handoffsOnly true, 2 files. Every required check queued at 12:04Z; a REQUEST_CHANGES does not wait on them.",
-  "thermonuclear": "Pair ran once at a8377334 (a new round: forward merge 9ac93a97 changed the fingerprint). deep-review: APPROVE, no Medium or High finding; the new failure-path tests fail on the round-1 code at 94647c77 and pass at the head; outbox, deliveryaudit, api (Comment|Mention|Suppress|Document|Claim|HumanEdit|Edit), cmd/dispatch EditNotice and the bun suites pass; dist matches a fresh build. code-quality: CHANGES, no behaviour defect; cleanup and doc findings. The report output on the fixtures is unchanged by the split.",
-  "roundOneFindings": "All six fixed: 1 fbbd171228c3, 2/4/5 0937a91c1ac0, 3 383b9dcdc456, 6 in the PR body. Each thread replied to (4388436026, 4388436314, 4388436603, 4388437029, 4388437648) and accepted.",
-  "conflictMerges": "42b95bdb (fingerprint unchanged) and 9ac93a97 (fingerprint changed; #2137's artifact.human_edited author read moved into publishAuthorRoutes' case arm), both after GitHub reported CONFLICTING, each recorded in a PR comment. #2137's behaviour and tests are kept.",
+  "reviewedHead": "d6f1c41c2693aea772e6b6920d32a592f39b5963",
+  "codeHead": "97e2b115645f8fc0304a4cb61a0a2d6b3fb14d0e",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; no branch protection. CI head 97e2b115 (newest pull_request run), compare to d6f1c41c handoffsOnly true; its checks queued. The required `test` check completed failure at the two earlier code heads 86599d45 (job 122114381270) and 9ac93a97 (job 122162950817), both from this PR's scripts/dispatch/__tests__/comment-delivery.test.ts:30-31: `mkdtemp(join(process.env.TMPDIR ?? \"/legion/scratch/tmp\", ...))` gives ENOENT on a runner with no TMPDIR. The line is unchanged at 97e2b115, so its `test` will fail the same way.",
+  "thermonuclear": "Pair ran once at d6f1c41c. deep-review: APPROVE, no Medium or High; considerDocument, the uuid-parse removal and the classes.ts first-match chain change no output (report.ts on the fixtures identical to 6943c0a0 but for the --pairs filename line). code-quality: CHANGES, minor cleanup and docs only.",
+  "roundTwoFindings": "Both fixed in e28a3d7c2ad0; threads replied to (4388819953, 4388820254) and accepted.",
   "critical": 0,
   "important": 1,
-  "minor": 1,
+  "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "skills/dispatch/SKILL.md:48",
-      "description": "Main's 'Never route such an issue' referred to line 46's 'An issue with the legion label, or under one'. The new 'never route a `legion` issue' drops 'or under one', and a Legion child carries no label. With this PR, a route also turns off the claimant and primary-document delivery (takesClaimRecipients), so an agent that routes a Legion child to itself now takes people's comments away from the tree's claimant. The skill is agent behaviour; fix: 'never route a `legion` issue or one under it'."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/pi-envoy/CHANGELOG.md:53-55",
-      "description": "The entry says the skill says 'a thread the session wrote in brings people's replies'; 0937a91c removed that clause from SKILL.md:48. Remove it from the entry, or put it back in the skill."
+      "file": "scripts/dispatch/__tests__/comment-delivery.test.ts:30-31",
+      "description": "The test falls back to the deployment's /legion/scratch/tmp when TMPDIR is unset, so the required `test` check is red on GitHub's runners (ENOENT on mkdtemp, an unhandled error that fails the suite) at 86599d45 and 9ac93a97. Use node:os tmpdir(), as ask-census-window.test.ts does; tmpdir() reads TMPDIR where it is set."
     }
   ],
-  "fastFollow": "Dead code in the outbox and the report: one considerDocument closure for the two identical loadDocumentSessionAuthors blocks in publishAuthorRoutes (and drop editedDocument's now-redundant type guard), drop loadCommentRecipients' second uuid parse and its 'not-a-uuid' test input, move deliveryaudit's test-only Bind/Statements into the test file, and replace classes.ts's ClassRule/CLASS_RULES/ReportOptions seam with one first-match chain, deleting the four refusals production cannot reach, their tests and README:254.",
-  "contractCensus": "Not required: unchanged from round 1 (getComments in the unpublished workspace package @legion/envoy-client, all callers updated; suppressed_authors keeps its name and type)."
+  "notADefect": [
+    "No test reaches resolveThreadSessions' non-uuid reply path since 'not-a-uuid' left the loader test: reply_to is read from the uuid column comments.reply_to, so no producer gives a non-uuid; behaviour unchanged."
+  ],
+  "fastFollow": "Make describeCause return CauseEntry and drop render.ts's `?.`/`?? \"\"` and compareCauses' unknown-part rank, now unreachable; add the dispatch skill entry to packages/claude-envoy/CHANGELOG.md, which ships the same skill through its symlink.",
+  "contractCensus": "Not required: unchanged from round 1."
 }
