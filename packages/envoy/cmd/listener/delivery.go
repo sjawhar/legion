@@ -153,28 +153,35 @@ func isExceptionsTopic(topic string) bool {
 	return strings.HasPrefix(topic, bus.ExceptionTopicPrefix)
 }
 
-// publishDeliveryException raises one exception envelope for a role/control-lane delivery that
-// failed or a role-lane publish that was refused, keyed to the original topic
-// (ExceptionTopicPrefix+item.Topic). Both the delivery path (applyDeliveryOutcome) and the publish
-// route's unheld-role refusal (publishHandler, api.go) build the exception through here, so the
-// Legion daemon's consumer (packages/daemon/internal/daemon/notice_exceptions.go) decodes one
-// shape. A role-lane exception topic is outside the stream, so client.Publish routes it over core
-// NATS (usesCoreTransport); fanoutRefusal forces the core path for a generic-fanout refusal, whose
-// exception topic is likewise core-only.
-func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool) error {
+// deliveryExceptionEnvelope builds one exception envelope keyed to the original topic
+// (ExceptionTopicPrefix+item.Topic). It is the one place the shape the Legion daemon's consumer
+// decodes (packages/daemon/internal/daemon/notice_exceptions.go, roleLaneException) is written, so
+// the delivery path (publishDeliveryException) and the publish route's unheld-role refusal
+// (publishRefusalException, api.go) cannot drift apart.
+//
+// The exception carries the original machine payload, so a large original would make an envelope
+// past the server's max payload, which NATS refuses whole (bus.ErrTooLarge). The delivery path has
+// always carried it and keeps doing so; a caller that must not fail that way passes a bound, and a
+// payload past it is left out rather than carried (payload_summary still names the message).
+// bound 0 carries the payload whatever its size.
+func deliveryExceptionEnvelope(item contracts.Envelope, reason, recipientSession string, bound int) (contracts.Envelope, error) {
+	carried := item.Payload
+	if bound > 0 && len(carried) > bound {
+		carried = ""
+	}
 	payload, err := json.Marshal(deliveryExceptionPayload{
 		OriginalTopic:    item.Topic,
 		EventID:          item.EventID,
 		Reason:           reason,
 		RecipientSession: recipientSession,
 		PayloadSummary:   item.PayloadSummary,
-		Payload:          item.Payload,
+		Payload:          carried,
 		DedupeKey:        item.DedupeKey,
 		Source:           item.Source,
 		SourceSession:    item.SourceSession,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal delivery exception: %w", err)
+		return contracts.Envelope{}, fmt.Errorf("marshal delivery exception: %w", err)
 	}
 	exceptionID := id.New()
 	exception := contracts.Envelope{
@@ -189,7 +196,20 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 		TraceID:        id.New(),
 	}
 	if err := exception.Validate(); err != nil {
-		return fmt.Errorf("validate delivery exception: %w", err)
+		return contracts.Envelope{}, fmt.Errorf("validate delivery exception: %w", err)
+	}
+	return exception, nil
+}
+
+// publishDeliveryException raises the exception of one control-lane delivery that failed, or of one
+// generic-fanout refusal. A role-lane exception topic is outside the stream, so client.Publish
+// routes it over core NATS (usesCoreTransport); fanoutRefusal forces the core path for a
+// generic-fanout refusal, whose exception topic is likewise core-only. It runs inside a delivery
+// handler, which has no request deadline of its own, so it keeps the publish's own bound.
+func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool) error {
+	exception, err := deliveryExceptionEnvelope(item, reason, recipientSession, 0)
+	if err != nil {
+		return err
 	}
 	if fanoutRefusal {
 		if err := client.PublishCore(exception); err != nil {

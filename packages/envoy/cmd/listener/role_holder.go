@@ -8,10 +8,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -115,6 +119,52 @@ func writeRoleClaimUnreadable(w http.ResponseWriter, role string, err error) int
 		"envoy: the claim record of role %s is unreadable: %s", role, err,
 	))
 	return http.StatusInternalServerError
+}
+
+// refusalExceptionBound is the most of a refused publish's machine payload its exception carries.
+// The exception embeds the original payload, so without a bound a large refused publish would make
+// an envelope past the server's max payload, which NATS refuses whole (bus.ErrTooLarge) on every
+// attempt: the refusal would log exceptionPublishFailedLine, which the deployed publish-failure
+// alarm matches, for a message nothing was wrong with. A payload past this is left out and the
+// exception still carries the topic, the reason, the dedupe key and the one-line payload_summary,
+// which is what a consumer of the refusal needs. 64 KiB keeps the exception far below NATS's
+// default 1 MiB max payload, and every notice the Legion daemon publishes to a role is orders of
+// magnitude smaller, so its own reports always carry their payload whole.
+const refusalExceptionBound = 64 << 10
+
+// refusalExceptionBudget bounds the exception publish of one refused role-lane publish. It is the
+// publish path's own bound (bus publishBound), spent on a context of this call's own rather than
+// the request's, which net/http cancels when the handler returns.
+const refusalExceptionBudget = 5 * time.Second
+
+// publishRefusalException raises the role-lane exception of a publish this listener refused because
+// no live session holds the role, so the Legion daemon hears of a peer's publish that reached no
+// holder; until it existed, the role lane raised an exception only in the delivery path, and this
+// refusal was silent to the bus. The envelope is the delivery path's own
+// (deliveryExceptionEnvelope), so the daemon's consumer decodes one shape, and the reason is the
+// refusal's own state -- unclaimed, or holder_lapsed carrying the lapsed holder as its recipient --
+// which the daemon tells apart from a delivery that failed after a holder was resolved.
+//
+// It publishes on a goroutine of its own, after the caller has written the 404. net/http holds a
+// handler's answer until the handler returns, so publishing in line would delay the 404 by as long
+// as the publish takes -- up to the publish bound on a reconnecting connection, past this route's
+// own budget and past the Envoy client's per-attempt deadline, whose retry would refuse a second
+// time and raise a second exception. Detached, the answer is written and the handler returns while
+// the exception goes out behind it. The publish is best effort: nothing waits for it, nothing
+// retries it, and a failure is logged (exceptionPublishFailedLine) and nothing more.
+func publishRefusalException(client *bus.Client, logger *logging.Logger, item contracts.Envelope, result roleHolderResult) {
+	exception, err := deliveryExceptionEnvelope(item, string(result.state), result.holder, refusalExceptionBound)
+	if err != nil {
+		logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), refusalExceptionBudget)
+		defer cancel()
+		if err := client.PublishWithin(ctx, exception); err != nil {
+			logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
+		}
+	}()
 }
 
 // releaseExpiredRoleClaim is the single point in the listener that

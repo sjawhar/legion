@@ -3,11 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/store"
@@ -82,13 +86,24 @@ func TestARoleLookupAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) {
 }
 
 // A role-lane publish answers the same record as the lookup does, and records it under its own
-// outcome rather than bus_unavailable, at WARN as every refusal is.
+// outcome rather than bus_unavailable, at WARN as every refusal is. It also raises no role-lane
+// exception: only a refusal that establishes the role has no live holder (unclaimed,
+// holder_lapsed) reports one, and an unreadable claim establishes nothing about the holder, so a
+// consumer of the lane is told nothing it would act on.
 func TestARolePublishAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) {
 	const role = "reviewer"
 	topic := contracts.RoleTopicPrefix + role
 	for _, tc := range unreadableRoleClaims {
 		t.Run(tc.name, func(t *testing.T) {
 			state, registry := openUnreadableRoleClaim(t, role, tc.record)
+			exceptionProbe, err := state.client.Conn.SubscribeSync(bus.ExceptionTopicPrefix + topic)
+			if err != nil {
+				t.Fatalf("subscribe to the role's exception lane: %v", err)
+			}
+			t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+			if err := state.client.Conn.Flush(); err != nil {
+				t.Fatalf("flush the exception subscription: %v", err)
+			}
 			recorder, record := serveRecorded(t,
 				func(logger *logging.Logger) http.HandlerFunc { return publishHandler(state, logger) },
 				postJSON("/v1/messages/publish", sendBody(map[string]any{
@@ -105,6 +120,11 @@ func TestARolePublishAnswersAnUnreadableClaimRecordAsAServerError(t *testing.T) 
 				"status":  float64(http.StatusInternalServerError),
 				"topic":   topic,
 			})
+			if message, err := exceptionProbe.NextMsg(250 * time.Millisecond); err == nil {
+				t.Fatalf("an unreadable claim raised an exception: %s", message.Data)
+			} else if !errors.Is(err, nats.ErrTimeout) {
+				t.Fatalf("wait for an exception: %v", err)
+			}
 		})
 	}
 }

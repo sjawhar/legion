@@ -88,6 +88,12 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // process from the relaunched one, and a copy the session already has costs one frame its plugin
 // drops, where a skipped copy the relaunched process never saw is a notice lost.
 //
+// The listener also reports a publish it refused before forwarding anything, because no live
+// session held the role (`unclaimed`, `holder_lapsed`), and the executor's own notice publishes
+// are among those. Such a report queues nothing and logs nothing above debug: the publish was
+// answered 404, so its row is still held and retries on its own backoff, and a copy would send
+// the notice twice. Any reason other than these five is refused as malformed.
+//
 // The notice goes back through the executor as a new row of its issue, counted in its Resends,
 // so it is routed, fenced and held as any notice is, and it is published under the dedupe key of
 // the row it copies (Notice.Published), so a session that did get the forward recognises the copy.
@@ -134,6 +140,16 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	issue, notice := reported.issue, reported.notice
 	switch exception.Reason {
 	case "delivery_failed", "no_holder", "receipt_timeout":
+	case "unclaimed", "holder_lapsed":
+		// The listener refused this publish itself, before forwarding anything, because no live
+		// session held the role, and answered it 404 (notify.ErrNoHolder). The executor that sent it
+		// still holds the row and retries it on its own backoff (errNoticeWaits), or finishes it once
+		// the architect will not hold its role again, so a copy queued here would send the notice
+		// twice. These two reasons are never a re-hold, and they are not malformed: a positive match
+		// that changes nothing, so the default below still refuses every other reason.
+		r.log.Debug("outbox notice not re-held: the listener refused its publish, and its row retries on its own",
+			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason)
+		return nil
 	default:
 		return fmt.Errorf("%w: exception %s names reason %q", errNoticeException, envelope.EventID, exception.Reason)
 	}

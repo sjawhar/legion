@@ -1155,7 +1155,15 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 		assertOneRoleRefusalException(t, exceptionProbe, "notifications.role.lapsed", "holder_lapsed", "ses_lapsed", "please review", "")
 	})
 
-	t.Run("live holder is returned", func(t *testing.T) {
+	t.Run("live holder is returned, and raises no exception", func(t *testing.T) {
+		exceptionProbe, err := client.Conn.SubscribeSync("notifications.envoy.exceptions.notifications.role.reviewer")
+		if err != nil {
+			t.Fatalf("subscribe to the held role's exception lane: %v", err)
+		}
+		t.Cleanup(func() { _ = exceptionProbe.Unsubscribe() })
+		if err := client.Conn.Flush(); err != nil {
+			t.Fatalf("flush the held role's exception subscription: %v", err)
+		}
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.role.reviewer","message":"please review"}`))
 		handler.ServeHTTP(recorder, request)
@@ -1172,6 +1180,8 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 		if response.Holder != "ses_holder" {
 			t.Fatalf("holder = %q, want ses_holder", response.Holder)
 		}
+		// A publish that reached its holder reports nothing on the exception lane.
+		assertNoRoleTopicMessage("held-role exception", exceptionProbe)
 	})
 
 	t.Run("stale holder returns 404 from publish and lookup", func(t *testing.T) {

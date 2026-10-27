@@ -657,22 +657,7 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			}
 			if result.state != roleHolderLive {
 				record.refuseRoleHolder(w, role, result)
-				// The publisher has its 404 above. A peer's envoy_publish to an unheld role never
-				// reaches a holder, and until now the role lane raised an exception only in the
-				// delivery path, so the Legion daemon never heard of this refusal. Raise the same
-				// role-lane exception the delivery path raises, over core NATS, in the envelope
-				// publishDeliveryException builds, so the daemon's existing consumer
-				// (packages/daemon/internal/daemon/notice_exceptions.go, roleLaneException) decodes
-				// it unchanged. The reason is the refusal's own state -- unclaimed or holder_lapsed,
-				// distinct from the delivery path's no_holder -- and the recipient_session is the
-				// lapsed holder when one is known (empty, so omitted, for an unclaimed role). Best
-				// effort: it runs after the answer is written, so it can neither delay nor fail the
-				// 404, and a publish failure is only logged. One exception per refused publish; the
-				// route's own role-holder resolution already bounds a hammering publisher, so no
-				// per-topic rate limiting is added.
-				if err := publishDeliveryException(d.client, item, string(result.state), result.holder, false); err != nil {
-					logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
-				}
+				publishRefusalException(d.client, logger, item, result)
 				return
 			}
 			// The lane resolved: the session this role topic reaches is on the record from here
