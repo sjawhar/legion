@@ -1,6 +1,6 @@
 // Package admission decides whether the server has room for a request before the request takes
-// any, and answers the requests it could not serve - refused here, out of time, or out of
-// database connections - with a retryable 503 rather than an error.
+// any, and answers the requests it could not serve: refused here with a retryable 429, out of
+// time or out of database connections with a retryable 503, rather than with an error.
 //
 // Without it every request queued, with no bound, for one pool of connections: past capacity the
 // queue grew until clients gave up, and almost nothing succeeded. A Limiter admits a request only
@@ -81,14 +81,11 @@ const (
 )
 
 // DefaultWait is how long a request waits in its class's queue for room before it is refused:
-// long enough to ride out a burst, short enough that a client refused after it still has most of
-// its own time left to retry.
-const DefaultWait = time.Second
-
-// queueFactor sizes each class's wait queue at that many times its limit: room for one more
-// burst of the class's full width behind the one running, and no more, since a request that
-// would queue behind two full widths cannot expect room within the wait anyway.
-const queueFactor = 2
+// 75 ms, so a refused request has its answer within the 100 ms p99 the architect set for a refusal
+// (INFRA-514), with 25 ms left for the rest of the request's path. Room that does not come free in
+// that time is not coming free in time for the request either: an admitted request holds its unit
+// for the length of its work, tens of milliseconds at best.
+const DefaultWait = 75 * time.Millisecond
 
 // Limits are a Limiter's concurrency limits per class, in units (a request takes its route's
 // weight), and how long a request may wait for room; a zero Wait is DefaultWait.
@@ -104,8 +101,8 @@ func DefaultLimits() Limits {
 
 // Limiter admits requests per class under Limits. Each class runs at most its limit's units at
 // once; a request that finds no room waits in that class's queue, first come first served, for at
-// most Limits.Wait, and a request that finds the queue holding twice the limit's requests is
-// refused at once. A Limiter is safe for concurrent use.
+// most Limits.Wait, and a request that finds the queue already holding as many requests as the
+// limit is refused at once. A Limiter is safe for concurrent use.
 type Limiter struct {
 	classes [classCount]*gate
 }
@@ -119,7 +116,7 @@ func New(limits Limits) *Limiter {
 	l := &Limiter{}
 	for class, limit := range [classCount]int{Read: limits.Read, Write: limits.Write} {
 		limit = max(limit, 1)
-		l.classes[class] = &gate{class: Class(class), limit: limit, queueCap: queueFactor * limit, wait: wait}
+		l.classes[class] = &gate{class: Class(class), limit: limit, wait: wait}
 	}
 	return l
 }
@@ -248,10 +245,9 @@ func TicketFrom(ctx context.Context) *Ticket {
 // gate is one class's units and wait queue: a weighted semaphore whose waiters are served in
 // arrival order, so a heavy request at the head is not overtaken by light ones behind it.
 type gate struct {
-	class    Class
-	limit    int
-	queueCap int
-	wait     time.Duration
+	class Class
+	limit int
+	wait  time.Duration
 
 	mu      sync.Mutex
 	used    int
@@ -274,7 +270,10 @@ func (g *gate) acquire(ctx context.Context, units int) error {
 		g.mu.Unlock()
 		return nil
 	}
-	if g.waiters.Len() >= g.queueCap {
+	// The queue holds as many requests as the class's limit: room for one more burst of the
+	// class's full width behind the one running, and no more, since a request that would queue
+	// behind two full widths cannot expect room within the wait.
+	if g.waiters.Len() >= g.limit {
 		g.mu.Unlock()
 		g.queueFull.Add(1)
 		return &Refusal{Class: g.class, Reason: QueueFull}

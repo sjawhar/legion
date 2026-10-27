@@ -12,9 +12,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// The pools a Pool opens, by the name each one carries: the suffix of its connections'
-// application_name in pg_stat_activity (configurePool), its entry in Stats, and what Use is asked
-// about.
+// The pools a Pool opens, by the name each one carries: its connections' application_name in
+// pg_stat_activity is dispatch-<name> (configurePool), and the name is its entry in Stats and what
+// Use is asked about.
 const (
 	// RequestsPool is the shared pool store.Open opens: what every API request reads and writes
 	// through (sharedPoolSize).
@@ -43,10 +43,12 @@ var poolNames = [...]string{
 	BackgroundPool, LivePool, SettlementsPool,
 }
 
-// defaultApplicationName is the application_name prefix of every pool's connections when the
-// connection string names none; a connection string's own application_name replaces it, so a
-// deployment that names its process still finds each pool under that name.
-const defaultApplicationName = "envoy-dispatch"
+// applicationNamePrefix begins every pool's application_name: dispatch-<pool>, the one convention
+// every pool of the process shares, so pg_stat_activity groups a process's connections by pool and
+// the metrics' pool label is the part after the prefix. The connection string's own
+// application_name, if it names one, is replaced: a pool's name is what an operator reading
+// pg_stat_activity during an incident needs, and it is the same in every deployment.
+const applicationNamePrefix = "dispatch-"
 
 // The acquire bounds: how long one acquire on each pool waits for a connection before it gives up
 // with ErrPoolBusy. Before them every wait was unbounded, so past capacity callers queued until
@@ -166,12 +168,12 @@ type PoolStats struct {
 // caller of the pool, the store.Pool wrappers and the raw pgxpool users alike, while the statement
 // still runs on the caller's own context.
 type acquireTracer struct {
-	// base and name make the application_name, and inner is the tracer the configuration had
-	// before this one was composed with it: kept so a pool opened from this pool's configuration
-	// composes its own tracer with that one rather than with this.
-	base, name string
-	bound      time.Duration
-	inner      pgx.QueryTracer
+	// name makes the application_name, and inner is the tracer the configuration had before this
+	// one was composed with it: kept so a pool opened from this pool's configuration composes its
+	// own tracer with that one rather than with this.
+	name  string
+	bound time.Duration
+	inner pgx.QueryTracer
 
 	waiting  atomic.Int64
 	timeouts atomic.Uint64
@@ -272,24 +274,20 @@ func acquireTracerOf(tracer pgx.QueryTracer) *acquireTracer {
 	return nil
 }
 
-// configurePool names config's connections <base>/<name> in application_name, where base is the
-// connection string's application_name or defaultApplicationName, and sets the pool's acquire
-// tracer, bounded at bound (zero is none) and composed with any tracer config already carries. A
-// configuration copied from another pool's is re-configured from that pool's base and original
-// tracer, not stacked on its name and its acquire tracer.
+// configurePool names config's connections dispatch-<name> in application_name
+// (applicationNamePrefix) and sets the pool's acquire tracer, bounded at bound (zero is none) and
+// composed with any tracer config already carries. A configuration copied from another pool's is
+// re-configured from that pool's original tracer, not stacked on its acquire tracer.
 func configurePool(config *pgxpool.Config, name string, bound time.Duration) *acquireTracer {
-	base, inner := config.ConnConfig.RuntimeParams["application_name"], config.ConnConfig.Tracer
+	inner := config.ConnConfig.Tracer
 	if configured := acquireTracerOf(inner); configured != nil {
-		base, inner = configured.base, configured.inner
+		inner = configured.inner
 	}
-	if base == "" {
-		base = defaultApplicationName
-	}
-	tracer := &acquireTracer{base: base, name: name, bound: bound, inner: inner}
+	tracer := &acquireTracer{name: name, bound: bound, inner: inner}
 	if config.ConnConfig.RuntimeParams == nil {
 		config.ConnConfig.RuntimeParams = map[string]string{}
 	}
-	config.ConnConfig.RuntimeParams["application_name"] = base + "/" + name
+	config.ConnConfig.RuntimeParams["application_name"] = applicationNamePrefix + name
 	if inner == nil {
 		config.ConnConfig.Tracer = tracer
 		return tracer

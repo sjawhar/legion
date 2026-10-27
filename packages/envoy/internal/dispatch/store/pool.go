@@ -687,7 +687,7 @@ const commitTimeout = 10 * time.Second
 
 // CommitContext is the context a transaction commits on: ctx's values without its cancellation
 // or deadline, bounded at commitTimeout. A commit cut short by its caller - a client that went
-// away, a request deadline that passed - has an unknown outcome, since the server may have
+// away, a caller's deadline that passed - has an unknown outcome, since the server may have
 // committed it, and the document service fails every room such a transaction wrote, which then
 // reload the durable document (docs.Ledger.Commit); a request that ended mid-commit would take its
 // rooms down with it. So a commit in flight runs to its end, and only its own bound, ten seconds,

@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,19 +22,22 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// assertUnavailable fails the test unless response is a 503 with code, Retry-After: 1 and
+// assertRetryable fails the test unless response has status and code, Retry-After: 1 and
 // Cache-Control: no-store, in Dispatch's {error, code} body.
-func assertUnavailable(t *testing.T, response *httptest.ResponseRecorder, code string) {
+func assertRetryable(t *testing.T, response *http.Response, status int, code string) {
 	t.Helper()
-	var body struct{ Error, Code string }
-	if response.Code != http.StatusServiceUnavailable || json.Unmarshal(response.Body.Bytes(), &body) != nil ||
-		body.Code != code || body.Error == "" {
-		t.Fatalf("status=%d body=%s, want 503 %s with a message", response.Code, response.Body.String(), code)
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read the answer: %v", err)
 	}
-	if got := response.Header().Get("Retry-After"); got != "1" {
+	var body struct{ Error, Code string }
+	if response.StatusCode != status || json.Unmarshal(data, &body) != nil || body.Code != code || body.Error == "" {
+		t.Fatalf("status=%d body=%s, want %d %s with a message", response.StatusCode, data, status, code)
+	}
+	if got := response.Header.Get("Retry-After"); got != "1" {
 		t.Fatalf("Retry-After = %q, want 1", got)
 	}
-	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+	if got := response.Header.Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("Cache-Control = %q, want no-store", got)
 	}
 }
@@ -59,9 +65,9 @@ func holdIssueRow(t *testing.T, database *store.Store, key string) func() {
 	return release
 }
 
-// A write that finds its class's one unit held waits its second in the queue and is refused
-// 503 OVERLOADED, which tells its client to retry: it never runs, so it never queues behind the
-// held write for as long as that write is held.
+// A write that finds its class's one unit held waits its 75 ms in the queue and is refused 429
+// OVERLOADED, which tells its client to retry, within the 100 ms a refusal is answered in: it never
+// runs, so it never queues behind the held write for as long as that write is held.
 func TestARequestPastTheAdmissionLimitIsRefusedOverloaded(t *testing.T) {
 	limiter := admission.New(admission.Limits{Read: 1, Write: 1})
 	handler, database, _ := newTestServer(t, testServerOptions{admission: limiter})
@@ -72,20 +78,14 @@ func TestARequestPastTheAdmissionLimitIsRefusedOverloaded(t *testing.T) {
 	go func() {
 		held <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"title": "Renamed"}, "alice")
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for limiter.Stats()[admission.Write].InFlight != 1 {
-		if time.Now().After(deadline) {
-			t.Fatal("the held write was never admitted")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitForWriteInFlight(t, limiter)
 
 	started := time.Now()
 	refused := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "OTHER", "name": "Other"}, "alice")
-	if waited := time.Since(started); waited >= 1200*time.Millisecond {
-		t.Fatalf("the refusal took %v, want under 1.2s", waited)
+	if waited := time.Since(started); waited >= 100*time.Millisecond {
+		t.Fatalf("the refusal took %v, want under 100ms", waited)
 	}
-	assertUnavailable(t, refused, admission.CodeOverloaded)
+	assertRetryable(t, refused.Result(), http.StatusTooManyRequests, admission.CodeOverloaded)
 	if stats := limiter.Stats()[admission.Write]; stats.WaitExceeded != 1 {
 		t.Fatalf("write stats %+v, want one wait_exceeded refusal", stats)
 	}
@@ -96,20 +96,132 @@ func TestARequestPastTheAdmissionLimitIsRefusedOverloaded(t *testing.T) {
 	}
 }
 
-// A request whose work runs past its deadline is stopped there and answered 503 REQUEST_TIMEOUT,
-// not left holding its connection for as long as the lock it waits on is held.
-func TestARequestHeldPastItsDeadlineAnswersRequestTimeout(t *testing.T) {
-	const deadline = time.Second
-	handler, database, _ := newTestServer(t, testServerOptions{requestDeadline: deadline})
-	issue := createInteractionIssue(t, handler, "TEST", "Held past its deadline", "A spec")
+// waitForWriteInFlight returns once limiter has admitted one write.
+func waitForWriteInFlight(t *testing.T, limiter *admission.Limiter) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for limiter.Stats()[admission.Write].InFlight != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the held write was never admitted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
 
-	holdIssueRow(t, database, issue.Key)
+// countingReader counts the bytes read from it.
+type countingReader struct {
+	io.Reader
+	read atomic.Int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.read.Add(int64(n))
+	return n, err
+}
+
+// A refused upload is answered only once the server has read its whole body, so its client reads
+// the 429 rather than a connection reset under the bytes it is still sending: the body is far
+// past what the sockets buffer between the two, so a server that answered and closed first would
+// leave most of it unread.
+func TestARefusedPostIsAnsweredAfterItsBodyIsDrained(t *testing.T) {
+	limiter := admission.New(admission.Limits{Read: 1, Write: 1})
+	handler, _, _ := newTestServer(t, testServerOptions{admission: limiter})
+	issue := createInteractionIssue(t, handler, "TEST", "Refused upload", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	held, err := limiter.Admit(context.Background(), admission.Write, 1)
+	if err != nil {
+		t.Fatalf("hold the write class's one unit: %v", err)
+	}
+	defer held.Release()
+
+	const size = 8 << 20 // within the upload route's limit (maxUploadRequestBytes)
+	body := &countingReader{Reader: bytes.NewReader(make([]byte, size))}
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, httpServer.URL+"/api/v1/issues/"+issue.Key+"/artifacts", body)
+	if err != nil {
+		t.Fatalf("build the upload: %v", err)
+	}
+	request.ContentLength = size
+	request.Header.Set("Content-Type", "application/octet-stream")
+	request.Header.Set("X-Dispatch-User", "alice")
+	response, err := httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatalf("the refused upload: %v, want its 429 read", err)
+	}
+	defer response.Body.Close()
+	assertRetryable(t, response, http.StatusTooManyRequests, admission.CodeOverloaded)
+	if sent := body.read.Load(); sent != size {
+		t.Fatalf("the client sent %d of the body's %d bytes before the answer, want all of them", sent, size)
+	}
+}
+
+// A read whose work runs past its deadline is stopped there and answered 503 REQUEST_TIMEOUT, not
+// left holding its connection for as long as the lock it waits on is held.
+func TestAReadHeldPastItsDeadlineAnswersRequestTimeout(t *testing.T) {
+	const deadline = time.Second
+	handler, database, _ := newTestServer(t, testServerOptions{readDeadline: deadline})
+	issue := createInteractionIssue(t, handler, "TEST", "Read past its deadline", "A spec")
+	lockTables(t, database, "issues")
+
 	started := time.Now()
-	response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"title": "Renamed"}, "alice")
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "alice")
 	answered := time.Since(started)
-	assertUnavailable(t, response, admission.CodeRequestTimeout)
+	assertRetryable(t, response.Result(), http.StatusServiceUnavailable, admission.CodeRequestTimeout)
 	if answered < deadline || answered > deadline+200*time.Millisecond {
 		t.Fatalf("answered after %v, want within %v of the deadline %v", answered, 200*time.Millisecond, deadline)
+	}
+}
+
+// lockTables takes an access exclusive lock on tables in a transaction of the test's own, so
+// every read of them waits until the returned release runs; the test's end releases it too.
+func lockTables(t *testing.T, database *store.Store, tables string) func() {
+	t.Helper()
+	ctx := context.Background()
+	locker, err := pgx.ConnectConfig(ctx, database.Pool.Config().ConnConfig.Copy())
+	if err != nil {
+		t.Fatalf("connect the table locker: %v", err)
+	}
+	t.Cleanup(func() { _ = locker.Close(context.Background()) })
+	locked, err := locker.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the table lock: %v", err)
+	}
+	release := func() { _ = locked.Rollback(context.Background()) }
+	t.Cleanup(release)
+	if _, err := locked.Exec(ctx, `lock table `+tables+` in access exclusive mode`); err != nil {
+		t.Fatalf("lock %s: %v", tables, err)
+	}
+	return release
+}
+
+// A write has no deadline: one held past the deadline a read would get still runs to its end and
+// commits once what held it lets go.
+func TestAWriteHeldPastTheReadDeadlineCompletesAndCommits(t *testing.T) {
+	const deadline = time.Second
+	handler, database, _ := newTestServer(t, testServerOptions{readDeadline: deadline})
+	issue := createInteractionIssue(t, handler, "TEST", "Write past the deadline", "A spec")
+
+	release := holdIssueRow(t, database, issue.Key)
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"title": "Renamed"}, "alice")
+	}()
+	time.Sleep(deadline + 300*time.Millisecond)
+	select {
+	case response := <-responses:
+		t.Fatalf("the write answered while the issue row was held: status=%d body=%s", response.Code, response.Body.String())
+	default:
+	}
+	release()
+	if response := awaitResponse(t, responses); response.Code != http.StatusOK {
+		t.Fatalf("the held write: status=%d body=%s, want 200", response.Code, response.Body.String())
+	}
+	stored := decodeBody[struct {
+		Title string `json:"title"`
+	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "alice"))
+	if stored.Title != "Renamed" {
+		t.Fatalf("issue title %q after the write, want Renamed", stored.Title)
 	}
 }
 
@@ -129,14 +241,14 @@ func TestARequestOnAFullPoolAnswersDatabaseBusy(t *testing.T) {
 	if answered := time.Since(started); answered > bound+200*time.Millisecond {
 		t.Fatalf("answered after %v, want within the acquire bound %v + 200ms", answered, bound)
 	}
-	assertUnavailable(t, response, admission.CodeDatabaseBusy)
+	assertRetryable(t, response.Result(), http.StatusServiceUnavailable, admission.CodeDatabaseBusy)
 }
 
-// An event stream is neither admitted nor bounded by the request deadline: it stays open, and
-// keeps writing its heartbeat, long after an ordinary request's deadline would have ended it.
-func TestAnEventStreamOutlivesTheRequestDeadline(t *testing.T) {
+// An event stream is neither admitted nor bounded by the read deadline: it stays open, and keeps
+// writing its heartbeat, long after an ordinary read's deadline would have ended it.
+func TestAnEventStreamOutlivesTheReadDeadline(t *testing.T) {
 	const deadline = 100 * time.Millisecond
-	handler, _, _ := newTestServer(t, testServerOptions{requestDeadline: deadline, streamHeartbeat: 20 * time.Millisecond})
+	handler, _, _ := newTestServer(t, testServerOptions{readDeadline: deadline, streamHeartbeat: 20 * time.Millisecond})
 	httpServer := httptest.NewServer(handler)
 	t.Cleanup(httpServer.Close)
 
@@ -147,7 +259,7 @@ func TestAnEventStreamOutlivesTheRequestDeadline(t *testing.T) {
 			return
 		}
 	}
-	t.Fatalf("the event stream ended after %v (%v), within three request deadlines", time.Since(opened), scanner.Err())
+	t.Fatalf("the event stream ended after %v (%v), within three read deadlines", time.Since(opened), scanner.Err())
 }
 
 // holdCommitsLockKey is the advisory lock the commit-holding trigger waits on.
@@ -237,44 +349,46 @@ func storedText(t *testing.T, database *store.Store, artifactID string) string {
 	return renderDocument(t, document)
 }
 
-// A write whose deadline passes while its commit is in flight still commits: the commit runs
-// apart from the request's deadline, so its outcome is known, and the room it wrote stays
-// resident - its browser still connected - holding the text the store holds. A commit the
-// deadline cut short would leave its outcome unknown and fail the room, closing the browser's
+// A write whose client goes away while its commit is in flight still commits: the commit runs
+// apart from the request's cancellation, so its outcome is known, and the room it wrote stays
+// resident - its browser still connected - holding the text the store holds. A commit the client's
+// disconnect cut short would leave its outcome unknown and fail the room, closing the browser's
 // connection and reloading the document.
-func TestAWriteWhoseDeadlinePassesMidCommitKeepsItsRoom(t *testing.T) {
-	const deadline = time.Second
-	handler, database, deps := newTestServer(t, testServerOptions{requestDeadline: deadline, settle: time.Hour, browserPeers: true})
+func TestAWriteWhoseClientDisconnectsMidCommitKeepsItsRoom(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{settle: time.Hour, browserPeers: true})
 	service := deps.Docs.(*docs.Service)
-	issue := createInteractionIssue(t, handler, "TEST", "Commit past the deadline", "Before.")
+	issue := createInteractionIssue(t, handler, "TEST", "Commit after the client left", "Before.")
 	peer := connectBrowserPeer(t, service, issue.PrimaryArtifactID)
 	t.Cleanup(peer.close)
 	release := holdCommits(t, database)
 
-	const written = "Committed past the deadline."
-	started := time.Now()
-	responses := make(chan *httptest.ResponseRecorder, 1)
+	const written = "Committed after the client left."
+	data, err := json.Marshal(map[string]any{"ops": []map[string]string{{"op": "insert", "markdown": written, "after": "end"}}})
+	if err != nil {
+		t.Fatalf("encode the edit: %v", err)
+	}
+	ctx, disconnect := context.WithCancel(context.Background())
+	defer disconnect()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", bytes.NewReader(data)).WithContext(ctx)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Dispatch-User", "alice")
+	served := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-			"ops": []map[string]string{{"op": "insert", "markdown": written, "after": "end"}},
-		}, "alice")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		served <- response
 	}()
 	waitForHeldCommit(t, database)
-	if reached := time.Since(started); reached >= deadline {
-		t.Fatalf("the write reached its commit after %v, past its deadline %v: the deadline never passed mid-commit", reached, deadline)
-	}
-	time.Sleep(time.Until(started.Add(deadline + 100*time.Millisecond)))
+	disconnect()
+	time.Sleep(200 * time.Millisecond) // long enough for the disconnect to reach anything it could
 	select {
-	case response := <-responses:
-		t.Fatalf("the write answered while its commit was held: status=%d body=%s", response.Code, response.Body.String())
+	case response := <-served:
+		t.Fatalf("the write ended while its commit was held: status=%d body=%s", response.Code, response.Body.String())
 	default:
 	}
 	release()
 
-	response := awaitResponse(t, responses)
-	if response.Code != http.StatusOK && !strings.Contains(response.Body.String(), `"code":"`+admission.CodeRequestTimeout+`"`) {
-		t.Fatalf("the write: status=%d body=%s, want 200 or 503 %s", response.Code, response.Body.String(), admission.CodeRequestTimeout)
-	}
+	awaitResponse(t, served)
 	peer.barrier(t) // fails when the room was failed and its browser's connection closed
 	stored := storedText(t, database, issue.PrimaryArtifactID)
 	if !strings.Contains(stored, written) {
@@ -303,19 +417,7 @@ func TestTheDeliveryTimelineHoldsAtMostTwoConnections(t *testing.T) {
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed delivery settings: %v", err)
 	}
-	locker, err := pgx.ConnectConfig(ctx, database.Pool.Config().ConnConfig.Copy())
-	if err != nil {
-		t.Fatalf("connect the table locker: %v", err)
-	}
-	t.Cleanup(func() { _ = locker.Close(context.Background()) })
-	tables, err := locker.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin the table lock: %v", err)
-	}
-	t.Cleanup(func() { _ = tables.Rollback(context.Background()) })
-	if _, err := tables.Exec(ctx, `lock table delivery_pull_requests, delivery_runs in access exclusive mode`); err != nil {
-		t.Fatalf("lock the timeline's tables: %v", err)
-	}
+	release := lockTables(t, database, "delivery_pull_requests, delivery_runs")
 
 	responses := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -327,9 +429,7 @@ func TestTheDeliveryTimelineHoldsAtMostTwoConnections(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 		highWater = max(highWater, database.Pool.Stat().AcquiredConns())
 	}
-	if err := tables.Rollback(ctx); err != nil {
-		t.Fatalf("release the timeline's tables: %v", err)
-	}
+	release()
 	if response := awaitResponse(t, responses); response.Code != http.StatusOK {
 		t.Fatalf("timeline: status=%d body=%s, want 200", response.Code, response.Body.String())
 	}

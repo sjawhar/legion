@@ -37,7 +37,7 @@ const poolSizeParam = "pool_max_conns"
 // Open connects to databaseURL and verifies the database is reachable. The pool's size is
 // sharedPoolSize: how many connections Dispatch may hold is a property of Dispatch, not of the
 // string that names its database. It is the request pool (RequestsPool): its connections carry
-// that name in application_name, and its acquires are bounded at requestAcquireBound.
+// dispatch-requests in application_name, and its acquires are bounded at requestAcquireBound.
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	declared, err := declaresPoolSize(databaseURL)
 	if err != nil {

@@ -28,10 +28,10 @@ func cancelledRequest() context.Context {
 	return ctx
 }
 
-func assertUnavailable(t *testing.T, w *httptest.ResponseRecorder, code string) {
+func assertRetryable(t *testing.T, w *httptest.ResponseRecorder, status int, code string) {
 	t.Helper()
-	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"code":"`+code+`"`) {
-		t.Fatalf("status=%d body=%s, want 503 %s", w.Code, w.Body.String(), code)
+	if w.Code != status || !strings.Contains(w.Body.String(), `"code":"`+code+`"`) {
+		t.Fatalf("status=%d body=%s, want %d %s", w.Code, w.Body.String(), status, code)
 	}
 	if got := w.Header().Get("Retry-After"); got != "1" {
 		t.Fatalf("Retry-After = %q, want 1", got)
@@ -50,8 +50,8 @@ func TestWriteUnservedTellsTheCausesApartInOrder(t *testing.T) {
 		code string // empty: nothing written
 		ok   bool
 	}{
-		{"the request's deadline passed", expiredRequest(t), context.DeadlineExceeded, CodeRequestTimeout, true},
-		{"the request's deadline passed, whatever the handler failed with", expiredRequest(t), busy, CodeRequestTimeout, true},
+		{"the read's deadline passed", expiredRequest(t), context.DeadlineExceeded, CodeRequestTimeout, true},
+		{"the read's deadline passed, whatever the handler failed with", expiredRequest(t), busy, CodeRequestTimeout, true},
 		{"the client went away", cancelledRequest(), context.Canceled, "", true},
 		{"the client went away while the pool was busy", cancelledRequest(), busy, "", true},
 		{"the pool was busy", context.Background(), busy, CodeDatabaseBusy, true},
@@ -69,13 +69,15 @@ func TestWriteUnservedTellsTheCausesApartInOrder(t *testing.T) {
 				}
 				return
 			}
-			assertUnavailable(t, w, test.code)
+			assertRetryable(t, w, http.StatusServiceUnavailable, test.code)
 		})
 	}
 }
 
-func TestWriteRefusedAnswersOverloaded(t *testing.T) {
+// A refusal is 429 Too Many Requests, not 503: nothing ran, the server is up, and the client is
+// told to slow down and retry after Retry-After.
+func TestWriteRefusedAnswersTooManyRequestsOverloaded(t *testing.T) {
 	w := httptest.NewRecorder()
 	WriteRefused(w, &Refusal{Class: Write, Reason: QueueFull})
-	assertUnavailable(t, w, CodeOverloaded)
+	assertRetryable(t, w, http.StatusTooManyRequests, CodeOverloaded)
 }

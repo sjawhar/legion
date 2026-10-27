@@ -46,19 +46,23 @@ type apiRoute struct {
 	// TestHook marks a route TestHooksEnabled mounts; a test's own route is neither admitted nor
 	// bounded either.
 	TestHook bool
-	// Deadline replaces the server's request deadline (defaultRequestDeadline) for a route whose
-	// work is bounded by the bytes or the repository it moves rather than by the database.
+	// Deadline replaces the server's read deadline (defaultReadDeadline) for a read whose work is
+	// bounded by the bytes it moves rather than by the database. Only a read has a deadline, so
+	// only a read's row may set one (mountedRoutes).
 	Deadline time.Duration
 	// Weight is how many of its class's admission units a request takes (admission.Limiter): the
 	// most request-pool connections it holds at once. Zero is one.
 	Weight int
+	// BodyLimit is the most bytes the route reads of a request body, which is also how much of a
+	// refused request's body the server drains before it answers (drainRequestBody). Zero is
+	// maxJSONRequestBytes, every JSON route's limit.
+	BodyLimit int64
 }
 
-// transferDeadline is the deadline of the routes that move a file's bytes - the three uploads and
-// the four file version downloads, a file up to files.MaxObjectSize over whatever link the client
-// has - and of the architecture syncs, which read a whole repository's model through GitHub. Five
-// minutes is what such a transfer or import is given before the server gives up on it.
-const transferDeadline = 5 * time.Minute
+// downloadDeadline is the deadline of the four file version downloads, which move a file up to
+// files.MaxObjectSize over whatever link the client has: five minutes is what such a transfer is
+// given before the server gives up on it, where a read of the database gets defaultReadDeadline.
+const downloadDeadline = 5 * time.Minute
 
 // concurrentReadWeight is the weight of a route that runs its reads side by side, at most two at
 // once (readDeliveryRows, readPipelinePopulation): two request-pool connections.
@@ -71,16 +75,14 @@ var routeServings = map[string]apiRoute{
 	"GET /api/v1/events":                     {Stream: true},
 	"GET /api/v1/agents/{session_id}/stream": {Stream: true},
 
-	"POST /api/v1/projects/{key}/artifacts":                                {Deadline: transferDeadline},
-	"POST /api/v1/issues/{key}/artifacts":                                  {Deadline: transferDeadline},
-	"POST /api/v1/agents/{session_id}/artifacts":                           {Deadline: transferDeadline},
-	"GET /api/v1/artifacts/{id}/versions/{number}":                         {Deadline: transferDeadline},
-	"GET /api/v1/issues/{key}/artifacts/{slug}/versions/{number}":          {Deadline: transferDeadline},
-	"GET /api/v1/projects/{key}/artifacts/{slug}/versions/{number}":        {Deadline: transferDeadline},
-	"GET /api/v1/agents/{session_id}/artifacts/{slug}/versions/{number}":   {Deadline: transferDeadline},
-	"POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync": {Deadline: transferDeadline},
-	"POST /api/v1/projects/{key}/architecture-sources/sync":                {Deadline: transferDeadline},
-	"POST /api/v1/projects/{key}/architecture-source/sync":                 {Deadline: transferDeadline},
+	"POST /api/v1/projects/{key}/artifacts":      {BodyLimit: maxUploadRequestBytes},
+	"POST /api/v1/issues/{key}/artifacts":        {BodyLimit: maxUploadRequestBytes},
+	"POST /api/v1/agents/{session_id}/artifacts": {BodyLimit: maxUploadRequestBytes},
+
+	"GET /api/v1/artifacts/{id}/versions/{number}":                       {Deadline: downloadDeadline},
+	"GET /api/v1/issues/{key}/artifacts/{slug}/versions/{number}":        {Deadline: downloadDeadline},
+	"GET /api/v1/projects/{key}/artifacts/{slug}/versions/{number}":      {Deadline: downloadDeadline},
+	"GET /api/v1/agents/{session_id}/artifacts/{slug}/versions/{number}": {Deadline: downloadDeadline},
 
 	"GET /api/v1/delivery/timeline": {Weight: concurrentReadWeight},
 	"GET /api/v1/delivery/measures": {Weight: concurrentReadWeight},
@@ -96,6 +98,9 @@ func mountedRoutes(rows, testHooks []routeRow) []apiRoute {
 		route, found := routeServings[row.Method+" "+row.Pattern]
 		if found {
 			served++
+		}
+		if route.Deadline != 0 && row.Method != http.MethodGet {
+			panic(fmt.Sprintf("routeServings gives %s %s a deadline, and only a read has one", row.Method, row.Pattern))
 		}
 		route.routeRow = row
 		routes = append(routes, route)

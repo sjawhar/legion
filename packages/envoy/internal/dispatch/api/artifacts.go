@@ -33,6 +33,8 @@ const (
 	// the store accepts and serves back.
 	maxArtifactBlobSize      = files.MaxObjectSize
 	maxDocumentMarkdownBytes = pmdoc.MaxDocumentBytes // A Markdown document, and what a write may grow one to (docs' refuseGrowth); maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
+	// maxUploadRequestBytes bounds an upload's whole body: the file and a megabyte of fields.
+	maxUploadRequestBytes int64 = maxArtifactBlobSize + (1 << 20)
 )
 
 // artifactColumns is the canonical artifact column list scanArtifact reads.
@@ -95,7 +97,7 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, target artifactTarget) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxArtifactBlobSize+(1<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadRequestBytes)
 	requestType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil {
 		writeError(w, "ARTIFACT_INPUT", http.StatusBadRequest, "invalid artifact input type")

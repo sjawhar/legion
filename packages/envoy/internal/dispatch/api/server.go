@@ -114,9 +114,10 @@ type Deps struct {
 	// Admission admits every table route's request but the event streams' and the test hooks'
 	// (register); nil is a Limiter at admission.DefaultLimits. A test sets a small one to fill it.
 	Admission *admission.Limiter
-	// RequestDeadline bounds every table route's request that the route itself does not bound
-	// otherwise (apiRoute.Deadline); zero is defaultRequestDeadline. A test sets a short one.
-	RequestDeadline time.Duration
+	// ReadDeadline bounds every table route's read (GET, HEAD) that the route itself does not bound
+	// otherwise (apiRoute.Deadline); zero is defaultReadDeadline. A test sets a short one. A write
+	// has no deadline.
+	ReadDeadline time.Duration
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -161,9 +162,9 @@ type DepsInput struct {
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
 	StreamHeartbeat time.Duration
-	// Admission and RequestDeadline are Deps.Admission and Deps.RequestDeadline.
-	Admission       *admission.Limiter
-	RequestDeadline time.Duration
+	// Admission and ReadDeadline are Deps.Admission and Deps.ReadDeadline.
+	Admission    *admission.Limiter
+	ReadDeadline time.Duration
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -224,7 +225,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		TestHooksEnabled: input.TestHooksEnabled,
 		StreamHeartbeat:  heartbeat,
 		Admission:        input.Admission,
-		RequestDeadline:  input.RequestDeadline,
+		ReadDeadline:     input.ReadDeadline,
 	}, nil
 }
 
@@ -314,10 +315,10 @@ type queryer interface {
 // its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
 // document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 //
-// Every table route but the event streams and the test hooks is admitted by Deps.Admission and
-// bounded by a deadline before its handler runs (serveRoute), so past capacity a request is
-// refused at once with a retryable 503 instead of queueing without end. The websockets are mounted
-// outside the table and are neither.
+// Every table route but the event streams and the test hooks is admitted by Deps.Admission before
+// its handler runs, and a read is bounded by a deadline too (serveRoute), so past capacity a
+// request is refused at once with a retryable 429 instead of queueing without end. The websockets
+// are mounted outside the table and are neither.
 //
 // With a Lifetime, the server holds the delivery hub (LEGION-690), which starts its goroutines on
 // the first subscription and runs them until Lifetime ends, and mounts GET /ws/delivery beside the
@@ -364,9 +365,9 @@ func register(mux *http.ServeMux, deps Deps) *server {
 	if limiter == nil {
 		limiter = admission.New(admission.DefaultLimits())
 	}
-	deadline := deps.RequestDeadline
+	deadline := deps.ReadDeadline
 	if deadline == 0 {
-		deadline = defaultRequestDeadline
+		deadline = defaultReadDeadline
 	}
 	for _, route := range routes {
 		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, s.serveRoute(route, limiter, deadline)))
@@ -384,38 +385,51 @@ func register(mux *http.ServeMux, deps Deps) *server {
 	return s
 }
 
-// defaultRequestDeadline bounds an ordinary route's request. Twenty seconds is below the thirty
-// the load generator and the web app's pages wait before they give up and the sixty the dispatch
-// command waits, so the server stops a request's work before its client abandons it, rather than
-// finishing work nobody is waiting for while the requests behind it queue.
-const defaultRequestDeadline = 20 * time.Second
+// defaultReadDeadline bounds an ordinary read (GET, HEAD). Twenty seconds is below the thirty the
+// load generator and the web app's pages wait before they give up and the sixty the dispatch
+// command waits, so the server stops a read's work before its client abandons it, rather than
+// finishing work nobody is waiting for while the requests behind it queue. A write has no deadline:
+// once admitted it runs to completion, since an upload takes a minute or more and an architecture
+// import up to two per source, and a write cancelled partway rolls back and makes its page retry
+// it for ever. Its connection acquires stay bounded by each pool's acquire bound.
+const defaultReadDeadline = 20 * time.Second
 
-// serveRoute is route's handler as register mounts it, inside the access log: admission, then the
-// request's deadline, then the transaction tracking and the parameter refusal every route has.
-// Admission comes before the deadline so a request's wait for room is bounded by admission's own
-// wait, and the deadline counts only the work the request was admitted to do. An event stream
-// (Stream) and a test hook are neither admitted nor bounded: a stream runs for as long as its
-// client listens, holding no connection between events, and a test hook is a test's own.
+// serveRoute is route's handler as register mounts it, inside the access log, its layers
+// outermost first: the transaction tracking, admission, a read's deadline, then the parameter
+// refusal every route has. Admission comes before the deadline so a request's wait for room is
+// bounded by admission's own wait, and the deadline counts only the work the read was admitted to
+// do. An event stream (Stream) and a test hook are neither admitted nor bounded: a stream runs for
+// as long as its client listens, holding no connection between events, and a test hook is a
+// test's own.
 func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline time.Duration) http.HandlerFunc {
-	handler := trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler))
+	handler := s.refuseUnstorableParameters(route.Pattern, route.Handler)
 	if route.Stream || route.TestHook {
-		return handler
+		return trackTransactions(handler)
 	}
-	if route.Deadline != 0 {
-		deadline = route.Deadline
+	if route.Method == http.MethodGet {
+		if route.Deadline != 0 {
+			deadline = route.Deadline
+		}
+		handler = boundedBy(deadline, handler)
 	}
-	return admitted(limiter, route.Weight, boundedBy(deadline, handler))
+	bodyLimit := route.BodyLimit
+	if bodyLimit == 0 {
+		bodyLimit = maxJSONRequestBytes
+	}
+	return trackTransactions(admitted(limiter, route.Weight, bodyLimit, handler))
 }
 
 // admitted runs handler once limiter admits the request at weight, with the ticket on the
 // request's context so a wait elsewhere can park it (admission.Ticket.Park), and answers a
-// refusal 503 OVERLOADED. A request whose client went away while it waited is answered nothing.
-func admitted(limiter *admission.Limiter, weight int, handler http.HandlerFunc) http.HandlerFunc {
+// refusal 429 OVERLOADED, after draining the refused request's body up to bodyLimit
+// (drainRequestBody). A request whose client went away while it waited is answered nothing.
+func admitted(limiter *admission.Limiter, weight int, bodyLimit int64, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ticket, err := limiter.Admit(r.Context(), admission.ClassOf(r.Method), weight)
 		if err != nil {
 			var refusal *admission.Refusal
 			if errors.As(err, &refusal) {
+				drainRequestBody(w, r, bodyLimit)
 				admission.WriteRefused(w, refusal)
 			}
 			return
@@ -425,8 +439,8 @@ func admitted(limiter *admission.Limiter, weight int, handler http.HandlerFunc) 
 	}
 }
 
-// boundedBy runs handler under deadline (admission.WithDeadline), whose passing writeHandlerError
-// answers 503 REQUEST_TIMEOUT.
+// boundedBy runs a read's handler under deadline (admission.WithDeadline), whose passing
+// writeHandlerError answers 503 REQUEST_TIMEOUT.
 func boundedBy(deadline time.Duration, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := admission.WithDeadline(r.Context(), deadline)

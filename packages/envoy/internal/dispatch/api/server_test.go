@@ -97,8 +97,8 @@ type testServerOptions struct {
 	streamHeartbeat time.Duration
 	// admission replaces the server's admission limiter; nil is the deployment's limits.
 	admission *admission.Limiter
-	// requestDeadline replaces the server's request deadline; zero is the deployment's.
-	requestDeadline time.Duration
+	// readDeadline replaces the server's read deadline; zero is the deployment's.
+	readDeadline time.Duration
 	// requestPoolSize and acquireBound replace the request pool's size and its acquire bound
 	// (store.BoundAcquires), each when non-zero, so a test can fill the pool and see a request
 	// refused within a fraction of a second.
@@ -217,7 +217,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		Lifetime:         lifetime,
 		StreamHeartbeat:  options.streamHeartbeat,
 		Admission:        options.admission,
-		RequestDeadline:  options.requestDeadline,
+		ReadDeadline:     options.readDeadline,
 		EnvoyURL:         options.envoyURL,
 		EnvoyTimeout:     options.envoyTimeout,
 		OIDC:             options.oidc,

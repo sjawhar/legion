@@ -88,11 +88,11 @@ func refusalReason(err error) Reason {
 // Each queued request takes the whole limit, so the next is admitted only once the one before it
 // is released: the order they are admitted in is the order the queue serves them.
 func TestQueuedRequestsAreAdmittedInArrivalOrder(t *testing.T) {
-	l := newLimiter(2, 1, patient)
-	held := admit(t, l, Read, 2)
+	l := newLimiter(3, 1, patient) // the queue holds three requests
+	held := admit(t, l, Read, 3)
 	order := make(chan int, 3)
 	for index := range 3 {
-		outcome := admitInBackground(t, l, context.Background(), Read, 2)
+		outcome := admitInBackground(t, l, context.Background(), Read, 3)
 		go func() {
 			result := <-outcome
 			if result.err != nil {
@@ -162,12 +162,13 @@ func TestEachClassHasItsOwnLimit(t *testing.T) {
 	}
 }
 
+// A class's queue holds as many requests as its limit; the next request is refused at once.
 func TestAFullQueueRefusesAtOnce(t *testing.T) {
-	l := newLimiter(1, 1, patient)
-	held := admit(t, l, Write, 1)
+	l := newLimiter(1, 2, patient)
+	held := []*Ticket{admit(t, l, Write, 1), admit(t, l, Write, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	for range 2 { // the queue holds twice the limit
+	for range 2 { // the queue holds the limit's two requests
 		admitInBackground(t, l, ctx, Write, 1)
 	}
 	started := time.Now()
@@ -187,12 +188,15 @@ func TestAFullQueueRefusesAtOnce(t *testing.T) {
 	}
 	cancel()
 	waitForQueued(t, l, Write, 0)
-	held.Release()
+	for _, ticket := range held {
+		ticket.Release()
+	}
 }
 
+// A request waits DefaultWait, 75 ms, for room and is then refused, so its refusal is answered
+// within the 100 ms the architect set for one.
 func TestAWaitPastItsBoundIsRefused(t *testing.T) {
-	const wait = 50 * time.Millisecond
-	l := newLimiter(1, 1, wait)
+	l := newLimiter(1, 1, 0) // a zero wait is DefaultWait
 	held := admit(t, l, Read, 1)
 	started := time.Now()
 	_, err := l.Admit(context.Background(), Read, 1)
@@ -200,8 +204,8 @@ func TestAWaitPastItsBoundIsRefused(t *testing.T) {
 	if refusalReason(err) != WaitExceeded {
 		t.Fatalf("admit behind a held request: %v, want a wait_exceeded refusal", err)
 	}
-	if waited < wait {
-		t.Fatalf("refused after %v, before its wait of %v", waited, wait)
+	if waited < 75*time.Millisecond || waited >= 100*time.Millisecond {
+		t.Fatalf("refused after %v, want after its wait of 75ms and within 100ms", waited)
 	}
 	stats := classStats(l, Read)
 	if stats.WaitExceeded != 1 || stats.Queued != 0 || stats.InFlight != 1 {
@@ -214,8 +218,8 @@ func TestAWaitPastItsBoundIsRefused(t *testing.T) {
 // A request whose client goes away while it waits leaves the queue and takes no unit with it:
 // the units it would have held go to the request behind it.
 func TestACancelledWaitLeaksNoUnits(t *testing.T) {
-	l := newLimiter(1, 1, patient)
-	held := admit(t, l, Write, 1)
+	l := newLimiter(1, 2, patient) // the queue holds two requests
+	held := admit(t, l, Write, 2)
 	ctx, cancel := context.WithCancel(context.Background())
 	gone := admitInBackground(t, l, ctx, Write, 1)
 	behind := admitInBackground(t, l, context.Background(), Write, 1)

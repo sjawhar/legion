@@ -722,25 +722,11 @@ func (c *countingTracer) TraceAcquireStart(ctx context.Context, _ *pgxpool.Pool,
 
 func (*countingTracer) TraceAcquireEnd(context.Context, *pgxpool.Pool, pgxpool.TraceAcquireEndData) {}
 
-// Each pool's connections carry its name in application_name, after the connection string's own
-// application_name, so pg_stat_activity tells the pools apart; a connection string that names
-// none gets envoy-dispatch.
+// Each pool's connections carry dispatch-<pool> in application_name, so pg_stat_activity tells
+// the pools apart, and a connection string's own application_name does not change it.
 func TestEachPoolNamesItsConnectionsInPgStatActivity(t *testing.T) {
 	ctx := context.Background()
-	base := "pooltest_" + randomDatabaseSuffix(t)
-	named, err := url.Parse(testDatabaseURL(t))
-	if err != nil {
-		t.Fatalf("parse the test database URL: %v", err)
-	}
-	query := named.Query()
-	query.Set("application_name", base)
-	named.RawQuery = query.Encode()
-	database, err := Open(ctx, named.String())
-	if err != nil {
-		t.Fatalf("open the store: %v", err)
-	}
-	pool := database.Pool
-	t.Cleanup(pool.Close)
+	pool := openEmptyTestStore(t).Pool
 
 	requests := holdOne(t, pool.Acquire)
 	for _, open := range []func() (*Pool, error){pool.Outbox, pool.Background, pool.Live, pool.Settlements} {
@@ -766,28 +752,40 @@ func TestEachPoolNamesItsConnectionsInPgStatActivity(t *testing.T) {
 	}
 	t.Cleanup(func() { listener.Close(context.Background()) })
 
+	// The database is this test's own, so every connection to it is one of this store's.
 	var names []string
 	if err := requests.QueryRow(ctx, `select array_agg(distinct application_name order by application_name)
-		from pg_stat_activity where starts_with(application_name, $1)`, base+"/").Scan(&names); err != nil {
+		from pg_stat_activity where datname = current_database()`).Scan(&names); err != nil {
 		t.Fatalf("read pg_stat_activity: %v", err)
 	}
 	var want []string
 	for _, name := range poolNames {
-		want = append(want, base+"/"+name)
+		want = append(want, "dispatch-"+name)
 	}
 	slices.Sort(want)
 	if !slices.Equal(names, want) {
 		t.Errorf("pg_stat_activity names %v, want %v", names, want)
 	}
 
-	unnamed := openTestStore(t).Pool
-	conn := holdOne(t, unnamed.Acquire)
+	named, err := url.Parse(testDatabaseURL(t))
+	if err != nil {
+		t.Fatalf("parse the test database URL: %v", err)
+	}
+	query := named.Query()
+	query.Set("application_name", "pooltest_"+randomDatabaseSuffix(t))
+	named.RawQuery = query.Encode()
+	database, err := Open(ctx, named.String())
+	if err != nil {
+		t.Fatalf("open a store whose connection string names an application: %v", err)
+	}
+	t.Cleanup(database.Pool.Close)
+	conn := holdOne(t, database.Pool.Acquire)
 	var name string
 	if err := conn.QueryRow(ctx, `select application_name from pg_stat_activity where pid = pg_backend_pid()`).Scan(&name); err != nil {
 		t.Fatalf("read the connection's application_name: %v", err)
 	}
-	if name != defaultApplicationName+"/"+RequestsPool {
-		t.Errorf("a request connection from a connection string naming no application is %q, want %q", name, defaultApplicationName+"/"+RequestsPool)
+	if name != "dispatch-requests" {
+		t.Errorf("a request connection from a connection string naming an application is %q, want dispatch-requests", name)
 	}
 }
 
