@@ -770,7 +770,7 @@ primary_issue() {
   begin primary-planner-handoff
   send_agent "$root_issue" planner "Stage 3 proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
   wait_for_phase "$root_issue" implementing
-  assert_handoff_committer "$root_issue" planner planning 0
+  assert_handoff_record "$root_issue" planner planning 0
   wait_for_worker "$root_issue" implementer
   pass
 
@@ -779,29 +779,29 @@ primary_issue() {
   until_true 900 "implementer pull request on legion/$root_issue" sh -c \
     "gh -R '$repo' pr list --head 'legion/$root_issue' --state open --json number | jq -e 'length == 1' >/dev/null"
   pr_number=$(gh -R "$repo" pr list --head "legion/$root_issue" --state open --json number --jq '.[0].number')
-  # Each pane commits as its role's App: the planner's handoff as the review App's bot, the
-  # implementer's change as the implement App's (role_app), author and committer alike.
+  # The planner's handoff is a record on the Dispatch issue, so the pull request's commits are the
+  # implementer's alone, authored and committed by the implement App's bot (role_app); no commit is
+  # a handoff, and none changes only .legion/.
   authors=$(gh api "repos/$repo/pulls/$pr_number/commits" --jq '[.[] | .commit.author.name + "|" + .commit.committer.name] | unique | join(",")')
-  want_authors=$(jq -nr --arg implementer "$(role_app implementer)" --arg planner "$(role_app planner)" \
-    '[$implementer + "|" + $implementer, $planner + "|" + $planner] | unique | join(",")')
+  want_authors="$(role_app implementer)|$(role_app implementer)"
   [ "$authors" = "$want_authors" ] ||
-    fail "$repo#$pr_number commits are authored|committed by $authors, want the implementer's and planner's App bots for both: $want_authors"
+    fail "$repo#$pr_number commits are authored|committed by $authors, want the implementer's App bot for both: $want_authors"
   wait_for_phase "$root_issue" testing
   assert_round_handoff "$root_issue" 0
-  assert_handoff_committer "$root_issue" implementer implementing 0
+  assert_handoff_record "$root_issue" implementer implementing 0
   # The spec's one-file change: the file every review round's correction must land in.
   smoke_file=$(pull_request_product_files)
   if [ -z "$smoke_file" ] || [ "$(wc -l <<<"$smoke_file")" != 1 ]; then
     fail "$repo#$pr_number changes product files '$(tr '\n' ' ' <<<"$smoke_file")', want the spec's one file"
   fi
   wait_for_worker "$root_issue" tester
-  note "implementer opened $repo#$pr_number on legion/$root_issue changing $smoke_file, its commits authored and committed by the implementer and planner App bots, and its handoff advanced the daemon to testing"
+  note "implementer opened $repo#$pr_number on legion/$root_issue changing $smoke_file, its commits authored and committed by the implementer App bot alone, and its completion naming its Dispatch handoff record advanced the daemon to testing"
   pass
 
   begin primary-tester-pass
   send_agent "$root_issue" tester "Stage 3 proof test operation: inspect the implementer's actual one-file change and pull request #$pr_number, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass."
   wait_for_phase "$root_issue" reviewing
-  assert_handoff_committer "$root_issue" tester testing 0
+  assert_handoff_record "$root_issue" tester testing 0
   wait_for_worker "$root_issue" reviewer
   pass
 
@@ -821,10 +821,10 @@ primary_issue() {
       review_note="A bot's review thread on the pull request asks whether the file change is needed, and the implementer answered it: judge the answer, reply on that thread in your own words, and name its thread id to the implementer as accepted, as your role says for a bot's thread (the change is needed: the spec asks for it)."
     fi
     request_changes_as_reviewer "$root_issue" "$round" "Stage 3 proof review, round $round: append the line \`$(round_line "$round")\` to the end of the same file this pull request changes, below the lines already there, and change nothing else. The spec permits one more line in that file for a review round, so this correction is in scope." "$review_note"
-    # The round ends when the reviewer completes it: its review, its handoff commit, its completion.
+    # The round ends when the reviewer completes it: its review, its handoff record, its completion.
     wait_for_phase "$root_issue" implementing 1200
-    assert_handoff_committer "$root_issue" reviewer reviewing "$round"
-    assert_review_of_own_handoff "$root_issue" "$round" CHANGES_REQUESTED
+    assert_handoff_record "$root_issue" reviewer reviewing "$round"
+    assert_review_of_head "$root_issue" "$round" CHANGES_REQUESTED
     until_true 180 "round $round to write in_progress on the Dispatch board" dispatch_status_is "$root_issue" in_progress
     wait_for_worker "$root_issue" implementer
     if [ "$round" = 3 ]; then
@@ -845,7 +845,7 @@ primary_issue() {
       bot_note=" A bot also left one review thread on the pull request asking whether the file change is needed: answer it and resolve it as your role says for a thread you answer (it is needed: the spec asks for it), before you complete."
     fi
     send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the correction the review names (append the line \`$(round_line "$round")\` to the file this pull request changes), push it to the existing pull request #$pr_number, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round.$bot_note"
-    # A correction round runs the implementer's whole loop (the edit, the push, the handoff commit,
+    # A correction round runs the implementer's whole loop (the edit, the push, the handoff record,
     # the completion) as the retro does, and took past 600 s in acceptance runs: 1200 s.
     wait_for_phase "$root_issue" testing 1200
     until_true 120 "round $round's correction on pull request #$pr_number" round_correction_pushed "$round"
@@ -858,11 +858,11 @@ primary_issue() {
       note "the bot's review thread $bot_thread carries the Legion reviewer's reply and is resolved: the reviewer adjudicated it and named it to the implementer"
     fi
     assert_round_handoff "$root_issue" "$round"
-    assert_handoff_committer "$root_issue" implementer implementing "$round"
+    assert_handoff_record "$root_issue" implementer implementing "$round"
     wait_for_worker "$root_issue" tester
     send_agent "$root_issue" tester "Stage 3 proof retest round $round: verify the correction on pull request #$pr_number, write the tester handoff with verdict pass, and complete the phase."
     wait_for_phase "$root_issue" reviewing
-    assert_handoff_committer "$root_issue" tester testing "$round"
+    assert_handoff_record "$root_issue" tester testing "$round"
     wait_for_worker "$root_issue" reviewer
     pass
   done
@@ -873,11 +873,11 @@ primary_issue() {
   wait_for_phase "$root_issue" testing 1200
   until_true 120 "round 3's correction on pull request #$pr_number" round_correction_pushed 3
   assert_round_handoff "$root_issue" 3
-  assert_handoff_committer "$root_issue" implementer implementing 3
+  assert_handoff_record "$root_issue" implementer implementing 3
   wait_for_worker "$root_issue" tester
   send_agent "$root_issue" tester "Stage 3 proof final test: verify pull request #$pr_number, record the tester pass handoff, then complete it."
   wait_for_phase "$root_issue" reviewing
-  assert_handoff_committer "$root_issue" tester testing 3
+  assert_handoff_record "$root_issue" tester testing 3
   wait_for_worker "$root_issue" reviewer
   # The acceptance's negative control, at the one point the issue stands still in reviewing: the
   # tester's completion started the reviewer, which waits for the proof's instruction, so a sign_off
@@ -906,8 +906,8 @@ primary_issue() {
     fail "a status write is pending for $root_issue at accepting, which writes none: $(jq -c --arg issue "$root_issue" '[.pendingStatusWrites[]? | select(.issue == $issue)]' "$evidence/accepting.json")"
   dispatch_status_is "$root_issue" needs_review >/dev/null ||
     fail "the board shows $root_issue $(dispatch_get "issues/$root_issue" | jq -r .status) at accepting, want needs_review, which the move to accepting leaves alone"
-  assert_handoff_committer "$root_issue" reviewer reviewing 3
-  assert_review_of_own_handoff "$root_issue" 3 APPROVED
+  assert_handoff_record "$root_issue" reviewer reviewing 3
+  assert_review_of_head "$root_issue" 3 APPROVED
   note "the reviewer's approval moved $root_issue to accepting: no worker started (the implementer's claim holds ${pending_phase:+a $pending_phase task, }no retro task), the board still needs_review with no status write pending, and the architect holds the reviewer's phase-finished notice"
   pass
   [ "$until" != rework ] || return 0
@@ -1051,10 +1051,17 @@ primary_issue() {
   pass
 
   begin smoke-main-clean
+  # The merged pull request carried no handoff (A2): no commit of it changes only .legion/, and no
+  # file it merged is under .legion/, since every phase's handoff is a record on the Dispatch issue.
+  handoff_pushes=$(pull_request_legion_only_commits) || fail "could not read the commits of $repo#$pr_number"
+  [ -z "$handoff_pushes" ] || fail "$repo#$pr_number carries commits that change only .legion/: $(tr '\n' ' ' <<<"$handoff_pushes")"
+  merged_files=$(pull_request_product_files) || fail "could not read the files of $repo#$pr_number"
+  handoff_files=$(grep '^\.legion/' <<<"$merged_files" || true)
+  [ -z "$handoff_files" ] || fail "$repo#$pr_number merged handoff files: $(tr '\n' ' ' <<<"$handoff_files")"
   clean_smoke_main
   leftovers=$(smoke_main_leftovers)
   [ -z "$leftovers" ] || fail "$repo main still carries proof leftovers: $(tr '\n' ' ' <<<"$leftovers")"
-  note "$repo main carries no .legion/ handoff and no docs/solutions/ learning"
+  note "$repo#$pr_number merged no commit that changes only .legion/ and no file under .legion/; $repo main carries no .legion/ path and no docs/solutions/ learning"
   release_smoke_main
   pass
 

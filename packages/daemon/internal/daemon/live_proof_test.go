@@ -1,8 +1,9 @@
 //go:build e2e
 
-// The harness this package's whole-daemon live proofs share: merged_root_waits_live_test.go and
-// no_required_checks_live_test.go, whose scripts (scripts/e2e/merged-root-waits.sh and
-// scripts/e2e/no-required-checks.sh) make the same run around them through
+// The harness this package's whole-daemon live proofs share: merged_root_waits_live_test.go,
+// no_required_checks_live_test.go and handoff_records_live_test.go, whose scripts
+// (scripts/e2e/merged-root-waits.sh, scripts/e2e/no-required-checks.sh and
+// scripts/e2e/handoff-records.sh) make the same run around them through
 // scripts/e2e/lib/live-daemon-proof.sh. A driver embeds liveProof, which holds what every such
 // proof needs before and around the daemon it boots: the configuration it boots with (newLiveProof
 // reads the broker LEGION_E2E_NATS_URL names, skips when it names none, and builds workflowConfig
@@ -259,10 +260,11 @@ func (p *liveProof) waitArchitectNotices(key, kind string, count int) []listener
 
 // liveDispatch is workflowConfig's Dispatch stand-in — the repository mapping and an empty issue
 // list — grown into the board the daemon writes to: it holds each issue's status, as Dispatch's own
-// board does, answers the issue read the outbox makes before a status write, and records every
+// board does, answers the issue read the outbox makes before a status write, records every
 // status and message the daemon posted, so a step can read back what the daemon told Dispatch and
-// tell a write that never came from one it cannot see. Anything else is a call a live proof does
-// not expect, and fails the test as workflowConfig's stand-in does.
+// tell a write that never came from one it cannot see, and serves the handoff records a step
+// seeds (handoff), which a phase completion names and the daemon reads back. Anything else is a
+// call a live proof does not expect, and fails the test as workflowConfig's stand-in does.
 type liveDispatch struct {
 	t       *testing.T
 	project string
@@ -270,6 +272,8 @@ type liveDispatch struct {
 	// status is each issue's status as this board holds it, the daemon's writes applied.
 	status map[string]string
 	posted []liveDispatchWrite
+	// handoffs is each seeded handoff record by its id, as GET /api/v1/handoffs/{id} answers it.
+	handoffs map[string]map[string]any
 }
 
 // liveDispatchWrite is one write the daemon made to Dispatch: a status it set on an issue, or a
@@ -281,7 +285,7 @@ type liveDispatchWrite struct {
 }
 
 func newLiveDispatch(t *testing.T, project string) *liveDispatch {
-	return &liveDispatch{t: t, project: project, status: map[string]string{}}
+	return &liveDispatch{t: t, project: project, status: map[string]string{}, handoffs: map[string]map[string]any{}}
 }
 
 // show puts key on the board at status, as the seeded fixture stands on Dispatch before the daemon
@@ -290,6 +294,19 @@ func (b *liveDispatch) show(key, status string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.status[key] = status
+}
+
+// handoff seeds version 1 of key's handoff record of phase word, written by session, as a worker's
+// `dispatch handoff-write` leaves it, and answers its id for the completion to name.
+func (b *liveDispatch) handoff(key, word, session string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	id := fmt.Sprintf("00000000-0000-4000-8000-%012d", len(b.handoffs)+1)
+	b.handoffs[id] = map[string]any{
+		"id": id, "issue_key": key, "phase": word, "version": 1, "created_at": "2026-10-27T00:00:00Z",
+		"author": map[string]any{"kind": "session", "id": session}, "body": "{}",
+	}
+	return id
 }
 
 func (b *liveDispatch) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -316,6 +333,8 @@ func (b *liveDispatch) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		write := liveDispatchWrite{Issue: key, Status: b.decode(req, w)}
 		b.show(key, write.Status)
 		b.record(write, w)
+	case req.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/handoffs/"):
+		b.showHandoff(strings.TrimPrefix(path, "/api/v1/handoffs/"), w)
 	default:
 		b.t.Errorf("Dispatch request = %s %s", req.Method, path)
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
@@ -332,6 +351,22 @@ func (b *liveDispatch) showIssue(key string, w http.ResponseWriter) {
 		"labels": []string{"legion"}, "last_seq": 1, "resolved_repo": liveRepo,
 	}); err != nil {
 		b.t.Errorf("write the Dispatch issue %s: %v", key, err)
+	}
+}
+
+// showHandoff answers the handoff record read a completion makes: the seeded record, or Dispatch's
+// 404 HANDOFF_NOT_FOUND.
+func (b *liveDispatch) showHandoff(id string, w http.ResponseWriter) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	handoff, ok := b.handoffs[id]
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"code":"HANDOFF_NOT_FOUND","error":"handoff `+id+` not found"}`)
+		return
+	}
+	if err := json.NewEncoder(w).Encode(handoff); err != nil {
+		b.t.Errorf("write the Dispatch handoff %s: %v", id, err)
 	}
 }
 

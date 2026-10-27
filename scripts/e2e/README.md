@@ -17,15 +17,17 @@ through `scripts/e2e/.shellcheckrc`.
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config, reporting after its OK line the two deployment capabilities a tmux file alone leaves open (secrets, resource-limits), and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, carrying its Dispatch id as the host's tag, while a BTW stays a side question; the composer completes the session's slash commands, and a skill, a prompt template, a file command, an extension command, `/session`, `/compact`, `/new` and an unknown `/foo` each run from the page as they would at the session's terminal; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `dispatch-session-settings.sh` | Dispatch's live view shows a real Oh My Pi session's current model and thinking level and switches them (INFRA-195), run in an issue pod: Oh My Pi in `--mode rpc` with this checkout's Envoy plugin, a real listener, `nats-server`, Postgres and Dispatch, and one held-open Chromium page. Each value the header shows matches the session's own RPC answers, its `/effort` output and its session file: before any turn; within 20 s of a change at the terminal, by a message or by a fallback; after a pick from either picker, including `auto` kept across a model pick, the level a model pick leaves (compared with a twin session), a pick during a turn, a refusal, and a pick to a stopped session that ends in the no-answer line and is refused `ACCEPT_STALE` once it resumes. A forged switch, an Envoy message and an agent's bearer change nothing. Another session, a resumed session and a new session each keep their own values. A session on the released pi-envoy shows the restart notice. A switch is stored under the person who sent it |
-| `claude-backend-tmux.sh` | `worker_backends` on tmux: an implementer the daemon runs on Claude Code (`legion claude-bridge -- claude -p`) registers its Claude Code transcript as its session, takes its phase, completes it through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit, and, its pane killed, relaunches with `claude --resume` into the same session id, its earlier turns unchanged on disk and in its context. Devbox only |
+| `claude-backend-tmux.sh` | `worker_backends` on tmux: an implementer the daemon runs on Claude Code (`legion claude-bridge -- claude -p`) registers its Claude Code transcript as its session, takes its phase, completes it through the `legion` MCP tool's `handoff_complete` naming the Dispatch handoff record it wrote under that session beside its pushed commit, which changes nothing under `.legion/`, and, its pane killed, relaunches with `claude --resume` into the same session id, its earlier turns unchanged on disk and in its context. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `burstable-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` giving the issue pod `issue: {memory: 32Gi, memory_request: 8Gi}` is admitted, scheduled and recorded `Burstable`, its `roles` container carrying exactly that request and limit, while one from a file with no `resources` block stays `Guaranteed`; `legion start --check-config` names the Burstable issue pod and refuses a request past its limit or that is no quantity, naming the key |
 | `controller-sweep-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, the project controller Legion's own loader, `sandboxOptions` and boot's Sandbox runtime factory launch from a `controller: daemon` `legion.yaml` over a real Postgres store keeps its Sandbox and volume through five orphan sweeps at grace 0 told claims read before its launch, because the store holds its claim unretired, and loses both to the first sweep once the claim is retired; the same launch and sweep on a driver whose sweep reads no claim (the sweep before the fix) deletes the launched controller's Sandbox |
 | `share-volumes-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` whose `runtime.kubernetes.pod` mounts an existing NFS share twice — through a PersistentVolumeClaim (read-only by default) and as an `nfs` export with `read_only: false` — reads the server's seed file through the claim, is refused a write there, and writes a file through the export that the server then holds; `legion start --check-config` refuses a volume naming two sources, and `legion probe-boot` mounts both shares and refuses a missing claim, a missing export and a server that never answers, each naming the volume and its share, and an image digest the registry does not have, naming the image |
 | `merged-root-waits.sh` | the daemon keeps a tree's order, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own: a `sign_off` of a root with a child in the workflow is refused 409 `SIGNOFF_CHILD_IN_WORKFLOW` naming the child, and lands once that child is parked; the root's merge, as GitHub's own envelope, leaves it in `awaiting_merge` with its pull request `merged`, no Dispatch `done`, no suspension, its slot kept and its architect told once by a `pr-merged` notice naming the child; a restart there leaves the wait and tells nobody again; the child's implementer completes its phase in that wait, where a lingering tree refuses it 409 `TREE_LINGERING`; a pull request GitHub reports opened from the waiting root's branch leaves the merged one the root waits on recorded; and the child's own merge closes it and the root behind it, with the tree suspended, the slot freed and the root's production check open on the root's merged pull request |
 | `no-required-checks.sh` | a pull request whose base branch requires no check and no workflow has no CI verdict, driven through the whole daemon `legion start` boots, over a PostgreSQL the caller names and a `nats-server` of the run's own, with GitHub's settlements, push and synchronize as its own envelopes and what each base requires read by the daemon's own required-checks pass from a GitHub stand-in the driver switches: a failed check on a base that requires nothing leaves no `checksVerdict` key on `GET /legion/v1/state`, the issue in `testing` and no `checks-red`; the same failure once that base requires the check is `red`, sends the work to `implementing` and tells one `checks-red` naming it; a passing required check is `green`; and at an exhausted fix-attempt count a code push onto the held head once its base requires nothing leaves the counted attempt, `fixAttempts` unchanged, so the new head's red once the base requires the check again sends the work back with a `checks-red` rather than being held |
+| `handoff-records.sh` | a phase's handoff is a record on its Dispatch issue (INFRA-177), driven against the real Dispatch server this checkout builds, on a database of its own, and the whole daemon booted with `dispatch_url` at it, over a PostgreSQL the caller names and a `nats-server` of the run's own, through the real `dispatch` CLI and `POST /legion/v1/handoff/complete`: a 40 KB body reads back byte for byte and two writes are versions 1 and 2, a body one byte over the cap refused by the CLI and 413 `CAP_EXCEEDED` by Dispatch; a record another session wrote is refused `HANDOFF_SESSION_MISMATCH` and the planner's own moves the issue on; `legion handoffs import`'s record, under the daemon's session, is refused the tester, which rewrites it, and the reviewer's task names the rewrite; a round-1 record named in round 2 is refused `HANDOFF_NOT_NEW`; with Dispatch stopped the write fails and the completion is refused `DISPATCH_READ_FAILED`, and once it is back both land and the issue's handoff list holds the record. No GitHub, no cluster |
+| `handoff-cutover-github.sh` | on `sjawhar/legion-smoke`, as the implement App, what handoffs leaving git do to GitHub's required check `gate`: a `.legion/`-only commit with the `skip-checks: true` trailer, and the pull request opened on it, get no `gate` check run and no workflow run within 10 minutes (today's behaviour, the negative control); the commit `legion handoffs import` makes removing `.legion/` (the same Git Data API calls) gets one; and a pull request whose only commit is empty, with no trailer, is opened by GitHub and its head gets one (D13). Its scratch workflow runs are cancelled and its branches and pull requests closed and deleted on exit |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
-| `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` | the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits: GitHub's compare of the two must show nothing outside `docs/solutions/` and `.legion/<issue>/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths. Devbox only |
+| `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` | the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits: GitHub's compare of the two must show nothing outside `docs/solutions/` but files removed under `.legion/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths. Devbox only |
 
 ## TestRealGitHubCredentialSurface
 
@@ -512,12 +514,15 @@ Each wait for a tree's architect to be suspended once its tree lingers (`await_t
 bounded by `phase_seconds`, the proof's budget for an agent's turn: the daemon holds that
 suspension until the architect's turn ends and names it no deadline, and a timeout prints the
 architect's claim from `legion claims list` (its state and whether its suspension is held).
-After the first look's report the proof human removes
-every `.legion/` file and `docs/solutions/` learning from the smoke `main` through one merged
-fixture pull request, and the run checks that `main` carries none: handoffs are records on the
-Dispatch issue and no commit carries one, so a proof merge carries only its retro learnings, and
-the cleanup removes those and any `.legion/` a merge from before handoffs moved to Dispatch left, so the next run
-starts from a base carrying no other issue's files.
+After the first look's report, `smoke-main-clean` first holds that the merged pull request carried
+no handoff: no commit of it changes only `.legion/` (`pull_request_legion_only_commits`) and no file
+it merged is under `.legion/`, since every role's handoff is a record on the Dispatch issue, which
+each phase's `assert_handoff_record` read back as written by that role's claim session. The proof
+human then removes every `.legion/` file and `docs/solutions/` learning from the smoke `main`
+through one merged fixture pull request, and the run checks that `main` carries none: a proof merge
+carries only its retro learnings, and the cleanup removes those and any `.legion/` a merge from
+before handoffs moved to Dispatch left, so the next run starts from a base carrying no other
+issue's files.
 The smoke `main` requires the `gate` check, which has not started when the fixture pull request is
 created, and GitHub refuses a merge before it passes, so the cleanup first waits up to 600 s, named
 in the transcript, for the pull request's merge state to read `CLEAN`, `UNSTABLE` or `HAS_HOOKS`
@@ -684,11 +689,13 @@ pane. The checks:
   order, after the executable's name: no other word of the command line counts, the pane's system
   prompt (past 64 KB, with newlines) included, and no pipe can end early on it. A failure prints
   the claude's ancestry.
-- `claude-implementer-handoff`: told through Dispatch to make the spec's one-file change, write
-  and push its handoff, and call the `legion` tool's `handoff_complete`, it does: the daemon records
-  the completion's commit, which the implement App authored and committed, which is on
-  `sjawhar/legion-smoke` and which changes `.legion/<issue>/`, and the transcript holds the
-  `mcp__legion__legion` call with a result that is not an error. No pull request is opened.
+- `claude-implementer-handoff`: told through Dispatch to make the spec's one-file change, push it,
+  write its handoff with `dispatch handoff-write` and call the `legion` tool's `handoff_complete`,
+  it does: the daemon records the completion's Dispatch handoff record, which Dispatch holds as the
+  issue's `implement` handoff written by the implementer's claim session (its Claude Code session,
+  `assert_handoff_record`), and its commit, which the implement App authored and committed, which
+  is on `sjawhar/legion-smoke` and which changes nothing under `.legion/`, and the transcript holds
+  the `mcp__legion__legion` call with a result that is not an error. No pull request is opened.
 - `kill-resumes-the-same-claude-session`: its pane killed, the claim relaunches one generation on,
   registers the same session id and transcript path, runs `claude --resume <that id>`, and the
   transcript's bytes from before the kill are unchanged. The resumed session, asked to quote the
@@ -1549,7 +1556,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and one run of each completed. A run completes by the task-result block the reviewer received, whether by async delivery, a `wait`, or a `read` of its `proc://` job, saying `completed`. With no block, the subagent's own session beside the reviewer's must end in an accepted yield. Every turn of that session runs on the fixture overlay's `review` target: the task executor runs a subagent on its parent's model, silently, when the subagent's own does not resolve. A refusal (`Unknown agent`, `No model selected`) in a task result or in a run that did not complete fails with its text. tree-reviewed keeps the reviewer's session and the subagents' sessions as the pair settles, reading the session database, not the daemon |
 | `first-turns` | every role on tree 1 completed a first turn in its pod |
 | `token-rotation` | a pod's projected operator token (`/var/run/operator/token`, 3600 s, renewed by the kubelet at 80 %) is renewed: the token in the file was issued (its `iat`) after the pod started, in the same pod by uid. An exec that does not answer is never a token. A model turn after the renewal still runs on a model the operator fixture's `overlay.yml` gives a role |
-| `github-credential` | `gh` as the role's App inside the pod, and isolation inside one pod: in tree 1's issue pod, the implementer's `gh` is the image's wrapper `/opt/legion/bin/gh` (`legion gh`), which, handed the agent's `LEGION_GH_PATH=/usr/local/bin/gh` and `LEGION_GH_OWNERS_DIR=/var/run/legion/gh` since an exec carries none of the agent's variables, authenticates as the implement App's bot (`role_app implementer`, the login `read_app_logins` read from GitHub) from the gh files of the repository owner's directory its `GH_CONFIG_DIR` (`/var/run/legion/gh/<owner>`, the read-only `gh-implementer` projection of its role Secret, which its role-init binds there) names, and `gh auth status` there names account `x-access-token`; its Oh My Pi environment carries `GH_CONFIG_DIR`, `LEGION_GH_OWNERS_DIR`, `LEGION_GH_PATH`, an empty `GH_TOKEN`, none of the old tool pins, no grant file (`LEGION_GRANT_FILE`, `LEGION_GRANT`), no App login variable and a PATH with no `worker-bin`; a `task` subagent of that session answers the same login with no `legion` command of the parent's first, since it inherits the directory, and the implementer's own bash runs `jj undo --help` and reports jj's first help line, nothing refusing it (acceptance 4c); in the same pod the reviewer's `gh` is the review App's bot from a different `hosts.yml`, and each role's bundle root holds owners' directories and the kubelet's entries alone. Isolation in the pod's one `roles` container, each read in the role's own namespaces (entered as its agent sees the pod: `nsenter -t <its role-init> -U -m -p -i`, then its shim's `-U`): the container holds all six roles' directories under `/var/run/legion/roles` (the control that a cover, not an absent mount, hides each sibling's), while in the implementer's and in the reviewer's namespaces that directory is empty, `/proc` lists one worker-shim, its own, and the `hosts.yml` at its `GH_CONFIG_DIR` hashes to its own `/var/run/legion/roles/<role>/gh` copy in the container and differs from the other's; the pod shares no process namespace; the daemon logged `github credential written` for every role of the pod and names no token route; GitHub's record of each commit attributes the planner's handoff push to the review App's bot and the implementer's head to the implement App's; the planner's handoff-only push ends its message with two empty lines and `skip-checks: true` (the shape GitHub honours; one empty line started both workflows in the rule's first live run) and has no check run, the implementer's code head carries no CI-skipping line and has check runs, and the daemon recorded each pushed head as that role's completion (acceptance 4a); the negative control is the same `gh` with `GH_CONFIG_DIR=/nonexistent`, which fails naming `GH_TOKEN`; a seventh holder of a gh directory, the controller, both operator-launched and daemon-launched, is proven in the `controller` and `daemon-controller-liveness` rows below |
+| `github-credential` | `gh` as the role's App inside the pod, and isolation inside one pod: in tree 1's issue pod, the implementer's `gh` is the image's wrapper `/opt/legion/bin/gh` (`legion gh`), which, handed the agent's `LEGION_GH_PATH=/usr/local/bin/gh` and `LEGION_GH_OWNERS_DIR=/var/run/legion/gh` since an exec carries none of the agent's variables, authenticates as the implement App's bot (`role_app implementer`, the login `read_app_logins` read from GitHub) from the gh files of the repository owner's directory its `GH_CONFIG_DIR` (`/var/run/legion/gh/<owner>`, the read-only `gh-implementer` projection of its role Secret, which its role-init binds there) names, and `gh auth status` there names account `x-access-token`; its Oh My Pi environment carries `GH_CONFIG_DIR`, `LEGION_GH_OWNERS_DIR`, `LEGION_GH_PATH`, an empty `GH_TOKEN`, none of the old tool pins, no grant file (`LEGION_GRANT_FILE`, `LEGION_GRANT`), no App login variable and a PATH with no `worker-bin`; a `task` subagent of that session answers the same login with no `legion` command of the parent's first, since it inherits the directory, and the implementer's own bash runs `jj undo --help` and reports jj's first help line, nothing refusing it (acceptance 4c); in the same pod the reviewer's `gh` is the review App's bot from a different `hosts.yml`, and each role's bundle root holds owners' directories and the kubelet's entries alone. Isolation in the pod's one `roles` container, each read in the role's own namespaces (entered as its agent sees the pod: `nsenter -t <its role-init> -U -m -p -i`, then its shim's `-U`): the container holds all six roles' directories under `/var/run/legion/roles` (the control that a cover, not an absent mount, hides each sibling's), while in the implementer's and in the reviewer's namespaces that directory is empty, `/proc` lists one worker-shim, its own, and the `hosts.yml` at its `GH_CONFIG_DIR` hashes to its own `/var/run/legion/roles/<role>/gh` copy in the container and differs from the other's; the pod shares no process namespace; the daemon logged `github credential written` for every role of the pod and names no token route; GitHub's record of the pull request's head attributes it to the implement App's bot, the head carries no CI-skipping line and has check runs, and the daemon recorded it as the implementer's completion (acceptance 4a); no commit of the pull request changes only `.legion/` (`pull_request_legion_only_commits`), and the planner's handoff is a Dispatch record of tree 1's `plan` handoff written by the planner's claim session (`assert_handoff_record`, which every later round's implementer, tester and reviewer handoff passes too); the negative control is the same `gh` with `GH_CONFIG_DIR=/nonexistent`, which fails naming `GH_TOKEN`; a seventh holder of a gh directory, the controller, both operator-launched and daemon-launched, is proven in the `controller` and `daemon-controller-liveness` rows below |
 | `github-credential-refresh` | the hour boundary, on the architect (its pod the longest-lived, read first at issue-independence): the daemon's lease chain for the sandbox and role (its `written` line, then every `sandbox runtime: github credential refreshed`) is judged pair by pair — each refresh made with the review App, at least fifteen minutes before the expiry of the lease it replaced, for a lease expiring later — however many cycles have elapsed by the time the checkpoint runs; a refresh after the read at issue-independence is awaited, in the same pod by uid, and the architect's `hosts.yml` then changed in place within the kubelet's sync (the propagation delay is noted); its plain `gh` authenticates as the review App's bot on the new file; once the lease the read belonged to has expired, the token read then answers `401` while the refreshed one answers the review App's bot (both presented raw to the real gh, mise's, past the devbox's gh wrapper, which refuses an inherited `GH_TOKEN`; every other gh call of the proof is the proof human's); the tokens live in the proof's shell alone |
 | `idle-resident` | every finished worker of tree 1 (planner, implementer, tester, reviewer) still runs in the pod it first registered with, that pod Running; the root's one Sandbox is Running and its pod's own disk Bound; child 2, parked in backlog, has no Sandbox and no disk, and so no pod; and child 1, done, has neither a Sandbox nor a disk — each disk read by its pod's name, since an issue's disk is its pod's own ephemeral volume and carries no label |
 | `kill-role-resume` | once the merger runs, the driver ends only its generation (`end_claim_process kill`, as `finished-idle-planner-death` does; the launcher, every role's PID 1, is never killed), and the daemon resumes the merger's session at a new process generation in the same pod; the `roles` container's id and restart count stay as they were, and so does every other live claim of the pod (its token, generation and incarnation, from `legion claims`) |
@@ -2232,6 +2239,116 @@ each seed is printed as one. The configuration, the store and its migrations, th
 real ones. `NO_REQUIRED_CHECKS_EVIDENCE_DIR` (default a fresh directory under `TMPDIR`, kept and
 printed) keeps the transcript, the `nats-server`'s log and the daemon's own, which the driver
 writes through `LEGION_E2E_DAEMON_LOG`.
+
+## handoff-records.sh
+
+```sh
+LEGION_TEST_PG_DSN=postgres://<user>@<host>:<port>/<database>?sslmode=disable \
+  [LEGION_E2E_NATS_BIN=<nats-server>] bash scripts/e2e/handoff-records.sh     # → "handoff records e2e: PASS in <n>s", exit 0
+```
+
+INFRA-177's live proof that a phase's handoff is a record on its Dispatch issue (its A3, A6, A10
+and the daemon's half of A7, and `HANDOFF_NOT_NEW`), which INFRA-480 runs again on main (A11). It
+runs on any Linux host with `go`, `awk` and `bun` (after `bun install` at the checkout's root) — no
+Docker, no cluster, no GitHub, no deployed Dispatch. `LEGION_TEST_PG_DSN` is required and names the
+PostgreSQL the daemon migrates and runs on; the driver also creates Dispatch's own database on the
+same server and drops it on exit, so the DSN's role must be allowed to create and drop databases,
+and the server must offer the `pgvector` extension Dispatch's migrations create. The script starts
+no database. The broker is the run's own, as for [`merged-root-waits.sh`](#merged-root-waitssh). A
+run takes two to four minutes, most of it building Dispatch and the driver. The four checks are
+[`lib/live-daemon-proof.sh`](#liblive-daemon-proofsh)'s; before them the script refuses a host with
+no `bun` or no `node_modules`, and exports `LEGION_E2E_REPO_ROOT`, the checkout the driver builds
+Dispatch from and runs the CLI out of.
+
+| check | what it holds |
+| :--- | :--- |
+| `prerequisites` | `LEGION_TEST_PG_DSN` is set (the DSN itself is not printed), `go` and `awk` are on PATH, and a `nats-server` is named or installed |
+| `broker` | that `nats-server`, with JetStream, listening on 127.0.0.1 and ready |
+| `driver` | a test binary of `TestHandoffRecordsLive` (`internal/daemon/handoff_records_live_test.go`, `-tags e2e`) |
+| `proof` | the steps below, each printing what it drove and what it read back between its own `== <name>` and `ok <name>` |
+
+Nothing of the record path is stood in for. The driver builds `packages/envoy`'s `cmd/dispatch` and
+runs it as `packages/dispatch/e2e/run-server.sh` does: `DISPATCH_AGENT_TOKEN` (a token of the
+run's own, which the daemon's `dispatch_token_file` and the CLI's `DISPATCH_TOKEN` carry), NATS off
+(`DISPATCH_NATS_DISABLED=1`), the trusted identity header the setup writes through, no
+`DISPATCH_*`, `ENVOY_*` or `NATS_*` variable of the caller's shell, and a database
+`dispatch_handoff_records_<random>` of its own. On it the driver creates a project of the run's
+own (`HR<6 hex>`, since a Dispatch project key is at most ten characters and the daemon's project
+is its Dispatch project), maps `acme/widgets` to it as its default, and creates five issues. It
+boots the whole daemon through `run`, the function `legion start` calls, with `dispatch_url` at
+that server, so its every Dispatch read and write — the repository mapping, the issue list, status
+writes and messages, and the read of the record a completion names — goes to the real routes. Four
+of the issues are seeded in the daemon's store, each the root of its own tree with its slot: two
+in `planning`, one in `testing` and one `implementing` on open pull requests, each phase's worker
+a launch a previous daemon began, which the boot relaunches serving run 1. Each worker is brought to
+ready over the daemon's worker stream as its pane's shim brings it (answering the daemon's
+negotiation, state probes and prompts, each prompt starting a turn the step ends after its
+completion), registered under a session the step names, and completes with a grant minted for it
+over `POST /legion/v1/handoff/complete`. Every handoff is written and read with the real `dispatch`
+CLI (`bun packages/envoy-client/bin/dispatch.ts`) as that session (`DISPATCH_HOST=omp`,
+`DISPATCH_SESSION_ID`, `DISPATCH_URL`, `DISPATCH_TOKEN`), with a home, configuration file (absent)
+and session state of the run's own.
+
+| step | driven by | read back as |
+| :--- | :--- | :--- |
+| `a6-a-40kb-handoff-reads-back-byte-identical-two-writes-are-versions-1-and-2` | two `handoff-write`s of 41 KB bodies (JSON objects with a proof list, non-ASCII text and literal escapes a re-encoding would change, ending in a newline) on the fifth issue, which no daemon holds | versions 1 and 2; `handoff-read` (the newest) and `handoff-read --version 1` print one metadata line, then each body byte for byte (sha256 printed) |
+| `a6-control-a-body-one-byte-over-the-cap-is-refused` | `handoff-write` of a 262145-byte body, then the same body posted raw with the agent's bearer | the CLI exits non-zero having called nothing, naming 1 byte over the 262144-byte limit; Dispatch answers 413 `CAP_EXCEEDED`; the issue still lists versions 2 and 1 |
+| `a3-a-record-another-session-wrote-is-refused-at-completion` | a `plan` record written under another session; the planner's completion naming it | 403 `HANDOFF_SESSION_MISMATCH` naming both sessions; for three seconds the issue stays in `planning` |
+| `a3-control-the-planners-own-record-moves-the-issue-to-implementing` | the planner's own `handoff-write` and the same completion naming that record | 200 and the issue in `implementing` |
+| `a7-the-imports-record-is-refused-the-tester-writes-it-again-and-the-reviewer-is-told-it` | `legion handoffs import` itself (`handoffimport.Run`) against the running daemon's state, the real Dispatch and a GitHub stand-in whose `legion/<testing issue>` carries `.legion/<KEY>/{plan,implement,test}.json`; the tester's completion naming the imported `test` record; the tester's `handoff-read` and `handoff-write` of the body it read; its completion naming that record with verdict `pass` | the import prints `imported v1` for each file, `removed .legion/ at <sha>` for that branch and `no branch` for the rest, and wrote to the stand-in one tree on the head's tree deleting the three paths (sha null), one commit of it on the head with no trailer, and a non-forced ref update; the record is the file byte for byte under `legion-daemon:<PROJECT>`; the completion is refused 403 `HANDOFF_SESSION_MISMATCH` naming that session and the tester's, the issue still in `testing`; the rewrite is version 2 under the tester's session with the same body; the pass moves the issue to `reviewing`, and the reviewer the daemon starts is prompted with a task naming `Handoff: test version 2 (dispatch handoff-read --issue <KEY> --phase test)`, which its own `handoff-read` reads as the tester's |
+| `handoff-not-new-the-implementers-round-1-record-is-refused-in-round-2` | the implementer's round-1 record and completion; the tester the daemon starts, prompted with its task, failing the round with its own record; the implementer's round-2 completion naming its round-1 record; then a new record and its completion | `testing`, then `implementing` again with the implementer prompted its round-2 task; 409 `HANDOFF_NOT_NEW` naming the round-1 record with the issue still `implementing`; the control 200 and `testing` |
+| `a10-control-with-dispatch-up-the-first-write-succeeds` | the planner's first `handoff-write` with Dispatch up | version 1 |
+| `a10-with-dispatch-stopped-the-write-fails-and-the-completion-is-refused` | the Dispatch process stopped (SIGINT); the planner's `handoff-write`; its completion naming the version 1 that exists | the CLI exits non-zero naming the failed connection (`Unable to connect`); 502 `DISPATCH_READ_FAILED` naming the refused dial; the issue still `planning` |
+| `a10-dispatch-restarted-the-retried-write-and-the-completion-land` | Dispatch started again on the same database and port; the same `handoff-write`; its completion | version 2; 200 and `implementing`; `GET /api/v1/issues/<KEY>/handoffs`, the list Conversation reads, holds version 2 by the planner's session newest, then version 1 |
+
+What the proof stands in for lies outside the records: the broker is a native `nats-server`;
+GitHub is two REST stand-ins, the daemon's (each repository with default branch `main`, nothing
+else) and the import's (one branch carrying `.legion/`, read and removed through the contents and
+Git Data APIs; P7, `handoff-cutover-github.sh`, makes that removal on GitHub itself); the Apps'
+tokens are placeholders; Envoy's listener is the package's `noticeListener`; and no agent runs:
+each claim is launched by the package's fake runtime, which provisions its own workspace. The
+issues, pull requests, slots and the claims the boot relaunches are seeded through the store, as
+every daemon test seeds its fixture. `HANDOFF_RECORDS_EVIDENCE_DIR` (default a fresh directory
+under `TMPDIR`, kept and printed) keeps the transcript, the `nats-server`'s log, the daemon's own,
+Dispatch's (`dispatch.log`) and the driver's output.
+
+## handoff-cutover-github.sh
+
+```sh
+bash scripts/e2e/handoff-cutover-github.sh     # → "handoff cutover github e2e: PASS in <n>s", exit 0, in about 12 minutes
+```
+
+INFRA-177's proof, on GitHub itself, of what moving the handoffs out of git does to a branch's
+required checks (its A8 and A9's GitHub half, and the plan's D13), on `sjawhar/legion-smoke`,
+whose `main` requires the check `gate` (the `gate` job of `.github/workflows/fail-on-demand.yml`,
+run on every push and pull request; the `prerequisites` check reads the requirement from `GET
+/repos/<repo>/rules/branches/main`). It needs `gh` acting as an App installed on the smoke
+repository with contents and pull-request write — the implement App, as an issue pod's `gh` acts
+for owner `sjawhar` through `GH_CONFIG_DIR` — and `jq`; no clone, no Legion binary. Every write is
+a `gh api` call, so no token is printed or leaves `gh`. GitHub fills a repository's `permissions`
+for a user's token only: for an App installation token every one reads `false`, so when `push`
+does, `prerequisites` holds instead that the installation lists the repository, and the first
+branch write is the push itself, whose refusal ends the run with GitHub's words.
+
+| check | what it holds |
+| :--- | :--- |
+| `prerequisites` | `gh` acts as an App (`[bot]`) that may push to the repository, and `main` requires `gate` |
+| `negative-control` | a branch pushed at a code commit gets a `gate` check run; a `.legion/`-only commit above it, whose message ends with two empty lines and `skip-checks: true` (the handoff push of the release before INFRA-177), pushed by a non-forced ref update, and a pull request opened on it get no `gate` check run in any status and no workflow run for the whole wait (600 s) |
+| `import-removal` | the removal `legion handoffs import` makes, by the same Git Data API calls (`branch.head`, `branch.removalSet`, `branch.removalCommit` and `branch.move` in `packages/daemon/internal/handoffimport/handoffimport.go`): the branch's ref, its head's root tree, `.legion/`'s recursive tree, a tree on the root tree deleting each path under `.legion/` (sha null), a commit of it on the head with the import's message and no trailer, and PATCH of the ref with `force: false`; the new head carries no `.legion/`, is the pull request's head, and gets a `gate` check run |
+| `empty-root-pull-request` | D13: a branch whose only commit above `main` is empty (`main`'s tree) and carries no trailer, as a root whose code all lands through its children pushes; GitHub opens a pull request on it (1 commit, 0 changed files) and its head gets a `gate` check run. A refusal to open it fails the run naming GitHub's answer and says to report it to the architect rather than work around it |
+
+What each check holds is whether GitHub started the required check on a head: a `gate` check run
+on it, in any status. A push GitHub skips gets no workflow run and no check run at all, while one it
+runs checks for is queued the moment it is pushed; on the smoke account's Actions queue a result
+then took 20 to 40 minutes on 2026-10-27, so the run does not wait for the conclusion, and prints
+each check run's status as it saw it. Each head is polled every 15 s for at most
+`HANDOFF_CUTOVER_WAIT` seconds (default 600). The run's branches are
+`handoff-cutover/<run>/negative` and `handoff-cutover/<run>/root`, and its pull requests are titled
+with the run id; on any exit the workflow runs on its branches that have not finished are
+cancelled, so they hold no runner of the queue other proofs share, both pull requests are closed
+and both branches deleted, each failure to do so named. `HANDOFF_CUTOVER_EVIDENCE_DIR` (default a
+fresh directory under `TMPDIR`, kept and printed) keeps the transcript, the ruleset read and each
+head's `gate` check runs as GitHub answered them.
 
 ## lib/free-port.sh
 
@@ -2988,8 +3105,7 @@ Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECON
 the phase's worker runs a whole loop and the caller passes its own bound: a correction round, the
 retro, and planning, whose planner runs its gap analyst and up to three plan-review rounds before
 its handoff (Stage 4b's `plan_seconds`, 2700 s). `round_correction_pushed ROUND` accepts the round's
-line only as an addition in `smoke_file`'s patch, never in a notes file or in a `.legion/` handoff
-that quotes it.
+line only as an addition in `smoke_file`'s patch, never in a notes file that quotes it.
 
 `request_changes_as_reviewer ISSUE ROUND BODY [NOTE]` is a scripted changes-requested round: it
 tells the reviewer pane its decision and the review's text, quoted, which the reviewer ends with
@@ -3002,20 +3118,26 @@ round waits for `reviewer_requested_changes_from ROUND SESSION`: the review App'
 changes-requested review whose last footer names the session the daemon's state gives the reviewer,
 read as the daemon reads it. `lib/reviewer-footer.test.ts` drives both against a fake `gh`.
 
-The handoff checks read the daemon's phase record (the `phases` table joined to `issues`), not the
-ids of the facts it processed, so they hold whatever format a handoff event id takes. A role's
-`handoff_commit` is the commit its `handoff_complete` reported at its last completion the daemon
-accepted (for a file-backed phase the pushed commit carrying the handoff, which the `legion` tool
-finds in the pane and refuses unpushed, so a push before the completion is the role's rule; for
-retro and READY the commit the workspace stands on), and the daemon empties it
-when a transition starts that role on a new phase (`clearHandoff`,
-`packages/daemon/internal/workflow/effects.go`); the implementer's `rounds` counts its returns
-to implementing. Read right after the transition a completion caused, a role's non-empty
-`handoff_commit` is that phase's own: `assert_round_handoff ISSUE ROUND` (testing reached on the
-implementer's completion of that round; implementing moves to testing only once that handoff is
-recorded), `assert_handoff_committer ISSUE ROLE PHASE ROUND` (that commit is authored and committed
-by the role's own App, read with `workspace_jj`), and `retro_reported` (the implementer's handoff while
-the issue is merging or awaiting merge).
+The handoff checks read the daemon's phase record (the `phases` table joined to `issues`, and the
+same row as `legion state --json` shows it under `.workers[ROLE]`), not the ids of the facts it
+processed, so they hold whatever format a handoff event id takes. A role's completion of a
+file-backed phase (planning, implementing, testing, reviewing) names the Dispatch handoff record
+it wrote with `dispatch handoff-write` (`handoffRecord`: its id and version); the implementer's and
+the merger's also report a commit (`handoff_commit`: the implementer's pushed tip, which the
+`legion` tool refuses unpushed, and for retro and READY the commit the workspace stands on). The
+daemon empties both when a transition starts that role on a new phase (`clearHandoff`,
+`packages/daemon/internal/workflow/effects.go`); the implementer's `rounds` counts its returns to
+implementing. Read right after the transition a completion caused, a role's handoff is that
+phase's own: `assert_round_handoff ISSUE ROUND` (testing reached on the implementer's completion of
+that round; implementing moves to testing only on it), `assert_handoff_record ISSUE ROLE PHASE
+ROUND` (Dispatch's `GET /api/v1/handoffs/<id>` holds the record as the issue's handoff of the role's
+word — `plan`, `implement`, `test`, `review` — at the version named, written by the session the
+role's claim registered; for the implementer, its commit is authored and committed by its own App,
+read with `workspace_jj`), `assert_review_of_head ISSUE ROUND STATE` (the reviewer's newest review
+of that state names the pull request's head the daemon records: the reviewer pushes nothing),
+`pull_request_legion_only_commits` (each commit of the proof's pull request that changes only
+`.legion/`, of which a run makes none) and `retro_reported` (the implementer's completion while the
+issue is merging or awaiting merge).
 
 The production check after the close is no phase: a look's report is a `handoff_complete` with a
 verdict and no commit, moves no phase and writes no handoff, so it is read from `legion state
@@ -3155,9 +3277,9 @@ trap. `LEGION_E2E_KIND` names the kind binary when it is not on `PATH`.
 
 ## lib/live-daemon-proof.sh
 
-The run a whole-daemon live proof makes around its driver. `merged-root-waits.sh` and
-`no-required-checks.sh` differ only in what their driver proves, so each sets its own values and
-makes this run.
+The run a whole-daemon live proof makes around its driver. `merged-root-waits.sh`,
+`no-required-checks.sh` and `handoff-records.sh` differ only in what their driver proves, so each
+sets its own values and makes this run.
 
 ```sh
 . "$root/scripts/e2e/lib/live-daemon-proof.sh"     # sourced, never run
@@ -3174,18 +3296,19 @@ prints `LABEL e2e: PASS in <n>s (evidence: <dir>)`, or
 
 | argument | is |
 | :--- | :--- |
-| `LABEL` | the run's name in its last line: `merged root waits`, `no required checks` |
+| `LABEL` | the run's name in its last line: `merged root waits`, `no required checks`, `handoff records` |
 | `SLUG` | the name of the run's own files under `TMPDIR` (or `/tmp` when it is unset): the work directory `legion-e2e-SLUG.<pid>.*`, which holds the broker's store and the driver binary `SLUG.test`, and the evidence directory `legion-e2e-SLUG-evidence.*` when `EVIDENCE` is empty |
 | `TEST` | the one test the driver runs (`-test.run '^TEST$'`); `proof` fails unless the driver reports `--- PASS: TEST`, so a driver that skipped, or a pattern that matched nothing, is no pass |
-| `EVIDENCE` | the evidence directory the script's own variable names (`MERGED_ROOT_WAITS_EVIDENCE_DIR`, `NO_REQUIRED_CHECKS_EVIDENCE_DIR`), or empty for a fresh one; kept and printed, it holds `transcript.log`, the broker's `nats.log`, the daemon's own `daemon.log`, which the driver writes through `LEGION_E2E_DAEMON_LOG`, and the driver's `proof.log` |
+| `EVIDENCE` | the evidence directory the script's own variable names (`MERGED_ROOT_WAITS_EVIDENCE_DIR`, `NO_REQUIRED_CHECKS_EVIDENCE_DIR`, `HANDOFF_RECORDS_EVIDENCE_DIR`), or empty for a fresh one; kept and printed, it holds `transcript.log`, the broker's `nats.log`, the daemon's own `daemon.log`, which the driver writes through `LEGION_E2E_DAEMON_LOG`, and the driver's `proof.log` |
 
-The two drivers share their Go harness the same way: `internal/daemon/live_proof_test.go`
+The drivers share their Go harness the same way: `internal/daemon/live_proof_test.go`
 (`-tags e2e`) holds the broker and log variables (`LEGION_E2E_NATS_URL`, `LEGION_E2E_DAEMON_LOG`);
 the configuration the daemon boots with (`newLiveProof` reads `LEGION_E2E_NATS_URL`, skips when it
 is unset, and builds the workflow configuration around it); the stream the daemon's intake
-consumes; the Dispatch board stand-in (`liveDispatch`); the store; the seeding of a tree into the
-next free admission slots (`admit`); and the envelope, `processed_events` and notice reads and
-writes a step makes, the notices read by the issue whose architect they tell (`architectNotices`).
+consumes; the Dispatch board stand-in (`liveDispatch`), which `handoff-records.sh`'s driver replaces
+with the real Dispatch server; the store; the seeding of a tree into the next free admission slots
+(`admit`); and the envelope, `processed_events` and notice reads and writes a step makes, the
+notices read by the issue whose architect they tell (`architectNotices`).
 
 ## lib/secret-leaks.ts
 

@@ -489,8 +489,9 @@ func (r *mergedRootWaitsLive) childCompletesItsPhase() {
 	t := r.t
 	implementer := r.claimant(claim.RoleImplementer, r.child, "ses_implementer")
 	r.note("the child's implementer is registered and ready on the launch the restart made, serving run 1")
+	record := r.board.handoff(r.child, "implement", "ses_implementer")
 	status, body := r.d.request(http.MethodPost, "/legion/v1/handoff/complete",
-		api.HandoffCompleteRequest{GrantID: implementer.grant(), Summary: "implemented the child", Commit: "head-child"}, false)
+		api.HandoffCompleteRequest{GrantID: implementer.grant(), Summary: "implemented the child", Commit: "head-child", HandoffID: record, HandoffVersion: 1}, false)
 	if status != http.StatusOK {
 		t.Fatalf("the child's implementer completion = %d %s, want 200", status, body)
 	}

@@ -213,6 +213,9 @@ interface RunResult {
   branches: string[];
   pr: (n: number) => PullRequest["state"] | undefined;
 }
+// What a merged proof pull request leaves on the smoke main: its retro learning, and a `.legion/`
+// handoff only a merge from before handoffs moved to the Dispatch issue carries, which the cleanup
+// still removes (smoke_main_leftovers).
 const leftovers = [".legion/LEGION-1/plan.json", "docs/solutions/testing/smoke.md"];
 
 let runs = 0;

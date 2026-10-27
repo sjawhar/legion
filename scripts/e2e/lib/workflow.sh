@@ -377,9 +377,26 @@ require_proof_human() {
   note "the proof human: the devbox gh acts as $login for $repo"
 }
 
-# pull_request_product_files prints each file the pull request changes outside .legion/.
+# pull_request_product_files prints each file the pull request changes. A handoff is a record on
+# the Dispatch issue, so no file the pull request changes is a handoff: one under .legion/ is listed
+# with the rest, and a check that counts the product files counts it too.
 pull_request_product_files() {
-  gh api --paginate "repos/$repo/pulls/$pr_number/files" --jq '.[] | select(.filename | startswith(".legion/") | not) | .filename'
+  gh api --paginate "repos/$repo/pulls/$pr_number/files" --jq '.[].filename'
+}
+# pull_request_legion_only_commits prints each commit of the proof's pull request whose every
+# changed file is under .legion/: a handoff-only push, which no phase makes now that a handoff is a
+# record on the Dispatch issue. An empty commit changes no file and is not one. Each commit's files
+# are read whole before they are judged (no grep -q downstream of a live gh: under pipefail its
+# early close would read as gh's failure).
+pull_request_legion_only_commits() {
+  local commits sha files
+  commits=$(gh api --paginate "repos/$repo/pulls/$pr_number/commits" --jq '.[].sha') || return 1
+  for sha in $commits; do
+    files=$(timeout 60 gh api "repos/$repo/commits/$sha" --jq '.files[].filename') || return 1
+    if [ -n "$files" ] && ! grep -qv '^\.legion/' <<<"$files"; then
+      printf '%s\n' "$sha"
+    fi
+  done
 }
 # request_changes_as_reviewer ISSUE ROUND BODY [NOTE] has the reviewer pane post a round's
 # changes-requested review and complete its phase. A review ends when its reviewer completes it —
@@ -427,8 +444,7 @@ reviewer_requested_changes_from() {
 # within the spec, whose architect was told a review may ask for one more line in the smoke file.
 round_line() { printf 'Legion proof review round %s (%s)' "$1" "$project"; }
 # round_correction_pushed ROUND: that round's line is added to the smoke file, the one the round's
-# review names; the line in any other file (a notes file, or a .legion/ handoff that quotes it) is
-# not the correction.
+# review names; the line in any other file (a notes file that quotes it) is not the correction.
 # Each gh read below is captured before it is matched: piped, grep's first match would close the
 # pipe while gh still writes, and under the caller's pipefail the SIGPIPE (141) would read as absent.
 round_correction_pushed() {
@@ -461,12 +477,13 @@ reviewer_commented() {
   commented=$(review_app_reviews '.state == "COMMENTED" and .body != ""' id) || return 1
   [ -n "$commented" ]
 }
-# reviewer_completed ISSUE: the daemon recorded the reviewer's completion of the issue's open round.
-reviewer_completed() { daemon_state | jq -e --arg issue "$1" '(.issues[$issue].workers.reviewer.handoffCommit // "") != ""' >/dev/null; }
+# reviewer_completed ISSUE: the daemon recorded the reviewer's completion of the issue's open round,
+# which names the reviewer's Dispatch handoff record (the reviewer pushes nothing).
+reviewer_completed() { daemon_state | jq -e --arg issue "$1" '(.issues[$issue].workers.reviewer.handoffRecord.id // "") != ""' >/dev/null; }
 # approve_as_reviewer asks the reviewer for the round's last review and waits for it to approve the
-# head on its own: the Go reviewer prompt says to approve a clean head that carries .legion/<issue>/,
-# which retro's last commit then removes. The merge carries the run's retro learnings onto the
-# smoke main, and clean_smoke_main removes them.
+# head on its own: the reviewer approves the code head and pushes nothing above it, its handoff
+# being a record on the Dispatch issue. The merge carries the run's retro learnings onto the smoke
+# main, and clean_smoke_main removes them.
 approve_as_reviewer() {
   local issue=$1 app
   app=$(role_app reviewer) || return 1
@@ -518,8 +535,9 @@ release_smoke_main() {
   exec {smoke_main_fd}>&-
   note "released $repo main ($smoke_main_lock)"
 }
-# smoke_main_leftovers prints each path on the smoke repository's main under .legion/ or
-# docs/solutions/: the handoffs and retro learnings a merged proof pull request carries there.
+# smoke_main_leftovers prints each path on the smoke repository's main under docs/solutions/, the
+# retro learnings a merged proof pull request carries there, or under .legion/, which only a merge
+# from before handoffs moved to Dispatch can have left.
 smoke_main_leftovers() {
   gh api "repos/$repo/git/trees/main?recursive=1" \
     --jq '.tree[] | select(.type == "blob") | .path | select(startswith(".legion/") or startswith("docs/solutions/"))'
@@ -854,20 +872,22 @@ close_unpassed_run_pull_requests() {
 
 # ---- the handoffs the daemon accepted -------------------------------------------------------------
 
-# The record keeps each role's phase row: the commit the role's `handoff_complete` reported at the
-# completion the daemon accepted (for a file-backed phase the pushed commit carrying the handoff,
-# which the `legion` tool finds in the pane and refuses unpushed, so a push before the completion
-# is the role's rule; for retro and READY the commit the workspace stands on), emptied when the
-# role's next phase starts, and, on the implementer's row, the review round (its returns to
-# implementing). The issue moves out of implementing, retro, and merging only on that phase's
-# completion, so a checker reads the row right after the transition it follows, before the role's
-# next phase can empty it. A production check's look is no phase: its report moves no phase and
-# writes no handoff (a verdict and a summary, no commit), so it is read from the daemon's state's
-# `check`, below, never from this record.
+# The record keeps each role's phase row: what the role's `handoff_complete` reported at the
+# completion the daemon accepted — for a file-backed phase (planning, implementing, testing,
+# reviewing) the Dispatch handoff record the role wrote with `dispatch handoff-write` under its own
+# session, its id and version, which the daemon read back from Dispatch and held to the claim's
+# session; for the implementer's implementing round also its pushed tip, which the `legion` tool
+# refuses unpushed; for retro and READY the commit the workspace stands on — emptied when the role's
+# next phase starts, and, on the implementer's row, the review round (its returns to implementing).
+# The issue moves out of each phase only on that phase's completion, so a checker reads the row right
+# after the transition it follows, before the role's next phase can empty it. A production check's
+# look is no phase: its report moves no phase and writes no handoff (a verdict and a summary, no
+# commit, no record), so it is read from the daemon's state's `check`, below, never from this record.
 
-# role_handoff ISSUE ROLE [PHASE...] prints the pushed commit carrying the handoff that ROLE's
-# `handoff_complete` reported at the completion the daemon accepted, when the issue stands in one
-# of the PHASEs (any phase when none is named).
+# role_handoff ISSUE ROLE [PHASE...] prints the commit ROLE's `handoff_complete` reported at the
+# completion the daemon accepted (the implementer's and the merger's; the planner, the tester and
+# the reviewer report none), when the issue stands in one of the PHASEs (any phase when none is
+# named).
 role_handoff() {
   local issue=$1 role=$2 phases='' p
   shift 2
@@ -879,28 +899,53 @@ role_handoff() {
 review_round() {
   db_value "select coalesce((select rounds from phases where issue = '$1' and role = 'implementer'), 0)"
 }
-# handoff_fact_commit ISSUE ROLE PHASE ROUND prints the pushed commit carrying the handoff that the
-# role's `handoff_complete` reported for its completion of that phase round. The check runs right
-# after the round's transition, before the role's next completion can move it.
-handoff_fact_commit() {
-  [ "$(review_round "$1")" = "$4" ] || return 0
-  role_handoff "$1" "$2"
+# handoff_word ROLE prints the word of the Dispatch handoff record ROLE's file-backed phase ends
+# with (the daemon's phase.HandoffFile): plan, implement, test or review.
+handoff_word() {
+  case "$1" in
+    planner) printf plan ;;
+    implementer) printf implement ;;
+    tester) printf test ;;
+    reviewer) printf review ;;
+    *) return 1 ;;
+  esac
 }
-# assert_handoff_committer ISSUE ROLE PHASE ROUND: the pushed commit carrying the handoff that the
-# role's `handoff_complete` reported is authored and committed by the role's own App, read from the
-# issue's workspace (the role pushed it from there, so its clone holds the commit), so no other
-# pane sealed another role's handoff.
-assert_handoff_committer() {
-  local commit identity want
-  commit=$(handoff_fact_commit "$1" "$2" "$3" "$4")
-  [ -n "$commit" ] || fail "$1 has no $2 $3 round $4 handoff fact"
-  # Only stdout is the identity: jj reports on stderr when it imports the workspace's git refs,
-  # which an agent's own git push leaves it to do.
-  identity=$(workspace_jj "$1" log -r "$commit" --no-graph -T 'author.name() ++ "|" ++ committer.name()' 2>"$work/handoff-committer.err") ||
-    fail "read $1's $2 $3 round $4 handoff commit $commit: $(cat "$work/handoff-committer.err")"
-  want="$(role_app "$2")|$(role_app "$2")"
-  [ "$identity" = "$want" ] || fail "$1's $2 $3 round $4 handoff commit $commit is authored|committed by $identity, want $want"
-  note "$2 $3 round $4 handoff $commit authored and committed by $identity"
+# role_handoff_record ISSUE ROLE prints `<id> <version>` of the Dispatch handoff record ROLE's
+# completion of its current file-backed phase named, as the daemon's state shows it
+# (.workers[ROLE].handoffRecord), and nothing before that completion.
+role_handoff_record() {
+  daemon_state | jq -r --arg issue "$1" --arg role "$2" '.issues[$issue].workers[$role].handoffRecord // empty | "\(.id) \(.version)"'
+}
+# assert_handoff_record ISSUE ROLE PHASE ROUND: ROLE's completion of that phase round named a
+# Dispatch handoff record, and Dispatch holds that record (GET /api/v1/handoffs/<id>) as ISSUE's
+# handoff of the phase's word at the version the completion reported, written by the session ROLE's
+# claim registered — no other pane wrote another role's handoff, and none was committed. The
+# implementer's completion also reports its pushed tip, which is authored and committed by its own
+# App, read from the issue's workspace (the implementer pushed it from there).
+assert_handoff_record() {
+  local issue=$1 role=$2 phase=$3 round=$4 word handoff id version session record commit identity want
+  [ "$(review_round "$issue")" = "$round" ] || fail "$issue is at review round $(review_round "$issue"), not $round, at its $role $phase handoff"
+  word=$(handoff_word "$role") || fail "the $role's $phase ends with no handoff record"
+  handoff=$(role_handoff_record "$issue" "$role")
+  [ -n "$handoff" ] || fail "$issue has no $role $phase round $round handoff record in the daemon's state"
+  read -r id version <<<"$handoff"
+  session=$(issue_worker_session "$issue" "$role") && [ -n "$session" ] ||
+    fail "the daemon's state names no session for $issue's $role"
+  record=$(dispatch_get "handoffs/$id") || fail "Dispatch could not read $issue's $role $phase round $round handoff record $id: $record"
+  jq -e --arg issue "$issue" --arg word "$word" --argjson version "$version" --arg session "$session" \
+    '.issue_key == $issue and .phase == $word and .version == $version and .author.kind == "session" and .author.id == $session' <<<"$record" >/dev/null ||
+    fail "Dispatch holds $issue's $role $phase round $round handoff record $id as $(jq -c '{issue_key, phase, version, author}' <<<"$record"), want $issue's $word handoff version $version written by session $session, the $role's claim session"
+  if [ "$role" = implementer ]; then
+    commit=$(role_handoff "$issue" implementer)
+    [ -n "$commit" ] || fail "$issue's implementer $phase round $round completion reported no commit"
+    # Only stdout is the identity: jj reports on stderr when it imports the workspace's git refs,
+    # which an agent's own git push leaves it to do.
+    identity=$(workspace_jj "$issue" log -r "$commit" --no-graph -T 'author.name() ++ "|" ++ committer.name()' 2>"$work/handoff-committer.err") ||
+      fail "read $issue's implementer $phase round $round commit $commit: $(cat "$work/handoff-committer.err")"
+    want="$(role_app implementer)|$(role_app implementer)"
+    [ "$identity" = "$want" ] || fail "$issue's implementer $phase round $round commit $commit is authored|committed by $identity, want $want"
+  fi
+  note "$role $phase round $round handoff: Dispatch record $id, $word version $version, written by the $role's session $session${commit:+; pushed tip $commit authored and committed by $identity}"
 }
 # post_bot_thread opens one file-level review thread on the proof's pull request as the proof human,
 # a GitHub App and so a bot account, as a CI bot is, and none of Legion's role Apps; it prints the
@@ -1012,26 +1057,27 @@ thread_resolved_with_reply() {
 threads_all_resolved() {
   jq -e --arg id "$2" 'all(.[]; .isResolved) and any(.[]; .id == $id)' "$1" >/dev/null
 }
-# assert_review_of_own_handoff ISSUE ROUND STATE: the reviewer's newest STATE review
-# (CHANGES_REQUESTED or APPROVED) on the proof's pull request names the commit carrying its round
-# ROUND handoff, the head its own handoff push made. The Go reviewer prompt orders the round so: an
-# approval of a head the handoff push then replaces is of a head the pull request no longer has.
-assert_review_of_own_handoff() {
-  local handoff reviewed app
+# assert_review_of_head ISSUE ROUND STATE: the reviewer's newest STATE review (CHANGES_REQUESTED or
+# APPROVED) on the proof's pull request names the head the daemon records for the pull request at
+# the round's end: the reviewer pushes nothing (its handoff is a record on the Dispatch issue), so
+# the head it reviewed is the head its decision ends the round on. The check runs right after the
+# round's transition, before the implementer's next push can move the head.
+assert_review_of_head() {
+  local head reviewed app
   app=$(role_app reviewer) || return 1
-  handoff=$(handoff_fact_commit "$1" reviewer reviewing "$2")
-  [ -n "$handoff" ] || fail "$1 has no reviewer reviewing round $2 handoff fact"
+  head=$(daemon_state | jq -r --arg issue "$1" '.issues[$issue].pullRequest.head // empty')
+  [ -n "$head" ] || fail "the daemon's state records no pull request head for $1 at its review round $2"
   reviewed=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
     --jq ".[] | select(.user.login == \"$app\" and .state == \"$3\") | .commit_id" | tail -1) ||
     fail "read the reviews on pull request #$pr_number"
-  [ "$reviewed" = "$handoff" ] || fail "the reviewer's round $2 $3 review names $reviewed, not $handoff, the head its handoff push made"
-  note "the reviewer's round $2 $3 review names $handoff, the head its own handoff push made"
+  [ "$reviewed" = "$head" ] || fail "the reviewer's round $2 $3 review names $reviewed, not $head, the pull request's head the daemon records"
+  note "the reviewer's round $2 $3 review names $head, the pull request's head, with nothing pushed above it"
 }
 # retro_reported ISSUE: the daemon applied the implementer's retro completion, the one way out of
 # retro.
 retro_reported() { [ -n "$(role_handoff "$1" implementer merging awaiting_merge)" ]; }
 # assert_round_handoff ISSUE ROUND: the issue reached testing on the implementer's own completion
-# of that implementing round, never on a push alone carrying an earlier round's handoff.
+# of that implementing round (its pushed tip reported beside its record), never on a push alone.
 assert_round_handoff() {
   if [ "$(review_round "$1")" != "$2" ] || [ -z "$(role_handoff "$1" implementer testing reviewing)" ]; then
     fail "$1 reached testing without the implementer's implementing round $2 handoff"

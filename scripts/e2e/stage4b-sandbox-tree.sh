@@ -4236,7 +4236,7 @@ on_tree "$tree1" until_true 1500 "implementer pull request on legion/$tree1" sh 
   "timeout 60 gh -R '$repo' pr list --head 'legion/$tree1' --state open --json number | jq -e 'length == 1' >/dev/null"
 pr_number=$(gh -R "$repo" pr list --head "legion/$tree1" --state open --json number --jq '.[0].number')
 on_tree "$tree1" wait_for_phase "$tree1" testing 1200
-assert_handoff_committer "$tree1" implementer implementing 0
+assert_handoff_record "$tree1" implementer implementing 0
 smoke_file=$(pull_request_product_files)
 on_tree "$tree1" wait_for_worker "$tree1" tester
 record_resident "$tree1" tester || fail "tree 1's tester has no session and pod to keep: $(claim_view "$tree1" tester)"
@@ -4273,7 +4273,7 @@ POST /legion/v1/operator/claims/{token}/resume" ] ||
   fail "the daemon logged operator request lines for $held_architect with routes '$(tr '\n' ' ' <<<"$held_routes")', want one suspend and then one resume"
 note "the operator's resume relaunched $held_architect and the held notice arrived ($(notice_deliveries "$tree1" architect "$held_needle") phase-finished notices now); the daemon logged one api: operator request line for the suspend and one for the resume"
 # The adoption on top of a described commit: the tester's @ is a new empty change authored by the
-# reviewer App, and the implementer's handoff commit keeps its author.
+# reviewer App, and the implementer's pushed commit keeps its author.
 adoption=$(workspace_jj "$tree1" log -r '@|@-' --no-graph -T 'if(empty, "empty", "change") ++ "|" ++ author.name() ++ "\n"')
 note "after the tester's adoption: $(tr '\n' ' ' <<<"$adoption")"
 [ "$(sed -n 1p <<<"$adoption")" = "empty|$review_app" ] || fail "the tester's adoption left @ as '$(sed -n 1p <<<"$adoption")', want a new empty change authored by $review_app"
@@ -4291,11 +4291,11 @@ begin github-credential
 # copy under that role's directory and differ between the two roles). The agent's environment names
 # GH_CONFIG_DIR and no tool pin, no grant file (the `legion` tool mints its grants in-process; no
 # agent runs `legion` from bash), its PATH has no worker-bin shim, and a task subagent it launches
-# runs the same gh with the same credential. The pushes on legion/<issue> were made by the Apps
-# themselves with plain jj: GitHub's record of each head names the planner's handoff commit the
-# review App's and the implementer's head the implement App's; the planner's handoff-only push ends
-# its message with `skip-checks: true` and started no check run, while the implementer's code head
-# has its check runs (acceptance 4a).
+# runs the same gh with the same credential. The pushes on legion/<issue> were made by the
+# implement App itself with plain jj: GitHub's record of the pull request's head names the implement
+# App, and that head has its check runs (acceptance 4a). No phase pushes a commit to hand off: no
+# commit of the pull request changes only .legion/, and the planner's handoff, as every role's, is
+# a record on the Dispatch issue written under the planner's claim session (assert_handoff_record).
 gh_pod=$(claim_sandbox "$tree1" implementer) || fail "tree 1's implementer has no Sandbox locator"
 gh_bin=$(pod_exec "$gh_pod" implementer sh -c 'command -v gh') || fail "no gh in the implementer's namespaces of $gh_pod"
 [ "$gh_bin" = /opt/legion/bin/gh ] || fail "the implementer's gh is $gh_bin, want the image's wrapper /opt/legion/bin/gh"
@@ -4374,68 +4374,35 @@ legion_commands=$(bash_legion_commands "$tree1" implementer "$sub_label")
 undo_label="Stage 4b jj proof"
 send_agent "$tree1" implementer "$undo_label: run exactly jj undo --help in your bash tool, run nothing else, and reply with one line: JJ-UNDO= followed by the exact first line of its output. Wait after reporting."
 on_tree "$tree1" until_true 600 "the implementer to report jj undo --help's first line" session_contains "$tree1" implementer "JJ-UNDO=Undo the last operation"
-# The pushes: the planner's handoff by the review App, the implementer's head by the implement App.
-# GitHub's record of the commit (its committer, the account the pane's git identity maps to, which
-# is the App whose token the pane pushes with) is read for each head: the repository's events feed
-# is lossy (a push can be missing from it while later ones are listed), so it is no oracle.
+# The pushes: the implementer's head by the implement App. GitHub's record of the commit (its
+# committer, the account the pane's git identity maps to, which is the App whose token the pane
+# pushes with) is read for the head: the repository's events feed is lossy (a push can be missing
+# from it while later ones are listed), so it is no oracle.
 pr_head=$(gh -R "$repo" pr view "$pr_number" --json headRefOid --jq .headRefOid)
 [ -n "$pr_head" ] || fail "pull request #$pr_number has no head"
-# The planner's handoff is the newest such commit on tree 1's own chain, `::$pr_head` — the ancestors
-# of the pull request's head as GitHub reads it, pushed from this very clone — never a match over the
-# whole repository: the clone sees every branch it fetched, and a sibling tree's later planner
-# handoff is the newest `plan: record handoff` there (the seventh live run read LEGSMOKE-650's for
-# LEGSMOKE-649's). One line is asked of jj (`--limit 1`, newest first in jj's order), never cut from
-# more with `head`: under pipefail a consumer that stops reading sends the kubectl-backed producer
-# SIGPIPE, and the pipeline exits 141 whenever the log holds a second match.
-plan_head=$(workspace_jj "$tree1" log -r "description(glob:\"plan: record handoff*\") & ::$pr_head" --no-graph --limit 1 -T 'commit_id ++ "\n"')
-[ -n "$plan_head" ] || fail "no 'plan: record handoff' commit among the ancestors of pull request #$pr_number's head $pr_head in tree 1's workspace"
-for pair in "$plan_head:$(role_app planner):the planner's handoff commit" "$pr_head:$implement_app:the implementer's head"; do
-  IFS=: read -r sha want what <<<"$pair"
-  actor=$(timeout 60 gh api "repos/$repo/commits/$sha" --jq '.committer.login // "nobody"') || fail "GitHub could not read $what $sha on $repo"
-  printf '%s %s %s\n' "$sha" "$actor" "$what" >>"$evidence/github-credential-pushes.txt"
-  [ "$actor" = "$want" ] || fail "$what $sha on legion/$tree1 was committed by $actor, want $want"
-done
-# The planner's push touched only .legion/ (a handoff-only push): its head's message ends with two
-# empty lines and `skip-checks: true` as the last line — the one shape GitHub honours (its "Skipping
-# workflow runs": the trailer last, preceded by two empty lines; the rule's first live run wrote one
-# empty line and GitHub started both workflows) — with the pane's `Omp-Session:` trailer above it;
-# GitHub started no check run on it, and the daemon recorded that head as the planner's completion.
-# The implementer's code head (its newest commit on the pull request touching a path outside
-# .legion/) carries no such line and has its check runs, and the daemon recorded the branch head as
-# the implementer's completion (acceptance 4a).
-plan_message=$(timeout 60 gh api "repos/$repo/commits/$plan_head" --jq .commit.message) || fail "GitHub could not read the planner's handoff commit $plan_head"
-plan_tail=$(tail -3 <<<"$plan_message" | tr '\n' '|')
-[ "$plan_tail" = "||skip-checks: true|" ] ||
-  fail "the planner's handoff commit $plan_head does not end its message with two empty lines and 'skip-checks: true' (the shape GitHub honours); its last three lines are '$plan_tail': $(tr '\n' '|' <<<"$plan_message")"
-grep -q '^Omp-Session: ' <<<"$plan_message" || fail "the planner's handoff commit $plan_head carries no Omp-Session trailer above skip-checks: $(tr '\n' '|' <<<"$plan_message")"
-plan_checks=$(timeout 60 gh api "repos/$repo/commits/$plan_head/check-runs" --jq .total_count) || fail "GitHub could not list the check runs on $plan_head"
-[ "$plan_checks" = 0 ] || fail "GitHub started $plan_checks check run(s) on the planner's handoff-only push $plan_head"
-[ "$(role_handoff "$tree1" planner)" = "$plan_head" ] || fail "the daemon recorded the planner's completion at $(role_handoff "$tree1" planner), not the pushed head $plan_head"
+actor=$(timeout 60 gh api "repos/$repo/commits/$pr_head" --jq '.committer.login // "nobody"') || fail "GitHub could not read the implementer's head $pr_head on $repo"
+printf '%s %s %s\n' "$pr_head" "$actor" "the implementer's head" >>"$evidence/github-credential-pushes.txt"
+[ "$actor" = "$implement_app" ] || fail "the implementer's head $pr_head on legion/$tree1 was committed by $actor, want $implement_app"
+# No handoff-only push (A2): the pull request's commits, each one's files read whole before they are
+# judged (pull_request_legion_only_commits), hold none that changes only .legion/; the planner's
+# handoff is its Dispatch record, written under the planner's claim session; and the daemon recorded
+# the branch head as the implementer's completion.
+handoff_pushes=$(pull_request_legion_only_commits) || fail "could not read the commits of pull request #$pr_number"
+[ -z "$handoff_pushes" ] || fail "pull request #$pr_number carries commits that change only .legion/: $(tr '\n' ' ' <<<"$handoff_pushes")"
+assert_handoff_record "$tree1" planner planning 0
 [ "$(role_handoff "$tree1" implementer)" = "$pr_head" ] || fail "the daemon recorded the implementer's completion at $(role_handoff "$tree1" implementer), not the branch head $pr_head"
-# The pull request's commits newest first, then each one's files, read whole before they are
-# judged: a `grep -q` or a `break` downstream of a live `gh api` would close its pipe early and
-# turn the pipeline's status into the producer's SIGPIPE under pipefail.
-pr_commits=$(gh api --paginate "repos/$repo/pulls/$pr_number/commits" --jq '.[].sha' | tac)
-code_head=
-for sha in $pr_commits; do
-  files=$(timeout 60 gh api "repos/$repo/commits/$sha" --jq '.files[].filename') || fail "GitHub could not list the files of $sha on $repo"
-  if grep -qv '^\.legion/' <<<"$files"; then
-    code_head=$sha
-    break
-  fi
-done
-[ -n "$code_head" ] || fail "pull request #$pr_number has no commit touching a path outside .legion/"
-code_message=$(timeout 60 gh api "repos/$repo/commits/$code_head" --jq .commit.message) || fail "GitHub could not read the implementer's code head $code_head"
-! grep -qE 'skip-checks: true|\[(skip ci|ci skip|no ci|skip actions|actions skip)\]' <<<"$code_message" || fail "the implementer's code head $code_head carries a CI-skipping line: $(tr '\n' '|' <<<"$code_message")"
-code_checks() { [ "$(timeout 60 gh api "repos/$repo/commits/$code_head/check-runs" --jq .total_count)" -gt 0 ] 2>/dev/null; }
-on_tree "$tree1" until_true 300 "a check run on the implementer's code head $code_head" code_checks
-printf 'planner handoff %s: 0 check runs, two empty lines then skip-checks: true as the last line\nimplementer code head %s: %s check runs\n' "$plan_head" "$code_head" "$(timeout 60 gh api "repos/$repo/commits/$code_head/check-runs" --jq .total_count)" >>"$evidence/github-credential-pushes.txt"
+# The implementer's head carries no CI-skipping line and has its check runs (acceptance 4a).
+code_message=$(timeout 60 gh api "repos/$repo/commits/$pr_head" --jq .commit.message) || fail "GitHub could not read the implementer's head $pr_head"
+! grep -qE 'skip-checks: true|\[(skip ci|ci skip|no ci|skip actions|actions skip)\]' <<<"$code_message" || fail "the implementer's head $pr_head carries a CI-skipping line: $(tr '\n' '|' <<<"$code_message")"
+code_checks() { [ "$(timeout 60 gh api "repos/$repo/commits/$pr_head/check-runs" --jq .total_count)" -gt 0 ] 2>/dev/null; }
+on_tree "$tree1" until_true 300 "a check run on the implementer's head $pr_head" code_checks
+printf 'implementer head %s: %s check runs; no commit of pull request #%s changes only .legion/\n' "$pr_head" "$(timeout 60 gh api "repos/$repo/commits/$pr_head/check-runs" --jq .total_count)" "$pr_number" >>"$evidence/github-credential-pushes.txt"
 # Negative control: the real gh with a GH_CONFIG_DIR holding no files is nobody, and says so.
 if pod_exec "$gh_pod" implementer sh -c "GH_CONFIG_DIR=/nonexistent GH_TOKEN= GITHUB_TOKEN= GH_HOST= /usr/local/bin/gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login" >/dev/null 2>"$evidence/github-credential-negative.txt"; then
   fail "gh in the implementer's namespaces with GH_CONFIG_DIR=/nonexistent still answered a viewer"
 fi
 grep -q GH_TOKEN "$evidence/github-credential-negative.txt" || fail "gh with GH_CONFIG_DIR=/nonexistent failed without gh's own not-logged-in message: $(cat "$evidence/github-credential-negative.txt")"
-note "in $gh_pod the implementer's gh ($gh_bin, GH_CONFIG_DIR=$gh_config_dir) is $implement_app and the reviewer's $review_app from different hosts.yml files, each role's namespaces seeing its own gh-<role> copy and an empty roles directory, no grant file or App login is in the environment; the implementer's subagent answered $implement_app with no legion command, and its own bash ran jj undo --help; GitHub records the planner's handoff commit $plan_head as $review_app's (skip-checks: true, 0 check runs) and the implementer's head $pr_head as $implement_app's, its code head $code_head with check runs; the daemon recorded both heads as the completions"
+note "in $gh_pod the implementer's gh ($gh_bin, GH_CONFIG_DIR=$gh_config_dir) is $implement_app and the reviewer's $review_app from different hosts.yml files, each role's namespaces seeing its own gh-<role> copy and an empty roles directory, no grant file or App login is in the environment; the implementer's subagent answered $implement_app with no legion command, and its own bash ran jj undo --help; GitHub records the implementer's head $pr_head as $implement_app's, with check runs; no commit of pull request #$pr_number changes only .legion/; the planner's handoff is its Dispatch record under its claim session, and the daemon recorded the head as the implementer's completion"
 pass
 
 begin ci-red-takeover
@@ -4525,7 +4492,7 @@ on_tree "$tree1" wait_for_phase "$tree1" reviewing 1200
 # recordRound), so tree 1 stands at round 1 here and at round 2 once the review below requests
 # changes; `round_line 1` and `round_correction_pushed 1` below label the proof's correction, not
 # the daemon's round.
-assert_handoff_committer "$tree1" tester testing 1
+assert_handoff_record "$tree1" tester testing 1
 on_tree "$tree1" wait_for_worker "$tree1" reviewer
 record_resident "$tree1" reviewer || fail "tree 1's reviewer has no session and pod to keep: $(claim_view "$tree1" reviewer)"
 # A round no review decides (LEGION-326): the reviewer comments instead of deciding, and completes.
@@ -4577,8 +4544,8 @@ notice_line "$tree1" reviewer "notifications.role.$(claim_token "$tree1" archite
 on_tree "$tree1" until_true 1800 "$review_app's round 1 decision on pull request #$pr_number" reviewer_decision 1
 [ "$(<"$work/review-decision")" = changes ] || fail "the reviewer approved pull request #$pr_number in round 1, which the proof asked to request changes"
 on_tree "$tree1" wait_for_phase "$tree1" implementing 1200
-assert_handoff_committer "$tree1" reviewer reviewing 2
-assert_review_of_own_handoff "$tree1" 2 CHANGES_REQUESTED
+assert_handoff_record "$tree1" reviewer reviewing 2
+assert_review_of_head "$tree1" 2 CHANGES_REQUESTED
 thread_id=$(reviewer_thread 2>"$work/reviewer-thread.err") ||
   fail "the reviewer's round 1 review did not leave one thread of its own: $(cat "$work/reviewer-thread.err")"
 note "the reviewer's round 1 review opened one thread, $thread_id"
@@ -4588,14 +4555,14 @@ on_tree "$tree1" send_agent "$tree1" implementer "Stage 4b proof correction roun
 on_tree "$tree1" wait_for_phase "$tree1" testing 1500
 on_tree "$tree1" until_true 120 "round 1's correction on pull request #$pr_number" round_correction_pushed 1
 assert_round_handoff "$tree1" 2
-assert_handoff_committer "$tree1" implementer implementing 2
+assert_handoff_record "$tree1" implementer implementing 2
 review_thread "$thread_id" >"$evidence/review-thread-after-correction.json" ||
   fail "read the reviewer's thread $thread_id after the correction round"
 note "after the correction round the reviewer's thread reads isResolved $(jq -r .isResolved "$evidence/review-thread-after-correction.json"), newest comment by $(jq -r '[.comments[] | select(.state == "SUBMITTED")] | last | .author' "$evidence/review-thread-after-correction.json")"
 on_tree "$tree1" wait_for_worker "$tree1" tester
 on_tree "$tree1" send_agent "$tree1" tester "Stage 4b proof retest round 1: verify the correction on pull request #$pr_number, write the tester handoff with verdict pass, and complete the phase."
 on_tree "$tree1" wait_for_phase "$tree1" reviewing 1200
-assert_handoff_committer "$tree1" tester testing 2
+assert_handoff_record "$tree1" tester testing 2
 on_tree "$tree1" wait_for_worker "$tree1" reviewer
 # A bot's thread for the re-review (acceptance 4d): the proof human, a GitHub App and so a bot
 # account that is none of Legion's role Apps, opens one now, after the implementer's correction
@@ -6109,6 +6076,12 @@ note "READY #$pr_number was posted at $ready_head with $(jq length "$evidence/re
 # The daemon submits the READY head's merge itself; await_ready_merge reads the pull request until
 # it merges and never merges it by hand.
 await_ready_merge "$repo" "$pr_number" --delete-branch
+# The whole run pushed no commit only to hand off (A2): every commit the merged pull request holds,
+# the run's every push on legion/$tree1, changes something outside .legion/ (or nothing, an empty
+# commit), since each role's handoff was its Dispatch record (assert_handoff_record above).
+handoff_pushes=$(pull_request_legion_only_commits) || fail "could not read the commits of pull request #$pr_number"
+[ -z "$handoff_pushes" ] || fail "merged pull request #$pr_number carries commits that change only .legion/: $(tr '\n' ' ' <<<"$handoff_pushes")"
+note "merged pull request #$pr_number holds $(gh api --paginate "repos/$repo/pulls/$pr_number/commits" --jq '.[].sha' | grep -c .) commits, none changing only .legion/"
 # The merge is recorded and the root waits for the rest of its tree (INFRA-229).
 merge_recorded() {
   daemon_state | jq -e --arg issue "$tree1" '.issues[$issue] | .phase == "awaiting_merge" and .pullRequest.state == "merged"' >/dev/null
