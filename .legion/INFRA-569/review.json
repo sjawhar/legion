@@ -2,27 +2,17 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-569",
-  "completed": "2026-10-27T12:54:47Z",
+  "completed": "2026-10-27T14:54:24Z",
   "decision": "approved",
-  "round": 3,
-  "reviewedCodeHead": "5c49fe2b546a6ab2b88c58af2ca3b669307539b7",
+  "round": 4,
+  "reviewedCodeHead": "a494be24a8adb25db77f275b72e18e98f867bf65",
   "critical": 0,
   "important": 0,
-  "minor": 5,
-  "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/CHANGELOG.md:1498", "description": "The selected-[] entry names only the ask routes. It does not name the event logs (GET /api/v1/issues/{key}/events, the artifact events route) or GET /api/v1/events, whose answer and previous_answer this delta also changes from null to []. The architect's acceptance send-back carries this fix."},
-    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/markdown-fragment.ts:4", "description": "Wording: 'at the source's end' means one cut at its end; search.e2e.ts:228 says 'in AskHitStatus' where it means 'beside'. The architect's send-back carries both."},
-    {"severity": "minor", "file": "packages/dispatch/web/src/features/search/SearchPalette.test.tsx:262", "description": "The expected value is built with markdownHead's own regex, so a mistake in that regex would be copied into the expectation. Use a fixed expected value (architect's send-back)."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/events_test.go:293", "description": "The live-frame half repeats coverage that TestLiveAskEventFrameCarriesTheReadTimeFields already gives; the live relay reads through readEventsAfterID like the catch-up. Drop it (architect's send-back)."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/events.go:417", "description": "normalizeAnsweredSelected decodes each ask.answered payload a second time, strictly. Every writer marshals model.AskAnswer and no migration rewrites answers, so no stored payload can fail it. The architect accepts this as it is."}
-  ],
-  "fingerprint": {"lastReviewCommit": "17f6a0a88e15bf42f9a798f652b5bc06401d5bf0", "lastReview": "c456ff9a1aef9847c69936b74176ebf0a2ebe2ad5d5e1c3aae20630545aad4a8", "head": "77a6337c77547f0dc2bab3891e04f2f4c866abcc", "headFingerprint": "de44852171837f82ae218fa7fc913b6edc03f9a4b788d4ed8ae07297e61c98d3", "verdict": "changed: a new round, limited to the architect's narrowed delta (17f6a0a8..5c49fe2b)"},
-  "ci": "Required set: lint, typecheck, test, pr-title. CI head 5c49fe2b, the newest pull_request run; compare to 77a6337c gives handoffsOnly true, 2 files. Attempt 1: test failed in TestRealTmuxSplitsIntoTheIssueWindow (packages/daemon, which this PR does not touch; run 40486298844, job 122128805370). A single re-run of the failed job (attempt 2, job 122162620823) passed. lint, typecheck and pr-title passed.",
-  "conflict": "GitHub reports the head CONFLICTING with main, on packages/envoy/CHANGELOG.md only. The architect sends the issue back from accepting for the forward merge, together with the items above.",
-  "thermonuclear": {
-    "head": "5c49fe2b546a6ab2b88c58af2ca3b669307539b7",
-    "deepReview": "APPROVE, with no critical or important finding. Every event serving path goes through readEventRows -> attachAskEventFields: the issue and artifact logs, the SSE catch-up and the live relay. Only selected changes. No consumer treats null specially. No stored payload can fail the decode.",
-    "codeQuality": "No critical or important finding. Minor items only (1-4 above)."
-  },
-  "proofLines": "E2E (implementer) and E2E (tester) are present for this round's head."
+  "minor": 0,
+  "keyFindings": [],
+  "delta": "a38994a2, the forward merge of main: the PR's own diff is unchanged apart from one blank line in packages/envoy/CHANGELOG.md, and the PR touches the same set of files. a494be24 applies the architect's four acceptance items. (1) The CHANGELOG names GET /api/v1/issues/{key}/events, GET /api/v1/artifacts/{id}/events and the GET /api/v1/events stream; all three exist in routes_table.go:93,148,181. (2) Two comment fixes. (3) SearchPalette.test.tsx has a fixed expected value. (4) The duplicated live-frame half of events_test.go is gone; fmt, eventHead and readSSEFrameOfType still have users. No runtime code changed.",
+  "fingerprint": {"lastReviewCommit": "99d7c49da05fcf70e33593645638d2bcfd7dfdb3", "lastReview": "de44852171837f82ae218fa7fc913b6edc03f9a4b788d4ed8ae07297e61c98d3", "merge": "a38994a23128: 563d0ecd (one blank CHANGELOG line)", "head": "93ffc380f7df5daa8a3c80ec75ff0a64e11eff81", "headFingerprint": "2ad6e933f431814fc8ef1d472ee3771c1f189052b5f65f9e3cc93c1ec2160bfa", "verdict": "changed: a new round. The delta changes tests, comments and the changelog only, so the thermonuclear pair did not run (the reviewer rule: the pair runs only when the diff touches runtime code)."},
+  "ci": "Required set: lint, typecheck, test, pr-title. CI head a494be24, the newest pull_request run; compare to 93ffc380 gives handoffsOnly true, 2 files. All four completed success by 14:53Z (a superseded pr-title run was cancelled).",
+  "conflict": "At 14:53Z GitHub reports the head CONFLICTING again: main moved to 59f6647d at 14:46Z. Both sides changed packages/claude-envoy/CHANGELOG.md, packages/dispatch/AGENTS.md, packages/envoy/CHANGELOG.md and packages/envoy/cmd/dispatch/README.md, all documentation. Reported to the architect for the forward merge.",
+  "proofLines": "E2E (implementer) and E2E (tester) are present."
 }
