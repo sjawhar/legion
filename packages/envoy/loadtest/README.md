@@ -17,7 +17,7 @@ same step before and after its change, and compares the two rows.
 
 | File | What it is |
 | --- | --- |
-| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql` |
+| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy` |
 | `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
 | `run.go` | One step: sessions, the event generator, the request generator, SSE streams, the window, `summary.json` |
@@ -34,20 +34,29 @@ same step before and after its change, and compares the two rows.
 | `stack.sh` | The local stack: `setup`, `start`, `seed`, `reset`, `stop`, `status`, `build-info`, `loadgen` |
 | `run-step.sh` | The one command for a named step |
 | `run-series.sh` | The series of six steps, 0.25x to 10x |
+| `lock.sh` | The run lock of a `LOADTEST_ROOT` (One run at a time, below). The three scripts source it. |
 | `*_test.go` | Unit tests. They need no Postgres and no NATS: `cd packages/envoy && go test ./loadtest/` |
+| `run-step.test.sh` | The test of the run lock. It fakes `go` and `uv` and needs no stack: `cd packages/envoy && bash loadtest/run-step.test.sh` |
 
 ## Requirements
 
 - A Linux machine with 2 vCPUs, the shape of a Legion issue pod. The root report ran on such a
   pod: `nproc` 2, 19 GiB of memory, a gVisor sandbox. The samplers read `/proc`, so the harness
   runs on Linux only.
-- No other heavy work on the machine during a step. `meta.json` records the load average before
-  each step.
+- No other heavy work on the machine during a step. `meta.json` records `box_busy_before`: the
+  share of the box's CPU time that was busy over 5 s just before the step, from two `/proc/stat`
+  reads. `run-step.sh` takes it before its reset, while Dispatch is stopped and the rest of the
+  stack is idle (`loadgen box-busy`), so Dispatch's own start-up work is not in it; an idle box
+  reads 0%. When it is above 10%, `run.log` warns that another process on the machine uses CPU. The
+  load average proves nothing here: on gVisor `/proc/loadavg` always reads 0.00. Each Legion role
+  runs in its own PID namespace, so the processes of other roles in the same pod are invisible to
+  `ps` and to the sampler, but their CPU shows in this number.
+- One run at a time on a `LOADTEST_ROOT` (One run at a time, below).
 - The Go toolchain (`go`). `stack.sh setup` builds the binaries and installs `nats-server` with it.
   `loadgen tables` uses `go tool pprof`.
 - `uv`. `stack.sh setup` installs Python 3.12 and the `pgserver` wheel (0.1.4) with it. The wheel
   holds Postgres 16.2 and pgvector. The harness uses no Docker.
-- `jq` and `curl`.
+- `jq`, `curl` and `flock` (util-linux).
 - `git` is optional. Without it, `meta.json` and `seed.meta.json` record the build commit as
   `unknown`.
 - Disk space under `LOADTEST_ROOT`. In the measured runs, each step directory held 20-25 MB, most
@@ -131,10 +140,40 @@ from the RNG seed, so two runs of one step with one seed offer the same arrivals
    listener keep running. `stack.sh stop` stops them.
 7. It copies the listener and NATS logs into the step directory and runs `loadgen tables` there.
 
+Before step 1, `run-step.sh` takes the run lock of the root (One run at a time, below).
+
+**A step whose stack process exits fails.** The sampler checks every stack process (Dispatch, the
+listener, NATS, the proxy and Postgres) at each 5 s sample, and once more after the grace. A
+process is alive while `/proc/<pid>` exists and is not a zombie. When one has exited,
+`loadgen run` still writes `summary.json`, with `stack_exits` (each process's name, pid and the
+time it was first seen gone), and the other files that it can take. Then it exits with status 1:
+`loadgen run: dispatch (pid N) exited during the step (first seen gone at T); this row does not
+measure the load`. `run-step.sh` renders `TABLES.md` for diagnosis, with the mark
+`(dispatch exited)` after the step name, and exits with status 1, naming the process. A Dispatch
+crash or out-of-memory kill at a high step thus never reads as the overload that the series
+measures.
+
 To run a step name again, remove its step directory first.
 
 `loadgen run` also takes `-nats-conns` (default 50), the NATS connections that the sessions share.
 `run-step.sh` does not pass it.
+
+### One run at a time
+
+A step resets the stack and measures the whole box, so one `LOADTEST_ROOT` runs one step or one
+series at a time. A second `run-step.sh` on the root of a running step would stop that step's
+Dispatch and listener in its reset, and the first step would finish as a row of connection
+failures.
+
+`run-step.sh` and `run-series.sh` take an exclusive `flock` on `$LOADTEST_ROOT/.run.lock` before
+they touch the stack, and hold it until they exit. The holder writes its pid, command, start time
+and a random token into the lock file. Another run on the root is refused with status 1, and the
+refusal names the root and the holder. So are `stack.sh setup`, `start`, `seed`, `reset` and
+`stop`; `stack.sh status`, `build-info` and `loadgen` take no lock. The holder's own children pass:
+the holder exports the token as `LOADTEST_LOCK_TOKEN`, and a caller whose token equals the lock
+file's goes on without locking. Thus the series' own `run-step.sh` calls, and the `stack.sh` calls
+of a run, are not refused. The lock is released when the holder exits. No stack process holds it:
+`stack.sh` starts each one with the lock's file descriptor closed.
 
 ## Run the series
 
@@ -165,6 +204,10 @@ series directory.
   `--requests`, `--sse` and `--out`, because it sets them.
 - With the default window, a step takes about 5 minutes and a series about 30 minutes. The setup
   and the seed run once, before the series directory exists.
+- The series holds the run lock for its whole run.
+- A failed step stops the series. `run-series.sh` still writes the series `TABLES.md`, over the
+  steps that ran (the failed step included when it wrote `summary.json`), and exits with status 1,
+  naming the step.
 
 ## The stack (`stack.sh`)
 
@@ -178,6 +221,9 @@ series directory.
 | `stack.sh status` | Prints each process's pid and ports, and the seed's migration, build commit and counts. |
 | `stack.sh build-info` | Prints the checkout's commit and `true` or `false` for uncommitted changes in its tree, as `<commit> <dirty>`. `run-step.sh` records them in `meta.json`. |
 | `stack.sh loadgen ARGS...` | Runs `$LOADTEST_ROOT/bin/loadgen` with the stack's environment, from the root. `run-step.sh` and `run-series.sh` call `loadgen` this way. |
+
+`setup`, `start`, `seed`, `reset` and `stop` take the run lock for their run, and are refused
+while another run holds it (One run at a time, above).
 
 The processes:
 
@@ -267,6 +313,10 @@ on a seed that a newer build made. `run-step.sh` compares the highest migration 
 checkout (`packages/envoy/internal/dispatch/store/migrations`) with `seed.meta.json`. It refuses a
 build that is older than the seed, and names both levels. `meta.json` records the build commit and
 whether the tree had uncommitted changes.
+
+Committed rate at 1x varied from run to run on one build: 1.23 to 2.14 events/s in the
+2026-10-27 runs, with the commit-order lock held 100% of the time in every run. So a before and
+after compares several runs of each side, not one run of each.
 
 ## The load
 
@@ -417,10 +467,10 @@ Every percentile in the harness is the lower nearest rank: the value at index
 
 | File | What it holds |
 | --- | --- |
-| `summary.json` | The step's results. Every table cell comes from it (The tables, below). |
+| `summary.json` | The step's results. Every table cell comes from it (The tables, below). `stack_exits` is there only when a stack process exited during the step: each entry's `name`, `pid` and `first_seen_gone`. Such a step failed. |
 | `TABLES.md` | The tables of this step. `loadgen tables` writes it. |
-| `meta.json` | The step name and arguments, `start`, `window_start`, `window_end`, `end`, `nproc`, CPU model, kernel, the load average before the step, `GOMAXPROCS` of Dispatch (`unset` by default), the Postgres version, the build commit and `build_dirty`, the seed meta, the `stack.json` path, `pg_direct`, `allow_foreign` and the pids. |
-| `run.log` | `loadgen run`'s log: the configuration, the guard, the sampler's pids, the NATS subscriptions, the registrations, the window, failed writes and the result line. |
+| `meta.json` | The step name and arguments, `start`, `window_start`, `window_end`, `end`, `nproc`, CPU model, kernel, `box_busy_before` and `box_busy_before_window_s` (5), `GOMAXPROCS` of Dispatch (`unset` by default), the Postgres version, the build commit and `build_dirty`, the seed meta, the `stack.json` path, `pg_direct`, `allow_foreign` and the pids. `box_busy_before` is the share of the box's CPU time, all CPUs, that was not idle or I/O wait over 5 s just before the step, from two `/proc/stat` reads: `run-step.sh` reads it with `loadgen box-busy` before its reset and passes it as `-box-busy-before`; a `loadgen run` without that flag reads it itself (Requirements, above). `null` when `/proc/stat` gave no ticks. |
+| `run.log` | `loadgen run`'s log: the configuration, the guard, a warning when `box_busy_before` is above 10%, the sampler's pids, the NATS subscriptions, the registrations, the window, failed writes, the result line, and the failure line when a stack process exited. |
 | `samples.json` | The 5 s samples: CPU ticks and RSS per process, `/proc/stat` ticks, Postgres connections by state, goroutines, pool waiters, heap (every 15 s), NATS `/varz`. |
 | `cpu.pprof` | Dispatch's CPU profile over the whole window. |
 | `heap.pprof` | Dispatch's heap profile at the end of the window. |
@@ -454,7 +504,7 @@ path below is a field of the step's `summary.json`.
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
-| `step` | name | The step name. | `config.step` |
+| `step` | name | The step name, with the mark `(<process> exited)` when a stack process exited during the step. | `config.step`, `stack_exits` |
 | `start (UTC)` | date and time | The start of the window. | `meta.json` `window_start` |
 | `sessions` | count | The simulated sessions. | `config.sessions` |
 | `events/s target / offered / committed` | writes per second | The target rate, then the offered writes and the committed writes, each divided by the window. `0` when the target is 0. | `config.events_per_s`, `events.offered_per_s`, `events.committed_per_s` |
@@ -470,6 +520,12 @@ path below is a field of the step's `summary.json`.
 **The below-target mark.** `(below 95%)` in `req/s target / sent` means that the step sent fewer
 than 95% of its target requests per second. Its request columns then describe a lighter load than
 its name says. `TABLES.md` repeats this under the table when a row has the mark.
+
+**The stack-exit mark.** `(dispatch exited)` after the step name, in every table, means that the
+named stack process (`dispatch`, `listener`, `nats`, `proxy` or `postgres`) exited during the step
+(`stack_exits` in `summary.json`). The step failed, and its row does not measure the load: its
+numbers show a stack without that process. `TABLES.md` repeats this under the first table when a
+row has the mark.
 
 **Connect timeouts above 1x.** At 10x on the 2-vCPU pod (series run of 2026-10-27, step
 `step-10x`), most requests and writes ended with `dial tcp …: i/o timeout` after 5 s, and
@@ -510,6 +566,7 @@ divided by 100 ticks per second and by the seconds between the two samples.
 | `loadgen cores` | cores | Mean cores of the `loadgen run` process: the generators, the sessions and the samplers. | `resources.cpu_cores_mean.loadgen` |
 | `proxy cores` | cores | Mean cores of the latency proxy. | `resources.cpu_cores_mean.proxy` |
 | `box busy` | percent | The share of the box's total CPU time (all CPUs) that was not idle or I/O wait, from `/proc/stat`. | `resources.sys_busy_frac` |
+| `box busy before` | percent | The same share over 5 s just before the step, read by `run-step.sh` before its reset, while Dispatch is stopped: the other work on the machine, other roles' processes in the pod included. Above 10%, the step shared the box (`run.log` warns). | `meta.json` `box_busy_before` |
 | `Dispatch RSS max MiB` | MiB | Dispatch's highest resident memory (`VmRSS`) in a sample. | `resources.rss_mib_max.dispatch` |
 | `heap in use MiB p50 / max` | MiB | Dispatch's `HeapInuse` from `/debug/pprof/heap?debug=1`, read every 15 s. | `resources.heap_inuse_mib` |
 | `goroutines p50 / max` | count | Dispatch's goroutines, from `/debug/pprof/goroutine?debug=1`. | `resources.goroutines` |
@@ -520,7 +577,7 @@ divided by 100 ticks per second and by the seconds between the two samples.
 
 `resources` also holds every process's RSS, Postgres connections by state, and NATS messages in and
 out per second and slow consumers. Under `-allow-foreign`, `loadgen` has no stack pids, so only
-the `loadgen` cores have a value.
+the `loadgen` cores have a value, and no stack process is checked for an exit.
 
 ### Commit-order lock
 

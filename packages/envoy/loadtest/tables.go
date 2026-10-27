@@ -125,6 +125,19 @@ func p50(s stat) float64  { return s.P50 }
 func p99(s stat) float64  { return s.P99 }
 func smax(s stat) float64 { return s.Max }
 
+// label is the step's name in a table row, marked "(<names> exited)" when a stack process exited
+// during the step.
+func (s stepData) label() string {
+	if len(s.sum.StackExits) == 0 {
+		return s.name
+	}
+	names := make([]string, len(s.sum.StackExits))
+	for i, x := range s.sum.StackExits {
+		names[i] = x.Name
+	}
+	return s.name + " (" + strings.Join(names, ", ") + " exited)"
+}
+
 func renderTables(steps []stepData) string {
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
@@ -141,7 +154,7 @@ func renderTables(steps []stepData) string {
 	header("step", "start (UTC)", "sessions", "events/s target / offered / committed", "write errors non-2xx / transport",
 		"delivery ms from arrival p50 / p99", "delivery ms from commit p50 / p99", "issue-topic receipts got / expected",
 		"req/s target / sent", "req 2xx", "req ms p50 / p99", "requests dropped at the in-flight cap")
-	below := false
+	below, exited := false, false
 	for _, s := range steps {
 		c, e, q := s.sum.Config, s.sum.Events, s.sum.Requests
 		start := "-"
@@ -164,7 +177,10 @@ func renderTables(steps []stepData) string {
 		if q.Sent > 0 {
 			share = num(100*float64(q.OK2xx)/float64(q.Sent), 1) + "%"
 		}
-		row(s.name, start, num(float64(c.Sessions), 0), events,
+		if len(s.sum.StackExits) > 0 {
+			exited = true
+		}
+		row(s.label(), start, num(float64(c.Sessions), 0), events,
 			fmt.Sprintf("%s / %s", num(float64(e.WriteErrors.Non2xx), 0), num(float64(e.WriteErrors.Transport), 0)),
 			pair(e.DeliveryMsFromArrival, p50, p99, 0), pair(e.DeliveryMsFromCommit, p50, p99, 0),
 			fmt.Sprintf("%s / %s", num(float64(e.IssueTopicReceipts), 0), num(float64(e.ExpectedIssueTopicReceipts), 0)),
@@ -172,6 +188,9 @@ func renderTables(steps []stepData) string {
 	}
 	if below {
 		w("\n(below 95%%): the step sent fewer than 95%% of its target requests per second, so its request columns describe a lighter load than its name.")
+	}
+	if exited {
+		w("\n(<process> exited): that stack process exited during the step (summary.json `stack_exits`), so the step failed and its row, in every table here, does not measure the load.")
 	}
 
 	w("\n## Write latency by kind\n")
@@ -182,7 +201,7 @@ func renderTables(steps []stepData) string {
 	}
 	header(cells...)
 	for _, s := range steps {
-		cells := []string{s.name}
+		cells := []string{s.label()}
 		for _, k := range eventKinds {
 			ks, ok := s.sum.Events.ByKind[k]
 			if !ok || ks.Offered == 0 {
@@ -196,17 +215,23 @@ func renderTables(steps []stepData) string {
 
 	w("\n## Resources\n")
 	resourceCells := []string{"step", "Dispatch cores mean / peak 5 s", "Postgres cores", "listener cores", "NATS cores", "loadgen cores", "proxy cores",
-		"box busy", "Dispatch RSS max MiB", "heap in use MiB p50 / max", "goroutines p50 / max",
+		"box busy", "box busy before", "Dispatch RSS max MiB", "heap in use MiB p50 / max", "goroutines p50 / max",
 		"goroutines waiting for a pool connection p50 / max", "Postgres connections max", "connections waiting on a lock p50",
 		"Dispatch CPU-s per operation"}
 	header(resourceCells...)
 	for _, s := range steps {
+		busyBefore := "-"
+		if s.meta != nil && s.meta.BoxBusyBefore != nil {
+			busyBefore = num(100**s.meta.BoxBusyBefore, 0) + "%"
+		}
 		r := s.sum.Resources
 		if r == nil {
-			cells := []string{s.name}
+			cells := []string{s.label()}
 			for range len(resourceCells) - 1 {
 				cells = append(cells, "-")
 			}
+			// The reading before the step is meta.json's, not the sampler's.
+			cells[slices.Index(resourceCells, "box busy before")] = busyBefore
 			row(cells...)
 			continue
 		}
@@ -239,8 +264,8 @@ func renderTables(steps []stepData) string {
 		if r.PGConnsTotal.N > 0 {
 			pgMax = num(r.PGConnsTotal.Max, 0)
 		}
-		row(s.name, dispatch, cores("postgres", 2), cores("listener", 3), cores("nats", 3), cores("loadgen", 2), cores("proxy", 2),
-			num(100*r.SysBusyFrac, 0)+"%", rss, pair(r.HeapInuseMiB, p50, smax, 0), pair(r.Goroutines, p50, smax, 0),
+		row(s.label(), dispatch, cores("postgres", 2), cores("listener", 3), cores("nats", 3), cores("loadgen", 2), cores("proxy", 2),
+			num(100*r.SysBusyFrac, 0)+"%", busyBefore, rss, pair(r.HeapInuseMiB, p50, smax, 0), pair(r.Goroutines, p50, smax, 0),
 			pair(r.PoolAcquireGoroutines, p50, smax, 0), pgMax, lockWait, perOp)
 	}
 
@@ -251,7 +276,7 @@ func renderTables(steps []stepData) string {
 	for _, s := range steps {
 		l := s.sum.CommitOrderLock
 		if l.Samples == 0 {
-			cells := []string{s.name}
+			cells := []string{s.label()}
 			for range len(lockCells) - 1 {
 				cells = append(cells, "-")
 			}
@@ -273,7 +298,7 @@ func renderTables(steps []stepData) string {
 			}
 			doing = append(doing, fmt.Sprintf("%s %s%%", strings.ReplaceAll(what, "|", `\|`), num(100*d.Share, 0)))
 		}
-		row(s.name, num(100*l.HeldFraction, 0)+"%", pair(l.Waiters, p50, smax, 0), holds, num(float64(l.HoldsObserved), 0), strings.Join(doing, "; "))
+		row(s.label(), num(100*l.HeldFraction, 0)+"%", pair(l.Waiters, p50, smax, 0), holds, num(float64(l.HoldsObserved), 0), strings.Join(doing, "; "))
 	}
 
 	w("\n## Requests by route\n")
@@ -281,7 +306,7 @@ func renderTables(steps []stepData) string {
 	cells = []string{"route"}
 	routes := map[string]bool{}
 	for _, s := range steps {
-		cells = append(cells, s.name)
+		cells = append(cells, s.label())
 		for name := range s.sum.Requests.Routes {
 			routes[name] = true
 		}

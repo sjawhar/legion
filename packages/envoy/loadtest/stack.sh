@@ -30,9 +30,15 @@
 # Every stack process starts under `env -i` with an explicit environment, so this shell's
 # DISPATCH_URL, ENVOY_URL, ENVOY_NATS_URL, AWS_*, HOME and XDG_* never reach it, and every process is
 # stopped by the pid in its pidfile ($LOADTEST_ROOT/run/<name>.pid), never by name.
+#
+# setup, start, seed, reset and stop take the root's run lock (lock.sh) for their run, and are
+# refused while another run holds it; run-step.sh's and run-series.sh's own calls pass. status,
+# build-info and loadgen take no lock.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=packages/envoy/loadtest/lock.sh
+source "$here/lock.sh"
 SRC=${LOADTEST_SRC:-$(cd -- "$here/../../.." && pwd -P)}
 ENVOY_SRC=$SRC/packages/envoy
 ROOT=${LOADTEST_ROOT:-${TMPDIR:-/tmp}/dispatch-loadtest}
@@ -220,10 +226,11 @@ spawn() {
   f=$(pidfile "$name")
   mkdir -p -- "$RUN" "$(dirname -- "$log")" "$ROOT/tmp"
   rm -f -- "$f"
-  # The shell writes its own pid and execs CMD, so the pidfile names CMD's process.
+  # The shell writes its own pid and execs CMD, so the pidfile names CMD's process. Descriptor 9,
+  # the run lock (lock.sh), is closed, so a stack process never holds the lock.
   # shellcheck disable=SC2016
   setsid -f env -i "${spawn_env[@]}" /bin/sh -c 'echo "$$" >"$0.tmp" && mv -f -- "$0.tmp" "$0" && exec "$@"' \
-    "$f" "$@" >"$log" 2>&1 </dev/null
+    "$f" "$@" >"$log" 2>&1 </dev/null 9>&-
   # Wait until the pidfile names a process running NAME's binary (the shell has exec'd).
   local i
   for ((i = 0; i < 100; i++)); do
@@ -606,6 +613,9 @@ usage() {
   exit 2
 }
 
+case ${1:-} in
+  setup | start | seed | reset | stop) lock_root "$ROOT" stack.sh ;;
+esac
 case ${1:-} in
   setup) cmd_setup ;;
   start) cmd_start ;;

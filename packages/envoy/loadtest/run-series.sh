@@ -17,10 +17,16 @@
 # Events are 4/s and requests 60/s at 1x, SSE max(1, round(2·f)); sessions come from
 # `loadgen series-sessions <f>`. Any other run-step.sh flag (--duration, --warmup, --grace,
 # --event-mix, --route-mix, --human, --rng-seed) is passed to every step.
+#
+# The series holds LOADTEST_ROOT for its whole run (lock.sh); its own run-step.sh calls pass. A
+# failed step stops the series: the series TABLES.md covers the steps that ran, the failed one
+# included when it wrote summary.json, and the script exits 1 naming the step.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 stack=$here/stack.sh
+# shellcheck source=packages/envoy/loadtest/lock.sh
+source "$here/lock.sh"
 ROOT=${LOADTEST_ROOT:-${TMPDIR:-/tmp}/dispatch-loadtest}
 mkdir -p -- "$ROOT"
 ROOT=$(cd -- "$ROOT" && pwd -P)
@@ -41,6 +47,8 @@ for arg in "$@"; do
   esac
 done
 
+lock_root "$ROOT" run-series.sh
+
 # Setup and seed once, before the series directory exists, so a failed setup leaves no empty series.
 "$stack" setup
 "$stack" start
@@ -49,16 +57,27 @@ done
 series=$ROOT/runs/series-$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p -- "$series"
 dirs=()
+failed=""
 #       factor events requests sse
 steps=("0.25 1 15 1" "0.5 2 30 1" "1 4 60 2" "2 8 120 4" "5 20 300 10" "10 40 600 20")
 for step in "${steps[@]}"; do
   read -r f events requests sse <<<"$step"
   sessions=$("$stack" loadgen series-sessions "$f")
   dir=$series/step-${f}x
-  "$here/run-step.sh" "step-${f}x" --events "$events" --sessions "$sessions" --requests "$requests" \
-    --sse "$sse" --out "$dir" "$@"
+  if ! "$here/run-step.sh" "step-${f}x" --events "$events" --sessions "$sessions" --requests "$requests" \
+    --sse "$sse" --out "$dir" "$@"; then
+    failed=step-${f}x
+    [ -f "$dir/summary.json" ] && dirs+=("$dir")
+    break
+  fi
   dirs+=("$dir")
 done
 # Each step's run-step.sh already wrote its pprof tops and goroutine summary.
-"$stack" loadgen tables -tops=false -out "$series/TABLES.md" "${dirs[@]}"
+if [ ${#dirs[@]} -gt 0 ]; then
+  "$stack" loadgen tables -tops=false -out "$series/TABLES.md" "${dirs[@]}"
+fi
+if [ -n "$failed" ]; then
+  [ ${#dirs[@]} -gt 0 ] || die "step $failed failed (run-step.sh above names why); the series stopped there, before any step wrote summary.json"
+  die "step $failed failed (run-step.sh above names why); the series stopped there; $series/TABLES.md holds the steps that ran"
+fi
 printf 'run-series.sh: series done: %s\n' "$series" >&2

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,7 +42,7 @@ type sample struct {
 
 // sampler takes a sample every 5 s: CPU and RSS of each stack process and of loadgen from /proc,
 // Postgres connections, Dispatch's goroutines and pool waiters, its heap every 15 s, and NATS
-// /varz.
+// /varz. At each sample it also checks that every stack process is alive (checkAlive).
 type sampler struct {
 	pids    map[string]int // by name; "postgres" is the postmaster
 	pprof   string
@@ -48,14 +50,49 @@ type sampler struct {
 	pgURL   string
 	mu      sync.Mutex
 	samples []sample
+	exits   map[string]stackExit // by name, the stack processes found gone
+}
+
+// stackExit is a stack process that exited during the step: the first check that found it gone.
+type stackExit struct {
+	Name          string    `json:"name"`
+	PID           int       `json:"pid"`
+	FirstSeenGone time.Time `json:"first_seen_gone"`
 }
 
 func newSampler(ep endpoints) *sampler {
-	return &sampler{pids: ep.pids, pprof: ep.pprof, natsMon: ep.natsMon, pgURL: ep.pg}
+	return &sampler{pids: ep.pids, pprof: ep.pprof, natsMon: ep.natsMon, pgURL: ep.pg, exits: map[string]stackExit{}}
+}
+
+// checkAlive records each stack process that is no longer alive, with the time it was first
+// seen gone. Under -allow-foreign there are no pids, so nothing is checked.
+func (s *sampler) checkAlive(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for name, pid := range s.pids {
+		if _, seen := s.exits[name]; !seen && !procAlive(pid) {
+			s.exits[name] = stackExit{Name: name, PID: pid, FirstSeenGone: now}
+		}
+	}
+}
+
+// stackExits lists the stack processes found gone, in the order they were first seen gone.
+func (s *sampler) stackExits() []stackExit {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := slices.Collect(maps.Values(s.exits))
+	slices.SortFunc(out, func(a, b stackExit) int {
+		if c := a.FirstSeenGone.Compare(b.FirstSeenGone); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return out
 }
 
 // procStatFields are the fields of /proc/<pid>/stat after the command name.
 type procStatFields struct {
+	state                        string
 	ppid                         int
 	utime, stime, cutime, cstime float64
 }
@@ -76,6 +113,7 @@ func readProcStat(pid int) (procStatFields, bool) {
 		return procStatFields{}, false
 	}
 	var p procStatFields
+	p.state = f[0]
 	p.ppid, _ = strconv.Atoi(f[1])
 	p.utime, _ = strconv.ParseFloat(f[11], 64)
 	p.stime, _ = strconv.ParseFloat(f[12], 64)
@@ -100,6 +138,13 @@ func procRSS(pid int) float64 {
 		}
 	}
 	return 0
+}
+
+// procAlive is whether pid is a live process: /proc/<pid> exists and it is not a zombie (Z) or
+// dead (X) task.
+func procAlive(pid int) bool {
+	st, ok := readProcStat(pid)
+	return ok && st.state != "Z" && st.state != "X"
 }
 
 // childrenOf lists the live processes whose parent is pid.
@@ -138,6 +183,8 @@ func postgresUsage(postmaster int) (ticks, rssKiB float64, ok bool) {
 	return ticks, rssKiB, true
 }
 
+// sysCPU reads the box's busy (not idle or I/O wait) and total CPU ticks, all CPUs, from the
+// first line of /proc/stat.
 func sysCPU() (busy, total float64) {
 	b, err := os.ReadFile("/proc/stat")
 	if err != nil {
@@ -158,6 +205,21 @@ func sysCPU() (busy, total float64) {
 	return busy, total
 }
 
+// boxBusy is the box's busy fraction over window, from two /proc/stat reads window apart; false
+// when /proc/stat gave no ticks or ctx ended first. Every process on the box counts, also those of
+// other PID namespaces that ps does not show.
+func boxBusy(ctx context.Context, window time.Duration) (float64, bool) {
+	busy0, total0 := sysCPU()
+	if !sleepUntil(ctx, time.Now().Add(window)) {
+		return 0, false
+	}
+	busy1, total1 := sysCPU()
+	if total1 <= total0 {
+		return 0, false
+	}
+	return (busy1 - busy0) / (total1 - total0), true
+}
+
 func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time) {
 	var pg *pgx.Conn
 	defer func() {
@@ -171,6 +233,7 @@ func (s *sampler) loop(ctx context.Context, winStart, winEnd time.Time) {
 	for n := 0; ; n++ {
 		sm := sample{At: time.Now(), CPUTicks: map[string]float64{}, RSSKiB: map[string]float64{}, PGConns: map[string]int{}, NATS: map[string]float64{}}
 		sm.InWindow = !sm.At.Before(winStart) && !sm.At.After(winEnd.Add(5*time.Second))
+		s.checkAlive(sm.At)
 		for name, pid := range s.pids {
 			if name == "postgres" {
 				if tk, rss, ok := postgresUsage(pid); ok {

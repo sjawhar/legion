@@ -14,10 +14,17 @@
 #
 # Dispatch is stopped when the step ends, pass or fail, so the box is idle between steps; Postgres,
 # the proxy, NATS and the listener keep running (stack.sh stop stops them).
+#
+# One run at a time per LOADTEST_ROOT (lock.sh): a run-step.sh or run-series.sh on a root that
+# another run holds is refused before it touches the stack. A step in which a stack process exited
+# fails: loadgen run exits non-zero, and so does this script, naming the process; it still renders
+# TABLES.md, where the row carries the mark.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 stack=$here/stack.sh
+# shellcheck source=packages/envoy/loadtest/lock.sh
+source "$here/lock.sh"
 SRC=${LOADTEST_SRC:-$(cd -- "$here/../../.." && pwd -P)}
 ROOT=${LOADTEST_ROOT:-${TMPDIR:-/tmp}/dispatch-loadtest}
 mkdir -p -- "$ROOT"
@@ -71,6 +78,8 @@ $have_events || die "--events is required (0 sends no writes)"
 $have_sessions || die "--sessions is required"
 $have_requests || die "--requests is required (0 sends no requests)"
 
+lock_root "$ROOT" run-step.sh
+
 out=$(realpath -m -- "$out")
 if [ -e "$out" ] && [ -n "$(ls -A -- "$out")" ]; then
   die "$out already holds a step; remove it or name another step"
@@ -95,12 +104,25 @@ build_info=$("$stack" build-info)
 read -r commit dirty <<<"$build_info"
 
 mkdir -p -- "$out"
+# The box's busy share before this step starts anything: Dispatch is stopped (the last step stopped
+# it) and the rest of the stack is idle, so what it shows is other work on the machine. Read after
+# the reset, it would show Dispatch's own start-up work instead.
+box_busy=$("$stack" loadgen box-busy)
 trap '"$stack" stop dispatch' EXIT
 "$stack" reset "$out/dispatch.log"
-"$stack" loadgen run -name "$name" -out "$out" -build-commit "$commit" -build-dirty="$dirty" "${args[@]}"
+rc=0
+"$stack" loadgen run -name "$name" -out "$out" -build-commit "$commit" -build-dirty="$dirty" -box-busy-before "$box_busy" "${args[@]}" || rc=$?
 "$stack" stop dispatch
 trap - EXIT
 cp -- "$ROOT/logs/listener.out" "$out/listener.log"
 cp -- "$ROOT/logs/nats.out" "$out/nats.log"
+if ((rc != 0)); then
+  # loadgen writes summary.json once the step has run, also when a stack process exited in it.
+  [ -f "$out/summary.json" ] || die "step $name failed: loadgen run exited $rc before it wrote summary.json; see $out/run.log"
+  "$stack" loadgen tables "$out" || true
+  exits=$(jq -r '[(.stack_exits // [])[] | "\(.name) (pid \(.pid))"] | join(", ")' "$out/summary.json")
+  [ -n "$exits" ] || die "step $name failed: loadgen run exited $rc; see $out/run.log"
+  die "step $name failed: $exits exited during the step, so its row in $out/TABLES.md does not measure the load"
+fi
 "$stack" loadgen tables "$out"
 printf 'run-step.sh: step %s done in %d s: %s\n' "$name" "$((SECONDS - started))" "$out" >&2

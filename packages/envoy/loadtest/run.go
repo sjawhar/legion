@@ -50,7 +50,10 @@ type runConfig struct {
 	natsConns    int
 	buildCommit  string
 	buildDirty   bool
-	args         []string
+	// boxBusyBefore is the box's busy fraction read before Dispatch started (run-step.sh reads it
+	// with `loadgen box-busy` before its reset); negative means collectMeta reads it itself.
+	boxBusyBefore float64
+	args          []string
 }
 
 func runLoad(args []string) error {
@@ -74,6 +77,7 @@ func runLoad(args []string) error {
 	seedPath := fs.String("seed", "", "seed.json path (default $LOADTEST_ROOT/seed.json)")
 	buildCommit := fs.String("build-commit", "", "commit Dispatch was built from, for meta.json")
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
+	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
 	_ = fs.Parse(args)
 
 	// Every input is validated before the first connection.
@@ -108,6 +112,8 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-nats-conns must be at least 1")
 	case *sse < -1:
 		return fmt.Errorf("-sse must be 0 or more")
+	case *boxBusyBefore > 1 || !finite(*boxBusyBefore):
+		return fmt.Errorf("-box-busy-before must be a fraction between 0 and 1")
 	}
 	if *out == "" {
 		return fmt.Errorf("-out is required")
@@ -141,7 +147,7 @@ func runLoad(args []string) error {
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
 		human: *human, sse: *sse, rngSeed: *rngSeed, natsConns: *natsConns,
-		buildCommit: *buildCommit, buildDirty: *buildDirty, args: args,
+		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: args,
 	}, sf)
 }
 
@@ -213,28 +219,34 @@ type summary struct {
 	CommitOrderLock lockSummary       `json:"commit_order_lock"`
 	Sessions        sessionsSummary   `json:"sessions"`
 	SSEBytes        int64             `json:"sse_bytes"`
+	// StackExits are the stack processes that exited during the step; such a step fails and its
+	// row does not measure the load.
+	StackExits []stackExit `json:"stack_exits,omitempty"`
 }
 
 type metaFile struct {
-	Step            string          `json:"step"`
-	Args            []string        `json:"args"`
-	Start           time.Time       `json:"start"`
-	WindowStart     time.Time       `json:"window_start"`
-	WindowEnd       time.Time       `json:"window_end"`
-	End             time.Time       `json:"end,omitzero"`
-	Nproc           int             `json:"nproc"`
-	CPUModel        string          `json:"cpu_model"`
-	Kernel          string          `json:"kernel"`
-	LoadavgBefore   string          `json:"loadavg_before"`
-	GOMAXPROCS      string          `json:"gomaxprocs"`
-	PostgresVersion string          `json:"postgres_version"`
-	BuildCommit     string          `json:"build_commit"`
-	BuildDirty      bool            `json:"build_dirty"`
-	SeedMeta        json.RawMessage `json:"seed_meta,omitempty"`
-	Stack           string          `json:"stack"`
-	PGDirect        bool            `json:"pg_direct"`
-	AllowForeign    bool            `json:"allow_foreign"`
-	PIDs            map[string]int  `json:"pids"`
+	Step        string    `json:"step"`
+	Args        []string  `json:"args"`
+	Start       time.Time `json:"start"`
+	WindowStart time.Time `json:"window_start"`
+	WindowEnd   time.Time `json:"window_end"`
+	End         time.Time `json:"end,omitzero"`
+	Nproc       int       `json:"nproc"`
+	CPUModel    string    `json:"cpu_model"`
+	Kernel      string    `json:"kernel"`
+	// BoxBusyBefore is the box's busy fraction over the BoxBusyBeforeWindowS seconds before the
+	// step, from /proc/stat; null when /proc/stat gave no ticks.
+	BoxBusyBefore        *float64        `json:"box_busy_before"`
+	BoxBusyBeforeWindowS float64         `json:"box_busy_before_window_s"`
+	GOMAXPROCS           string          `json:"gomaxprocs"`
+	PostgresVersion      string          `json:"postgres_version"`
+	BuildCommit          string          `json:"build_commit"`
+	BuildDirty           bool            `json:"build_dirty"`
+	SeedMeta             json.RawMessage `json:"seed_meta,omitempty"`
+	Stack                string          `json:"stack"`
+	PGDirect             bool            `json:"pg_direct"`
+	AllowForeign         bool            `json:"allow_foreign"`
+	PIDs                 map[string]int  `json:"pids"`
 }
 
 var markerPattern = regexp.MustCompile(`lgm[0-9]+x`)
@@ -567,6 +579,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	<-reqDone
 	lg.Printf("generators done at %s; grace %s", time.Since(start).Round(time.Second), cfg.grace)
 	time.Sleep(cfg.grace)
+	smp.checkAlive(time.Now())
 	<-profDone
 	<-lpDone
 	cancel()
@@ -633,13 +646,30 @@ func execute(cfg runConfig, sf seedFile) error {
 	ss := smp.all()
 	writeJSONFile(filepath.Join(cfg.out, "samples.json"), ss, lg)
 	sum.Resources = summarizeResources(ss, sum.Events.Committed+sum.Requests.Sent, durS)
+	sum.StackExits = smp.stackExits()
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, lg)
 	meta.End = time.Now()
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, lg)
 	lg.Printf("step %s done: events offered %d committed %d, receipts %d of %d, requests sent %d (%.1f/s of %g)",
 		cfg.name, sum.Events.Offered, sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts,
 		sum.Requests.Sent, sum.Requests.SentPerS, cfg.requests)
+	if err := stackExitsError(sum.StackExits); err != nil {
+		lg.Print(err)
+		return err
+	}
 	return nil
+}
+
+// stackExitsError is the step's failure when a stack process exited during it, nil otherwise.
+func stackExitsError(exits []stackExit) error {
+	if len(exits) == 0 {
+		return nil
+	}
+	gone := make([]string, len(exits))
+	for i, x := range exits {
+		gone[i] = fmt.Sprintf("%s (pid %d) exited during the step (first seen gone at %s)", x.Name, x.PID, x.FirstSeenGone.UTC().Format(time.RFC3339))
+	}
+	return fmt.Errorf("%s; this row does not measure the load", strings.Join(gone, ", "))
 }
 
 // planEvent draws one write from the event stream: a session, one of its watched issues, a
@@ -755,7 +785,17 @@ func writeJSONFile(path string, v any, lg *log.Logger) {
 	}
 }
 
-// collectMeta records the machine, the build and the seed before the step starts.
+// boxBusyBeforeWindow is the interval of the box-busy reading before a step, and
+// boxBusyBeforeWarn the busy fraction above which run.log warns that the box is not idle. On
+// gVisor /proc/loadavg always reads 0.00 and each Legion role has its own PID namespace, so only
+// /proc/stat shows another role's CPU use.
+const (
+	boxBusyBeforeWindow = 5 * time.Second
+	boxBusyBeforeWarn   = 0.10
+)
+
+// collectMeta records the machine, how busy it was over the 5 s before the step, the build and
+// the seed, before the step starts.
 func collectMeta(ctx context.Context, cfg runConfig, lg *log.Logger) metaFile {
 	m := metaFile{
 		Step: cfg.name, Args: cfg.args, Nproc: runtime.NumCPU(), BuildCommit: cfg.buildCommit, BuildDirty: cfg.buildDirty,
@@ -772,10 +812,19 @@ func collectMeta(ctx context.Context, cfg runConfig, lg *log.Logger) metaFile {
 	if b, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
 		m.Kernel = strings.TrimSpace(string(b))
 	}
-	if b, err := os.ReadFile("/proc/loadavg"); err == nil {
-		if f := strings.Fields(string(b)); len(f) >= 3 {
-			m.LoadavgBefore = strings.Join(f[:3], " ")
+	m.BoxBusyBeforeWindowS = boxBusyBeforeWindow.Seconds()
+	busy, ok := cfg.boxBusyBefore, cfg.boxBusyBefore >= 0
+	if !ok {
+		busy, ok = boxBusy(ctx, boxBusyBeforeWindow)
+	}
+	if ok {
+		m.BoxBusyBefore = &busy
+		if busy > boxBusyBeforeWarn {
+			lg.Printf("warning: the box was %.0f%% busy over the %s before the step (above %.0f%%): another process on the machine is using CPU, so this step shares it",
+				100*busy, boxBusyBeforeWindow, 100*boxBusyBeforeWarn)
 		}
+	} else {
+		lg.Printf("meta: box busy before: /proc/stat gave no ticks")
 	}
 	// GOMAXPROCS as Dispatch was started with it, from its environment when its pid is known.
 	if v, ok := os.LookupEnv("GOMAXPROCS"); ok {

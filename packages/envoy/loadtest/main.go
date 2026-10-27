@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
@@ -22,6 +23,7 @@ commands:
   tables           render TABLES.md and pprof tops from step directories
   series-sessions  print the session count of the series step at a load factor
   trigger-sql      print the commit-time trigger SQL (commit-trigger.sql)
+  box-busy         print the box's busy fraction over the next 5 s, from /proc/stat
 
 Run "loadgen <command> -h" for a command's flags.
 `
@@ -45,6 +47,13 @@ func main() {
 		err = runSeriesSessions(os.Args[2:])
 	case "trigger-sql":
 		fmt.Print(commitTriggerSQL)
+	case "box-busy":
+		busy, ok := boxBusy(context.Background(), boxBusyBeforeWindow)
+		if !ok {
+			err = fmt.Errorf("/proc/stat gave no ticks")
+		} else {
+			fmt.Printf("%.4f\n", busy)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "loadgen: unknown command %q\n\n%s", os.Args[1], usage)
 		os.Exit(2)

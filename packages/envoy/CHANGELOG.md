@@ -17,8 +17,11 @@
   `run-series.sh` runs the six steps from 0.25x to 10x into one `TABLES.md`. Every endpoint comes
   from the stack's own `stack.json`, and a step checks that NATS, Dispatch and the listener hold
   the stack's name and random tokens before its first write, so it refuses the pod's live listener
-  and production. `packages/envoy/loadtest/README.md` says how to run it, what every column means
-  and how the stack differs from production.
+  and production. One run at a time holds a `LOADTEST_ROOT`: a second `run-step.sh`,
+  `run-series.sh` or stack command on it is refused, naming the run that holds it. A step in which
+  Dispatch or another stack process exits fails, naming the process, and its row carries a mark;
+  `meta.json` records how busy the box was just before the step. `packages/envoy/loadtest/README.md`
+  says how to run it, what every column means and how the stack differs from production.
 - Each block of a Dispatch document is a node of the reference graph. A reference can name one
   block, `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
   `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
