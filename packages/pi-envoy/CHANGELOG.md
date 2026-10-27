@@ -41,6 +41,12 @@
 
 ### Fixed
 
+- The `dispatch` skill now says what a claim delivers. A claim on an issue with no route brings
+  people's comments on that issue to the claiming session, and a thread the session wrote in
+  brings people's replies. The skill said that a claim delivers no comments. Routing the issue to
+  the session, or subscribing to the issue's topic, stays the way to get everything else
+  (INFRA-596).
+
 - A live view held open while its session is relaunched with `--resume` now shows the resumed
   process's model, thinking level and command changes. Two things stopped it. Every process
   numbered its agent-stream frames from 0, and the page keeps a `settings` or `commands` frame only

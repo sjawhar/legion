@@ -425,21 +425,12 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			suppressedRouteSessionID = route.sessionID
 		}
 	}
-	// A session a mention delivers this comment to hears it from the mention alone: the author
-	// routes skip it (suppressed_authors). A reply's author route reaches its thread's root
-	// author; a new comment's reaches the sessions that wrote its document, which the outbox reads
-	// when it publishes, so every session a mention resolved to is named, an author or not.
-	suppressedAuthors := []string{}
-	switch {
-	case replyRoot != nil:
-		if replyRoot.Author.Kind == "session" {
-			if _, mentioned := mentionedSessions[replyRoot.Author.ID]; mentioned {
-				suppressedAuthors = append(suppressedAuthors, replyRoot.Author.ID)
-			}
-		}
-	case input.AskID == nil:
-		suppressedAuthors = slices.Sorted(maps.Keys(mentionedSessions))
-	}
+	// A session a mention delivers this comment to hears it from the mention alone: the claimant
+	// route and the author routes skip it (suppressed_authors). The outbox reads the claimant, the
+	// thread's sessions and the document's authors only when it publishes, so every session a
+	// mention resolved to is named, on a new comment, a reply and an ask's thread alike. The ask's
+	// follower routes do not read the list.
+	suppressedAuthors := append([]string{}, slices.Sorted(maps.Keys(mentionedSessions))...)
 	turn := threadTarget.replyTurn(actor, input.Turn)
 	var rowID string
 	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {

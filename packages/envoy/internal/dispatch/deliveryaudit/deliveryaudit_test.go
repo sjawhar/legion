@@ -484,9 +484,10 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 		if row["event_id"] == "" || row["published_at"] == "" {
 			t.Errorf("the reply's row names no published event: %v", row)
 		}
-		// Today's fan-out sends a person's reply to the thread's root and parent authors only, both
-		// the person here, so this reads false until the outbox also reaches the claimant.
+		// The outbox sends a person's comment on a claimed, unrouted issue to the claimant, so the
+		// row reads addressed, as the event's published_destinations records it.
 		r.expectAddressedAsRecorded(t, row)
+		expect(t, row, map[string]string{"addressed": "true"})
 		rootRow := targetRow(t, rows, root, agent("s-claimant"))
 		expect(t, rootRow, map[string]string{"shape": "anchored", "reopened": "false", "owed_reasons": "claimant"})
 		if rows := rowsFor(rows, sessionReply); len(rows) != 0 {

@@ -1429,6 +1429,20 @@
 
 ### Fixed
 
+- A person's reply in a Dispatch comment thread now reaches the agents in that thread (INFRA-596).
+  A reply stores its thread root as `reply_to`, so the outbox sent it to the root's author and the
+  direct parent's author, which were both the person when a person started the thread, and the
+  agent that answered in the thread never heard the person's next reply. The outbox now sends a
+  person's reply, and its edit, to every session that wrote a comment in the thread and to every
+  session that wrote the document the thread is on. It reads these sessions for a whole batch in
+  one query (`outbox/recipients.go`). On an issue with no route, a person's comment, and its edit,
+  now also reach the session that claimed the issue (a document comment uses the document's
+  issue), in an ask's thread too. A person's claim adds nothing, and a routed issue still reaches
+  its route and not the claimant. A comment's `suppressed_authors` now names every session a
+  mention resolved to, on a reply and in an ask's thread too, so a mentioned session hears the
+  comment once, from the mention. A resolve or a reopen still reaches the thread root's author
+  only, so the reopen that a reply makes in the same transaction tells no session twice.
+
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a
   map value), naming the component and the input's path and never quoting a secret value, before

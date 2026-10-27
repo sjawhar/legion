@@ -1205,10 +1205,10 @@ type CommentEventPayload struct {
 	ThreadRootID string `json:"thread_root_id,omitempty"`
 	// SuppressRoute and SuppressedAuthors are resolved before the comment event commits,
 	// so the outbox can deduplicate without consulting the live session registry.
-	// SuppressedAuthors names the sessions the author routes skip because a mention delivers the
-	// comment to them: on a reply, its thread's root author when mentioned; on a new comment not
-	// in an ask's thread, every session a mention resolved to, since the outbox reads the
-	// document's authors only when it publishes.
+	// SuppressedAuthors names the sessions the claimant route and the author routes skip because a
+	// mention delivers the comment to them: every session a mention resolved to, on a new comment,
+	// a reply and a comment in an ask's thread alike, since the outbox reads the claimant, the
+	// thread's sessions and the document's authors only when it publishes.
 	SuppressRoute            bool     `json:"suppress_route"`
 	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
 	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`

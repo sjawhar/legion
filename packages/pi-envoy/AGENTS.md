@@ -296,7 +296,11 @@ pass it only when none of the session's subscriptions, as the Envoy listener rec
 the owner. What a write does give the session is a *follow* on the ask it
 opened or replied to (`details.follows.ask`): the ask's answer and replies then reach
 the session's own agent topic directly, server-side, with no NATS subscription to
-manage. The `dispatch` command prints the first `details.follows` for each ask id as one
+manage. The outbox gives a session three more server-side deliveries, with no write and no
+subscription: a person's reply in a comment thread the session wrote in, a person's comment on a
+document the session wrote, and, while the session holds the claim of an issue with no route, a
+person's comment on that issue and its edit. The `dispatch` command prints the first
+`details.follows` for each ask id as one
 notice after the call's result (the session's `state.json` remembers which asks it already
 announced, the once-per-ask policy over `followedAsk` and `followNoticeText` every host shares); a later
 write on the same ask stays quiet, and reads (`dispatch read`, `dispatch doc-read`) return only
