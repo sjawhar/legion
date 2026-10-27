@@ -75,8 +75,9 @@ type Deps struct {
 // DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
 // state decoded once with the stamp it was read under, which a read of a document no room holds
 // caches its rendering by (coldRead). compactRoom is the compaction every path Dispatch compacts a
-// document on runs (a room's close, CompactAll), under the tail rule; Compact, ygo's, is the keep-N
-// rule only.
+// document on runs (a room's close, the compaction queue, CompactAll), under the tail rule; Compact,
+// ygo's, is the keep-N rule only. pgVersioned is the PgVersioned the store is or wraps, which New
+// hands the Service's note of each append and load (noteStoredUpdates).
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
@@ -86,6 +87,7 @@ type VersionedStore interface {
 	DocumentStamp(ctx context.Context, room string) (DocumentStamp, error)
 	LoadDocument(ctx context.Context, room string) (LoadedDocument, error)
 	compactRoom(ctx context.Context, room string, rule compactRule, wait bool) (compactResult, error)
+	pgVersioned() *PgVersioned
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
@@ -262,6 +264,10 @@ type Service struct {
 	// reads holds the renderings of the documents cold reads served, each under the stored state
 	// it was rendered from (coldRead).
 	reads *documentReads
+	// compactions is the queue of the documents this service compacts, whose worker New starts,
+	// Shutdown stops and Quiesce pauses (compactionQueue). Every committed append and every load
+	// notes its room there (noteStoredUpdates).
+	compactions *compactionQueue
 }
 
 type artifactOwner struct {
@@ -587,6 +593,14 @@ func New(deps Deps) *Service {
 		unrecordedMarkTTL: unrecordedMarkTTL,
 		reads:             newDocumentReads(documentReadBudget),
 	}
+	service.compactions = startCompactionQueue(service.compactionStep)
+	// The store tells the queue of every append it commits and every load it reads; a store that
+	// wraps a PgVersioned - a test's, to fail or hold one of its calls - tells it through the one
+	// it wraps.
+	if versioned := persist.pgVersioned(); versioned != nil {
+		note := service.noteStoredUpdates
+		versioned.noteStored.Store(&note)
+	}
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
 	srv := websocket.NewServerWithPersistence(adapter)
 	srv.HocuspocusFraming = true
@@ -666,7 +680,14 @@ const ShutdownDrainBudget = 9 * time.Second
 // resumption (RunSettlementResumption). For each document that owed a settlement Shutdown logs
 // whether it settled or was left to resume; once the caller's deadline has passed it cannot read
 // that back, and its error names those documents.
+//
+// The compaction queue takes no note and starts no compaction once Shutdown begins, and drops the
+// documents it held, which a later process compacts. A compaction already running finishes within
+// ctx, and is cancelled once ctx ends; either way Shutdown returns only after the queue's worker
+// has, so nothing of it outlives the store's pools, which its caller closes next.
 func (s *Service) Shutdown(ctx context.Context) error {
+	s.compactions.shutDown()
+	defer s.compactions.awaitStopped(ctx)
 	// loadedRoom is a room as Shutdown found it: the generation its settlement runs at, and
 	// whether an editor was connected.
 	type loadedRoom struct {
@@ -834,8 +855,12 @@ func settlementsUnconfirmed(cause error, owed map[string]bool, rooms []string) e
 // Nothing in production calls it. It exists so the browser-test harness can truncate its
 // database between scenarios with every document the previous scenario had open already
 // written: a settlement still running would write to tables the truncate has just emptied, or
-// wait on the truncate's locks and fail once it commits.
+// wait on the truncate's locks and fail once it commits. The compaction queue is held for the
+// same reason: it takes no note while Quiesce runs, Quiesce waits for a compaction already
+// running and drops the documents the queue held, and the queue takes notes again once Quiesce
+// returns.
 func (s *Service) Quiesce(ctx context.Context) error {
+	defer s.compactions.pause(ctx)()
 	s.quiescing.Store(true)
 	defer s.quiescing.Store(false)
 	s.stopAllSettleTimers()

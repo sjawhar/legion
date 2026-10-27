@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -43,6 +44,23 @@ type PgVersioned struct {
 	// takes the room's lock to write the fold back. Nil outside tests; tests use it to hold a
 	// compaction inside its fold while another writer changes the document.
 	duringCompactionFold func(room string)
+	// noteStored is the note of the Service that took this store last (New), which each append
+	// gives the version it committed and each load the versions it read (noteStoredUpdates), so
+	// the Service's compaction queue checks the room. Nil for a store no Service took.
+	noteStored atomic.Pointer[func(room string, head, oldest int64)]
+}
+
+// pgVersioned is p itself, the PgVersioned the Service notes appends and loads through.
+func (p *PgVersioned) pgVersioned() *PgVersioned {
+	return p
+}
+
+// noted gives the Service that took p the versions from oldest to head of the room's rows an
+// append committed or a load read (noteStored).
+func (p *PgVersioned) noted(room string, head, oldest int64) {
+	if note := p.noteStored.Load(); note != nil {
+		(*note)(room, head, oldest)
+	}
 }
 
 // roomLock is one room's in-process lock and how many callers hold it or wait for it.
@@ -57,7 +75,7 @@ func NewPgVersioned(database *store.Store) *PgVersioned {
 }
 
 // Load returns the room's state at its head (stateThrough), constrained by a pending prune
-// checkpoint when one exists.
+// checkpoint when one exists, and notes the rows it read once its transaction ends (noted).
 func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	if err := ctx.Err(); err != nil {
 		return persistence.LoadResult{}, err
@@ -82,10 +100,30 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	if err != nil {
 		return persistence.LoadResult{}, err
 	}
+	oldest, err := p.oldestNoted(ctx, tx, room)
+	if err != nil {
+		return persistence.LoadResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return persistence.LoadResult{}, fmt.Errorf("commit document load: %w", err)
 	}
+	p.noted(room, int64(head), oldest)
 	return persistence.LoadResult{Update: update, Version: head}, nil
+}
+
+// oldestNoted is the version of the room's oldest row as tx reads it, which a load notes with the
+// head it read (noted), or 0 without a read when no Service takes p's notes.
+func (p *PgVersioned) oldestNoted(ctx context.Context, tx pgx.Tx, room string) (int64, error) {
+	if p.noteStored.Load() == nil {
+		return 0, nil
+	}
+	var oldest int64
+	if err := tx.QueryRow(ctx, `
+		select coalesce(min(version), 0) from doc_updates where artifact_id = $1
+	`, room).Scan(&oldest); err != nil {
+		return 0, fmt.Errorf("read the document's oldest update: %w", err)
+	}
+	return oldest, nil
 }
 
 // Head is the version Load folds the room up to now, read through the pool that owns loads, as
@@ -156,7 +194,13 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 		advanceRoomCursor(roomCursorFrom(ctx), version)
 		return nil
 	})
-	return version, err
+	if err != nil {
+		return version, err
+	}
+	// The committed row is noted once the document's locks are gone: the note waits on nothing
+	// the append holds.
+	p.noted(room, int64(version), int64(version))
+	return version, nil
 }
 
 // AppendUpdateTx appends an already validated V1 update inside tx, recording whether it changes

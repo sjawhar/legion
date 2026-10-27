@@ -257,7 +257,8 @@ type LoadedDocument struct {
 // LoadDocument is the room's document at its head, decoded once, and the stamp of the state it was
 // decoded from, both read in the one repeatable-read transaction Load reads in. Its document is
 // the one Load's state decodes into (documentThrough), so a read of it shows what a room load
-// would. A history that does not decode is ErrDocumentUnloadable.
+// would. A history that does not decode is ErrDocumentUnloadable. Like Load, it notes the rows it
+// read once its transaction ends (noted).
 func (p *PgVersioned) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
 	if err := ctx.Err(); err != nil {
 		return LoadedDocument{}, err
@@ -276,13 +277,18 @@ func (p *PgVersioned) LoadDocument(ctx context.Context, room string) (LoadedDocu
 		return LoadedDocument{}, err
 	}
 	loaded := LoadedDocument{Stamp: stamp}
+	var oldest int64
 	if stamp.Version != 0 {
 		if loaded.Doc, err = documentThrough(ctx, tx, room, persistence.Version(stamp.Version)); err != nil {
+			return LoadedDocument{}, err
+		}
+		if oldest, err = p.oldestNoted(ctx, tx, room); err != nil {
 			return LoadedDocument{}, err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return LoadedDocument{}, fmt.Errorf("commit document load: %w", err)
 	}
+	p.noted(room, stamp.Version, oldest)
 	return loaded, nil
 }
