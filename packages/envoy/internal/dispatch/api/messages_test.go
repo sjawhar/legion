@@ -1728,11 +1728,14 @@ func readMessageAttemptHistory(t *testing.T, database *store.Store, messageID st
 
 // The control for the test above: an attempt that failed WITHOUT landing carries nothing the
 // listener has seen, so its retry must reach the agent. A fix that collapses every retry of a
-// message onto one key has to keep this green.
+// message onto one key has to keep this green. A refusal is a listener take-over's failure, tried
+// again inside the take-over window (takeoverRetry) under the same key, so the attempt is recorded
+// failed only when every try of that window was refused; this listener refuses every one until
+// the message's own request has answered.
 func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
-		sends     int
+		answering bool
 		delivered map[string]struct{}
 	}
 	listenerState.delivered = map[string]struct{}{}
@@ -1752,13 +1755,12 @@ func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 				t.Errorf("decode targeted send: %v", err)
 			}
 			listenerState.Lock()
-			listenerState.sends++
-			first := listenerState.sends == 1
-			if !first {
+			refusing := !listenerState.answering
+			if !refusing {
 				listenerState.delivered[request.IdempotencyKey+"@"+request.TargetSession] = struct{}{}
 			}
 			listenerState.Unlock()
-			if first {
+			if refusing {
 				// Refused before the envelope was published: nothing landed.
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_, _ = w.Write([]byte(`{"error":"listener refused the send"}`))
@@ -1770,7 +1772,7 @@ func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "A send that never landed", "before")
 
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
@@ -1781,8 +1783,11 @@ func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 	}
 	message := decodeBody[model.Message](t, created)
 	if len(message.Deliveries) != 1 || message.Deliveries[0].State != "failed" {
-		t.Fatalf("first attempt = %#v, want one attempt recorded failed", message.Deliveries)
+		t.Fatalf("first attempt = %#v, want one attempt recorded failed once every try was refused", message.Deliveries)
 	}
+	listenerState.Lock()
+	listenerState.answering = true
+	listenerState.Unlock()
 
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
@@ -1799,6 +1804,13 @@ func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 	listenerState.Unlock()
 	if delivered != 1 {
 		t.Fatalf("the listener delivered %d distinct keys, want the retry to reach the agent once", delivered)
+	}
+	// The first attempt failed without landing, so the second is a real delivery, not a duplicate.
+	if got := readMessageAttemptHistory(t, database, message.ID); !reflect.DeepEqual(got, []attemptRow{
+		{Attempt: 1, State: "failed", Duplicate: false},
+		{Attempt: 2, State: "sent", Duplicate: false},
+	}) {
+		t.Fatalf("attempt history = %#v", got)
 	}
 }
 
