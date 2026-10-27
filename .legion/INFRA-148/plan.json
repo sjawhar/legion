@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-148",
+  "completed": "2026-10-27T02:52:00Z",
+  "scope": "INFRA-148's own pull request: (1) people's answers and comments from the last 72 hours on every Oh My Pi model request and at Claude Code's start, resume, compaction and subagent start; (2) dispatch doc-read printing open anchored comments in full. Children INFRA-568..573 own the rest.",
+  "plan": "Full plan: dispatch://INFRA-148/artifact/plan-md (plan.md on the issue). Tasks: 1 contracts (SessionAnswer types, dispatch_answers spec, doc-read help); 2 server (GET /api/v1/agents/{session_id}/answers over published_destinations, message_deliveries and comment_deliveries, two partial-index migrations, Go tests through the outbox publish path); 3 envoy-client (sessionAnswers client, shared session-answers module: render under 8,000 chars, 800 ms deadline, single flight, memory and disk cache, 404 back-off, non-running token resolution; dispatch answers; doc-read comments section); 4 pi-envoy (context handler appends the list as a per-call message after the last message; real-omp test session-answers-omp.test.ts cases a-h); 5 claude-envoy (answers hook mode on SessionStart and SubagentStart, dist rebuild, hook tests, real-claude test gated on LEGION_TEST_CLAUDE with install action); 6 docs; 7 smoke on local Dispatch with NATS and real omp, plus real-provider cache reads.",
+  "cachePlacement": "The list is a separate user message appended after the request's last message. OMP marks it per-call, so no cache_control anchor goes on it; anchors stay on the last two conversation messages and the decimation anchors before the head dispatch-first message, so the cached prefix is byte-identical whatever the list holds. Proven by session-answers-omp.test.ts case (h) and task 7's cache_read_input_tokens.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, the six-field proof, PR body and pushes",
+      "dispatch: the dispatch CLI commands this changes (doc-read, the new answers) and any Dispatch write while proving them",
+      "ce-simplify-code: the simplify pass pr-body.md requires before the proof head"
+    ],
+    "test": [
+      "legion-worker: re-running each proof with its negative control at the head and the test handoff",
+      "dispatch: driving dispatch doc-read, dispatch answers and the local Dispatch the proofs run against"
+    ],
+    "review": [
+      "legion-worker: review rules, threads and the merge gate (references/merge-gate.md, review-threads.md)",
+      "dispatch: judging the CLI output and the new route against Dispatch's conventions"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "published_destinations alone misses mentions (comment_deliveries), targeted messages and broadcasts (message_deliveries), and adds session-route deliveries; role-route deliveries name no session.",
+        "answer": "D1: three sources S1 events (ask.answered, comment.created, message.created by a person, agent topic in published_destinations), S2 message_deliveries sent, S3 comment_deliveries sent; role-topic deliveries, ask.resolved and ask.handed_back left out; recorded as spec departure 1 for the architect; one Go test per source in task 2."
+      },
+      {
+        "finding": "Where the list sits so the prompt cache survives; consecutive user turns; summary requests.",
+        "answer": "D3: a separate per-call user message appended after the last message, never at the head; OMP places no anchor on a per-call message; task 4(h) asserts no cache_control on it and N's prefix through its last anchor byte-identical in N+1; task 7 reads real cache_read_input_tokens on the pod's model route."
+      },
+      {
+        "finding": "The one-second bound vs blocking token commands, cache scope across subagents and Claude hook processes, re-filtering cached items, hung reads in tool loops.",
+        "answer": "D5: 800 ms deadline, process-wide single flight and memory cache, disk cache under the Dispatch session state dir, 72h re-filter at render, no second wait on a read already past its deadline, a non-running token resolution mode in envoy-config/session-settings; failure line when no cache; case (f) and answers-hook.test.ts measure it."
+      },
+      {
+        "finding": "Dispatch load from a read on every model request, unbounded response size, meaning of 'next model request'.",
+        "answer": "D5/D6: read every request with single flight per session; partial index keeps reads to the window's human events; max_chars bounds the body; 'next' = next request after the delivery is recorded; EXPLAIN ANALYZE on a 1M-event seeded table in the PR and access-log latency in the production check."
+      },
+      {
+        "finding": "Replaced answers, edited comments, cross-source duplicates, Envoy copies, a second extension copy.",
+        "answer": "D2: one item per (kind,id): latest answer marked replaces an earlier answer, current comment body with edited time, resolved comments kept; 'once' means once in the list; marker guard at the tail position like dispatch-first; unit tests in tasks 2-4."
+      },
+      {
+        "finding": "The 8,000-character cap: unit, what counts, an item larger than the cap.",
+        "answer": "D4: UTF-16 length of the whole message incl. header and left-out line; strict newest-first prefix so every item left out is older than every item shown; an item over the cap is left out whole, never cut; tests at 7,999/8,000/8,001 and a 9,000-character newest item; its own Claude hook command for the 10,000 cap."
+      },
+      {
+        "finding": "'The command that reads them' does not exist.",
+        "answer": "D7: new read-only `dispatch answers` (dispatch_answers spec, issueFreeTools, execute case), all 72h items in full, old-server message and exit 1; contracts AGENTS.md, docs/site for-agents.md, CHANGELOGs, claude-envoy dist updated."
+      },
+      {
+        "finding": "Claude Code moments cannot be shown in a model request without a claude binary.",
+        "answer": "Task 5: real-binary test gated on LEGION_TEST_CLAUDE with a stand-in ANTHROPIC_BASE_URL, driving startup, resume, /compact and a Task subagent; pinned via .claude-code-pin and .github/actions/install-claude-code so it is required on Actions; any moment that cannot be driven goes to the architect with evidence."
+      },
+      {
+        "finding": "No real-binary harness drives a task subagent.",
+        "answer": "Task 4(c): the stand-in model answers with a task tool call; the subagent's first Messages request is told apart by its prompt and must carry the answer; the harness profile turns task on if needed."
+      },
+      {
+        "finding": "Who may call the new route.",
+        "answer": "D6: auth any, session in the path, described as not an authorization boundary (direct-message text already reaches every caller through GET /api/v1/events); a person may read any session's list."
+      },
+      {
+        "finding": "Migrations, indexes, lock behaviour, numbering, Postgres for Go tests without docker.",
+        "answer": "D6: two migrations (partial events index on created_at for person events of the three types; comment_deliveries (session_id, created_at)), censuses of one select, README paragraphs, measured build time; next free number, renumber if INFRA-568 lands first; Go tests on a cluster Postgres Job via DISPATCH_TEST_DATABASE_URL."
+      },
+      {
+        "finding": "A new plugin against an old server (404).",
+        "answer": "D5/D7: 404 is a failed read with a named reason, backed off 5 minutes per Dispatch URL process-wide; the request carries the cache or the failure line; `dispatch answers` prints that the build predates INFRA-148; case (g)."
+      },
+      {
+        "finding": "'Under the passage it is anchored to' without corrupting the document agents quote for doc-edit.",
+        "answer": "D8: comments printed after the document in an `Open anchored comments:` section, each under its `> quote` and Position line; document markdown unchanged; recorded as spec departure 2."
+      },
+      {
+        "finding": "Other doc-read gaps: replies, suggestions, time, --version, --blocks, exact help phrase.",
+        "answer": "D8: replies grouped under the root by reply_to with author/time/body, suggestion replacement printed, created_at plus edited time, live comments at --version under a heading saying so, --blocks unchanged, the exact help sentence checked by a contracts test."
+      },
+      {
+        "finding": "Build hygiene: claude-envoy dist, docs and CHANGELOGs.",
+        "answer": "Tasks 3-6: bun run build and check-dist in claude-envoy; pi-envoy AGENTS.md/README, claude-envoy docs, contracts AGENTS.md, docs/site generated pages, CHANGELOGs of envoy, envoy-client, contracts, pi-envoy, claude-envoy, and the architecture docs."
+      },
+      {
+        "finding": "Unsupported claims: OMP per-call/cache placement internals, SubagentStart session_id, Claude 10,000 cap, anchor_block on list routes.",
+        "answer": "OMP internals were read from the bundled JS in /opt/omp/bin/omp (emitContext marks per-call; Anthropic placement skips per-call messages) and are proven by case (h); SubagentStart session_id and the hook cap are checked on the real binary in task 5; D8 does not rely on anchor_block from list routes."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "The list carries the answers and comments people wrote that Dispatch delivered to that session or its parent: answers to its asks, replies to its comments, comments on documents it wrote, and messages to it.",
+      "plan": "Also carries a person's comment on an issue routed to that session, a person's reply on its ask, and a mention, since Dispatch delivers each to the session's own topic or to the session directly; leaves out role-topic issue-route deliveries (no session Dispatch can name) and ask resolutions and hand-backs (neither answer nor comment).",
+      "evidence": "packages/envoy/internal/dispatch/outbox/publisher.go:419-432 (session route, author routes, follower routes), :498-525 (ask followers incl. thread replies), comment_deliveries for mentions (migration 0039, suppressed_authors at publisher.go:536-537).",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "`dispatch doc-read` prints each open anchored comment's author, time and full text under the passage it is anchored to.",
+      "plan": "Prints each open anchored comment, with its replies, under its quoted passage in an `Open anchored comments:` section after the document, never inside the document's markdown.",
+      "evidence": "doc-edit finds text by occurrence in the rendered markdown (packages/contracts/src/dispatch-tools.ts:909, :931-938); comment text inside it would add occurrences and read as document structure; list routes carry no anchor_block (block_path_test.go:80-88).",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
+  ]
+}
