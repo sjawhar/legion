@@ -2,41 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-367",
-  "completed": "2026-10-27T11:01:30Z",
-  "decision": "changes_requested",
-  "round": 2,
-  "reviewedHead": "b3b3f1e0a4ce4a9ba75d1ea1eb651f2e48f6f70b",
+  "completed": "2026-10-27T12:47:20Z",
+  "decision": "approved",
+  "round": 3,
+  "reviewedHead": "6480fe46ff6c67dcda8aa3d38da99c5554d38c04",
+  "codeHead": "7bbf6b715c7b",
   "critical": 0,
-  "important": 2,
-  "minor": 3,
+  "important": 0,
+  "minor": 2,
   "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/store/migrations/0129_comments_written_version.up.sql",
-      "description": "Migration numbers collide with main: main has 0129_document_edit_notices (merged in #2137), and the INFRA-156 PR #2394 takes 0130_block_pointer_links. After any merge of main, pgmigrate.Load refuses two migrations that share version 129 (internal/pgmigrate/set.go:44-47,131-139), so the store fails before it applies anything (store/store.go:95-97). GitHub also reports the PR CONFLICTING (packages/envoy-client/CHANGELOG.md). Merge main forward, renumber 0129-0133 (up and census files) above main's highest, and update node_facts_migration_test.go:10-15 and the numbers quoted in packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md, packages/envoy/cmd/dispatch/AGENTS.md, packages/envoy/cmd/dispatch/README.md, the migrations' own comments and the PR body."
-    },
-    {
-      "severity": "important",
-      "file": "(CI)",
-      "description": "No CI has run for code 69d138bb. The implementer's push ended at 5ad3589f, whose message carries 'skip-checks: true' although the push also carried code (33cc1fec, 69d138bb), so GitHub started no workflow for it. The newest pull_request runs are at 9386d556 and were still queued at 10:53Z. The corrective push (the merge of main) must carry no trailer, so that CI runs on the code."
-    },
     {
       "severity": "minor",
       "file": "PR body",
-      "description": "The census says dispatch-execute.ts is the only TypeScript reader of GraphNode. The dashboard also reads graph nodes through GraphReferences/GraphEdge (re-exported at packages/dispatch/web/src/api/types.ts:137-138): features/refs/ReferencedBy.tsx, RefPreview.tsx:344-357, reference-target.ts:262. None reads changed_at, and the new fields are optional, so nothing breaks. Add them as hits with a disposition. The Size line is also wrong: +3215/-219 at b3b3f1e0, not +3270/-225."
+      "description": "Body text only, no behaviour: 'Proven by' still cites the run at 69d138bb, although the E2E lines carry the run at 7bbf6b71. The census cites line numbers from 69d138bb (dispatch-api.ts:3382,3396 are now 3413/3427; dispatch-execute.ts:2006 is now 2007). The PRRT_kwDORFy7ds6wpCnu disposition describes RemovedBlockFacts, which 7bbf6b71 replaced with RemovedBlockNode. What the census concludes is still right."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/refs/blocks.go",
-      "description": "Cleanup, no behaviour change (fast-follow): RemovedBlockFacts returns a facts-only GraphNode with no Kind or ID, and api/references.go:141-160 copies the six facts out one by one. A RemovedBlockNode that builds the whole block node, as loadBlockNodes does, would remove the copy."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/e2e/acceptance/block-graph.sh",
-      "description": "Cleanup, no behaviour change (fast-follow): the script branches on component_source in three places (the R12 case at 671, the if at 728, the inner if at 736). Moving the component-node read into a function called from the fixture and existing arms would leave one branch."
+      "file": "packages/envoy/internal/dispatch/refs/graph.go",
+      "description": "Not a defect; a risk recorded in the body: loadIssueNodes finds an issue's last change by reading its events backwards on (issue_key, seq), and no partial index matches that type list. It is unmeasured on large issues; in practice the daemon's status writes are issue.updated events, so the scan stays short."
     }
   ],
-  "threads": "My four round-1 threads (PRRT_kwDORFy7ds6wpCni, ...Cnn, ...Cnu, ...Cnx): each replied to as accepted. The implementer had already resolved all four. No other threads.",
-  "ci": "CI head 9386d556 (the newest pull_request run); compare 9386d556...b3b3f1e0 handoffsOnly false, 10 files. No run exists for code 69d138bb, because the push's head 5ad3589f carried skip-checks.",
-  "thermo": "At b3b3f1e0: thermonuclear-deep-review Verdict CHANGES (the migration collision; three body Minors); thermonuclear-code-quality Verdict CHANGES (structural only: the RemovedBlockFacts facts-only node and the driver's three branches). Previous findings storedActors and the comment join: withdrawn as fixed."
+  "ci": "CI head 692446de (the newest pull_request run; the compare from it to 6480fe46 changes only .legion/, 1 file). Required: lint, typecheck, test, pr-title (rulesets; branch protection lists none). All completed success at 692446de, read at 12:46Z.",
+  "thermo": "At 6480fe46: thermonuclear-deep-review Verdict APPROVE (three body Minors); thermonuclear-code-quality Verdict APPROVE (both round-2 findings withdrawn as fixed).",
+  "threads": "Five threads, all mine, each with my reply. The four from round 1 were accepted in round 2. PRRT_kwDORFy7ds6wpyUC (the migration collision) was accepted this round and named to the implementer over Envoy. All five are resolved.",
+  "migrations": "0130-0134 above main's 0129_document_edit_notices; main has no newer migration as of 12:46Z. #2394 also takes 0130; by agreement, whichever merges second renumbers."
 }
