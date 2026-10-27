@@ -920,6 +920,9 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		// Reference-shaped text whose label lowercases to a defined label's, which main escaped: the
 		// engine keeps `İ` apart from `i`, and the escaped text reads back as the same text.
 		"Ref[^i] and \\[^İ] text.\n\n[^i]: Def.\n",
+		// A link labelled with an address, to the address itself or to its mailto: URL.
+		"Write to [a@b.test](a@b.test).\n",
+		"Write to [a@b.test](mailto:a@b.test).\n",
 	} {
 		t.Run(markdown, func(t *testing.T) {
 			tree, err := Parse(markdown)
