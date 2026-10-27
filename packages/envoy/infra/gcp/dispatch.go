@@ -26,11 +26,11 @@ const (
 	// defaultDispatchDatabaseTier is the Cloud SQL tier when databaseTier is unset: 4 vCPU and
 	// 15 GB. Cloud SQL's default max_connections follows the instance's memory, and from 15 to
 	// under 30 GB it is 500 (https://cloud.google.com/sql/docs/postgres/flags, max_connections).
-	// Every server pod opens up to the sum of its pools, 32 connections
+	// Every server pod opens up to the sum of its pools, 81 connections
 	// (packages/envoy/internal/dispatch/store/pool.go); the listener's and the front door's pods
 	// open none. A rolling update runs replicas plus one pod (maxSurge), so connections per pod x
-	// (replicas + 1) must stay under max_connections: 32 x 15 is 480, so up to 14 replicas roll
-	// inside 500.
+	// (replicas + 1) must stay under max_connections: 81 x 6 is 486, so up to 5 replicas roll
+	// inside 500, where the 100 of a 3.75 GB tier holds one pod and no roll.
 	defaultDispatchDatabaseTier = "db-custom-4-15360"
 	defaultDispatchNamespace    = "dispatch"
 	defaultDispatchReplicas     = 1
@@ -74,7 +74,7 @@ const (
 	// defaultDispatchProxyCPU and defaultDispatchProxyMemory size the app pod's cloud-sql-proxy
 	// sidecar when proxyCpu and proxyMemory are unset; Autopilot counts it in the pod's request
 	// beside envoy-dispatch. Every database call of the pod passes through the proxy's TLS: up
-	// to 32 connections at once (defaultDispatchDatabaseTier counts them). The proxy's own
+	// to 81 connections at once (defaultDispatchDatabaseTier counts them). The proxy's own
 	// Kubernetes sidecar example requests 1 CPU, since its CPU use scales linearly with the IO
 	// between the database and the application, and 2Gi, since its memory scales linearly with
 	// the active connections

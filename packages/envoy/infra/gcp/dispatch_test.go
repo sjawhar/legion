@@ -164,7 +164,7 @@ func proxyContainer(t *testing.T, template map[string]any) map[string]any {
 
 // Unset, proxyCpu and proxyMemory size the cloud-sql-proxy sidecar for one server pod's pools,
 // 1 CPU and 2Gi as its request and its limit, the sizes the proxy's own Kubernetes sidecar
-// example requests: every database call of the pod, up to 32 connections, passes through its TLS.
+// example requests: every database call of the pod, up to 81 connections, passes through its TLS.
 func TestDispatchProxyContainerDefaultsToOneCPUAnd2Gi(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -2251,7 +2251,7 @@ func TestDispatchDatabaseAvailabilityTypeReachesTheInstance(t *testing.T) {
 }
 
 // Unset, databaseTier reaches the Cloud SQL instance's settings as db-custom-4-15360, 4 vCPU and
-// 15 GB, whose default max_connections of 500 holds 15 server pods of 32 connections each; set, it
+// 15 GB, whose default max_connections of 500 holds six server pods of 81 connections each; set, it
 // reaches them as written.
 func TestDispatchDatabaseTierReachesTheInstance(t *testing.T) {
 	for _, row := range []struct {
