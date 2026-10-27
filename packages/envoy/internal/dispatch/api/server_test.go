@@ -1983,8 +1983,10 @@ func TestArtifactUploadSummaryCreatesNamedVersions(t *testing.T) {
 	}
 }
 
-func TestSSEPagesThroughCappedBacklogWithoutDisconnecting(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
+// createStreamIssue creates project TEST and an issue in it with no spec, which commits nothing
+// after its response: the event log then holds exactly what the test commits next.
+func createStreamIssue(t *testing.T, handler http.Handler) string {
+	t.Helper()
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
 	}, "alice"); response.Code != http.StatusCreated {
@@ -1996,55 +1998,130 @@ func TestSSEPagesThroughCappedBacklogWithoutDisconnecting(t *testing.T) {
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
 	}
-	issue := decodeBody[struct {
+	return decodeBody[struct {
 		Key string `json:"key"`
-	}](t, created)
-	if _, err := database.Pool.Exec(context.Background(), `
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		select $1, value, 'seeded', jsonb_build_object('kind', 'session', 'id', 'seed'), jsonb_build_object('seq', value), false
-		from generate_series(2, 1006) as value
-	`, issue.Key); err != nil {
-		t.Fatalf("seed replay events: %v", err)
-	}
-	if _, err := database.Pool.Exec(context.Background(), `update issues set last_seq = 1006 where key = $1`, issue.Key); err != nil {
-		t.Fatalf("sync issue last_seq after seeding: %v", err)
-	}
+	}](t, created).Key
+}
 
-	httpServer := httptest.NewServer(handler)
-	defer httpServer.Close()
-	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=1", nil)
-	if err != nil {
-		t.Fatalf("construct capped SSE request: %v", err)
+// seedStreamEvents commits count events on the issue in one transaction, each payload padded with
+// pad bytes, and answers the event log's head after them.
+func seedStreamEvents(t *testing.T, database *store.Store, issueKey string, count, pad int) int64 {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		with bumped as (update issues set last_seq = last_seq + $2 where key = $1 returning last_seq - $2 as base)
+		insert into events (issue_key, seq, type, actor, payload, notify)
+		select $1, bumped.base + value, 'seeded', jsonb_build_object('kind', 'session', 'id', 'seed'),
+			jsonb_build_object('seq', value, 'pad', repeat('x', $3::int)), false
+		from bumped, generate_series(1, $2::int) as value
+	`, issueKey, count, pad); err != nil {
+		t.Fatalf("seed %d events: %v", count, err)
 	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open capped SSE stream: %v", err)
+	return eventHead(t, database)
+}
+
+// renameStreamIssue renames the issue and answers the event log's head after the rename.
+func renameStreamIssue(t *testing.T, handler http.Handler, database *store.Store, issueKey, title string) int64 {
+	t.Helper()
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issueKey, map[string]string{
+		"title": title,
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue to %q: status=%d body=%s", title, response.Code, response.Body.String())
 	}
-	defer stream.Body.Close()
-	scanner := bufio.NewScanner(stream.Body)
-	// The 1005 seeded events plus the issue creation exceed one capped page
-	// (maxSSEReplay=1000); a single connection pages through all of them without
-	// ever disconnecting: a capped page that ended the stream and forced a client
-	// reconnect would leave a gap where a low id committing between "read this page"
-	// and "a new connection subscribes" could be lost forever.
-	for wantID := 2; wantID <= 1007; wantID++ {
-		frame := readSSEFrame(t, scanner)
-		if frame[0] != fmt.Sprintf("id: %d", wantID) {
-			t.Fatalf("paged replay frame = %#v, want id %d", frame, wantID)
+	return eventHead(t, database)
+}
+
+// eventIDsBetween is every committed event id in (after, through], in order.
+func eventIDsBetween(t *testing.T, database *store.Store, after, through int64) []int64 {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `select id from events where id > $1 and id <= $2 order by id`, after, through)
+	if err != nil {
+		t.Fatalf("read event ids in (%d, %d]: %v", after, through, err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		t.Fatalf("read event ids in (%d, %d]: %v", after, through, err)
+	}
+	return ids
+}
+
+// readFramesThrough reads frames until one carries the id last, and answers every id it read.
+func readFramesThrough(t *testing.T, scanner *bufio.Scanner, last int64) []int64 {
+	t.Helper()
+	ids := []int64{}
+	for {
+		id := sseFrameID(t, readSSEFrame(t, scanner))
+		ids = append(ids, id)
+		if id >= last {
+			return ids
 		}
 	}
-	// The same connection is still open afterward: a live event delivers with no
-	// reconnect required.
-	updated := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed after paging",
-	}, "alice")
-	if updated.Code != http.StatusOK {
-		t.Fatalf("update issue after paged backlog: status=%d body=%s", updated.Code, updated.Body.String())
+}
+
+// TestSSEReplaysAResumeAtTheBoundInFullThenStreamsLive: a reconnect maxSSEReplay events behind is
+// replayed every one of them, says so with the complete header (its client then skips its
+// refetch), and goes on to the live events, each once.
+func TestSSEReplaysAResumeAtTheBoundInFullThenStreamsLive(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	key := createStreamIssue(t, handler)
+	since := eventHead(t, database)
+	backlog := seedStreamEvents(t, database, key, maxSSEReplay, 0)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	stream := openSSEResponse(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since))
+	if got := stream.Header.Get(eventReplayHeader); got != "complete" {
+		t.Fatalf("%s = %q on a resume %d events behind, want complete", eventReplayHeader, got, maxSSEReplay)
 	}
-	live := readSSEFrame(t, scanner)
-	if live[1] != "event: issue.updated" || !strings.Contains(live[2], `"title":"Renamed after paging"`) {
-		t.Fatalf("live frame after paged backlog: %#v", live)
+	scanner := bufio.NewScanner(stream.Body)
+	if got, want := readFramesThrough(t, scanner, backlog), eventIDsBetween(t, database, since, backlog); !slices.Equal(got, want) || len(want) != maxSSEReplay {
+		t.Fatalf("replayed ids = %v, want the %d committed after since: %v", got, maxSSEReplay, want)
+	}
+
+	renameStreamIssue(t, handler, database, key, "Renamed after the replay")
+	last := renameStreamIssue(t, handler, database, key, "Renamed again")
+	if got, want := readFramesThrough(t, scanner, last), eventIDsBetween(t, database, backlog, last); !slices.Equal(got, want) {
+		t.Fatalf("live ids after the replay = %v, want each event committed since once: %v", got, want)
+	}
+}
+
+// TestSSESendsNoReplayToAResumePastTheBound: a reconnect one event past maxSSEReplay behind is
+// replayed nothing and carries no complete header, which sends its client to refetch what it shows
+// instead; its connection stays open for the live events.
+func TestSSESendsNoReplayToAResumePastTheBound(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	key := createStreamIssue(t, handler)
+	since := eventHead(t, database)
+	backlog := seedStreamEvents(t, database, key, maxSSEReplay+1, 0)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	stream := openSSEResponse(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since))
+	if got := stream.Header.Get(eventReplayHeader); got != "" {
+		t.Fatalf("%s = %q on a resume %d events behind, want none", eventReplayHeader, got, maxSSEReplay+1)
+	}
+	live := renameStreamIssue(t, handler, database, key, "Renamed past the bound")
+	if got, want := readFramesThrough(t, bufio.NewScanner(stream.Body), live), eventIDsBetween(t, database, backlog, live); !slices.Equal(got, want) {
+		t.Fatalf("frames = %v, want only the live events %v and no replayed one", got, want)
+	}
+}
+
+// TestSSESendsNoReplayWhoseFramesExceedTheByteBound: maxSSEReplay events whose frames total more
+// than maxSSEReplayBytes are not replayed either, and the response carries no complete header.
+func TestSSESendsNoReplayWhoseFramesExceedTheByteBound(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	key := createStreamIssue(t, handler)
+	since := eventHead(t, database)
+	backlog := seedStreamEvents(t, database, key, maxSSEReplay, maxSSEReplayBytes/maxSSEReplay)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	stream := openSSEResponse(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since))
+	if got := stream.Header.Get(eventReplayHeader); got != "" {
+		t.Fatalf("%s = %q on a resume whose frames exceed %d bytes, want none", eventReplayHeader, got, maxSSEReplayBytes)
+	}
+	live := renameStreamIssue(t, handler, database, key, "Renamed past the byte bound")
+	if got, want := readFramesThrough(t, bufio.NewScanner(stream.Body), live), eventIDsBetween(t, database, backlog, live); !slices.Equal(got, want) {
+		t.Fatalf("frames = %v, want only the live events %v and no replayed one", got, want)
 	}
 }
 
@@ -2064,10 +2141,9 @@ func TestQuiesceDocumentsHookIsGatedByTestHooksEnabled(t *testing.T) {
 	}
 }
 
-// TestDisconnectAllStreamsClosesOpenConnections proves the test-only hook drives a
-// client through its reconnect-from-lastId path without seeding thousands of events
-// to trip the replay cap: the same recovery path useEventStream exercises after any
-// real disconnect (dropped connection, server restart, tab sleep).
+// TestDisconnectAllStreamsClosesOpenConnections proves the test-only hook drives a client through
+// its reconnect-from-lastId path on demand: the same recovery path useEventStream exercises after
+// any real disconnect (dropped connection, server restart, tab sleep).
 func TestDisconnectAllStreamsClosesOpenConnections(t *testing.T) {
 	handler, _ := newTestHandlerWithTestHooks(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -2311,6 +2387,12 @@ const sseStreamDeadline = 30 * time.Second
 // with the cleanups, after every defer.
 func openSSEStream(t *testing.T, url string) *bufio.Scanner {
 	t.Helper()
+	return bufio.NewScanner(openSSEResponse(t, url).Body)
+}
+
+// openSSEResponse is openSSEStream's response, for a test that reads its headers.
+func openSSEResponse(t *testing.T, url string) *http.Response {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), sseStreamDeadline)
 	t.Cleanup(cancel)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -2326,7 +2408,7 @@ func openSSEStream(t *testing.T, url string) *bufio.Scanner {
 	if stream.StatusCode != http.StatusOK {
 		t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
 	}
-	return bufio.NewScanner(stream.Body)
+	return stream
 }
 
 // sseFrameID is the event id of one frame readSSEFrame read.
@@ -2343,15 +2425,15 @@ func sseFrameID(t *testing.T, frame []string) int64 {
 }
 
 // TestSSEDoesNotResendAnEventAtOrBelowItsSince covers the one id comparison the live loop makes.
-// The relay is one per process and can stand behind a connection opened after it: it then
-// publishes ids that connection's catch-up has already covered, which sentDuringCatchup cannot be
-// asked about, since it holds only the ids above since that catch-up sent. Forwarding them would
-// show a client an event it has already seen.
+// The relay is one per process and can stand behind a connection's since: it then publishes ids
+// that connection's client already holds. Forwarding them would show a client an event it has
+// already seen, so a connection whose since is above the relay's head but within the log skips
+// everything through since.
 //
-// The comparison is safe because since is fixed for the connection, and the commit-order lock
-// events.Broker.Append holds until its transaction commits leaves no uncommitted id at or below a
-// committed max(id). A late-committing lower id -- what the live loop used to carry a rule
-// against -- is now the lock's to prevent and TestOnlyTheBrokerInsertsEvents's to keep.
+// The comparison is safe because that position is fixed for the connection, and the commit-order
+// lock events.Broker.Append holds until its transaction commits leaves no uncommitted id at or
+// below a committed max(id): no late-committing lower id can hide below it
+// (TestOnlyTheBrokerInsertsEvents keeps the broker the only writer).
 func TestSSEDoesNotResendAnEventAtOrBelowItsSince(t *testing.T) {
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
 	// Long enough that the second connection below opens between a commit and the read that
@@ -2383,44 +2465,40 @@ func TestSSEDoesNotResendAnEventAtOrBelowItsSince(t *testing.T) {
 	}
 }
 
-// TestSSECappedCatchupDeliversACommitDuringPagingExactlyOnce: a catch-up that fills a page keeps
-// paging on the subscription it opened with. An event committing while it pages reaches the
-// client on a later page or live from the relay, whichever sees it first, and sentDuringCatchup is
-// what keeps it from arriving on both. A capped page that ended the stream instead, sending the
-// client to a reconnect, would leave a gap between the last page and the new subscription for that
-// commit to fall into.
-func TestSSECappedCatchupDeliversACommitDuringPagingExactlyOnce(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
-	// Exactly maxSSEReplay committed events, so the first catch-up page fills and a second runs.
-	if _, err := database.Pool.Exec(context.Background(), `
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		select $1, value, 'seeded', jsonb_build_object('kind', 'session', 'id', 'seed'), jsonb_build_object('seq', value), false
-		from generate_series(101, 1100) as value
-	`, issue.Key); err != nil {
-		t.Fatalf("seed capped backlog: %v", err)
+// TestSSEDeliversACommitBetweenItsSubscriptionAndItsReplayExactlyOnce: an event that has committed
+// when a connection reads its replay, but that the relay had not yet published when the
+// connection subscribed, is visible to a replay read and will also arrive live. The replay stops
+// at the head the subscription answered, so the event arrives once, live.
+//
+// The relay's reads wait for release, so the relay stands at the head the first connection
+// started it on while the rename commits and the second connection subscribes and replays.
+func TestSSEDeliversACommitBetweenItsSubscriptionAndItsReplayExactlyOnce(t *testing.T) {
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	key := createStreamIssue(t, handler)
+	release := make(chan struct{})
+	served.eventRelay.readAfter = func(ctx context.Context, after int64) ([]model.Event, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return served.readEventsAfterID(ctx, after)
 	}
 	httpServer := httptest.NewServer(handler)
 	t.Cleanup(httpServer.Close)
-	scanner := openSSEStream(t, httpServer.URL+"/api/v1/events?since=2")
+	openSSEStream(t, httpServer.URL+"/api/v1/events")
+	head := eventHead(t, database)
 
-	// Committed while that catch-up is still paging.
-	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed",
-	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("rename issue: status=%d body=%s", response.Code, response.Body.String())
+	renameStreamIssue(t, handler, database, key, "Renamed while the relay stands behind")
+	since := head - 1
+	stream := openSSEResponse(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since))
+	if got := stream.Header.Get(eventReplayHeader); got != "complete" {
+		t.Fatalf("%s = %q on a resume one event behind the relay, want complete", eventReplayHeader, got)
 	}
-	live := eventHead(t, database)
-	seen := map[int64]bool{}
-	for id := int64(0); id != live; {
-		id = sseFrameID(t, readSSEFrame(t, scanner))
-		if seen[id] {
-			t.Fatalf("event %d was delivered twice", id)
-		}
-		seen[id] = true
-		if len(seen) > maxSSEReplay+100 {
-			t.Fatalf("the commit %d made during the catch-up was not delivered in %d frames", live, len(seen))
-		}
+	close(release)
+	last := renameStreamIssue(t, handler, database, key, "Renamed again")
+	if got, want := readFramesThrough(t, bufio.NewScanner(stream.Body), last), eventIDsBetween(t, database, since, last); !slices.Equal(got, want) {
+		t.Fatalf("frames = %v, want each event committed since %d once, in order: %v", got, since, want)
 	}
 }
 
@@ -2457,14 +2535,14 @@ func TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit(t *testing.T) {
 // between its scenarios (`truncate ... restart identity cascade`, e2e/seed.ts), so the next row's
 // id is 1 again. The relay notices, ends every open subscription and sends the browser through
 // its reconnect -- and a browser only ever raises its lastEventId, never lowers it
-// (web/src/api/sse.ts), so it comes back asking for a since above the new log's head. Without the
-// handler's clamp, catch-up (`id > since`) matches nothing and the live loop drops every event of
-// the new log for ever, because they all sit at or below that stale since: a reader silent for
-// good, on a connection that stays open and heartbeats, with nothing logged and nothing failed.
+// (web/src/api/sse.ts), so it comes back asking for a since above the new log's max(id). A
+// connection that kept that since as its position would drop every event of the new log for
+// ever, because they all sit at or below it: a reader silent for good, on a connection that stays
+// open and heartbeats, with nothing logged and nothing failed.
 //
 // The assertion is the frame of an event committed after the reset, whose id is below the
-// pre-reset head this connection resumed from. It can reach the reader only through a since the
-// handler clamped to the head it resolved for this connection; an unclamped since drops it, and
+// pre-reset head this connection resumed from. It can reach the reader only if the connection
+// takes the relay's head as its position when its since is above the log's max(id); otherwise
 // the only frame this reader then ever sees is a heartbeat.
 func TestSSEResumesAfterTheEventLogIsResetBeneathTheReader(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
