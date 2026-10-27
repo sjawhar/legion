@@ -2,41 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-528",
-  "completed": "2026-10-27T03:21:21Z",
-  "decision": "changes_requested",
-  "reviewedHead": "9333ed9ee76658c559eb31f6cf6d116bf02ed86d (code 9607c1b933cf84a437dab8f596b96488261f96b3)",
+  "completed": "2026-10-27T06:23:45Z",
+  "decision": "approved",
+  "reviewedHead": "the handoff head this commit makes (code 95dd30e91781e66b183bedbdaa542bb2416eff5f)",
+  "scope": "Round narrowed by the INFRA-138 architect (envoy a58b0e7c): acceptance line A1, the 5-second worker bound, and the fix that drops a cancelled draw from the worker's queue; correctness defects anywhere still block; naming, duplication and wording go to Fast-follow.",
   "critical": 0,
-  "important": 1,
-  "minor": 4,
+  "important": 0,
+  "minor": 3,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts:150",
-      "description": "Drawing cost is unbounded and runs synchronously on the reader's main thread inside useRenderedMarkdown's layout effect (useRenderedMarkdown.tsx:118). Measured with renderProofMermaidSvg under Bun: a 100-node flowchart (2.4 KB) 1.6 s, 200 nodes (5.2 KB) 3.6 s; the deep review measured 400 nodes (12.4 KB) at 10.7 s in V8 and 800 nodes (25 KB, under the 32,000-character body cap) at 75.8 s in JSC. Any author's comment, ask or message freezes every reader's Inbox or Conversation tab, again on each page load once the 32-entry cache is passed. Fix: keep the draw off the main thread (a Worker) or refuse a source over a measured budget with the existing refusal status and its source open, and prove it with a test that a source over the budget never reaches renderMermaidSvg."
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts:194",
+      "description": "Not a defect for this round (judged, not deferred): a worker that fails to load latches `failed` until the window's next `online` event, and the draws waiting at the failure are dropped. A tab that stays online after a redeploy (old worker asset gone) shows mermaid as code until reload. The fallback is the pre-change behaviour, the source stays readable, the error is logged once, and DeploymentResilience's version check already offers that tab a reload. This is the latch round 1 asked for; recorded in the PR body's Not proven / risk."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts:137",
-      "description": "A failed chunk load forgets the attempt, so the next body (a live-view turn re-parses once per frame) imports again and logs console.error again, up to 60 times a second for a streamed turn holding a closed mermaid block."
+      "file": "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts:269",
+      "description": "Not a defect: the 5 s limit is a main-thread timer from postMessage, so a laptop sleep or a main thread blocked longer than the limit mid-draw can refuse a diagram that would have drawn, and the refusal is cached for the page (32 entries). Rare; a reload clears it."
     },
     {
       "severity": "minor",
-      "file": "packages/proof-editor/tests/mermaid-svg.test.ts:40",
-      "description": "Pins beautiful-mermaid's private CSS variable --_text; a renderer upgrade that renames it fails the test with no reader-visible change. Assert what the line means: the sheet survives non-empty and loses its @import."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts:172",
-      "description": "data-mermaid-diagram is read only by MarkdownBody.test.tsx and dispatch-mermaid-status has no rule or reader; select figure.dispatch-mermaid in tests and drop both."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts:65",
-      "description": "The late-draw machinery (pending Set, PendingDraw, drain loop, two attempt guards, contains check) is a second convention for markdown-engine.ts renderWithEngine's draw-now-or-later-with-cancel; and sanitizeMermaidSvg mixes null and throw, lowercases case-sensitive XML element names so <SVG xmlns=svg> passes the svg check and is cast to SVGSVGElement. Behaviour-neutral; fix in this round, since the deployment allows no deferral."
+      "file": "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx:551",
+      "description": "Test gap, Fast-follow: FakeWorker posts ready on a 0 ms timer, so no unit case pins that the limit starts at ready rather than at worker creation, and none exercises a reply posted after terminate. The code handles both (read at :211 and :265-271)."
     }
   ],
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head e0c95026: all queued at reading; compare e0c95026...9333ed9e handoffsOnly true (1 file). Not waited on: a REQUEST_CHANGES stands whatever CI says.",
-  "threads": "0 review threads on the PR.",
-  "thermonuclear": "Both run at 9607c1b9: deep review CHANGES (the important finding above; sanitizer, namespaces, href/on*, url()/escape filter, @import strip, shadow-root ids, open-fence probe, races cleared); code quality CHANGES on behaviour-neutral items, carried as the last minor finding.",
-  "fastFollow": "none"
+  "acceptance": {
+    "A1": "e2e/mermaid.e2e.ts rows for a comment, an Inbox ask, an issue message, a reply, a refusal, a markup label and an other-language guard; 32 passed in chromium, iphone, webkit and firefox at 04728453 (tester) and 95dd30e9 (implementer); red commit ecc18ff3 24 failed / 4 passed.",
+    "timeLimit": "sendNext starts the timer only when a ready, idle worker takes the source (mermaid-diagrams.ts:265-271); refuseLate terminates and a fresh worker takes the rest; every worker replacement clears its timer; stale replies dropped by id (:211). e2e 800-node row: page timers on time, refusal names 5 seconds, in four projects.",
+    "cancelledDraw": "The cancel removes only its own draws and queues dropAbandoned once on a microtask (:352-362); a repaint in the same commit asks again first, so the source keeps its draw; dropAbandoned stops the worker only for the source it is drawing (:281). Unit cases for repaint, abandoned queued source and abandoned current source fail with the drop made synchronous or removed (code-quality review's probe); the implementer's and tester's leave-the-page e2e: B draws in ~1.8-2.2 s against 11.4-11.7 s at d9ff6c61."
+  },
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection): all completed success at the CI head 04728453; compare 04728453...5127dfbb handoffsOnly true (1 file).",
+  "threads": "5 threads, all the reviewer's from round 1; each answered with the fixing commit and accepted; the implementer had already resolved all five.",
+  "thermonuclear": "Both at 95dd30e9: deep review APPROVE (no critical or important; built the worker bundle, notices list beautiful-mermaid and elkjs); code quality APPROVE (no correctness defect; cleanup only).",
+  "fastFollow": "Split the Mermaid cases and FakeWorker out of MarkdownBody.test.tsx (now 1,003 lines) into mermaid-diagrams.test.tsx, with a case that holds ready past the limit; make refuseLate call stopRenderer; correct the test comment at MarkdownBody.test.tsx:767, the worker's setter comment and AGENTS.md's 'far past what a comment holds'."
 }
