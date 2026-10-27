@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-559",
+  "completed": "2026-10-27T10:36:00Z",
+  "proof": [
+    {
+      "criterion": "A1: Dispatch's browser suite, against two server processes running two builds, loads every page and lazily loaded route with no failed asset and no blank page; fails before, passes after",
+      "surface": "Dispatch web app in Chromium through the round-robin proxy (e2e/round-robin-proxy.ts) in front of two real envoy-dispatch processes on one Postgres 17 + pgvector, A serving web/dist and B serving web/dist-b (a second build with another build id)",
+      "command": "cd packages/dispatch && DATABASE_URL=<isolated db> bun run e2e:multiprocess -- two-builds.multiprocess.e2e.ts (after `go build -o ./dispatch-e2e ./cmd/dispatch` in packages/envoy)",
+      "observed": "5 passed (1.5m): every route of app.tsx plus the editor/Yjs, echarts and Markdown lazy pieces, with the page from A and every /assets/ request pinned to B, and the reverse, render their landmark with no /assets/ request failed or >= 400, no pageerror, and every .js/.css of each build answered 200; every file of both builds answers 200 with its bytes from A and from B; banner rows pass. Boot logs: A `published dashboard assets ... assets=45 written=45`, B `assets=45 written=30` (15 files shared by name and bytes).",
+      "headSha": "dc41305784ba39e735bffecc618323e7a5b6f740",
+      "negativeControl": "The same harness and spec at 47c3ba79d2e4 (harness + spec, server without the shared store): 3 of 3 failed, every page load `\"/assets/index-CNAstPYb.js from Dispatch B answered 404\"` then `net::ERR_ABORTED` (blank page), and 60 files of the two builds answered 404 from the process that lacks them."
+    },
+    {
+      "criterion": "A2/A3: every file of either build's assets directory answers 200 from every process; boot publishes before listening; a restart on the same build writes no bytes; a burst is served; store, publish, prune, publish/prune race and cache behave",
+      "surface": "two envoy-dispatch processes started by the Go multiprocess rig (build tag multiprocess) on real Postgres; internal/dispatch/dashboard and routes on real Postgres",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<db> go test -tags multiprocess -count=1 ./cmd/dispatch (whole package) and -run TestDashboard -v; go test -count=1 ./internal/dispatch/dashboard/... ./internal/dispatch/routes/... ./internal/dispatch/processes/... ./internal/dispatch/store/... ./cmd/dispatch/...",
+      "observed": "multiprocess package ok 423s; TestDashboardServesEveryFileOfEitherBuildFromBothProcesses, TestDashboardServesABurstOfTheOtherBuildsFiles, TestDashboardRestartOnTheSameBuildWritesNoAssetBytes, TestDashboardBuildsAnswersTheBuildsTheLiveProcessesServe PASS; dashboard, routes, processes, store, cmd/dispatch ok",
+      "headSha": "dc41305784ba39e735bffecc618323e7a5b6f740",
+      "negativeControl": "With the prune's advisory lock removed, the publish/prune race test in internal/dispatch/dashboard fails with a foreign-key error (checked while writing it); at 47c3ba79 (no store) the browser direct check got 404 for each build's unshared files from the other process."
+    },
+    {
+      "criterion": "A4 (item 2): page recovery from a failed script, module preload or stylesheet is at most 3 reloads per tab in any 5 minutes, renews, and covers the main stylesheet",
+      "surface": "Dispatch web app in Chromium (single-process harness), plus happy-dom unit tests of DeploymentResilience",
+      "command": "cd packages/dispatch && bun run build:web && DATABASE_URL=<db> bunx playwright test --config e2e/playwright.config.ts shell.e2e.ts delivery-live.e2e.ts live.e2e.ts doc.e2e.ts --project chromium; bun test web/src/features/shell",
+      "observed": "52 passed, 2 skipped (phone projects) in 3.5m, including `a page whose main stylesheet fails once reloads and renders styled`, `a tab whose three reloads are older than five minutes reloads for a new failure`, `a tab that reloaded three times in the last five minutes does not reload for a new failure`, `an entry chunk's reloads and a page chunk's share the tab's three`; shell unit tests pass",
+      "headSha": "dc41305784ba39e735bffecc618323e7a5b6f740",
+      "negativeControl": "With index.html and DeploymentResilience.tsx put back to their pre-change versions and the web rebuilt, 7 of the 18 shell.e2e.ts rows fail (the stylesheet row, the two renewal rows, the shared-budget row and the three reload-count rows); the unit file fails to import spendChunkReload."
+    },
+    {
+      "criterion": "A5 (item 3): no 'A new version is available' while two builds are live; the notice when one other build is live",
+      "surface": "GET /api/v1/dashboard/builds on two real processes and the dashboard tab in Chromium through the two-process harness; DeploymentResilience unit tests",
+      "command": "two-builds.multiprocess.e2e.ts rows `a tab of build A focused while A and B are both live shows no new-version notice` and `a tab of build B focused once only build A is live shows the new-version notice`; go test -tags multiprocess -run TestDashboardBuilds ./cmd/dispatch; bun test web/src/features/shell",
+      "observed": "both browser rows pass; the route answers both builds while A and B are live and only A once B is gone; a process aged past the 15 s window by setting heartbeat_at drops out",
+      "headSha": "dc41305784ba39e735bffecc618323e7a5b6f740",
+      "negativeControl": "With the pre-change DeploymentResilience.tsx (which reads `/` after /healthz), the browser row fails because the notice appears (`<section aria-label=\"A new version is available\"…>`) and 8 unit tests fail."
+    },
+    {
+      "criterion": "A6 (item 4): the first reconnect after a dropped stream or socket is spread over [0, 2 s) for SSE, the delivery socket (close 1012 included), the agent stream and the document socket",
+      "surface": "happy-dom unit tests of live.ts, sse, delivery-live, the real Hocuspocus provider against a fake server socket; browser reconnect specs",
+      "command": "cd packages/dispatch && bun test web/src/features/shell web/src/__tests__/live.test.ts web/src/api web/src/features/doc web/src/features/delivery e2e/__tests__; the browser run of A4 includes delivery-live.e2e.ts, live.e2e.ts, doc.e2e.ts",
+      "observed": "427 pass, 0 fail; 1,000 seeded attempt-0 draws put no more than 10 % in any 100 ms bucket; a document socket reconnect after a server close waits the stubbed draw while the first connect is immediate; browser reconnect specs pass",
+      "headSha": "dc41305784ba39e735bffecc618323e7a5b6f740",
+      "negativeControl": "With the pre-change live.ts the distribution and spread tests fail (`Expected: 0 Received: 1000`, `Expected: <= 100 Received: 1000`); with the pre-change connection.ts and delivery-live.ts the connection test sees an immediate reconnect and the 1012 test opens at once (4 failures)."
+    }
+  ],
+  "filesChanged": [
+    "packages/dispatch/e2e: harness-processes.ts, http-relay.ts, round-robin-proxy.ts (new), plain-http-proxy.ts, harness-listeners.ts, harness-ports.ts, run-server.sh, playwright.config.ts, preflight.ts, api.ts, local-instance.ts, seed.ts, delivery-live-probe.ts, shell.e2e.ts, two-builds.multiprocess.e2e.ts and two-builds-routes.ts (new), __tests__/round-robin-proxy.test.ts, __tests__/two-builds-routes.test.ts, __tests__/delivery-live-probe.test.ts",
+    "packages/dispatch/web: index.html, vite.config.ts, src/features/shell/DeploymentResilience.tsx(+test), src/api/live.ts, src/api/sse.ts, src/api/delivery-live.ts(+test), src/features/doc/connection.ts(+test), src/asset-sizes-in-build.ts(+test), src/__tests__/live.test.ts, sse-attempts.test.tsx, sse-reconnect.test.tsx, features/delivery/DeliveryPage.test.tsx; package.json (e2e:multiprocess, check:asset-sizes)",
+    "packages/envoy/internal/dispatch/dashboard (new: BuildID, Publish, Prune, Store) and migrations 0130_dashboard_assets.{up,census}.sql",
+    "packages/envoy/internal/dispatch/routes: assets.go (S3 reader removed, 64 MiB LRU cache with singleflight), router.go, assets_test.go",
+    "packages/envoy/internal/dispatch/api: dashboard_builds.go(+test), routes_table.go(+test), server.go, server_test.go, delivery_live_socket_test.go (comment and message)",
+    "packages/envoy/cmd/dispatch: main.go (publishDashboard before listen, DISPATCH_DEV_SIGNIN_SHARED_KEY, AssetStore always the Postgres store), settings.go, settings_test.go, main_test.go, multiprocess_test.go, README.md, AGENTS.md",
+    "packages/envoy/internal/dispatch/files/s3.go (comment), internal/dispatch/store/pool.go (merge: leasePoolSize 10)",
+    ".github/workflows/envoy-and-contracts.yaml (dispatch-browser-multiprocess job, check:asset-sizes step), .gitignore",
+    "packages/envoy/AGENTS.md, packages/dispatch/AGENTS.md, packages/dispatch/README.md, packages/envoy/CHANGELOG.md, docs/site/src/content/docs/dispatch/delivery.md, running-dispatch.md"
+  ],
+  "trickyParts": [
+    "The branch merges legion/INFRA-555 at ff571a0894e3 (key sets, signed sign-in state, server_processes registry) because item 3 reads that registry; pull request #2323 carries those commits until INFRA-555 (#2390) is on main, so it must merge after it. INFRA-555's migration is renumbered 0129 and ours 0130 in agreement with its implementer; dashboard.BuildID takes the id from processes.DashboardBuild (one build-id function).",
+    "The two-builds spec keys each pending /assets/ request to the document that made it: a page being left can start a lazy import between the wait and the next goto, and Chromium cancels it with neither requestfinished nor requestfailed.",
+    "The asset store read runs on a context no request cancels, bounded at 3 s, so a client that leaves cannot poison the singleflight read other requests share.",
+    "The document socket draws its reconnect delay when the socket opens, since the provider's dead-socket check calls onClose without a close event."
+  ],
+  "deviations": [
+    "The browser walk's pending-request tracking was corrected after the red run (47c3ba79), keyed by document; the red run's failures were 404 responses, which the correction does not touch.",
+    "LiveDashboardBuilds lives in package api, not dashboard: dashboard imports routes, which imports api, so a helper in dashboard would be an import cycle; processes is INFRA-555's package and was not edited.",
+    "Pod-only Go failures not caused by this change: files TestS3AgainstAnS3CompatibleServer needs Docker (none in the pod); pmdoc linearity tests, docs TestAHealthyRoomUnderWritesIsNeverRefused and api TestALoneRunnerMakesAPassOnEveryTick fail on timing under a 2-CPU pod at full load; the api lease test passed 3 of 3 when run alone. CI is the record for those."
+  ],
+  "openQuestions": [
+    "Merge order: #2323 after INFRA-555's #2390 (told to the INFRA-63 architect). The branch also carries .legion/INFRA-555/plan.json from that merge; retro removes .legion/INFRA-559/ and must remove .legion/INFRA-555/ too if it is still on the head.",
+    "signin.multiprocess.e2e.ts moves to whichever of INFRA-555 and INFRA-559 merges second (architect's message): if INFRA-555 is on main before this pull request is ready to merge, this branch adds it."
+  ]
+}
