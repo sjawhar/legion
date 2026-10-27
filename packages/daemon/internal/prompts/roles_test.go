@@ -24,7 +24,7 @@ var (
 	modeNeutral        = append(append([]string{"core/common.md"}, coreFiles()...), "mechanics/interactive.md")
 	reusableParts      = append(slices.Clone(modeNeutral), "mechanics/headless.md")
 	headlessOnly       = []string{
-		"LEGION_", "GH_CONFIG_DIR", "handoff_", "skip-checks", "envoy_publish", ".legion/",
+		"LEGION_", "GH_CONFIG_DIR", "handoff_", "envoy_publish",
 		"roleToken", "spawn_worker", "legion-worker",
 		// Naming a task agent is headless mechanics: the daemon's load probe checks that a pane's Oh
 		// My Pi finds every agent a role prompt names and runs it on its own model, and nothing
