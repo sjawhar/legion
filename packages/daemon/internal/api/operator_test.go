@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"slices"
@@ -8,13 +9,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 const architectToken = claim.Token("legion-legion-legion-208-architect")
@@ -384,6 +389,139 @@ func TestTheOperatorsRetryOfAFailedPhaseWorkerIsRefused(t *testing.T) {
 	after := h.stored(workerToken)
 	if after.State != before.State || after.Generation != before.Generation || after.Budgets != before.Budgets {
 		t.Errorf("the refused retry moved the worker: %+v -> %+v", before, after)
+	}
+	if got := h.runtime.Calls()[calls:]; len(got) != 0 {
+		t.Errorf("the refused retry asked the runtime %+v", got)
+	}
+}
+
+// heldRetrier stands in for the workflow's retry_or_escalate: a retry decision on a held issue
+// restores the phase it was held from, unless lingers says the tree lingers, where the workflow
+// does nothing. Every fact is recorded first.
+type heldRetrier struct {
+	factRecorder
+	lingers bool
+}
+
+func (r *heldRetrier) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
+	result, err := r.factRecorder.Apply(ctx, tx, fact)
+	retry, ok := fact.(intake.RetryOrEscalate)
+	if err != nil || result.Refusal != nil || !ok || retry.Decision != intake.RetryDecision || r.lingers {
+		return result, err
+	}
+	records := record.NewStore()
+	issue, err := records.Issue(ctx, tx, retry.Issue)
+	if err != nil || issue == nil || issue.Phase != phase.Held || issue.Hold == nil {
+		return result, err
+	}
+	issue.Phase, issue.Hold = issue.Hold.From, nil
+	return result, records.PutIssue(ctx, tx, *issue)
+}
+
+// heldIssue records LEGION-209, a child of LEGION-208, held from the phase from.
+func heldIssue(t *testing.T, h *harness, from phase.Phase) {
+	t.Helper()
+	parent := "LEGION-208"
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
+			Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject,
+			Title: "LEGION-209", Parent: &parent, Phase: phase.Held, Hold: &record.Hold{From: from}, Generation: 1, Status: "in_progress",
+		})
+	}); err != nil {
+		t.Fatalf("seed the held issue: %v", err)
+	}
+}
+
+// failedImplementer is the harness with the operator's server applying facts to handler, a root,
+// and LEGION-209's implementer failed: the runtime refused every launch of it.
+func failedImplementer(t *testing.T, handler intake.Handler) (*harness, claim.Token) {
+	t.Helper()
+	h := newHarness(t)
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: h.store,
+		Pool: h.store.Pool(), Record: record.NewStore(), Releaser: h.runtime, Trees: h.store, Handlers: []intake.Handler{handler}, RoleFor: workflow.RoleFor,
+	}).Handler
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	refused := fake.SpawnResult{Err: errors.New("the runtime refused the launch")}
+	h.runtime.ScriptSpawn(refused, refused, refused)
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", worker); recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("spawn of a worker whose every launch the runtime refused = %d, want 500; body %s", recorder.Code, recorder.Body)
+	}
+	token, err := claim.NewToken(testProject, worker.Issue, worker.Role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h, token
+}
+
+// A failed phase worker whose issue the workflow holds for its own role — its working role failed —
+// is retried by the operator as its architect's retry_or_escalate retries it: the route applies the
+// held phase's retry (intake.RetryOrEscalate, decision retry), whose start relaunches the role, and
+// answers 202 with the claim as it is until that start runs, asking the runtime nothing itself. A
+// refusal of the fact is the route's answer. `legion claims retry --failed` relies on this to
+// relaunch every claim a runtime failed to launch once the cause is gone.
+func TestTheOperatorsRetryOfAFailedPhaseWorkerOnAHeldIssueRetriesThePhase(t *testing.T) {
+	facts := &heldRetrier{}
+	h, workerToken := failedImplementer(t, facts)
+	heldIssue(t, h, phase.Implementing)
+	calls := len(h.runtime.Calls())
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("retry of a failed worker on a held issue = %d, want 202; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaim
+	decodeInto(t, recorder, &got)
+	if got.Token != workerToken || got.State != string(supervise.StateFailed) {
+		t.Errorf("retry answered %+v, want the worker as it is until the phase's start runs", got)
+	}
+	applied := facts.recorded()
+	if len(applied) != 1 {
+		t.Fatalf("the retry applied %d facts, want the held phase's retry alone: %#v", len(applied), applied)
+	}
+	if fact, ok := applied[0].(intake.RetryOrEscalate); !ok || fact.Issue != "LEGION-209" || fact.Decision != intake.RetryDecision {
+		t.Errorf("the retry applied %#v, want RetryOrEscalate{LEGION-209, retry}", applied[0])
+	}
+	if got := h.runtime.Calls()[calls:]; len(got) != 0 {
+		t.Errorf("the route asked the runtime %+v itself, want the phase's start to", got)
+	}
+
+	heldIssue(t, h, phase.Implementing)
+	facts.refusal = &intake.Refusal{Status: http.StatusConflict, Message: "LEGION-209 is not held"}
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict, "LEGION-209 is not held")
+}
+
+// A retry the workflow applies but that leaves the issue held relaunched nothing — a lingering
+// tree's members stay where they stood — so the operator is answered 409 naming the issue, the
+// phase and the claim, never 202.
+func TestTheOperatorsRetryOfAHeldPhaseThatStaysHeldIsRefused(t *testing.T) {
+	facts := &heldRetrier{lingers: true}
+	h, workerToken := failedImplementer(t, facts)
+	heldIssue(t, h, phase.Implementing)
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict,
+		"LEGION-209 is still held after the retry of its phase implementing, so nothing relaunched "+string(workerToken)+": its tree lingers, and a lingering tree's members stay where they stood")
+	if applied := facts.recorded(); len(applied) != 1 {
+		t.Errorf("the retry applied %#v, want the held phase's retry alone", applied)
+	}
+}
+
+// A failed phase worker whose issue is held for another role's phase is not the held phase's
+// worker: retrying the phase would relaunch that other role under this claim's name. The route
+// applies nothing and the machine refuses it, as for a phase worker whose issue holds no phase.
+func TestTheOperatorsRetryOfAFailedPhaseWorkerHeldForAnotherRoleIsRefused(t *testing.T) {
+	facts := &heldRetrier{}
+	h, workerToken := failedImplementer(t, facts)
+	heldIssue(t, h, phase.Testing)
+	calls := len(h.runtime.Calls())
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict,
+		"retry refused: the operator's retry relaunches only an architect; a phase worker is retried by its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise")
+	if applied := facts.recorded(); len(applied) != 0 {
+		t.Errorf("the retry applied %#v, want nothing: the issue is held for the tester", applied)
 	}
 	if got := h.runtime.Calls()[calls:]; len(got) != 0 {
 		t.Errorf("the refused retry asked the runtime %+v", got)

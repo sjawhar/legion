@@ -2,6 +2,7 @@ package cistore
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -202,9 +203,9 @@ func wrapStore(t testing.TB, conn *natsgo.Conn, delay time.Duration) (*Store, *w
 func record(s *Store, observation contracts.CIObservation) error {
 	return within(func() error {
 		if observation.CheckName == "" {
-			return s.RecordSuite(observation)
+			return s.RecordSuite(context.Background(), observation)
 		}
-		return s.Record(observation)
+		return s.Record(context.Background(), observation)
 	})
 }
 
@@ -315,7 +316,7 @@ func (c *calls) wait(what string) []error {
 // checkCall is a call that records the completed check check-i of h with run id base+i.
 func checkCall(s *Store, h head, base uint64) func(i int) error {
 	return func(i int) error {
-		return s.Record(h.check(fmt.Sprintf("check-%d", i), base+uint64(i), "completed", "success", "2026-09-24T01:00:00Z"))
+		return s.Record(context.Background(), h.check(fmt.Sprintf("check-%d", i), base+uint64(i), "completed", "success", "2026-09-24T01:00:00Z"))
 	}
 }
 
@@ -524,7 +525,7 @@ func recordBurst(t testing.TB, s *Store, h head, n int) []error {
 		go func() {
 			defer wg.Done()
 			<-start
-			errs[i] = s.Record(h.check(fmt.Sprintf("unit-tests (shard %d, ubuntu-latest)", i), uint64(50_000_000_000+i), "completed", "success", "2026-09-24T01:29:00Z"))
+			errs[i] = s.Record(context.Background(), h.check(fmt.Sprintf("unit-tests (shard %d, ubuntu-latest)", i), uint64(50_000_000_000+i), "completed", "success", "2026-09-24T01:29:00Z"))
 		}()
 	}
 	close(start)
@@ -896,6 +897,43 @@ func TestASlowKVCallOnALiveConnectionIsWaitedFor(t *testing.T) {
 	requireNoErrors(t, "a burst behind a slow KV call", batch.wait("a slow KV call"))
 	if checks := len(getState(t, s, h.owner, h.repo, h.number, h.sha).Checks); checks != n {
 		t.Fatalf("record holds %d checks, want all %d", checks, n)
+	}
+}
+
+// A caller queued behind a write waits only while its context lasts (update): once it ends, the
+// caller returns the context's error and leaves the queue, so the next batch neither carries its
+// observation nor waits on it, and the caller queued after it still writes. Here check-0's write
+// is held, check-1 queues under a context that is then cancelled and check-2 under none, and
+// check-0's write is let through once check-1 has left.
+func TestAQueuedCallerWhoseContextEndsLeavesTheQueue(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s, kv := wrapStore(t, conn, 0)
+	h := head{"example-org", "example-repo", "42", "7777777777777777777777777777777777777777"}
+	entered, release := kv.holdNextWrite()
+	leaving, leave := context.WithCancel(context.Background())
+	defer leave()
+	batch := newCalls(t, s, h.key(), 3, func(i int) error {
+		ctx := context.Background()
+		if i == 1 {
+			ctx = leaving
+		}
+		return s.Record(ctx, h.check(fmt.Sprintf("check-%d", i), uint64(700+i), "completed", "success", "2026-10-26T01:00:00Z"))
+	})
+	batch.behind(entered, 3)
+	leave()
+	waitQueued(t, s, h.key(), 1)
+	release()
+	errs := batch.wait("a queued caller whose context ended")
+	if errs[0] != nil || errs[2] != nil {
+		t.Fatalf("check-0: %v, check-2: %v; want both written", errs[0], errs[2])
+	}
+	if !errors.Is(errs[1], context.Canceled) {
+		t.Fatalf("check-1: %v, want its context's end", errs[1])
+	}
+	checks := getState(t, s, h.owner, h.repo, h.number, h.sha).Checks
+	if _, ok := checks["check-1"]; ok || len(checks) != 2 {
+		t.Fatalf("record holds %v, want check-0 and check-2 and not check-1, whose caller left", checks)
 	}
 }
 

@@ -134,6 +134,37 @@ test("a handoff the lookup refuses posts nothing and mints nothing", async () =>
   expect(requests.map(({ path }) => path)).toEqual(["/legion/v1/state"])
 })
 
+test("the MCP request's cancellation ends a handoff_complete waiting out a daemon restart", async () => {
+  const requests: string[] = []
+  const cancelled = new AbortController()
+  // The daemon refuses the connection, and the client cancels the request at that moment: no
+  // wait starts and nothing more is sent.
+  const refusing = (async (input): Promise<Response> => {
+    requests.push(new URL(input.toString()).pathname)
+    cancelled.abort()
+    throw Object.assign(
+      new TypeError("Unable to connect. Is the computer able to access the url?"),
+      {
+        code: "ConnectionRefused",
+      },
+    )
+  }) as typeof fetch
+  await expect(
+    executeLegionTool(
+      {
+        daemon: createLegionDaemonClient("http://daemon.test", refusing),
+        claim: () => implementer,
+        handoffCommit: async () => "a".repeat(40),
+      },
+      { op: "handoff_complete", summary: "Done." },
+      cancelled.signal,
+    ),
+  ).rejects.toThrow(
+    "handoff_complete: the Legion daemon was unreachable (Unable to connect. Is the computer able to access the url?) and the call was aborted; call it again once the daemon is back",
+  )
+  expect(requests).toEqual(["/legion/v1/state"])
+})
+
 test("read_record answers the issue's record, and request_backward_move posts with its grant", async () => {
   const { client, requests } = await daemon()
   const runtime = {

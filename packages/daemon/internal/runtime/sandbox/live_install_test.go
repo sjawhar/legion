@@ -340,8 +340,8 @@ func (r *liveRig) checkImageProbe() error {
 		return fmt.Errorf("the probe log says agent-models=%q, want %q: %s", models, bootprobe.AgentModelsResolved, passed["log"])
 	}
 	note("runtime", "agent-models=%s parsed: every task agent the prompts dispatch resolved its model under the operator's pod", bootprobe.AgentModelsResolved)
-	if !bootprobe.CapabilitiesChecked(passed["log"]) {
-		return fmt.Errorf("the probe log carries no capabilities=checked: %s", passed["log"])
+	if checked := bootprobe.Capabilities(passed["log"]); checked != bootprobe.CapabilitiesAll {
+		return fmt.Errorf("the probe log says capabilities=%q, want %q: %s", checked, bootprobe.CapabilitiesAll, passed["log"])
 	}
 	note("runtime", "capabilities=checked parsed: every image-site capability present under the operator's pod")
 	if report.ModelFallback != "on" && report.ModelFallback != "off" {

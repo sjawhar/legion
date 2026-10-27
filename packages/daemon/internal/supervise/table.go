@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -452,8 +453,8 @@ func init() { table = build(fillTable) }
 
 func fillTable(t *builder) {
 	// What the runtime says about the process.
-	t.row(onObservation, "judge the process; alive and ready or idle, send what is waiting", observe,
-		[]ClaimState{StateLaunching, StateFailed, StateWorking}, live...)
+	t.row(onObservation, "judge the process; alive and ready or idle, send what is waiting; working after an unanswered ask, ask again whether the turn is over", observe,
+		[]ClaimState{StateLaunching, StateFailed, StateWorking, StateIdle}, live...)
 	t.ignore(onObservation, noProcess, processless...)
 
 	// The shim.
@@ -475,7 +476,7 @@ func fillTable(t *builder) {
 	t.ignore(onAcked, noSend, unready...)
 	t.ignore(onAcked, noSend, gone...)
 
-	t.row(onRefused, "the prompt was refused (charged) or lost (not charged): re-queue it", refused,
+	t.row(onRefused, "the prompt was refused (charged, unless the agent is in a turn of its own) or lost (not charged): re-queue it", refused,
 		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateReady, StateIdle, StateWorking)
 	t.ignore(onRefused, noSend, unready...)
 	t.ignore(onRefused, noSend, gone...)
@@ -663,11 +664,15 @@ func (b *builder) ignore(kind eventKind, reason string, states ...ClaimState) {
 // observe is the runtime's sweep. A live process in a ready or idle claim is also the retry of a
 // delivery that is waiting — after a refusal, a prompt that started no turn, or a missing
 // connection — when nothing else will come: the retry is bounded by the sweep's interval and by
-// the prompt budget, never made on the spot.
+// the prompt budget, never made on the spot. In a working claim it asks again whether the turn an
+// earlier daemon saw start is over, when the last ask went unanswered (askTurnOver).
 func observe(m *Machine, ctx context.Context, ev Event) error {
 	return m.judge(ctx, ev.(RuntimeObservation).Observation, func(ctx context.Context) error {
 		if err := m.ensureEnrolled(ctx); err != nil {
 			return err
+		}
+		if m.claim.State == StateWorking {
+			return m.askTurnOver(ctx, ev)
 		}
 		return m.sendPending(ctx)
 	}, TimerProbe, m.deps.Timeouts.Probe)
@@ -712,12 +717,41 @@ func reconnectedMidTurn(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.ensureEnrolled(ctx); err != nil {
 		return err
 	}
+	return m.askTurnOver(ctx, ev)
+}
+
+// unansweredAsksWarn is the count of unanswered asks in a row from which askTurnOver logs each one
+// at Warn: a restored working claim whose agent never answers stays working with no limit while
+// its process lives, and an operator should see that.
+const unansweredAsksWarn = 3
+
+// askTurnOver asks a restored working claim's agent whether the turn an earlier daemon saw start
+// is still running, and ends it when the agent says it is not. An ask the agent does not answer
+// says nothing about the turn: the claim stays working, the question stays armed, and the next
+// sweep asks again. Taken as "not streaming", it would end a turn still running and set the claim
+// idle, and the sweep would then send the task into the busy agent every interval.
+func (m *Machine) askTurnOver(ctx context.Context, ev Event) error {
 	if !m.askFirst {
 		return nil
 	}
-	m.askFirst = false
 	conn, ok := m.deps.Conns.Conn(m.claim.Token)
-	if !ok || m.streaming(ctx, conn) {
+	if !ok {
+		// No shim yet (a sweep before its hello): the hello asks.
+		return nil
+	}
+	streaming, answered := m.streaming(ctx, conn)
+	if !answered {
+		m.unansweredAsks++
+		level := slog.LevelInfo
+		if m.unansweredAsks >= unansweredAsksWarn {
+			level = slog.LevelWarn
+		}
+		m.log.Log(ctx, level, "supervise: the agent did not say whether the turn an earlier daemon saw start is over; the claim stays working and the next sweep asks again",
+			"claim", m.claim.Token, "unanswered", m.unansweredAsks)
+		return nil
+	}
+	m.askFirst, m.unansweredAsks = false, 0
+	if streaming {
 		return nil
 	}
 	m.log.Info("supervise: the turn an earlier daemon saw start is over")
@@ -747,8 +781,14 @@ func acked(m *Machine, ctx context.Context, _ Event) error {
 //
 // A refusal is the agent's answer and is charged like a prompt that started no turn (LEGION-60:
 // an agent that refused every prompt would otherwise be retried forever); it is retried by the next
-// sweep, hello, turn end, or ready, never on the spot. A prompt lost to the transport is not
-// charged and waits for the shim's next hello — which may already have come while the send was out.
+// sweep, hello, turn end, or ready, never on the spot. Oh My Pi's busy answer (agentBusy) is the
+// exception, as it is for a late refusal (lateRefused): the agent is in a turn of its own — an
+// Envoy notice's, which a tree publishes freely while its worker boots — so it is working, not
+// refusing to work, and charging it would spend the budget of the very turn doing the work, three
+// such collisions retiring the agent mid-turn. The task waits unread, charged nothing, and that
+// turn's end sends it (the next sweep does, when the turn's start was not seen). A prompt lost to
+// the transport is not charged and waits for the shim's next hello — which may already have come
+// while the send was out.
 func refused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(PromptRefused)
 	resend := m.helloDuringSend
@@ -760,6 +800,11 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 		}
 	}
 	if errors.Is(r.Err, runtime.ErrPromptRefused) {
+		if agentBusy(runtime.RefusalReason(r.Err)) {
+			m.log.Warn("supervise: the agent refused the prompt; it is in a turn of its own, whose end sends the task again",
+				"delivery", r.DeliveryID, "error", r.Err)
+			return nil
+		}
 		m.log.Warn("supervise: the agent refused the prompt", "delivery", r.DeliveryID, "error", r.Err)
 		return m.chargePrompt(ctx, "refused: "+r.Err.Error())
 	}
@@ -854,7 +899,8 @@ func lateRefused(m *Machine, ctx context.Context, ev Event) error {
 		return err
 	}
 	conn, connected := m.deps.Conns.Conn(m.claim.Token)
-	if m.claim.State == StateWorking || agentBusy(r.Error) || (connected && m.streaming(ctx, conn)) {
+	streaming := func() bool { busy, _ := m.streaming(ctx, conn); return busy }
+	if m.claim.State == StateWorking || agentBusy(r.Error) || (connected && streaming()) {
 		m.log.Warn("supervise: the agent refused an acknowledged prompt; it is in a turn of its own",
 			"delivery", r.DeliveryID, "error", r.Error)
 		// The agent is in a turn it started itself, so it never read this task: the delivery goes

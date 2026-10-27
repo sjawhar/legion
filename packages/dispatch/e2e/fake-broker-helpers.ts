@@ -6,7 +6,7 @@ import { usesFakeBroker } from "./harness-broker";
 import { harnessPorts } from "./harness-ports";
 
 async function fixtureRequest(path: string, body: unknown): Promise<void> {
-  const response = await fetch(`http://127.0.0.1:${harnessPorts.fakeBroker.port}${path}`, {
+  const response = await fetch(`http://127.0.0.1:${harnessPorts().fakeBroker.port}${path}`, {
     body: JSON.stringify(body),
     headers: { "Content-Type": "application/json" },
     method: "PUT",

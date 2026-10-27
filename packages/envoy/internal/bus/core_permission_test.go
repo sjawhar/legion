@@ -3,6 +3,7 @@ package bus_test
 import (
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +78,52 @@ func TestPublishCoreReportsAPublishNATSDenies(t *testing.T) {
 	}
 	if _, err := received.NextMsg(5 * time.Second); err != nil {
 		t.Fatalf("granted publish was not delivered: %v", err)
+	}
+}
+
+// A window holding several denied core sends among granted ones answers every denied send with
+// its denial and every granted one accepted, and delivers the granted ones: a granted send whose
+// flush another send's denial left unconfirmed is published again once the window's flushes are
+// in, one at a time, so a further denial cannot leave that republish unconfirmed too.
+func TestAWindowWithSeveralDenialsConfirmsEveryGrantedSend(t *testing.T) {
+	const pairs = 20
+	client, subscriber := grantedClient(t)
+	received, err := subscriber.SubscribeSync(grantedRole)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := subscriber.Flush(); err != nil {
+		t.Fatalf("flush subscription: %v", err)
+	}
+
+	window := client.Window()
+	denied := make([]<-chan error, 0, pairs)
+	granted := make([]<-chan error, 0, pairs)
+	for index := range pairs {
+		denied = append(denied, window.PublishAsync(roleEnvelope(deniedRole+"-"+strconv.Itoa(index))))
+		granted = append(granted, window.PublishAsync(roleEnvelope(grantedRole)))
+	}
+	answer := func(outcome <-chan error) error {
+		select {
+		case err := <-outcome:
+			return err
+		case <-time.After(30 * time.Second):
+			t.Fatal("a send was never answered")
+			return nil
+		}
+	}
+	for index := range pairs {
+		if err := answer(denied[index]); !errors.Is(err, bus.ErrPublishDenied) {
+			t.Fatalf("denied send %d was answered %v, want ErrPublishDenied", index, err)
+		}
+		if err := answer(granted[index]); err != nil {
+			t.Fatalf("granted send %d was answered %v, want accepted", index, err)
+		}
+	}
+	for index := range pairs {
+		if _, err := received.NextMsg(5 * time.Second); err != nil {
+			t.Fatalf("granted envelope %d was not delivered: %v", index, err)
+		}
 	}
 }
 

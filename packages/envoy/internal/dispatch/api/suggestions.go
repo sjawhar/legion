@@ -21,8 +21,8 @@ import (
 const writeSuggestionTimeout = 300 * time.Millisecond
 
 // suggestionAllowance is the deadline the suggestion step runs under: writeSuggestionTimeout on
-// every server the deployment builds, since register builds &server{deps: deps} and sets no
-// suggestionTimeout, and whatever a test set otherwise.
+// every server the deployment builds, since register sets no suggestionTimeout, and whatever a
+// test set otherwise.
 func (s *server) suggestionAllowance() time.Duration {
 	return cmp.Or(s.suggestionTimeout, writeSuggestionTimeout)
 }

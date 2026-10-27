@@ -4,6 +4,16 @@
 
 ### Added
 
+- A person's browser edit of a spec a session wrote reaches that session's channel as one card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block.
+- The `dispatch` command (`dist/dispatch.js`) reads one block of a document:
+  `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
+  `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
+  last changed in, its text, for a pinned reference its text at that version and whether it
+  changed or was removed since, and what cites it; `dist/` was regenerated. The block forms, the
+  pin and the 256-byte bound past which a block is no graph node are in the commands' `--help`
+  (`dispatch read --help`, `dispatch ask --help`, `dispatch doc-edit --help`).
 - The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
   filtered issue listing in one request rather than a page, for a caller that must not miss or
   repeat a row while the list changes under it. `--all` with `--limit` or `--offset` is a usage
@@ -26,6 +36,18 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
+  `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
+  while its architect waits on a person's answer, and the issue field `waitingOn`, naming the
+  question (`kind: "ask"`) or, for the gate waits of a later release, the spec version
+  (`kind: "gate"`), when the wait began, and when and by what act the wait was answered (not always
+  a person's). The MCP server's strict state reader admits both, and nothing this plugin reads or
+  writes moved; `dist/` was rebuilt and a session of it registers with a daemon at 40. The
+  generated `legion-architect` skill opens a question on the root and ends its turn after handing
+  it back, takes a resume task that says "this resume is your design-approved wake" as its
+  `design-approved` wake, and has a waiting root's resume task, not a notice, name a changes
+  request; the generated `legion-controller` skill reads the `awaiting-person` wake and a waiting
+  root as no reason to label or admit anything.
 - The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is
   waiting to start behind an unfinished Dispatch issue, each `{issue, blockedBy}`, and
@@ -61,8 +83,23 @@
   session received none. A session of this plugin holds its own NATS connection and receives such
   a topic as before (INFRA-122).
 
+- `scripts/smoke-session-title.sh` starts nats-server (`-p -1`) and the Envoy listener (`PORT=0`)
+  on ports the kernel chooses and reads each back from the server's own log, instead of picking a
+  port that was free a moment earlier, which another program could take before the server bound
+  it; the Dispatch address its session is configured with, which nothing serves, is
+  `http://127.0.0.1:1` (INFRA-253).
+
 ### Fixed
 
+- The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
+  daemon records. The daemon now refuses a completion of a run the issue has left before it applies
+  any fact and names the current run's queued task, so the worker ends the turn and calls
+  `handoff_complete` again at the same commit in that task's turn, which is applied.
+- The Legion tool's `handoff_complete` waits out a daemon restart: a connection refused, reset or
+  closed before a response, or a 502 or 503 from a proxy, is retried with backoff for up to 10
+  minutes, each attempt with a fresh grant, until the MCP client cancels the request
+  (`notifications/cancelled`), after which nothing more is sent. The retry notice goes to the MCP
+  server's stderr only. Every answer the daemon gives is passed on at once.
 - `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
   record every request you accept in Dispatch and read that record back before a turn ends.
 - The plugin's `legion/` copy of the `legion-architect` skill is regenerated with the same

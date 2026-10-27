@@ -4,8 +4,22 @@
 
 ### Added
 
+- A person's browser edit of a spec a session wrote reaches that session as one Envoy card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block. An idle session starts a turn on it.
+- The `dispatch` command this plugin ships reads one block of a document:
+  `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
+  `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
+  last changed in, its text, for a pinned reference its text at that version and whether it
+  changed or was removed since, and what cites it. `dispatch read --help` lists the block forms
+  and the id's percent-encoding, `dispatch ask --help` takes a block reference, and
+  `dispatch doc-edit --help` says a block id past 256 bytes is stored but its block is no graph
+  node.
+- The `dispatch` skill never claims an issue with the `legion` label unless the session is a
+  Legion role of its tree, even when its claim reads `not running`: the Legion daemon suspends a
+  root's architect while the root waits on a person, and taking that claim takes the tree out of
+  the workflow.
 - `dispatch-first`'s blocker rule says a design question that a document records is an ask block in that document, and any other blocker a `dispatch ask`. `packages/pi-shared/test/skills-partition.test.ts` now fails when a shipped skill or a daemon prompt names a `skill://` that neither plugin ships.
-
 - The agent stream reports the model and thinking level the session runs now, so Dispatch's live
   view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
   every model the session lists as available, the configured thinking level `/effort` reports

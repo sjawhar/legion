@@ -107,9 +107,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   reader-facing Dispatch change must pass before it merges, reaches `psql` through
   `packages/dispatch/e2e/psql.ts` — `packages/dispatch/e2e/seed.ts` calls it for every spec's
   database reset — and the local stack `bun run dispatch:local`
-  (`packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`, `psql`, `flock` and
-  `openssl` on `PATH`, and without `docker` too unless a `DATABASE_URL` is given; the image
-  carries `go`, `flock` and `openssl`, a `DATABASE_URL` stands in for `docker`, and `psql` was the
+  (`packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`, `psql`, `flock`,
+  `openssl` and `python3` on `PATH`, and without `docker` too unless a `DATABASE_URL` is given; the
+  image carries `go`, `flock`, `openssl` and `python3`, a `DATABASE_URL` stands in for `docker`,
+  and `psql` was the
   one a role had no way to supply, so a role on a digest without it cannot run the suite its own
   change owes — Debian's `psql` is a Perl wrapper around the versioned client, and it resolves
   because `perl-base` is in the image),
@@ -339,7 +340,9 @@ image build's own run passes no `--role-namespaces`, since a build's container m
 namespaces. The runtime requires
 `capabilities=checked` too: an image whose `legion` predates the capability check prints no such mark and
 is refused naming that (`Succeeded without checking the capability list (its legion CLI predates the
-check): build the image from this daemon's commit`), and a probe pod that exits 1 on a missing capability
+check): build the image from this daemon's commit`), a line that carries `capabilities=browser-skipped`
+(a probe run with `--skip-browser`, which the daemon's probe never passes) is refused naming that mark,
+and a probe pod that exits 1 on a missing capability
 is refused with its log tail, which names it (`capability <name> is missing: <detail>` under the table's
 `missing` row; the stage 4a harness's `image-probe-capability-negative` check drives that with an operator
 pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). An image the kubelet cannot use refuses
@@ -407,6 +410,12 @@ mark for the deployment's capability report ([The deployment's capability report
 `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models`
 (both roots are required: the Legion and Envoy plugin roots a Sandbox pod loads the plugins from, so the probe loads them the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
+`--skip-browser` leaves the browser row unchecked, for the build of an image meant for a deployment
+that turns Oh My Pi's browser off (`browser.enabled: false`) and so carries no Chromium: that row
+reads `unchecked`, and the OK line carries `capabilities=browser-skipped` in place of
+`capabilities=checked`. The daemon's probe never passes the flag and refuses that line, so such an
+image runs only where no probe runs, under `runtime: tmux`. Oh My Pi downloads Chrome for Testing
+on first use when it finds no browser, so the deployment's own overlay must turn the browser off.
 A step of its own, before that final one, runs every toolchain command listed above as `legion`, from
 the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
 `tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
@@ -441,7 +450,7 @@ Where the digest is published:
 - `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` for a `sha-` or
   `<legion version>` worker-image tag.
 
-Worker-image tags: `sha-<12 hex of the built commit>` on every run (on a pull request that is the
+Worker-image tags: `sha-<12 hex of the built commit>` on every run that builds (on a pull request that is the
 PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion_publish`
 job released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
 only and never touch a release. The package also currently holds `sha256-<image digest hex>` OCI
@@ -493,9 +502,14 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
 — no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
 the `legion_build` and `legion_publish` jobs on every `main` push that touches any file the image builds
-from, (2) on every head of a pull request against `main` whose diff touches any of those files — building
+from, (2) on a pull request against `main` whose diff touches any of those files — building
 the PR head and publishing `sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the
-workflow exists on `main`. The
+workflow exists on `main`. Trigger (2) does not build every head. A draft's head builds no image and
+publishes no `sha-` tag. Marking the pull request ready builds that head. A newer push to the pull
+request cancels the build of an older head, waiting or running, so that older head gets no image.
+Closing the pull request cancels its build too. No `main`, `release.yaml` or `workflow_dispatch` run is
+ever cancelled this way. A reopen within about a minute of the close can race the `closed` run:
+`.github/workflows/tests-closed.yaml` says what happens and what to do. The
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
 lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
 whole — the Dockerfile (`packages/daemon/docker/**`), the two plugins and what they bundle (`packages/pi-envoy/**`,
@@ -523,7 +537,8 @@ then names `refs/pull/<n>/merge`, which the verify command above refuses.
 **The image is built only by this workflow, on the GitHub-hosted runner.** Never build it on a workstation
 — no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the devbox
 host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is not a workstation). Iterate by
-pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
+pushing the PR branch (trigger 2; a draft builds only once it is marked ready, and a push cancels the
+previous head's build) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
 running the published image locally is fine. A failed build is retried with `gh run rerun <run-id> --failed`
 (`--failed` keeps `legion_build`'s and `legion_publish`'s recorded outputs) or by pushing the branch again. A
@@ -2544,8 +2559,9 @@ usually empty during a plain refused dial, since nats.go clears it on every fail
 own cause while a handshake keeps failing, since nats.go leaves that one in place until the
 connection succeeds. At boot an unreachable NATS or Dispatch delays the boot instead of exiting,
 retried one second doubling to one minute, forever, logged at warn as `boot probe failed
-transiently; waiting to run it again` with its `probe` (naming which), `attempt`, `retryIn` and
-`detail`.
+transiently; waiting to run it again` with its `probe` (naming which: `repository mapping read`,
+the boot's first Dispatch read, `connect Envoy NATS`, or `list Dispatch issues for admission`),
+`attempt`, `retryIn` and `detail`.
 
 A malformed seed refuses the boot immediately at startup, before any network connection is
 attempted. A NATS authorization violation at connect time is the same: the server said no
@@ -2592,7 +2608,9 @@ waits and the logged `detail` may never name the authorization error at all (LEG
 While the readiness gate waits, callers outside the daemon see it as still booting, not as down:
 the API port is already bound by this point (the same as during the image probe, both before this
 gate), so it accepts a connection but serves nothing until the gate passes, and `legion status`
-reports the daemon's PID alive but not yet answering. A pane's `legion` tool calls (`read_record`
+reports the daemon's PID alive but not yet answering. The repository mapping read waits before the
+port is bound, so while it waits a connection to the API is refused, as for a daemon that is not
+running, and only the daemon's log says it waits. A pane's `legion` tool calls (`read_record`
 and `handoff_complete`, the latter minting its grant in-process first) and `controller start` all
 wait on that same API, so none of them succeeds until the daemon actually serves; a pane's plain
 `gh` and `git` do not, since they read the role's credential from its gh files and call the daemon
@@ -5429,11 +5447,15 @@ issue's pod (every role of it alike) and the image probe's.
   `GET /legion/v1/state`'s `agentSecretsLogin` reads its `state`: `none` before the first login
   finishes, `issued` while a credential that has not expired is held (a renewal that failed beside
   it included), or `failed` (daemon API contract 22). Pod enrollment fails closed and retries until
-  a login succeeds. After a failed login the daemon waits 30 s before the next, doubling each time
-  to at most 5 minutes, whether or not it still holds a credential, and a successful login resets
-  the wait. Running the daemon off the cluster (the Stage 4a live proof), `token_file` holds a
-  token the operator mints, at most an hour long, for a ServiceAccount of the proof's own that
-  `BROKER_SERVICE_LOGINS` lists for `legion-daemon` and no running daemon uses, with
+  a login succeeds. After a login given no HTTP answer, or a 5xx answer from the broker or its
+  front door (the broker is down, out of reach, or cannot reach its database), the daemon waits
+  2 s before the next, doubling each time to at most 10 s, so after an outage it logs in again
+  within about 10 s of the broker serving. After a login the broker refused (a 4xx, 429
+  included), or a token file it could not read, it waits 30 s, doubling each time to at most 5
+  minutes. Either way it waits whether or not it still holds a credential, and a successful login
+  resets both waits. Running the daemon off the cluster (the Stage 4a live proof), `token_file`
+  holds a token the operator mints, at most an hour long, for a ServiceAccount of the proof's own
+  that `BROKER_SERVICE_LOGINS` lists for `legion-daemon` and no running daemon uses, with
   `kubectl create token <account> -n <namespace> --audience agent-secrets --duration 1h`: each
   account holds one credential, so a proof logging in as a running daemon's account would take
   that daemon's credential.
@@ -5677,12 +5699,20 @@ bind: <devbox VPC IP>
 worker_stream_port: <worker stream port>
 ```
 
+The reverse, a project moved from pods onto one tmux host, keeps its store: the Go tmux daemon takes
+over the Kubernetes daemon's claims once every pod of the project is gone and its `legion.yaml`
+sets `runtime.tmux.take_over: kubernetes` (docs/deployment.md, "Moving a project onto tmux").
+
 **`--resume` keeps the same-agent invariant, and the table is what keeps it.** The tmux runtime
-`stat`s the recorded session file on the daemon host and refuses to spawn when it is missing (a
-silent fresh agent would lose the session), and Oh My Pi itself does not refuse: verified against
+looks for the recorded session file on the daemon host, in the other folders of the same sessions
+directory and of the pane's own sessions directory too, and refuses to spawn when it is found
+nowhere (a silent fresh agent would lose the session), the launch charged and the session kept.
+The one exception is a claim this daemon takes over from a pod under `take_over`, whose session
+may never have been carried: it starts a fresh agent that registers its own, logged and charged
+nothing. Oh My Pi itself does not refuse: verified against
 the pinned build (`omp --resume=<missing path> --mode rpc`), it exits 0, answers `ready`, and runs
 as a fresh agent, with no error frame and no mention of the file. Under Kubernetes there is no
-file to `stat` and no init container that looks for one: every session is a row in the session
+file to look for and no init container that looks for one: every session is a row in the session
 database, and the pod's disk, which dies with the pod, never holds a transcript. The role's own
 launcher makes the check instead, inside the pod and before it starts the child: it looks the
 recorded session up in the table through the mounted URL file and refuses the start when the table
@@ -5862,9 +5892,10 @@ A 403 fails the spawn (or stop) naming the verb and resource, e.g. `create secre
 The controller is the one Legion session a person talks to. `controller` in `legion.yaml` says who
 launches it: `operator` (the default), a person running `legion controller start` on a machine of
 theirs ([Operator-launched controller](#operator-launched-controller)), or `daemon`, the daemon
-itself, as an Agent Sandbox pod it supervises ([Daemon-launched controller](#daemon-launched-controller)).
-`controller: daemon` needs `runtime: kubernetes`; the loader refuses it under tmux (`controller:
-daemon needs runtime: kubernetes, …`) and refuses any value but the two.
+itself, as an Agent Sandbox pod it supervises ([Daemon-launched controller](#daemon-launched-controller)),
+or under `runtime: tmux` as a pane in a window of its own (docs/deployment.md, "The `runtime.tmux`
+block"). `controller: daemon` needs `dispatch_url` (`controller: daemon needs dispatch_url: …`), and
+the loader refuses any value but the two.
 
 Under either mode a controller reads its daemon's resolved settings — `max_fix_attempts`,
 `worker_boot_timeout_seconds`, `admission_cap` and the rest of `legion.yaml`, with every credential,
