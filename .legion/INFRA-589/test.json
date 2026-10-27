@@ -2,32 +2,87 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-589",
-  "completed": "2026-10-27T08:27:00Z",
-  "headTested": "90039f9dc30d8ea123e37496364256b8b6bad65b (code head 3b6c5ab4; meta.json build_commit 90039f9d, build_dirty false)",
-  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod, from a fresh LOADTEST_ROOT=/legion/scratch/tmp/lt-tester on ports 25432/25433/24222/28222/29120/28777/26061 (env in /legion/scratch/tmp/lt-tester.env), because the implementer's stack, in the implementer's PID namespace, still held the default ports 15432-19120 (stack.sh start refused port 15432 naming LOADTEST_PG_PORT). The stack is stopped; its seed (migration 120) is kept for the next round.",
+  "completed": "2026-10-27T14:05:00Z",
+  "round": 2,
+  "headTested": "11c1ac3f29f74a192472cfc98b9657301c9526d5 (code head 7675a7ac; meta.json build_commit 11c1ac3f, build_dirty false)",
+  "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion issue pod, LOADTEST_ROOT=/legion/scratch/tmp/lt-tester on ports 25432/25433/24222/28222/29120/28777/26061 (/legion/scratch/tmp/lt-tester.env), reseeded with this build by `stack.sh seed --force` (migration 129, 1,600 s, block-index backfill waited for). The stack is stopped; the seed is kept.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran every acceptance command of implement.json on a fresh stack built by the one run-step.sh command (setup, nats-server v2.10.29 and pgserver 0.1.4 installs, initdb, seed 1,068 s): A1/A3 smoke-kinds, A4 step-1x and step-1x-report-mix, A5 routes-alt, A2 run-series.sh, A6 README header coverage; each criterion held as the implementer reported. Re-ran its four negative controls with the same refusals. The implementer's 'load average 0.00 before' is not evidence of an idle box (failure 3)."
+    "how": "Drove each of the three round-1 failures and A1-A6 on my own stack at this build, with the implementer's commands and with harder ones: live concurrent runs, refusals while seeding and during a series, SIGKILL of Dispatch, of NATS and of run-step.sh itself, a symlinked root. I re-ran its negative controls and got the same refusals. Its box_busy_before control was confirmed by accident: its own leftover busy loop made my first smoke step warn at 47%."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "One LOADTEST_ROOT runs one step at a time (README 'Run one step': run-step.sh resets the stack before each step; 'No other heavy work on the machine during a step'). A second run-step.sh or run-series.sh on the root of a running step must be refused before it touches the stack.",
-      "evidence": "Started `run-step.sh conc-a --events 1 --sessions 50 --requests 10 --duration 120s`; 20 s into its window started `run-step.sh conc-b --events 1 --sessions 50 --requests 10 --duration 60s` on the same root. conc-b ran setup, start and seed, then its reset printed `stopped dispatch (pid 8325)`, `stopped listener (pid 8266)` and failed on `ERROR: database \"dispatch\" is being accessed by other users`, exit 1, leaving the listener stopped. conc-a then printed `run-step.sh: step conc-a done`, exit 0, with run.log showing pprof and heartbeat `connection refused` from 2 s into its window and a TABLES.md row of 0.95 offered / 0.01 committed events/s, 1.6% of requests 2xx, lock held 0%, no cpu.pprof or heap.pprof: a row that reads as a load collapse. Red test (its own commit, 'test(envoy): a second load-test run on one LOADTEST_ROOT is refused while the first holds it (red)'): packages/envoy/loadtest/run-step.test.sh; `cd packages/envoy && bash loadtest/run-step.test.sh` fails with `FAIL: a second run-step.sh on the root of a running run-step.sh was not refused: it went on to stack.sh setup (its go build ran) ...`. It fakes go and uv on PATH and holds the first run inside setup; it asserts a second run-step.sh, a run-series.sh during a run-step.sh, and a run-step.sh during a run-series.sh are each refused before their build, and that a run after the first exits is not refused. It is not yet in CI: GitHub refused the review App's push of a step for it in .github/workflows/envoy-and-contracts.yaml ('refusing to allow a GitHub App to create or update workflow ... without `workflows` permission'), so the fix adds, after the envoy job's 'Verdict test for listener-deploy-probe.sh' step: `- name: One-run-at-a-time test for loadtest/run-step.sh and run-series.sh (fakes go and uv; no stack)` / `run: bash loadtest/run-step.test.sh` / `working-directory: packages/envoy`; if the implement App cannot push a workflow either, that is the architect's to route. A scratch prototype (flock on $LOADTEST_ROOT/.run.lock in both scripts, the series exporting that it holds the lock to its own run-step.sh calls) passes all four cases; it is not committed. The repository's precedent is packages/envoy/scripts/e2e-local.sh's flock, whose comment names the trap a fix here meets: the stack's processes outlive the step, so a lock descriptor they inherit (setsid -f in stack.sh spawn) keeps the root held after the step; the next round checks on the real stack that a step after a step is not refused."
+      "criterion": "Round-1 failure 1: one LOADTEST_ROOT runs one step or series at a time; a second run is refused before it touches the stack, and the lock is released when the holder ends",
+      "surface": "run-step.sh, run-series.sh and stack.sh on the real local stack",
+      "command": "run-step.sh conc2-a --events 1 --sessions 20 --requests 5 --duration 60s in the background; 15 s into its window run-step.sh conc2-b ... and stack.sh stop; after conc2-a, run-step.sh conc2-c ...; during stack.sh seed --force: run-step.sh, run-series.sh, stack.sh reset/stop/setup/status and stack.sh reset through a symlink to the root; during run-series.sh: run-step.sh; kill -KILL of a running run-step.sh, then run-step.sh at once and 60 s later",
+      "observed": "conc2-b and stack.sh stop: 'run-step.sh: LOADTEST_ROOT /legion/scratch/tmp/lt-tester is in use by another run (pid 34593, started 2026-10-27T12:44:04Z): bash packages/envoy/loadtest/run-step.sh conc2-a ...', exit 1; conc2-a exit 0 with a normal row (0.67/0.67 events/s, 100% 2xx); conc2-c exit 0 (no stack process kept the lock; flock -n on .run.lock also succeeded after the seed with the stack still running). During the seed every listed command was refused, also through the symlink, while status answered; during the series run-step.sh was refused. After the SIGKILL its orphaned loadgen held the root until its window ended (refused at once), then post-sigkill-b ran exit 0 and its reset stopped the orphaned Dispatch. CI: envoy-go job 122155127626 at d6916b36, step 'One-run-at-a-time test for loadtest/run-step.sh and run-series.sh' success.",
+      "headSha": "11c1ac3f29f74a192472cfc98b9657301c9526d5",
+      "negativeControl": "the second run (run-step.sh conc2-b) on the root of the running step: refused with exit 1, naming the root and the holder's pid and command; conc2-b's step directory was never created"
     },
     {
-      "criterion": "A step reports the load it measured: a step whose Dispatch exits during the window must fail (non-zero exit naming the exited process), not finish as a normal row.",
-      "evidence": "`run-step.sh dispatch-killed --events 1 --sessions 50 --requests 10 --duration 60s`, Dispatch SIGKILLed by its stack.json pid (/legion/scratch/tmp/lt-tester/bin/envoy-dispatch) 11 s into the window: `run-step.sh: step dispatch-killed done in 130 s`, EXIT=0, TABLES.md row 0.67 offered / 0.10 committed events/s, 18.9% of requests 2xx, cpu.pprof and heap.pprof absent; run.log names only the failed pprof fetches. A Dispatch crash or OOM at a high step would read as the overload collapse the series is meant to show. No red test in the repository's suite: the package's tests run with no Postgres or NATS, and reaching this needs a live stack; the next round's real-surface check is this same command, expecting a non-zero exit that names Dispatch."
+      "criterion": "Round-1 failure 2: a step in which a stack process exits fails with a non-zero exit naming the process, and its row is marked",
+      "surface": "run-step.sh on the real local stack",
+      "command": "run-step.sh killed-dispatch-r2 --events 1 --sessions 20 --requests 5 --duration 60s with kill -KILL <stack.json pids.dispatch> 15 s into the window; the same as killed-nats-r2 with pids.nats; then run-step.sh after-kill-r2 ...",
+      "observed": "killed-dispatch-r2: 'run-step.sh: step killed-dispatch-r2 failed: dispatch (pid 48521) exited during the step, so its row in .../TABLES.md does not measure the load', EXIT=1, row 'killed-dispatch-r2 (dispatch exited)', stack_exits [{name: dispatch, pid: 48521}]; killed-nats-r2: EXIT=1 naming 'nats (pid 49030)', row 'killed-nats-r2 (nats exited)'; after-kill-r2 exit 0 on a fresh NATS",
+      "headSha": "11c1ac3f29f74a192472cfc98b9657301c9526d5",
+      "negativeControl": "every step with no kill (smoke-r2b, step-1x-r2/-r2b/-r2c, the report-mix step, routes-alt-r2, conc2-a/c, the six series steps) exited 0 with no stack_exits and no mark"
     },
     {
-      "criterion": "README 'Requirements': 'No other heavy work on the machine during a step. meta.json records the load average before each step.' On the target pod that record must be able to show other work.",
-      "evidence": "On this gVisor pod /proc/loadavg read `0.00 0.00 0.00 0/0 0` 2 min into step-1x while two /proc/stat reads 5 s apart (cpu 628826 0 195805 1622367 -> 629490 0 195878 1622634) put the box at about 74% busy; every step's meta.json has loadavg_before `0.00 0.00 0.00`. Each Legion role runs in its own PID namespace, so `ps` and the sampler see none of another role's processes: this run found the implementer's whole stack still running in the pod (its ports open, its pids absent from /proc here) while meta.json said 0.00. The PR body's 'load average 0.00 before' therefore proves no idle box. A measure that works here is /proc/stat busy over a short interval before the step (the sampler already reads /proc/stat for `box busy`); the README and the PR body should name it instead."
+      "criterion": "Round-1 failure 3: the record of other work on the box before a step shows CPU from processes this role cannot see",
+      "surface": "run-step.sh meta.json box_busy_before, run.log, and stack.sh loadgen box-busy",
+      "command": "run-step.sh smoke-r2 --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; stack.sh loadgen box-busy (x3); the same after the implementer ended its process",
+      "observed": "smoke-r2 box_busy_before 0.472 and run.log 'warning: the box was 47% busy over the 5s before the step (above 10%): another process on the machine is using CPU, so this step shares it'. `ps` in my namespace showed nothing busy. box-busy read 0.472/0.451/0.463. The implementer confirmed the CPU came from its round-2 busy-loop control, still spinning in its own process (implementer message 12:45:52Z), and ended that process. box-busy then read 0.011/0.004, and every later step read 0.004-0.035.",
+      "headSha": "11c1ac3f29f74a192472cfc98b9657301c9526d5",
+      "negativeControl": "idle box after the implementer's process ended: box_busy_before 0.4-3.5% on every later step, no warning in run.log"
+    },
+    {
+      "criterion": "A1 and A3: harness in the repo on real Postgres (no Docker), nats-server JetStream, Dispatch and listener from the checkout; N sessions on agent and issue topics; all five event kinds; delivery latency from arrival and from commit",
+      "surface": "packages/envoy/loadtest CLI on this 2-vCPU gVisor Legion pod",
+      "command": "run-step.sh smoke-r2b --events 2 --sessions 50 --requests 10 --duration 90s --event-mix comment=20,anchored=20,reply=20,edit=20,upload=20; jq on summary.json, meta.json and run.log",
+      "observed": "committed/offered comment 29/29, anchored 30/30, reply 30/30, edit 50/50, upload 34/34; receipts 865/865; 300 subscriptions on 50 connections, 50 registered, 0 errors; delivery p50/p90/p99 from arrival 421/1,186/2,428 ms, from sent 421/1,186/2,429, from commit 39/137/498 (arrival >= commit at every percentile); clock_anomalies 0; 179 SSE frames, 0 order violations; 70 ungranted-lock samples; 7.6 xids/s; build 11c1ac3f, build_dirty false, nproc 2",
+      "headSha": "11c1ac3f29f74a192472cfc98b9657301c9526d5",
+      "negativeControl": "--event-mix comment=50,bogus=10 -> 'event mix: \"bogus\" is not a kind; kinds are comment, anchored, reply, edit, upload', exit 1, events max id 10004 before and after"
+    },
+    {
+      "criterion": "A4: tonight's 1x step reproduces the first knee on 2 cores (commit-order lock held in most samples, waiters, committed below offered)",
+      "surface": "same pod and CLI; Dispatch built from the PR head (main merged in, INFRA-591 not on main)",
+      "command": "run-step.sh step-1x-r2, step-1x-r2b, step-1x-r2c --events 4 --sessions 400 --requests 60; the series' step-1x; run-step.sh step-1x-report-mix-r2 --events 4 --sessions 400 --requests 60 --event-mix report-2026-10-27",
+      "observed": "held_fraction 1.0 in all four; waiters p50 20/41/45/45; committed 0.28/0.82/1.36/1.41 of 3.99 events/s (median 1.09); ungranted locks advisory commit_order_lock ExclusiveLock in 100% of samples, transactionid row_wait ShareLock in 92%; report mix: held 1.0, waiters p50 48, 2.85 of 3.83 events/s (root report step-1x 2.89 of 4.12, step-1x-rerun 1.91 of 3.97)",
+      "headSha": "11c1ac3f29f74a192472cfc98b9657301c9526d5",
+      "negativeControl": "the series' step-0.25x on the same build (1 event/s, 100 sessions): lock held 7.8%, every write committed (0.98 of 0.98): the knee is absent below it"
+    },
+    {
+      "criterion": "A5: the request generator takes the route mix as input",
+      "surface": "same pod and CLI",
+      "command": "run-step.sh routes-alt-r2 --events 0 --sessions 20 --requests 5 --duration 60s --route-mix <file: '1 other agent GET /api/v1/projects'>; jq '.requests.routes | keys, .requests.sent, .requests.ok_2xx, .events.offered'",
+      "observed": "routes [\"other GET /api/v1/projects\"], 294 sent, 294 2xx, events offered 0",
+      "headSha": "11c1ac3f29f74a192472cfc98b9657301c9526d5",
+      "negativeControl": "a route-mix file with 'POST /api/v1/issues/{key}/comments' on line 3 -> 'loadgen run: route mix .../routes-post.txt line 3: method \"POST\" is refused', exit 1, before any request"
+    },
+    {
+      "criterion": "A2: one command runs a named step; a second runs the series 0.25x to 10x into one table",
+      "surface": "same pod and CLI",
+      "command": "packages/envoy/loadtest/run-series.sh",
+      "observed": "'run-series.sh: series done: .../series-20261027T132318Z', exit 0; six step directories each with summary.json, TABLES.md, cpu.pprof, heap.pprof; series TABLES.md with 8 tables, 6 rows in each per-step table; box_busy_before 0.4-3.5%; lock held 8%, 27%, 100%, 89%, 0%, 57% from 0.25x to 10x",
+      "headSha": "11c1ac3f29f74a192472cfc98b9657301c9526d5",
+      "negativeControl": "run-step.sh during-series ... while the series ran -> 'LOADTEST_ROOT ... is in use by another run (pid 52732 ...): bash packages/envoy/loadtest/run-series.sh', exit 1"
+    },
+    {
+      "criterion": "A6: the README says how to run it and what each column means",
+      "surface": "packages/envoy/loadtest/README.md against the tables loadgen writes",
+      "command": "every distinct header of the series, smoke-r2b, routes-alt-r2 and killed-dispatch-r2 TABLES.md (header rows '| step |' and '| route |', step names skipped) searched in backticks in README.md with grep -F",
+      "observed": "checked=47 missing=0, including the new box busy before, NATS delivery from sent, SSE frame, ungranted-lock and transaction-id columns",
+      "headSha": "11c1ac3f29f74a192472cfc98b9657301c9526d5",
+      "negativeControl": "the guard against the party it must refuse: loadgen run -allow-foreign -url $DISPATCH_URL -listener $ENVOY_URL (production) -> 'guard: dispatch check failed: GET .../api/v1/projects with the stack's agent token answered 401', 'invalid bearer token', exit 1; -url $DISPATCH_URL and -url http://127.0.0.1:9020 without -allow-foreign refused before any connection"
     }
   ],
-  "failed": 3,
   "observations": [
-    "Committed rate at 1x on one build varies run to run: 1.23 (tester step-1x), 1.88 (tester series), 2.02 and 2.14 (implementer) events/s, with the lock held 100% in every run. The architect may want the README to say how many runs a before/after takes; this is not recorded as a failure.",
-    "Current main (32b6dd9f, 6 commits past the PR base c3d09eec, Dispatch migrations 121-128) plus this package reproduces the knee: held 100%, waiters p50 45, 1.97 of 3.99 events/s; the README's before/after-across-commits path worked (LOADTEST_SRC, forward migration of the seed copy 120 -> 128). INFRA-591 is todo, so no lock fix is on main.",
-    "The implementer's stack (Postgres with shared_buffers 1GB, the proxy, NATS, the listener) is still running in the pod on the default ports under /legion/scratch/tmp/dispatch-loadtest; `stack.sh stop` with that root stops it.",
-    "CI at the code head: runs exist only for f8d7b4fa (Tests, Legion Envoy and Contracts, Docs, Worker Image queued; PR Title success). None exist for 3b6c5ab4 or 90039f9d, read on GitHub at 08:2xZ."
+    "Fast-follow (wording only): README.md lines 136-137 and 254 and stack.sh lines 11 and 527 still give the seed as about 17 minutes (1,025 s). With the block-index wait, this round's seed took 1,600 s.",
+    "1x committed rate at this build (main merged in, including edit notices, migration 129): 0.28, 0.82, 1.36, 1.41 events/s (median 1.09), against the README's eight runs at a7b5f467: 0.74-1.95 (median 1.70). The ranges overlap and the run counts are small, so this shows no regression. The README's rule of five or more runs per side and medians is what can decide one.",
+    "After a SIGKILL of run-step.sh, the refusal names the dead run-step.sh pid as holder while its orphaned loadgen still holds the lock until its window ends. The refusal itself is correct.",
+    "`stack.sh loadgen run` takes no lock, as the README says, so a hand-run loadgen during a step is not refused. The documented entry points are covered.",
+    "CI at code head 7675a7ac when read: lint, typecheck, build, changes and pr-title passed; Tests in progress; Legion Envoy and Contracts jobs (envoy-go, envoy-e2e-local, envoy-smoke, dispatch-*) queued. At d6916b36, envoy-go succeeded, including the one-run-at-a-time test step."
   ]
 }
