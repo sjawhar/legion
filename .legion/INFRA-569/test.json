@@ -2,52 +2,36 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-569",
-  "completed": "2026-10-27T07:53:30Z",
-  "round": 3,
-  "testedHead": "b7b1325d21837bc5b1efe09de299785a6dd55e69",
+  "completed": "2026-10-27T10:26:00Z",
+  "round": 4,
+  "testedHead": "5c49fe2b546a6ab2b88c58af2ca3b669307539b7",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 2's independent drive of the same surfaces stands at b9278db5. The merge to b7b1325d leaves the branch's diff unchanged (my own fingerprint at both heads, equal to the implementer's), and my smoke run at b7b1325d reproduced the CLI and route results."
+    "how": "I drove the same surfaces myself on the tester lane at 5c49fe2b, using asks of my own. First I read the issue event log and the /api/v1/events catch-up for ask.answered events after editing the stored payloads through psql: selected set to JSON null, then the key removed. Then I ran the web margin's Pinned view on the changed-answer event, and re-ran search.e2e.ts, activity.e2e.ts and margin.e2e.ts."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "A dispatch search hit for an ask prints its state: the latest answer of a changed answer, who gave it, when, and the options chosen or none; closed with no answer; open. A closing reason over several lines stays indented under its hit (review finding 1).",
-      "surface": "the head's dispatch command (packages/envoy-client/bin/dispatch.ts) against a real Dispatch server and Postgres 17 + pgvector: bun run dispatch:local on the tester lane of the pod harness (http://127.0.0.1:18777)",
-      "command": "bash /legion/scratch/tmp/i569-test/r2.sh (resolve-ask --reason $'The crank stays.\\r\\nDecided in the spec.\\nSee section 4.'; a legacy retraction seeded through psql with reason E'removed from the document in version 3\\nby a later edit'; then dispatch search --query phenakistiscope)",
-      "observed": "'  Closed with no answer: resolved by session tester-r2 at 2026-10-27T07:07:48.629015135Z: The crank stays.' then '    Decided in the spec.' and '    See section 4.'. '  Closed after an answer: retracted by system document-settlement at …: removed from the document in version 3' then '    by a later edit', '  Last answer by alice at … · options chosen: Arc', '  Answer text: Arc.'. The changed answer prints '  Answered by alice at 2026-10-27T07:07:48.353526697Z · options chosen: none' and its two text lines, indented. In this output only hit lines start at column 0. Log: /legion/scratch/tmp/i569-test/r2-head.log.",
-      "headSha": "b9278db51d9551092fc957cd6cda57ff7c4de72e",
-      "negativeControl": "At 284986e6 (round 1) the reason was printed raw, so its later lines started at column 0, where the reviewer found them. In round 1 the base CLI (94ab028a) printed no state line under any ask hit (/legion/scratch/tmp/i569-test/cli-change-base.log)."
+      "criterion": "The issue event log and the live stream serve a stored ask.answered event's answer.selected and previous_answer.selected as [], never null; the web event view renders such an event (architect's acceptance send-back).",
+      "surface": "a real Dispatch server and Postgres 17 + pgvector on the tester lane (bun run dispatch:local, http://127.0.0.1:18777): GET /api/v1/issues/{key}/events, the SSE stream GET /api/v1/events?since=0, and the issue page's Activity tab → Pinned margin in headless Chromium",
+      "command": "bash /legion/scratch/tmp/i569-test/r4.sh. It answers ask K with [Silk] and changes it to [Linen] with expected_answer_at, and answers ask N with [Indigo]. It reads both routes, then psql sets answer.selected and previous_answer.selected to null in the stored events, and the routes are read again; then psql removes both keys, and the routes are read a third time. After that a throwaway Playwright driver, since removed, pins the 'changed the answer' row on /issues/CORE-8/activity and opens the Pinned tab.",
+      "observed": "As written, seq 4 shows [\"Silk\"], seq 5 shows [\"Linen\"] with previous [\"Silk\"], and seq 6 shows [\"Indigo\"]. The stored payload after the first psql edit read 4|null|<no previous>, 5|null|null, 6|null|<no previous>. With null, and again with the key absent, both the issue log and the SSE catch-up send answer.selected [] for seq 4, 5 and 6, and previous_answer.selected [] for seq 5. previous_answer stays absent on the two first answers, and text is unchanged (\"Silk, it twists evenly.\", \"Linen after all.\", null). The Pinned card shows 'Linen after all.' over struck 'was: Silk, it twists evenly.', with no page error. Logs: /legion/scratch/tmp/i569-test/r4-head.log, r4-pinned.png.",
+      "headSha": "5c49fe2b546a6ab2b88c58af2ca3b669307539b7",
+      "negativeControl": "The broken inputs are stored ask.answered payloads whose selected lists are JSON null, and then missing altogether. Neither route passes the null or the absence through. At b7b1325d the issue log sent the stored null as it was (the implementer's run, implement.json)."
     },
     {
-      "criterion": "An ask answer given without selected reads \"selected\": [] on every ask route, never null, stored null rows included (architect's adjacent fix).",
-      "surface": "the real Dispatch server's HTTP routes (alice's session cookie) and the dispatch CLI, on the same local instance",
-      "command": "r2.sh step T: POST /api/v1/asks/T/answer {\"text\":\"Neither: hornbeam.\"} (no selected key); GET /api/v1/asks/T, /api/v1/issues/CORE-8/asks?thread=1, /api/v1/me/answers, /api/v1/search?q=hornbeam; then psql removes selected from the row and from its ask.answered event payload, and the GETs run again; then psql sets both to JSON null, and the GETs run a third time",
-      "observed": "POST answer.selected []. In all three states (written fresh, key absent from row and event, JSON null in row and event), every route sends []: ask.answer and answers[], the list's answer and thread.answers[], the me/answers row, and the search hit's ask.answer. The stored row after the edit read {\"at\":…,\"text\":\"Neither: hornbeam.\",\"user\":\"alice\"}. dispatch search --query hornbeam prints 'options chosen: none'.",
-      "headSha": "b9278db51d9551092fc957cd6cda57ff7c4de72e",
-      "negativeControl": "The stored row with no selected key, and the row with selected JSON null, are the broken inputs: no route passes the absence or the null through. Before this fix, the implementer's TestAskAnswerWithoutSelectedReadsAsEmptyList at the unchanged server read selected null (implement.json)."
-    },
-    {
-      "criterion": "The browser suite shows the search panel marking an answered ask with its answer; the option's accessible name stays bounded for a long answer (review finding 2).",
-      "surface": "Dispatch's browser suite (Playwright chromium + iphone) against the real Go server, production SPA bundle and Postgres on the tester lane. The palette was also driven in headless Chromium against dispatch:local at 1280 px and 390 px.",
-      "command": "( source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone search.e2e.ts keyboard-palette.e2e.ts answers.e2e.ts activity.e2e.ts inbox.e2e.ts inbox-drawer.e2e.ts ask-blocks.e2e.ts approval.e2e.ts replies.e2e.ts ). Palette driver: a throwaway Playwright script, since removed, that read each option's ariaSnapshot name for the query phenakistiscope.",
-      "observed": "259 passed, 35 skipped, 0 failed (20.6 min). Among them: ✓ [chromium] › e2e/search.e2e.ts:169:1 › an ask hit says whether it is answered, … (2.5s) and ✓ [iphone] › e2e/search.e2e.ts:338:1 › phone search rows are at least 44px, do not overflow, …. In the palette, the option for a 2,110-character answer that ends 'zenithward' has an accessible name of 469 characters, ending at the 280-character head of the answer with an ellipsis. No option name holds 'zenithward', the other ask options stay between 107 and 147 characters, and there is no horizontal overflow at 390 px. Logs: /legion/scratch/tmp/i569-test/r2-e2e-head.log, r2-palette.log, r2-palette.png, r2-palette-phone.png.",
-      "headSha": "b9278db51d9551092fc957cd6cda57ff7c4de72e",
-      "negativeControl": "In round 1, the head's search.e2e.ts run against the base app and server (94ab028a) failed: Expected substring \"Answered\" at search.e2e.ts:218 (/legion/scratch/tmp/i569-test/e2e-base.log). At 284986e6 the option held the whole answer, CSS-clamped only, which is what the reviewer found."
+      "criterion": "The search panel still marks an answered ask with its latest answer after the cleanup; the event view and margin still work (regression).",
+      "surface": "Dispatch's browser suite (Playwright chromium + iphone) against the real Go server, production SPA bundle and Postgres on the tester lane",
+      "command": "( source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- --project=chromium --project=iphone search.e2e.ts activity.e2e.ts margin.e2e.ts )",
+      "observed": "51 passed, 7 skipped, 0 failed (4.7 min), including ✓ [chromium] › e2e/search.e2e.ts:169:1 › an ask hit says whether it is answered, and an answered one shows its latest answer, who gave it and the options chosen (3.0s). Log: /legion/scratch/tmp/i569-test/r4-e2e-head.log.",
+      "headSha": "5c49fe2b546a6ab2b88c58af2ca3b669307539b7",
+      "negativeControl": "In round 1, the head's search.e2e.ts run against the base app and server (94ab028a) failed: Expected substring \"Answered\" at search.e2e.ts:218 (/legion/scratch/tmp/i569-test/e2e-base.log)."
     }
   ],
-  "ci": "At 07:52Z the merge head b7b1325d had workflow runs on GitHub (Tests, Docs, Worker Image, PR Title, Legion Envoy and Contracts) with lint, typecheck, test, pr-title, build and changes all queued; one superseded PR Title run was cancelled. I read them as running and did not wait. The PR head 49071703 is handoff-only and carries skip-checks: true, which is correct now that the code head has its own runs. My round-2 untrailered push 8413b9c0 never got a run; the merge head replaced it.",
+  "earlierRounds": "Rounds 1–3 verified the CLI states, the search route's ask field, selected [] on the ask routes, the palette's bounded accessible name, and the unchanged fingerprint across the merge with main (c456ff9a… at b9278db5 and b7b1325d). Round 4 changes only events.go, EventBody.tsx, and wording, tests and a constant export, so those results stand; search.e2e.ts re-ran green at 5c49fe2b.",
+  "ci": "At 10:25Z code head 5c49fe2b had its own workflow runs on GitHub: build, changes, lint, test, typecheck and pr-title were queued, and a superseded pr-title run was cancelled. I read them as running and did not wait. Handoff head dd06879a carries skip-checks: true, which is correct now that the code head has runs.",
   "observations": [
     "Not a defect: when markdownHead cuts inside a Markdown link or code fence, the palette shows the cut source text. The preview links to the full ask."
-  ],
-  "rebaseRecheck": {
-    "from": "b9278db51d9551092fc957cd6cda57ff7c4de72e",
-    "to": "b7b1325d21837bc5b1efe09de299785a6dd55e69",
-    "fingerprintFrom": "c456ff9a1aef9847c69936b74176ebf0a2ebe2ad5d5e1c3aae20630545aad4a8",
-    "fingerprintTo": "c456ff9a1aef9847c69936b74176ebf0a2ebe2ad5d5e1c3aae20630545aad4a8",
-    "verdict": "rebase re-check b9278db5 → b7b1325d: fingerprint unchanged, bare gates only",
-    "command": "jj diff --from \"fork_point(\\\"main\\\"@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, computed at each head after jj git fetch",
-    "smoke": "bun run dispatch:local at b7b1325d: the SPA bundle built (2827 modules), the server booted and the seed passed. bash /legion/scratch/tmp/i569-test/r2.sh exited 0, with the same lines as round 2: indented multi-line reasons under 'Closed with no answer' and 'Closed after an answer', 'Answered by alice … · options chosen: none', and selected [] on the POST and every GET in all three stored states (log /legion/scratch/tmp/i569-test/r3-smoke.log)."
-  }
+  ]
 }
