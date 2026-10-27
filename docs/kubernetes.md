@@ -5353,12 +5353,15 @@ issue's pod (every role of it alike) and the image probe's.
   /repos/{owner}/{repo}/installation` under each App's JWT): a repository either App is missing
   from is left out, not refused, and `legion state --json` names it under `repositories.refused`
   with the App it lacks; a repository whose installation read fails (any failure but GitHub's
-  answer, an installation or a 404, a read longer than 5 s included) is left out for now, named
-  under `repositories.refused` with the App, the repository and the failure, an issue handed to
-  Legion on it, by a live event or in the boot's listing, is held rather than refused, and admitted
-  once the repository is served, and the mapping is read again, 30 s doubling to 10
-  min, until GitHub answers, then the repository is served with no restart (a served repository
-  whose read fails stays served on its last answer and is read again the same way); a project
+  answer, an installation or a 404, a read longer than 15 s included; each read is bounded on its
+  own, never the check as a whole, so a slow GitHub that answers is served) is left out for now,
+  named under `repositories.refused` with the App, the repository and the failure; an issue
+  handed to Legion on it, by a live event, in the boot's listing or by `release_children`, is
+  held in the daemon rather than refused, its event acknowledged, nothing said on it, and
+  admitted, parents first, once the repository is served, and the mapping is read again, 30 s
+  doubling to 10 min, until GitHub answers, then the repository is served with no restart (a
+  served repository whose read fails stays served on its last answer, with the name GitHub last
+  gave it, and is read again the same way); a project
   with no repository mapped does not boot, one whose every repository lacks an App boots serving
   none, admitting nothing until an App is installed, and one whose every repository's
   installation read fails boots serving none and logs so at ERROR (the boot's own reads of the

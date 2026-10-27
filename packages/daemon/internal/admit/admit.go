@@ -424,7 +424,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []intake
 
 	caughtUp := position.Reached(target)
 	deferred := make(map[string]intake.DispatchIssue)
-	for _, summary := range parentsFirst(summaries) {
+	for _, summary := range ParentsFirst(summaries) {
 		stored, err := a.store.Issue(ctx, tx, summary.Key)
 		if err != nil {
 			return fmt.Errorf("read reconciled issue %s: %w", summary.Key, err)
@@ -465,14 +465,14 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []intake
 	return a.wakeForFreeSlot(ctx, tx, append(released, returned...))
 }
 
-// parentsFirst orders a Dispatch listing by how many of each issue's ancestors the listing itself
+// ParentsFirst orders a Dispatch listing by how many of each issue's ancestors the listing itself
 // holds, so every issue comes after its parent, and keeps the listing's own order among the issues
 // of one such depth. The workflow records a child only under a recorded parent, so an unrecorded
 // todo child under an unrecorded todo parent of a live tree is recorded in the same pass as that
 // parent, at any depth. A recorded issue is ordered by the same rule, so a root's own listed move —
 // a close, a re-admission — is applied before its children's, which is the order the tree's own
 // events carry: a child's re-entry then reads the tree as that move left it.
-func parentsFirst(summaries []intake.DispatchIssue) []intake.DispatchIssue {
+func ParentsFirst(summaries []intake.DispatchIssue) []intake.DispatchIssue {
 	parents := make(map[string]string, len(summaries))
 	for _, summary := range summaries {
 		parents[summary.Key] = summary.Parent
@@ -1404,7 +1404,7 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 			slotted[slot.Issue] = struct{}{}
 		}
 		held := slices.SortedFunc(maps.Values(releasing), func(x, y intake.DispatchIssue) int { return cmp.Compare(x.Key, y.Key) })
-		for _, summary := range parentsFirst(held) {
+		for _, summary := range ParentsFirst(held) {
 			if err := a.applySummary(ctx, tx, summary, slotted); err != nil {
 				return nil, err
 			}

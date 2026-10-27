@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
@@ -346,10 +348,12 @@ func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project 
 // doubling to 10 min, without limit (Attempts is unused), back to 30 s once none is left.
 var installReadRetry = bootprobe.Retry{Initial: 30 * time.Second, Max: 10 * time.Minute}
 
-// installReadAttempt bounds one installation read: a read GitHub has not answered by then is a
-// failed read, so a repository GitHub hangs on is left out for now rather than holding up the
-// mapping, at most two rounds of mappingReads reads inside a refresh attempt (appMintAttempt).
-var installReadAttempt = 5 * time.Second
+// installReadAttempt bounds one installation read: as long as any one GitHub call the boot waits
+// for (appMintAttempt), so a GitHub that answers slowly is still answered for, while a read GitHub
+// has not answered by then is a failed read, and a repository GitHub hangs on is left out for now
+// rather than holding up the mapping. Nothing bounds the check as a whole: mappingReads reads run at
+// once, so a check of n repositories takes at most ceil(2n / mappingReads) of these.
+var installReadAttempt = 15 * time.Second
 
 // readFailures is the refusals of refused that a failed installation read made (readErr).
 func readFailures(refused []refusedRepository) []refusedRepository {
@@ -457,10 +461,13 @@ func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 // refreshMapping reads the repository mapping again: refreshOnMappingChange's read, which a
 // mapping change in Dispatch, an admission held for it (requestMappingRead) or a repository whose
 // installation read failed (installReadRetry) asks for. A repository the daemon serves whose
-// installation read fails stays served on its last answer, recorded as unverified so it is read
-// again: GitHub's failure to answer is no reason to stop serving a repository it answered for,
-// and no reason either to hold back the rest of the mapping. One left out whose read fails stays
-// left out, with the new failure. It has
+// installation read fails stays served on its last answer, with the name GitHub last gave it and
+// no read of GitHub, recorded as unverified so it is read again: GitHub's failure to answer is no
+// reason to stop serving a repository it answered for, and no reason either to hold back the rest
+// of the mapping. One left out whose read fails stays left out, with the new failure. Dispatch's
+// read, and the naming and publication after the check, are each bounded by appMintAttempt; the
+// check itself is bounded per read (installReadAttempt), so a GitHub that answers slowly is
+// answered for whatever the mapping's size. It has
 // GitHub intake hear every repository the new mapping serves and every repository a record of the
 // project names, so a repository unmapped while an issue is recorded on it is still heard, and
 // only then publishes the new mapping: a read that fails before the subscription took publishes
@@ -469,25 +476,35 @@ func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	w.mappingMu.Lock()
 	defer w.mappingMu.Unlock()
-	accepted, refused, err := readMapping(ctx, w.dispatch, w.dispatchProject, w.installs)
+	listing, cancel := context.WithTimeout(ctx, appMintAttempt)
+	mappings, err := listMapping(listing, w.dispatch)
+	cancel()
 	if err != nil {
 		return err
 	}
+	accepted, refused, err := checkMapping(ctx, mappings, w.dispatchProject, w.installs)
+	if err != nil {
+		return err
+	}
+	var kept []mappedRepository
 	var unverified []string
 	refused = slices.DeleteFunc(refused, func(failed refusedRepository) bool {
 		mapped, refusal, _, _ := w.repositories.lookup(failed.Repo)
 		if failed.readErr == nil || refusal != "" {
 			return false
 		}
-		accepted = append(accepted, mappedRepository{Repo: mapped.Repo, Default: failed.mappedDefault})
+		kept = append(kept, mappedRepository{Repo: mapped.Repo, Default: failed.mappedDefault})
 		unverified = append(unverified, mapped.Repo.String())
 		w.log.Warn("workflow: a served repository's GitHub App installation read failed, so the daemon keeps serving it on its last answer and reads it again",
 			"repo", mapped.Repo.String(), "error", failed.readErr)
 		return true
 	})
+	ctx, cancel = context.WithTimeout(ctx, appMintAttempt)
+	defer cancel()
 	if accepted, err = nameAccepted(ctx, accepted, w.defaultBranches); err != nil {
 		return err
 	}
+	accepted = append(accepted, kept...)
 	served := make([]ghrepo.Repository, 0, len(accepted))
 	for _, mapped := range accepted {
 		served = append(served, mapped.Repo)
@@ -557,7 +574,7 @@ func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
 	recheckIn := installReadRetry.Initial
 	for {
 		var recheck <-chan time.Time
-		waiting := append(w.repositories.awaitingRead(), w.heldListed()...)
+		waiting := append(w.repositories.awaitingRead(), w.heldForReadReasons()...)
 		if len(waiting) == 0 {
 			recheckIn = installReadRetry.Initial
 		} else {
@@ -575,12 +592,10 @@ func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
 		wait := appMintRetry.Initial
 		for {
 			covers := w.mappingRequested.Load()
-			attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
-			err := w.refreshMapping(attempt)
-			cancel()
+			err := w.refreshMapping(ctx)
 			if err == nil {
 				w.mappingApplied.Store(covers)
-				w.admitListingHeld(ctx)
+				w.admitHeldForRead(ctx)
 				break
 			}
 			if ctx.Err() != nil {
@@ -597,82 +612,103 @@ func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
 	}
 }
 
-// holdListed holds issue, prepared from the boot's listing (prepareListed), out of the boot's
-// admission when it comes up for admission unrecorded (records holds no record of it) on a
-// repository left out only because its installation read failed, as a live event of it is held
-// (prepareUnrecorded): no refusal is said on it, and admitListingHeld admits it once a read of
-// the mapping serves the repository, with no person's move. It reports whether it held issue.
-func (w *workflowRuntime) holdListed(records map[string]*record.Issue, issue intake.DispatchIssue) bool {
-	if records[issue.Key] != nil || !admissionBound(issue) || issue.ResolvedRepo == "" {
-		return false
-	}
-	if _, _, _, unread := w.repositories.lookup(issue.ResolvedRepo); !unread {
-		return false
-	}
+// holdForRead holds issue key, unrecorded and up for admission on repo, which a failed
+// installation read leaves out: its event is acknowledged and applied with no refusal said on it
+// (workflow.Resolution.Unread), so no event of it sits unacknowledged on the stream, where it would
+// keep the Dispatch consumer below the position the boot's admission waits for, and the daemon
+// admits it itself once a read of the mapping serves repo (admitHeldForRead). The hold is in
+// memory: a restart's boot listing, which shows the issue in todo, holds it again.
+func (w *workflowRuntime) holdForRead(key, repo string) {
 	w.awaitingMu.Lock()
 	defer w.awaitingMu.Unlock()
-	if w.listingHeld == nil {
-		w.listingHeld = map[string]struct{}{}
+	if _, held := w.heldForRead[key]; held {
+		return
 	}
-	w.listingHeld[issue.Key] = struct{}{}
-	w.log.Info("workflow: an issue of the boot listing is held until GitHub answers its repository's installation read",
-		"issue", issue.Key, "repo", issue.ResolvedRepo)
-	return true
+	if w.heldForRead == nil {
+		w.heldForRead = map[string]struct{}{}
+	}
+	w.heldForRead[key] = struct{}{}
+	w.log.Info("workflow: an issue is held until GitHub answers its repository's installation read", "issue", key, "repo", repo)
 }
 
-// heldListed is every issue holdListed holds, by key, sorted.
-func (w *workflowRuntime) heldListed() []string {
+// repositoryHeld is whether holdForRead holds key: release_children's answer for a child it holds.
+func (w *workflowRuntime) repositoryHeld(key string) bool {
 	w.awaitingMu.Lock()
 	defer w.awaitingMu.Unlock()
-	keys := make([]string, 0, len(w.listingHeld))
-	for key := range w.listingHeld {
-		keys = append(keys, key+": a boot listing's issue held for its repository's installation read")
-	}
-	slices.Sort(keys)
-	return keys
+	_, held := w.heldForRead[key]
+	return held
 }
 
-// admitListingHeld applies, after each read of the mapping, every issue holdListed holds whose
+// heldForReadReasons is every issue holdForRead holds, as the refresher logs what it waits on.
+func (w *workflowRuntime) heldForReadReasons() []string {
+	w.awaitingMu.Lock()
+	defer w.awaitingMu.Unlock()
+	reasons := make([]string, 0, len(w.heldForRead))
+	for key := range w.heldForRead {
+		reasons = append(reasons, key+": held for its repository's installation read")
+	}
+	slices.Sort(reasons)
+	return reasons
+}
+
+// admitHeldForRead applies, after each read of the mapping, every issue holdForRead holds whose
 // repository a failed installation read no longer leaves out, as Dispatch shows it now
 // (intake.ObservedIssue), through the same preparation and handlers a live event of it takes: one
-// served is admitted, one GitHub now says lacks an App is refused as any is. An issue recorded
-// meanwhile, or no longer coming up for admission, is let go; one whose read or apply fails stays
-// held for the next read.
-func (w *workflowRuntime) admitListingHeld(ctx context.Context) {
+// served is admitted, one GitHub now says lacks an App is refused as any is. Parents go first, as
+// the boot listing's do (admit.ParentsFirst), and a child whose Dispatch parent is still held stays
+// held, since the workflow records a child only under a recorded parent. An issue recorded
+// meanwhile, no longer up for admission, or gone from Dispatch is let go; one whose read or apply
+// fails stays held for the next read. Each read and each admission is bounded by appMintAttempt.
+func (w *workflowRuntime) admitHeldForRead(ctx context.Context) {
 	w.awaitingMu.Lock()
-	keys := make([]string, 0, len(w.listingHeld))
-	for key := range w.listingHeld {
-		keys = append(keys, key)
-	}
+	keys := slices.Sorted(maps.Keys(w.heldForRead))
 	w.awaitingMu.Unlock()
-	slices.Sort(keys)
+	release := func(key string) {
+		w.awaitingMu.Lock()
+		delete(w.heldForRead, key)
+		w.awaitingMu.Unlock()
+	}
+	still := make(map[string]bool, len(keys))
+	var views []intake.DispatchIssue
 	for _, key := range keys {
-		done, err := w.admitHeldListed(ctx, key)
+		read, cancel := context.WithTimeout(ctx, appMintAttempt)
+		now, err := w.dispatch.GetIssue(read, key)
+		cancel()
+		switch {
+		case dispatch.Missing(err):
+			release(key)
+		case err != nil:
+			still[key] = true
+			w.log.Warn("workflow: a held issue was not read from Dispatch; it stays held for the next read of the mapping", "issue", key, "error", err)
+		default:
+			still[key] = true
+			views = append(views, intake.ObservedIssue(now))
+		}
+	}
+	for _, observed := range admit.ParentsFirst(views) {
+		if still[observed.Parent] {
+			continue
+		}
+		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
+		done, err := w.admitHeld(attempt, observed)
+		cancel()
 		if err != nil {
-			w.log.Warn("workflow: a held issue of the boot listing was not admitted; it stays held for the next read of the mapping", "issue", key, "error", err)
+			w.log.Warn("workflow: a held issue was not admitted; it stays held for the next read of the mapping", "issue", observed.Key, "error", err)
 		}
 		if done {
-			w.awaitingMu.Lock()
-			delete(w.listingHeld, key)
-			w.awaitingMu.Unlock()
+			still[observed.Key] = false
+			release(observed.Key)
 		}
 	}
 }
 
-// admitHeldListed is admitListingHeld for one issue, and whether it is no longer held.
-func (w *workflowRuntime) admitHeldListed(ctx context.Context, key string) (bool, error) {
-	recorded, err := w.recordOf(ctx, key)
-	if err != nil {
-		return false, err
+// admitHeld is admitHeldForRead for one issue, as Dispatch shows it now (observed), and whether it
+// is no longer held.
+func (w *workflowRuntime) admitHeld(ctx context.Context, observed intake.DispatchIssue) (bool, error) {
+	recorded, err := w.recordOf(ctx, observed.Key)
+	if err != nil || recorded != nil {
+		return recorded != nil, err
 	}
-	if recorded != nil {
-		return true, nil
-	}
-	now, err := w.dispatch.GetIssue(ctx, key)
-	if err != nil {
-		return false, fmt.Errorf("read %s from Dispatch: %w", key, err)
-	}
-	observed := intake.ObservedIssue(now)
 	if !admissionBound(observed) {
 		return true, nil
 	}
@@ -687,8 +723,8 @@ func (w *workflowRuntime) admitHeldListed(ctx context.Context, key string) (bool
 	if err != nil {
 		return false, err
 	}
-	if _, err := intake.ApplyFact(ctx, w.pool, "daemon", fmt.Sprintf("listing-held:%s:%d", key, prepared.Seq), prepared, w.handlers...); err != nil {
-		return false, fmt.Errorf("apply %s: %w", key, err)
+	if _, err := intake.ApplyFact(ctx, w.pool, "daemon", fmt.Sprintf("held-for-read:%s:%d", observed.Key, prepared.Seq), prepared, w.handlers...); err != nil {
+		return false, fmt.Errorf("apply %s: %w", observed.Key, err)
 	}
 	return true, nil
 }
@@ -1102,7 +1138,11 @@ func parentKey(parent *string) string {
 
 // prepareUnrecorded readies the event of an issue the workflow does not record, as
 // prepareRepository says, holding back an admission on a repository not served for a read of the
-// mapping, under the sequence the event was delivered at (held), when await is set.
+// mapping, under the sequence the event was delivered at (held), when await is set. An admission
+// on a repository a failed installation read leaves out is held in memory instead (holdForRead),
+// whoever prepares it (a live event, the boot listing, release_children), and the event is
+// returned to be applied and acknowledged: the workflow says nothing on it
+// (workflow.Resolution.Unread), and admitHeldForRead admits it once the repository is served.
 func (w *workflowRuntime) prepareUnrecorded(ctx context.Context, issue intake.DispatchIssue, await bool, held int64) (intake.DispatchIssue, error) {
 	if issue.ResolvedRepoMissing {
 		detail, err := w.dispatch.GetIssue(ctx, issue.Key)
@@ -1115,17 +1155,14 @@ func (w *workflowRuntime) prepareUnrecorded(ctx context.Context, issue intake.Di
 		return issue, nil
 	}
 	mapped, refusal, _, unread := w.repositories.lookup(issue.ResolvedRepo)
-	if refusal != "" && await && admissionBound(issue) {
+	if refusal != "" && !unread && await && admissionBound(issue) {
 		if err := w.awaitMappingRead(issue, held); err != nil {
 			return issue, err
 		}
 		mapped, refusal, _, unread = w.repositories.lookup(issue.ResolvedRepo)
-		if unread {
-			// GitHub gave no answer for the repository, so the event is held, not refused: it is
-			// admitted once a read again serves the repository.
-			return issue, &intake.RetryLater{After: installReadRetry.Initial,
-				Err: fmt.Errorf("%s resolves to %s, which is left out until GitHub answers its installation read: %s", issue.Key, issue.ResolvedRepo, refusal)}
-		}
+	}
+	if unread && admissionBound(issue) {
+		w.holdForRead(issue.Key, issue.ResolvedRepo)
 	}
 	if refusal != "" {
 		return issue, nil

@@ -44,11 +44,15 @@ mapped repository both the implement and the review App are installed on, and le
 App is missing from: the boot logs it, `legion state --json` lists it under `repositories.refused`
 with the App it lacks, and an issue on it is not admitted until the App is installed, when moving
 the issue to `todo` again admits it. A repository whose installation GitHub does not answer for
-(any failure but a 404, a read longer than 5 seconds included) is left out for now the same way,
+(any failure but a 404, a read longer than 15 seconds included) is left out for now the same way,
 its refusal naming the App, the repository and GitHub's failure, and the daemon reads the mapping
 again, 30 seconds doubling to 10 minutes between reads, until GitHub answers, then serves it with no
-restart; an issue handed to Legion on it meanwhile, or one the boot finds waiting in `todo`, waits
-for that read rather than being refused, and is admitted then with no one moving it.
+restart. An issue handed to Legion on it meanwhile, one the boot finds waiting in `todo`, or a
+child `release_children` releases is held by the daemon rather than refused: nothing is said on
+it, its event does not hold up any other issue's admission, and it is admitted, parents before
+children, once the repository is served, with no one moving it; `release_children` answers such a
+child released, with nothing for the architect to retry. A held issue is held in memory, and a
+restart's boot listing holds it again.
 A served repository whose read fails stays served on its last answer and is read again the same
 way. A project with no repository mapped does not boot; one whose every repository lacks an App
 boots serving none and admits nothing until an App is installed, and one whose every repository's

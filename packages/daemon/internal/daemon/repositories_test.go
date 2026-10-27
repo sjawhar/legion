@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -91,13 +92,15 @@ func (i *installations) reads(key string) int {
 	return count
 }
 
-// mappingDispatch is a Dispatch whose repository mapping is mappings and whose project listing
-// is listed.
+// mappingDispatch is a Dispatch whose repository mapping is mappings, whose project listing is
+// listed, and whose issue detail is issues' entry for a key it names, the embedded issue for any
+// other.
 type mappingDispatch struct {
 	outboxDispatch
 	mu       sync.Mutex
 	mappings []dispatch.RepoProject
 	listed   []dispatch.IssueSummary
+	issues   map[string]dispatch.Issue
 	err      error
 }
 
@@ -111,6 +114,16 @@ func (d *mappingDispatch) ListIssues(context.Context, string, []string) ([]dispa
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]dispatch.IssueSummary{}, d.listed...), nil
+}
+
+func (d *mappingDispatch) GetIssue(ctx context.Context, key string) (dispatch.Issue, error) {
+	d.mu.Lock()
+	issue, named := d.issues[key]
+	d.mu.Unlock()
+	if named {
+		return issue, nil
+	}
+	return d.outboxDispatch.GetIssue(ctx, key)
 }
 
 func (d *mappingDispatch) set(mappings ...dispatch.RepoProject) {
@@ -209,6 +222,29 @@ func TestTheMappingNamesEveryMissingAppAndLeavesOutOnlyARepositoryWhoseReadFaile
 	want := "the review App is not installed on acme/gadgets; the implement App's installation on acme/gadgets could not be read: GitHub answered 502"
 	if err != nil || len(refused) != 1 || refused[0].Reason != want || refused[0].readErr != nil {
 		t.Fatalf("readMapping = %#v, %v; want acme/gadgets refused with %q and no read again", refused, err, want)
+	}
+}
+
+// Each installation read is bounded by installReadAttempt alone: twenty slow reads, more than two
+// rounds of mappingReads, are each answered and every repository served, however long the whole
+// check takes, and a read longer than installReadAttempt is a failed read, refused for now.
+func TestEachInstallationReadIsBoundedOnItsOwn(t *testing.T) {
+	read := installReadAttempt
+	t.Cleanup(func() { installReadAttempt = read })
+	var mappings []dispatch.RepoProject
+	for i := range 10 {
+		mappings = append(mappings, dispatch.RepoProject{Repo: fmt.Sprintf("acme/repo-%d", i), Project: "LEGION", Default: i == 0})
+	}
+	installReadAttempt = 400 * time.Millisecond
+	accepted, refused, err := checkMapping(context.Background(), mappings, "LEGION", &installations{delay: 150 * time.Millisecond})
+	if err != nil || len(accepted) != 10 || len(refused) != 0 {
+		t.Fatalf("checkMapping of 20 slow reads = %d accepted, %#v, %v; want all 10 served", len(accepted), refused, err)
+	}
+
+	installReadAttempt = 50 * time.Millisecond
+	accepted, refused, err = checkMapping(context.Background(), mappings[:1], "LEGION", &installations{delay: 150 * time.Millisecond})
+	if err != nil || len(accepted) != 0 || len(refused) != 1 || !errors.Is(refused[0].readErr, context.DeadlineExceeded) {
+		t.Fatalf("checkMapping of a read longer than installReadAttempt = %#v, %#v, %v; want it refused for now as a failed read", accepted, refused, err)
 	}
 }
 
