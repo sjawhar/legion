@@ -72,6 +72,13 @@ func TestTildeRunsReadAsTheEngineReadsThem(t *testing.T) {
 		{`\~~ x* ~~a*b~~c*`, `paragraph: "~~ x* " | "a*b" strike_through | "c*"`, false},
 		{`> **\~~](u)![_![~_`, `paragraph: "**~~](u)![" | "![~" emphasis`, true},
 		{`[**~~**d**~~**](u)`, `paragraph: "d" link(u) strike_through strong`, false},
+		// A `**` run directly after a `~~` opener, inside a `*` pair: main read these as the engine
+		// does (the `**` stays text, struck inside the emphasis), so pairing in separate passes must
+		// not pair the `**` with the outer closer.
+		{`*~~**b~~*`, `paragraph: "**b" emphasis strike_through`, false},
+		{`p *~~**a~~* q`, `paragraph: "p " | "**a" emphasis strike_through | " q"`, false},
+		{`*x ~~**b~~ y*`, `paragraph: "x " emphasis | "**b" emphasis strike_through | " y" emphasis`, false},
+		{`*[~~**é~~*`, `paragraph: "[" emphasis | "**é" emphasis strike_through`, false},
 	}
 	readers := []struct {
 		name  string
