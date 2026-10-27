@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-595",
+  "completed": "2026-10-27T17:04:15Z",
+  "round": "changelog key removal (architect's request, after the operator's rule that nothing new on sjawhar/legion names a Dispatch key)",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2367",
+  "change": "One line: packages/envoy/CHANGELOG.md, the CI summary loop entry no longer ends with the issue key. Nothing else changed in this push except this handoff file.",
+  "proof": [
+    {
+      "criterion": "Nothing the PR lands on main names a Dispatch key in author-written text (the operator's rule as the architect relayed it); behaviour unchanged.",
+      "surface": "the pull request's diff against main and its commit messages, which the squash merge carries onto main",
+      "command": "jj diff --git --from 2fed59b9 --to 369fb669; jj diff --git --from 'fork_point(main@origin | 369fb669)' --to 369fb669 '~.legion' | grep -cE '^\\+.*(INFRA-[0-9]|LEGION-[0-9]|dispatch://)'; jj log -r 'fork_point(main@origin | 369fb669)..369fb669' --no-graph -T description | grep -cE 'INFRA-[0-9]|LEGION-[0-9]|dispatch://'",
+      "observed": "the change above 2fed59b9 is one removed line '(INFRA-595).' with the period moved to the line before; 0 added lines naming a key in the PR diff; 0 commit messages naming a key",
+      "headSha": "369fb66975037d4875978805b3ade171885656c0",
+      "negativeControl": "the same diff grep at the previous head 2fed59b9 prints one hit: '+  (INFRA-595).'"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/CHANGELOG.md"
+  ],
+  "deviations": [],
+  "openQuestions": []
+}
