@@ -135,7 +135,8 @@ type runner struct {
 // Run is `legion handoffs import` once the configuration is read: one line per issue and phase on
 // stdout — `<KEY> <word>: imported v<n>`, `unchanged`, `kept worker record v<n>` or `failed:
 // <why>` — then the branch's: `<KEY>: removed .legion/ at <sha>` under the records' daemon, or
-// `removal deferred: <KEY> is in <phase>; …` for an issue in testing or reviewing there; `removed
+// `removal deferred: <KEY> is in <phase>; …` for an issue in testing, reviewing, merging or
+// awaiting_merge there; `removed
 // .legion/<KEY>/ at <sha>` under the daemon before it, with `; kept .legion/<dirs> for the run
 // after the rollout` when the branch carries more under .legion/; `unchanged` (nothing of the
 // issue's under .legion/ to remove), `no branch` or `failed: <why>` — and a closing count of each.
@@ -305,16 +306,18 @@ func (r *runner) attempt(ctx context.Context, b branch, phases map[string]result
 }
 
 // removal is what the attempt removes from the branch at head, whose .legion/ lists top, and
-// removes it. Under the records' daemon it is all of .legion/, but nothing for an issue in testing
-// or reviewing: that daemon carries no push, so the new head would clear a tester's planned red
-// and leave a reviewer's approval of the round it has not completed standing for nothing; the line
-// says the removal is deferred until the phase ends. Under the daemon before it, it is only
+// removes it. Under the records' daemon it is all of .legion/, but nothing for an issue in testing,
+// reviewing, merging or awaiting_merge: that daemon carries no push, so the new head would clear a
+// tester's planned red, leave a reviewer's approval of the round it has not completed standing for
+// nothing, or move the head past the one the merger's READY names, which withdraws that READY and
+// sends the issue back to implementing; the line says the removal is deferred until the phase
+// ends. Under the daemon before it, it is only
 // .legion/<KEY>/ (own says the branch has it), the one push that daemon carries as handoffs alone,
 // keeping the issue's verdict and approval; every other path under .legion/ stays on the branch for
 // the run after the rollout, and the line names it.
 func (r *runner) removal(ctx context.Context, b branch, head string, top []contentEntry, own bool) (last result, moved bool, err error) {
 	if r.recordsDaemon {
-		if b.phase == phase.Testing || b.phase == phase.Reviewing {
+		if b.phase == phase.Testing || b.phase == phase.Reviewing || b.phase == phase.Merging || b.phase == phase.AwaitingMerge {
 			return result{deferred, fmt.Sprintf("removal deferred: %s is in %s; run the import again once the phase ends", b.key, b.phase)}, false, nil
 		}
 		return r.remove(ctx, b, head, "")
