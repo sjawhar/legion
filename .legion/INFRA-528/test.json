@@ -2,21 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-528",
-  "completed": "2026-10-27T12:58:00Z",
-  "testedHead": "e5baa696e08fc74eef03a7b1a3e4c5cac69dba82 (code head fc920c24dd5702480bdcec53ddc1d76491a6969b, merge of main a9f5c529)",
-  "rebaseCheck": "Fingerprint from my last verified head 7666a94d (b63ce8e7…) to e5baa696 (5e380076f5deb912e06a2cc89d031dec60359e9f1b7d20ff680b293f481d97f2): changed. The only difference is the useRenderedMarkdown doc comment, where this branch's mermaid sentence now sits inside main's rewritten paragraph. The architect asked for a full round, because main's INFRA-526 (#2310) and this change meet in useRenderedMarkdown's layout effect. I read the merged effect (useRenderedMarkdown.tsx:141-199): ask hosts are collected right after paint, the mermaid draw runs after the reference, decorate and picture passes and before onRendered, the cleanup runs both cancels, and the dependencies include main's `Card`.",
+  "completed": "2026-10-27T14:45:00Z",
+  "testedHead": "4db2471d08fde4237e6e98d9da1c2ad5317c1e1f (code head a45806be02b00460a36635bc9d732b3aadba1a1a, merge of main ae36683e)",
+  "rebaseCheck": "Fingerprint from my last verified head e5baa696 (5e380076…) to 4db2471d (c2f25b53faceb0e49f00206a303884d4b797838cba7d1397fb2056f9bcc0d244): changed. The only difference is one blank `+` line in MarkdownBody.test.tsx that moved from before the Mermaid block to after it (diff lines 330 and 864), so a full round. Main brought INFRA-527's task-item checkboxes into the same Markdown body paint and styles.css, and a new e2e runner (`bun e2e/run.ts -- …`). 4db2471d merges cleanly with the current main@origin.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its commands on the tester lane after `bun run build:web` at e5baa696: four-project `e2e/mermaid.e2e.ts` -> 32 passed (3.1m); `e2e/text-typed-blocks.e2e.ts e2e/unknown-directive.e2e.ts --project chromium --project iphone` -> 14 passed (55.5s). Both match its counts. Its typed-block interaction claims (a diagram inside a callout) I drove independently (below)."
-  },
-  "firefoxCommentRow": {
-    "asked": "The architect asked for the Firefox comment row at least 10 times, compared with main a9f5c529 if it fails. The implementer saw its 'Expand thread' click leave the thread collapsed in 2 of 5 Firefox runs at fc920c24.",
-    "runs": [
-      "`bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project firefox -g \"a comment holding a mermaid block draws a diagram\" --repeat-each 20` -> 40 passed (5.3m): the comment row 20/20 and the reply row (whose title also matches, and which also clicks 'Expand thread') 20/20.",
-      "Four-project `e2e/mermaid.e2e.ts --repeat-each 3` -> 96 passed (8.7m), the Firefox comment row 3/3 among them.",
-      "The Firefox comment row `--repeat-each 10` with two busy-loop processes holding both of the pod's 2 CPUs (killed by PID afterwards) -> 10 passed (3.2m)."
-    ],
-    "result": "33 of 33 Firefox comment-row runs passed, with 0 failures in 156 tests across the three runs. The failure did not reproduce, so main was not run: the architect's check of main applies only to a reproduced failure. The implementer's two failures stand as an unreproduced intermittent at fc920c24, with no evidence that it is this change's."
+    "how": "Re-ran its commands through main's runner on the tester lane after `bun run build:web` at 4db2471d: `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox` -> 32 passed (2.7m); the same runner for e2e/text-typed-blocks.e2e.ts, e2e/unknown-directive.e2e.ts and e2e/task-items.e2e.ts across the four projects -> 24 passed (1.6m). Both match its counts."
   },
   "failed": 0,
   "failures": [],
@@ -24,19 +15,19 @@
     {
       "criterion": "A1, the spec Summary rows and the time limit at the merged head: comment, Inbox ask, message, reply, refusal, too-large refusal with the page responsive, markup label, other-language guard",
       "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector, Desktop Chrome, iPhone 13, WebKit, Firefox",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox [--repeat-each 3]",
-      "observed": "32 passed (3.1m); with --repeat-each 3, 96 passed (8.7m).",
-      "headSha": "e5baa696e08fc74eef03a7b1a3e4c5cac69dba82",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox",
+      "observed": "32 passed (2.7m)",
+      "headSha": "4db2471d08fde4237e6e98d9da1c2ad5317c1e1f",
       "negativeControl": "Round 1: the same suite at the red commit ecc18ff3 -> 24 failed, 4 passed (9.1m)."
     },
     {
-      "criterion": "Main's typed-block cards (INFRA-526) and the mermaid drawing work together in one body and on the Inbox",
-      "surface": "Dispatch Conversation and Inbox, chromium, real server, throwaway e2e (deleted after the run)",
-      "command": "bunx playwright test --config e2e/playwright.config.ts e2e/zz-tester-probe8.e2e.ts --project chromium",
-      "observed": "6/6 as expected, with no page error and no refusal line. Drawn: a diagram inside `:::callout{kind=\"warning\" title=\"Read this\"}` (the callout header and title shown above it), a diagram after a callout, a diagram after and one before an `:::ask` decision card (the card shows 'High', 'Decision' and its options), and an Inbox ask whose question holds a callout with a diagram inside. Kept as code (0 images): a fence still open inside an unclosed callout.",
-      "headSha": "e5baa696e08fc74eef03a7b1a3e4c5cac69dba82",
-      "negativeControl": "The open fence inside the unclosed callout stays code while the closed one inside a callout draws."
+      "criterion": "Main's task-item checkboxes (INFRA-527) and the mermaid drawing work together in one body",
+      "surface": "Dispatch Conversation, chromium, real server, throwaway e2e through `bun e2e/run.ts` (deleted after the run)",
+      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/zz-tester-probe9.e2e.ts --project chromium",
+      "observed": "A diagram inside a task item (`- [ ] with a diagram` + an indented fence) draws, with 2 checkboxes beside it. A diagram after a task list draws, with 2 checkboxes. A fence still open inside a task item stays code, with 1 checkbox and no refusal. No checkbox appears inside any SVG, and there are no page errors.",
+      "headSha": "4db2471d08fde4237e6e98d9da1c2ad5317c1e1f",
+      "negativeControl": "The open fence inside the task item stays code while the closed one draws. A label holding brackets, `A[\"[x] not a task\"] --> B`, shows the renderer's refusal `Unable to render Mermaid diagram: Mermaid diagram includes connectors but no valid edges were parsed.` with its source open. The renderer itself refuses that source: `renderMermaidMarkup` (upstream renderProofMermaidSvg, the document editor's renderer) throws that message for it and for `A[\"[x]\"] --> B`, and draws `A[\"x not a task\"] --> B`. So Dispatch shows the editor's own verdict; this is not a defect of this change."
     }
   ],
-  "ci": "At c75b7947 (the first commit after the merge that GitHub ran) when read (12:55Z): build x2, changes, lint, pr-title, test, typecheck queued; no lane concluded. fc920c24 and e5baa696 have no runs."
+  "ci": "At 4db2471d on GitHub when read (14:43Z): build x2, changes, lint, pr-title, test, typecheck queued (one earlier pr-title cancelled); no lane concluded. a45806be has no runs (pushed with the handoff)."
 }
