@@ -273,3 +273,4 @@ const server = Bun.serve({
 const origin = `http://127.0.0.1:${server.port}`;
 
 console.log(`Open ${origin}/ and create each App (GitHub signs you in first).`);
+// Scratch change for the INFRA-584 production check: a pull-request run after the merge writes no cache entry.
