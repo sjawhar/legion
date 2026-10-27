@@ -1,8 +1,11 @@
 package supervise
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
 // testIdleSuspend is the idle suspend a test deployment gives its workers
@@ -14,8 +17,20 @@ const testIdleSuspend = 30 * time.Minute
 // untouched by the wait.
 func idleHarness(t *testing.T) *harness {
 	t.Helper()
+	return idleHarnessInPhase(t, nil)
+}
+
+// idleHarnessInPhase is idleHarness whose issue is in a delivered task's phase while holds says so
+// and has left it when it does not: a task the phase has left is dropped without ever becoming a
+// turn (sendPending), which is one of the two ways a claim goes back to idle with no turn to arm
+// its wait.
+func idleHarnessInPhase(t *testing.T, holds *bool) *harness {
+	t.Helper()
 	h := newBareHarness(t)
 	h.deps.Timeouts.IdleSuspend = testIdleSuspend
+	if holds != nil {
+		h.deps.PhaseHolds = func(context.Context, string, phase.Phase, uint64) (bool, error) { return *holds, nil }
+	}
 	c := queuedClaim()
 	h.token = c.Token
 	if err := h.store.PutClaim(h.ctx, c); err != nil {
@@ -46,18 +61,89 @@ func TestAnIdleWorkerIsSuspendedWithItsSessionKept(t *testing.T) {
 	h.wantCalls("Suspend", 1)
 }
 
-// A task that reaches the claim before the wait is spent ends it: the claim keeps its process, and
-// the next wait begins when that task's turn ends.
+// A task that reaches the claim before the wait is spent ends it: the claim keeps its process
+// through the deadline that wait had, and the next wait begins whole at the task's turn's end.
 func TestATaskBeforeTheIdleSuspendKeepsTheProcess(t *testing.T) {
 	h := idleHarness(t)
 	h.reach(StateIdle)
 	h.advance(testIdleSuspend / 2)
 	h.must(RequestDeliver{Claim: h.token, Task: "review the head"})
-	h.advance(testIdleSuspend)
-	if got := h.state(); got == StateSuspended {
-		t.Fatalf("state = %s, want a claim with a task to keep its process", got)
-	}
+	h.must(StreamTurnStart{Claim: h.token})
+	h.advance(testIdleSuspend / 6)
+	h.must(StreamTurnEnd{Claim: h.token})
+	h.wantState(StateIdle)
+
+	// The wait the task ended would be spent here; the one its turn began is not.
+	h.advance(testIdleSuspend / 2)
+	h.wantState(StateIdle)
 	h.wantCalls("Suspend", 0)
+
+	h.advance(testIdleSuspend / 2)
+	h.wantState(StateSuspended)
+}
+
+// A task the issue's phase has left is dropped where it is, without ever becoming a turn
+// (sendPending): the worker is idle again with nothing waiting, and the wait begins again from the
+// drop. Nothing else would ever arm it — no turn of that task will end — so the worker would
+// otherwise hold its process for as long as its issue ran.
+func TestATaskDroppedWithoutATurnStartsTheWaitAgain(t *testing.T) {
+	holds := true
+	h := idleHarnessInPhase(t, &holds)
+	h.reach(StateIdle)
+	h.advance(testIdleSuspend / 2)
+
+	holds = false // the issue left the task's phase while the worker sat idle
+	h.must(RequestDeliver{Claim: h.token, Task: "test the head", Phase: phase.Testing})
+	if p := h.claim().Pending; p != nil {
+		t.Fatalf("the claim still holds %+v after the issue left the task's phase", p)
+	}
+
+	// The wait the task ended does not fire at that wait's old deadline.
+	h.advance(testIdleSuspend / 2)
+	h.wantState(StateIdle)
+	h.wantCalls("Suspend", 0)
+
+	h.advance(testIdleSuspend / 2)
+	h.wantState(StateSuspended)
+	if by := h.claim().SuspendedBy; by != SuspendedByIdle {
+		t.Fatalf("suspended by %q, want idle", by)
+	}
+}
+
+// A turn the agent started itself — an Envoy notice's, a human's steer — is the agent at work, so
+// it ends the wait as a task does, and the next wait begins whole at that turn's end rather than
+// at the deadline the claim had before it.
+func TestATurnOfTheAgentsOwnStartsTheWaitAgainAtItsEnd(t *testing.T) {
+	h := idleHarness(t)
+	h.reach(StateIdle)
+	h.advance(testIdleSuspend / 2)
+
+	h.must(StreamTurnStart{Claim: h.token})
+	h.wantState(StateWorking)
+	h.advance(testIdleSuspend / 6)
+	h.must(StreamTurnEnd{Claim: h.token})
+	h.wantState(StateIdle)
+
+	h.advance(testIdleSuspend / 2)
+	h.wantState(StateIdle)
+	h.wantCalls("Suspend", 0)
+
+	h.advance(testIdleSuspend / 2)
+	h.wantState(StateSuspended)
+}
+
+// What else reaches an idle claim is not the worker's own work and does not postpone its
+// suspension: the shim reconnecting hands the agent nothing, so the wait it finds running keeps
+// the deadline it had.
+func TestAShimReconnectDoesNotPostponeTheIdleSuspend(t *testing.T) {
+	h := idleHarness(t)
+	h.reach(StateIdle)
+	h.advance(testIdleSuspend / 2)
+	h.connect()
+	h.wantState(StateIdle)
+
+	h.advance(testIdleSuspend / 2)
+	h.wantState(StateSuspended)
 }
 
 // A claim in a turn is never suspended by the wait: nothing arms it while the agent works, and the
@@ -67,6 +153,41 @@ func TestAWorkingClaimIsNeverIdleSuspended(t *testing.T) {
 	h.reach(StateWorking)
 	h.advance(2 * testIdleSuspend)
 	h.wantState(StateWorking)
+	h.wantCalls("Suspend", 0)
+}
+
+// A worker that survives a daemon restart is idle-suspended like any other: the restart's machine
+// starts the wait from the claim it read back, where only a turn's end ever armed it before and an
+// idle worker re-adopted after a restart kept its process for as long as its issue ran.
+func TestAnIdleWorkerRestoredAtBootIsSuspendedWhenItsWaitIsSpent(t *testing.T) {
+	h := idleHarness(t)
+	h.reach(StateIdle)
+	h.restart()
+	h.wantState(StateIdle)
+
+	h.advance(testIdleSuspend)
+	h.wantState(StateSuspended)
+	if by := h.claim().SuspendedBy; by != SuspendedByIdle {
+		t.Fatalf("suspended by %q, want idle", by)
+	}
+	h.wantCalls("Suspend", 1)
+}
+
+// A worker read back still holding a task is given no wait at all: the wait is for a worker with
+// nothing to do, and this one's task reaches it as soon as its shim says hello. The turn that task
+// becomes starts the first wait at its end.
+func TestAnIdleWorkerRestoredHoldingATaskIsGivenNoWait(t *testing.T) {
+	h := idleHarness(t)
+	h.reach(StateIdle)
+	h.conns.Remove(h.token) // no connection: the task waits for the shim's hello
+	h.must(RequestDeliver{Claim: h.token, ID: "d-restored", Task: "test the head"})
+	h.restart()
+
+	if live := h.clock.Live(); live != 0 {
+		t.Fatalf("%d timers armed for a claim read back holding its task, want none", live)
+	}
+	h.advance(2 * testIdleSuspend)
+	h.wantState(StateIdle)
 	h.wantCalls("Suspend", 0)
 }
 

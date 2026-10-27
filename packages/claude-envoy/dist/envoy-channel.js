@@ -44763,7 +44763,7 @@ var LegionOperatorClaimResponse = exports_external.strictObject({
   }),
   uncertainStreak: exports_external.number().int().nonnegative(),
   pending: legionDeliveryView.optional(),
-  suspendedBy: exports_external.enum(["unknown", "operator", "daemon", "exit"]).optional(),
+  suspendedBy: exports_external.enum(["unknown", "operator", "daemon", "exit", "idle"]).optional(),
   suspensionHeld: exports_external.literal(true).optional(),
   pluginContract: exports_external.number().int().nonnegative()
 });

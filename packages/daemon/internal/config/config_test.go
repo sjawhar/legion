@@ -144,6 +144,22 @@ func TestLoadMinimalFileAppliesDefaults(t *testing.T) {
 	}
 }
 
+// `worker_idle_suspend_seconds` is the one duration key a file may turn off, and 0 is how: it
+// loads as a zero duration, which arms no wait at all, so an idle worker keeps its process
+// (supervise's idleWait). Every other duration key refuses 0, since a zero timer would fire at
+// once.
+func TestLoadTakesZeroAsTheIdleSuspendTurnedOff(t *testing.T) {
+	cfg, err := Load(writeConfigFile(t, minimalFile+"worker_idle_suspend_seconds: 0\n"), noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := defaultsFor(13370)
+	want.WorkerIdleSuspend = 0
+	if !reflect.DeepEqual(cfg, want) {
+		t.Errorf("Load = %+v, want %+v", cfg, want)
+	}
+}
+
 // Stage 2 command paths only need the local daemon record. They keep loading until Task 3.12
 // wires the workflow's App and Dispatch clients, which is the first operation that needs them.
 func TestLoadAllowsStage2ConfigWithoutWorkflowKeys(t *testing.T) {
@@ -957,6 +973,16 @@ func TestLoadRefuses(t *testing.T) {
 			name: "worker_stop_timeout_seconds past the timer bound",
 			body: minimalFile + "worker_stop_timeout_seconds: 9999999\n",
 			want: "worker_stop_timeout_seconds must be at most 2147483",
+		},
+		{
+			name: "worker_idle_suspend_seconds negative",
+			body: minimalFile + "worker_idle_suspend_seconds: -1\n",
+			want: "worker_idle_suspend_seconds must be a positive integer, or 0 to turn it off",
+		},
+		{
+			name: "worker_idle_suspend_seconds past the timer bound",
+			body: minimalFile + "worker_idle_suspend_seconds: 2147484\n",
+			want: "worker_idle_suspend_seconds must be at most 2147483",
 		},
 		{
 			name: "tree_stop_timeout_seconds zero",

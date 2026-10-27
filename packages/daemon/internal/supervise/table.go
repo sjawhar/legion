@@ -97,9 +97,9 @@ const (
 	// lifecycle check failed with no cleanup reserved, or a launch whose write failed. The claim waits
 	// launching with no process until it fires.
 	TimerRelaunch TimerKind = "relaunch"
-	// TimerIdle is the idle suspend's wait (worker_idle_suspend_seconds): armed when a turn ends
-	// with nothing waiting, disarmed by anything that gives the agent work, and firing to suspend a
-	// claim that is idle still.
+	// TimerIdle is the idle suspend's wait (worker_idle_suspend_seconds): armed while the claim is
+	// idle with nothing waiting for it, disarmed by anything that gives the agent work, and firing
+	// to suspend a claim that is idle still (idleWait).
 	TimerIdle TimerKind = "idle"
 )
 
@@ -533,7 +533,7 @@ func fillTable(t *builder) {
 	t.row(onIdleTimer, "the worker has been idle its whole idle suspend: suspend it, keeping its session", idleSuspend,
 		[]ClaimState{StateSuspended, StateFailed}, StateIdle)
 	t.ignore(onIdleTimer, "the agent is in a turn, so it is not idle", StateWorking)
-	t.ignore(onIdleTimer, "no turn of this claim has ended, so no idle suspend is armed",
+	t.ignore(onIdleTimer, "the claim is not idle, so no idle suspend is armed",
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady)
 	t.ignore(onIdleTimer, noProcess, gone...)
 
@@ -938,13 +938,11 @@ func agentBusy(reason string) bool {
 // turnStarted is a turn starting in a ready or idle claim. It confirms the pending delivery when
 // it is that delivery's turn: a replay naming it, or — B1 — Oh My Pi's own agent_start while the
 // delivery is in flight (sent and not yet answered, acknowledged and waiting, or possibly sent by
-// an earlier daemon). Any other turn is a foreign one, and confirms nothing.
+// an earlier daemon). Any other turn is a foreign one, and confirms nothing. The claim leaves idle
+// here whoever asked for the turn, so the idle suspend's wait ends with it (idleWait).
 func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	start := ev.(StreamTurnStart)
 	m.claim.State = StateWorking
-	// A turn of the agent's own ends the idle suspend's wait as a delivery does: the agent is at
-	// work, whoever asked it.
-	m.leftIdle()
 	p := m.claim.Pending
 	_, awaiting := m.timers[TimerTurn]
 	inFlight := m.send != nil || awaiting || m.askFirst
@@ -958,7 +956,8 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 // unless a suspension is held for this turn (holdSuspension), which runs instead; a stop the
 // runtime refuses leaves the claim idle, still holding it. A turn interrupted for a start that takes
 // over the issue's phase lets that start go on (Quiesce). The agent just said where it is, so
-// nothing is left to ask it after a restart.
+// nothing is left to ask it after a restart. A claim this leaves idle with nothing waiting starts
+// the idle suspend's wait, as every decision does (idleWait).
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.askFirst = false
 	m.interruptOver()
@@ -981,19 +980,16 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.settle(ctx); err != nil {
 		return err
 	}
-	if err := m.sendPending(ctx); err != nil {
-		return err
-	}
-	m.armIdleSuspend()
-	return nil
+	return m.sendPending(ctx)
 }
 
 // idleSuspend is the idle suspend's timer: the worker's turn ended a whole
 // worker_idle_suspend_seconds ago and nothing has reached it since. Its process is taken back and
 // its session kept, so the next task resumes the same agent, and the suspension is the daemon's
-// own by rule (SuspendedByIdle), which the boot's resume by rule and every wake act on. A claim
-// the timer finds with work — a delivery queued, sent or waiting for its turn — is left alone and
-// armed again by the turn that work becomes: the timer is a wait, never a decision of its own.
+// own by rule (SuspendedByIdle), which the boot's resume by rule and every wake act on. The wait
+// is disarmed the moment anything reaches the claim (idleWait), so work the timer finds here
+// arrived as it fired: the claim is left alone, and its wait begins again when that work is over
+// — the turn it becomes ends, or it is dropped without ever becoming one.
 func idleSuspend(m *Machine, ctx context.Context, _ Event) error {
 	if busy, why := m.notIdle(); busy {
 		m.log.Info("supervise: the idle suspend found work waiting; the claim keeps its process", "waiting", why)

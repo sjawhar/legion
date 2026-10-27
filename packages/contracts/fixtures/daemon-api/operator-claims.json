@@ -53,6 +53,101 @@
       },
       "suspensionHeld": true,
       "pluginContract": 0
+    },
+    {
+      "token": "legion-legion-legion-209-tester-unknown",
+      "tree": "LEGION-208",
+      "issue": "LEGION-209",
+      "role": "tester",
+      "generation": 1,
+      "state": "suspended",
+      "session": "ses_tester_209",
+      "sessionFile": "/srv/legion/state/home/.omp/agent/sessions/ses_tester_209.jsonl",
+      "budgets": {
+        "launchFailures": 0,
+        "deaths": 0,
+        "promptFailures": 0,
+        "promptRetires": 0
+      },
+      "uncertainStreak": 0,
+      "suspendedBy": "unknown",
+      "pluginContract": 0
+    },
+    {
+      "token": "legion-legion-legion-209-tester-operator",
+      "tree": "LEGION-208",
+      "issue": "LEGION-209",
+      "role": "tester",
+      "generation": 1,
+      "state": "suspended",
+      "session": "ses_tester_209",
+      "sessionFile": "/srv/legion/state/home/.omp/agent/sessions/ses_tester_209.jsonl",
+      "budgets": {
+        "launchFailures": 0,
+        "deaths": 0,
+        "promptFailures": 0,
+        "promptRetires": 0
+      },
+      "uncertainStreak": 0,
+      "suspendedBy": "operator",
+      "pluginContract": 0
+    },
+    {
+      "token": "legion-legion-legion-209-tester-daemon",
+      "tree": "LEGION-208",
+      "issue": "LEGION-209",
+      "role": "tester",
+      "generation": 1,
+      "state": "suspended",
+      "session": "ses_tester_209",
+      "sessionFile": "/srv/legion/state/home/.omp/agent/sessions/ses_tester_209.jsonl",
+      "budgets": {
+        "launchFailures": 0,
+        "deaths": 0,
+        "promptFailures": 0,
+        "promptRetires": 0
+      },
+      "uncertainStreak": 0,
+      "suspendedBy": "daemon",
+      "pluginContract": 0
+    },
+    {
+      "token": "legion-legion-legion-209-tester-exit",
+      "tree": "LEGION-208",
+      "issue": "LEGION-209",
+      "role": "tester",
+      "generation": 1,
+      "state": "suspended",
+      "session": "ses_tester_209",
+      "sessionFile": "/srv/legion/state/home/.omp/agent/sessions/ses_tester_209.jsonl",
+      "budgets": {
+        "launchFailures": 0,
+        "deaths": 0,
+        "promptFailures": 0,
+        "promptRetires": 0
+      },
+      "uncertainStreak": 0,
+      "suspendedBy": "exit",
+      "pluginContract": 0
+    },
+    {
+      "token": "legion-legion-legion-209-tester-idle",
+      "tree": "LEGION-208",
+      "issue": "LEGION-209",
+      "role": "tester",
+      "generation": 1,
+      "state": "suspended",
+      "session": "ses_tester_209",
+      "sessionFile": "/srv/legion/state/home/.omp/agent/sessions/ses_tester_209.jsonl",
+      "budgets": {
+        "launchFailures": 0,
+        "deaths": 0,
+        "promptFailures": 0,
+        "promptRetires": 0
+      },
+      "uncertainStreak": 0,
+      "suspendedBy": "idle",
+      "pluginContract": 0
     }
   ]
 }
