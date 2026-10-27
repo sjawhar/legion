@@ -4,6 +4,13 @@
 
 ### Added
 
+- A typed block's `block[]` attribute: `BlockAttributeKind` gains `"block[]"` and
+  `BlockAttributeSchema` gains `targets`, the block types it points at. `parseBlockPointerValue`
+  reads a value (canonical block references joined by exactly one space), with
+  `parseCanonicalBlockReference` and `formatBlockReference` for one reference, tested with Go's
+  `pmdoc.ParseBlockPointerValue` against `DISPATCH_BLOCK_POINTER_VALUES`. `GraphEdgeKind` admits
+  a `block[]` attribute's name beside the structural kinds, the kind of the edges its pointers
+  make.
 - Blocks of a Dispatch document as graph nodes: `GraphNode.kind` gains `"block"`, whose node
   carries `block_id`, `document`, `changed_version` and `changed_at`, and, on the node a reference
   read names, `text` and, for a reference pinned to a version (`#b-<id>@v<N>`), `pin` (`BlockPin`:

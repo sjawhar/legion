@@ -4,6 +4,15 @@
 
 ### Added
 
+- A typed block's schema can declare an attribute of kind `block[]` that points at blocks: its
+  value is canonical block references joined by exactly one space, anything else refused, and
+  each block it names is a graph edge from the typed block of a kind named by the attribute,
+  which `GET /api/v1/references?kind=` accepts. Its `targets` limit the
+  block types it points at: an agent's or API write introducing a pointer to an existing block of
+  another type is refused (`400 INVALID_MARKDOWN`, or `INVALID_OP` on `attributes` from
+  `POST /edits`), a browser's edit never is, and every block-aware read lists a pointer's edge only
+  while its target has an allowed type (migration `0129_block_pointer_links`). No shipped block type
+  declares one yet.
 - Each block of a Dispatch document is a node of the reference graph. A reference can name one
   block, `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
   `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
