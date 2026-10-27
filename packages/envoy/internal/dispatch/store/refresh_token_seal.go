@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 )
 
 // sealedRefreshTokenPrefix leads every refresh token people.refresh_token holds sealed: the
@@ -22,39 +24,53 @@ const sealedRefreshTokenPrefix = "v1:"
 const refreshTokenKeyInfo = "dispatch people.refresh_token v1"
 
 // refreshTokenSeal seals the sign-in pool's refresh tokens Dispatch keeps in people, with
-// AES-256-GCM under a key derived from the session signing key (DISPATCH_SIGNING_KEY) with HKDF.
+// AES-256-GCM under a key derived from a session signing key (DISPATCH_SIGNING_KEY) with HKDF.
 // The person's email is the additional data, so a value moved to another person's row does not
-// open. A database dump alone therefore holds no usable refresh token, and a new signing key
-// opens none sealed under the old one.
+// open. A database dump alone therefore holds no usable refresh token, and a signing key set
+// opens none sealed under a key it does not hold.
+//
+// It seals under the current key and opens under any key of the set, trying each in turn: the
+// GCM tag refuses a key the value was not sealed under. The value names no key, so the v1 format
+// stays byte for byte what an earlier build writes and reads: a new prefix would read as plain
+// text to an earlier build booting during a roll or a rollback, whose RetirePlainRefreshTokens
+// would revoke every such token at the issuer.
 type refreshTokenSeal struct {
-	aead cipher.AEAD
+	// aeads holds one AEAD per signing key, the current key's first.
+	aeads []cipher.AEAD
 }
 
-func newRefreshTokenSeal(signingKey string) refreshTokenSeal {
-	key, err := hkdf.Key(sha256.New, []byte(signingKey), nil, refreshTokenKeyInfo, 32)
-	if err != nil {
-		panic(fmt.Sprintf("dispatch: derive the refresh-token key from the signing key: %v", err))
+func newRefreshTokenSeal(keys auth.SigningKeys) refreshTokenSeal {
+	if keys.Empty() {
+		panic("dispatch: the refresh-token seal needs a signing key")
 	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		panic(fmt.Sprintf("dispatch: refresh-token cipher: %v", err))
+	var seal refreshTokenSeal
+	for _, signingKey := range keys.Keys() {
+		key, err := hkdf.Key(sha256.New, []byte(signingKey), nil, refreshTokenKeyInfo, 32)
+		if err != nil {
+			panic(fmt.Sprintf("dispatch: derive the refresh-token key from the signing key: %v", err))
+		}
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			panic(fmt.Sprintf("dispatch: refresh-token cipher: %v", err))
+		}
+		aead, err := cipher.NewGCMWithRandomNonce(block)
+		if err != nil {
+			panic(fmt.Sprintf("dispatch: refresh-token AEAD: %v", err))
+		}
+		seal.aeads = append(seal.aeads, aead)
 	}
-	aead, err := cipher.NewGCMWithRandomNonce(block)
-	if err != nil {
-		panic(fmt.Sprintf("dispatch: refresh-token AEAD: %v", err))
-	}
-	return refreshTokenSeal{aead: aead}
+	return seal
 }
 
-// seal returns token sealed for email: the version prefix, then the random nonce, ciphertext and
-// tag, base64url without padding.
+// seal returns token sealed for email under the current signing key: the version prefix, then the
+// random nonce, ciphertext and tag, base64url without padding.
 func (s refreshTokenSeal) seal(email, token string) string {
-	return sealedRefreshTokenPrefix + base64.RawURLEncoding.EncodeToString(s.aead.Seal(nil, nil, []byte(token), []byte(email)))
+	return sealedRefreshTokenPrefix + base64.RawURLEncoding.EncodeToString(s.aeads[0].Seal(nil, nil, []byte(token), []byte(email)))
 }
 
-// open returns the refresh token sealed holds for email. Its error never carries the value: a value
-// in another format, one that does not decode, and one sealed under another key or for another
-// person each fail with a fixed message.
+// open returns the refresh token sealed holds for email, sealed under any of the signing keys. Its
+// error never carries the value: a value in another format, one that does not decode, and one
+// sealed under no key of the set or for another person each fail with a fixed message.
 func (s refreshTokenSeal) open(email, sealed string) (string, error) {
 	encoded, ok := strings.CutPrefix(sealed, sealedRefreshTokenPrefix)
 	if !ok {
@@ -64,9 +80,10 @@ func (s refreshTokenSeal) open(email, sealed string) (string, error) {
 	if err != nil {
 		return "", errors.New("the sealed value is not base64url")
 	}
-	token, err := s.aead.Open(nil, nil, ciphertext, []byte(email))
-	if err != nil {
-		return "", errors.New("the sealed value does not open under this signing key for this person")
+	for _, aead := range s.aeads {
+		if token, err := aead.Open(nil, nil, ciphertext, []byte(email)); err == nil {
+			return string(token), nil
+		}
 	}
-	return string(token), nil
+	return "", errors.New("the sealed value does not open under any signing key for this person")
 }

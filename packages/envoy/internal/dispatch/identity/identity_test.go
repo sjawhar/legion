@@ -141,9 +141,12 @@ func (s *testPeopleStore) get(email string) (auth.PersonMembership, bool) {
 	return membership, found
 }
 
+// testSigningKey is the one-key set the package's session cookies are signed with.
+var testSigningKey = auth.SingleSigningKey("signing-key")
+
 func cookieRequest(t *testing.T, email string, generation int64) *http.Request {
 	t.Helper()
-	cookie := strings.SplitN(auth.IssueSessionCookie(email, generation, "signing-key", true), ";", 2)[0]
+	cookie := strings.SplitN(auth.IssueSessionCookie(email, generation, testSigningKey, true), ";", 2)[0]
 	name, value, ok := strings.Cut(cookie, "=")
 	if !ok {
 		t.Fatalf("invalid session cookie %q", cookie)
@@ -190,7 +193,7 @@ func TestHeaderIdentityRejectsAMissingHeader(t *testing.T) {
 
 func TestCookieIdentityNamesThePersonOfAValidCookie(t *testing.T) {
 	sessions := &testSessionStore{generations: map[string]int64{"a.b+c@d.example": 0}}
-	identity := CookieIdentity{SigningKey: "signing-key", Sessions: sessions}
+	identity := CookieIdentity{SigningKey: testSigningKey, Sessions: sessions}
 	if _, err := identity.Login(httptest.NewRequest(http.MethodGet, "/", nil)); !errors.Is(err, ErrNoIdentity) {
 		t.Errorf("missing cookie error: got %v, want ErrNoIdentity", err)
 	}
@@ -204,7 +207,7 @@ func TestCookieIdentityNamesThePersonOfAValidCookie(t *testing.T) {
 		t.Errorf("login: got %q, want a.b+c@d.example", email)
 	}
 
-	if _, err := (CookieIdentity{SigningKey: "signing-key"}).Login(request); !errors.Is(err, ErrNoIdentity) {
+	if _, err := (CookieIdentity{SigningKey: testSigningKey}).Login(request); !errors.Is(err, ErrNoIdentity) {
 		t.Errorf("cookie identity without session store error: got %v, want ErrNoIdentity", err)
 	}
 	if err := sessions.RevokeSessions(context.Background(), "a.b+c@d.example"); err != nil {
@@ -217,7 +220,7 @@ func TestCookieIdentityNamesThePersonOfAValidCookie(t *testing.T) {
 
 func TestCookieIdentityReadsGenerationWithoutWriting(t *testing.T) {
 	sessions := &testSessionStore{generations: map[string]int64{"sami@example.com": 0}}
-	email, err := (CookieIdentity{SigningKey: "signing-key", Sessions: sessions}).Login(cookieRequest(t, "sami@example.com", 0))
+	email, err := (CookieIdentity{SigningKey: testSigningKey, Sessions: sessions}).Login(cookieRequest(t, "sami@example.com", 0))
 	if err != nil || email != "sami@example.com" {
 		t.Fatalf("cookie login = %q, %v; want sami@example.com, nil", email, err)
 	}
@@ -231,7 +234,7 @@ func TestCookieIdentityReadsGenerationWithoutWriting(t *testing.T) {
 
 func TestCookieIdentityRejectsCookieWithoutSessionRow(t *testing.T) {
 	sessions := &testSessionStore{generations: map[string]int64{}}
-	if _, err := (CookieIdentity{SigningKey: "signing-key", Sessions: sessions}).Login(cookieRequest(t, "sami@example.com", 0)); !errors.Is(err, ErrNoIdentity) {
+	if _, err := (CookieIdentity{SigningKey: testSigningKey, Sessions: sessions}).Login(cookieRequest(t, "sami@example.com", 0)); !errors.Is(err, ErrNoIdentity) {
 		t.Fatalf("cookie without session row error = %v, want ErrNoIdentity", err)
 	}
 }

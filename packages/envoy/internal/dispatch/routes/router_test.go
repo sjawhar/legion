@@ -24,6 +24,9 @@ import (
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
+// testSigningKey is the one-key set the package's session cookies are signed with.
+var testSigningKey = auth.SingleSigningKey("signing-key")
+
 // sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
 func sharedAgentTokens(t *testing.T, setting string) *auth.SharedAgentTokens {
 	t.Helper()
@@ -213,10 +216,10 @@ func newSignInRigFor(t *testing.T, serverURL string, rule identity.SignInRule, h
 	rig.people.sessions = rig.sessions
 	membership := &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Rule: rule, Now: rig.clock}
 	rig.ctx, err = BuildAppContext(AppContextOptions{
-		SigningKey: "signing-key",
+		SigningKey: testSigningKey,
 		People:     rig.people,
 		Sessions:   rig.sessions,
-		Identity:   identity.CookieIdentity{SigningKey: "signing-key", Sessions: rig.sessions, Membership: membership},
+		Identity:   identity.CookieIdentity{SigningKey: testSigningKey, Sessions: rig.sessions, Membership: membership},
 		SignIn:     flow,
 		SignInRule: rule,
 		ServerURL:  serverURL,
@@ -574,7 +577,7 @@ func TestDomainSignInEndsACookieFromBeforeTheSwitchToDomainMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure session: %v", err)
 	}
-	before, err := http.ParseSetCookie(auth.IssueSessionCookie(rigGoogleEmail, generation, "signing-key", true))
+	before, err := http.ParseSetCookie(auth.IssueSessionCookie(rigGoogleEmail, generation, testSigningKey, true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
@@ -695,7 +698,7 @@ func newTestRouter(t *testing.T) (http.Handler, *AppContext) {
 	t.Helper()
 	people := newMemoryPeople()
 	ctx, err := BuildAppContext(AppContextOptions{
-		SigningKey: "signing-key",
+		SigningKey: testSigningKey,
 		People:     people,
 		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", People: people},
 	})
@@ -1317,17 +1320,17 @@ func cookieRouter(t *testing.T, serverURL string) (http.Handler, *http.Cookie, *
 	}
 	sessions := &memorySessionStore{generations: map[string]int64{"sami@d.example": 0}}
 	ctx, err := BuildAppContext(AppContextOptions{
-		SigningKey:  "signing-key",
+		SigningKey:  testSigningKey,
 		People:      people,
 		Sessions:    sessions,
-		Identity:    identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions},
+		Identity:    identity.CookieIdentity{SigningKey: testSigningKey, Sessions: sessions},
 		AgentTokens: sharedAgentTokens(t, "agent-token"),
 		ServerURL:   serverURL,
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sami@d.example", 0, "signing-key", true))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sami@d.example", 0, testSigningKey, true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}

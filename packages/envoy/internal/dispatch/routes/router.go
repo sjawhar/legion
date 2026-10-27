@@ -50,7 +50,7 @@ import (
 // read-only after BuildAppContext returns; per-request state lives on
 // *router.
 type AppContext struct {
-	SigningKey     string
+	SigningKey     auth.SigningKeys
 	WebDistDir     string
 	AssetStore     AssetStore
 	Sessions       auth.SessionStore
@@ -79,7 +79,7 @@ type AppContext struct {
 // after deciding which storage / config sources to use. The router takes
 // what it's given; selection logic stays in cmd/dispatch/main.go.
 type AppContextOptions struct {
-	SigningKey     string
+	SigningKey     auth.SigningKeys
 	WebDistDir     string
 	AssetStore     AssetStore
 	Sessions       auth.SessionStore
@@ -122,7 +122,7 @@ type AppContextOptions struct {
 
 // BuildAppContext bundles the shared HTTP-handler state.
 func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
-	if opts.SigningKey == "" {
+	if opts.SigningKey.Empty() {
 		return nil, fmt.Errorf("BuildAppContext: SigningKey required")
 	}
 	if opts.People == nil {

@@ -108,9 +108,9 @@ type bootConfig struct {
 	WebDist string
 	// AssetStoreBucket is DISPATCH_ASSET_STORE_BUCKET. Empty preserves local-only asset serving.
 	AssetStoreBucket string
-	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie key, or empty to keep one in the
-	// data dir (sessionSigningKey).
-	SigningKey string
+	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie keys, the current one first, or the
+	// empty set to keep one key in the data dir (sessionSigningKey).
+	SigningKey auth.SigningKeys
 	// InsecureCookie (DISPATCH_INSECURE_COOKIE set to anything) drops Secure from every cookie.
 	InsecureCookie bool
 	// EnvoyToken is ENVOY_TOKEN, the bearer every Envoy listener call sends.
@@ -580,7 +580,6 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		WebDist:            env.get("DISPATCH_WEB_DIST"),
 		FileStoreBucket:    strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
 		AssetStoreBucket:   strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
-		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
 		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
 		EnvoyToken:         env.get("ENVOY_TOKEN"),
 	}
@@ -596,6 +595,11 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_TOKEN %w", err)
 	}
 	boot.AgentTokens = tokens
+	if setting := env.get("DISPATCH_SIGNING_KEY"); strings.TrimSpace(setting) != "" {
+		if boot.SigningKey, err = auth.ParseSigningKeys(setting); err != nil {
+			return bootConfig{}, fmt.Errorf("DISPATCH_SIGNING_KEY %w", err)
+		}
+	}
 	listenAddr, err := listenAddress(env)
 	if err != nil {
 		return bootConfig{}, err
@@ -708,7 +712,7 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 	if err := loopbackDatabase(boot.DatabaseURL); err != nil {
 		return err
 	}
-	if boot.SigningKey != "" {
+	if !boot.SigningKey.Empty() {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process; unset DISPATCH_SIGNING_KEY")
 	}
 	if !boot.NATSDisabled && env.get(bus.AllowRemoteEnvVar) == "1" {
@@ -805,16 +809,20 @@ func explainMigrateError(err error) error {
 	)
 }
 
-// sessionSigningKey is the key session cookies are signed with: one generated for this process
-// under dev sign-in, otherwise DISPATCH_SIGNING_KEY when it is set (a deployment's, from its
-// secrets manager), otherwise the data dir's signing-key file, created on first start (a local
-// run's). Outside dev sign-in the key must stay the same across deploys, or every dsession cookie
-// is invalidated whenever a container rolls.
-func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
+// sessionSigningKey is the key set session cookies are signed with: one key generated for this
+// process under dev sign-in, otherwise DISPATCH_SIGNING_KEY's keys when it is set (a deployment's,
+// from its secrets manager), otherwise the data dir's signing-key file, created on first start (a
+// local run's). Outside dev sign-in the keys must stay the same across deploys, or every dsession
+// cookie is invalidated whenever a container rolls; a rotation adds the new key second first.
+func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error) {
 	if boot.DevSignIn {
-		return auth.NewSigningKey()
+		key, err := auth.NewSigningKey()
+		if err != nil {
+			return auth.SigningKeys{}, err
+		}
+		return auth.SingleSigningKey(key), nil
 	}
-	if boot.SigningKey != "" {
+	if !boot.SigningKey.Empty() {
 		return boot.SigningKey, nil
 	}
 	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))

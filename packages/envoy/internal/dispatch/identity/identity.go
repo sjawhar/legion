@@ -19,9 +19,9 @@ type Identity interface {
 	Login(r *http.Request) (email string, err error)
 }
 
-// CookieIdentity resolves a signed Dispatch session cookie.
+// CookieIdentity resolves a signed Dispatch session cookie, signed with any key of SigningKey.
 type CookieIdentity struct {
-	SigningKey string
+	SigningKey auth.SigningKeys
 	Sessions   auth.SessionStore
 	// Membership confirms, at least hourly, that the person a cookie names may still use Dispatch,
 	// and ends their session when the sign-in issuer no longer says so. It is nil only on the local

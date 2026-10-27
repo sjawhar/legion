@@ -154,7 +154,7 @@ func migratedDispatchDatabase(t *testing.T) *dispatchstore.Store {
 	if err := database.Migrate(ctx); err != nil {
 		t.Fatalf("migrate the Dispatch database: %v", err)
 	}
-	people := dispatchstore.NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := dispatchstore.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("signing-key"), nil)
 	if err := people.Record(ctx, rigHuman); err != nil {
 		t.Fatalf("record %s as having signed in: %v", rigHuman, err)
 	}
@@ -169,7 +169,7 @@ func dispatchMux(t *testing.T, database *dispatchstore.Store, envoyURL string) h
 	if err != nil {
 		t.Fatalf("parse the shared agent token: %v", err)
 	}
-	people := dispatchstore.NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := dispatchstore.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("signing-key"), nil)
 	broker := events.NewBroker()
 	caller := identity.HeaderIdentity{Header: rigUserHeader, People: people}
 	// The document service is built here rather than left to NewDeps so this test can shut it

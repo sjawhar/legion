@@ -29,10 +29,10 @@ func newDevSignInRouterWithPeople(t *testing.T, serverURL string, sessions *memo
 	t.Helper()
 	people := newMemoryPeople()
 	ctx, err := BuildAppContext(AppContextOptions{
-		SigningKey:  "signing-key",
+		SigningKey:  testSigningKey,
 		People:      people,
 		Sessions:    sessions,
-		Identity:    identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions},
+		Identity:    identity.CookieIdentity{SigningKey: testSigningKey, Sessions: sessions},
 		AgentTokens: sharedAgentTokens(t, "e2e-token"),
 		ServerURL:   serverURL,
 		DevSignIn:   true,
@@ -105,7 +105,7 @@ func TestDevSignInIssuesTheSessionCookieAndRecordsThePerson(t *testing.T) {
 	if cookie == nil {
 		t.Fatalf("sign-in set no dsession cookie: %v", response.Header().Values("Set-Cookie"))
 	}
-	session, ok := auth.VerifySession(cookie.Value, "signing-key")
+	session, ok := auth.VerifySession(cookie.Value, testSigningKey)
 	if !ok || session.Login != "alice@d.example" || session.Generation != 3 {
 		t.Fatalf("cookie session = %#v valid=%t, want alice@d.example at generation 3", session, ok)
 	}
@@ -303,10 +303,10 @@ func TestDevSignInRouterRefusesAnotherHost(t *testing.T) {
 func TestDevSignInIsNotMountedByDefault(t *testing.T) {
 	sessions := &memorySessionStore{generations: map[string]int64{}}
 	ctx, err := BuildAppContext(AppContextOptions{
-		SigningKey: "signing-key",
+		SigningKey: testSigningKey,
 		People:     newMemoryPeople(),
 		Sessions:   sessions,
-		Identity:   identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions},
+		Identity:   identity.CookieIdentity{SigningKey: testSigningKey, Sessions: sessions},
 		ServerURL:  devSignInOrigin,
 	})
 	if err != nil {
@@ -333,7 +333,7 @@ func TestDevSignInIsNotMountedByDefault(t *testing.T) {
 
 func TestBuildAppContextDevSignInNeedsSessions(t *testing.T) {
 	_, err := BuildAppContext(AppContextOptions{
-		SigningKey: "signing-key",
+		SigningKey: testSigningKey,
 		People:     newMemoryPeople(),
 		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User"},
 		ServerURL:  devSignInOrigin,
@@ -347,7 +347,7 @@ func TestBuildAppContextDevSignInNeedsSessions(t *testing.T) {
 func TestBuildAppContextDevSignInRefusesAPublicOrigin(t *testing.T) {
 	build := func(serverURL string) error {
 		_, err := BuildAppContext(AppContextOptions{
-			SigningKey: "signing-key",
+			SigningKey: testSigningKey,
 			People:     newMemoryPeople(),
 			Sessions:   &memorySessionStore{generations: map[string]int64{}},
 			Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User"},

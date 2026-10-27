@@ -64,16 +64,29 @@ type previousTokenCaller struct {
 }
 
 // ParseSharedAgentTokens parses the shared agent token setting: one value, or several separated
-// by whitespace, the first the current value. Whitespace at either end is not a value. It refuses
-// an empty entry (two whitespace characters in a row, a CR LF among them) and an entry that
-// repeats an earlier one, naming each by its position, never its value, since the error reaches
-// the boot log.
+// by whitespace, the first the current value, refused as parseSettingEntries refuses it.
 func ParseSharedAgentTokens(setting string) (*SharedAgentTokens, error) {
-	entries := splitAtEachSpace(strings.TrimSpace(setting))
+	entries, err := parseSettingEntries(setting)
+	if err != nil {
+		return nil, err
+	}
 	tokens := &SharedAgentTokens{
 		values: make([][]byte, 0, len(entries)),
 		logged: map[previousTokenCaller]time.Time{},
 	}
+	for _, entry := range entries {
+		tokens.values = append(tokens.values, []byte(entry))
+	}
+	return tokens, nil
+}
+
+// parseSettingEntries parses a setting that holds one secret value or several separated by
+// whitespace (DISPATCH_AGENT_TOKEN, DISPATCH_SIGNING_KEY), and returns them in order. Whitespace at
+// either end is not a value. It refuses an empty entry (two whitespace characters in a row, a
+// CR LF among them) and an entry that repeats an earlier one, naming each by its position, never
+// its value, since the error reaches the boot log.
+func parseSettingEntries(setting string) ([]string, error) {
+	entries := splitAtEachSpace(strings.TrimSpace(setting))
 	positions := make(map[string]int, len(entries))
 	for index, entry := range entries {
 		if entry == "" {
@@ -83,9 +96,8 @@ func ParseSharedAgentTokens(setting string) (*SharedAgentTokens, error) {
 			return nil, fmt.Errorf("entry %d of %d repeats entry %d", index+1, len(entries), earlier)
 		}
 		positions[entry] = index + 1
-		tokens.values = append(tokens.values, []byte(entry))
 	}
-	return tokens, nil
+	return entries, nil
 }
 
 // splitAtEachSpace splits s at every whitespace character, so two in a row enclose an empty
