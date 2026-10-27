@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-559",
+  "completed": "2026-10-27T11:16:45Z",
+  "decision": "changes_requested",
+  "reviewedHead": "f169f43e22f4d376455bc4b31501d2c1c151db88",
+  "codeHead": "dc41305784ba39e735bffecc618323e7a5b6f740",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/store/migrations/0129_server_processes.up.sql",
+      "description": "GitHub reports PR #2323 CONFLICTING (mergeStateStatus DIRTY) against main 2e8c68cd98ce: `git merge-tree` shows content conflicts in packages/envoy/CHANGELOG.md and packages/envoy/internal/dispatch/store/pool.go, and main's #2137 adds migration 0129_document_edit_notices, the number this branch gives 0129_server_processes (0130_dashboard_assets follows). GitHub runs no checks on a conflicting head, so the required checks cannot settle. Forward-merge main, renumber both migrations (in step with INFRA-555's #2390), resolve pool.go's lease-pool size against main's."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/shell/DeploymentResilience.tsx",
+      "description": "deploymentChanged (line 86) compares live[0], always an entry path /assets/index-*.js, with runningIndexAsset(), which falls back to __DISPATCH_BUILD__ (line 66) when the page has no /assets/index-*.js script (Vite dev server). Under `bun run dev` with a backend on :8766 that serves any built web/dist, the route answers one live entry and the tab shows 'A new version is available' on every focus; a reload brings it back. Before this change the old code read `/` from the dev server, found no index asset and offered nothing. Fix: offer nothing when the page names no entry chunk, plus a unit test of that case."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/routes/router.go",
+      "description": "Hardening, no exploit path: readRetainedAsset's flight runs on context.WithoutCancel (line 595) while the 8 MiB reservation is released when the handler returns, so a client that disconnects at once leaves a store lookup running outside the memory cap's concurrency bound. Lookups are sub-millisecond primary-key reads; not a gate."
+    }
+  ],
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head dc41305784ba (compare to f169f43e: 2 files, handoffsOnly true): typecheck success, lint and test in_progress, pr-title queued. Not green; the conflict blocks the head regardless.",
+  "thermonuclear": "Pair run once at f169f43e (code dc41305784ba): deep review CHANGES (the dev-notice finding, Minor detached-read hardening, everything else clean incl. DISPATCH_DEV_SIGNIN_SHARED_KEY refused without dev sign-in at cmd/dispatch/main.go:688, path cleaned and parameterized, publish/prune advisory locks); code quality CHANGES on cleanup only (reload budget in two copies as the plan accepted, LiveDashboardBuilds in package api and BuildID re-reading index.html because INFRA-555's processes package is frozen on #2390, assetCache flight in router, duplicate size check, dead top-level testIgnore) - none changes behaviour; not requested.",
+  "threads": "0 threads on the pull request.",
+  "e2eLines": "E2E (implementer) and E2E (tester) both present in the PR body."
+}
