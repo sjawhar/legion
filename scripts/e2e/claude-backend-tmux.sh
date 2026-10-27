@@ -28,7 +28,7 @@
 # environment, no argv and no transcript.
 # The rig is Stage 3's without its GitHub ingress bridge: scratch
 # Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through the App key runner
-# (LEGION_E2E_APP_KEY_RUNNER, `secrets` by default; this
+# (LEGION_E2E_APP_KEY_RUNNER, `agent-secrets` by default; this
 # deployment's own pair unless the four LEGION_E2E_*_APP_* inputs name another deployment's,
 # lib/github-apps.sh; each key is resolved by the daemon's private_key_command and once by
 # lib/app-logins.ts, which proves it is its id's App before the run writes anything, never in this

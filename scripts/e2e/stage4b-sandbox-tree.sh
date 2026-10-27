@@ -72,7 +72,7 @@
 #   listener's API token. The repository carries neither credential.
 # - LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_KEY_NAME, LEGION_E2E_REVIEW_APP_ID and
 #   LEGION_E2E_REVIEW_APP_KEY_NAME name another deployment's two role Apps: each App's numeric id
-#   and the secret-store key the `secrets` CLI resolves to its private key (lib/github-apps.sh).
+#   and the secrets broker key the `agent-secrets` client resolves to its private key (lib/github-apps.sh).
 #   Each defaults to this deployment's own, so a run here sets none. prerequisites proves each key
 #   is its id's App against GitHub's GET /app before the run's first write anywhere; the daemon's
 #   github_apps is the block proved.
@@ -1021,6 +1021,7 @@ session_copy() {
   # Every name is derived before any is written, so a key whose name a later key also derives is
   # known to collide before either is copied. An empty name is no array subscript, and it, `.` and
   # `..` are refused below whatever else derives them.
+  # shellcheck disable=SC2001 # sed pairs hex digits per line; ${hex//??/…} would pair across newlines
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     printf -v path '%b' "$line"
@@ -2996,7 +2997,7 @@ audit_failure() { echo "the run wrote outside $project or subscribed outside it:
 # ==== checkpoints ===================================================================================
 
 begin prerequisites
-for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets setpriv pgrep npm; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets agent-secrets setpriv pgrep npm; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 require_app_inputs implement review
 # The host's jq compiles every lib/*.jq module this script includes, read from the script itself: a
 # jq that cannot parse one would otherwise fail the run at the first checkpoint to include it, hours

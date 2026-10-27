@@ -197,9 +197,18 @@ describe("app-logins.ts", () => {
       NATS_NKEY_SEED_FILE: "/seed-file",
     });
     expect(code).toBe(1);
+    // The command's stderr reaches the operator as it is written, then again in the failure.
     expect(stderr).toBe(
-      "app-logins: github_apps.implement.private_key_command failed (exit 4): ||/seed-file|"
+      "||/seed-file|app-logins: github_apps.implement.private_key_command failed (exit 4): ||/seed-file|"
     );
+  });
+
+  test("a key command's stderr reaches the operator on success too, and the key it prints still signs", async () => {
+    const pending = `printf 'request req-42 pending\\n' >&2; cat ${join(dir, "key-101.pem")}`;
+    const { code, stdout, stderr } = await run(config(app("101", pending), app("202")));
+    expect(code).toBe(0);
+    expect(stderr).toBe("request req-42 pending");
+    expect(stdout).not.toBe("");
   });
 
   test("two roles on one App are refused, as the daemon refuses them at boot", async () => {
@@ -312,7 +321,7 @@ describe("read_app_logins", () => {
 
 // lib/github-apps.sh as a stage proof uses it: sourced under the stage scripts' shell options with
 // their check helpers, the inputs in the environment, and `then` run after. The seams are bun,
-// handed the stand-in GitHub after the helper's own arguments, and a stand-in `secrets` first on
+// handed the stand-in GitHub after the helper's own arguments, and a stand-in `agent-secrets` first on
 // PATH, which puts the store's value for the key it names (the App's PEM in the store's Node-style
 // base64: URL-safe alphabet, unpadded) into the environment of the command after `--`, as the real
 // CLI does.
@@ -333,8 +342,8 @@ writeFileSync(
   Buffer.from(apps["404"].key.privateKey).toString("base64url")
 );
 writeFileSync(
-  join(fakeBin, "secrets"),
-  `#!/bin/sh\nname=$1\nshift\n[ "$1" = -- ] && shift\nexport "$name=$(cat "${store}/$name")"\nexec "$@"\n`,
+  join(fakeBin, "agent-secrets"),
+  `#!/bin/sh\nname=$1\nwhile [ "$1" != -- ]; do shift; done\nshift\nexport "$name=$(cat "${store}/$name")"\nexec "$@"\n`,
   { mode: 0o755 }
 );
 const appInputs = {
@@ -402,7 +411,9 @@ echo "defaults $default_implement_app_id $default_implement_app_key_name"`
     const defaults = (stdout.split("\n").find((l) => l.startsWith("defaults ")) ?? "").split(" ");
     const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
     expect(sources.implement?.appId).toBe(defaults[1]);
-    expect(sources.implement?.privateKeyCommand).toStartWith(`secrets ${defaults[2]} -- sh -c '`);
+    expect(sources.implement?.privateKeyCommand).toStartWith(
+      `agent-secrets ${defaults[2]} --reason=legion-live-proof-github-app-key -- sh -c '`
+    );
     expect(sources.review?.appId).toBe("202");
     // The default pair is never asked of GitHub by this test: check_github_apps did not run.
     expect(seen).toEqual([]);
@@ -508,7 +519,7 @@ env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=
     expect(stderr).toContain("401");
   });
 
-  test("matching Apps pass, and the block written is the daemon's: each id and its secrets command", async () => {
+  test("matching Apps pass, and the block written is the daemon's: each id and its agent-secrets command", async () => {
     const { code, stdout, stderr, work } = await githubApps(appInputs, proveBoth);
     expect(stderr).toBe("");
     expect(code).toBe(0);
@@ -519,21 +530,26 @@ env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=
     });
     const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
     expect(sources.implement?.appId).toBe("101");
-    expect(sources.implement?.privateKeyCommand).toStartWith("secrets IMPLEMENT_KEY -- sh -c '");
+    expect(sources.implement?.privateKeyCommand).toStartWith(
+      "agent-secrets IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c '"
+    );
     expect(sources.review?.appId).toBe("202");
-    expect(sources.review?.privateKeyCommand).toStartWith("secrets REVIEW_KEY -- sh -c '");
+    expect(sources.review?.privateKeyCommand).toStartWith(
+      "agent-secrets REVIEW_KEY --reason=legion-live-proof-github-app-key -- sh -c '"
+    );
   });
 
   test("a key runner input reads each key through that runner, and the check proves the Apps through it", async () => {
-    // A store whose runner is not `secrets`: the stand-in `secrets` would serve the same keys, so
-    // it is made to fail, and only the named runner can have produced the keys GitHub accepted.
+    // A store whose runner is not the default `agent-secrets`: the stand-in `agent-secrets` would
+    // serve the same keys, so it is made to fail, and only the named runner can have produced the
+    // keys GitHub accepted.
     const runnerBin = mkdtempSync(join(dir, "runner-bin."));
     writeFileSync(
       join(runnerBin, "other-store"),
       `#!/bin/sh\nname=$1\nshift\n[ "$1" = -- ] && shift\nexport "$name=$(cat "${store}/$name")"\nexec "$@"\n`,
       { mode: 0o755 }
     );
-    writeFileSync(join(runnerBin, "secrets"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
+    writeFileSync(join(runnerBin, "agent-secrets"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
     const { code, stdout, stderr, work } = await githubApps(
       {
         ...appInputs,
@@ -604,7 +620,7 @@ echo "wrote the block"`;
     // After the keys are resolved the runner fails, so only the files can have given GitHub the
     // keys it accepted.
     const brokenBin = mkdtempSync(join(dir, "broken-bin."));
-    writeFileSync(join(brokenBin, "secrets"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
+    writeFileSync(join(brokenBin, "agent-secrets"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
     const { code, stdout, stderr, work } = await githubApps(
       { ...appInputs, KEY_DIR: keyDir, BROKEN_BIN: brokenBin },
       `require_app_inputs implement review
@@ -683,6 +699,61 @@ echo "logins $github_app_logins"`
       expect(stderr).toContain("holds a character other than letters, digits and _ . / -");
       expect(readdirSync(keyDir)).toEqual([]);
       expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
+    }
+  });
+});
+
+// lib/secrets-via-broker.sh is Stage 4a's `secrets` for the previous release's harness. A stand-in
+// `agent-secrets` records its argv and, as the real one does, runs the command after `--` with the
+// named secret in its environment.
+describe("lib/secrets-via-broker.sh", () => {
+  const shim = join(import.meta.dir, "secrets-via-broker.sh");
+  const bin = join(dir, "broker-shim-bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(
+    join(bin, "agent-secrets"),
+    `#!/bin/sh\nprintf '%s\\n' "$*" >"${join(dir, "broker-shim-argv")}"\nname=$1\nwhile [ "$1" != -- ]; do shift; done\nshift\nexport "$name=from-broker"\nexec "$@"\n`,
+    { mode: 0o755 }
+  );
+  const shimRun = async (...args: string[]) => {
+    const child = Bun.spawn(["sh", shim, ...args], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    return { stdout, stderr, code };
+  };
+
+  test("the previous harness's `secrets NAME -- cmd` becomes `agent-secrets NAME --reason=… -- cmd`", async () => {
+    const { stdout, stderr, code } = await shimRun(
+      "IMPLEMENT_KEY",
+      "--",
+      "sh",
+      "-c",
+      'printf %s "$IMPLEMENT_KEY"'
+    );
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toBe("from-broker");
+    expect(readFileSync(join(dir, "broker-shim-argv"), "utf8")).toBe(
+      'IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c printf %s "$IMPLEMENT_KEY"\n'
+    );
+  });
+
+  test("any other `secrets` call shape is refused, never sent to the broker", async () => {
+    for (const args of [
+      ["get", "IMPLEMENT_KEY", "--no-request"],
+      ["IMPLEMENT_KEY", "sh"],
+      ["-x", "--", "true"],
+    ]) {
+      const { code, stderr } = await shimRun(...args);
+      expect(code).toBe(2);
+      expect(stderr).toStartWith("secrets-via-broker: ");
     }
   });
 });

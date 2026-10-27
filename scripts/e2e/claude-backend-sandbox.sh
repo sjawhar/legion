@@ -131,14 +131,15 @@
 #   lane holds, and the repository carries no deployment's own.
 # - LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_KEY_NAME, LEGION_E2E_REVIEW_APP_ID and
 #   LEGION_E2E_REVIEW_APP_KEY_NAME (optional) name the two role Apps the run acts as: each App's
-#   numeric id and the secret-store key the `secrets` CLI resolves to its private key
-#   (lib/github-apps.sh). Each defaults to this deployment's own, so a run here sets none.
+#   numeric id and the store key the key runner resolves to its private key, and
+#   LEGION_E2E_APP_KEY_RUNNER (optional) that runner, `agent-secrets` (the secrets broker's client)
+#   by default (lib/github-apps.sh). Each defaults to this deployment's own, so a run here sets none.
 # - CLAUDE_SANDBOX_E2E_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) holds the
 #   transcript of the run, the daemon's log, the legion.yaml and pod fixture the run wrote, the
 #   implementer's Claude Code transcript as the session table holds it, and the namespace snapshots.
 #
 # Legion's role Apps resolve as the tmux proof's do (lib/github-apps.sh): under aws-private-ip the
-# daemon runs each App's private_key_command, `secrets <key name> -- …`, never this shell; under
+# daemon runs each App's private_key_command, `<runner> <key name> -- …`, never this shell; under
 # bridge prerequisites runs those commands once on the devbox into owner-only files on the user's
 # tmpfs (resolve_app_keys), and each App's private_key_command is `cat` of its file, which the
 # daemon's container mounts read-only, for the run's lifetime alone. Either way prerequisites proves
@@ -1200,10 +1201,11 @@ fi
 require_app_inputs implement review
 daemon_env_unset+=("${app_key_unsets[@]}")
 # sha256sum holds the session table's copy of the transcript to the pod's (pod-deleted-resumes-…).
-tools=(go docker jq curl ss kubectl bun secrets gh sha256sum)
+tools=(go docker jq curl ss kubectl bun gh sha256sum)
 # getent holds the bridge Service's name to resolving nowhere on the devbox (prerequisites, below).
 [ "$pod_reachability" != bridge ] || tools+=(getent)
 for tool in "${tools[@]}"; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+command -v "$app_key_runner" >/dev/null || fail "$app_key_runner, the App key runner LEGION_E2E_APP_KEY_RUNNER names, is required"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 refuse_leftovers legion-e2eccs
 ports_free "$port_daemon" "$port_worker_stream" "$port_dispatch" "$port_listener" "$port_nats" "$port_session_db"

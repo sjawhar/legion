@@ -9,17 +9,19 @@
 # app_key_command from stdout, so neither of those two writes anything else to stdout, and
 # proveLiveProofApps defines fail and note, writes $work/github-apps.yaml itself from the block the
 # proofs act with, and runs check_github_apps on it. Each App is an id and the
-# name of the secret-store key holding its private key, read by require_app_inputs from two inputs
+# secrets broker name of the key holding its private key, read by require_app_inputs from two inputs
 # that default to the pair below:
 #   LEGION_E2E_<ROLE>_APP_ID        the App's numeric id (ROLE is IMPLEMENT or REVIEW)
-#   LEGION_E2E_<ROLE>_APP_KEY_NAME  the secret-store key the key runner resolves to the App's
-#                                   private key, base64-encoded PEM
+#   LEGION_E2E_<ROLE>_APP_KEY_NAME  the store's name for the App's private key (the secrets
+#                                   broker's, by default), which the key runner resolves to
+#                                   base64-encoded PEM
 # and one input for both, the key runner:
 #   LEGION_E2E_APP_KEY_RUNNER       the command that runs `<runner> <NAME> -- <command>` with the
-#                                   key NAME holds in that command's environment alone; `secrets`
-#                                   by default, or any store's runner of that form (`agent-secrets`
-#                                   reads the broker with no local fallback). Legion names no store.
-# A deployment with its own Apps sets all four; a run here sets none and acts as it always has.
+#                                   key NAME holds in that command's environment alone;
+#                                   `agent-secrets`, the secrets broker's client, by default, or
+#                                   any store's runner of that form (`secrets` reads the devbox's
+#                                   local store). Legion names no other store.
+# A deployment with its own Apps sets all four; a run here sets none and takes the default pair.
 # write_github_apps writes the `github_apps` block of legion.yaml from them, each key read by a
 # private_key_command that runs `<runner> <name> -- …`, and check_github_apps proves each App's key
 # is its id's, whether the pair came from a default or an input: lib/app-logins.ts signs an App JWT
@@ -38,13 +40,14 @@
 
 github_apps_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
-# The default pair, which a run that sets no input takes: the App ids and secret-store key names
-# the live proofs here have used since they were written. GitHub shows both Apps owned by an
-# organization, not by this repository's owner, so a deployment with Apps of its own passes them
-# through the inputs; no other deployment's ids or names belong here.
-default_implement_app_id=3202636
+# The default pair, which a run that sets no input takes: the App ids and secrets broker key names
+# of the legion-implementer and legion-reviewer Apps, both owned by the sjawhar account. The
+# implement key is agent tier; the review key is human tier, so its first read waits for a person's
+# grant. A deployment with Apps of its own passes them through the inputs; no other deployment's
+# ids or names belong here.
+default_implement_app_id=5341240
 default_implement_app_key_name=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
-default_review_app_id=3202653
+default_review_app_id=5341243
 default_review_app_key_name=GH_REVIEW_APP_PRIVATE_KEY_B64
 
 # require_app_inputs ROLE... sets <role>_app_id and <role>_app_key_name for each ROLE (implement,
@@ -82,14 +85,14 @@ require_app_inputs() {
     # The bounds keep a pasted credential out of the message: a base64 key is letters and digits
     # too, so only its length tells it from a store key's name, and a refusal prints neither.
     [[ "$id" =~ ^[1-9][0-9]*$ && ${#id} -le 12 ]] || fail "$id_var must be the $role App's numeric id (1 to 12 digits, no leading zero); its value is not printed"
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && ${#key} -le 64 ]] || fail "$key_var must be a secret-store key's name (letters, digits and underscores, at most 64), not the key itself; its value is not printed"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && ${#key} -le 64 ]] || fail "$key_var must be a secrets broker key's name (letters, digits and underscores, at most 64), not the key itself; its value is not printed"
     printf -v "${role}_app_id" %s "$id"
     printf -v "${role}_app_key_name" %s "$key"
     roles_read+=("$role")
   done
   # The runner is a command word in the key command's shell text, so it is one word of path
   # characters: a store's runner by name or by path, never a command line.
-  app_key_runner=${LEGION_E2E_APP_KEY_RUNNER-secrets}
+  app_key_runner=${LEGION_E2E_APP_KEY_RUNNER-agent-secrets}
   [[ "$app_key_runner" =~ ^[A-Za-z0-9_./+-]+$ && ${#app_key_runner} -le 256 ]] ||
     fail "LEGION_E2E_APP_KEY_RUNNER must be one command, by name or path (letters, digits and _ . / + -), that runs '<runner> <NAME> -- <command>'; its value is not printed"
   if [[ " ${roles_read[*]} " == *" implement "* && " ${roles_read[*]} " == *" review "* ]]; then
@@ -112,19 +115,23 @@ require_app_inputs() {
   done < <(compgen -e)
 }
 
-# app_key_command NAME prints the private_key_command that prints the PEM the secret-store key NAME
-# holds: the key runner (`secrets` unless LEGION_E2E_APP_KEY_RUNNER names another) puts the value in
+# app_key_command NAME prints the private_key_command that prints the PEM the store key NAME holds:
+# the key runner (`agent-secrets` unless LEGION_E2E_APP_KEY_RUNNER names another) puts the value in
 # one `sh` child's environment, which turns the store's
 # Node-style base64 (URL-safe alphabet, unpadded, maybe one dangling sextet) into POSIX base64 and
 # decodes it to stdout, the daemon's pipe. Once resolve_app_keys has set app_key_dir, it prints
 # `cat -- '<app_key_dir>/<NAME>.pem'` instead, which reads the PEM resolve_app_keys wrote there.
+# An `agent-secrets` runner, by name or by path, is given --reason=legion-live-proof-github-app-key
+# after NAME, the reason the broker records for the read; any other runner is given none.
 app_key_command() {
   if [ -n "$app_key_dir" ]; then
     printf "cat -- '%s/%s.pem'" "$app_key_dir" "$1"
     return 0
   fi
+  local reason=
+  [ "${app_key_runner##*/}" != agent-secrets ] || reason=' --reason=legion-live-proof-github-app-key'
   # shellcheck disable=SC2016 # the expansions are the key command's own, run by its sh
-  printf '%s %s -- sh -c '\''value=$(printf %%s "${%s}" | tr "_-" "/+"); case $((${#value} %% 4)) in 1) value=${value%%?};; 2) value="${value}==";; 3) value="${value}=";; esac; printf %%s "$value" | base64 -d'\''' "$app_key_runner" "$1" "$1"
+  printf '%s %s%s -- sh -c '\''value=$(printf %%s "${%s}" | tr "_-" "/+"); case $((${#value} %% 4)) in 1) value=${value%%?};; 2) value="${value}==";; 3) value="${value}=";; esac; printf %%s "$value" | base64 -d'\''' "$app_key_runner" "$1" "$reason" "$1"
 }
 
 # resolve_app_keys DIR ROLE... runs each ROLE's key command (app_key_command's runner command) once,

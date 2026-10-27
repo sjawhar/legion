@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
@@ -66,16 +67,23 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner str
 
 // resolveApp reads the implement App's key from the secret store, handed to one child process
 // through the key runner's `<runner> <KEY> -- …` injection (LEGION_E2E_APP_KEY_RUNNER, lib/github-apps.sh's
-// app_key_runner: `secrets` unless the operator names another store's runner), mints the App's installation token for
+// app_key_runner: `agent-secrets`, the secrets broker's client, unless the operator names another
+// store's runner; an `agent-secrets` runner, by name or path, is given
+// --reason=legion-live-proof-github-app-key after KEY), mints the App's installation token for
 // each of the run's two repositories' owners, and with them reads each repository's default branch
 // as GitHub names it, the base every launch on it provisions at; the key stays in this process's
 // memory.
 func (r *liveRig) resolveApp() error {
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(r.ctx, r.env.appKeyRunner, r.env.appKeyName, "--", "sh", "-c", `printf %s "$`+r.env.appKeyName+`"`)
+	args := []string{r.env.appKeyName}
+	if filepath.Base(r.env.appKeyRunner) == "agent-secrets" {
+		args = append(args, "--reason=legion-live-proof-github-app-key")
+	}
+	args = append(args, "--", "sh", "-c", `printf %s "$`+r.env.appKeyName+`"`)
+	cmd := exec.CommandContext(r.ctx, r.env.appKeyRunner, args...)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("reading %s from the secret store: %v: %s", r.env.appKeyName, err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("reading %s through the key runner %s: %v: %s", r.env.appKeyName, r.env.appKeyRunner, err, strings.TrimSpace(stderr.String()))
 	}
 	pem, err := config.DecodePrivateKey(stdout.String())
 	if err != nil {
