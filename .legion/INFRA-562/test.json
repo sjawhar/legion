@@ -2,46 +2,42 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-562",
-  "completed": "2026-10-27T13:54:24Z",
-  "round": 3,
-  "testedHead": "7e196589f1b2c07e43dd30dbfbe8eb4e4263d232",
-  "codeHead": "58fd08bf4d64",
+  "completed": "2026-10-27T17:03:49Z",
+  "round": 4,
+  "testedHead": "5b9eb953d51d4098135e12b989721ecfd389b768",
+  "codeHead": "14d17e590631",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at 7e196589 (code 58fd08bf): the implementer's review-round tests and every earlier tester red test, `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -count=1 -v -run 'TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce|TestARetryCarriesTheUrgencyOfTheAttemptItResumesAndNoneOnANewAttempt|TestARouteStatusFilterAnswersAFailedRosterReadAsTheDatabases|TestAHookNotificationNamingMorePartsThanAnyCallIsDropped|TestACommentDuringAListenerTakeOverReachesTheRouteHolderOnce|TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow|TestAListenerRefusingTheTokenSettlesTheSendAtOnce|TestOneCallersCancellationDoesNotFailAnotherCallersRepositoryToken|TestASettingsReSaveDuringTwoSyncsNeverLeavesTheEarlierHead|TestAHeldGitHubRateLimitEmitsOneSyncFailedEvent' ./internal/dispatch/api/ ./internal/dispatch/githubapp/ ./internal/dispatch/architecture/` -> all 10 PASS; then the whole two-process suite `go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch` -> ok 408.975s, 95 top-level PASS, 0 FAIL, 0 '--- SKIP'. Logs: /legion/scratch/tmp/infra562-test/r3-unit-7e196589.log, mp-7e196589.log."
+    "how": "Drove the same surfaces independently at 5b9eb953 (code 14d17e59). (1) The api package's time, the review's acceptance: `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -count=1 -timeout 60m -json ./internal/dispatch/api/` -> pass, package elapsed 854.8 s, 1087 tests, 0 fail; the same command at main 2df3353c (the main parent of the latest forward merge 3ddf76a4), same pod, run right after -> pass, 855.9 s, 1063 tests. The branch's api package now costs what main's does. Slowest tests at the head are main's own document tests (approval_carry_approved_test.go 51.4 s, growth_test.go 42.1 s, approval_carry_test.go 39.1 s; none in the branch's diff against main); the only take-over test above 10 s is TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow (12.2 s), which keeps the real window on purpose. (2) Every deployment keeps 12 s: `grep -rn ListenerTakeoverWindow --include=*.go packages/envoy | grep -v _test.go` hits only internal/dispatch/api (envoy_resolve.go, server.go): neither routes nor cmd/dispatch sets it; and the whole two-process suite on real binaries, `go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch` -> ok 438.786s, 98 top-level PASS, 0 FAIL, 0 '--- SKIP', where TestASendDuringAListenerTakeOverReachesItsSession/sent_to_a_session_the_listener_never_knows still takes 19.86 s (the real 12 s window before 'failed: no live session'), sent_during_the_take-over 15.98 s, killed_during_the_wait 9.51 s. Logs: /legion/scratch/tmp/infra562-test/api-head.json, api-main.json, mp-5b9eb953.log."
   },
   "failed": 0,
   "failures": [],
-  "contractCensus": [
-    "1. redeliver-webhooks without DATABASE_URL: built the head's binary and ran `env -i PATH=/usr/bin:/bin HOME=<scratch> NATS_URLS=nats://127.0.0.1:4222 envoy-dispatch redeliver-webhooks --since 1h` -> 'redeliver-webhooks: DATABASE_URL is required: the GitHub rate limits every process obeys live there', exit 2. With DATABASE_URL set it passes that check and stops at the next step ('connect NATS: nats: no servers available', exit 1, no NATS in the drive); the full run with both is TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain, PASS 4.63s.",
-    "2. GET /api/github/rest/... answers 503 GITHUB_RATE_LIMITED with Retry-After: driven over HTTP on two real envoy-dispatch processes by TestARateLimitOneProcessMetStopsTheOtherFromCallingGitHub (PASS 7.42s), which asserts status 503, code GITHUB_RATE_LIMITED and Retry-After on both A (\"60\") and B (the seconds left). Not driven by hand: a hand drive needs a GitHub App and a GitHub fake the row already provides.",
-    "3. POST /api/v1/agents/{session}/stream/_test/publish, real envoy-dispatch (DISPATCH_TEST_HOOKS=1, own database, NATS disabled) on 127.0.0.1:18091: body bytes ff fe + '{\"type\":\"x\"}' -> 400 {\"code\":\"FRAME_INPUT\",\"error\":\"a frame is UTF-8 text\"}; control '{\"type\":\"agent_start\"}' -> 200 {\"ok\":true}.",
-    "4. Recorded listener failure text, same server with a fake listener on 127.0.0.1:18090: POST /api/v1/agents/t401/messages (steer) against a listener answering 401 {\"error\":\"unauthorized\"} -> 201 in 127 ms, attempt 1 failed 'envoy listener answered: GET /v1/registry/t401 returned 401: unauthorized'; control against 503 'service starting' -> 201 after 12014 ms (the take-over window), attempt 1 failed 'envoy listener: GET /v1/registry/t503 returned 503: service starting'.",
-    "5. route_status filter on a failed route_roster read, same server: project TST, issue TST-1 routed role:sre, `alter table route_roster rename to route_roster_hidden`, GET /api/v1/issues?project=TST&route_status=live -> 500 {\"code\":\"INTERNAL\"}; table renamed back with the listener answering 503 -> 503 ENVOY_UNAVAILABLE 'the Envoy listener did not answer ...'. Scratch database dropped and processes stopped after the drive."
+  "testerTestChanged": "comment_mention_takeover_test.go changed in one line between rounds (3ddf76a4..14d17e59): TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow builds its server with `testServerOptions{envoyURL, takeoverWindow: listenerTakeoverWindow}` in place of newTargetedMessageHandler, because the rig's default window is now 750 ms. That keeps the real 12 s window the test measures against; no assertion changed. Accepted.",
+  "reviewFindings": [
+    "Important (window a constant, api tests sleep 12 s, envoy-go timed out on CI): verified fixed in the pod, as above. CI envoy-go at 14d17e59 not yet run (queued).",
+    "Minor (AGENTS.md re-resolution rule; attempt-1-only guarantee): read packages/envoy/AGENTS.md at 14d17e59; it now names attempt 1 of a comment recording mentions_decide_routes with a session or resolve error as the only attempt that keeps its resolution, and says a person's Retry after attempt 1 settled can reach a route holder the route already reached."
   ],
-  "breakAttempts": [
-    "Read the review fix (mentions_decide_routes on comment.created, comment_delivery.go:440,498-505): a routed comment's attempt 1 whose pre-commit resolution failed keeps that resolution when resumed or retried in the same mode (TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce PASS: s1 hears it once, [1:failed]). A person's Retry after attempt 1 has settled failed opens attempt 2 and resolves afresh, which can reach a route holder that already had the route copy; that is an explicit resend a person asked for, the same as on main, so not recorded as a failure."
-  ],
-  "ci": "Read on GitHub at 12:00Z-13:54Z. Code head 58fd08bf: build, test, lint, typecheck, changes queued; no lane settled; not waited for. The previous code head 125a3bfb: lint, typecheck, test, build, dispatch-multiprocess, envoy-e2e-local, broker-multiprocess success.",
+  "ci": "Read on GitHub at 17:03Z. Code head 14d17e59: changes, lint, typecheck, test, build queued; no lane settled; not waited for. The Actions queue is backed up repository-wide (main's envoy-and-contracts runs queued too).",
   "observations": [
-    "Still open for the reviewer, not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule, longer window); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY. The urgency observation from rounds 1-2 is fixed (TestARetryCarriesTheUrgencyOfTheAttemptItResumesAndNoneOnANewAttempt)."
+    "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY.",
+    "The api package takes about 855 s in this pod on main as on the branch, above go test's default 10-minute per-binary timeout that envoy-go uses (`go list ./... | grep -v /integration | xargs go test`); main's envoy-go passes on CI's faster runners, so CI is where the branch's margin is read."
   ],
   "proof": [
     {
-      "criterion": "Items 1 and 2: a message or mention whose request is cancelled after commit reaches its recipient without a retry; pending attempts a killed process left are sent by the other process under their own key",
-      "surface": "Dispatch HTTP API on two real envoy-dispatch processes over one Postgres 17 and one NATS, with a fake Envoy listener",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
-      "observed": "TestADeliveryAKilledProcessLeftPendingIsSentByTheOther PASS 17.38s, TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient PASS 17.83s, TestASendDuringAListenerTakeOverReachesItsSession PASS 45.34s; whole suite ok 408.975s, 95 PASS, 0 FAIL, 0 SKIP",
-      "headSha": "7e196589f1b2c07e43dd30dbfbe8eb4e4263d232",
-      "negativeControl": "Rows at the tests-only commits (round 2 re-check): 2c76dfcf 'the direct message reads [1:pending] 30s after'; 88bf24bf 'the direct message reads [1:failed] 10s after'"
+      "criterion": "Review round 2: the api package's existing tests no longer sleep the 12 s take-over window, while every deployment keeps 12 s",
+      "surface": "the api package's test binary in the pod (the same go test envoy-go runs), and the real envoy-dispatch binary under the two-process harness",
+      "command": "cd packages/envoy && go test -count=1 -timeout 60m -json ./internal/dispatch/api/ (at 5b9eb953, then at main 2df3353c); go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
+      "observed": "api package 854.8 s at the head vs 855.9 s at main, 0 failures both; two-process suite ok 438.786s, 98 PASS, 0 SKIP, the never-known session's send still waits the real window (19.86 s) on the real binary",
+      "headSha": "5b9eb953d51d4098135e12b989721ecfd389b768",
+      "negativeControl": "At the previous code head 125a3bfb CI's envoy-go ran out: 'panic: test timed out after 10m0s' in internal/dispatch/api (the review's evidence; implementer's pod run there 1166-1257 s)"
     },
     {
-      "criterion": "Contract change census: each refusal a person meets, driven on a real envoy-dispatch process",
-      "surface": "envoy-dispatch binary built at the head: the redeliver-webhooks command, the publish test hook, POST /api/v1/agents/{session}/messages, GET /api/v1/issues?route_status=",
-      "command": "envoy-dispatch redeliver-webhooks --since 1h (no DATABASE_URL); curl -X POST .../agents/<uuid>/stream/_test/publish --data-binary $'\\xff\\xfe{...}'; curl -X POST .../agents/t401/messages against a 401 listener; GET .../issues?project=TST&route_status=live with route_roster renamed away",
-      "observed": "exit 2 'DATABASE_URL is required'; 400 FRAME_INPUT 'a frame is UTF-8 text'; attempt failed 'envoy listener answered: ... returned 401: unauthorized' in 127 ms; 500 INTERNAL",
-      "headSha": "7e196589f1b2c07e43dd30dbfbe8eb4e4263d232",
-      "negativeControl": "The accepted inputs: a valid JSON frame -> 200 {ok:true}; a 503 listener -> 'envoy listener: ... 503' after the 12 s window; the roster table restored -> 503 ENVOY_UNAVAILABLE, the listener's own failure"
+      "criterion": "Items 1, 2 and 8: a cancelled or killed sender's attempt reaches its recipient; a send during a listener take-over reaches its session",
+      "surface": "Dispatch HTTP API on two real envoy-dispatch processes over one Postgres 17 and one NATS, with a fake Envoy listener",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
+      "observed": "TestADeliveryAKilledProcessLeftPendingIsSentByTheOther PASS 18.40s, TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient PASS 12.25s, TestASendDuringAListenerTakeOverReachesItsSession PASS 45.35s",
+      "headSha": "5b9eb953d51d4098135e12b989721ecfd389b768",
+      "negativeControl": "sent_to_a_session_the_listener_never_knows: a session the listener never knows settles failed: no live session after the window"
     }
   ]
 }
