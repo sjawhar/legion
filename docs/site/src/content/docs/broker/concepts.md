@@ -353,7 +353,9 @@ The broker never stores a value. Each time a session reads a grant, the broker c
 session is still enrolled, the grant is live, its approval still verifies, and the current policy
 still allows every name; then it reads the value from the secret store (AWS Secrets Manager in
 production) and returns it to that session alone. `agent-secrets NAME -- command` puts each value
-in the command's environment under its name and replaces itself with the command. `agent-secrets`
+in the command's environment under its name and replaces itself with the command. A value stored
+as one line followed by one newline (`\n` or `\r\n`, as `echo` writes it) goes in without that
+newline; every other value, a multi-line PEM key included, goes in unchanged. `agent-secrets`
 itself never prints a value, but the command is the agent's choice, and a command can print or send
 what its environment holds (`printenv NAME` prints it). A session holding a grant can therefore read
 the value: approve a secret only for a session you would trust with the value itself.
