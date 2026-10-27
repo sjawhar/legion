@@ -2,10 +2,19 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-526",
-  "completed": "2026-10-27T04:10:00Z",
-  "round": 3,
+  "completed": "2026-10-27T05:30:00Z",
+  "round": 4,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2310",
+  "rebaseRecheck": "154d6cea -> 2497adefd872c64ad0cdf4b27d062b472a4531d4: fingerprint unchanged (5051300770a6dd6d111c0f4dbd52d8014cb466caf440a0a08aafe4b82bbecfef before and after, comment https://github.com/sjawhar/legion/pull/2310#issuecomment-6434337098), bare gates only. A forward merge of main 448a4100 (contains #2317 baadccdc), no conflict, nothing else changed, as the architect directed, so the required checks test this change against a main with the daemon fix. The reviewer's round-2 fast-follow (one owner for the shell frame) is not in this round and is named on the PR's Fast-follow line.",
   "proof": [
+    {
+      "criterion": "Round 4 smoke after the forward merge: the change still draws the header and card, and keeps a reply's lists",
+      "surface": "Issue Conversation tab and issue page; real Go Dispatch server, production SPA bundle, Postgres 17 + pgvector, Playwright chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone",
+      "observed": "6 passed from a fresh build at the merge head; also bun run typecheck clean, bun run lint clean, bun test web/src/features/refs web/src/features/doc 351 pass / 0 fail",
+      "headSha": "2497adefd872c64ad0cdf4b27d062b472a4531d4",
+      "negativeControl": "The diff fingerprint excluding .legion and docs/solutions is identical before and after the merge, so the change under test is byte-for-byte the one whose negative controls are recorded below (base 64e8c890: 4 failed; b6720fc1: the reply test failed; 9439f4a8: the nested-decision case failed)"
+    },
     {
       "criterion": "A1a. A comment holding a callout with a title shows the callout's kind and title (with A2: one-row header, filled badge)",
       "surface": "Issue Conversation tab /issues/<KEY>/conversation, comment thread expanded; real Go Dispatch server (e2e/run-server.sh), production SPA bundle, Postgres 17 + pgvector, Playwright Chromium; projects chromium and iphone",
