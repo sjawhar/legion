@@ -8,6 +8,8 @@ import "strings"
 // checkCensus's reading of a census file (censusTokens) and the census's reading of a migration
 // (migrationCode).
 
+// INFRA-583 scratch probe B: a comment in internal/pgmigrate, which every one of the five jobs compiles.
+
 // sqlTokenKind is the kind of one token scanSQL reads.
 type sqlTokenKind int
 
