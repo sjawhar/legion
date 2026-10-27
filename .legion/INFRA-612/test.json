@@ -2,41 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-612",
-  "completed": "2026-10-27T16:32:00Z",
+  "completed": "2026-10-27T17:40:00Z",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's five-spec command on the pod harness (tester lane) at the merge head 7fd9f9e4: 94 passed (8.5m), matching its 94 passed. Recomputed the unchanged-diff fingerprint myself: fa623f9a 61437fd9... -> 1bdc063c 22760bf3... (changed, as it reported), so this was a full test round. C5 greps re-run: slot grep only typed-block-drawing.ts:271-273; the removed names match nothing."
+    "how": "Re-ran the implementer's five-spec command on the pod harness (tester lane) at code head 00db1b8a (review round 3 fix): 96 passed (8.6m), matching its 96 passed, the new typed-option case and the reworked blank-option case included. C5 greps re-run: slot grep only typed-block-drawing.ts:269-271; the removed names match nothing."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "A1 / C4, C6, C7 after the conflict merge with main: the decision and typed-block browser specs, main's content-rule and task-item specs included, pass on desktop and phone",
+      "criterion": "Review round 3: in an editable document a malformed decision's blank option shows and takes typed text; a body and a read-only document still hide it; A1 / C4 specs pass",
       "surface": "Dispatch SPA production build on the real Go Dispatch server, Postgres 17 + pgvector, Playwright chromium and iphone (pod harness /legion/harness, tester lane, database dispatch_tester_e2e)",
       "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts e2e/ask-blocks.e2e.ts e2e/typed-blocks.e2e.ts e2e/typed-block-content-rule.e2e.ts e2e/task-items.e2e.ts --project chromium --project iphone",
-      "observed": "94 passed (8.5m), 0 failed",
-      "headSha": "7fd9f9e4e288",
-      "negativeControl": "The drop mutation in the next entry; the implementer's own control at this head (dropServerAttributes skipped -> proof-editor case Expected \"open\" Received \"answered\")"
+      "observed": "96 passed (8.6m), 0 failed",
+      "headSha": "00db1b8a3eb4",
+      "negativeControl": "Implementer's before-leg at main 2df3353c: the typed-option case fails with stored 'Which one?Option A\\n\\n- \\n'; my own control is the scope mutation in the next entry"
     },
     {
-      "criterion": "C8 / C9 on main's decide step: forged server attributes read at their defaults at every depth, also on a decision kept typed inside a refused (drawn) parent; refused and unfit directives stay text, so clientAttributes' throw is not reached",
-      "surface": "conversation tab /issues/<KEY>/conversation, comment threads, chromium and iphone (throwaway spec e2e/zz-tester-infra612.e2e.ts, deleted, never committed)",
+      "criterion": "The blank option is shown only where it is edited: an existing blank option of an editable document takes a typed label; a reply body inside an editable document, a closed issue's read-only document and an edited comment hide it",
+      "surface": "artifact page /issues/<KEY>/artifacts/<slug> (editable and on a closed issue), the issue document's decision reply thread, and the conversation tab, chromium and iphone (throwaway spec e2e/zz-tester-infra612.e2e.ts, deleted, never committed)",
       "command": "cd packages/dispatch && bun run e2e -- e2e/zz-tester-infra612.e2e.ts --project chromium --project iphone",
-      "observed": "10 passed (5 cases x 2 projects). Four forged decisions (top level, in a ::::callout, in a > quote, in a list item) each open, no malformed stamp, options folded into 2 rows, no 'Answered'/'mallory'/'forged' text; ':::ask{state=\"bogus\"}', ':::Ask{…}', ':::unknown{…}' show as fence text with content; a forged decision inside a refused ::::callout{kind=\"bogus\"} is an open card while the callout shows as its fence lines; a forged decision holding '# Heading inside' is drawn as its lines with every word and gives no card; no page error",
-      "headSha": "7fd9f9e4e288",
-      "negativeControl": "dropServerAttributes(tree.children, blockSchema) call skipped: on chromium 'Top?' and 'Inside drawn?' data-dispatch-ask-state Expected \"open\" Received \"answered\" (2 failed); line restored (file tag back to 2FDB)"
-    },
-    {
-      "criterion": "C7 / C9: the one shell writer keeps a mounted card's stamps and fold right when a body or a document decision changes in place, and a blank option found by position is hidden",
-      "surface": "conversation tab (comment edited live by its author through PATCH /api/v1/comments/{id}) and an issue document /issues/<KEY>/artifacts/<slug> edited live through POST /api/v1/artifacts/{id}/edits, chromium and iphone (same throwaway spec)",
-      "command": "same command as above (cases 'edited', 'fixed live', 'preview')",
-      "observed": "comment well-formed -> malformed (bare '-') -> well-formed changes data-dispatch-ask-malformed, data-dispatch-ask-urgency and data-dispatch-ask-options each time; while malformed the second li by position has display none; document decision fixed by replacing ': No label' with 'Hold: Wait' keeps the same frame element, which loses the malformed stamp, gains data-dispatch-ask-options=rows and folds its source list; collapsed preview draws with no page error",
-      "headSha": "7fd9f9e4e288",
-      "negativeControl": "A decision as the document's first block starts with the caret inside it (data-dispatch-ask-editing) and shows its list as designed; the case puts a paragraph first and asserts data-dispatch-ask-editing is not true"
+      "observed": "10 passed (5 cases x 2 projects). Editable artifact '- A: first' + bare '-': blank li display list-item with height > 0; click it, type 'B: second' -> stored 'Which one?\\n\\n- A: first\\n- B: second\\n:::' and data-dispatch-ask-malformed gone. Reply under the editable document's decision with ':::ask … - A: a / -': blank li display none, 'A: a' visible. Closed issue (status done) artifact, .dispatch-doc[data-read-only=true]: blank li display none. Comment edited well-formed -> malformed (bare '-') -> well-formed: blank li display none, stamps and fold change each time. Forged server attributes at top level, in a quote and inside a refused callout read open; state=bogus stays fence text.",
+      "headSha": "00db1b8a3eb4",
+      "negativeControl": "styles.css rule scope widened from ':is(.dispatch-markdown, .dispatch-doc[data-read-only=\"true\"])' to ':is(.dispatch-markdown, .dispatch-doc)' (the reported defect): the fill-blank case fails on chromium, display Expected \"list-item\" Received \"none\"; line restored (file tag back to C345)"
     }
   ],
   "notes": [
-    "Merge read: main moved the read-only transform into remarkDecideTypedBlocks (typed-block-drawing.ts:166-205), which decides every containerDirective at any depth and keeps one typed only when typedBlockRefusal accepts it; the branch's dropServerAttributes then walks the decided tree, so every containerDirective it meets is an accepted type and the throw in clientAttributes stays unreachable.",
-    "CI on GitHub at 7fd9f9e4: build, changes, lint, pr-title, test, typecheck queued when read; not waited on. 1bdc063c has no check runs."
+    "The plan's C7 said the document hides a blank option; round 3 changes that for an editable document at the reviewer's request (the INFRA-624 typing defect). The read-only document and every body still hide it, which the implementer's reworked case and my probes check.",
+    "Fingerprint at 8328e47a: 4f2f5fa3… (changed from 22760bf3… by the round-3 code commit), so a full round.",
+    "CI on GitHub at 8328e47a: build, changes, lint, test, typecheck and two pr-title runs queued (one older pr-title cancelled); not waited on. 00db1b8a has no check runs. The earlier run at 7fd9f9e4 shows lint, typecheck, build, pr-title success and test cancelled (superseded)."
   ]
 }
