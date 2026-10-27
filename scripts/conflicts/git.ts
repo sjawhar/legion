@@ -57,8 +57,13 @@ export class GitRepo {
     return this.has(oid);
   }
 
+  /** Whether `a` is an ancestor of `b`; throws when git cannot tell (e.g. a missing object). */
   async isAncestor(a: string, b: string): Promise<boolean> {
-    return (await this.git(["merge-base", "--is-ancestor", a, b], anyExit)).code === 0;
+    const { code } = await this.git(
+      ["merge-base", "--is-ancestor", a, b],
+      (exit) => exit === 0 || exit === 1
+    );
+    return code === 0;
   }
 
   /** The paths `git merge-tree` reports conflicted, sorted unique; [] for a clean merge. */

@@ -7,6 +7,8 @@ import { GitRepo } from "../git.ts";
 import { type GraphCommit, type GraphPullRequest, type MergeRecord, UsageError } from "../types.ts";
 
 const UPSTREAM = "refs/remotes/origin/main";
+/** An oid no test repository holds, and that `file:///nonexistent` cannot provide. */
+const ABSENT = "0123456789abcdef0123456789abcdef01234567";
 const CHANGELOG = "packages/x/CHANGELOG.md";
 const directories: string[] = [];
 
@@ -149,6 +151,15 @@ function mergeOf(merges: MergeRecord[], oid: string): MergeRecord {
   return merge;
 }
 
+/** `pr` with each commit's parent `from` renamed `to`, as GitHub lists a commit the clone lacks. */
+function withParent(pr: GraphPullRequest, from: string, to: string): GraphPullRequest {
+  const commits = pr.commits.map((c) => ({
+    ...c,
+    parents: { nodes: c.parents.nodes.map((p) => ({ oid: p.oid === from ? to : p.oid })) },
+  }));
+  return { ...pr, commits };
+}
+
 describe("analysePullRequest", () => {
   test("re-runs a conflicting forward merge and lists its conflicted file", async () => {
     const { git, pr, b, c, x, m1, m2 } = await changelogHistory();
@@ -217,6 +228,31 @@ describe("analysePullRequest", () => {
       conflicts: [],
     });
   });
+
+  test("a merge whose upstream parent cannot be fetched is an undeterminable forward merge", async () => {
+    const { git, pr, b, c, x, m1, m2 } = await changelogHistory();
+
+    const record = await analysePullRequest(git, withParent(pr, b, ABSENT), UPSTREAM);
+
+    const merge = mergeOf(record.merges, m1);
+    expect(merge).toEqual({
+      oid: m1,
+      date: pr.commits[1].committedDate, // pr lists X, M1, M2
+      headline: "M1",
+      parents: [x, ABSENT],
+      branch_parent: x,
+      upstream_parent: ABSENT,
+      kind: "forward",
+      conflicts: null,
+      error: "parent object missing",
+    });
+    expect(mergeOf(record.merges, m2)).toMatchObject({
+      kind: "forward",
+      branch_parent: m1,
+      upstream_parent: c,
+      conflicts: [],
+    });
+  });
 });
 
 describe("fix states", () => {
@@ -246,5 +282,33 @@ describe("fix states", () => {
     await expect(
       resolveFixes(git, [{ glob: "*.md", commit: "refs/heads/no-such-branch" }])
     ).rejects.toBeInstanceOf(UsageError);
+  });
+
+  test("classifyFixes refuses a merge whose parent cannot be fetched", async () => {
+    const { git, pr, c, m1 } = await changelogHistory();
+    const merge = mergeOf((await analysePullRequest(git, pr, UPSTREAM)).merges, m1);
+    const fixes = await resolveFixes(git, [{ glob: "**/CHANGELOG.md", commit: c }]);
+
+    for (const event of [
+      { ...merge, upstream_parent: ABSENT },
+      { ...merge, branch_parent: ABSENT },
+    ]) {
+      const error = await classifyFixes(git, [event], fixes).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(UsageError);
+    }
+    const states = await classifyFixes(git, [merge], fixes);
+    expect(states.get(m1)?.get("**/CHANGELOG.md")).toBe("before");
+  });
+});
+
+describe("GitRepo", () => {
+  test("isAncestor answers for present commits and throws for a missing one", async () => {
+    const { git, a, c, x } = await changelogHistory();
+
+    expect(await git.isAncestor(a, c)).toBe(true);
+    expect(await git.isAncestor(c, x)).toBe(false);
+    await expect(git.isAncestor(ABSENT, UPSTREAM)).rejects.toBeInstanceOf(Error);
+    await expect(git.isAncestor(a, ABSENT)).rejects.toBeInstanceOf(Error);
   });
 });
