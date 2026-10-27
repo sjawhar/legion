@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-631",
+  "completed": "2026-10-27T18:05:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2422",
+  "proof": [
+    {
+      "criterion": "1. Outside fenced code blocks no line holds more than one sentence, list items are separated by blank lines, and no list item or table row is longer than one screen; a check shows it.",
+      "surface": "scripts/semantic-line-breaks.ts on the two guides as a contributor runs it",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; echo $?  (and an independent audit, node $TMPDIR/infra631/indep.mjs, that strips code spans per paragraph and greps '[.!?] [A-Z`]')",
+      "observed": "exit 0 at head; the independent audit finds 0 multi-sentence lines at head (61 at the earlier head 52f2ecef, which led to fix 7150c044, and 1841 on main's old files)",
+      "headSha": "43aac0eb29f628e9f78d3d1f0f00de5a3d7ad8d5",
+      "negativeControl": "the same command on main 2df3353c's old-layout files exits 1: AGENTS 1559 R1, 99 R2, 7 R3; README 547 R1, 23 R2, 1 R3. Scratch file 'Has `x`. `y` runs.' plus two items with no blank line between -> R1 and R2 findings, exit 1"
+    },
+    {
+      "criterion": "2. Nothing is lost: every difference is a move the plan names, a pointer to the new place, or a listed format word or statement edit.",
+      "surface": "git history of the branch, compared as folded words and as CommonMark+GFM renderings (micromark 4.0.2 + micromark-extension-gfm 3.0.0)",
+      "command": "for f in packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md; do cmp <(jj file show -r 3e604ca8 $f | tr -s '[:space:]' ' ') <(jj file show -r 4b7a6bf9 $f | tr -s '[:space:]' ' '); done; node $TMPDIR/infra631/render/compare.mjs on the same pairs and on 2b4b7ddc vs 43aac0eb AGENTS.md; bun .legion/INFRA-631/restructure.ts --strict on main 2df3353c's two files, cmp with the head files; diff of grep '^#' between main and head",
+      "observed": "both whitespace-only commits folded-equal and render-equal; regeneration byte-identical to the head; headings unchanged (10 and 22); cited phrases each on one line; the word diff of the structural commit 3e604ca8 classified into tables converted, intro sentences, rewordings, statement edits, split markers, one split citation, the migration paragraph and the two file-head paragraphs, none outside these",
+      "headSha": "43aac0eb29f628e9f78d3d1f0f00de5a3d7ad8d5",
+      "negativeControl": "the comparer reports DIFFERENT for 'a\\n\\nb' against 'a\\nb'; semantic-line-breaks.ts --write on a copy whose relayout replaced one word refused: 'refusing to write: the re-layout would change more than whitespace', exit 2, file unchanged"
+    },
+    {
+      "criterion": "3. Replay: real conflicting pairs ported to the new layout merge clean wherever the two edits changed different, non-adjacent sentences or added items at different places; two new items added at different places of one list merge clean.",
+      "surface": "git merge-tree --write-tree on branches made from the head's files with the committed patches",
+      "command": "TMPDIR=/legion/scratch/tmp/infra631/replay-work bash .legion/INFRA-631/replay/run.sh",
+      "observed": "exit 0, every line PASS: 5e45356e68aa, 4671996e14fd, 56d31191f8f1, 949ebe03bd4e (different sentences) clean; 5aee84d6930e (both add an item right after one Where to look item) and 125a3bfb0484 (both rewrite the one loop-count sentence) classified same-or-adjacent and conflict; append(a) README Routes and append(b) AGENTS Where to look clean",
+      "headSha": "43aac0eb29f628e9f78d3d1f0f00de5a3d7ad8d5",
+      "negativeControl": "the four clean pairs on the old layout: git merge-tree --write-tree exit 1 on 7fca5b7a1958/12cbe2cdcc62, ca51db66954f/2e8c68cd98ce, 4ff4dc39319c/df396380c0ef, cdac19417b8c/2f16634c6f26; append(c), two items at one point of Routes, conflicts; same-sentence controls 728b5e297fb5 and 4440fc7b57a2 conflict"
+    },
+    {
+      "criterion": "4. Every citation of a moved section still resolves (checks and tests that read the files pass).",
+      "surface": "the repository's own checks that read packages/envoy/AGENTS.md, and Dispatch's document element measure",
+      "command": ".github/scripts/check-body-embed-limit.sh; bash .github/scripts/check-body-embed-limit.test.sh; .github/scripts/check-private-names.sh; bunx biome check .; cd packages/envoy && go test -overlay $TMPDIR/infra631/measure/overlay.json -run TestMeasureGuides -count=1 -v ./internal/dispatch/pmdoc/",
+      "observed": "embed-limit pass ('a line of each package guide names both'); its test 49 passed, 0 failed; private names exit 0; biome exit 0 (1 warning and 4 infos in files this change does not touch); AGENTS 24,312 elements / 556,870 bytes, README 10,016 / 169,020, under 65,536 and 1 MiB. TestSearchTextKeepsEveryLexeme needs Postgres (DISPATCH_TEST_DATABASE_URL), none reachable here: CI's envoy-go-race runs it",
+      "headSha": "43aac0eb29f628e9f78d3d1f0f00de5a3d7ad8d5",
+      "negativeControl": "restructure.ts --strict on a copy of the base with the body-cap phrase and one split anchor removed: exit 1 naming statement-body-cap-one-line and split-claim-status, nothing written; --lenient on it warns on both and on the 52-row item"
+    }
+  ],
+  "filesChanged": [
+    "scripts/semantic-line-breaks.ts (new: check R1/R2/R3, --write whitespace-only re-layout with a self-guard)",
+    "packages/envoy/AGENTS.md (tables to lists, rewordings, two statement edits, file-head instruction, 11 items split, one sentence per line)",
+    "packages/envoy/cmd/dispatch/README.md (tables to lists, rewordings, migration-log rule, file-head instruction, cookie item split, one sentence per line)",
+    "docs/solutions/best-practices/...-LEGION-752.md (status: superseded in part)",
+    ".legion/INFRA-631/restructure.ts (regeneration script, removed at retro)",
+    ".legion/INFRA-631/replay/ (16 pair patches, 6 demo patches, run.sh, README.md; removed at retro)"
+  ],
+  "trickyParts": [
+    "Main moved twice on both files after the plan (452e46479082, c210f10d6588): the PR conflicted at open and was resolved by the forward merge 52f2ecef, whose two guides are restructure.ts --strict on main 2df3353c's files. Any later merge to main touching either file conflicts again; resolve the same way and re-run .legion/INFRA-631/replay/run.sh.",
+    "The README migration sentence names the highest migration the log documents, computed at regeneration (0128 at the plan's base, 0134 on main now: main still appended notes for 0130-0134).",
+    "Items at 48-50 screen rows after the re-layout (AGENTS repo bullet 48, delete-markers 49, shutdown 50, /v1/interests/subscribe 48): a later main edit that grows one past 50 makes restructure.ts --strict fail; add a split anchor at a sentence that stands alone.",
+    "semantic-line-breaks.ts check mode reads a paragraph whole (7150c044): a code span broken across lines in the old layout had hidden 61 sentence ends on five AGENTS lines from both the check and --write."
+  ],
+  "deviations": [
+    "Body-cap wording is 'so keep a line of this bullet that names both constants' (plan: 'keep the sentence that names both constants on one line', which the re-layout makes false).",
+    "Converted table rows put the prose cell in a second paragraph of the item, not continuation lines, so key and prose do not run together when rendered.",
+    "Self-health/shutdown: the worker's second split ('A consumer already gone') was removed because the sentences after it say 'it' for the shutdown; the shutdown item is 50 rows.",
+    "Replay: 7 pairs have one side already on main; that side's patch is its change reversed at head (same head lines). 2 of 6 real pairs conflict as classified (same place / same sentence).",
+    "Cookie item (README Identity) split into two sibling items that are not identity modes; no split point inside it avoids that."
+  ],
+  "openQuestions": []
+}
