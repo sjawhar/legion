@@ -131,13 +131,14 @@ type Pool struct {
 	// mu guards each separate pool's creation against this pool's close: one lock, so a
 	// caller that loses the race is told the pool is closed rather than opening one nothing
 	// will ever close.
-	mu     sync.Mutex
-	rooms  *pgxpool.Pool
-	health *pgxpool.Pool
-	listen *pgxpool.Pool
-	leases *pgxpool.Pool
-	outbox *pgxpool.Pool
-	closed bool
+	mu         sync.Mutex
+	rooms      *pgxpool.Pool
+	health     *pgxpool.Pool
+	listen     *pgxpool.Pool
+	leases     *pgxpool.Pool
+	outbox     *pgxpool.Pool
+	compaction *pgxpool.Pool
+	closed     bool
 }
 
 // NewPool wraps an open pgx pool.
@@ -269,7 +270,9 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // leased loop added here makes a ninth caller that waits for a connection rather than failing,
 // for as long as the longest pass then holding one. They cannot come from the shared pool:
 // a lease is held for the whole pass, which is minutes for the compaction, and the shared pool's
-// sharedPoolSize connections are what every request reads through.
+// sharedPoolSize connections are what every request reads through. The document compaction holds
+// only its lease here: each document it compacts reads and writes on the compaction pool
+// (Pool.Compaction).
 const leasePoolSize = 8
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
@@ -297,6 +300,23 @@ func (p *Pool) Outbox() (*Pool, error) {
 		return nil, err
 	}
 	return NewPool(opened), nil
+}
+
+// compactionPoolSize bounds the pool a document's compaction reads and writes through. A
+// compaction holds one connection at a time - its read transaction, then, after a fold that holds
+// none, its write under the document's lock - so one would serve one compaction; two let a second
+// compaction (a room closing while another compacts) read while the first writes.
+const compactionPoolSize = 2
+
+// Compaction is where a document's compaction takes its connections: the repeatable-read
+// transaction it reads the rows to fold in, and the connection it holds the document's advisory
+// lock on while it writes the fold back. Compaction is housekeeping. On the shared pool its write
+// would hold a connection every request reads through while it waits for the document's lock, and
+// on the rooms pool its read would queue a room's load behind a log it is folding; on a pool of
+// its own it takes neither. Like the rooms pool it is outside the nested-acquire guard, because a
+// separate pool cannot close the cycle the guard prevents.
+func (p *Pool) Compaction() (*pgxpool.Pool, error) {
+	return p.separate(&p.compaction, compactionPoolSize, "dispatch-compaction")
 }
 
 // separate opens the pool held at field on demand, sized at size and copied from the shared
@@ -327,8 +347,8 @@ func (p *Pool) separate(field **pgxpool.Pool, size int32, name string) (*pgxpool
 	return opened, nil
 }
 
-// Close releases every connection the pool holds, the document rooms and the health probe
-// included.
+// Close releases every connection the pool holds, the document rooms, the compaction and the
+// health probe included.
 func (p *Pool) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -336,10 +356,10 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	rooms, health, listen, leases, outbox := p.rooms, p.health, p.listen, p.leases, p.outbox
-	p.rooms, p.health, p.listen, p.leases, p.outbox = nil, nil, nil, nil, nil
+	rooms, health, listen, leases, outbox, compaction := p.rooms, p.health, p.listen, p.leases, p.outbox, p.compaction
+	p.rooms, p.health, p.listen, p.leases, p.outbox, p.compaction = nil, nil, nil, nil, nil, nil
 	p.mu.Unlock()
-	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox} {
+	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox, compaction} {
 		if separate != nil {
 			separate.Close()
 		}

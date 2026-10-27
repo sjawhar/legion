@@ -131,15 +131,15 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	return nil
 }
 
+// Compact is ygo's room-close compaction: its persistence worker calls it as it exits, the server's
+// shutdown included, and it runs the tail rule (compactRoom) inline on that worker. roomServer
+// keeps that exit from racing a repair, but intentionally does not gate a published live write: it
+// is already durable, and its room can still retire under publishLiveUpdate's Apply. Compaction is
+// housekeeping, so the worker leaves a room whose lock another holder has to a later compaction
+// rather than waiting behind that holder. A failed room's eviction is the exception: it waits for
+// the lock and compacts before recovery.
 func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) error {
-	// ygo's persistence worker calls this, at its exit among other times. roomServer guards a
-	// repair but not a published live write (it is already durable), so a worker can still exit
-	// under that Apply. Any nonfailed compaction leaves a busy document lock to the next pass;
-	// a failed room's eviction compacts under the lock so recovery remains fail-fast (compactIfIdle).
-	if !a.service.roomFailed(room) {
-		ctx = compactIfIdle(ctx)
-	}
-	_, err := a.store.Compact(ctx, room, compactKeep)
+	_, err := a.store.compactRoom(ctx, room, tailRule, a.service.roomFailed(room))
 	return err
 }
 

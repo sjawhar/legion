@@ -257,10 +257,11 @@ func writeRoomLoadComment(tb testing.TB, service *Service, artifactID string, in
 }
 
 // evictRoomLoadRoom closes the document's room, which the write path leaves resident, and checks
-// none is. The room's persistence worker compacts the history as it exits, which would fold the
-// young versions the benchmark lays out; it leaves a room whose advisory lock another holder has
-// for a later compaction (compactIfIdle), so the eviction runs while this holds that lock. The
-// eviction appends nothing that would wait for it: the write path made every update durable.
+// none is. The room's persistence worker compacts the history as it exits
+// (servicePersistenceAdapter.Compact), which would fold the versions the benchmark lays out once
+// they are old; it leaves a room whose advisory lock another holder has for a later compaction,
+// so the eviction runs while this holds that lock. The eviction appends nothing that would wait
+// for it: the write path made every update durable.
 func evictRoomLoadRoom(tb testing.TB, service *Service, artifactID string) {
 	tb.Helper()
 	ctx := context.Background()

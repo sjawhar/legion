@@ -1,8 +1,8 @@
 package docs
 
 // The fold and decode of a room's stored history: the state its updates make (stateThrough), the
-// document that state decodes into (documentThrough, LoadDocument), and the fold they and Compact
-// share (foldThrough, fold, readsBackOtherwise).
+// document that state decodes into (documentThrough, LoadDocument), and the fold they and a
+// compaction (compactRoom) share (fold, readsBackOtherwise).
 
 import (
 	"context"
@@ -39,14 +39,14 @@ import (
 // TestACompactedDocumentKeepsItsOrderThroughLaterUpdates guards that on each ygo bump. A state that
 // reads back otherwise, or a log the fold's document cannot apply (one parking more than its
 // pending queue, maxUpdateItems, holds), is not used: stateThrough returns the stored updates
-// merged whole, as they were read before it folded them, and Compact, which calls foldThrough
+// merged whole, as they were read before it folded them, and a compaction, which calls fold
 // itself, leaves them as stored. The merge of a log the fold cannot apply is what a load of it
 // decodes and refuses (ErrDocumentUnloadable), which offers its rebuild.
 //
-// A log of one update is returned as stored: compaction leaves the state as one update, and a
-// document's first update deletes nothing an earlier one inserted.
+// A log of one update is returned as stored: a compaction leaves the rows it folds as one update
+// holding their state, and a document's first update deletes nothing an earlier one inserted.
 func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) ([]byte, error) {
-	state, misread, err := foldThrough(ctx, tx, room, version)
+	state, _, misread, err := fold(storedUpdates(ctx, tx, room, version))
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persisten
 // the state decoded into a document with the server's pending queue, as a room decodes it. A state
 // that does not decode is ErrDocumentUnloadable; a log holding no update is no document.
 func documentThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) (*crdt.Doc, error) {
-	state, readBack, misread, err := fold(ctx, tx, room, version)
+	state, readBack, misread, err := fold(storedUpdates(ctx, tx, room, version))
 	switch {
 	case err != nil:
 		return nil, err
@@ -106,18 +106,38 @@ func mergedThrough(ctx context.Context, tx pgx.Tx, room string, version persiste
 // errUnfoldable marks a stored update the fold's document could not apply.
 var errUnfoldable = errors.New("apply a stored document update")
 
-// foldThrough is the fold stateThrough and Compact share: the state, or misread naming why the
-// stored updates through version do not fold into a state that reads back as them - an update the
-// fold's document could not apply, or a state that reads back otherwise.
-func foldThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) (state []byte, misread error, err error) {
-	state, _, misread, err = fold(ctx, tx, room, version)
-	return state, misread, err
+// updateSource hands use each update of a stored log, oldest first, every time it is called: the
+// fold reads the log a second time when its document parked anything. It replays either the rows
+// a transaction reads (storedUpdates) or rows already read into memory (memoryUpdates), so a load
+// and a compaction fold one way whichever holds the rows.
+type updateSource func(use func([]byte) error) error
+
+// storedUpdates replays the room's stored updates through version, reading them one row at a time
+// in tx (eachUpdateThrough).
+func storedUpdates(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) updateSource {
+	return func(use func([]byte) error) error {
+		return eachUpdateThrough(ctx, tx, room, version, use)
+	}
 }
 
-// fold is foldThrough with the document its read-back check decoded the state into, readBack, nil
-// unless the state reads back. A log of one update is returned as stored, with no document. The
-// fold holds one document at once: its own, until it has encoded the state, then the read-back's.
-func fold(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) (state []byte, readBack *crdt.Doc, misread error, err error) {
+// memoryUpdates replays updates, a log's rows already read, holding no connection.
+func memoryUpdates(updates [][]byte) updateSource {
+	return func(use func([]byte) error) error {
+		for _, update := range updates {
+			if err := use(update); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+// fold is the state the updates make, the document its read-back check decoded that state into,
+// readBack, nil unless the state reads back, or misread naming why the updates do not fold into a
+// state that reads back as them - an update the fold's document could not apply, or a state that
+// reads back otherwise. A log of one update is returned as stored, with no document. The fold
+// holds one document at once: its own, until it has encoded the state, then the read-back's.
+func fold(updates updateSource) (state []byte, readBack *crdt.Doc, misread error, err error) {
 	var doc *crdt.Doc
 	apply := func(update []byte) error {
 		if doc == nil {
@@ -130,7 +150,7 @@ func fold(ctx context.Context, tx pgx.Tx, room string, version persistence.Versi
 	}
 	var first []byte
 	seen := 0
-	err = eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
+	err = updates(func(update []byte) error {
 		seen++
 		switch seen {
 		case 1:
@@ -156,7 +176,7 @@ func fold(ctx context.Context, tx pgx.Tx, room string, version persistence.Versi
 	made := doc.StateVector()
 	if parked := doc.PendingStats(); parked.Items > 0 || parked.DeleteRanges > 0 {
 		parts := [][]byte{state}
-		if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
+		if err := updates(func(update []byte) error {
 			rest, err := crdt.DiffUpdateV1(update, made)
 			if err != nil {
 				return fmt.Errorf("read parked document update: %w", err)

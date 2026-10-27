@@ -60,9 +60,7 @@ func TestAFoldedHistoryReadsAsTheMergedHistory(t *testing.T) {
 				}
 				requireReadsAs(t, fmt.Sprintf("version %d after compaction to two", version), state, readMerged(t, history[:version]))
 			}
-			if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
-				t.Fatalf("compact: %v", err)
-			}
+			compactAged(t, versioned, database, artifactID)
 			if rows := storedUpdateCount(t, database, artifactID); rows != 1 {
 				t.Fatalf("compaction left %d stored updates, want 1", rows)
 			}
@@ -108,9 +106,7 @@ func TestCompactionLeavesTheStateNotTheContentItDeleted(t *testing.T) {
 	}
 	want := readMerged(t, history)
 	requireReadsAs(t, "the load", loaded.Update, want)
-	if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
-		t.Fatalf("compact: %v", err)
-	}
+	compactAged(t, versioned, database, artifactID)
 	if stored := storedUpdateBytes(t, database, artifactID); stored > bound {
 		t.Fatalf("compaction stored %d bytes, want the one record's state, at most %d", stored, bound)
 	}
@@ -177,9 +173,7 @@ func TestALoadAndACompactionKeepWhatTheDocumentParked(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	arrive(t, "the load", loaded.Update)
-	if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
-		t.Fatalf("compact: %v", err)
-	}
+	compactAged(t, versioned, database, artifactID)
 	compacted, err := versioned.Load(ctx, artifactID)
 	if err != nil {
 		t.Fatalf("load the compacted log: %v", err)
@@ -219,11 +213,9 @@ func TestALogWithASkippedClockRangeFoldsIntoItsState(t *testing.T) {
 	want := rawReading(t, applied)
 	for _, step := range []string{"the load", "the load after compaction"} {
 		if step != "the load" {
-			if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
-				t.Fatalf("compact: %v", err)
-			}
-			if stored := storedUpdateCount(t, database, artifactID); stored != compactKeep {
-				t.Fatalf("compaction left %d stored updates, want %d", stored, compactKeep)
+			compactAged(t, versioned, database, artifactID)
+			if stored := storedUpdateCount(t, database, artifactID); stored != 1 {
+				t.Fatalf("compaction left %d stored updates, want 1", stored)
 			}
 		}
 		loaded, err := versioned.Load(ctx, artifactID)
@@ -293,9 +285,7 @@ func TestACompactionBeforeAMissingUpdateLosesNothingOnceItArrives(t *testing.T) 
 			t.Fatalf("append update %d: %v", index, err)
 		}
 		if index == 2 {
-			if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
-				t.Fatalf("compact: %v", err)
-			}
+			compactAged(t, versioned, database, artifactID)
 		}
 	}
 	read := func(what string, state []byte) string {
@@ -351,11 +341,9 @@ func TestACompactedDocumentKeepsItsOrderThroughLaterUpdates(t *testing.T) {
 			t.Fatalf("append update %d: %v", index, err)
 		}
 		if index == 8 {
-			if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
-				t.Fatalf("compact: %v", err)
-			}
-			if stored := storedUpdateCount(t, database, artifactID); stored != compactKeep {
-				t.Fatalf("compaction left %d stored updates, want %d", stored, compactKeep)
+			compactAged(t, versioned, database, artifactID)
+			if stored := storedUpdateCount(t, database, artifactID); stored != 1 {
+				t.Fatalf("compaction left %d stored updates, want 1", stored)
 			}
 		}
 	}
@@ -422,8 +410,8 @@ func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
 	if !bytes.Equal(loaded.Update, merged) {
 		t.Fatalf("the load returned %d bytes, want the %d-byte merge of its stored updates", len(loaded.Update), len(merged))
 	}
-	if deleted, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil || deleted != 0 {
-		t.Fatalf("compact deleted %d rows (%v), want every stored update kept", deleted, err)
+	if result := compactAged(t, versioned, database, artifactID); result.outcome != compactUnfoldable || result.deleted != 0 {
+		t.Fatalf("compaction = %+v, want every stored update kept as unfoldable", result)
 	}
 	if stored := storedUpdateCount(t, database, artifactID); stored != len(rows) {
 		t.Fatalf("compaction left %d stored updates, want %d", stored, len(rows))

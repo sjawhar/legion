@@ -74,7 +74,9 @@ type Deps struct {
 // Load would fold up to now, which says whether a state loaded earlier is still the stored one.
 // DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
 // state decoded once with the stamp it was read under, which a read of a document no room holds
-// caches its rendering by (coldRead).
+// caches its rendering by (coldRead). compactRoom is the compaction every path Dispatch compacts a
+// document on runs (a room's close, CompactAll), under the tail rule; Compact, ygo's, is the keep-N
+// rule only.
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
@@ -83,6 +85,7 @@ type VersionedStore interface {
 	Head(ctx context.Context, room string) (persistence.Version, error)
 	DocumentStamp(ctx context.Context, room string) (DocumentStamp, error)
 	LoadDocument(ctx context.Context, room string) (LoadedDocument, error)
+	compactRoom(ctx context.Context, room string, rule compactRule, wait bool) (compactResult, error)
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
@@ -590,7 +593,6 @@ func New(deps Deps) *Service {
 	// Transactional server-side edits suppress one automatic ygo write and
 	// append it inside the API transaction, so persistence stays per update.
 	srv.PersistCoalesceWindow = -1
-	srv.CompactEvery = 200
 	// The rooms decode under maxUpdateItems, the queue every decode of document bytes takes (see
 	// maxUpdateItems). It is also the most a room's peers can park in it, about ten times ygo's
 	// default; bounding what one peer's update can do to a room is LEGION-487. ygo's check of each

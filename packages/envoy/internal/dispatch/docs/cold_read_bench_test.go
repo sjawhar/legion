@@ -148,7 +148,7 @@ func moveBenchmarkStamp(b *testing.B, versioned *PgVersioned, artifactID string,
 	if _, err := versioned.AppendUpdate(context.Background(), artifactID, crdt.EncodeStateAsUpdateV1(live, before)); err != nil {
 		b.Fatal(err)
 	}
-	if _, err := versioned.Compact(context.Background(), artifactID, compactKeep); err != nil {
+	if _, err := versioned.Compact(context.Background(), artifactID, 1); err != nil {
 		b.Fatal(err)
 	}
 }
