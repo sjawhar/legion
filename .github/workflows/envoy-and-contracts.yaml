@@ -1100,6 +1100,41 @@ jobs:
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
         working-directory: packages/envoy
 
+  # The two-process and two-build tests of the listener (packages/envoy/cmd/listener/
+  # multiprocess_test.go and twobuild_test.go, INFRA-557): each row starts real cmd/listener
+  # binaries for one machine id - an active pod and a standby, which is what a machine runs once
+  # it has more than one - against one NATS, each behind a relay that can cut, freeze or slow its
+  # link, and drives them over real HTTP, the bus and their own logs. They take the delivery lease
+  # over through a reconnect in place, a SIGKILL, a lost node and a SIGTERM, check that no message is
+  # delivered twice or lost across each, that both pods answer registrations, sends and role lookups
+  # alike, and run a build with a stream subject more (the envoy_twobuild tag) beside the plain one.
+  #
+  # They build only under the `multiprocess` tag, so envoy-go's unit run leaves them out, and they
+  # could not run there in any case: that step runs under go test's default ten-minute package
+  # deadline, which the memory tests already took red at 600 s (run 37116639565), and the rows here
+  # wait out a lease, an ack wait, a 35 s attempt take-over and a 140 s standby, tens of seconds to
+  # minutes each. A job of their own rather than a step in dispatch-multiprocess, for the reason
+  # broker-multiprocess is: that job is a required check, and adding the listener to it would mean
+  # renaming it. The run names the rows (TestTwoPods*, TestTwoBuilds*): the package's untagged tests
+  # are envoy-go's, and one of them needs the Postgres this job does not start. Each row's NATS runs
+  # in its own test process (internal/testnats), so neither a container runtime nor a Postgres
+  # service is here.
+  listener-multiprocess:
+    needs: changes
+    if: needs.changes.outputs.envoy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+      - name: Two-process and two-build tests of the listener
+        run: go test -tags multiprocess -count=1 -timeout 20m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener
+        working-directory: packages/envoy
+
   # The container smoke test, the envoy-infra plugin's live tests, and the image both run. Its own
   # job, gated on envoy_image rather than envoy: the image is built from the Dispatch SPA and the
   # Bun workspace as well as the Go sources, so a Dispatch-only change changes the image and must
