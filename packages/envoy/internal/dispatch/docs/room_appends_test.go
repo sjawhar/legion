@@ -608,7 +608,7 @@ func TestABatchStopsAtASuppressedUpdateAndAtAnotherRoomInstance(t *testing.T) {
 		waitForLandedAppends(t, service, artifactID)
 		live := service.srv.GetDoc(artifactID)
 		before := storedHead(t, database, artifactID)
-		gate := &appendGate{entered: make(chan struct{}), release: make(chan struct{})}
+		gate := &heldAppendGate{entered: make(chan struct{}), release: make(chan struct{})}
 		t.Cleanup(gate.let)
 		appends.mu.Lock()
 		appends.gates = append(appends.gates, gate)

@@ -26,10 +26,28 @@ const documentChangedChannel = "dispatch_doc_changed"
 // reads as what it is; the artifact id is the parameter, because it is a value.
 const notifyDocumentChangedStatement = `select pg_notify('` + documentChangedChannel + `', $1)`
 
+// documentHeadChannel carries, beside documentChangedChannel's bare id and in the same statement,
+// a documentHeadNotice: which document changed, the head its stored history stands at once the
+// sending transaction commits, and which process sent it (Service.ProcessID). A listener can then
+// tell a change its room already holds, or one its own process made, from one it has to read.
+// documentChangedChannel keeps its bare payload, so a process of an older build, which listens on
+// that channel alone, still hears every change while two builds serve one database.
+const documentHeadChannel = "dispatch_doc_head"
+
+// documentHeadNotice is documentHeadChannel's payload, encoded as JSON with one-letter keys to keep
+// it small inside Postgres's 8000-byte notification limit: {"r":"<artifact uuid>","v":<head after
+// commit>,"p":"<process id>"}. Process is empty for a store no Service was built on, which no
+// process takes for its own.
+type documentHeadNotice struct {
+	Room    string `json:"r"`
+	Head    int64  `json:"v"`
+	Process string `json:"p"`
+}
+
 // notifyDocumentChanged announces room's durable change inside tx, the transaction that made it,
 // which holds the document's advisory lock (lockDocumentRoom). It is a rebuild's announcement,
 // one per rebuild; an append folds the same pg_notify into its own insert rather than spending a
-// second round trip on it under that lock (appendUpdateTxClass).
+// second round trip on it under that lock (appendUpdatesStatement).
 //
 // Inside that transaction for two reasons. Postgres delivers a notification only if the
 // transaction that sent it commits, so an append the gate refused (ErrRoomBehindHead), or one

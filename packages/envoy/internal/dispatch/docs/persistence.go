@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"github.com/reearth/ygo/encoding"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -33,6 +35,11 @@ type PgVersioned struct {
 	// Nil outside tests; tests use it to hold a reader of the cursor and the head in that window
 	// (TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow).
 	afterAppendCommit func(room string, version persistence.Version)
+	// processID is the id of the process whose Service was built on this store (Service.ProcessID),
+	// which every append's documentHeadChannel notification names, so a listener can tell this
+	// process's own writes from another's. New sets it (setProcessID) before the Service it builds
+	// runs anything; a store no Service was built on - a test's, a seed's - leaves it empty.
+	processID string
 }
 
 // roomLock is one room's in-process lock and how many callers hold it or wait for it.
@@ -44,6 +51,13 @@ type roomLock struct {
 // NewPgVersioned creates the versioned store for a Dispatch database.
 func NewPgVersioned(database *store.Store) *PgVersioned {
 	return &PgVersioned{store: database}
+}
+
+// setProcessID gives the store the id of the process whose Service was built on it
+// (Service.ProcessID). It is part of VersionedStore so that New reaches the PgVersioned under any
+// store that wraps one by embedding it.
+func (p *PgVersioned) setProcessID(id string) {
+	p.processID = id
 }
 
 // Load returns the room's state at its head (stateThrough), constrained by a pending prune
@@ -127,7 +141,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 			return fmt.Errorf("begin document update: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit)
+		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, appendBrowser)
 		if err != nil {
 			return err
 		}
@@ -155,7 +169,7 @@ func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, itemCapError(update, err)
 	}
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil, appendDerived)
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
@@ -200,7 +214,112 @@ func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
-func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+// appendKind is what an append stores, which the gate (queueAppendGate, gateAppend) is told: a room's
+// own browser update (appendBrowser), or an update the service derived and appends in a caller's
+// transaction (appendDerived) - a live write's, a settlement's repair, the block-id backfill's
+// stamp, a seed. The gate decides alike for both kinds: the cursor the append hands it must stand
+// at the head (refuseThroughBehindHead).
+type appendKind int
+
+const (
+	// appendBrowser is a room's own update, which a browser peer sent and the room applied.
+	appendBrowser appendKind = iota
+	// appendDerived is an update the service wrote and appends in a caller's transaction
+	// (AppendUpdateTx).
+	appendDerived
+)
+
+// ungatedAppend is the through an append hands the gate when no room cursor gates it
+// (appendingCursor is nil): a cold write, which renders from the store and holds no room, a new
+// document's seed, a test's own append. No version is negative, so the gate never takes it for a
+// cursor standing at the head, and refuseThroughBehindHead passes it without comparing.
+const ungatedAppend int64 = -1
+
+// appendGateStatement is the gate's one read: the room's greatest stored version, the head an
+// append's versions follow, and its least, the oldest version the room still stores, 0 each for a
+// room with none.
+const appendGateStatement = `
+	select coalesce(max(version), 0), coalesce(min(version), 0) from doc_updates where artifact_id = $1
+`
+
+// appendGate is the gate of one append transaction: its read, queued into the caller's batch
+// (queueAppendGate) or run alone (gateAppend), and, once that read has run, its decision (head).
+//
+// The gate: the document the appended updates were made on must stand at the head. Two
+// envoy-dispatch processes serve one database, and an append of the other process's room is not
+// in this one's document; appending from a room behind the head is itself harmless, since Yjs
+// updates commute and the document's advisory lock serialises them, but everything the appending
+// transaction renders from that document - an upload's or a conditional edit's version, a
+// settlement's repairs - is rendered from text the writer never saw. The caller holds that lock in
+// the same transaction, and the order is the lock, then the cursor (through, appendingThrough),
+// then the head: a peer of this very room whose append committed under the lock has already
+// advanced the cursor, so two peers of one room never refuse each other.
+type appendGate struct {
+	room    string
+	through int64
+	kind    appendKind
+	// read is set once the read has run and scanned; err is its failure.
+	read     bool
+	err      error
+	latest   int64
+	earliest int64
+}
+
+// queueAppendGate queues the gate's read of room into b, the caller's batch, for an append of kind
+// whose document holds every update through through (ungatedAppend for none). The caller holds the
+// document's advisory lock in the transaction b runs in, and asks head once b has run.
+func queueAppendGate(b *pgx.Batch, room string, through int64, kind appendKind) *appendGate {
+	gate := &appendGate{room: room, through: through, kind: kind}
+	b.Queue(appendGateStatement, room).QueryRow(gate.scan)
+	return gate
+}
+
+// gateAppend is queueAppendGate's read and head's decision as one statement in tx, which holds the
+// document's advisory lock: the head the append's versions follow, or ErrRoomBehindHead.
+func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind appendKind) (int64, error) {
+	gate := &appendGate{room: room, through: through, kind: kind}
+	if err := gate.scan(tx.QueryRow(ctx, appendGateStatement, room)); err != nil {
+		return 0, err
+	}
+	return gate.head()
+}
+
+// scan reads the gate's row.
+func (g *appendGate) scan(row pgx.Row) error {
+	if err := row.Scan(&g.latest, &g.earliest); err != nil {
+		g.err = fmt.Errorf("read latest document update: %w", err)
+		return g.err
+	}
+	g.read = true
+	return nil
+}
+
+// head is the gate's decision once its read has run: the room's head, which the append's versions
+// follow, or ErrRoomBehindHead when the append's document does not stand there. A read that failed,
+// or never ran because a statement before it in the batch failed, is an error too.
+func (g *appendGate) head() (int64, error) {
+	if g.err != nil {
+		return 0, g.err
+	}
+	if !g.read {
+		return 0, fmt.Errorf("read latest document update of room %s: the read did not run", g.room)
+	}
+	if err := refuseThroughBehindHead(g.room, g.through, g.latest); err != nil {
+		return 0, err
+	}
+	return g.latest, nil
+}
+
+// oldest is the least version the room stored when the gate read it, 0 for none: with the head
+// and the versions the transaction appends, what a committed batch hands noteStoredUpdates.
+func (g *appendGate) oldest() int64 {
+	return g.earliest
+}
+
+// appendUpdateTxClass appends one update inside tx under the gate: the document's advisory lock,
+// prune recovery, the gate (gateAppend) and the append's writes (appendWrites), each statement run
+// in tx in turn.
+func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit, kind appendKind) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -210,58 +329,137 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	if err := p.recoverPruneTx(ctx, tx, room); err != nil {
 		return 0, err
 	}
-	var latest int64
-	if err := tx.QueryRow(ctx, `
-		select coalesce(max(version), 0) from doc_updates where artifact_id = $1
-	`, room).Scan(&latest); err != nil {
-		return 0, fmt.Errorf("read latest document update: %w", err)
-	}
-	// The gate: the document this update was made on must stand at the head. Two envoy-dispatch
-	// processes serve one database, and an append of the other process's room is not in this
-	// one's document; appending from a room behind the head is itself harmless, since Yjs updates
-	// commute and this lock serialises them, but everything the appending transaction renders
-	// from that document - an upload's or a conditional edit's version, a settlement's repairs -
-	// is rendered from text the writer never saw. The order is the lock, then the cursor, then
-	// the head: a peer of this very room whose append committed under this lock has already
-	// advanced the cursor (appendUpdate), so two peers of one room never refuse each other.
-	if err := refuseRoomBehindHead(room, appendingCursor(ctx, room), latest); err != nil {
+	head, err := gateAppend(ctx, tx, room, appendingThrough(ctx, room), kind)
+	if err != nil {
 		return 0, err
 	}
-	version := persistence.Version(latest + 1)
-	// The insert announces the change itself (documentChangedChannel), as a data-modifying CTE
-	// rather than a statement of its own, so a durable append is one round trip under the
-	// document's advisory lock instead of two: every browser update is its own append
-	// (PersistCoalesceWindow = -1). Why the announcement belongs inside this transaction is
-	// notifyDocumentChanged's doc comment, which still carries a rebuild's. The room is passed
-	// twice because its two parameters are different types: doc_updates.artifact_id is a uuid,
-	// and pg_notify takes text.
-	if _, err := tx.Exec(ctx, `
-		with appended as (
-			insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
-		)
-		select pg_notify('`+documentChangedChannel+`', $5)
-	`, room, int64(version), update, contentChanged, room); err != nil {
-		return 0, fmt.Errorf("append document update: %w", err)
-	}
-	authors, lastActor, include := credit.take()
-	// An edit credited to authors names its latest edit source, none included when no one
-	// peer made it; an update no one is credited with keeps the row's. The row is taken here, with
-	// the write, so a route that goes on to append an event (an upload, issue creation) holds it
-	// before the events' commit-order lock, as an answer marking this document a copy owed does
-	// (owedCopiesOf); Ledger.Commit's later recordLatestEditSource then waits on nothing.
-	if include && (len(authors) > 0 || lastActor != nil) {
-		if err := markUpdateOwedBy(ctx, tx, room, lastActor); err != nil {
-			return 0, err
-		}
-	} else if err := markUpdateOwed(ctx, tx, room); err != nil {
+	statements, version, err := p.appendWrites(room, head, []appendedUpdate{{update: update, contentChanged: contentChanged, credit: credit}})
+	if err != nil {
 		return 0, err
 	}
-	if include {
-		if err := upsertPendingAuthors(ctx, tx, room, pendingAuthorsAt(authors, version)); err != nil {
+	for _, statement := range statements {
+		if err := statement.exec(ctx, tx); err != nil {
 			return 0, err
 		}
 	}
 	return version, nil
+}
+
+// appendedUpdate is one update an append transaction stores: its bytes, whether it changes the
+// document's content, and the browser edit's in-flight credit, nil for an update no browser edit
+// credited.
+type appendedUpdate struct {
+	update         []byte
+	contentChanged bool
+	credit         *UpdateCredit
+}
+
+// appendUpdatesStatement stores every update of one append transaction and announces the change,
+// in one statement: the insert of one doc_updates row per update, at consecutive versions from the
+// head the gate read, each with its own content class, is a data-modifying CTE, and the select it
+// feeds sends both notifications, documentChangedChannel's bare id and documentHeadChannel's
+// documentHeadNotice naming the last version. One update or a room's whole batch, the transaction
+// spends one round trip under the document's advisory lock on its rows and its announcement, and
+// sends each notification once. Why the announcement belongs inside this transaction is
+// notifyDocumentChanged's doc comment, which still carries a rebuild's. The room is passed twice
+// because its two parameters are different types: doc_updates.artifact_id is a uuid, and
+// pg_notify takes text.
+const appendUpdatesStatement = `
+	with appended as (
+		insert into doc_updates (artifact_id, version, update, content_changed)
+		select $1::uuid, version, update, content_changed
+		from unnest($2::bigint[], $3::bytea[], $4::boolean[]) as appended(version, update, content_changed)
+	)
+	select pg_notify('` + documentChangedChannel + `', $5), pg_notify('` + documentHeadChannel + `', $6)
+`
+
+// appendWrites is every write of an append transaction whose gate passed at head, in the order the
+// transaction runs them, and the last version they store: the insert and its notifications
+// (appendUpdatesStatement), the owed settlement written once (updateOwedStatement), and one
+// doc_pending_authors upsert of every credited update's authors at that update's own version
+// (pendingAuthorsStatement), left out when no update credits anyone. The rows are exactly those
+// the same updates leave appended one at a time. A caller runs the statements in its transaction
+// (writeStatement.exec) or queues them into the batch it commits with (writeStatement.queue).
+//
+// Each update's credit is taken here (UpdateCredit.take), so the caller holds the document's
+// advisory lock from before the gate until the transaction ends. The owed row is taken with the
+// write, so a route that goes on to append an event (an upload, issue creation) holds it before
+// the events' commit-order lock, as an answer marking this document a copy owed does
+// (owedCopiesOf); Ledger.Commit's later recordLatestEditSource then waits on nothing.
+func (p *PgVersioned) appendWrites(room string, head int64, updates []appendedUpdate) ([]writeStatement, persistence.Version, error) {
+	if len(updates) == 0 {
+		return nil, 0, errors.New("append document updates: no update to append")
+	}
+	versions := make([]int64, len(updates))
+	contents := make([][]byte, len(updates))
+	classes := make([]bool, len(updates))
+	credited := false
+	var lastActor *model.Actor
+	var authors []pendingAuthor
+	for index, appended := range updates {
+		version := head + int64(index) + 1
+		versions[index], contents[index], classes[index] = version, appended.update, appended.contentChanged
+		updateAuthors, updateActor, include := appended.credit.take()
+		// An edit credited to authors names its latest edit source, none included when no one
+		// peer made it; an update no one is credited with keeps the row's.
+		if include && (len(updateAuthors) > 0 || updateActor != nil) {
+			credited, lastActor = true, updateActor
+		}
+		if include {
+			authors = append(authors, pendingAuthorsAt(updateAuthors, persistence.Version(version))...)
+		}
+	}
+	last := versions[len(versions)-1]
+	notice, err := json.Marshal(documentHeadNotice{Room: room, Head: last, Process: p.processID})
+	if err != nil {
+		return nil, 0, fmt.Errorf("encode the document's head notification: %w", err)
+	}
+	owed, err := updateOwedStatement(room, credited, lastActor)
+	if err != nil {
+		return nil, 0, err
+	}
+	statements := []writeStatement{{
+		sql:  appendUpdatesStatement,
+		args: []any{room, versions, contents, classes, room, string(notice)},
+		what: "append document update",
+	}, owed}
+	if len(authors) > 0 {
+		upsert, err := pendingAuthorsStatement(room, authors)
+		if err != nil {
+			return nil, 0, err
+		}
+		statements = append(statements, upsert)
+	}
+	return statements, persistence.Version(last), nil
+}
+
+// writeStatement is one statement of a durable write, with the words its error is wrapped in. A
+// caller runs it in its own transaction (exec), or queues it into a batch it sends itself (queue),
+// so one SQL serves a write made either way.
+type writeStatement struct {
+	sql  string
+	args []any
+	what string
+}
+
+// exec runs the statement in tx.
+func (s writeStatement) exec(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, s.sql, s.args...); err != nil {
+		return fmt.Errorf("%s: %w", s.what, err)
+	}
+	return nil
+}
+
+// queue queues the statement into b; its error, wrapped as exec wraps it, is what b's Close
+// returns when the statement is the first of b's to fail.
+func (s writeStatement) queue(b *pgx.Batch) {
+	what := s.what
+	b.Queue(s.sql, s.args...).Fn = func(results pgx.BatchResults) error {
+		if _, err := results.Exec(); err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		}
+		return nil
+	}
 }
 
 // clearSettlementPending deletes the document's pending settlement inside the settlement

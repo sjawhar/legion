@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
@@ -74,7 +75,9 @@ type Deps struct {
 // Load would fold up to now, which says whether a state loaded earlier is still the stored one.
 // DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
 // state decoded once with the stamp it was read under, which a read of a document no room holds
-// caches its rendering by (coldRead).
+// caches its rendering by (coldRead). setProcessID hands the store the Service's process id
+// (Service.ProcessID), which every append's head notification names (documentHeadNotice); a store
+// that wraps a PgVersioned by embedding it passes it on with no code of its own.
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
@@ -83,13 +86,18 @@ type VersionedStore interface {
 	Head(ctx context.Context, room string) (persistence.Version, error)
 	DocumentStamp(ctx context.Context, room string) (DocumentStamp, error)
 	LoadDocument(ctx context.Context, room string) (LoadedDocument, error)
+	setProcessID(id string)
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
 type Service struct {
-	srv               *roomServer
-	store             *store.Store
-	persistence       VersionedStore
+	srv         *roomServer
+	store       *store.Store
+	persistence VersionedStore
+	// processID names this Service among the processes serving one database: New makes it, one
+	// per Service, and every append's head notification carries it (documentHeadNotice), so a
+	// listener can tell this process's own writes from another's.
+	processID         string
 	events            *events.Broker
 	identity          identity.Identity
 	agentTokens       *auth.SharedAgentTokens
@@ -592,9 +600,12 @@ func New(deps Deps) *Service {
 	if persist == nil {
 		persist = NewPgVersioned(deps.Store)
 	}
+	processID := uuid.NewString()
+	persist.setProcessID(processID)
 	service := &Service{
 		store:             deps.Store,
 		persistence:       persist,
+		processID:         processID,
 		events:            deps.Events,
 		identity:          deps.Identity,
 		agentTokens:       deps.AgentTokens,
@@ -654,6 +665,12 @@ func New(deps Deps) *Service {
 	srv.OnUnloadDocument = service.releaseUnloadedRoom
 
 	return service
+}
+
+// ProcessID is the id New made for this Service, which names its writes in the head notifications
+// every process listening on the database hears (documentHeadNotice).
+func (s *Service) ProcessID() string {
+	return s.processID
 }
 
 // ShutdownDrainBudget bounds the part of Shutdown that waits on document work - each room's durable
