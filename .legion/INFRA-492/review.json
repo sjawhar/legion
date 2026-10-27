@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-492",
+  "completed": "2026-10-27T13:29:15Z",
+  "decision": "changes_requested",
+  "headReviewed": "6e32f0016417c9f352d1c157b7fd9a1bf7bdc04c (code head 5873436a73aff98676ce3bc58cd11dd0e21276f4)",
+  "scope": "Architect's ruling at the review-round cap (Envoy 13:12Z, dispatch://INFRA-492/comment/7c1a6d04-9f47-44d3-aa17-8156b73e6486): spec acceptance 1 and 2, the tester's 7 round-1 and 4 round-2 defects, the Retry-After cap, the login-only snooze event; any correctness defect is still fixed here. Every item in that scope holds at this head (read in code; tester's runs at 9e324a38).",
+  "critical": 0,
+  "important": 3,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/issue_patch.go",
+      "description": "Freshness regression against main: a write that adds or removes a blocker (issue.updated or issue.created with blocked_by) leaves the blocker's open issue page showing an old 'Referenced by (N)' count. The count is issue.referenced_by_count (IssueHeader.tsx:601), which counts blocked_by edges (graph_edges, migration 0121:105-106). The event names no other issue in references_changed unless the title moved (issue_patch.go:418-425), and the client refreshes only ancestors' details unless parent, components or repo moved (event-refresh.ts:442-450); the blocked_by rule (event-refresh.ts:510-527) reaches only panels that already hold data. Main refreshed every ['issue'] detail on every issue.* event. Fix: name the added and removed blockers through refs.CountedChanges in issue_patch.go and issue_create.go, as titleExcerptChanges does for a retitle."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/refs/reference-target.ts",
+      "description": "A summary or block read that fails (a 503 after its two retries) never recovers on the open page: staleTime Infinity and refetchOnWindowFocus false (lines 62-63, 73-74, 139-140), and a reconnect with a complete replay no longer refreshes the whole cache. The link stays on its short form until an event names it or it remounts. On main the full read recovered on focus. Fix: refetch on focus only an errored query, e.g. refetchOnWindowFocus: (query) => query.state.status === 'error'."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "No '## Contract change census'. The PR changes signatures at a package and process boundary: @legion/contracts UserStateUpdatedEventPayload.state required -> optional (absent on the new snooze event), ChangedReference.kind widened to artifact and block, references_changed_truncated now coexists with named targets (it meant the list was absent). Each needs its search, hits and disposition (consumers: packages/dispatch/web, packages/envoy-client/src/delivery.ts reads IssueEventPayloadSchema, activity-model.ts and event-description.ts switch on user_state.updated) and a rollout line."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/routes_table.go",
+      "description": "The summary route's self-description (line 90) lists each document as {id, slug, name, kind, latest_version} and leaves out primary, which the handler, the contract and AGENTS.md carry."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "Two claims overstate: 'no request is ever cancelled ... including the ones mutations ask for' (optimistic mutations call cancelQueries, e.g. useAskSnooze.ts:37,103, useAskAnswerForm.ts:142), and 'focusing a tab no longer refetches every read the page holds' (refetchOnWindowFocus stays true with staleTime 30 s in main.tsx; only the reconnect's whole-cache refresh is gone). The E2E (implementer) line still names fe1e97d24744; after the conflict merge it takes the 'rebase re-check fe1e97d24744 -> 5873436a73af: fingerprint unchanged, bare gates only' form."
+    }
+  ],
+  "thermonuclear": "Both run at 6e32f001. Deep review: finding 1 above (verified by reading), minors 2-5 above, a throwing frame now loses its refresh when the replay is complete (no producer found; risk line), and hardening H1 (a snooze event shows who snoozed in which project and when). Code quality: six structural items, no behaviour change, on the Fast-follow line.",
+  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title. At 5873436a (newest pull_request run's head; 6e32f001 differs only in .legion/, compare handoffsOnly true, 2 files): build, changes, lint, test, typecheck queued; pr-title cancelled once and queued again. Not settled at 13:28Z; no approval given this round."
+}
