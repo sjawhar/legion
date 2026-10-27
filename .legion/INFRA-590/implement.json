@@ -2,9 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-27T16:20:00Z",
+  "completed": "2026-10-27T17:55:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "63e0500890c1f641c2b553fde67655176271bf27",
+  "head": "3d0b23c8008ab95bdd9e0c9caca8ab85a724219d",
+  "round": "2: the tester's red test TestAStandbyDoesNotTryTheHoldForEveryEventTheHolderWrites (6ebf4be0) passes unmodified; the standby has a wake channel of its own",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -42,9 +43,17 @@
       "criterion": "Before and after numbers: publish rate and delivery latency at 4 and 40 events/s, one and two processes",
       "surface": "committed black-box harness TestTheOutboxLoadSteps (real envoy-dispatch processes, HTTP writes, NATS reads) and TestOutboxThroughputUnderRemoteLatency",
       "command": "cd packages/envoy && DISPATCH_OUTBOX_LOAD_STEPS=1 DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -tags multiprocess -count=1 -timeout 60m -run TestTheOutboxLoadSteps -v ./cmd/dispatch at bed0fdc4 and at 891e854b; go test -count=1 -run TestOutboxThroughputUnderRemoteLatency -v ./internal/dispatch/outbox/ at both",
-      "observed": "40 events/s, one process: 40.00 -> 39.99 published/s, p99 from commit 1,063 -> 530 ms; two processes: p99 1,271 -> 1,054 ms; every event delivered before and after. Remote latency 50/150 ms: backlog 749/444 -> 176/71 events/s, one-issue burst of 100: 0.14/0.40 s -> 6.0/16.2 s (one round trip per event per destination). Recorded in THROUGHPUT.md",
+      "observed": "40 events/s: about 40 published/s before and after, every event delivered in every run; the p99 from commit moves between about 0.5 and 1.3 s from run to run on the 2-core pod (before 1,063 / 1,271 ms; after 530 / 1,054 ms at 891e854b and 1,154 / 1,106 ms in the tester's run at 63e05008), so no latency change is claimed. Remote latency 50/150 ms: backlog 749/444 -> 176/71 events/s, one-issue burst of 100: 0.14/0.40 s -> 6.0/16.2 s (one round trip per event per destination). Recorded in THROUGHPUT.md",
       "headSha": "891e854b63b7",
       "negativeControl": "n/a for a measurement; the harness fails the step when any written event is not delivered within 60 s after it (none failed before or after)"
+    },
+    {
+      "criterion": "No periodic poll: a standby tries the publisher hold only on the hold's release, its timer to the lapse, a new LISTEN connection or its NATS connection changing, never per event the holder writes",
+      "surface": "two real envoy-dispatch binaries (multiprocess harness) on one Postgres with log_statement=all, counting every 'insert into duty_holds' the server logged; and two outboxes on real Postgres and NATS in the outbox package",
+      "command": "cd packages/envoy && psql -c \"alter system set log_statement='all'\"; DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -tags multiprocess -count=1 -run TestEachSessionTakesEachEventOnceAndInOrderAcrossTwoProcesses -v ./cmd/dispatch, counting 'insert into duty_holds' lines in the server log over the run; DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=1 -run TestAStandbyDoesNotTryTheHoldForEveryEventTheHolderWrites -v ./internal/dispatch/outbox/",
+      "observed": "200 comments written through both processes: 3 takes of duty_holds in the whole run (the processes' first takes), each comment delivered once and in order; the tester's red test passes unmodified: 'the standby sent 0 takes of the hold and 0 reads of its lapse' while 100 events were written. Whole outbox package (and -race), TestHealthz, and the whole tagged multiprocess package (548.9 s) pass at this head",
+      "headSha": "3d0b23c8008ab95bdd9e0c9caca8ab85a724219d",
+      "negativeControl": "The same multiprocess run on the code before the fix (8fcb26c7, in a scratch archive) logged 308 takes of duty_holds for the same 200 comments; the red test at 8fcb26c7 fails with 'the standby sent 98 takes of the publisher hold and 98 reads of its lapse while the holder wrote 100 events'"
     }
   ],
   "filesChanged": [
