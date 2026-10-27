@@ -226,6 +226,43 @@ describe("searchAnswer: where an ask hit stands", () => {
     ]);
   });
 
+  test("a closing reason's later lines are indented under the hit, as an answer's are", () => {
+    const resolution = {
+      kind: "resolved" as const,
+      reason: "Settled in the spec.\r\nSee the decision block.\n\nNo further work.",
+      actor: { kind: "user" as const, id: "ada@example.com" },
+      at: "t3",
+    };
+
+    expect(searchText(askHit({ state: "resolved", resolution }))).toEqual([
+      askHeader,
+      askLine,
+      "  Closed with no answer: resolved by user ada@example.com at t3: Settled in the spec.",
+      "    See the decision block.",
+      "    ",
+      "    No further work.",
+    ]);
+    expect(
+      searchText(
+        askHit({
+          state: "resolved",
+          resolution,
+          answer: { user: "ada@example.com", selected: [], text: "Silvered.\nOr not.", at: "t1" },
+        })
+      )
+    ).toEqual([
+      askHeader,
+      askLine,
+      "  Closed after an answer: resolved by user ada@example.com at t3: Settled in the spec.",
+      "    See the decision block.",
+      "    ",
+      "    No further work.",
+      "  Last answer by ada@example.com at t1 · options chosen: none",
+      "  Answer text: Silvered.",
+      "    Or not.",
+    ]);
+  });
+
   test("an open ask says it has no answer yet", () => {
     expect(searchText(askHit({ state: "open" }))).toEqual([
       askHeader,

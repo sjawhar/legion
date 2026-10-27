@@ -228,6 +228,48 @@ test("an ask hit says where it stands and shows its latest answer", async () => 
   }
 });
 
+// The answer's three-line clamp is CSS only: whatever text reaches the option is its accessible
+// name, so a long answer is cut to its start before it renders.
+test("an ask hit shows only the start of a long answer, cut at a word with an ellipsis", async () => {
+  const text = `Keep **both** frames. ${"The meridian ring stays level. ".repeat(80)}zenithward`;
+  const search = spyOn(api, "search").mockResolvedValue(
+    searchAnswer([
+      {
+        ask: {
+          answer: { at: "2026-10-01T00:00:00Z", selected: [], text, user: "alice" },
+          state: "answered",
+        },
+        href: "/issues/LEGION-5/asks/long",
+        id: "long",
+        kind: "ask",
+        owner: { key: "LEGION-5", kind: "issue", status: "todo", title: "Orrery" },
+        rank: 1,
+        snippet: "Which <mark>orrery</mark> frame?",
+      },
+    ])
+  );
+  const view = renderPalette();
+
+  try {
+    await searchFor("orrery");
+    const option = screen.getByRole("option");
+    await waitFor(() => expect(option.querySelector("strong")?.textContent).toBe("both"));
+
+    // 280 characters end inside the ninth sentence's second word, so the cut falls after its first.
+    const shown = option.textContent ?? "";
+    expect(text.length).toBeGreaterThan(2000);
+    expect(shown).not.toContain("zenithward");
+    expect(
+      shown.endsWith(`Keep both frames. ${"The meridian ring stays level. ".repeat(8)}The…`)
+    ).toBe(true);
+    expect(shown.length).toBeLessThan(400);
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
 test("does not query below two characters", () => {
   const search = spyOn(api, "search").mockResolvedValue(searchAnswer([]));
   const view = renderPalette();

@@ -40217,17 +40217,20 @@ function searchHitLine(result, baseUrl) {
   const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
   return `${label}: ${snippetText(result.snippet)} -> ${href}`;
 }
+function indentedText(text) {
+  return text.split(/\r?\n/u).join(`
+    `);
+}
 function answerLines(lead, answer) {
   const selected = answer.selected.length === 0 ? "none" : answer.selected.join(", ");
-  const text = answer.text === null || answer.text === "" ? "none" : answer.text.split(/\r?\n/u).join(`
-    `);
+  const text = answer.text === null || answer.text === "" ? "none" : indentedText(answer.text);
   return [
     `  ${lead} by ${answer.user} at ${answer.at} \xB7 options chosen: ${selected}`,
     `  Answer text: ${text}`
   ];
 }
 function resolutionText(resolution) {
-  return `${resolution.kind} by ${actorText(resolution.actor)} at ${resolution.at}: ${resolution.reason}`;
+  return `${resolution.kind} by ${actorText(resolution.actor)} at ${resolution.at}: ${indentedText(resolution.reason)}`;
 }
 function askStateLines(ask) {
   if (ask === undefined) {

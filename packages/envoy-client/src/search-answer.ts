@@ -28,22 +28,25 @@ function searchHitLine(result: SearchResult, baseUrl: string): string {
   return `${label}: ${snippetText(result.snippet)} -> ${href}`;
 }
 
-/** An answer's two lines under its hit: who gave it, when and the options chosen, then its text,
- *  every later line of which is indented four spaces so it stays under the hit. */
+/** Free text on a line under a hit, every later line of it indented four spaces so it stays
+ *  under the hit rather than starting at column 0, where hit lines start. */
+function indentedText(text: string): string {
+  return text.split(/\r?\n/u).join("\n    ");
+}
+
+/** An answer's two lines under its hit: who gave it, when and the options chosen, then its text. */
 function answerLines(lead: string, answer: AskAnswer): string[] {
   const selected = answer.selected.length === 0 ? "none" : answer.selected.join(", ");
-  const text =
-    answer.text === null || answer.text === ""
-      ? "none"
-      : answer.text.split(/\r?\n/u).join("\n    ");
+  const text = answer.text === null || answer.text === "" ? "none" : indentedText(answer.text);
   return [
     `  ${lead} by ${answer.user} at ${answer.at} · options chosen: ${selected}`,
     `  Answer text: ${text}`,
   ];
 }
 
+/** Who closed an ask, when and why; the reason is free text and can hold line breaks. */
 function resolutionText(resolution: AskResolution): string {
-  return `${resolution.kind} by ${actorText(resolution.actor)} at ${resolution.at}: ${resolution.reason}`;
+  return `${resolution.kind} by ${actorText(resolution.actor)} at ${resolution.at}: ${indentedText(resolution.reason)}`;
 }
 
 /** Where an ask hit stands, as the lines under its hit; `undefined` is a Dispatch that predates

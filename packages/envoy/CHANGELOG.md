@@ -1443,6 +1443,9 @@
   from the text its search vector indexes - the question, the options' labels and descriptions,
   the answer's text and the options it chose - where it was cut from the question, the options'
   raw JSON and the answer's text, so the excerpt could show JSON keys and braces (INFRA-569).
+- An ask answer that chose no option reads `"selected": []` from `GET /api/v1/asks/{id}`, the ask
+  lists and `GET /api/v1/me/answers`, where it read `null`, including the rows and `ask.answered`
+  events already stored with `null`; a new answer stores `[]` (INFRA-569).
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a
   map value), naming the component and the input's path and never quoting a secret value, before
