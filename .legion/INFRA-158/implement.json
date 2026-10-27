@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T09:25:47Z",
+  "completed": "2026-10-27T10:30:02Z",
   "proof": [
+    {
+      "criterion": "Testing round 13: on a closed issue, existing block rows claim their blocks before text alignment, so identical paragraphs, moved, deleted-then-retyped and newly typed blocks each keep a true history, with rows and in the deploy order",
+      "surface": "real Postgres with the docs service, the block-index tick, settlement after the reopen, and refs resolution; the api deploy-order test",
+      "command": "go test -count=5 -run TestAClosedDocumentsCrossedEditsKeepTheirRowsHistory ./internal/dispatch/docs/ ; go test -count=1 -run 'BlockIndex|TestTheReopens|TestAClosed|Block|Rebuild|WriteIssueAskStates|Settle' ./internal/dispatch/docs/ ; go test -count=1 -run 'Repair|Unloadable|TestClosingAnIssue|Block|TestTheBlockIndex' ./internal/dispatch/api/ ; go test ./internal/dispatch/refs/",
+      "observed": "44cf9cac's, 2f3a9b7f's and 196f5a85's tests pass unmodified (diffed); the crossing test passes 5 of 5 in rows and deploy modes; docs, api and refs suites ok; at the fifteenth merge 6c7b9483 the closed-document and repair tests pass again",
+      "headSha": "6c7b9483ff36fa392cfcf4aec5e39794756ac312",
+      "negativeControl": "3a58ed47's block_index.go: 44cf9cac's test reads 'dated 0 (text at version 1 false, deleted at version 1 true)'; before the rows-first reorder the crossing test's rows mode records the deleted Retyped. deleted at version 1 and the retyped one dated 1"
+    },
     {
       "criterion": "Testing round 12 / decision 22: a closed issue's owed live-ahead document stops being owed, every block a version holds resolves under its live id, block history never names a version that lacks the text or records a deletion at a version that holds the block, and after the reopen each block is dated to the first version that holds it; open issues unchanged",
       "surface": "real Postgres with the docs service, settlement and refs resolution; the api deploy-order test with the boot repair and the real block-index loop",
@@ -38,12 +46,14 @@
     }
   ],
   "filesChanged": [
+    "round 13: docs/block_index.go (rows claim first: stage A, stored-row claim, gap text alignment, unique-text pass), docs/block_index_test.go (crossing test), packages/envoy/AGENTS.md; fifteenth forward merge 6c7b9483 (packages/envoy/CHANGELOG.md, both kept)",
     "round 12: docs/block_index.go (closedVersionBlocks with difflib alignment and stored-row hash match; live-text path removed), docs/block_index_test.go (edited-untyped-block test; round-9 docs test back to version text), packages/envoy/AGENTS.md",
     "round 10: docs/block_index.go (closed issue's live text indexed; closedVersionBlocks removed), docs/block_index_test.go (round-9 test expects live text; skip test on an open issue), packages/envoy/AGENTS.md",
     "round 9: docs/block_index.go (closedVersionBlocks, open flag), docs/block_index_test.go, api/issue_ask_repair_test.go, packages/envoy/AGENTS.md; wording: docs/solutions lease learning, cmd/dispatch/multiprocess_test.go, packages/envoy/CHANGELOG.md",
     "fourteenth forward merge 4440fc7b: packages/envoy/internal/dispatch/store/pool.go (leasePoolSize 10, ten-name comment), packages/envoy/cmd/dispatch/main.go (both loops start), packages/envoy/cmd/dispatch/README.md (eight loops), packages/dispatch/web/src/features/doc/ProofDocument.decisions.test.tsx (both tests kept)"
   ],
   "deviations": [
+    "In a document with no rows (deploy order), a deleted-then-retyped identical paragraph takes the deleted one's version text under the retyped id: text-true, identity unknowable without rows.",
     "Decision 22 (architect, ship as is): a block only a closed document's live text holds has no row until a settlement versions it; its #b- reference resolves after the reopen.",
     "Residual: a stored row indexed at an older version whose text the latest version changed is still recorded deleted at the latest version.",
     "Added a marked_at guard: the closed-issue path indexes the live text only while the pending settlement's marked_at under the lock equals the listed one, since the live text is read before the lock.",
