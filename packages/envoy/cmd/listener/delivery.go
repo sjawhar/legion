@@ -143,6 +143,17 @@ func (message deliveryMessage) retryAfter(delay time.Duration) {
 	_ = message.msg.NakWithDelay(delay)
 }
 
+// settle ends the handling of a message nothing more is delivered for: a retry after retryIn when
+// a recipient asked for one (counted as a NAK), else an ack.
+func (message deliveryMessage) settle(cfg listenerDeliveryHandlerConfig, retryIn time.Duration) {
+	if retryIn > 0 {
+		cfg.messagesNAKed.Inc()
+		message.retryAfter(retryIn)
+	} else {
+		message.finalize(false)
+	}
+}
+
 // durableHandler handles one message of the listener's durable under ctx, the message's handling
 // context, and settles it: an ack, or a NAK for a retry.
 type durableHandler func(ctx context.Context, msg *nats.Msg)
@@ -369,7 +380,7 @@ func ledgerAttempt(cfg listenerDeliveryHandlerConfig, message deliveryMessage, i
 		line, status = "listener attempt-dedupe skip", "skipped"
 	case dedupe.Deferred:
 		metricStatus, line, status = "deferred", "listener delivery deferred to another pod's attempt", "deferred"
-		if message.mode == durableDelivery {
+		if durable {
 			retryIn = attempt.RetryIn
 		}
 	}
@@ -705,12 +716,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		var deliver bool
 		var retryIn time.Duration
 		if attempt, deliver, retryIn = ledgerAttempt(cfg, message, item, sessionID, false); !deliver {
-			if retryIn > 0 {
-				cfg.messagesNAKed.Inc()
-				message.retryAfter(retryIn)
-			} else {
-				message.finalize(false)
-			}
+			message.settle(cfg, retryIn)
 			return
 		}
 	}
@@ -816,6 +822,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 
 	var retryIn time.Duration
 	var deadDeliveries int
+	deliverer := message.deliverer(cfg)
 	for _, interest := range items {
 		if item.SourceSession != "" && item.SourceSession == interest.SessionID {
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
@@ -871,7 +878,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			continue
 		}
 		deliveryTimer := metrics.NewTimer()
-		delivery, err := message.deliverer(cfg).DeliverWithResultForEntry(item, interest, target)
+		delivery, err := deliverer.DeliverWithResultForEntry(item, interest, target)
 		if err != nil && message.cancelled() {
 			// The receiver cut the prompt short on a shutdown: a retry for whichever pod holds the
 			// lease next, whatever the session's state, with no failure to report.
@@ -937,10 +944,5 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 	if deadDeliveries > 0 {
 		cfg.logger.Info("listener skipped dead session deliveries", slog.String("topic", item.Topic), slog.Int("count", deadDeliveries))
 	}
-	if retryIn > 0 {
-		cfg.messagesNAKed.Inc()
-		message.retryAfter(retryIn)
-	} else {
-		message.finalize(false)
-	}
+	message.settle(cfg, retryIn)
 }

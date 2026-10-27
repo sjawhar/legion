@@ -158,12 +158,8 @@ func (v *apiVerifier) discover(ctx context.Context, logger *logging.Logger) {
 			slog.String("retry_in", wait.String()),
 			slog.String("error", err.Error()),
 		)
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if waitUnlessDone(ctx, wait) != nil {
 			return
-		case <-timer.C:
 		}
 		wait = nextDiscoveryRetry(wait)
 	}

@@ -8,15 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
+	"reflect"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/store"
 )
 
 // The delivery lease's timing. Every pod of one machine runs a lease over one record; the pod
@@ -63,7 +63,7 @@ const (
 // bucket: no retry opens it until the grant changes. It wraps the server's own violation.
 var errListenerStateRefused = errors.New("NATS refused KV bucket " + bus.ListenerStateBucket +
 	": the listener's NATS user lacks the grant for KV bucket " + bus.ListenerStateBucket +
-	" (infra/core ListenerPermissions)")
+	" (" + listenerGrant + ")")
 
 // openListenerState opens the listener state bucket, creating it at replicas with file storage,
 // listenerStateMaxAge and one value per key when it does not exist, with wait as the JetStream
@@ -104,33 +104,11 @@ func openListenerState(conn *nats.Conn, replicas int, wait time.Duration) (bus.K
 var publishViolation = regexp.MustCompile(`Publish to "([^"]*)"`)
 
 // listenerStateRefusal returns the permissions violation that refused a failed open of the
-// listener state bucket, or nil when the open failed for another reason: err when it is itself
-// a violation of a subject of the bucket, else after, the connection's last error once the open
-// failed, when it differs from before, the last error before the open, and is such a violation.
+// listener state bucket, or nil when the open failed for another reason (bucketRefusal over that
+// one bucket).
 func listenerStateRefusal(err, before, after error) error {
-	if refusesListenerState(err) {
-		return err
-	}
-	if !sameLastError(before, after) && refusesListenerState(after) {
-		return after
-	}
-	return nil
-}
-
-// refusesListenerState reports whether err is the server's refusal of a publish to a subject of
-// the listener state bucket: a JetStream API call on its stream KV_<bucket>, or a write to one of
-// its keys, $KV.<bucket>.<key>.
-func refusesListenerState(err error) bool {
-	if err == nil || !errors.Is(err, nats.ErrPermissionViolation) {
-		return false
-	}
-	match := publishViolation.FindStringSubmatch(err.Error())
-	if match == nil {
-		return false
-	}
-	subject, stream := match[1], ".KV_"+bus.ListenerStateBucket
-	return strings.HasSuffix(subject, stream) || strings.Contains(subject, stream+".") ||
-		strings.HasPrefix(subject, "$KV."+bus.ListenerStateBucket+".")
+	_, violation := bucketRefusal([]string{bus.ListenerStateBucket}, err, before, after)
+	return violation
 }
 
 // sameLastError reports whether a and b are the same error value. nats.go records each
@@ -163,7 +141,7 @@ type leaseFields struct {
 
 // leaseRecordKeys are leaseFields' JSON keys; any other key a record carries is a newer build's,
 // kept across every rewrite.
-var leaseRecordKeys = []string{"holder", "boot", "deliver_subject", "service_since", "acquired_at", "released"}
+var leaseRecordKeys = store.JSONKeys(reflect.TypeFor[leaseFields]())
 
 // leaseRecord is the lease's value: the fields this build knows and the JSON of every key it does
 // not, which encode writes back unchanged. Its unknown map is never modified once decoded, so
@@ -175,35 +153,16 @@ type leaseRecord struct {
 
 func decodeLeaseRecord(data []byte) (leaseRecord, error) {
 	var record leaseRecord
-	if err := json.Unmarshal(data, &record.leaseFields); err != nil {
+	unknown, err := store.DecodeKeeping(data, &record.leaseFields, leaseRecordKeys)
+	if err != nil {
 		return leaseRecord{}, err
 	}
-	var all map[string]json.RawMessage
-	if err := json.Unmarshal(data, &all); err != nil {
-		return leaseRecord{}, err
-	}
-	for _, key := range leaseRecordKeys {
-		delete(all, key)
-	}
-	if len(all) > 0 {
-		record.unknown = all
-	}
+	record.unknown = unknown
 	return record, nil
 }
 
 func (r leaseRecord) encode() ([]byte, error) {
-	known, err := json.Marshal(r.leaseFields)
-	if err != nil || len(r.unknown) == 0 {
-		return known, err
-	}
-	all := make(map[string]json.RawMessage, len(leaseRecordKeys)+len(r.unknown))
-	maps.Copy(all, r.unknown)
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(known, &fields); err != nil {
-		return nil, err
-	}
-	maps.Copy(all, fields)
-	return json.Marshal(all)
+	return store.EncodeKeeping(r.leaseFields, r.unknown)
 }
 
 // leaseAcquisition is how a pod took the lease: what the record was when it wrote over it. The

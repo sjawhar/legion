@@ -1279,9 +1279,7 @@ type listenerLoops struct {
 // listener. live is the live topics lane's client, nil when the lane is off.
 func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.Client, live *bus.Client, caches []listenerCache, loops listenerLoops) {
 	// 1. Stop the self-health monitor, so nothing re-subscribes or re-watches from here.
-	if loops.stop != nil {
-		loops.stop()
-	}
+	loops.stop()
 
 	// 2. Stop receiving the durable, inside the 10 s budget the HTTP stop shares: the holder-only
 	// loops stop, the subscription ends, the message in hand gets inflightGrace (3 s) before its
@@ -1290,9 +1288,7 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	// HTTP keeps serving meanwhile.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if loops.receiver != nil {
-		loops.receiver.Stop(shutdownCtx)
-	}
+	loops.receiver.Stop(shutdownCtx)
 
 	// 3. HTTP server — stop accepting new requests, drain in-flight, within what is left of the
 	// budget.
@@ -1307,12 +1303,10 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	// reconnecting, end the retired watchers and delete their consumers (endListenerKVWatchers, the
 	// drain hook main adds), and drain the connection, but never let a blocked NATS request pin the
 	// process after its HTTP listener is gone.
-	if loops.monitorDone != nil {
-		select {
-		case <-loops.monitorDone:
-		case <-shutdownCtx.Done():
-			logger.Warn("self-health monitor still running at shutdown")
-		}
+	select {
+	case <-loops.monitorDone:
+	case <-shutdownCtx.Done():
+		logger.Warn("self-health monitor still running at shutdown")
 	}
 	// The live lane drains before the main client, within 3 s: a live delivery still in its handler
 	// publishes its exception through the main client, and reads the caches stopped below. Core

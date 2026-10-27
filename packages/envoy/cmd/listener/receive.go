@@ -59,9 +59,9 @@ const (
 	receiveQueueCapacity = 2 * consumerMaxAckPending
 )
 
-// listenerLeaseUnavailable is what /healthz says, and the start logs at ERROR, about a listener
-// whose NATS user may not use the listener state bucket. It then delivers without a lease, as the
-// machine's one deliverer, receiving only while no other subscriber holds the durable.
+// listenerLeaseUnavailable is what /healthz says about a listener whose NATS user may not use the
+// listener state bucket. It then delivers without a lease, as the machine's one deliverer,
+// receiving only while no other subscriber holds the durable.
 const listenerLeaseUnavailable = "unavailable: missing NATS grant for KV bucket " + bus.ListenerStateBucket
 
 // receiveConfig carries the receive loop's timing, so a test of this package shortens it;

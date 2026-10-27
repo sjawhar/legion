@@ -7,10 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"reflect"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/store"
 )
 
 // writeAttempts bounds the compare-and-set attempts of one registration write (SessionRegistry.write).
@@ -76,62 +75,24 @@ type SessionEntry struct {
 
 // sessionEntryKeys are SessionEntry's JSON keys; any other key of a stored registration is kept in
 // SessionEntry.unknown.
-var sessionEntryKeys = jsonKeys(reflect.TypeFor[SessionEntry]())
-
-// jsonKeys are the object keys encoding/json writes for t's exported fields.
-func jsonKeys(t reflect.Type) []string {
-	keys := make([]string, 0, t.NumField())
-	for i := range t.NumField() {
-		field := t.Field(i)
-		if !field.IsExported() {
-			continue
-		}
-		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
-		switch name {
-		case "-":
-			continue
-		case "":
-			name = field.Name
-		}
-		keys = append(keys, name)
-	}
-	return keys
-}
+var sessionEntryKeys = store.JSONKeys(reflect.TypeFor[SessionEntry]())
 
 // decodeSessionEntry reads a stored registration: the fields SessionEntry names, and every other key
 // into its unknown map.
 func decodeSessionEntry(data []byte) (SessionEntry, error) {
 	var entry SessionEntry
-	if err := json.Unmarshal(data, &entry); err != nil {
+	unknown, err := store.DecodeKeeping(data, &entry, sessionEntryKeys)
+	if err != nil {
 		return SessionEntry{}, err
 	}
-	var all map[string]json.RawMessage
-	if err := json.Unmarshal(data, &all); err != nil {
-		return SessionEntry{}, err
-	}
-	for _, key := range sessionEntryKeys {
-		delete(all, key)
-	}
-	if len(all) > 0 {
-		entry.unknown = all
-	}
+	entry.unknown = unknown
 	return entry, nil
 }
 
 // encodeSessionEntry writes entry for the bucket: its known fields, and the unknown keys it was
 // decoded with.
 func encodeSessionEntry(entry SessionEntry) ([]byte, error) {
-	known, err := json.Marshal(entry)
-	if err != nil || len(entry.unknown) == 0 {
-		return known, err
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(known, &fields); err != nil {
-		return nil, err
-	}
-	all := maps.Clone(entry.unknown)
-	maps.Copy(all, fields)
-	return json.Marshal(all)
+	return store.EncodeKeeping(entry, entry.unknown)
 }
 
 // HostOrMachine is the session's real machine for display: Host when the registering plugin
@@ -296,19 +257,28 @@ func (r *SessionRegistry) resetCache() {
 
 // applyWatched applies one entry the KV watcher delivered to the cache.
 func (r *SessionRegistry) applyWatched(entry nats.KeyValueEntry) {
-	r.mu.Lock()
 	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+		r.mu.Lock()
 		r.evictCachedSessionLocked(entry.Key(), entry.Revision())
-	} else {
-		item, err := decodeSessionEntry(entry.Value())
-		if err != nil {
-			r.evictCachedSessionLocked(entry.Key(), entry.Revision())
-			r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key()), slog.Uint64("revision", entry.Revision()), slog.String("error", err.Error()))
-		} else {
-			r.cacheSessionLocked(entry.Key(), item, r.expiryFor(entry.Created(), item.UpdatedAt), entry.Revision())
-		}
+		r.mu.Unlock()
+		return
 	}
-	r.mu.Unlock()
+	_, _ = r.applyValue(entry)
+}
+
+// applyValue applies a stored value of entry to the cache and returns it decoded: a value that does
+// not decode is evicted with a WARN, and its error returned.
+func (r *SessionRegistry) applyValue(entry nats.KeyValueEntry) (SessionEntry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	item, err := decodeSessionEntry(entry.Value())
+	if err != nil {
+		r.evictCachedSessionLocked(entry.Key(), entry.Revision())
+		r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key()), slog.Uint64("revision", entry.Revision()), slog.String("error", err.Error()))
+		return SessionEntry{}, err
+	}
+	r.cacheSessionLocked(entry.Key(), item, r.expiryFor(entry.Created(), item.UpdatedAt), entry.Revision())
+	return item, nil
 }
 
 // expiryFor computes the local TTL deadline for a cached entry. It prefers the
@@ -460,9 +430,10 @@ func (r *SessionRegistry) cachedEntry(sessionID string) (SessionEntry, uint64, b
 }
 
 // readStored reads sessionID's registration from the bucket for a write, and applies it to the cache
-// as the watcher would. revision is the one to write at, 0 when the bucket holds no value. A value
-// that does not decode is found false, as the cache, which evicts it, sees no registration either,
-// and the write replaces it at its revision.
+// as the watcher would (applyValue: Get answers only a stored value, never a delete marker). revision
+// is the one to write at, 0 when the bucket holds no value. A value that does not decode is found
+// false, as the cache, which evicts it, sees no registration either, and the write replaces it at its
+// revision.
 func (r *SessionRegistry) readStored(kv bus.KeyValue, sessionID string) (entry SessionEntry, revision uint64, found bool, err error) {
 	stored, err := kv.Get(sessionID)
 	if errors.Is(err, nats.ErrKeyNotFound) {
@@ -471,8 +442,7 @@ func (r *SessionRegistry) readStored(kv bus.KeyValue, sessionID string) (entry S
 	if err != nil {
 		return SessionEntry{}, 0, false, err
 	}
-	r.applyWatched(stored)
-	entry, err = decodeSessionEntry(stored.Value())
+	entry, err = r.applyValue(stored)
 	return entry, stored.Revision(), err == nil, nil
 }
 

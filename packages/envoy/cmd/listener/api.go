@@ -248,6 +248,27 @@ func writeNATSError(w http.ResponseWriter, err error, status int, message string
 	}
 }
 
+// writeSessionLookupError answers a failed roleHolderSession read of sessionID and reports whether
+// it answered: a key NATS refuses (bus.ErrRefused) through writeNATSError, the bucket's word that
+// the session holds no entry as the 404 `no live session`, and any other error, a read that did not
+// answer, as a 503 with Retry-After. A nil err answers nothing.
+func writeSessionLookupError(w http.ResponseWriter, err error, sessionID string) bool {
+	switch {
+	case errors.Is(err, bus.ErrRefused):
+		// Refresh reports a refused key as a missing one too, so this test comes first:
+		// an id NATS will never hold is answered as the bad input it is, not as a 404.
+		writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, nats.ErrKeyNotFound):
+		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", sessionID))
+	case err != nil:
+		w.Header().Set("Retry-After", "1")
+		writeJSONError(w, http.StatusServiceUnavailable, "envoy: the message bus did not answer: "+err.Error())
+	default:
+		return false
+	}
+	return true
+}
+
 func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderResult) {
 	response := roleHolderError{
 		Reason: result.state,
@@ -519,17 +540,7 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 			return
 		}
 		target, err := roleHolderSession(d.sessions, targetSession, registered)
-		switch {
-		case errors.Is(err, bus.ErrRefused):
-			// Refresh reports a refused key as a missing one too, so this test comes first.
-			writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
-			return
-		case errors.Is(err, nats.ErrKeyNotFound):
-			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
-			return
-		case err != nil:
-			w.Header().Set("Retry-After", "1")
-			writeJSONError(w, http.StatusServiceUnavailable, "envoy: the message bus did not answer: "+err.Error())
+		if writeSessionLookupError(w, err, targetSession) {
 			return
 		}
 		var itemPayload *string
@@ -767,20 +778,10 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 			return
 		}
 		entry, err := roleHolderSession(d.sessions, sessionID, registered)
-		switch {
-		case errors.Is(err, bus.ErrRefused):
-			// Refresh reports a refused key as a missing one too, so this test comes first:
-			// an id NATS will never hold is answered as the bad input it is, not as a 404.
-			writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
-		case errors.Is(err, nats.ErrKeyNotFound):
-			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", sessionID))
-		case err != nil:
-			w.Header().Set("Retry-After", "1")
-			writeJSONError(w, http.StatusServiceUnavailable,
-				"envoy: the message bus did not answer: "+err.Error())
-		default:
-			writeJSON(w, http.StatusOK, sessionInfoFor(d.registry, sessionID, entry))
+		if writeSessionLookupError(w, err, sessionID) {
+			return
 		}
+		writeJSON(w, http.StatusOK, sessionInfoFor(d.registry, sessionID, entry))
 	}
 }
 

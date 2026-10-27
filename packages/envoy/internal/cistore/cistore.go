@@ -164,9 +164,8 @@ func encodeRecord(st *State) ([]byte, error) {
 
 // handoverGrace is how long past its debounce a record without a schema can still settle, so every
 // such record admitted is at most debounce+handoverGrace old. Five minutes is above the startup
-// floor in the table in docs/solutions/architecture-patterns/envoy-ci-summary.md (140 s since the
-// delivery lease replaced the 135 s durable bind it was first chosen over), the time a
-// stop-then-start compose deploy of a listener with the GitHub webhook route takes from the old
+// floor in the table in docs/solutions/architecture-patterns/envoy-ci-summary.md (140 s), the time
+// a stop-then-start compose deploy of a listener with the GitHub webhook route takes from the old
 // listener's SIGTERM to the new one's first tick, so a head that finished during a degraded
 // handover still settles; a wider grace would only make admitted settlements later. That doc holds
 // the derivation, its constants and the dated measurements.

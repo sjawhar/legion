@@ -47,12 +47,13 @@ type RoleClaim struct {
 // value is kept in its unknown map, and written back by every rewrite of the value, so pods of two
 // builds taking turns at one record during a roll do not drop each other's fields.
 var (
-	interestKeys  = jsonKeys(reflect.TypeFor[Interest]())
-	roleClaimKeys = jsonKeys(reflect.TypeFor[RoleClaim]())
+	interestKeys  = JSONKeys(reflect.TypeFor[Interest]())
+	roleClaimKeys = JSONKeys(reflect.TypeFor[RoleClaim]())
 )
 
-// jsonKeys are the object keys encoding/json writes for t's exported fields.
-func jsonKeys(t reflect.Type) []string {
+// JSONKeys are the object keys encoding/json writes for t's exported fields. A record type that
+// keeps the keys of a newer build passes them to DecodeKeeping as the keys it knows.
+func JSONKeys(t reflect.Type) []string {
 	keys := make([]string, 0, t.NumField())
 	for i := range t.NumField() {
 		field := t.Field(i)
@@ -71,9 +72,10 @@ func jsonKeys(t reflect.Type) []string {
 	return keys
 }
 
-// decodeKeeping reads data into value, the fields value's type names, and returns the JSON of every
-// other key of the object, or nil when there is none.
-func decodeKeeping(data []byte, value any, known []string) (map[string]json.RawMessage, error) {
+// DecodeKeeping reads data into value, the fields value's type names, and returns the JSON of every
+// key of the object not in known, or nil when there is none: the fields a newer build writes, which
+// EncodeKeeping writes back.
+func DecodeKeeping(data []byte, value any, known []string) (map[string]json.RawMessage, error) {
 	if err := json.Unmarshal(data, value); err != nil {
 		return nil, err
 	}
@@ -90,8 +92,9 @@ func decodeKeeping(data []byte, value any, known []string) (map[string]json.RawM
 	return all, nil
 }
 
-// encodeKeeping writes value's fields and the unknown keys it was decoded with as one object.
-func encodeKeeping(value any, unknown map[string]json.RawMessage) ([]byte, error) {
+// EncodeKeeping writes value's fields and the unknown keys it was decoded with (DecodeKeeping) as one
+// object, value's fields winning over an unknown key of the same name.
+func EncodeKeeping(value any, unknown map[string]json.RawMessage) ([]byte, error) {
 	known, err := json.Marshal(value)
 	if err != nil || len(unknown) == 0 {
 		return known, err
@@ -107,7 +110,7 @@ func encodeKeeping(value any, unknown map[string]json.RawMessage) ([]byte, error
 
 func decodeInterest(data []byte) (Interest, error) {
 	var item Interest
-	unknown, err := decodeKeeping(data, &item, interestKeys)
+	unknown, err := DecodeKeeping(data, &item, interestKeys)
 	if err != nil {
 		return Interest{}, err
 	}
@@ -116,7 +119,7 @@ func decodeInterest(data []byte) (Interest, error) {
 }
 
 func encodeInterest(item Interest) ([]byte, error) {
-	return encodeKeeping(item, item.unknown)
+	return EncodeKeeping(item, item.unknown)
 }
 
 // ExpiredRoleClaimRelease reports the conditional-delete outcome for an
@@ -586,7 +589,7 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 // map, or a bare session id an earlier build stored.
 func decodeRoleClaim(value []byte) (RoleClaim, error) {
 	var claim RoleClaim
-	unknown, err := decodeKeeping(value, &claim, roleClaimKeys)
+	unknown, err := DecodeKeeping(value, &claim, roleClaimKeys)
 	if err == nil {
 		if strings.TrimSpace(claim.HolderSessionID) == "" {
 			return RoleClaim{}, fmt.Errorf("role claim has no holder")
@@ -812,7 +815,7 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 	if soft {
 		claim.PreviousSessionID = previousSessionID
 	}
-	data, err := encodeKeeping(claim, claim.unknown)
+	data, err := EncodeKeeping(claim, claim.unknown)
 	if err != nil {
 		return Interest{}, err
 	}
