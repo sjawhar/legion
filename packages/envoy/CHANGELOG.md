@@ -28,7 +28,7 @@
   process: add the new key second, move it first, then remove the old key no sooner than 30 days
   later, the cookie's lifetime; a refresh token sealed under the old key is sealed again under the
   new one at its person's next hourly confirmation (INFRA-555).
-- A registry of live Dispatch server processes (migration `0130`, tables `server_processes` and
+- A registry of live Dispatch server processes (migration `0135`, tables `server_processes` and
   `server_build_announcements`, both new). A process registers once its port is bound and before
   it serves, stamps its row every 5 s on a one-connection pool of its own, counts as live while
   that stamp is within 15 s of the database's `now()`, and deletes its row once its HTTP drain has
@@ -131,6 +131,24 @@
   whatever the length of its target's key; only bare text it links is held to the index's
   bounds. A search hit for an ask links its typed block (`#b-<id>`) only while that block is a
   graph node, and otherwise `?ask=<id>`, so `dispatch read` of the hit reads the ask.
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. They are on every node
+  `GET /api/v1/references` and `GET /api/v1/block-links` answer, whatever its kind, always
+  present: who made the node and when, who last changed its own text or fields and when (its
+  maker while nothing has changed it since; a claim, an answer or a resolution is no change), the
+  node it belongs to (`{kind, id, ref?}`) and the version of that parent it belongs to. A fact
+  Dispatch never recorded is `[]` for an actor list and `null` otherwise: a session has none, and
+  a block's maker is known only when the block is in its document's first version or Dispatch
+  indexed the version before the one that first held it. Migrations `0130` and `0131` add
+  `comments.written_version` and `asks.written_version`, the version current when a comment or
+  an ask was written on a document without an anchor (an approval request's, the version it names
+  when it opens), which a `before insert` trigger records for every build's insert, and `0133` and
+  `0134` fill them on the rows stored before, from the latest version created at or before each
+  item or, for an approval request, from its `ask.opened` event, holding `comments` and then
+  `asks` `EXCLUSIVE` while they write, which every write of that table waits behind. Migration
+  `0132` creates `component_facts`, which each import keeps from this release on: a component's
+  `made_at` and `changed_at`, judged by a digest of its own fields. A component stored before it
+  has no `made_at`, and no `changed_at` until an import changes it.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -944,7 +962,7 @@
 ### Changed
 
 - Every Dispatch server process now stores its dashboard build's assets in Postgres at boot,
-  before it listens (migration `0131_dashboard_assets`: `dashboard_builds`, `dashboard_assets` and
+  before it listens (migration `0136_dashboard_assets`: `dashboard_builds`, `dashboard_assets` and
   `dashboard_build_assets`), and answers a file under `/assets/` that its own image lacks from
   there, through a cache of at most 64 MiB its requests share, with one database read per file
   however many requests ask for it at once. While a rolling update or a rollback runs two builds
@@ -954,9 +972,9 @@
   build no live server process serves that is not among the 20 started most recently. A publish
   that fails, a build holding a file over 8 MiB among them, refuses the boot, so a rolling update
   keeps the processes it would have replaced; `bun run check:asset-sizes` in `packages/dispatch`,
-  run in CI after the build, refuses such a build first. A release before `0131` neither reads
+  run in CI after the build, refuses such a build first. A release before `0136` neither reads
   nor writes the new tables, so it serves beside this one unchanged, its pages' chunks from its
-  own image alone as before, and rolling back past `0131` is an image rollback.
+  own image alone as before, and rolling back past `0136` is an image rollback.
 - **Breaking:** `DISPATCH_ASSET_STORE_BUCKET` and its S3 reader of earlier builds' assets are
   removed: a Dispatch that still sets the variable refuses to start, naming it and saying that
   every server process now keeps its build's dashboard assets in Dispatch's database. Unset it
@@ -1907,6 +1925,16 @@
   first events of an issue reached the Legion daemon after later ones, which it drops as stale.
   The shared database pool every request reads through holds 64 connections, from 16: under heavy
   agent load the API held all sixteen and every other caller waited behind them.
+
+- Dispatch's server now reads a `|` after an even run of backslashes in a table row as the end of a
+  cell, as the browser editor reads it: `| a \\| b |` is the two cells `a \` and `b` on both, where
+  the server read one cell `a \| b`, so a document no longer showed one table in the live editor
+  and the command line and another in the past-version view. A `|` after an odd run (`\|`) is
+  still the cell's text. Code in a cell cannot hold a `|` right after an odd run of backslashes,
+  since no markdown of a cell writes it: an API replace, delete by quote or accepted suggestion
+  that adds such code is refused, naming the table, the cell and the header above it, also beside
+  such code a browser edit left, and a browser edit that holds one is stored with that `|` written
+  as text after the code (INFRA-172).
 
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.

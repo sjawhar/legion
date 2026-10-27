@@ -41,7 +41,7 @@ func LiveDashboardBuilds(ctx context.Context, db processes.Querier) ([]string, e
 
 // getDashboardBuilds answers which dashboard builds are being served. Live is the registry of live
 // server processes (processes.Live, heartbeats on the database's clock) joined to the builds those
-// processes published at boot (dashboard_builds, migration 0131) on the build id: a process whose
+// processes published at boot (dashboard_builds, migration 0136) on the build id: a process whose
 // build has no row, or a row whose page names no entry chunk, adds nothing.
 func (s *server) getDashboardBuilds(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
