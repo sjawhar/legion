@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-148",
+  "completed": "2026-10-27T07:53:00Z",
+  "proof": [
+    {
+      "criterion": "A1: a session whose ask a person answered carries that answer word for word in its next model request (Oh My Pi)",
+      "surface": "real omp 18.12.2 (/opt/omp/bin/omp) with this checkout's pi-envoy, against a local Dispatch built from the head (Postgres 17 + pgvector, nats-server v2.10.29, outbox publishing) and a stand-in model gateway",
+      "command": "/legion/scratch/tmp/infra148/smoke2/driver.ts (rig: smoke2/run-dispatch.sh); record smoke2/RESULTS.md",
+      "observed": "The session opened an ask with `dispatch ask` from bash; alice answered through the web route; ask.answered was published to notifications.agent.<session>; the next Messages request (07:50:28.799Z) ended with a separate user message `[Dispatch: what people wrote to this session in the last 72 hours ...]` carrying the answer text byte for byte (lastHasAnswerVerbatim:true), with cache_control only on messages 5 and 7 and none on the list. A mention posted later was listed as `mentioned you` in turn 5's request and in `dispatch answers`.",
+      "headSha": "5d3b5e04c5df061e0f6d531b1f4ca68776142c76",
+      "negativeControl": "The 4 requests before the answer carried no list; `dispatch answers` for another session id printed `No person wrote to this session in the last 72 hours.`"
+    },
+    {
+      "criterion": "A2/A3/A4/A7/A8: after a compaction, in a subagent, for a reply/comment/message, past the cap, and with Dispatch hanging (request within 1 s)",
+      "surface": "real omp 18.12.2 against the omp-harness stand-in (model gateway + Dispatch answers route)",
+      "command": "cd packages/pi-envoy && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/session-answers-omp.test.ts",
+      "observed": "8 pass: (a) next turn, (b) after compaction, (c) subagent's first request, (d) answer + comment reply + document comment + message each verbatim, (e) 12 items -> newest prefix + left-out line, (f) answers route never answers: Messages request 825-851 ms after the answers request for turn 1 (failure line), turn 2 (earlier list) and the subagent, (g) 404 -> failure line and no second answers request, (h) list is the last message, no cache_control on it, prefix through the last anchor byte-identical between N and N+1",
+      "headSha": "5d3b5e04c5df061e0f6d531b1f4ca68776142c76",
+      "negativeControl": "Case (a) turn 1 (stand-in list empty) carries no list; case (g) a 404 route yields the failure line, never a list"
+    },
+    {
+      "criterion": "A5: Claude Code carries the list at start, resume, compaction and subagent start",
+      "surface": "real Claude Code 2.1.311 (.claude-code-pin) with --plugin-dir packages/claude-envoy against a stand-in Messages endpoint and Dispatch",
+      "command": "cd packages/claude-envoy && LEGION_TEST_CLAUDE=/legion/scratch/tmp/claude-code-2.1.311/node_modules/.bin/claude bun test tests/answers-claude.test.ts tests/answers-hook.test.ts",
+      "observed": "startup, --resume, /compact (stream-json) and an Agent-tool subagent each sent a next Messages request carrying the answer text; the SubagentStart hook read the parent's session id; the hook exits by about 0.87 s with Dispatch hanging (cached list or failure line)",
+      "headSha": "5d3b5e04c5df061e0f6d531b1f4ca68776142c76",
+      "negativeControl": "answers-hook.test.ts: an empty list or no Dispatch prints nothing; a hanging Dispatch with no cache prints the failure line, not a list"
+    },
+    {
+      "criterion": "A9: a change in the list does not invalidate the cached conversation",
+      "surface": "real omp 18.12.2 with this checkout's pi-envoy on the pod's real Anthropic route (claude-sonnet-4-5), stand-in Dispatch whose list changes between turns 2 and 3",
+      "command": "/legion/scratch/tmp/infra148/cache/rig.ts (omp --mode rpc -e packages/pi-envoy/extensions/envoy.ts); record cache/RESULTS.md",
+      "observed": "turn1 cacheRead 0 / write 20336; turn2 (L1) read 20336 / write 22; turn3 (list changed to L2) read 20358 = turn 2's read + write; uncached input 114 -> 199 tokens, the list's size (count_tokens L1 117, L2 202)",
+      "headSha": "1bf8a34e38581e290a283d63f3e5b4bd06721114",
+      "negativeControl": "A fresh session whose first message padding changed read only 8815 (system + tools) and re-wrote 11521: what a list at the head would cost"
+    },
+    {
+      "criterion": "A10/A11/A12: dispatch doc-read prints each open anchored comment's author, time and full text (help says so); dispatch answers reads every item",
+      "surface": "the dispatch CLI (bun packages/envoy-client/bin/dispatch.ts) against the local Dispatch built from the head",
+      "command": "dispatch doc-read --issue SMK-<n>; dispatch doc-read --help; DISPATCH_SESSION_ID=<session> dispatch answers (smoke2/RESULTS.md)",
+      "observed": "Trailer `Open anchored comments:` then `> The retry budget stays at three attempts` / `comment 3167b48a-... · user alice · 2026-10-27T07:50:40.802112Z` / full body / `reply 010f50d3-...` with its body; help contains `After the document it lists each open anchored comment under the passage it is anchored to, with its author, time and full text and every reply in its thread.`; `dispatch answers` printed 2 items (the mention and the answer) in full",
+      "headSha": "5d3b5e04c5df061e0f6d531b1f4ca68776142c76",
+      "negativeControl": "A resolved anchored comment is absent from doc-read (grep -c SMOKE-COMMENT-RESOLVED -> 0)"
+    }
+  ],
+  "filesChanged": [
+    "packages/contracts: SessionAnswer types, dispatch_answers spec, doc-read help, tests, AGENTS.md, CHANGELOG",
+    "packages/envoy: GET /api/v1/agents/{session_id}/answers (api/session_answers.go, store/session_answers.go), migrations 0121 events_person_words and 0122 comment_deliveries_session with censuses, routes table, model mirror, tests (api, outbox), README, CHANGELOG",
+    "packages/envoy-client: DispatchClient.sessionAnswers, session-answers.ts (render, read with deadline/single flight/cache/404 back-off), kept-command config mode, dispatch answers, doc-read comment threads, tests, CHANGELOG",
+    "packages/pi-envoy: context handler appends the list after the last message, session-answers-context.ts, shared user-text helpers in dispatch-first.ts, session-answers-omp.test.ts, docs",
+    "packages/claude-envoy: answers hook mode and hooks.json entries, answers-hook and answers-claude tests, rebuilt dist, docs",
+    ".claude-code-pin, .github/actions/install-claude-code, .github/workflows/envoy-and-contracts.yaml",
+    ".dispatch/architecture/*.md, docs/site/src/content/docs/dispatch/for-agents.md"
+  ],
+  "trickyParts": [
+    "A person's reply to a message is a message.answered event, so S1 and the 0121 index take message.answered as well as message.created.",
+    "Delivery rows' created_at can precede the item's own created_at by the writing transaction's length, so the window is applied to the item and the delivery arms are bounded an hour before it.",
+    "Oh My Pi drops everything a context handler returns when it throws, so the handler catches a failed list read: a list failure never costs the dispatch-first skill.",
+    "The claude hook resolves Dispatch with kept commands first and runs a `!` token command only in a worker thread it stops waiting on at 800 ms after process start.",
+    "readSessionAnswers treats a 200 whose body is no answers list as a failed read (the existing dispatch-first stand-in answers every path with the listener's JSON)."
+  ],
+  "deviations": [
+    "Census files are `select 0` with a comment, as 0082's is: a non-zero census refuses the deploy, so a row count would block every deploy.",
+    "owner and ref are null for a direct message, which has no issue and no dispatch:// address; its href is /agents/<session>/live.",
+    "Oh My Pi passes the context handler no abort signal, so the per-request read cannot be cancelled by the run's abort; Oh My Pi drops an aborted handler's result itself.",
+    "The real-binary Claude test calls the subagent tool `Agent` (Claude Code 2.1.311's API name for Task).",
+    "The real-provider cache proof ran at 1bf8a34e; the simplify head 5d3b5e04 changed no placement code (the shared user-text helper builds the same message object), and the full omp suite case (h) passes at 5d3b5e04."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "The answers-hook wall-time checks (< 1 s) measured 0.87-0.90 s on this loaded pod because Bun start-up varies 240-760 ms; a very loaded CI runner could make them flaky."
+  ]
+}
