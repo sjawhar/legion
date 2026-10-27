@@ -2,41 +2,35 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-595",
-  "completed": "2026-10-27T07:23:24Z",
-  "round": 2,
+  "completed": "2026-10-27T11:00:10Z",
+  "round": "conflict return after approval",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2367",
-  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6436150817",
-  "evidenceEarlierRounds": [
-    "https://github.com/sjawhar/legion/pull/2367#issuecomment-6435639833",
-    "https://github.com/sjawhar/legion/pull/2367#issuecomment-6434786198"
-  ],
-  "reviewThreads": [
-    "PRRT_kwDORFy7ds6wlR7Q: fixed in b1ce6a9d, the recreated-bucket test asserts the pass's empty queue (ok == false) right after the recreate, with no sleep or wall-time guard; resolved"
-  ],
+  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6440224951",
+  "merge": {
+    "kind": "forward merge, not a rebase: jj new legion/INFRA-595 \"main\"@origin",
+    "approvedHead": "9791bbe6d33dbe85223f49abd53ea64963b7b78d",
+    "mainMerged": "2e8c68cd",
+    "newHead": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
+    "fingerprintBefore": "9cfde11a35ae2b9601d92dab83bcc08daf816ef0774db140ab7372beb45741e7",
+    "fingerprintAfter": "9cfde11a35ae2b9601d92dab83bcc08daf816ef0774db140ab7372beb45741e7",
+    "verdict": "unchanged",
+    "conflicts": [
+      "packages/envoy/AGENTS.md: kept both sides: main's recordWait lines on the CI-write bullet, then this branch's rewritten schema bullet"
+    ],
+    "mergedWithoutConflict": ["packages/envoy/CHANGELOG.md"]
+  },
   "proof": [
     {
-      "criterion": "Behaviour visible to callers unchanged; existing cistore tests pass; a test covers an entry falling due with no other change (and the recreated-bucket reset is locked).",
-      "surface": "internal/cistore tests; the real envoy-listener binary with a signed check_run webhook; packages/envoy/scripts/e2e-local.sh",
-      "command": "go test -count=20 -run TestARecreatedBucketForgetsTheOldBucketsRecords ./internal/cistore/ && go test -count=1 ./internal/cistore/ && CGO_ENABLED=1 go test -race -count=1 ./internal/cistore/; $TMPDIR/infra595/settle.sh check-run-proof-r2.json infra595-proof-r2 settle-after-r2.txt; bash packages/envoy/scripts/e2e-local.sh",
-      "observed": "the test passes 20 of 20; cistore ok 15.7 s; race ok 27.6 s; settlement 5,559 ms after the post (base 5,957 ms); e2e-local PASS with four pr.42.checks settlements",
-      "headSha": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
-      "negativeControl": "only the queue reset removed from summarizer.pass: the test FAILS 'left a deadline queued at 1793089135136, want an empty queue'; only the held reset removed: FAILS 'held back 3 records, want 1'; restored, PASS"
-    },
-    {
-      "criterion": "The summary is recomputed only when an entry changes or falls due; no step copies or sorts the whole cache.",
-      "surface": "the real envoy-listener binary (packages/envoy/cmd/listener) on testnats natsd with 30,000 seeded CI records, ENVOY_CI_DEBOUNCE=5s",
-      "command": "go build -o $TMPDIR/infra595/listener-head3 ./cmd/listener && bash $TMPDIR/infra595/idle.sh $TMPDIR/infra595/listener-head3 $TMPDIR/infra595/idle-after-r2.txt --keep",
-      "observed": "0.0003 cores idle (delta 2 ticks in 60.02 s); all 30,000 records settled",
-      "headSha": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
-      "negativeControl": "listener-base (main c3d09eec) on the same seed and machine: 0.4537 and 0.4438 cores idle"
+      "criterion": "Behaviour visible to callers unchanged; existing cistore tests pass (rebase re-check, bare gates only).",
+      "surface": "internal/cistore and cmd/listener test suites; packages/envoy/scripts/e2e-local.sh on the merged tree",
+      "command": "bash $TMPDIR/infra595/fp.sh <sha> for 9791bbe6 and f48e32d9 (the conflicts-and-rewrites fingerprint); gofmt -l . && go vet ./internal/cistore/ ./cmd/listener/ && go test -count=1 ./internal/cistore/ && CGO_ENABLED=1 go test -race -count=1 ./internal/cistore/ && go test -count=1 ./cmd/listener/; bash packages/envoy/scripts/e2e-local.sh",
+      "observed": "fingerprint 9cfde11a...41e7 at both heads (unchanged); gofmt and vet clean; cistore ok 16.0 s; race ok 29.3 s; cmd/listener ok 450.2 s; e2e-local PASS with four pr.42.checks settlements; GitHub reports the PR MERGEABLE",
+      "headSha": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
+      "negativeControl": "before the merge, GitHub reported the PR CONFLICTING (mergeStateStatus DIRTY) at 9791bbe6; after it, MERGEABLE at f48e32d9"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/cistore/summary_loop_test.go",
-    "packages/envoy/internal/cistore/summary_helpers_test.go"
-  ],
-  "trickyParts": [
-    "The test uses a 1 h debounce so the old bucket's waiting record can never fall due; a kept queue entry then shows as pass's ok == true after the recreate, which the reset must clear."
+    "packages/envoy/AGENTS.md (merge resolution only)"
   ],
   "deviations": [],
   "openQuestions": []
