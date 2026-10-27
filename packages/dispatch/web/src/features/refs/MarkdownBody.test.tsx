@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import * as mermaidRenderer from "@legion/proof-editor/mermaid";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
@@ -7,6 +8,8 @@ import type { ReactNode } from "react";
 import { api } from "../../api/client";
 import type { Artifact, AskRead } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
+import { warmMarkdownRenderer } from "./markdown-engine";
+import { resetMermaidDiagrams } from "./mermaid-diagrams";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -516,4 +519,121 @@ test("a body re-renders when its text grows, formatting what has closed since", 
   } finally {
     view.unmount();
   }
+});
+
+// ELK, which lays out flowcharts, cannot be built under happy-dom, so these draw sequence
+// diagrams; a dangling edge is refused in validation, before any layout.
+describe("Mermaid diagrams", () => {
+  // The loaded renderer and the drawn-source cache are module state that outlives every render,
+  // so each case starts from a page that has loaded and drawn nothing.
+  beforeEach(resetMermaidDiagrams);
+
+  const fence = (source: string): string => `\`\`\`mermaid\n${source}\n\`\`\`\n`;
+  const figuresIn = (container: HTMLElement): HTMLElement[] =>
+    Array.from(container.querySelectorAll<HTMLElement>("figure[data-mermaid-diagram]"));
+  const diagramIn = (figure: Element): Element | null | undefined =>
+    figure
+      .querySelector(".dispatch-mermaid-preview")
+      ?.shadowRoot?.querySelector('svg[role="img"][aria-label="Rendered Mermaid diagram"]');
+
+  test("a mermaid block draws its diagram in the preview's shadow root, its source closed behind Mermaid source", async () => {
+    const view = render(
+      <MarkdownBody markdown={`Flow:\n\n${fence("sequenceDiagram\n  Alice->>Bob: Hi")}`} />
+    );
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      const [figure] = figuresIn(view.container);
+      const diagram = diagramIn(figure);
+      expect(diagram?.textContent).toContain("Alice");
+      expect(diagram?.textContent).toContain("Hi");
+      expect(figure.querySelector('[role="status"]')).toBeNull();
+      const source = figure.querySelector<HTMLDetailsElement>("details.dispatch-mermaid-source");
+      expect(source?.open).toBe(false);
+      expect(source?.querySelector("summary")?.textContent).toBe("Mermaid source");
+      expect(source?.querySelector("pre code")?.textContent).toContain("Alice->>Bob: Hi");
+      expect(view.container.textContent).toContain("Flow:");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("a source the renderer refuses shows the reason and its source open, and no diagram", async () => {
+    const view = render(<MarkdownBody markdown={`Broken:\n\n${fence("graph TD\n  A -->")}`} />);
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      const [figure] = figuresIn(view.container);
+      expect(figure.querySelector('[role="status"]')?.textContent).toMatch(
+        /^Unable to render Mermaid diagram: Dangling Mermaid edge/
+      );
+      expect(figure.querySelector(".dispatch-mermaid-preview")).toBeNull();
+      const source = figure.querySelector<HTMLDetailsElement>("details.dispatch-mermaid-source");
+      expect(source?.open).toBe(true);
+      expect(source?.querySelector("pre code")?.textContent).toContain("A -->");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("a dispatch reference in a diagram's label is neither linked nor resolved", async () => {
+    const view = render(
+      withQueries(
+        <MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: see dispatch://CORE-1")} />
+      )
+    );
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      const diagram = diagramIn(figuresIn(view.container)[0]);
+      expect(diagram?.textContent).toContain("dispatch://CORE-1");
+      expect(diagram?.querySelector("a")).toBeNull();
+      expect(view.container.querySelector("a")).toBeNull();
+      expect(within(view.container).queryAllByRole("link")).toHaveLength(0);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The live view re-parses a streamed turn on every frame: a diagram whose fence has not closed
+  // yet stays code, and the diagrams before it in the same body draw.
+  test("a body ending in an unclosed mermaid fence keeps it as code until the fence closes", async () => {
+    const done = fence("sequenceDiagram\n  Alice->>Bob: Hi");
+    const streaming = "```mermaid\nsequenceDiagram\n  Carol->>Dave: Yo";
+    const view = render(<MarkdownBody markdown={`${done}\n${streaming}`} />);
+    try {
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Alice");
+      const open = view.container.querySelectorAll("pre");
+      expect(open).toHaveLength(2);
+      const code = open[1];
+      expect(code.textContent).toContain("Carol->>Dave: Yo");
+      expect(code.closest("figure")).toBeNull();
+      view.rerender(<MarkdownBody markdown={`${done}\n${streaming}\n\`\`\`\n`} />);
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
+      expect(diagramIn(figuresIn(view.container)[1])?.textContent).toContain("Carol");
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("a body whose source changes while the renderer loads draws only the newest source", async () => {
+    // With the engine loaded the body paints in its layout effect, so only the renderer is late.
+    await warmMarkdownRenderer();
+    const draw = spyOn(mermaidRenderer, "renderMermaidSvg");
+    const view = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Alice->>Bob: First")} />);
+    // A body unmounted while the renderer loads keeps its code block in its own element, which
+    // only the cancel stops the late draw from reaching.
+    const gone = render(<MarkdownBody markdown={fence("sequenceDiagram\n  Erin->>Finn: Gone")} />);
+    try {
+      expect(view.container.querySelector("pre code")?.textContent).toContain("First");
+      expect(figuresIn(view.container)).toHaveLength(0);
+      gone.unmount();
+      view.rerender(<MarkdownBody markdown={fence("sequenceDiagram\n  Carol->>Dave: Second")} />);
+      await waitFor(() => expect(figuresIn(view.container)).toHaveLength(1));
+      expect(diagramIn(figuresIn(view.container)[0])?.textContent).toContain("Second");
+      expect(draw).toHaveBeenCalledTimes(1);
+      expect(draw.mock.calls[0]?.[0]).toContain("Carol->>Dave: Second");
+    } finally {
+      draw.mockRestore();
+      view.unmount();
+    }
+  });
 });

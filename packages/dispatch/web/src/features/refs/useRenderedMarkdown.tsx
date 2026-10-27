@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { renderWithEngine, type SoftBreaks } from "./markdown-engine";
+import { drawMermaidDiagrams } from "./mermaid-diagrams";
 import {
   collectReferenceAnchors,
   linkifyDispatchRefs,
@@ -71,6 +72,10 @@ export interface RenderedMarkdownOptions {
  * anchors the portals mount into, so it may replace an anchor's element. Each Dispatch picture's
  * placeholder is found after it, wherever it left one (`MarkdownPreview` puts an inert span in a
  * link's place), and gets a portal-mounted `DispatchPicture` in the shape `pictures` names.
+ * On a painted body, each fenced `mermaid` block then draws as its diagram (`drawMermaidDiagrams`,
+ * which may draw late, once its chunk arrives; the effect's cleanup cancels that). It runs after
+ * every other pass, so a `dispatch://` in a diagram's label is never wrapped as a link or
+ * collected as a reference.
  * `onRendered` fires after each render lands; the newest callback is the one called, and a new
  * callback alone re-renders nothing. `paint` and `decorate` are dependencies: a caller passes a
  * module-level function or memoises one on what it reads. The options object itself is not one,
@@ -94,7 +99,8 @@ export function useRenderedMarkdown(
       throw new Error("The Markdown element is unavailable.");
     }
     setIsFallback(false);
-    return renderWithEngine((engine) => {
+    let cancelDraw: (() => void) | undefined;
+    const cancelRender = renderWithEngine((engine) => {
       const parsed = engine?.parse(markdown, softBreaks);
       if (engine === undefined || parsed === undefined) {
         setIsFallback(true);
@@ -108,8 +114,15 @@ export function useRenderedMarkdown(
       setReferenceAnchors(anchors.length === 0 ? NO_ANCHORS : anchors);
       const placeholders = collectPictureAnchors(element);
       setPictureAnchors(placeholders.length === 0 ? NO_PICTURES : placeholders);
+      if (parsed !== undefined) {
+        cancelDraw = drawMermaidDiagrams(element, parsed, markdown);
+      }
       onRenderedRef.current?.();
     });
+    return () => {
+      cancelRender();
+      cancelDraw?.();
+    };
   }, [decorate, markdown, paint, root, softBreaks]);
 
   return {

@@ -73,6 +73,9 @@ export default defineConfig({
       "@legion/proof-editor/headless": fileURLToPath(
         new URL("../../proof-editor/src/lib-headless.ts", import.meta.url)
       ),
+      "@legion/proof-editor/mermaid": fileURLToPath(
+        new URL("../../proof-editor/src/mermaid-svg.ts", import.meta.url)
+      ),
       "@legion/proof-editor/style.css": fileURLToPath(
         new URL("../../proof-editor/src/lib.css", import.meta.url)
       ),
@@ -89,7 +92,9 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    // The editor (Milkdown + mermaid) is one ~2.8 MB lazy chunk loaded only on the document tab.
+    // The editor (Milkdown) is a lazy chunk loaded only on the document tab. beautiful-mermaid and
+    // ELK (~1.9 MB raw) are a lazy chunk the editor and the body diagram module
+    // (features/refs/mermaid-diagrams.ts) share, loaded only where a diagram draws.
     chunkSizeWarningLimit: 3000,
     emptyOutDir: true,
   },

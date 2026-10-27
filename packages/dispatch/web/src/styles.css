@@ -483,6 +483,27 @@ a {
   text-decoration: underline;
 }
 
+/* A body's drawn Mermaid diagram (features/refs/mermaid-diagrams.ts). The SVG's inline style reads
+   `--bg:var(--bg-color);--fg:var(--text-color)`, and custom properties inherit into the preview's
+   shadow root, so these give it the values documents use: no fill behind it, and the card's own
+   text colour, which follows dark mode. They sit on the figure, never on `.dispatch-markdown`,
+   which also sits inside documents (the ask block's footer), where the editor's own values rule.
+   The preview scrolls sideways when the diagram is wider than the body. */
+.dispatch-mermaid {
+  --bg-color: transparent;
+  --text-color: currentColor;
+  margin-block: 1em;
+  margin-inline: 0;
+}
+
+.dispatch-mermaid-preview {
+  overflow-x: auto;
+}
+
+.dispatch-mermaid-source > summary {
+  cursor: pointer;
+}
+
 /* The block's slots are `not-prose` (`AskBlockView`): the editor root is `prose`, and the card
    hosted in the slots must not be typeset as document text. Tailwind Typography cannot re-enter
    `prose` inside `not-prose`, so a `MarkdownBody` in the footer (a reply, the answer note, an
