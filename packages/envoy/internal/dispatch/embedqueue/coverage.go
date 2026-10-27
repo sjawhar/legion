@@ -26,10 +26,11 @@ const (
 
 // coverageSource is one kind of item meaning search ranks: its FROM clause (from, plus where when
 // the kind needs a filter), and the expressions for its id, its text and when it was written.
-// id and text are the kind's write-time trigger's own (0073-0077), byte for byte, so a row the
-// coverage pass writes is the row the trigger would have written, and a row the trigger wrote is
-// never seen as stale. from and where are the items search ranks (api/search.go's meaning
-// candidate CTEs), which the triggers can exceed: see coverageSources.
+// id and text are the kind's write-time trigger's own (0073-0077, the issue's as 0130 replaced
+// it), byte for byte, so a row the coverage pass writes is the row the trigger would have
+// written, and a row the trigger wrote is never seen as stale. from and where are the items search
+// ranks (api/search.go's meaning candidate CTEs), which the triggers can exceed: see
+// coverageSources.
 type coverageSource struct {
 	kind, from, where, id, text, writtenAt string
 }

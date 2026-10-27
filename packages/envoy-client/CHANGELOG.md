@@ -4,6 +4,25 @@
 
 ### Changed
 
+- `dispatch issue`, `dispatch ask` and `dispatch doc-edit` print the related-item check their
+  write got right under the line naming what was written, in exactly one of three forms, so a
+  check that never ran cannot read as one that found nothing (INFRA-568): `Related items (searched
+  by meaning and keywords):` (or `keywords only: <why>`) with one line per item, an ask item
+  followed by `Ask: open`, `Ask: answered by <who> at <when>, chose "<option>"` and its
+  `Answer text:`, or `Ask: closed …`; `Related-item check searched (<mode>) and found nothing.`;
+  or `No related-item check was made: <reason>. Search before you rely on this being new:
+  dispatch search --project <KEY> --query '<words>'`, the words the server's `search_query` or
+  else the first three words of four or more letters of the text it checked. A past decision
+  and, for a forced create, `Title overlaps you forced past: <KEY> [<status>] <title> → <link>`
+  follow the form. A
+  `dispatch doc-edit` that adds decision blocks prints `Decision block <id>:` and that block's
+  form for each, in document order. These replace `Possibly related, found by search:` and
+  `Related-item search was skipped: <reason>.`. A server that sends no check result, or the
+  older shapes (`missing` alone, items with no `outcome`, nothing with no `outcome`, a count of
+  new decision blocks with no checks), maps to one of the forms, the not-made one when it says
+  nothing; a result this client cannot read prints the not-made form, and advice that fails to
+  render prints `Other advice could not be shown: <error>` in place of the rest, keeping the
+  `Created` line and the form.
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
@@ -42,6 +61,10 @@
 
 ### Added
 
+- `dispatch related --project <KEY> [--title <title>] [--text <text>] [--exclude-issue <KEY>]
+  [--keywords-only]` runs the related-item check a new issue or ask gets, through
+  `POST /api/v1/projects/{key}/related` (`DispatchClient.related`), writes nothing, and prints the
+  check's form as `dispatch issue` does (INFRA-568). Use it to check a draft before filing it.
 - `dispatch read --ref` reads one block of a document: `dispatch://KEY/spec#b-<id>`,
   `dispatch://KEY/artifact/<slug>#b-<id>` or `dispatch://PROJECT/artifact/<slug>#b-<id>`,
   optionally pinned `@v<N>`, or a live document page's URL ending `#b-<id>`. It prints `Block:`,

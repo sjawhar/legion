@@ -393,7 +393,7 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Seven periodic maintenance loops run once per period across the processes, not once per process.
+- Eight periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -1171,8 +1171,12 @@ search answers by keyword alone with `degraded: embedder_unavailable`. Each vect
 embedder's identity in `embeddings.model`, `us.cohere.embed-v4:0` on Bedrock and
 `azure:<endpoint host>/<deployment>` on Azure, and search compares a query vector only with stored
 vectors of its own identity. A write enqueues its text through its table's trigger (0073–0077) in
-the same transaction. The server also runs a coverage pass (`embedqueue.Cover`) when it starts and
-every 10 minutes, so a deployment runs nothing by hand to embed what it already holds: the pass
+the same transaction. An issue's text is its title and its spec, the latest version of its primary
+document (its title alone while that is blank), and a new version of the spec queues the issue
+again through `0130`'s trigger on `artifact_versions`, so meaning search, and the related-item
+check below, find an issue with a terse title by what its spec says. The server also runs a
+coverage pass (`embedqueue.Cover`) when it starts and every 10 minutes, so a deployment runs
+nothing by hand to embed what it already holds: the pass
 adds a row for every searchable item that has none (one written before the triggers existed, or
 with them off, as a restore or a replication writes), points a row whose item's text changed with
 the triggers off at the current text, takes every vector another identity made out of the index and
@@ -1226,20 +1230,72 @@ adds to every later creation in its project, and how long that message can be: b
 titles at the cap, a check takes 56–95 ms, where parsing every title as it ran took 2.1–7.6 s.
 
 `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks`
-also return, under `advice.suggestions` and never blocking or slowing the write past
-`writeSuggestionTimeout` (300ms), the three fused search hits most like what was just filed
-(`related`) and, when an already-answered ask settles the same question, that decision with who
-answered and when (`decision`); `missing` says why search did not answer in time instead of
-listing anything (LEGION-550). The search is scoped to the write's own project, and leaves out
-everything its owner holds — the new issue and its spec, or the issue or project document an ask
-sits on and everything inside it — so nothing is ever suggested that the writer already has.
-A hit on an issue that is `done` ranks below every hit on an open owner, since keyword search
-otherwise puts an issue already closed as a duplicate above the open issue it was closed into.
-Every suggestion offered is recorded in `write_suggestions`, whose `outcome` the daemon's outcome
-sweep (`api.RunSuggestionOutcomeSweep`, every `SuggestionSweepInterval`) advances from `ignored`
-to `acted_on` (the suggested item was cited from the source, or the suggested issue was updated
-directly) or `overridden` (the source got further activity instead) — a count of how often the
-suggestion was right, without refusing anything on its strength.
+run the related-item check once the write has committed, and so does each decision block a
+document edit (`POST /api/v1/artifacts/{id}/edits`) adds, on the block's question (INFRA-568,
+which replaced LEGION-550's 300 ms keyword suggestions). The check never refuses the write, but
+the response waits for it, at most 5 s (`relatedCheckAllowance`); an edit's blocks are checked
+together under that one bound, the first five of them, and each block past five is answered as not
+made. It searches the write's own project in two stages started together:
+
+- Stage 1 picks the text's rarest words and runs search's keyword query over them. Each lexeme is
+  scored by its count in the text times its idf, BM25's `ln(1 + (N − df + 0.5)/(df + 0.5))`, where
+  df is how many of the project's searchable items hold it and N how many items the project has.
+  At most 25 are kept, highest score first; a lexeme no other item holds, one held by more than a
+  tenth of the project's items and more than 10, a number and a hash are dropped, and words stop
+  being added once their summed df would pass 3,000, which bounds how many rows the OR of them
+  matches and so its time. The query's keyword arms are ranked by idf-weighted coordination, the
+  sum of the idf of the chosen words an item holds plus a thousandth of `ts_rank_cd` to order
+  items holding the same words, where search ranks them by `ts_rank_cd` alone, so an item holding
+  three of the text's rare words outranks one repeating one of them. The rest of the query, the
+  per-kind lists and their fusion, is search's own.
+- Stage 2, when an embedder is configured, embeds the text and runs search's meaning query, which
+  fuses the same keyword arms with the nearest vectors. If it answers within 3 s of the check's
+  start, its result is the check's (searched by meaning and keywords); otherwise stage 1's is
+  (searched by keywords only, with the reason). If stage 1 has not answered when the 5 s end, the
+  check was not made.
+
+df and N come from `search_term_stats` and `search_term_totals` (`0129`), which the term-statistics
+refresh (`api.RunSearchTermStatsRefresh`, lease `search-term-stats`) rebuilds for every project at
+boot and every 10 minutes; the check only reads them. A word written since the last refresh is
+counted live, at most 50 per check, and a project with no statistics yet starts a refresh of its
+own in the background and has every word counted live meanwhile.
+
+The result, under `advice.suggestions` (for a decision block, in `advice.decision_block_checks`,
+one `{block_id, question, suggestions}` per block in document order), always says what the check
+did. `outcome` is `found`, `none` or `not_made`; `search` is `meaning_and_keywords` or
+`keywords_only`, with `search_note` saying why keywords only, and is absent when the check was not
+made; `missing` is the reason exactly when it was not made (the text holds no word to search for,
+the search behind it did not answer within 5s, the search behind it failed, …), so a client built
+before `outcome` still says so; and `search_query` is two or three of the words it used, spelled
+as the title spells them, for a reader's own `dispatch search`. `related` holds the three items
+most like what was filed, one per issue or document, each ask item carrying `ask`, where it stands
+(`open`; `answered`, with its latest answer, who gave it, when and the options chosen; or
+`resolved`, with the resolution and the last answer a person gave before it, if any); `decision`
+names an already-answered ask that may settle the same question, with who answered and when. An
+issue create forced past the title-overlap refusal also names those issues in `title_matches`. The
+search leaves out everything the write's owner holds — the new issue and its spec, or the issue or
+project document an ask or a block sits on and everything inside it — so nothing is ever suggested
+that the writer already has. A hit on an issue that is `done` ranks below every hit on an open
+owner, since keyword search otherwise puts an issue already closed as a duplicate above the open
+issue it was closed into. `GET` and `POST /api/v1/projects/{key}/related` (`dispatch related`) run
+the same check on a title and a text and write nothing.
+
+Every check of a write is recorded in `related_checks` (`0129`): its outcome, how it searched, the
+reason, the words, and its keyword, meaning and total milliseconds. `GET /api/v1/related-checks`
+counts them by source, outcome, search mode and reason, with the keyword and total times' p50, p95,
+maximum and how many took more than 300 ms, within `[from, to)` and, when given, one project and
+one source kind:
+
+```bash
+curl -sf -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/related-checks?project=<KEY>&from=<time>&to=<time>"
+```
+
+Every suggestion an issue's or an ask's check offers is recorded in `write_suggestions`, whose
+`outcome` the daemon's outcome sweep (`api.RunSuggestionOutcomeSweep`, every
+`SuggestionSweepInterval`) advances from `ignored` to `acted_on` (the suggested item was cited from
+the source, or the suggested issue was updated directly) or `overridden` (the source got further
+activity instead) — a count of how often the suggestion was right, without refusing anything on
+its strength.
 A ranking or latency change is measured on a restored copy of the production corpus:
 `packages/envoy/scripts/corpus-copy.sh` restores one, `search-smoke.sh` prints what a searcher
 sees for a list of queries from any build, and `search-latency-compare.sh` runs
@@ -1345,6 +1401,8 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` against the process's one copy of the listener's `GET /v1/sessions`, stored in no table: that copy is at most 5 s old, one listener call refreshes it for every read that asks while it runs, and a listener that fails or does not answer within 2 s is asked again only after 5 s, every read in that window reading `unknown` at once. The status is `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only ([Search](#search)). |
 | `/api/v1/search/coverage` | GET | cookie, trusted header, or bearer | Meaning search's coverage, counted in one statement ([Search](#search)): `{identity, place, model, total, kinds}`, the configured embedder's identity, its place (`bedrock` or `azure`) and its model, all three null with no embedder; then, in `total` and for each kind in `kinds` (`issue`, `document`, `comment`, `ask`, `message`), `items` (the searchable ones, a text with nothing to embed left out), `current` (embedded at the item's current text by that identity), `failed` (dead and not current), `lacking` (the rest) and `oldest_lacking_seconds`, how long the longest-waiting lacking item has waited (null when none lacks). With no embedder nothing is current. |
+| `/api/v1/projects/{key}/related?title=&text=&exclude_issue=&keywords_only=` | GET, POST | cookie, trusted header, or bearer | Run the related-item check an issue create runs ([Search](#search)) on a title and a text, checked as the title, a newline and the text (either alone is enough), and write nothing: no issue, ask, suggestion or `related_checks` row. `exclude_issue` leaves that issue of the project, and everything it holds, out of the results and out of the word statistics (`400 EXCLUDE_ISSUE_INPUT` when it is not an issue of the project); `keywords_only=true` skips meaning search. GET takes the fields in the query, title and text together at most 1,000 UTF-16 units (`400 CAP_EXCEEDED` past it); POST takes them as a JSON body `{title, text, exclude_issue, keywords_only}`, a title of at most 1,000 and a text as long as the body's 1 MiB bound. It waits at most 5 seconds and answers `200` with the create's `advice.suggestions` shape (`outcome`, `search`, `search_note`, `search_query`, `related`, `decision`, `missing`), a blank title and text included (`not_made`). `400 INVALID_PROJECT` for a key that is not a project key, `404 PROJECT_NOT_FOUND` for an unknown one. |
+| `/api/v1/related-checks?project=&source_kind=&from=&to=` | GET | cookie, trusted header, or bearer | Count the related-item checks recorded when an issue, an ask or a new decision block was written, within `[from, to)` (RFC3339, each optional) and of `project` and `source_kind` (`issue`, `ask` or `decision_block`; another is `400 INVALID_QUERY`) when given: `{project, source_kind, from, to}` echo the filters (null when absent), then `total`, `by_source_kind`, `by_outcome`, `by_search` (a check not made counted under `not_made`), `by_reason`, `completed` (found or none), `skipped_for_time` (reason `timeout`), and `keyword_ms` and `total_ms`, each `{count, p50, p95, max, over_300ms}` over the checks holding that time (`model.RelatedChecksReport`). |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure; a reference to a block reaches the block's document while a current version holds the block. An `If-None-Match` value equal to the response ETag returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference, read whatever its length (`text.ParseRef`); `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document); a document's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`. A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`; pinned to a version (`#b-<id>@v<N>`) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist, a block no current version holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at. |
 | `/api/v1/block-links?from=&to=` | GET | cookie, trusted header, or bearer | The links from blocks of the document `from` names to blocks of the document `to` names (an issue's spec or document, or a project's document; one document may be both), each reference read whatever its length: `{from, to, links}`, each link with its `kind`, both block nodes, and the `created_at` and `created_version` at which the source block first held it, newest first. A link is listed only while both blocks are current blocks of their documents. `400 INVALID_REFERENCE` when either is not a document reference; `404 NOT_FOUND` for a document that does not exist. |

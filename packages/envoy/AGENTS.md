@@ -425,21 +425,24 @@ meant a block learns it is text; a count of zero alone reads as a document needi
 and as the whole advice of a project document's edit: the ask blocks the edited tree holds whose
 block id no ask block in the tree before the batch carried (`addedAskBlocks`, counted in the
 transaction that applies the batch), so an inserted or retyped block counts wherever the parser
-reads one and a moved or reworded block does not. Issue-state advice is computed in the write
-transaction after its event is appended, so it includes that write. A stored document's decision
-blocks and unparsed openers are read from one parse of the canonical Markdown after the write
-transaction commits (`readDocumentBlocks`). Advice queries run
+reads one and a moved or reworded block does not. Beside it, `decision_block_checks` (INFRA-568)
+lists each block the edit added, in document order (`docs.EditOutcome.AddedAskBlocks`), as
+`{block_id, question, suggestions}`: the related-item check run on the block's question once the
+edit has committed (`decisionBlockChecks`), the first five checked at once under one 5 s
+allowance and each past them answered, and recorded, as not made; it is omitted when the edit
+added none. A conditional edit releases its document's edit gate at the commit, before those
+checks run, so they never hold the next conditional edit. Issue-state advice is computed in the
+write transaction after its event is appended, so it includes that write. A stored document's
+decision blocks and unparsed openers are read from one parse of the canonical Markdown after the
+write transaction commits (`readDocumentBlocks`). Advice queries run
 behind a savepoint with a 500 ms
 timeout that is restored before the savepoint is released: a failure of either session-scoped
 query is logged and omits `advice` without preventing the write from committing, while the
 `legion_managed_status` walk, which takes a savepoint of its own inside that one, is logged and
-omits that field alone, keeping the advice already assembled. That matters most on an issue
-creation, where `computeAndPersistSuggestions` runs only once the advice survives (`if advice
-!= nil`, `issue_create.go`), after it: a fatal advice failure there means LEGION-550's
-suggestions are never computed and no row is ever written, so what the walk's tolerance saves is
-the whole of that offer rather than a copy of something already stored. An ask is the other way
-round - `asks.go` computes its suggestions first and falls back to a suggestions-only advice, so
-they survive a fatal advice failure there. The consecutive-write query counts only the
+omits that field alone, keeping the advice already assembled. Neither failure costs a creation
+its related-item check: issue and ask creation run it after the write commits whatever the
+advice answered, and when the advice was omitted its result rides a suggestions-only advice
+(`withSuggestions`). The consecutive-write query counts only the
 calling actor's own events (it runs for a session caller alone; any other actor reports zero with no
 query) and materializes the last-human fence so its `max(id)` runs once, and relies on the
 `events (issue_key, seq)` unique index's issue prefix and commit-ordered event ids; the open-ask

@@ -4,6 +4,12 @@
 
 ### Added
 
+- The `dispatch` command (`dist/dispatch.js`) prints the related-item check an issue, an ask or a
+  new decision block got right under the line naming the write, as what it found and how it
+  searched, that it found nothing, or that no check was made, why, and the `dispatch search` to
+  run instead, and `dispatch related --project <KEY> --title … --text …` runs that check on a
+  draft and writes nothing; the bundled tool descriptions carry both, since `dist/` was
+  regenerated (INFRA-568).
 - The `dispatch` command (`dist/dispatch.js`) reads one block of a document:
   `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
   `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text

@@ -168,7 +168,8 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
 // kind's full body; only the page's own rows pay for one lateral fetch of their text and, after
 // that, a snippet. totals is joined outside the page, so a page past the end still answers how
 // many rows the query matches. This is the keyword-only fallback (LEGION-549 degraded mode); the
-// related-item check runs its body over its own q (relatedQOpener).
+// related-item check runs its body, with its keyword arms reranked, over its own q
+// (relatedCoordinationQuery).
 //
 // Parameters: $1 q, $2 project (empty for every project), $3 limit, $4 firstTerm,
 // $5 headlineOptions, $6 offset, $7 contracts.SearchKindDepth, $8 searchFusionK.
@@ -177,7 +178,8 @@ var searchQuery = searchQOpener + searchQueryBody
 // searchQOpener opens searchQuery and searchQueryMeaning: their q, the query text read as
 // websearch_to_tsquery, its first term ($4) for the snippet window, and the issue key the whole
 // text would be (own_key). The related-item check prefixes the same two bodies with its own q
-// (relatedQOpener), so its ranking is search's own.
+// (relatedQOpener) but replaces each keyword arm's ts_rank_cd with its idf-weighted coordination
+// rank (relatedCoordinationQuery); the rest of each body, the RRF and the page, is search's own.
 const searchQOpener = `
 with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key),
 `
