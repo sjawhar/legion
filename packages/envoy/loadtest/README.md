@@ -325,11 +325,11 @@ records the build commit and whether the tree had uncommitted changes.
 
 Committed rate at 1x varies from run to run. Across the runs of 2026-10-27 it was 0.34 to 2.14
 events/s. The lowest ran a build at migration 0128 on a seed at 0120, with the block-index backfill
-inside the step. With a seed made by the same build, three runs in a row committed 1.81, 1.77 and
-1.63 events/s, each with the commit-order lock held in 99.6-100% of samples and 45-46 waiters
-(p50), and `box_busy_before` at most 1%. That number sees only this pod's CPU: other pods on the
-same node are not in `/proc/stat`. So a before and after compares several runs of each side, not
-one run of each.
+inside the step. With a seed made by the same build, eight 1x runs committed 0.74, 1.16, 1.38,
+1.63, 1.77, 1.81, 1.83 and 1.95 events/s (median 1.70), each with the commit-order lock held in
+99.6-100% of samples and 41-46 waiters (p50), and `box_busy_before` at most 1%. That number sees
+only this pod's CPU: other pods on the same node are not in `/proc/stat`. So a before and after
+compares several runs of each side (five or more), and their medians, not one run of each.
 
 ## The load
 
