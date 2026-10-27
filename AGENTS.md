@@ -200,11 +200,32 @@ the daemon, because a durable consumer created fresh takes only what is publishe
 because the notification stream drops a message 72 hours old whether or not anyone read it, or it
 reached the daemon while the child's parent had no record or its tree was not live — is recorded
 into the tree at the daemon's next boot, from the parent Dispatch's listing shows then, at any
-depth, as its own event would have. No later event need bring such a child in: Dispatch already
-shows it `todo`, so nothing writes that status again. A child whose tree is not live is an orphan,
-admitted as a root of its own, so it needs the label as any root does. An issue is recorded on the
-repository Dispatch resolves for it (its own,
-else its nearest ancestor's, else the project's default) and keeps it: an issue whose repository
+depth, as its own event would have, labelled or not. No later event need bring such a child in:
+Dispatch already shows it `todo`, so nothing writes that status again. A child whose tree is not
+live is an orphan, admitted as a root of its own, so it needs the label as any root does. A `todo`
+root that never ran as a tree of its own (no slot reached it and it carries no run of its own,
+`record.Issue.TakenBack` included) and never left another tree joins the live tree its recorded
+parent is in, a waiting root's included: a person made it a child of that tree. It waits for no
+slot, gets no architect, runs there as a `todo` child does, held like any child while it waits on
+an unfinished Dispatch issue, and the tree's architect gets a `child-status` notice. A root that
+left another tree, handed over by its finished tree or admitted as an orphan, carried or not, stays
+its own tree (`record.Issue.HandedOverFrom`): admitting its old root again never takes it back, no
+other tree adopts it, and no live tree on its Dispatch chain holds it; it queues for a slot of its
+own. `release_children` adopts a joinable child the same way before it answers `released`, naming
+it under `held` when it waits on an unfinished issue, and refuses one it cannot, writing nothing:
+`CHILD_NOT_ADOPTABLE` for a root that ran as a tree of its own, carries a run of its own, or left
+another tree as a root of its own, `CHILD_IN_OTHER_TREE` for a child recorded in another tree. A
+labelled `todo` issue whose parent is not recorded, or is recorded as a root of its own, and whose
+Dispatch chain reaches a live tree (a child that tree's architect has not released, or a root
+parked under it) is held under that unreleased child, the ancestry hold: out of
+`admission.waiting`, and not in `admission.blocked`, which names only blocked-by links. It waits
+for no slot until that release, or its parent's, brings it into the tree, and a `todo` child of it
+waits with it and moves with it; it queues as a root of its own once no live tree is left on its
+chain: each lingers or leaves the workflow, or a person moves an ancestor, recorded or not, out
+from under it. A root that ran as a tree of its own, carries a run of its own, or left another tree
+is never held under an unreleased child: it keeps queueing as its own root.
+An issue is recorded on the repository Dispatch resolves for it (its own, else its nearest
+ancestor's, else the project's default) and keeps it: an issue whose repository
 resolves to none, or to one the daemon does not serve, is not admitted, and the daemon says why on
 the issue; a later change of an admitted issue's repository is not applied, which the daemon says
 too. A root that stays `done` through its linger hands every child still in the
@@ -219,7 +240,8 @@ since its workers already run their phases. A role of a carried child still in a
 tree stops first: nothing of the new tree launches until that turn ends, or is stopped at the old
 root's linger expiry, or at the stop timeout once that root no longer lingers, and the daemon
 suspends the role, keeping its session, which the new tree then resumes. A child stays its own tree
-after hand-over; reopening the old root later does not take it back. A root reopened inside its
+after hand-over, carried or not, as does an orphan a person admitted; reopening or re-admitting the
+old root later does not take it back. A root reopened inside its
 linger instead keeps its children. Taking the label off a waiting root drops it from the waiting
 line, as a status that leaves `todo` does; taking it off a root already admitted does not stop its
 tree. A waiting root moved to a status only a running tree has (`in_progress`, `testing`,

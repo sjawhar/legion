@@ -2011,17 +2011,17 @@ takes a file-backed phase's completion (planning, implementing, testing, reviewi
 names the handoff record its worker wrote on the Dispatch issue with `dispatch handoff-write`, and
 reads that record back from Dispatch (`GET /api/v1/handoffs/{id}`) before it records anything;
 its workers' plugins report the record, so the daemon and the plugins move together, as every
-contract bump does. Store migration 0059 adds two columns to `phases`, `handoff_record` and
+contract bump does. Store migration 0060 adds two columns to `phases`, `handoff_record` and
 `handoff_version`: the record a role's completion of its current phase named, and its version.
 
 To roll this release back to contract 40, stop the daemon and drop both columns, with the row
-`schema_version` records for 0059:
+`schema_version` records for 0060:
 
 ```sh
 psql '<postgres_dsn>' -X -v ON_ERROR_STOP=1 <<'SQL'
 begin;
 alter table phases drop column if exists handoff_record, drop column if exists handoff_version;
-delete from schema_version where version = 59;
+delete from schema_version where version = 60;
 commit;
 SQL
 ```
@@ -2033,10 +2033,10 @@ left in place, but it never clears them: a role it starts on a new phase or roun
 of its last one, and an upgrade back to this release would read that record as the new phase's
 completion (`record.PhaseRow.Completed`), ending a review round on an approval alone or starting
 the implementer on a red without waiting for the tester's turn. Dropping the columns and the row
-makes that upgrade apply 0059 again, to empty columns. `last_handoff` keeps the record id each role
+makes that upgrade apply 0060 again, to empty columns. `last_handoff` keeps the record id each role
 last named; the earlier release compares a completion's commit with it, which no record id equals,
 so no completion is refused `HANDOFF_NOT_NEW` for it. The records themselves stay on their Dispatch
-issues. The `59` is the number of `0059_handoff_records.up.sql`; where that file carries another
+issues. The `60` is the number of `0060_handoff_records.up.sql`; where that file carries another
 number in the release you roll back from, use that number. The SQL was run on 2026-10-26 against
 PostgreSQL 17 on a scratch schema holding `phases` and `schema_version` after that migration (then
 numbered 0055): the first run dropped both columns and the row, and a second printed the two
@@ -5218,8 +5218,8 @@ still in flight at the release carries files its next role would never see.
 moves them. From the daemon's own configuration — `project`, `dispatch_url` and
 `dispatch_token_file`, the implement GitHub App, and `daemon_url` — it reads the running daemon's
 unauthenticated `GET /legion/v1/state` for every issue in a phase other than done, and for the
-daemon's `daemon.schemaVersion`, which tells which release runs: at or past 59, the store migration
-`0059_handoff_records` the records' release added, it is the new daemon; below it, the old one.
+daemon's `daemon.schemaVersion`, which tells which release runs: at or past 60, the store migration
+`0060_handoff_records` the records' release added, it is the new daemon; below it, the old one.
 For each issue, as the implement App, it:
 
 - lists `.legion/` on `legion/<KEY>` through GitHub's contents API, and writes each of
@@ -5587,11 +5587,15 @@ issue's pod (every role of it alike) and the image probe's.
   `GET /legion/v1/state`'s `agentSecretsLogin` reads its `state`: `none` before the first login
   finishes, `issued` while a credential that has not expired is held (a renewal that failed beside
   it included), or `failed` (daemon API contract 22). Pod enrollment fails closed and retries until
-  a login succeeds. After a failed login the daemon waits 30 s before the next, doubling each time
-  to at most 5 minutes, whether or not it still holds a credential, and a successful login resets
-  the wait. Running the daemon off the cluster (the Stage 4a live proof), `token_file` holds a
-  token the operator mints, at most an hour long, for a ServiceAccount of the proof's own that
-  `BROKER_SERVICE_LOGINS` lists for `legion-daemon` and no running daemon uses, with
+  a login succeeds. After a login given no HTTP answer, or a 5xx answer from the broker or its
+  front door (the broker is down, out of reach, or cannot reach its database), the daemon waits
+  2 s before the next, doubling each time to at most 10 s, so after an outage it logs in again
+  within about 10 s of the broker serving. After a login the broker refused (a 4xx, 429
+  included), or a token file it could not read, it waits 30 s, doubling each time to at most 5
+  minutes. Either way it waits whether or not it still holds a credential, and a successful login
+  resets both waits. Running the daemon off the cluster (the Stage 4a live proof), `token_file`
+  holds a token the operator mints, at most an hour long, for a ServiceAccount of the proof's own
+  that `BROKER_SERVICE_LOGINS` lists for `legion-daemon` and no running daemon uses, with
   `kubectl create token <account> -n <namespace> --audience agent-secrets --duration 1h`: each
   account holds one credential, so a proof logging in as a running daemon's account would take
   that daemon's credential.

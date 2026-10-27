@@ -393,7 +393,7 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Seven periodic maintenance loops run once per period across the processes, not once per process.
+- Eight periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -866,7 +866,7 @@ is written. Its own migration, so its transaction holds `comments` alone: the dr
 `ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds. It
 refuses and rewrites no row; its census answers `0`.
 
-Migration `0129_handoffs` creates `handoffs` (`packages/envoy/AGENTS.md`), the phase handoffs a
+Migration `0130_handoffs` creates `handoffs` (`packages/envoy/AGENTS.md`), the phase handoffs a
 session records on its issue: `id`, `issue_key` (a foreign key to `issues`, `on delete cascade`),
 `phase` (checked to be a lowercase slug), `version` (from 1, unique per issue and phase), `body`
 (the exact text written, in a `text` column so a read answers the bytes written; the API checks it

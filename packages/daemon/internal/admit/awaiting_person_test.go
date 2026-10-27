@@ -290,7 +290,7 @@ func TestAHandBackNoLongerWithThePersonIsTakenIn(t *testing.T) {
 func TestAHeldRootIsNotDecidedBeforeTheConsumerCatchesUp(t *testing.T) {
 	pool := migratedPool(t)
 	admission := awaitingRig(t, pool)
-	admission.pending = map[string]dispatch.IssueSummary{"LEGION-208": {Key: "LEGION-208", Status: "todo", LastSeq: 20}}
+	admission.pending = map[string]intake.DispatchIssue{"LEGION-208": {Key: "LEGION-208", Status: "todo", Seq: 20}}
 	admission.target = 100
 	tick(t, pool, admission, "tick-held")
 	if got := issue(t, pool, "LEGION-208").Phase; got != phase.Admitted {

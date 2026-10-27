@@ -1,17 +1,17 @@
 //go:build e2e
 
 // The harness this package's whole-daemon live proofs share: merged_root_waits_live_test.go,
-// no_required_checks_live_test.go and handoff_records_live_test.go, whose scripts
-// (scripts/e2e/merged-root-waits.sh, scripts/e2e/no-required-checks.sh and
-// scripts/e2e/handoff-records.sh) make the same run around them through
-// scripts/e2e/lib/live-daemon-proof.sh. A driver embeds liveProof, which holds what every such
-// proof needs before and around the daemon it boots: the configuration it boots with (newLiveProof
-// reads the broker LEGION_E2E_NATS_URL names, skips when it names none, and builds workflowConfig
-// around it), the log file the script names, the stand-ins for Dispatch and Envoy's listener, the
-// store the daemon runs on, the seeding of a tree into the next free admission slots (admit), and
-// the reads and writes a step makes of them: the envelopes it publishes, the events it waits for
-// the daemon to take, and the notices an issue's architect is told (architectNotices). What the
-// driver keeps is what its own proof drives.
+// no_required_checks_live_test.go, child_adoption_live_test.go and handoff_records_live_test.go,
+// whose scripts (scripts/e2e/merged-root-waits.sh, scripts/e2e/no-required-checks.sh,
+// scripts/e2e/child-adoption.sh and scripts/e2e/handoff-records.sh) make the same run around them
+// through scripts/e2e/lib/live-daemon-proof.sh. A driver embeds liveProof, which holds what every
+// such proof needs before and around the daemon it boots: the configuration it boots with
+// (newLiveProof reads the broker LEGION_E2E_NATS_URL names, skips when it names none, and builds
+// workflowConfig around it), the log file the script names, the stand-ins for Dispatch and Envoy's
+// listener, the store the daemon runs on, the seeding of a tree into the next free admission slots
+// (admit), and the reads and writes a step makes of them: the envelopes it publishes, the events it
+// waits for the daemon to take, and the notices an issue's architect is told (architectNotices).
+// What the driver keeps is what its own proof drives.
 package daemon
 
 import (
@@ -34,6 +34,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -259,21 +260,30 @@ func (p *liveProof) waitArchitectNotices(key, kind string, count int) []listener
 }
 
 // liveDispatch is workflowConfig's Dispatch stand-in — the repository mapping and an empty issue
-// list — grown into the board the daemon writes to: it holds each issue's status, as Dispatch's own
-// board does, answers the issue read the outbox makes before a status write, records every
-// status and message the daemon posted, so a step can read back what the daemon told Dispatch and
-// tell a write that never came from one it cannot see, and serves the handoff records a step
-// seeds (handoff), which a phase completion names and the daemon reads back. Anything else is a
-// call a live proof does not expect, and fails the test as workflowConfig's stand-in does.
+// list — grown into the board the daemon reads and writes: it holds each issue's status, parent and
+// labels, as Dispatch's own board does, answers the issue reads the daemon makes (the outbox's
+// before a status write, a release's walk up an issue's parent chain, an event's walk up its
+// Dispatch chain to the top) and 404s an issue it does not hold, records every status and message
+// the daemon posted, so a step can read back what the daemon told Dispatch and tell a write that
+// never came from one it cannot see, and serves the handoff records a step seeds (handoff), which a
+// phase completion names and the daemon reads back. Anything else is a call a live proof does not
+// expect, and fails the test as workflowConfig's stand-in does.
 type liveDispatch struct {
 	t       *testing.T
 	project string
 	mu      sync.Mutex
-	// status is each issue's status as this board holds it, the daemon's writes applied.
-	status map[string]string
+	// issues is each issue as this board holds it, the daemon's writes applied.
+	issues map[string]liveDispatchIssue
 	posted []liveDispatchWrite
 	// handoffs is each seeded handoff record by its id, as GET /api/v1/handoffs/{id} answers it.
 	handoffs map[string]map[string]any
+}
+
+// liveDispatchIssue is one issue as the board holds it: its status, its parent ("" for none), and
+// whether it is handed to Legion, which its labels say.
+type liveDispatchIssue struct {
+	status, parent string
+	handed         bool
 }
 
 // liveDispatchWrite is one write the daemon made to Dispatch: a status it set on an issue, or a
@@ -285,15 +295,29 @@ type liveDispatchWrite struct {
 }
 
 func newLiveDispatch(t *testing.T, project string) *liveDispatch {
-	return &liveDispatch{t: t, project: project, status: map[string]string{}, handoffs: map[string]map[string]any{}}
+	return &liveDispatch{t: t, project: project, issues: map[string]liveDispatchIssue{}, handoffs: map[string]map[string]any{}}
 }
 
-// show puts key on the board at status, as the seeded fixture stands on Dispatch before the daemon
-// writes anything.
+// show puts key on the board at status, a root handed to Legion, as the seeded fixture stands on
+// Dispatch before the daemon writes anything.
 func (b *liveDispatch) show(key, status string) {
+	b.place(key, status, "", true)
+}
+
+// place puts key on the board at status under parent ("" for none), labelled for Legion when
+// handed.
+func (b *liveDispatch) place(key, status, parent string, handed bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.status[key] = status
+	b.issues[key] = liveDispatchIssue{status: status, parent: parent, handed: handed}
+}
+
+// liveDispatchLabels is an issue's labels: Legion's when it is handed to Legion, none otherwise.
+func liveDispatchLabels(handed bool) []string {
+	if handed {
+		return []string{dispatch.LegionLabel}
+	}
+	return []string{}
 }
 
 // handoff seeds version 1 of key's handoff record of phase word, written by session, as a worker's
@@ -331,7 +355,11 @@ func (b *liveDispatch) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		b.record(liveDispatchWrite{Issue: key, Body: b.decode(req, w)}, w)
 	case req.Method == http.MethodPatch && strings.HasPrefix(path, "/api/v1/issues/"):
 		write := liveDispatchWrite{Issue: key, Status: b.decode(req, w)}
-		b.show(key, write.Status)
+		b.mu.Lock()
+		issue := b.issues[key]
+		issue.status = write.Status
+		b.issues[key] = issue
+		b.mu.Unlock()
 		b.record(write, w)
 	case req.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/handoffs/"):
 		b.showHandoff(strings.TrimPrefix(path, "/api/v1/handoffs/"), w)
@@ -341,14 +369,24 @@ func (b *liveDispatch) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// showIssue answers the issue read the outbox makes before a status write: the board's own status
-// for it, with the Legion label the tree runs under.
+// showIssue answers Dispatch's issue read of key from the board, and 404 for an issue it does not
+// hold.
 func (b *liveDispatch) showIssue(key string, w http.ResponseWriter) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	issue, ok := b.issues[key]
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"code":"NOT_FOUND","error":"no such issue"}`)
+		return
+	}
+	var parent any
+	if issue.parent != "" {
+		parent = issue.parent
+	}
 	if err := json.NewEncoder(w).Encode(map[string]any{
-		"key": key, "project": b.project, "title": key, "status": b.status[key], "rank": "U",
-		"labels": []string{"legion"}, "last_seq": 1, "resolved_repo": liveRepo,
+		"key": key, "project": b.project, "title": key, "status": issue.status, "parent": parent, "rank": "U",
+		"labels": liveDispatchLabels(issue.handed), "last_seq": 1, "resolved_repo": liveRepo,
 	}); err != nil {
 		b.t.Errorf("write the Dispatch issue %s: %v", key, err)
 	}

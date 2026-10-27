@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { Event } from "../../api/types";
+import { activityDescription } from "../activity/activity-model";
 import { eventDescription } from "./event-description";
 
 function commentEvent(type: "comment.reopened" | "comment.edited"): Event {
@@ -206,6 +207,30 @@ test("eventDescription names the phase and version of a recorded handoff", () =>
   };
 
   expect(eventDescription(event)).toEqual(["Recorded the implement handoff, version 2"]);
+});
+
+test("eventDescription and the activity line name a person's spec edit by its versions", () => {
+  const event: Extract<Event, { type: "artifact.human_edited" }> = {
+    actor: { id: "person@example.com", kind: "user" },
+    created_at: "2026-10-24T00:00:00Z",
+    id: 6,
+    issue_key: "OPS-52",
+    notify: true,
+    payload: {
+      artifact_id: "artifact-1",
+      name: "spec.md",
+      from_version: 4,
+      to_version: 7,
+      editors: ["person@example.com"],
+      diff: "--- previous\n+++ current\n",
+      diff_truncated: false,
+    },
+    seq: 6,
+    type: "artifact.human_edited",
+  };
+
+  expect(eventDescription(event)).toEqual(["Edited spec.md v4 to v7"]);
+  expect(activityDescription(event)).toEqual(["edited spec.md v4 to v7"]);
 });
 
 test("eventDescription names the child a reparent adds or removes", () => {
