@@ -13,7 +13,6 @@ import (
 	metav1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/meta/v1"
 	networkingv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/networking/v1"
 	policyv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/policy/v1"
-	rbacv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/rbac/v1"
 	schedulingv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/scheduling/v1"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
@@ -287,25 +286,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			return nil, err
 		}
 	}
+	// The app and the listener run as ServiceAccount <hostname>, which Workload Identity lets mount
+	// the NATS seed and whose token the app presents (serviceAccountSubject); the front door's pods
+	// run as an account of their own (newDispatchFrontDoor).
 	if _, err := corev1.NewServiceAccount(ctx, s.hostname, &corev1.ServiceAccountArgs{Metadata: metadata(s.hostname)}, child...); err != nil {
-		return nil, err
-	}
-	stateName := s.hostname + "-tailscale-state"
-	_, err = rbacv1.NewRole(ctx, stateName, &rbacv1.RoleArgs{
-		Metadata: metadata(stateName),
-		Rules: rbacv1.PolicyRuleArray{
-			rbacv1.PolicyRuleArgs{ApiGroups: pulumi.StringArray{pulumi.String("")}, Resources: pulumi.StringArray{pulumi.String("secrets")}, Verbs: pulumi.StringArray{pulumi.String("create")}},
-			rbacv1.PolicyRuleArgs{ApiGroups: pulumi.StringArray{pulumi.String("")}, Resources: pulumi.StringArray{pulumi.String("secrets")}, ResourceNames: pulumi.StringArray{pulumi.String(stateName)}, Verbs: pulumi.StringArray{pulumi.String("get"), pulumi.String("update"), pulumi.String("patch")}},
-		},
-	}, child...)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := rbacv1.NewRoleBinding(ctx, stateName, &rbacv1.RoleBindingArgs{
-		Metadata: metadata(stateName),
-		RoleRef:  rbacv1.RoleRefArgs{ApiGroup: pulumi.String("rbac.authorization.k8s.io"), Kind: pulumi.String("Role"), Name: pulumi.String(stateName)},
-		Subjects: rbacv1.SubjectArray{rbacv1.SubjectArgs{Kind: pulumi.String("ServiceAccount"), Name: pulumi.String(s.hostname), Namespace: pulumi.String(s.namespace)}},
-	}, child...); err != nil {
 		return nil, err
 	}
 	authKeyName := s.hostname + "-tailnet-auth-key"
@@ -331,8 +315,8 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	if err != nil {
 		return nil, err
 	}
-	serveName := s.hostname + "-serve"
-	if _, err := corev1.NewConfigMap(ctx, serveName, &corev1.ConfigMapArgs{Metadata: metadata(serveName), Data: pulumi.StringMap{"serve.json": pulumi.String(s.serveConfig)}}, child...); err != nil {
+	frontDoorPod, frontDoorOpts, err := newDispatchFrontDoor(ctx, dispatch, s, args.TailnetService, authKeyName, metadata, child)
+	if err != nil {
 		return nil, err
 	}
 	seedName := s.hostname + "-nats-seed"
@@ -461,28 +445,13 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 
 	seedMount := corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("nats-seed"), MountPath: pulumi.String("/var/run/secrets/envoy"), ReadOnly: pulumi.Bool(true)}}
 	seedVolume := corev1.VolumeArray{corev1.VolumeArgs{Name: pulumi.String("nats-seed"), Csi: &corev1.CSIVolumeSourceArgs{Driver: pulumi.String("secrets-store-gke.csi.k8s.io"), ReadOnly: pulumi.Bool(true), VolumeAttributes: pulumi.StringMap{"secretProviderClass": pulumi.String(seedName)}}}}
-	tailnetHealth := func() *corev1.ProbeArgs {
-		return &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("wget"), pulumi.String("-qO-"), pulumi.String("http://127.0.0.1:9002/healthz")}}}
-	}
 
-	// The front door: the tailnet node every reader reaches Dispatch at, and the pod's SOCKS5
-	// proxy, which is how the app and the listener reach the NATS hub at its tailnet name. The
-	// proxy binds every address, since its callers are pods of their own now, not this pod's
-	// loopback. It runs frontDoorReplicas pods, recreated at one and rolled above it.
-	tailnetStartup := tailnetHealth()
-	tailnetStartup.PeriodSeconds, tailnetStartup.FailureThreshold = pulumi.Int(5), pulumi.Int(36)
-	tailnetReady := tailnetHealth()
-	tailnetReady.PeriodSeconds = pulumi.Int(10)
-	tailnet, err := deployment(tailnetName, s.frontDoorReplicas, s.frontDoorStrategy, s.disruption.frontDoorPDBMinAvailable, map[string]*corev1.Secret{authKeyName: authKeySecret}, corev1.PodSpecArgs{
-		ServiceAccountName: pulumi.String(s.hostname), EnableServiceLinks: pulumi.Bool(false),
-		Containers: corev1.ContainerArray{
-			corev1.ContainerArgs{Name: pulumi.String("tailscale"), Image: pulumi.String(s.images.tailscale), Resources: resources("500m", "512Mi"), Env: corev1.EnvVarArray{
-				secretEnv("TS_AUTHKEY", authKeyName, "TS_AUTHKEY"),
-				valueEnv("TS_AUTH_ONCE", "true"), valueEnv("TS_KUBE_SECRET", stateName), valueEnv("TS_USERSPACE", "true"), valueEnv("TS_SOCKS5_SERVER", "0.0.0.0:"+socks5Port), valueEnv("TS_SERVE_CONFIG", "/etc/tailscale/serve.json"), valueEnv("TS_HOSTNAME", s.hostname), valueEnv("TS_EXTRA_ARGS", "--advertise-tags="+strings.Join(s.tags, ",")), valueEnv("TS_ENABLE_HEALTH_CHECK", "true"), valueEnv("TS_LOCAL_ADDR_PORT", "127.0.0.1:9002"),
-			}, VolumeMounts: corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("serve"), MountPath: pulumi.String("/etc/tailscale")}}, StartupProbe: tailnetStartup, ReadinessProbe: tailnetReady},
-		},
-		Volumes: corev1.VolumeArray{corev1.VolumeArgs{Name: pulumi.String("serve"), ConfigMap: &corev1.ConfigMapVolumeSourceArgs{Name: pulumi.String(serveName)}}},
-	})
+	// The front door: frontDoorReplicas pods hosting the Tailscale Service svc:<hostname>, the name
+	// every reader reaches Dispatch at, each also running the SOCKS5 proxy the app and the listener
+	// reach the NATS hub through (newDispatchFrontDoor). Recreated at one pod and rolled above it, so
+	// by default a roll never leaves the name to a single pod. Only the auth key's checksum is on its
+	// template: a renewed certificate in its TLS Secret rolls no pod.
+	tailnet, err := deployment(tailnetName, s.frontDoorReplicas, s.frontDoorStrategy, s.disruption.frontDoorPDBMinAvailable, map[string]*corev1.Secret{authKeyName: authKeySecret}, frontDoorPod, frontDoorOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -547,7 +516,8 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// wait the grace period does not cover spends the document service's five-second reserve and
 	// kills a write still waiting on a lock mid-commit.
 	// The listener's container waits the same 5 s for the same reason (sleepPreStop); the front
-	// door's container does not wait.
+	// door's tailscale container drains the Tailscale Service and logs its node out instead
+	// (tailnetPreStop).
 	appPreStop := sleepPreStop(5)
 	// The app's container alone carries the broker relay and the GitHub App: the listener and the
 	// front door take neither.
@@ -695,8 +665,8 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	if err := policy(s.hostname, appIngress); err != nil {
 		return nil, err
 	}
-	// Whatever reaches the proxy gets tailnet egress as this node, so only the two workloads that
-	// dial the hub through it may.
+	// Whatever reaches the proxy gets tailnet egress as a front-door node, on every front-door pod,
+	// so only the two workloads that dial the hub through it may.
 	if err := policy(tailnetName, networkingv1.NetworkPolicyIngressRuleArray{
 		ingressFrom(dispatchSOCKS5Port, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname), podPeer(listenerName)}),
 	}); err != nil {

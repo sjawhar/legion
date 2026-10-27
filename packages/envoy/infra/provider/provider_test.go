@@ -187,6 +187,14 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
+	// The Tailscale Service the front door hosts is a required Input, typically the consumer's
+	// Service's name output; the image cert-publish runs on is a required plain string.
+	for input, plain := range map[string]bool{"tailnetService": false, "frontDoorToolsImage": true} {
+		require.Equal(t, "string", dispatch.InputProperties[input].Type, input)
+		require.Equal(t, plain, dispatch.InputProperties[input].Plain, input)
+		require.False(t, dispatch.InputProperties[input].Secret, input)
+		require.Contains(t, dispatch.RequiredInputs, input)
+	}
 	require.True(t, dispatch.Properties["agentToken"].Secret)
 	for _, output := range []string{"serviceAccountIssuer", "serviceAccountSubject"} {
 		require.Equal(t, "string", dispatch.Properties[output].Type, output)

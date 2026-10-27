@@ -102,10 +102,20 @@ type DispatchArgs struct {
 	TailnetDnsName string             `pulumi:"tailnetDnsName"`
 	Tags           []string           `pulumi:"tags"`
 	TailnetAuthKey pulumi.StringInput `pulumi:"tailnetAuthKey" provider:"secret"`
+	// TailnetService is the Tailscale Service the front door's pods host, as Tailscale's API names
+	// it: svc:<hostname>, and once resolved anything else is refused. The consumer declares the
+	// Service (with an auto-approval for the tags) and passes its name output here, so the serve
+	// ConfigMap, and through it the front door's Deployment, waits for the Service: a node that
+	// advertises a Service before it exists is not approved when it appears.
+	TailnetService pulumi.StringInput `pulumi:"tailnetService"`
 
 	EnvoyImage         string `pulumi:"envoyImage"`
 	TailscaleImage     string `pulumi:"tailscaleImage"`
 	CloudSqlProxyImage string `pulumi:"cloudSqlProxyImage"`
+	// FrontDoorToolsImage is the image the front door's cert-publish container runs on, pinned by
+	// digest: it needs /bin/sh, curl, openssl 3, base64, GNU date, sed, grep and tr, which the envoy
+	// image carries. An input of its own, so a release of the app's image never rolls the front door.
+	FrontDoorToolsImage string `pulumi:"frontDoorToolsImage"`
 
 	NatsUrl        pulumi.StringInput `pulumi:"natsUrl"`
 	NatsSeedSecret pulumi.StringInput `pulumi:"natsSeedSecret"`
@@ -231,6 +241,7 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 		{"envoyImage", args.EnvoyImage},
 		{"tailscaleImage", args.TailscaleImage},
 		{"cloudSqlProxyImage", args.CloudSqlProxyImage},
+		{"frontDoorToolsImage", args.FrontDoorToolsImage},
 		{"signInClientId", args.SignInClientId},
 		{"signInDomain", args.SignInDomain},
 		{"agentSecretsUrl", args.AgentSecretsUrl},
@@ -290,21 +301,20 @@ type Dispatch struct {
 	Kubeconfig       pulumi.StringOutput `pulumi:"kubeconfig"`
 	Principal        pulumi.StringOutput `pulumi:"principal"`
 	AgentToken       pulumi.StringOutput `pulumi:"agentToken" provider:"secret"`
-	// ServiceAccountIssuer and ServiceAccountSubject are the issuer and subject of the Dispatch
-	// pods' service-account tokens: the cluster's OIDC issuer, and the pods' Kubernetes service
-	// account. A federated credential trusting the pair (an Azure identity's, for the keyless
-	// form) admits exactly those pods.
+	// ServiceAccountIssuer and ServiceAccountSubject are the issuer and subject of the app's and
+	// the listener's service-account tokens: the cluster's OIDC issuer, and those pods' Kubernetes
+	// service account. A federated credential trusting the pair (an Azure identity's, for the
+	// keyless form) admits exactly those pods; the front door's pods run as an account of their own.
 	ServiceAccountIssuer  pulumi.StringOutput `pulumi:"serviceAccountIssuer"`
 	ServiceAccountSubject pulumi.StringOutput `pulumi:"serviceAccountSubject"`
 }
 
-// dispatchSettings are the plain inputs, validated, with the defaults applied, and the texts built
-// from them alone, so they are known at preview: the Serve configuration and the listener's
-// environment.
+// dispatchSettings are the plain inputs, validated, with the defaults applied, so they are known at
+// preview. images.tools is frontDoorToolsImage.
 type dispatchSettings struct {
 	hostname, tailnetDNSName, region, namespace string
 	tags                                        []string
-	images                                      struct{ envoy, tailscale, proxy string }
+	images                                      struct{ envoy, tailscale, proxy, tools string }
 	signIn                                      struct{ clientID, domain string }
 	databaseVersion, databaseTier               string
 	databaseAvailabilityType                    string
@@ -320,7 +330,6 @@ type dispatchSettings struct {
 	// strategy is the app Deployment's update strategy; frontDoorStrategy and listenerStrategy
 	// are the front door's and the listener's, each from that Deployment's own replica count.
 	strategy, frontDoorStrategy, listenerStrategy dispatchStrategy
-	serveConfig                                   string
 	azure                                         dispatchAzure
 }
 
@@ -449,6 +458,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		{"envoyImage", args.EnvoyImage},
 		{"tailscaleImage", args.TailscaleImage},
 		{"cloudSqlProxyImage", args.CloudSqlProxyImage},
+		{"frontDoorToolsImage", args.FrontDoorToolsImage},
 	} {
 		if !imageRule.MatchString(image.ref) {
 			return dispatchSettings{}, fmt.Errorf("%s %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>", image.field, image.ref)
@@ -465,6 +475,9 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 	if args.TailnetAuthKey == nil {
 		return dispatchSettings{}, errors.New("tailnetAuthKey is required")
+	}
+	if args.TailnetService == nil {
+		return dispatchSettings{}, errors.New("tailnetService is required")
 	}
 	if args.NatsUrl == nil {
 		return dispatchSettings{}, errors.New("natsUrl is required")
@@ -541,6 +554,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	s.images.envoy = args.EnvoyImage
 	s.images.tailscale = args.TailscaleImage
 	s.images.proxy = args.CloudSqlProxyImage
+	s.images.tools = args.FrontDoorToolsImage
 	s.signIn.clientID = args.SignInClientId
 	s.signIn.domain = args.SignInDomain
 	s.agentSecretsURL = agentSecretsURL
@@ -608,10 +622,6 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 			return dispatchSettings{}, fmt.Errorf("allowedNamespaces[%d] %q must be a DNS label", i, namespace)
 		}
 	}
-	// The tailnet node runs in a pod of its own now, so Serve proxies to the app's Service rather
-	// than to a container beside it. The Web key keeps the node's name and certificate domain.
-	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s:443":{"Handlers":{"/":{"Proxy":"http://%s:8766"}}}}}`,
-		core.TailnetHostName(s.hostname, s.tailnetDNSName), clusterLocal(s.hostname, s.namespace))
 	return s, nil
 }
 
@@ -891,8 +901,9 @@ func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...p
 	comp.AgentToken = cloud.agentToken.Result
 	comp.Url = pulumi.String("https://" + core.TailnetHostName(s.hostname, s.tailnetDNSName)).ToStringOutput()
 	comp.ServiceAccountIssuer = cloud.issuer
-	// Every Dispatch pod runs as ServiceAccount <hostname> in the component's namespace, the
-	// account newDispatchKubernetes registers, and Kubernetes names a token's subject after it.
+	// The app's and the listener's pods run as ServiceAccount <hostname> in the component's
+	// namespace, the account newDispatchKubernetes registers, and Kubernetes names a token's subject
+	// after it. The front door's pods run as <hostname>-tailnet, which this subject never names.
 	comp.ServiceAccountSubject = pulumi.String("system:serviceaccount:" + s.namespace + ":" + s.hostname).ToStringOutput()
 	return comp, nil
 }

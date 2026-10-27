@@ -40,28 +40,44 @@
             "value": "true"
           },
           {
-            "name": "TS_KUBE_SECRET",
-            "value": "example-dispatch-tailscale-state"
-          },
-          {
             "name": "TS_USERSPACE",
             "value": "true"
           },
           {
-            "name": "TS_SOCKS5_SERVER",
-            "value": "0.0.0.0:1055"
+            "name": "TS_STATE_DIR",
+            "value": "/var/lib/frontdoor/tailscale"
+          },
+          {
+            "name": "TS_LOGS_DIR",
+            "value": "/var/lib/frontdoor/tailscale"
+          },
+          {
+            "name": "TS_KUBE_SECRET",
+            "value": ""
+          },
+          {
+            "name": "TS_ACCEPT_DNS",
+            "value": "false"
+          },
+          {
+            "name": "TS_HOSTNAME",
+            "valueFrom": {
+              "fieldRef": {
+                "fieldPath": "metadata.name"
+              }
+            }
+          },
+          {
+            "name": "TS_EXTRA_ARGS",
+            "value": "--advertise-tags=tag:example-dispatch"
           },
           {
             "name": "TS_SERVE_CONFIG",
             "value": "/etc/tailscale/serve.json"
           },
           {
-            "name": "TS_HOSTNAME",
-            "value": "example-dispatch"
-          },
-          {
-            "name": "TS_EXTRA_ARGS",
-            "value": "--advertise-tags=tag:example-dispatch"
+            "name": "TS_EXPERIMENTAL_SERVICE_AUTO_ADVERTISEMENT",
+            "value": "false"
           },
           {
             "name": "TS_ENABLE_HEALTH_CHECK",
@@ -70,19 +86,52 @@
           {
             "name": "TS_LOCAL_ADDR_PORT",
             "value": "127.0.0.1:9002"
+          },
+          {
+            "name": "TS_SOCKET",
+            "value": "/var/lib/frontdoor/tailscaled.sock"
+          },
+          {
+            "name": "TS_SOCKS5_SERVER",
+            "value": "0.0.0.0:1055"
           }
         ],
         "image": "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "lifecycle": {
+          "preStop": {
+            "exec": {
+              "command": [
+                "/bin/sh",
+                "-c",
+                "read -r id _ 2\u003e/dev/null \u003c/var/lib/frontdoor/node-id \u0026\u0026 printf '%s %s\\n' \"$id\" \"$(date -u +%s)\" \u003e/var/lib/frontdoor/draining.tmp \u0026\u0026 mv /var/lib/frontdoor/draining.tmp /var/lib/frontdoor/draining; rm -f /var/lib/frontdoor/service-ready\ntimeout 5 tailscale --socket=/var/lib/frontdoor/tailscaled.sock serve drain svc:example-dispatch\nsleep 20\ntimeout 5 tailscale --socket=/var/lib/frontdoor/tailscaled.sock logout\n"
+              ]
+            }
+          }
+        },
+        "livenessProbe": {
+          "exec": {
+            "command": [
+              "tailscale",
+              "--socket=/var/lib/frontdoor/tailscaled.sock",
+              "version",
+              "--daemon"
+            ]
+          },
+          "failureThreshold": 6,
+          "periodSeconds": 10,
+          "timeoutSeconds": 5
+        },
         "name": "tailscale",
         "readinessProbe": {
           "exec": {
             "command": [
-              "wget",
-              "-qO-",
-              "http://127.0.0.1:9002/healthz"
+              "/bin/sh",
+              "-c",
+              "test -e /var/lib/frontdoor/service-ready"
             ]
           },
-          "periodSeconds": 10
+          "failureThreshold": 1,
+          "periodSeconds": 5
         },
         "resources": {
           "limits": {
@@ -92,6 +141,14 @@
           "requests": {
             "cpu": "500m",
             "memory": "512Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
           }
         },
         "startupProbe": {
@@ -109,12 +166,152 @@
           {
             "mountPath": "/etc/tailscale",
             "name": "serve"
+          },
+          {
+            "mountPath": "/var/lib/frontdoor",
+            "name": "state"
+          }
+        ]
+      },
+      {
+        "args": [
+          "state=/var/lib/frontdoor/tailscale\nsecret=/etc/frontdoor-tls\nfqdn=example-dispatch.example-tailnet.ts.net\ntokens=/var/run/secrets/kubernetes.io/serviceaccount\nurl=https://kubernetes.default.svc/api/v1/namespaces/dispatch/secrets/example-dispatch-tailnet-tls\nflag_file=/var/lib/frontdoor/advertise-service\nnode_file=/var/lib/frontdoor/node-id\nclaims_max=3\nwindow=604800\nnot_due=2678400\nkeep=2592000\nclaims_key=legion.dev/certificate-claims\nnodes_key=legion.dev/front-door-nodes\n(\n  at() { date -u +%Y-%m-%dT%H:%M:%SZ; }\n  log() { echo \"$(at) $1 $2 | $3 | $4\"; }\n  me=${HOSTNAME:-$(hostname)}\n  cache=$state/certs\n  # left prints the seconds until a PEM certificate's notAfter, and fails unless its\n  # subjectAltName names $fqdn exactly.\n  left() {\n    openssl x509 -noout -ext subjectAltName -in \"$1\" 2\u003e/dev/null |\n      tr ',' '\\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -Fqx \"DNS:$fqdn\" || return 1\n    end=$(openssl x509 -noout -enddate -in \"$1\" 2\u003e/dev/null) || return 1\n    end=$(date -u -d \"${end#notAfter=}\" +%s 2\u003e/dev/null) || return 1\n    echo $((end - $(date -u +%s)))\n  }\n  # annotation prints the value of the Secret's annotation $1 as the pass read it, or nothing.\n  annotation() { printf '%s' \"$body\" | sed -n \"s|.*\\\"$1\\\": *\\\"\\([^\\\"]*\\)\\\".*|\\1|p\"; }\n  # patch writes the annotations $1 (JSON members) on the Secret, with the resourceVersion the pass\n  # read as the precondition, so a write after another pod's fails with 409 and writes nothing.\n  patch() {\n    curl -sS -f -X PATCH \"$url\" --cacert \"$tokens/ca.crt\" -H \"Authorization: Bearer $(cat \"$tokens/token\")\" \\\n      -H 'Content-Type: application/merge-patch+json' \\\n      --data-binary \"{\\\"metadata\\\":{\\\"resourceVersion\\\":\\\"$rv\\\",\\\"annotations\\\":{$1}}}\" \u003e/dev/null 2\u003e\u00261\n  }\n  gate() {\n    if [ ! -s \"$node_file\" ]; then\n      log happened \"certificate budget\" \"cat $node_file\" \"this pod's node id is not read yet: not advertising; again in 30s\"\n      return 1\n    fi\n    id=$(cat \"$node_file\")\n    # A StableNodeID is alphanumeric; anything else would be written into the merge patch below\n    # unescaped, so it is not recorded at all.\n    case \"$id\" in ''|*[!A-Za-z0-9]*)\n      log happened \"certificate budget\" \"cat $node_file\" \"the node id is not alphanumeric: not recording it, not advertising; again in 30s\"\n      return 1 ;;\n    esac\n    cached=$cache/$fqdn.crt\n    why=\n    # A flag holds the node id it was set for, then why. A pod advertising already takes no claim\n    # and copies nothing: the registry is read, and this pod's entry under its current node id\n    # written again when it is missing.\n    flagged=\n    if [ -e \"$flag_file\" ]; then\n      read -r flagged prev \u003c\"$flag_file\" || :\n      why=${prev:-flag set}\n    elif l=$(left \"$cached\") \u0026\u0026 [ \"$l\" -gt \"$not_due\" ]; then\n      why=\"cached certificate, ${l}s left\"\n      log happened \"certificate budget\" \"openssl x509 -enddate -in $cached\" \"the cache holds the certificate with ${l}s left: advertise, no claim\"\n    elif l=$(left \"$secret/tls.crt\") \u0026\u0026 [ \"$l\" -gt \"$not_due\" ] \u0026\u0026 [ -s \"$secret/tls.key\" ]; then\n      cp \"$secret/tls.crt\" \"$cached.tmp\" \u0026\u0026 cp \"$secret/tls.key\" \"$cache/$fqdn.key.tmp\" \u0026\u0026 chmod 0644 \"$cached.tmp\" \u0026\u0026\n        chmod 0600 \"$cache/$fqdn.key.tmp\" \u0026\u0026 mv \"$cache/$fqdn.key.tmp\" \"$cache/$fqdn.key\" \u0026\u0026 mv \"$cached.tmp\" \"$cached\" || return 1\n      if [ ! -s \"$cache/acme-account.key.pem\" ] \u0026\u0026 [ -s \"$secret/acme-account.key.pem\" ]; then\n        cp \"$secret/acme-account.key.pem\" \"$cache/acme-account.key.pem\" \u0026\u0026 chmod 0600 \"$cache/acme-account.key.pem\"\n      fi\n      why=\"published certificate, ${l}s left\"\n      log happened \"certificate budget\" \"openssl x509 -enddate -in $secret/tls.crt\" \"the Secret holds the certificate with ${l}s left: copied into the cache, advertise, no claim\"\n    fi\n    if ! body=$(curl -sS -f --cacert \"$tokens/ca.crt\" -H \"Authorization: Bearer $(cat \"$tokens/token\")\" \"$url\" 2\u003e/dev/null); then\n      log happened \"certificate budget\" \"GET $url\" \"the claim ledger could not be read: not advertising; again in 30s\"\n      return 1\n    fi\n    body=$(printf '%s' \"$body\" | tr -d '\\n')\n    rv=$(printf '%s' \"$body\" | sed -n 's/.*\"resourceVersion\": *\"\\([0-9]*\\)\".*/\\1/p')\n    claims=$(annotation \"$claims_key\")\n    nodes=$(annotation \"$nodes_key\")\n    now=$(date -u +%s)\n    if [ -z \"$rv\" ]; then\n      log happened \"certificate budget\" \"GET $url\" \"no resourceVersion read: not advertising; again in 30s\"\n      return 1\n    fi\n    # The registry carried forward: every entry younger than the keep window but this pod's entry\n    # for its current node id, then that one, fresh. This pod's entries for older node ids stay, so\n    # a node it was before a re-registration is still named as the front door's.\n    reg=\n    for e in $nodes; do\n      t=${e%%/*}\n      rest=${e#*/}\n      case \"$t\" in ''|*[!0-9]*) continue ;; esac\n      [ $((now - t)) -lt \"$keep\" ] || continue\n      [ \"$rest\" = \"$me/$id\" ] \u0026\u0026 continue\n      reg=\"$reg $e\"\n    done\n    reg=\"${reg# } $now/$me/$id\"\n    reg=${reg# }\n    live=\n    count=0\n    mine=\n    for c in $claims; do\n      t=${c%%/*}\n      case \"$t\" in ''|*[!0-9]*) continue ;; esac\n      [ $((now - t)) -lt \"$window\" ] || continue\n      live=\"$live $c\"\n      count=$((count + 1))\n      [ \"${c#*/}\" = \"$me\" ] \u0026\u0026 mine=$c\n    done\n    live=${live# }\n    newclaims=$live\n    if [ -e \"$flag_file\" ]; then\n      case \" $nodes \" in *\"/$me/$id \"*) return 0 ;; esac\n      log happened \"certificate budget\" \"GET $url\" \"this pod advertises (its flag names node ${flagged:-none}), and the registry lacks $me/$id: recording it again\"\n    fi\n    if [ -z \"$why\" ]; then\n      log happened \"certificate budget\" \"GET $url\" \"claims in the last ${window}s: $count of $claims_max:${live:- none}\"\n      if [ -n \"$mine\" ]; then\n        why=\"claim $mine\"\n        log happened \"certificate budget\" \"GET $url\" \"this pod holds claim $mine: advertise\"\n      elif [ \"$count\" -ge \"$claims_max\" ]; then\n        log happened \"certificate budget\" \"GET $url\" \"no claim left: not advertising, so this pod orders no certificate for $fqdn; again in 30s\"\n        return 1\n      else\n        newclaims=\"${live:+$live }$now/$me\"\n        why=\"claim $now/$me\"\n      fi\n    fi\n    log asked \"certificate budget\" \"PATCH $url (resourceVersion $rv)\" \"$why; node $me=$id\"\n    if patch \"\\\"$claims_key\\\":\\\"$newclaims\\\",\\\"$nodes_key\\\":\\\"$reg\\\"\"; then\n      echo \"$id $why\" \u003e\"$flag_file\"\n      case \"$why\" in\n        \"claim $now/$me\") log happened \"certificate budget\" \"PATCH $url\" \"claim $now/$me taken, node $id recorded: advertise\" ;;\n        *) log happened \"certificate budget\" \"PATCH $url\" \"node $id recorded: advertise ($why)\" ;;\n      esac\n      return 0\n    fi\n    log happened \"certificate budget\" \"PATCH $url\" \"the write was refused (another pod's write, or the API): again in 30s\"\n    return 1\n  }\n  while :; do gate; sleep 30; done\n) \u0026\nstate=/var/lib/frontdoor/tailscale\nsecret=/etc/frontdoor-tls\nfqdn=example-dispatch.example-tailnet.ts.net\ntokens=/var/run/secrets/kubernetes.io/serviceaccount\nurl=https://kubernetes.default.svc/api/v1/namespaces/dispatch/secrets/example-dispatch-tailnet-tls\nset -u\ncache=$state/certs\ncrt=$cache/$fqdn.crt\nkey=$cache/$fqdn.key\naccount=$cache/acme-account.key.pem\nwaiting=\n# ournames succeeds only when the PEM certificate $1's subjectAltName names $fqdn exactly.\nournames() {\n  openssl x509 -noout -ext subjectAltName -in \"$1\" 2\u003e/dev/null |\n    tr ',' '\\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -Fqx \"DNS:$fqdn\"\n}\n# notafter prints a PEM certificate's notAfter as seconds since the epoch, and nothing at all\n# unless it is a certificate for $fqdn.\nnotafter() {\n  ournames \"$1\" || return 0\n  enddate=$(openssl x509 -noout -enddate -in \"$1\" 2\u003e/dev/null) || return 0\n  date -u -d \"${enddate#notAfter=}\" +%s 2\u003e/dev/null\n}\n# unreadable ends the container, naming what it cannot read.\nunreadable() {\n  echo \"$1 is not readable by uid $(id -u): this container's identity cannot read tailscaled's certificate cache, so the Secret will never be written\" \u003e\u00262\n  exit 1\n}\npublish() {\n  for dir in \"$state\" \"$cache\"; do\n    if [ -e \"$dir\" ] \u0026\u0026 ! { [ -r \"$dir\" ] \u0026\u0026 [ -x \"$dir\" ]; }; then unreadable \"$dir\"; fi\n  done\n  for file in \"$crt\" \"$key\" \"$account\"; do\n    if [ -e \"$file\" ] \u0026\u0026 [ ! -r \"$file\" ]; then unreadable \"$file\"; fi\n  done\n  if ! { [ -s \"$crt\" ] \u0026\u0026 [ -s \"$key\" ] \u0026\u0026 [ -s \"$account\" ]; }; then\n    if [ -z \"$waiting\" ]; then\n      echo \"waiting for tailscaled to cache a certificate under $cache\"\n      waiting=1\n    fi\n    return 0\n  fi\n  mine=$(notafter \"$crt\")\n  [ -n \"$mine\" ] || return 0\n  theirs=\n  if [ -s \"$secret/tls.crt\" ]; then theirs=$(notafter \"$secret/tls.crt\"); fi\n  if [ -n \"$theirs\" ] \u0026\u0026 [ \"$mine\" -le \"$theirs\" ]; then return 0; fi\n  body=$(printf '{\"data\":{\"tls.crt\":\"%s\",\"tls.key\":\"%s\",\"acme-account.key.pem\":\"%s\"}}' \\\n    \"$(base64 \u003c\"$crt\" | tr -d '\\n')\" \"$(base64 \u003c\"$key\" | tr -d '\\n')\" \"$(base64 \u003c\"$account\" | tr -d '\\n')\")\n  if curl -sS -f -X PATCH \"$url\" \\\n    --cacert \"$tokens/ca.crt\" \\\n    -H \"Authorization: Bearer $(cat \"$tokens/token\")\" \\\n    -H 'Content-Type: application/merge-patch+json' \\\n    --data-binary \"$body\" \u003e/dev/null; then\n    echo \"published a later certificate for $fqdn\"\n  else\n    echo \"publishing the certificate for $fqdn failed; retrying in 60s\" \u003e\u00262\n  fi\n}\nwhile true; do\n  publish\n  sleep 60\ndone\n"
+        ],
+        "command": [
+          "/bin/sh",
+          "-c"
+        ],
+        "env": [
+          {
+            "name": "HOSTNAME",
+            "valueFrom": {
+              "fieldRef": {
+                "fieldPath": "metadata.name"
+              }
+            }
+          }
+        ],
+        "image": "example.invalid/envoy@sha256:99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa",
+        "name": "cert-publish",
+        "resources": {
+          "limits": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/var/lib/frontdoor",
+            "name": "state"
+          },
+          {
+            "mountPath": "/etc/frontdoor-tls",
+            "name": "tls",
+            "readOnly": true
+          }
+        ]
+      },
+      {
+        "args": [
+          "socket=/var/lib/frontdoor/tailscaled.sock\nready_file=/var/lib/frontdoor/service-ready\ndraining_file=/var/lib/frontdoor/draining\nnode_file=/var/lib/frontdoor/node-id\nflag_file=/var/lib/frontdoor/advertise-service\nservice=svc:example-dispatch\ncertificate=example-dispatch.example-tailnet.ts.net\nhealth=''\ngrace=60\nstuck_first=120\nstuck_max=960\npause=15\nattempts=6\nperiod=5\nhealth_timeout=6\nrise=2\nfall=3\nset -u\nat() { date -u +%Y-%m-%dT%H:%M:%SZ; }\nnow() { date -u +%s; }\nlog() { echo \"$(at) $1 | $2 | $3\"; }\nts() { tailscale --socket=\"$socket\" \"$@\"; }\nerr=${TMPDIR:-/tmp}/tailnet-advertiser.err\nhealth_out=${TMPDIR:-/tmp}/tailnet-advertiser.health\n# follow sets id to Self.ID and st to the status it read, and keeps the node id file on id. It\n# fails, and writes nothing, while tailscaled does not answer as a logged-in node, or names an id\n# that is not alphanumeric, as no StableNodeID is.\nfollow() {\n  id=\n  st=$(ts status --json --peers=false 2\u003e/dev/null) || return 1\n  printf '%s\\n' \"$st\" | grep -q '^[[:space:]]*\"BackendState\": \"Running\",*$' || return 1\n  id=$(printf '%s\\n' \"$st\" | sed -n 's/^[[:space:]]*\"ID\": \"\\([^\"]*\\)\",*$/\\1/p' | head -n 1)\n  case \"$id\" in\n    '') return 1 ;;\n    *[!A-Za-z0-9]*) log \"node id\" \"tailscale status --json --peers=false\" \"$id is not alphanumeric: not written\"; id=; return 1 ;;\n  esac\n  was=$(cat \"$node_file\" 2\u003e/dev/null)\n  if [ \"$id\" != \"$was\" ]; then\n    printf '%s\\n' \"$id\" \u003e\"$node_file.tmp\" \u0026\u0026 mv \"$node_file.tmp\" \"$node_file\"\n    log \"node id\" \"tailscale status --json --peers=false\" \"$id, was ${was:-none}: written to $node_file\"\n  fi\n}\n# draining: the draining file names this cycle's node and is younger than the grace period. One\n# older than that is from a termination that is over (the kubelet has killed the container whose\n# preStop hook wrote it), and is removed: else a tailscale container that came back as the same\n# node, after a logout that failed, would never be advertised again. A time that is not a number\n# counts as over.\ndraining() {\n  [ -e \"$draining_file\" ] \u0026\u0026 read -r drained began _ \u003c\"$draining_file\" || return 1\n  case \"$began\" in ''|*[!0-9]*) began=0 ;; esac\n  if [ $(($(now) - began)) -gt \"$grace\" ]; then\n    rm -f \"$draining_file\"\n    log \"service advertisement\" \"rm -f $draining_file\" \"the preStop hook's drain of node ${drained:-none}, begun at $began, is more than ${grace}s old: over\"\n    return 1\n  fi\n  [ \"$drained\" = \"$node\" ]\n}\n# may: no preStop hook drains this cycle's node and, with an advertise gate, its flag names it.\nmay() {\n  if [ -n \"$flag_file\" ]; then\n    [ -e \"$flag_file\" ] \u0026\u0026 read -r flagged _ \u003c\"$flag_file\" \u0026\u0026 [ \"$flagged\" = \"$node\" ] || return 1\n  fi\n  ! draining\n}\n# still: tailscaled still runs as this cycle's node, and it may advertise.\nstill() { follow \u0026\u0026 [ \"$id\" = \"$node\" ] \u0026\u0026 may; }\nadvertising() { ts debug prefs 2\u003e/dev/null | grep -q \"\\\"$service\\\"\"; }\n# approved: the status follow last read lists the Service in the self node's service-host\n# capability.\napproved() {\n  printf '%s\\n' \"$st\" | awk -v want=\"\\\"$service\\\": [\" '\n    !inside \u0026\u0026 /^ *\"service-host\": \\[$/ { inside = 1; match($0, /^ */); indent = RLENGTH; next }\n    inside {\n      match($0, /^ */)\n      if (RLENGTH \u003c= indent) { inside = 0; next }\n      if (index(substr($0, RLENGTH + 1), want) == 1) found = 1\n    }\n    END { exit !found }'\n}\n# healthy: one GET of the health URL answered HTTP 200 (the last status line wget -S prints, after\n# any redirect). Each change of answer is logged once.\nlast_code=unknown\nhealthy() {\n  wget -S -O /dev/null -T \"$health_timeout\" \"$health\" \u003e\"$health_out\" 2\u003e\u00261\n  rc=$?\n  code=$(sed -n 's/^[[:space:]]*HTTP\\/[0-9.]* \\([0-9][0-9][0-9]\\).*/\\1/p' \"$health_out\" | tail -n 1)\n  [ -n \"$code\" ] || code=\"no answer: $(tr '\\n' ' ' \u003c\"$health_out\")\"\n  if [ \"$code\" != \"$last_code\" ]; then\n    log \"health\" \"wget $health\" \"HTTP $code, was $last_code\"\n    last_code=$code\n  fi\n  [ \"$rc\" -eq 0 ] \u0026\u0026 [ \"$code\" = 200 ]\n}\n# unstick drains the Service and advertises it again once the node has been advertised and\n# unapproved for more than stuck seconds, doubling stuck up to stuck_max. It returns 1 when the\n# cycle must start again: the node changed or may no longer advertise during the pause, or the new\n# advertisement failed.\nunstick() {\n  waited=$(($(now) - since))\n  [ \"$waited\" -gt \"$stuck\" ] || return 0\n  recoveries=$((recoveries + 1))\n  stuck=$((stuck * 2))\n  [ \"$stuck\" -le \"$stuck_max\" ] || stuck=$stuck_max\n  recovery=\"recovery $recoveries: not approved ${waited}s after advertising\"\n  if ! ts serve drain \"$service\" \u003e/dev/null 2\u003e\"$err\"; then\n    log \"service advertisement\" \"tailscale serve drain $service\" \"$recovery: the drain failed: $(tr '\\n' ' ' \u003c\"$err\"); next recovery after ${stuck}s\"\n    return 0\n  fi\n  sleep \"$pause\"\n  still || return 1\n  if ! ts serve advertise \"$service\" \u003e/dev/null 2\u003e\"$err\"; then\n    log \"service advertisement\" \"tailscale serve drain $service; sleep $pause; tailscale serve advertise $service\" \"$recovery: drained, and the advertisement failed: $(tr '\\n' ' ' \u003c\"$err\"); advertising again\"\n    return 1\n  fi\n  since=$(now)\n  log \"service advertisement\" \"tailscale serve drain $service; sleep $pause; tailscale serve advertise $service\" \"$recovery: drained and advertised again; next recovery after ${stuck}s\"\n}\norders=0\nwhile :; do\n  rm -f \"$ready_file\"\n  until follow; do sleep \"$period\"; done\n  node=$id\n  good=0\n  while :; do\n    if may; then\n      [ -z \"$health\" ] \u0026\u0026 break\n      if healthy; then good=$((good + 1)); else good=0; fi\n      [ \"$good\" -ge \"$rise\" ] \u0026\u0026 break\n    else\n      good=0\n    fi\n    sleep \"$period\"\n    follow \u0026\u0026 [ \"$id\" = \"$node\" ] || continue 2\n  done\n  [ -z \"$flag_file\" ] || log \"service advertisement\" \"cat $flag_file\" \"$(cat \"$flag_file\")\"\n  until ts serve advertise \"$service\" \u003e/dev/null 2\u003e\"$err\"; do\n    log \"service advertisement\" \"tailscale serve advertise $service\" \"failed: $(tr '\\n' ' ' \u003c\"$err\"); again in 10s\"\n    sleep 10\n    still || continue 2\n  done\n  log \"service advertisement\" \"tailscale serve advertise $service\" \"advertised as node $node\"\n  since=$(now)\n  stuck=$stuck_first\n  recoveries=0\n  bad=0\n  held=\n  while :; do\n    if ! follow; then gone=\"tailscaled answers as no logged-in node\"; break\n    elif [ \"$id\" != \"$node\" ]; then gone=\"tailscaled is node $id now, not $node\"; break\n    elif ! may; then gone=\"node $node may not advertise: a preStop hook drains it${flag_file:+, or the advertise flag does not name it}\"; break\n    fi\n    if [ -n \"$health\" ]; then\n      if healthy; then bad=0; else bad=$((bad + 1)); fi\n      if [ \"$bad\" -ge \"$fall\" ]; then\n        ts serve drain \"$service\" \u003e/dev/null 2\u003e\"$err\" || log \"service advertisement\" \"tailscale serve drain $service\" \"failed: $(tr '\\n' ' ' \u003c\"$err\")\"\n        gone=\"$bad health checks of $health failed in a row: $service drained\"\n        break\n      fi\n    fi\n    if ! advertising; then gone=\"node $node no longer advertises $service\"; break; fi\n    if ! approved; then\n      if [ -e \"$ready_file\" ]; then\n        rm -f \"$ready_file\"\n        log \"readiness\" \"rm -f $ready_file\" \"node $node is no longer approved to host $service: not ready\"\n      fi\n      if ! unstick; then gone=\"node $node changed, may no longer advertise, or was not advertised again during a recovery\"; break; fi\n      sleep \"$period\"\n      continue\n    fi\n    if [ -n \"$certificate\" ] \u0026\u0026 [ \"$held\" != \"$node\" ]; then\n      if ts cert --cert-file=- --key-file=- \"$certificate\" \u003e/dev/null 2\u003e\"$err\"; then\n        held=$node\n        log \"service certificate\" \"tailscale cert $certificate\" \"in tailscaled's cache\"\n      else\n        why=$(tr '\\n' ' ' \u003c\"$err\")\n        if grep -q 'invalid domain' \"$err\"; then\n          backoff=30\n        else\n          orders=$((orders + 1))\n          if [ \"$orders\" -ge \"$attempts\" ]; then\n            ts serve drain \"$service\" \u003e/dev/null 2\u003e\u00261\n            log \"service certificate\" \"tailscale cert $certificate\" \"$orders orders failed, the last: $why; no more from this pod: $service drained, not ready\"\n            while sleep 30; do follow; done\n          fi\n          backoff=$((60 * orders + ${RANDOM:-0} % 30))\n        fi\n        log \"service certificate\" \"tailscale cert $certificate\" \"not yet: $why; again in ${backoff}s\"\n        sleep \"$backoff\"\n        continue\n      fi\n    fi\n    if [ ! -e \"$ready_file\" ]; then\n      printf '%s\\n' \"$node\" \u003e\"$ready_file.tmp\" \u0026\u0026 mv \"$ready_file.tmp\" \"$ready_file\"\n      log \"readiness\" \"write $ready_file\" \"node $node is approved to host $service${certificate:+ and tailscaled holds its certificate}: ready\"\n    fi\n    sleep \"$period\"\n  done\n  rm -f \"$ready_file\"\n  log \"readiness\" \"rm -f $ready_file\" \"$gone: not ready; advertising again once the node may\"\ndone\n"
+        ],
+        "command": [
+          "/bin/sh",
+          "-c"
+        ],
+        "image": "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "name": "advertiser",
+        "resources": {
+          "limits": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/var/lib/frontdoor",
+            "name": "state"
           }
         ]
       }
     ],
     "enableServiceLinks": false,
-    "serviceAccountName": "example-dispatch",
+    "initContainers": [
+      {
+        "args": [
+          "state=/var/lib/frontdoor/tailscale\nsecret=/etc/frontdoor-tls\nfqdn=example-dispatch.example-tailnet.ts.net\nset -eu\ncache=$state/certs\nmkdir -p \"$cache\"\nchmod 0700 \"$cache\"\nif [ -s \"$secret/tls.crt\" ] \u0026\u0026 [ -s \"$secret/tls.key\" ] \u0026\u0026 [ -s \"$secret/acme-account.key.pem\" ]; then\n  cp \"$secret/tls.crt\" \"$cache/$fqdn.crt\"\n  chmod 0644 \"$cache/$fqdn.crt\"\n  cp \"$secret/tls.key\" \"$cache/$fqdn.key\"\n  chmod 0600 \"$cache/$fqdn.key\"\n  cp \"$secret/acme-account.key.pem\" \"$cache/acme-account.key.pem\"\n  chmod 0600 \"$cache/acme-account.key.pem\"\n  echo \"seeded the cached certificate for $fqdn from $secret\"\nelse\n  echo \"no published certificate in $secret; the claim gate decides whether this pod orders one\"\nfi\n"
+        ],
+        "command": [
+          "/bin/sh",
+          "-c"
+        ],
+        "image": "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "name": "cert-seed",
+        "resources": {
+          "limits": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/var/lib/frontdoor",
+            "name": "state"
+          },
+          {
+            "mountPath": "/etc/frontdoor-tls",
+            "name": "tls",
+            "readOnly": true
+          }
+        ]
+      }
+    ],
+    "securityContext": {
+      "runAsGroup": 999,
+      "runAsNonRoot": true,
+      "runAsUser": 999,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "serviceAccountName": "example-dispatch-tailnet",
+    "terminationGracePeriodSeconds": 60,
     "topologySpreadConstraints": [
       {
         "labelSelector": {
@@ -130,10 +327,21 @@
     ],
     "volumes": [
       {
+        "emptyDir": {},
+        "name": "state"
+      },
+      {
         "configMap": {
           "name": "example-dispatch-serve"
         },
         "name": "serve"
+      },
+      {
+        "name": "tls",
+        "secret": {
+          "optional": false,
+          "secretName": "example-dispatch-tailnet-tls"
+        }
       }
     ]
   }

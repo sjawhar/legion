@@ -26,23 +26,28 @@ const (
 	dispatchEnvoyImage     = "example.invalid/envoy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	dispatchTailscaleImage = "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 	dispatchProxyImage     = "example.invalid/cloud-sql-proxy@sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	// dispatchToolsImage is frontDoorToolsImage: the envoy image at a digest of its own, as a
+	// consumer pins it, so the app's image moving leaves it where it is.
+	dispatchToolsImage = "example.invalid/envoy@sha256:99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa"
 )
 
 func dispatchArgs() *gcp.DispatchArgs {
 	return &gcp.DispatchArgs{
-		Region:             "us-central1",
-		Hostname:           "example-dispatch",
-		TailnetDnsName:     "example-tailnet.ts.net",
-		Tags:               []string{"tag:example-dispatch"},
-		TailnetAuthKey:     pulumi.String("tskey-auth-example-0123456789"),
-		EnvoyImage:         dispatchEnvoyImage,
-		TailscaleImage:     dispatchTailscaleImage,
-		CloudSqlProxyImage: dispatchProxyImage,
-		NatsUrl:            pulumi.String("nats://example-hub.example-tailnet.ts.net:4222"),
-		NatsSeedSecret:     pulumi.String("projects/example-project/secrets/example-nats-seed"),
-		SignInClientId:     "example-client-id",
-		SignInClientSecret: pulumi.String("example-client-secret"),
-		SignInDomain:       "example.com",
+		Region:              "us-central1",
+		Hostname:            "example-dispatch",
+		TailnetDnsName:      "example-tailnet.ts.net",
+		Tags:                []string{"tag:example-dispatch"},
+		TailnetAuthKey:      pulumi.String("tskey-auth-example-0123456789"),
+		TailnetService:      pulumi.String("svc:example-dispatch"),
+		EnvoyImage:          dispatchEnvoyImage,
+		TailscaleImage:      dispatchTailscaleImage,
+		CloudSqlProxyImage:  dispatchProxyImage,
+		FrontDoorToolsImage: dispatchToolsImage,
+		NatsUrl:             pulumi.String("nats://example-hub.example-tailnet.ts.net:4222"),
+		NatsSeedSecret:      pulumi.String("projects/example-project/secrets/example-nats-seed"),
+		SignInClientId:      "example-client-id",
+		SignInClientSecret:  pulumi.String("example-client-secret"),
+		SignInDomain:        "example.com",
 	}
 }
 
@@ -133,7 +138,6 @@ func TestDispatchSettingsApplyDefaults(t *testing.T) {
 	require.Equal(t, 1, settings.Replicas)
 	require.Equal(t, "Recreate", settings.StrategyType)
 	require.Nil(t, settings.RollingUpdate, "one replica is recreated, never rolled")
-	require.Equal(t, `{"TCP":{"443":{"HTTPS":true}},"Web":{"example-dispatch.example-tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://example-dispatch.dispatch.svc.cluster.local:8766"}}}}}`, settings.ServeConfig)
 }
 
 // Unset, appCpu and appMemory are the 1 CPU and 4Gi the app container always had, as requests and
@@ -242,6 +246,8 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an unpinned Envoy image", edit: func(a *gcp.DispatchArgs) { a.EnvoyImage = "example.invalid/envoy:latest" }, err: []string{"envoyImage", "@sha256:"}},
 		{name: "an unpinned Tailscale image", edit: func(a *gcp.DispatchArgs) { a.TailscaleImage = "example.invalid/tailscale:latest" }, err: []string{"tailscaleImage", "@sha256:"}},
 		{name: "an unpinned Cloud SQL proxy image", edit: func(a *gcp.DispatchArgs) { a.CloudSqlProxyImage = "example.invalid/cloud-sql-proxy:latest" }, err: []string{"cloudSqlProxyImage", "@sha256:"}},
+		{name: "an unpinned front-door tools image", edit: func(a *gcp.DispatchArgs) { a.FrontDoorToolsImage = "example.invalid/envoy:latest" }, err: []string{"frontDoorToolsImage", "@sha256:"}},
+		{name: "no front-door tools image", edit: func(a *gcp.DispatchArgs) { a.FrontDoorToolsImage = "" }, err: []string{"frontDoorToolsImage", "pinned by digest"}},
 		{name: "no region", edit: func(a *gcp.DispatchArgs) { a.Region = "" }, err: []string{"region", "required"}},
 		{name: "no sign-in client ID", edit: func(a *gcp.DispatchArgs) { a.SignInClientId = "" }, err: []string{"signInClientId", "required"}},
 		{name: "an invalid sign-in domain", edit: func(a *gcp.DispatchArgs) { a.SignInDomain = "Example.COM" }, err: []string{"signInDomain", "lowercase DNS name"}},
@@ -252,6 +258,7 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "a namespace longer than a DNS label", edit: func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(strings.Repeat("a", 64)) }, err: []string{"namespace", "DNS label"}},
 		{name: "an allowed namespace longer than a DNS label", edit: func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{strings.Repeat("a", 64)} }, err: []string{"allowedNamespaces[0]", "DNS label"}},
 		{name: "no tailnet auth key", edit: func(a *gcp.DispatchArgs) { a.TailnetAuthKey = nil }, err: []string{"tailnetAuthKey", "required"}},
+		{name: "no tailnet service", edit: func(a *gcp.DispatchArgs) { a.TailnetService = nil }, err: []string{"tailnetService", "required"}},
 		{name: "no NATS URL", edit: func(a *gcp.DispatchArgs) { a.NatsUrl = nil }, err: []string{"natsUrl", "required"}},
 		{name: "no NATS seed secret", edit: func(a *gcp.DispatchArgs) { a.NatsSeedSecret = nil }, err: []string{"natsSeedSecret", "required"}},
 		{name: "no sign-in client secret", edit: func(a *gcp.DispatchArgs) { a.SignInClientSecret = nil }, err: []string{"signInClientSecret", "required"}},
@@ -480,6 +487,7 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed in the Envoy image", "envoyImage", func(a *gcp.DispatchArgs) { a.EnvoyImage = "example.invalid/" + seed + digest }},
 		{"a seed in the Tailscale image", "tailscaleImage", func(a *gcp.DispatchArgs) { a.TailscaleImage = "example.invalid/" + seed + digest }},
 		{"a seed in the Cloud SQL proxy image", "cloudSqlProxyImage", func(a *gcp.DispatchArgs) { a.CloudSqlProxyImage = "example.invalid/" + seed + digest }},
+		{"a seed in the front-door tools image", "frontDoorToolsImage", func(a *gcp.DispatchArgs) { a.FrontDoorToolsImage = "example.invalid/" + seed + digest }},
 		{"a seed as the sign-in client ID", "signInClientId", func(a *gcp.DispatchArgs) { a.SignInClientId = seed }},
 		{"a seed inside the sign-in domain", "signInDomain", func(a *gcp.DispatchArgs) { a.SignInDomain = lower + ".example.com" }},
 		{"a seed in the database version", "databaseVersion", func(a *gcp.DispatchArgs) { a.DatabaseVersion = pulumi.StringRef(seed) }},
@@ -847,9 +855,10 @@ func TestDispatchDeploymentsKeepTheirNamesAndSelectors(t *testing.T) {
 	require.Equal(t, []any{map[string]any{"port": float64(1055), "targetPort": float64(1055)}}, spec["ports"])
 }
 
-// The app's image reaching the front door's Deployment would roll the tailnet node, and with it
-// the hostname every reader reaches Dispatch at, on every release of the app. Registering the same
-// inputs twice is the only form a mock engine can state "the front door stays up" in.
+// The app's image reaching the front door's Deployment would roll the front door's pods on every
+// release of the app. cert-publish runs on frontDoorToolsImage, an input of its own, so no
+// front-door container takes the app's image. Registering the same inputs twice is the only form a
+// mock engine can state "the front door stays up" in.
 func TestDispatchFrontDoorDoesNotRollOnTheAppsImage(t *testing.T) {
 	first, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -867,6 +876,228 @@ func TestDispatchFrontDoorDoesNotRollOnTheAppsImage(t *testing.T) {
 		deploymentPodTemplate(t, first, "example-dispatch"),
 		deploymentPodTemplate(t, second, "example-dispatch"),
 		"the app's own pods carry the new image")
+}
+
+// frontDoorEnv indexes one front-door container's environment by name: a plain variable maps to
+// its value, and one from a Secret or a field to its valueFrom.
+func frontDoorEnv(t *testing.T, container map[string]any) map[string]any {
+	t.Helper()
+	env := map[string]any{}
+	for _, item := range container["env"].([]any) {
+		entry := item.(map[string]any)
+		name := entry["name"].(string)
+		require.NotContains(t, env, name, "the environment names %s once", name)
+		if value, ok := entry["value"]; ok {
+			env[name] = value
+		} else {
+			env[name] = entry["valueFrom"]
+		}
+	}
+	return env
+}
+
+// podNamed is a valueFrom that reads the pod's own name.
+var podNamed = map[string]any{"fieldRef": map[string]any{"fieldPath": "metadata.name"}}
+
+// By default the front door runs two pods and rolls them one new pod at a time with none missing,
+// so no single pod carries the tailnet name or the SOCKS5 proxy; the SOCKS5 Service selects exactly
+// the pods the Deployment creates, each of which runs the proxy.
+func TestDispatchFrontDoorRunsTwoRollingPodsBehindItsSOCKS5Service(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	requireStrategy(t, m, "example-dispatch-tailnet", 2)
+	template := deploymentPodTemplate(t, m, "example-dispatch-tailnet")
+	spec := m.Named(t, "kubernetes:core/v1:Service", "example-dispatch-tailnet").Inputs.Mappable()["spec"].(map[string]any)
+	require.Equal(t, template["metadata"].(map[string]any)["labels"], spec["selector"], "the SOCKS5 Service selects the front door's pods")
+	require.Equal(t, []any{map[string]any{"port": float64(1055), "targetPort": float64(1055)}}, spec["ports"])
+	require.Equal(t, "0.0.0.0:1055", frontDoorEnv(t, podContainer(t, template, "tailscale"))["TS_SOCKS5_SERVER"],
+		"every front-door pod runs the proxy, on every address")
+}
+
+// Each front-door pod is a tailnet node of its own hosting the Tailscale Service: its own
+// ServiceAccount; tailscaled's state on the pod's emptyDir in a directory below the mount point,
+// which tailscaled can make 0700 (the kubelet owns the mount point, and tailscaled falls back to
+// an in-memory store when its chmod fails); a node named after the pod; no Kubernetes Secret
+// holding node state; no advertisement by containerboot itself, the advertiser deciding it; the
+// SOCKS5 proxy on every pod; a grace period for the preStop drain and containerboot's shutdown;
+// readiness from the advertiser's ready file alone. Its containers are cert-seed (init), tailscale,
+// cert-publish on frontDoorToolsImage and the advertiser, every one as the envoy image's uid with
+// no privilege, together requesting 700m and 768Mi.
+func TestDispatchFrontDoorPodHostsTheTailscaleService(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	template := deploymentPodTemplate(t, m, "example-dispatch-tailnet")
+	pod := template["spec"].(map[string]any)
+	require.Equal(t, "example-dispatch-tailnet", pod["serviceAccountName"])
+	require.EqualValues(t, 60, pod["terminationGracePeriodSeconds"])
+	require.Equal(t, map[string]any{
+		"runAsUser": float64(999), "runAsGroup": float64(999), "runAsNonRoot": true,
+		"seccompProfile": map[string]any{"type": "RuntimeDefault"},
+	}, pod["securityContext"])
+	require.Equal(t, []any{
+		map[string]any{"name": "state", "emptyDir": map[string]any{}},
+		map[string]any{"name": "serve", "configMap": map[string]any{"name": "example-dispatch-serve"}},
+		map[string]any{"name": "tls", "secret": map[string]any{"secretName": "example-dispatch-tailnet-tls", "optional": false}},
+	}, pod["volumes"])
+
+	containers := podProbes(t, m, "example-dispatch-tailnet")
+	names := func(field string) []string {
+		var out []string
+		for _, item := range pod[field].([]any) {
+			out = append(out, item.(map[string]any)["name"].(string))
+		}
+		return out
+	}
+	require.Equal(t, []string{"cert-seed"}, names("initContainers"))
+	require.Equal(t, []string{"tailscale", "cert-publish", "advertiser"}, names("containers"))
+	for name, want := range map[string]struct{ image, cpu, memory string }{
+		"cert-seed":    {dispatchTailscaleImage, "100m", "128Mi"},
+		"tailscale":    {dispatchTailscaleImage, "500m", "512Mi"},
+		"cert-publish": {dispatchToolsImage, "100m", "128Mi"},
+		"advertiser":   {dispatchTailscaleImage, "100m", "128Mi"},
+	} {
+		container := containers[name]
+		require.Equal(t, want.image, container["image"], name)
+		require.Equal(t, map[string]any{"requests": map[string]any{"cpu": want.cpu, "memory": want.memory}, "limits": map[string]any{"cpu": want.cpu, "memory": want.memory}},
+			container["resources"], name)
+		require.Equal(t, map[string]any{"allowPrivilegeEscalation": false, "capabilities": map[string]any{"drop": []any{"ALL"}}},
+			container["securityContext"], name)
+		require.Contains(t, container["volumeMounts"], map[string]any{"name": "state", "mountPath": "/var/lib/frontdoor"}, "%s mounts the state volume", name)
+		if name != "tailscale" {
+			require.NotContains(t, container, "readinessProbe", "only the tailscale container's readiness counts")
+		}
+	}
+	for _, name := range []string{"cert-seed", "cert-publish"} {
+		require.Contains(t, containers[name]["volumeMounts"], map[string]any{"name": "tls", "mountPath": "/etc/frontdoor-tls", "readOnly": true}, name)
+	}
+
+	tailscale := containers["tailscale"]
+	env := frontDoorEnv(t, tailscale)
+	stateDir := env["TS_STATE_DIR"].(string)
+	require.Equal(t, "/var/lib/frontdoor/tailscale", stateDir)
+	require.Equal(t, stateDir, env["TS_LOGS_DIR"])
+	for _, item := range tailscale["volumeMounts"].([]any) {
+		require.NotEqual(t, stateDir, item.(map[string]any)["mountPath"], "TS_STATE_DIR is no mount point, which the pod's uid cannot chmod")
+	}
+	require.Equal(t, podNamed, env["TS_HOSTNAME"], "each pod registers under its own name")
+	require.Equal(t, "", env["TS_KUBE_SECRET"], "no Kubernetes Secret holds a node's state")
+	require.Equal(t, "false", env["TS_EXPERIMENTAL_SERVICE_AUTO_ADVERTISEMENT"], "containerboot advertises nothing by itself")
+	require.Equal(t, "0.0.0.0:1055", env["TS_SOCKS5_SERVER"])
+	require.Equal(t, "/etc/tailscale/serve.json", env["TS_SERVE_CONFIG"])
+	require.Contains(t, tailscale["volumeMounts"], map[string]any{"name": "serve", "mountPath": "/etc/tailscale"})
+	require.Equal(t, "/var/lib/frontdoor/tailscaled.sock", env["TS_SOCKET"])
+	require.Equal(t, map[string]any{"secretKeyRef": map[string]any{"name": "example-dispatch-tailnet-auth-key", "key": "TS_AUTHKEY"}}, env["TS_AUTHKEY"])
+	require.Equal(t, "--advertise-tags=tag:example-dispatch", env["TS_EXTRA_ARGS"])
+	require.Equal(t, map[string]any{
+		"exec":          map[string]any{"command": []any{"/bin/sh", "-c", "test -e /var/lib/frontdoor/service-ready"}},
+		"periodSeconds": float64(5), "failureThreshold": float64(1),
+	}, tailscale["readinessProbe"], "ready only while the advertiser's ready file exists")
+	require.Contains(t, tailscale, "livenessProbe")
+	require.Contains(t, tailscale, "startupProbe")
+	preStop := tailscale["lifecycle"].(map[string]any)["preStop"].(map[string]any)["exec"].(map[string]any)["command"].([]any)
+	require.Contains(t, preStop[2], "serve drain svc:example-dispatch", "the preStop hook drains the Service")
+	require.Contains(t, preStop[2], "logout", "the preStop hook logs the node out")
+
+	publish := containers["cert-publish"]
+	require.Equal(t, map[string]any{"HOSTNAME": podNamed}, frontDoorEnv(t, publish), "the claim gate keys its entries on the pod's own name")
+	script := publish["args"].([]any)[0].(string)
+	for _, want := range []string{"legion.dev/certificate-claims", "legion.dev/front-door-nodes", "published a later certificate",
+		"url=https://kubernetes.default.svc/api/v1/namespaces/dispatch/secrets/example-dispatch-tailnet-tls"} {
+		require.Contains(t, script, want, "cert-publish runs the claim gate and the publishing loop")
+	}
+	advertiser := containers["advertiser"]["args"].([]any)[0].(string)
+	require.Contains(t, advertiser, "certificate=example-dispatch.example-tailnet.ts.net\n", "the advertiser orders the Service name's certificate")
+	require.Contains(t, advertiser, "flag_file=/var/lib/frontdoor/advertise-service\n", "the advertiser advertises only the node the gate's flag names")
+	require.Contains(t, advertiser, "service=svc:example-dispatch\n")
+	require.Contains(t, containers["cert-seed"]["args"].([]any)[0], "seeded the cached certificate")
+}
+
+// The front door writes one object, its TLS Secret, through a Role that names that Secret alone
+// and binds the front door's own ServiceAccount alone; no Role lets any pod write a tailnet state
+// Secret, and no container names one. The app and the listener keep ServiceAccount <hostname>,
+// which the serviceAccountSubject output names (TestConstructOutputsTheServiceAccountIssuerAndSubject).
+func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	const roleType, bindingType = "kubernetes:rbac.authorization.k8s.io/v1:Role", "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding"
+	require.Len(t, registrationsOf(m, roleType), 1, "the component registers one Role")
+	require.Len(t, registrationsOf(m, bindingType), 1, "the component registers one RoleBinding")
+	role := m.Named(t, roleType, "example-dispatch-tailnet-tls").Inputs.Mappable()
+	require.Equal(t, []any{map[string]any{
+		"apiGroups": []any{""}, "resources": []any{"secrets"}, "resourceNames": []any{"example-dispatch-tailnet-tls"},
+		"verbs": []any{"get", "update", "patch"},
+	}}, role["rules"])
+	binding := m.Named(t, bindingType, "example-dispatch-tailnet-tls").Inputs.Mappable()
+	require.Equal(t, map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "example-dispatch-tailnet-tls"}, binding["roleRef"])
+	require.Equal(t, []any{map[string]any{"kind": "ServiceAccount", "name": "example-dispatch-tailnet", "namespace": "dispatch"}}, binding["subjects"])
+	for _, r := range append(registrationsOf(m, roleType), registrationsOf(m, bindingType)...) {
+		for _, s := range allStrings(resource.NewProperty(r.Inputs)) {
+			require.NotContains(t, s, "tailscale-state", "%s %s", r.Type, r.Name)
+		}
+	}
+
+	var accounts []string
+	for _, r := range registrationsOf(m, "kubernetes:core/v1:ServiceAccount") {
+		accounts = append(accounts, r.Name)
+	}
+	require.ElementsMatch(t, []string{"example-dispatch", "example-dispatch-tailnet"}, accounts)
+	for _, workload := range dispatchWorkloads {
+		want := "example-dispatch"
+		if workload.deployment == "example-dispatch-tailnet" {
+			want = "example-dispatch-tailnet"
+		}
+		require.Equal(t, want, deploymentPodTemplate(t, m, workload.deployment)["spec"].(map[string]any)["serviceAccountName"], workload.deployment)
+		for _, container := range podProbes(t, m, workload.deployment) {
+			env, _ := container["env"].([]any)
+			for _, item := range env {
+				entry := item.(map[string]any)
+				if entry["name"] == "TS_KUBE_SECRET" {
+					require.Equal(t, "", entry["value"], "%s names no Kubernetes Secret for tailnet state", workload.deployment)
+				}
+			}
+		}
+	}
+}
+
+// The TLS Secret holds what cert-publish writes and nothing the program declares: it is registered
+// with no data and with its data ignored, so no preview plans to undo a published certificate, and
+// no pod template carries its checksum, so a renewed certificate rolls no pod.
+func TestDispatchFrontDoorTLSSecretHoldsOnlyWhatThePodsPublish(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	secret := m.Named(t, "kubernetes:core/v1:Secret", "example-dispatch-tailnet-tls")
+	require.Equal(t, "example-dispatch-tailnet-tls", secret.Inputs.Mappable()["metadata"].(map[string]any)["name"])
+	require.NotContains(t, secret.Inputs, resource.PropertyKey("data"))
+	require.NotContains(t, secret.Inputs, resource.PropertyKey("stringData"))
+	require.ElementsMatch(t, []string{"data", "stringData"}, secret.RPC.GetIgnoreChanges())
+	for _, workload := range dispatchWorkloads {
+		annotations, _ := deploymentPodTemplate(t, m, workload.deployment)["metadata"].(map[string]any)["annotations"].(map[string]any)
+		for key := range annotations {
+			require.NotContains(t, key, "example-dispatch-tailnet-tls", workload.deployment)
+		}
+	}
+	require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies(),
+		"urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Secret::example-dispatch-tailnet-tls",
+		"the front door's pods mount the Secret, so the Deployment waits for it")
+}
+
+// tailnetService names the Tailscale Service the front door hosts, and the pods host
+// svc:<hostname>, whose name the certificate and the URL carry: once it resolves to anything else,
+// the run fails naming the input and never the value.
+func TestDispatchRefusesATailnetServiceOtherThanItsOwn(t *testing.T) {
+	for _, value := range []string{"svc:another-service", "another-service", "svc:example-dispatch-other"} {
+		t.Run(value, func(t *testing.T) {
+			args := dispatchArgs()
+			args.TailnetService = pulumi.String(value)
+			_, err := runDispatch(t, args, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: tailnetService must be svc:example-dispatch")
+			require.NotContains(t, err.Error(), value)
+		})
+	}
 }
 
 // requireWaitsForTheFrontDoor fails unless deployment is created after the front door's pod and
@@ -1058,8 +1289,9 @@ func TestDispatchNetworkPolicyAdmitsOnlyTheGivenNamespaces(t *testing.T) {
 	require.Equal(t, []string{"example-dispatch-tailnet"}, ingressPods(t, rules[1], 8766))
 }
 
-// Whatever reaches the proxy at 1055 gets tailnet egress as this node, so only the two workloads
-// that dial the hub through it may; and only the app calls the listener's API at 9020.
+// Whatever reaches the proxy at 1055 gets tailnet egress as a front-door node, on every front-door
+// pod, so only the two workloads that dial the hub through it may; and only the app calls the
+// listener's API at 9020.
 func TestDispatchPoliciesFenceTheProxyAndTheListener(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1070,12 +1302,23 @@ func TestDispatchPoliciesFenceTheProxyAndTheListener(t *testing.T) {
 		policyIngressPods(t, m, "example-dispatch-listener", 9020))
 }
 
+// The front door's serve config, ConfigMap example-dispatch-serve's serve.json, hosts the
+// Tailscale Service svc:example-dispatch, terminating TLS for its name on 443 and proxying to the
+// app's Service.
 func TestDispatchRenderingsMatchGoldens(t *testing.T) {
 	require.Equal(t, readGolden(t, "dispatch-kubeconfig.golden"),
 		gcp.DispatchKubeconfig("example-endpoint", "ZXhhbXBsZS1jYQ==", "example-dispatch"))
-	settings, err := gcp.ResolveDispatch(dispatchArgs())
+	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
-	require.Equal(t, readGolden(t, "dispatch-serve.golden"), settings.ServeConfig)
+	require.Equal(t, readGolden(t, "dispatch-serve.golden"), serveConfig(t, m))
+}
+
+// serveConfig is the front door's serve.json as ConfigMap <hostname>-serve holds it.
+func serveConfig(t *testing.T, m *pulumitest.Mocks) string {
+	t.Helper()
+	data := normalizedProperty(m.Named(t, "kubernetes:core/v1:ConfigMap", "example-dispatch-serve").Inputs["data"]).(map[string]any)
+	require.Len(t, data, 1, "the ConfigMap holds serve.json alone")
+	return data["serve.json"].(string)
 }
 
 func normalizedProperty(value resource.PropertyValue) any {
@@ -1136,8 +1379,9 @@ func TestDispatchPodMatchesGolden(t *testing.T) {
 	requirePodGolden(t, m, "example-dispatch", "dispatch-pod.golden")
 }
 
-// The front door is one tailnet node, in a pod labelled app=<hostname>-tailnet: Service <hostname>
-// selects app=<hostname> and would send user traffic to a pod wearing that label.
+// A front-door pod is a tailnet node of its own hosting the Tailscale Service, in a pod labelled
+// app=<hostname>-tailnet: Service <hostname> selects app=<hostname> and would send user traffic to
+// a pod wearing that label.
 func TestDispatchTailnetPodMatchesGolden(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1400,8 +1644,11 @@ func TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial(t *testing.T) {
 			require.NotContains(t, s, "BEGIN", "%s holds PEM material", registration.Name)
 			require.NotContains(t, s, "agent-secrets-token-value", "%s holds the broker token", registration.Name)
 		}
-		require.NotContains(t, secretDataKeys(unwrappedProperty(registration.Inputs["stringData"]).ObjectValue()), "DISPATCH_AGENT_SECRETS_TOKEN")
-		require.NotContains(t, secretDataKeys(unwrappedProperty(registration.Inputs["stringData"]).ObjectValue()), "DISPATCH_APP_PEM_B64")
+		// The front door's TLS Secret is registered with no data at all (its pods write it).
+		if data, ok := registration.Inputs["stringData"]; ok {
+			require.NotContains(t, secretDataKeys(unwrappedProperty(data).ObjectValue()), "DISPATCH_AGENT_SECRETS_TOKEN")
+			require.NotContains(t, secretDataKeys(unwrappedProperty(data).ObjectValue()), "DISPATCH_APP_PEM_B64")
+		}
 	}
 }
 

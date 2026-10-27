@@ -38,7 +38,6 @@ type DispatchSettings struct {
 	Replicas           int
 	StrategyType       string
 	RollingUpdate      *DispatchRollingUpdate
-	ServeConfig        string
 	AgentSecretsURL    string
 	AppClientID        string
 	AppID              string
@@ -62,7 +61,6 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 		Namespace:          s.namespace,
 		Replicas:           s.replicas,
 		StrategyType:       s.strategy.strategyType,
-		ServeConfig:        s.serveConfig,
 		AgentSecretsURL:    s.agentSecretsURL,
 		AppClientID:        s.appClientID,
 		AppID:              s.appID,
