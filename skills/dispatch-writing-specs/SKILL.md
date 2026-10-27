@@ -40,7 +40,7 @@ For each spec, ask, comment and message:
 
 ## Questions
 
-- Name the concrete case first: which machines, files, sessions or people, and the numbers. Ask the choice in those terms ("Ship Friday and sign out 1,240 users, or hold to Monday?"), never "Which option?". Generalize only after, if at all.
+- Name the concrete case first: which machines, files, sessions or people, and the numbers. Then ask the choice in those terms, never "Which option?": a reader cannot work back from a general question to the case.
 - Propose an answer to each point, numbers included, with a reason.
 - A choice inside what the person asked for, or one their messages favour, is settled: decide it.
 - Ask only for the person's authority, taste or risk appetite, when options differ on what they care about.

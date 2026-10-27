@@ -74,7 +74,8 @@ the Dispatch specs behind the `dispatch` command:
 - `dispatch ask` has no `kind` argument and `AskKind` is `"question" | "approval"`. The question
   names the concrete case first: which machines, files, sessions or people, and the numbers. It
   asks the choice in those terms, saying what happens to whom under each option, never "How
-  should we proceed?" or "Which option?". It carries every fact the reader needs to decide and
+  should we proceed?" or "Which option?", because a reader cannot work back from a general
+  question to the case. It carries every fact the reader needs to decide and
   nothing that does not change the decision; it generalizes only after the specifics, if at all,
   and then gives the recommendation and its reason. The options carry the genuinely different
   approaches. Each option has a label, and its description says what that approach costs.

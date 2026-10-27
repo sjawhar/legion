@@ -58,7 +58,8 @@ const ASK_QUESTION_CONTRACT =
   "The question names the concrete case first: which machines, files, sessions or people, and the " +
   "numbers. It asks the choice in those terms, saying what happens to whom under each option " +
   '("Ship Friday and risk signing out 1,240 users, or hold to Monday?"), never "How should we ' +
-  'proceed?" or "Which option?". It carries every fact the reader needs to decide and nothing ' +
+  'proceed?" or "Which option?", because a reader cannot work back from a general question to ' +
+  "the case. It carries every fact the reader needs to decide and nothing " +
   "that does not change the decision. Generalize only after the specifics, if at all. Then give " +
   "your recommendation and its reason.";
 
