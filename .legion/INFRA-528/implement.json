@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-528",
+  "completed": "2026-10-27T02:20:00Z",
+  "proof": [
+    {
+      "criterion": "A1: a comment holding a mermaid code block shows a drawn diagram; at the commit before, the browser test finds the diagram source as code",
+      "surface": "Dispatch Conversation tab (/issues/<KEY>/conversation, comment thread opened) against the real Go Dispatch server and Postgres 17 + pgvector, in Desktop Chrome, iPhone 13 (Chromium), Desktop Safari (WebKit) and Desktop Firefox",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox",
+      "observed": "At head d2e90bba: 28 passed (2.3m), every row in all four projects. At the red commit ecc18ff3 (spec alone, SPA built at that commit): 24 failed, 4 passed (9.1m); each drawing row failed on toBeVisible of getByRole('img', { name: 'Rendered Mermaid diagram' }) and the refusal row on its role=status text, the guard row passed.",
+      "headSha": "d2e90bba64df2ce559a94b7cbb02f4e3dae7a27d",
+      "negativeControl": "The red commit ecc18ff3 (no drawing code): the comment row fails in every project because the card shows the source as code and no diagram image; the guard row (a ts fence) passes at both commits, so the spec is not failing on navigation."
+    },
+    {
+      "criterion": "Spec Summary: the same for an ask's question (Inbox), an issue message and a reply to a comment",
+      "surface": "Inbox / (ask card getByTestId(ask-<id>)), Conversation message turn, Conversation reply under its comment; same four browser projects",
+      "command": "same spec file and command as A1 (rows 2-4)",
+      "observed": "At head d2e90bba the ask, message and reply rows pass in chromium, iphone, webkit and firefox: the image is visible and holds both node labels, the source line 'graph TD' is mounted but hidden until 'Mermaid source' is clicked, then visible.",
+      "headSha": "d2e90bba64df2ce559a94b7cbb02f4e3dae7a27d",
+      "negativeControl": "At ecc18ff3 the same three rows fail in all four projects on the diagram image assertion (the bodies show their source as code)."
+    },
+    {
+      "criterion": "A refused source shows the reason and its source; a markup label draws as text; a failed renderer chunk leaves the source as code",
+      "surface": "Conversation comment (four projects); throwaway Playwright run in chromium aborting the mermaid chunks with page.route",
+      "command": "spec rows 5-6 as above; throwaway e2e/zz-mermaid-abort.e2e.ts (deleted after the run) with page.route(/\\/assets\\/(mermaid-diagrams|mermaid-svg)-.*\\.js$/, route.abort())",
+      "observed": "Row 5: status 'Unable to render Mermaid diagram: Dangling Mermaid edge: \"A -->\"' and the source open; row 6: the label's text drawn, no img element, window.__mermaidHit never set. Throwaway: both chunk requests aborted, the app's chunk-failure policy reloaded once (2 loads), the second failure left the block as code with no reload and no error boundary, console.error 'Showing Mermaid source as code, the diagram renderer is unavailable'.",
+      "headSha": "d2e90bba64df2ce559a94b7cbb02f4e3dae7a27d",
+      "negativeControl": "A ts fence in the same card stays code with no diagram and no 'Mermaid source' disclosure (guard row, passes at both commits)."
+    }
+  ],
+  "filesChanged": [
+    "biome.json",
+    "packages/dispatch/AGENTS.md",
+    "packages/dispatch/e2e/mermaid.e2e.ts",
+    "packages/dispatch/e2e/playwright.config.ts",
+    "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx",
+    "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts",
+    "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx",
+    "packages/dispatch/web/src/styles.css",
+    "packages/dispatch/web/vite.config.ts",
+    "packages/envoy/CHANGELOG.md",
+    "packages/proof-editor/AGENTS.md",
+    "packages/proof-editor/package.json",
+    "packages/proof-editor/src/mermaid-svg.ts",
+    "packages/proof-editor/tests/mermaid-svg.test.ts",
+    "packages/proof-editor/tests/upstream-boundary.ts"
+  ],
+  "trickyParts": [
+    "Browser harness: /legion/harness/setup.sh (idempotent) and /legion/harness/env.sh (source only around harness commands; it moves LD_LIBRARY_PATH). Lanes by LEGION_ROLE: implementer 18777/19021-19024 db dispatch_implementer_e2e, tester 20777/21021-21024 db dispatch_tester_e2e, reviewer 22777/23021-23024 db dispatch_reviewer_e2e; one Postgres on 127.0.0.1:55439 (re-run setup.sh if the pod was replaced). Rebuild web/dist (bun run build:web) after every web/src change.",
+    "An author's classDef/style/linkStyle paint reaches beautiful-mermaid's output as presentation attributes (fill=\"url(https://...)\", and the escaped spelling fill=\"\\75rl(...)\"); the sanitizer drops every non-data-* attribute holding a backslash or a fetching function other than a local url(#id). Author text never reaches the <style> element (measured).",
+    "Comment threads in the Conversation are collapsed to a MarkdownPreview by default, so the spec clicks 'Expand thread' (a phone opens the Thread dialog).",
+    "A failed chunk triggers the app's existing once-per-session reload (DeploymentResilience reloadForChunkFailure); the second failure leaves the block as code.",
+    "Bundle at head: org.eclipse.elk and 'Dangling Mermaid edge' appear only in mermaid-diagrams-*.js (1,542 kB, 470 kB gzip), statically imported only by the editor chunk lib-*.js (now 201 kB, was 1,746 kB) and the lazy mermaid-svg-*.js; the entry index-*.js (757 kB) only names it in its dynamic preload list; lib-headless-*.js imports index-*, index-* and lib-remark-directive-plugin-*, none of which carries the markers."
+  ],
+  "deviations": [
+    "The refusal row's source locator was fixed in its own commit 828d6894 after the change (upstream's status message quotes the dangling line, so getByText('A -->') matched two elements); the red commit ecc18ff3 is unchanged and its red run stands, since that row failed there on the status assertion before this line.",
+    "Sanitizer is stricter than the plan: besides the allowlist, on*/href removal and @import strip, it removes every non-data-* attribute holding a backslash or a fetching CSS function (url() other than url(#id), image-set, image, cross-fade, src, element), because an author's classDef/style paint reaches presentation attributes.",
+    "The closing-fence test also accepts blockquote markers before the fence (/^(?:\\s*>)*\\s*(`{3,}|~{3,})\\s*$/), so a finished diagram quoted at the end of a body draws.",
+    "One full Dispatch unit run at head reported 2418 pass / 1 fail; the failing test name was not captured, and two reruns at the same head passed 2419/0. Recorded as an unidentified flake, not reproduced."
+  ],
+  "openQuestions": []
+}
