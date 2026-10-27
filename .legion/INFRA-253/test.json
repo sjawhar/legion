@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-253",
-  "completed": "2026-10-27T08:50:00Z",
-  "headSha": "aef917661d13207b126a3953bbb26045e59fa108",
+  "completed": "2026-10-27T10:55:00Z",
+  "headSha": "26655eb1fdf7206814c9906a02aa58507b7908b7",
   "generation": 3,
   "implementerProof": {
     "verdict": "verified",
@@ -13,19 +13,19 @@
   "failed": 0,
   "proof": [
     {
-      "criterion": "After the merge of #2304: claude-backend-tmux.sh, stage3-4b13b-acceptance.sh and stage3-devbox-workflow.sh still require python3 (held-port.py's interpreter) and no longer require ss",
-      "surface": "pod: each script's tool-list line at aef91766 (claude-backend:527, stage3-4b13b:567, stage3:616) run verbatim under `env -i` with a PATH of stub tools and the scripts' fail",
-      "command": "env -i PATH=<stub dir> bash -c 'fail() {…}; <line>' for each line, with every tool present, without python3, and without ss",
-      "observed": "For all three lines: every tool present → `all tools found`, exit 0; ss absent (python3 present) → `all tools found`, exit 0, and no line names ss",
-      "headSha": "aef917661d13207b126a3953bbb26045e59fa108",
-      "negativeControl": "python3 absent → `FAIL python3 is required`, exit 1, for each of the three lines"
+      "criterion": "A1d/A3 after the merge of #2167: e2e-local.sh runs NATS, the listener and the fake session on ports the OS chose and passes; explicit overrides are used as given and an occupied one is refused",
+      "surface": "pod: packages/envoy, real natsd (built from the checkout), real envoy-listener and the Bun fake session, at 26655eb1",
+      "command": "cd packages/envoy && bash scripts/e2e-local.sh; bash scripts/e2e-local.test.sh",
+      "observed": "e2e-local.sh exit 0: `NATS: nats://127.0.0.1:41150`, `listener: http://127.0.0.1:16237` (both reported by the processes); `PASS: topic set, structured payloads, checks settlement, and both renderers match the local acceptance contract`; `PASS: an absent destination, the listener request records and a bus that did not answer are each refused by name`. e2e-local.test.sh exit 0, 7 PASS: --help starts no server; unsupported arguments start no server; refuses a NATS it did not start (E2E_NATS_PORT in use); an E2E_PORT in use fails with address already in use; an E2E_SESSION_PORT in use fails with address already in use; a second run in the same checkout is refused; TERM exits 143 and frees out/e2e.",
+      "headSha": "26655eb1fdf7206814c9906a02aa58507b7908b7",
+      "negativeControl": "e2e-local.test.sh's occupied-override rows: E2E_PORT and E2E_SESSION_PORT set to ports another process holds each fail with 'address already in use', and an occupied E2E_NATS_PORT is refused as a NATS the run did not start"
     },
     {
       "criterion": "Bare gate after the merge: the Stage 1 live proof at the new head",
-      "surface": "pod: the real legion built at aef91766, under tmux 3.5a, with Postgres 17",
+      "surface": "pod: the real legion built at 26655eb1, under tmux 3.5a, with Postgres 17",
       "command": "LEGION_E2E_PG_DSN=<pod pg> bash scripts/e2e/stage1-skeleton.sh",
       "observed": "`stage 1 e2e: PASS`, including the keeper restart and the check that only the daemon and keeper hold the listening socket",
-      "headSha": "aef917661d13207b126a3953bbb26045e59fa108",
+      "headSha": "26655eb1fdf7206814c9906a02aa58507b7908b7",
       "negativeControl": "the run's own first check: a DSN to a port with no Postgres is refused, naming the host and not the password"
     },
     {
@@ -45,7 +45,7 @@
       "negativeControl": "A1b's deterministic control: HoldPort mutated to release before Start fails TestHeldPortStaysHeldUntilItsProcessServes"
     }
   ],
-  "ciAtHead": "aef91766 at 08:48Z: Tests 40474924015, Legion Envoy and Contracts 40474923941, Docs 40474923947 and Worker Image 40474923940 all queued. e93c81da, read job by job: Tests success (3/3); Docs and Worker Image success; Legion Envoy and Contracts 40449991030: 15 jobs success, envoy-smoke included; dispatch cancelled when the run was superseded; contracts skipped. dispatch last passed at e067b440. The reviewer and merger must read every job at aef91766, dispatch and envoy-smoke included.",
+  "ciAtHead": "26655eb1 at 10:53Z: Tests 40490926408, Legion Envoy and Contracts 40490926489, Docs 40490926723 and Worker Image 40490926316 all queued. aef91766: Tests success (test, lint, typecheck); Docs and Worker Image success; Legion Envoy and Contracts 40474923941 cancelled by this push (changes success, every other job cancelled). Per the architect, approval rests on main's required checks (lint, typecheck, test, pr-title) at 26655eb1 plus these pod runs.",
   "devbox": "Unchanged since the last round: at 46502a84, stage2 PASS (23/23, restart-readopts included) and claude-backend PASS (9/9). stage3 has reached no restart checkpoint in four runs, each failing for a cause outside this PR, and a re-run waits for a quiet Actions queue. stage3-4b13b and dispatch-user-turns take only the gateway route and are not run.",
-  "mergeRecheck": "e93c81da → aef91766 (forward merge of main b08a56bc for a GitHub-reported conflict in four files from #2304): fingerprint changed, 890278d4f5b253ac1b1405ccfc0aa9f94276f8d28d369ca71035efe70b497555 → 35d99ffc412580020c0d8bcd598ee9b1f888db489238036bf4df18c48263256c. My interdiff of the PR's diff before and after the merge shows three moved line pairs, the required-tool lists of claude-backend-tmux.sh, stage3-4b13b-acceptance.sh and stage3-devbox-workflow.sh. #2304 added agent-secrets to them (and dropped secrets from claude-backend's); this PR's `ss` → `python3` is unchanged in each. This round ran the three lines verbatim (proof below) and the Stage 1 smoke. Earlier: rebase re-check 9c51021b → e93c81da and e067b440 → 9c51021b, both with the fingerprint unchanged at 890278d4."
+  "rebaseRecheck": "rebase re-check aef91766 → 26655eb1: fingerprint unchanged (35d99ffc412580020c0d8bcd598ee9b1f888db489238036bf4df18c48263256c at both heads), so this PR's own diff did not move. 26655eb1 merges main b08a56bc..main for a GitHub-reported conflict; main's #2167 rewrote packages/envoy/scripts/e2e-local.sh around this PR's held-port lines: NATS is now this checkout's own internal/testnats/cmd/natsd, started with `-p ${E2E_NATS_PORT:--1}` and read back from its 'Listening for client connections on' line, and two refusal checks (an absent session, a bus that is gone) are added. As the architect asked, I ran e2e-local.sh to its PASS lines and e2e-local.test.sh at the new head (proof below), plus the Stage 1 smoke."
 }
