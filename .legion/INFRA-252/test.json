@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-252",
+  "completed": "2026-10-27T02:20:00Z",
+  "round": 14,
+  "generation": 3,
+  "headSha": "8f2a161df84718bafeaedafee6210c8224421da7",
+  "fingerprint": "c78e5a511aec 3d830fce35b106e4d0470a6b4c597f9cad33f358617a3b01be741ca92013a12c -> 8f2a161df847 cbd0f67428911365091313c42dc8b4eab65f3c74d901cab475d57c1a62e5e14c: changed, full round",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran `LEGION_TEST_PG_DSN=<fresh postgres> LEGION_E2E_NATS_BIN=<nats-server> bash scripts/e2e/child-adoption.sh` at 8f2a161df847: `child adoption e2e: PASS in 54s`, all eleven steps (https://github.com/sjawhar/legion/pull/2226#issuecomment-6431985769)."
+  },
+  "failures": [
+    {
+      "criterion": "The pull request merges into main: GitHub reports it CONFLICTING",
+      "evidence": "Main moved to aa64baf632c2 (#2293, the boot records a todo child of a live tree that has no record) after this head merged bc98d3e7. `gh pr view 2226 --json mergeable` = CONFLICTING; `git merge-tree --write-tree aa64baf632c2 8f2a161df847` exits 1 with conflicts in AGENTS.md and packages/daemon/internal/admit/admit.go (auto-merged: daemon/daemon.go, daemon/repositories.go, workflow/engine.go). #2293 changes the boot's handling of todo children of live trees, the path this branch's boot listing and adoption sweep also change, so the forward merge needs resolving by meaning and a full test round after it. Main still ends at migration 0057, so 0058_issue_ancestry collides with nothing. No red test: a merge conflict, not a defect of the head, whose behaviour passed every check in proof."
+    }
+  ],
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "The head's behaviour (for the record; the round fails on the conflict)",
+      "surface": "store suite, round 1's red test, scripts/e2e/child-adoption.sh, and throwaway -tags e2e drivers on the whole daemon over real PostgreSQL and nats-server",
+      "command": "go test ./internal/store/; red test; child-adoption.sh; upgrade driver from migration 57; awaiting-tree driver (W in awaiting_person without a slot; Q re-parented under W; H labelled todo under unreleased P of W; slot freed; Z plain labelled root)",
+      "observed": "store ok (TestTheTreeARootLeftIsBackfilledBy0058 included); red test ok; PASS in 54s; upgrade keeps O and R their own roots (handed_over_from T) while Q joins T; Q joins W at admitted with no planner or slot; H takes no slot with one free; Z takes the free slot",
+      "headSha": "8f2a161df84718bafeaedafee6210c8224421da7",
+      "negativeControl": "Z, a plain labelled root, takes the slot H is held from"
+    }
+  ],
+  "ci": "At 8f2a161df847, read 2026-10-27T02:15Z: Tests 40435945965, Docs 40435945895, Worker Image 40435945846, Legion Envoy and Contracts 40435946054 queued; PR Title 40436046543 pending (40435946144 cancelled).",
+  "verdictProvider": "provider not verified (no review subagents ran)"
+}
