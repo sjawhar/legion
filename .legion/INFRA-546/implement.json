@@ -2,52 +2,49 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-546",
-  "completed": "2026-10-27T08:50:00Z",
-  "round": 2,
+  "completed": "2026-10-27T11:45:00Z",
+  "round": 3,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2362",
   "answers": {
-    "testFailure1": "Merged legion/INFRA-439@origin (c78a4e925318) forward into the branch at 5fbe7ca51666 (fingerprint 76d5d933 -> cdf44397, changed: the reworded retention_gap notice now sits beside #2228's stream_moved_back in envoy-client CHANGELOG/README and pi-envoy AGENTS.md; claude-envoy dist rebuilt, check-dist matches; envoy-client, pi-envoy, claude-envoy suites green). GitHub reports MERGEABLE; the push of 1ecd5dc8 starts CI.",
-    "testFailure2": "Architect's decision (c): (a) every doc, the CHANGELOG, packages/envoy/AGENTS.md and the two settings descriptions make the guarantee conditional on every program of a deployment carrying the same ENVOY_NATS_REPLICAS and ENVOY_STREAM_MAX_BYTES; (b) a keeper (internal/bus/keeper.go) in every ConnectOwningStream client re-reads the stream every 30 s and puts back copies, the byte limit and envoy_stream_id, and raises the buckets the program names (WithKeptBuckets), each logged. The tester's race.sh passes 8/8 at 1ecd5dc8."
+    "review1": "All seven inline threads answered (Fixed in <commit>) and resolved: findings 1, 4, 6, 7 in fcd91e242074; findings 2, 3, 5 in 7dbbc0462606. Finding 8: '## Contract change census' added to the PR body with search commands, hits, dispositions and a rollout line (immediate refusal). Finding 9: the red `test` lane was a packages/daemon timeout outside this diff; the push of 40e1a16643ee starts new runs.",
+    "architectDesignChange": "Spec decision 'a full stream refuses new messages': streamCfg uses DiscardNew; start and keeper set it; bus.ErrStreamFull (not ErrRefused) wraps the server's 'maximum bytes exceeded' (10077); the webhook answers 503 (TestA...FullStream test in internal/webhook); #2228's notice rewording reverted (envoy-client, pi-envoy, claude-envoy are now unchanged from c78a4e925318; #2228's implementer told); the redelivery sweep is left to INFRA-493 per the architect, and packages/envoy/AGENTS.md says so."
   },
   "proof": [
     {
-      "criterion": "The mixed-settings race (one program with ENVOY_NATS_REPLICAS=3 and ENVOY_STREAM_MAX_BYTES=2000000, one with neither, started at the same moment) ends within one period after both starts with three copies, the byte limit and the id, every round",
+      "criterion": "Copies, the byte limit and envoy_stream_id end right after two programs with different settings start at the same moment (mixed-settings race), every round",
       "surface": "Real envoy-listener and envoy-dispatch binaries against three nats-server v2.15.1 processes clustered on loopback with the rendered grants (the tester's harness)",
-      "command": "bash /legion/scratch/tmp/r546/race.sh /legion/workspaces/sjawhar/legion/infra-546 4 75 (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6437258329)",
-      "observed": "8/8 pairs (listener||listener and envoy-dispatch||listener, 4 rounds) PASS: replicas 3 on 3 current peers, max_bytes 2000000, an envoy_stream_id, buckets 3 3 3, both programs alive. The race lowered the stream in 7 of 8 pairs; each time the R3 program logged 'envoy nats keeper restored the stream ... restored=\"replicas 1 -> 3, max_bytes -1 -> 2000000\"'.",
-      "headSha": "1ecd5dc8a3a131e91bb4252641431f82386de5ed",
+      "command": "bash /legion/scratch/tmp/r546/race.sh /legion/workspaces/sjawhar/legion/infra-546 4 75 (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6440756443)",
+      "observed": "8/8 pairs PASS: replicas 3 on 3 current peers, max_bytes 2000000, discard new, an id, buckets 3 3 3, both programs alive; the race lowered the stream in 6 pairs and the keeper logged restored=\"replicas 1 -> 3, max_bytes -1 -> 2000000\" each time.",
+      "headSha": "40e1a16643ee24ce958b2cba89cbe6a16c00bdd0",
       "negativeControl": "The same harness at 0681b1218da2 (no keeper) ended 7 of 8 pairs at {\"replicas\":1,\"max_bytes\":-1} (tester, https://github.com/sjawhar/legion/pull/2362#issuecomment-6434935100)"
     },
     {
-      "criterion": "A stream update from the listener and from the Dispatch server keeps three copies, the byte limit and envoy_stream_id; an R1 stream and an R1 bucket are raised to three",
-      "surface": "Real envoy-listener and envoy-dispatch binaries (Postgres 17 on the issue volume) against three nats-server v2.15.1 processes, and one standalone v2.15.1 server, read with natscli v0.5.1",
-      "command": "bash /legion/scratch/tmp/p546/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (log in https://github.com/sjawhar/legion/pull/2362#issuecomment-6437258329)",
-      "observed": "P1: R1 stream (old subjects, no id, 3 msgs) and R1 KV_envoy_interests raised to 3 current peers, max_bytes 44023414784, discard old, one id over two reads, messages kept, durable listener-proof-a at 3. P2: restart at ENVOY_NATS_REPLICAS=1 with no limit left all as it was. P3: envoy-dispatch at ENVOY_NATS_REPLICAS=3, no limit, put back 3 dropped subjects (5 -> 8) keeping 3 copies, the limit and the id.",
-      "headSha": "1ecd5dc8a3a131e91bb4252641431f82386de5ed",
-      "negativeControl": "Standalone v2.15.1: ENVOY_NATS_REPLICAS=3 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode' (fresh create and raise of an existing R1 stream, left at 1); ENVOY_STREAM_MAX_BYTES=44023414784 on its 29 GB store -> exit 1 '...: insufficient storage resources available'; ENVOY_NATS_REPLICAS=0 -> 'invalid ENVOY_NATS_REPLICAS \"0\": want a whole number of copies from 1 to 5'"
+      "criterion": "A stream update from the listener and Dispatch keeps three copies, the byte limit, DiscardNew and envoy_stream_id; R1 stream and bucket raised to three; a full stream refuses a publish and keeps every stored message",
+      "surface": "Real envoy-listener and envoy-dispatch binaries (Postgres 17 on the issue volume) against three nats-server v2.15.1 processes and one standalone v2.15.1 server, read with natscli v0.5.1",
+      "command": "bash /legion/scratch/tmp/p546/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (log in https://github.com/sjawhar/legion/pull/2362#issuecomment-6440756443)",
+      "observed": "P1: R1 stream and KV_envoy_interests raised to 3 current peers, max_bytes 44023414784, discard new, one id over two reads, messages kept, durable at 3. P2: restart at setting 1 with no limit changed nothing. P3: envoy-dispatch put back 3 dropped subjects (5 -> 8) keeping copies, limit, discard and id. P4: a stream at ENVOY_STREAM_MAX_BYTES=3000 acknowledged 10 of 30 JetStream publishes and refused 20 with 'nats: error: maximum bytes exceeded (10077)'; it kept messages 1-10, full-1 first.",
+      "headSha": "40e1a16643ee24ce958b2cba89cbe6a16c00bdd0",
+      "negativeControl": "Standalone v2.15.1: ENVOY_NATS_REPLICAS=3 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode'; ENVOY_STREAM_MAX_BYTES=44023414784 on its 29 GB store -> exit 1 '...: insufficient storage resources available'; ENVOY_NATS_REPLICAS=0 -> 'invalid ENVOY_NATS_REPLICAS \"0\": want a whole number of copies from 1 to 5'"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/bus/keeper.go (new: the keeper), keeper_test.go (new), nats.go (WithKeptBuckets, keeper start/stop in newClient/Close/Drain), stream.go (keptStream shared by start and keeper, streamHolds), kv.go (raiseReplicas returns old count, error names KV_<bucket>), stream_replicas_test.go",
-    "packages/envoy/cmd/listener/main.go listenerStreamOptions and cmd/dispatch/main.go dispatchStreamOptions: WithKeptBuckets",
-    "packages/envoy/infra/core/bucket_raise_test.go, permissions.go (comment)",
-    "Merge resolution: packages/envoy-client/CHANGELOG.md, README.md, packages/pi-envoy/AGENTS.md, packages/claude-envoy/dist/envoy-channel.js",
-    "Docs made conditional and keeper documented: packages/envoy/CHANGELOG.md, AGENTS.md, cmd/dispatch/settings.go descriptions, cmd/dispatch/AGENTS.md and README.md, deploy/README.md, docs/architecture.md, infra/README.md, infra/docs/nats-hub.md, internal/config/config.go, internal/cistore/cistore.go, internal/store/kv.go comments, docs/site dispatch/envoy.md and running-dispatch.md, two docs/solutions pages, .dispatch/architecture/envoy-listener.md",
-    "packages/envoy/infra/go.work.sum restored to the base (stray tooling churn from the grant commit)"
+    "fcd91e242074: internal/bus/keeper.go, stream.go (ownedStream, keptSubjects, updateStream), kv.go, nats.go, keeper_test.go; CHANGELOG, AGENTS.md, docs/site dispatch/envoy.md, docs/solutions nats-jetstream-stream-ensure-only-adds-subjects.md",
+    "7dbbc0462606: bus.MaxReplicas/ParseNATSReplicas/ParseStreamMaxBytes (nats.go, settings_test.go), bus.ListenerBuckets (stream.go), internal/config, cmd/dispatch main.go and redeliver.go, cmd/listener/main.go, infra/aws/rendering/listener.go, infra/core/permissions.go; internal/testnats/streams.go and internal/bus/bustest (shared test helpers) with every duplicate removed",
+    "7edb9e78a505: streamCfg DiscardNew, bus.ErrStreamFull (nats.go, async.go), internal/webhook (503 test), bus tests; docs and setting descriptions; envoy-client, pi-envoy, claude-envoy restored to c78a4e925318",
+    "40e1a16643ee: packages/envoy/AGENTS.md (full stream's GitHub deliveries come back through the redelivery sweep, INFRA-493)"
   ],
   "trickyParts": [
-    "Keeper buckets are an explicit list per program (WithKeptBuckets), not discovered: each program's NATS grant covers only its own buckets, and the listener's stores open buckets through their own JetStream contexts on client.Conn. A listed bucket not created yet (CI bucket without a GitHub route, redelivery bucket without an App key) is skipped silently.",
-    "The keeper never touches subjects, age, duplicate window or discard: two releases with different subject lists would otherwise switch the stream each period.",
-    "Race harness: /legion/scratch/tmp/r546 is my copy of the tester's /legion/scratch/tmp/t546 with one fix: race.sh cleanup waits only when programs were started (a bare 'wait' hung on the setsid'd nats-servers). Two race runs back to back can collide on Postgres's postmaster.pid; wait for the first to stop it.",
-    "go tooling rewrites go.work.sum and packages/envoy/infra/go.work.sum when tests run; restore them before committing.",
-    "Local checks at this round: go test internal/bus, internal/testnats, internal/integration, internal/config, cmd/dispatch, cmd/listener (four Docker-only tests skipped), infra core/aws/render green; keeper tests with -race (CGO_ENABLED=1) green; envoy-client, pi-envoy, claude-envoy bun suites green after the merge."
+    "The keeper's subjects are add-only; a read still holding a role lane makes it send nothing, since only a start moves role lanes (after the consumer filters).",
+    "A full-stream publish error is nats APIError code 10077 'maximum bytes exceeded'; bus.ErrStreamFull wraps it and is not ErrRefused, so the webhook answers 503 and the send routes 500.",
+    "Proof harnesses: /legion/scratch/tmp/p546/proof.sh (now with P4) and /legion/scratch/tmp/r546/race.sh (the tester's harness, cleanup fixed to wait only on started programs). Two runs back to back can collide on Postgres's postmaster.pid.",
+    "Restore go.work.sum and packages/envoy/infra/go.work.sum after go tooling runs."
   ],
   "deviations": [
-    "Keeper period 30 s (decision asked for one minute or less).",
-    "The keeper restores the id with the derived deployedStreamID when the metadata key is gone; the original id is unrecoverable once deleted, which sessions then read as a recreated stream."
+    "Test fixture package internal/bus/bustest added beside testnats, because testnats cannot import bus.",
+    "The redelivery sweep's 5-attempt cap (~30 min) is not changed here: the architect assigned it to INFRA-493."
   ],
   "openQuestions": [
-    "Memory per hub server for the 72 h duplicate map at the sized load is about 3.6 GB (round 1); whether to shorten the window is the architect's (plan coordination item 4).",
-    "Who sets ENVOY_STREAM_MAX_BYTES and ENVOY_NATS_REPLICAS=3 in every program for the production deployment at the move (plan coordination item 1); the docs now say every program must carry the same values."
+    "Who sets ENVOY_STREAM_MAX_BYTES and ENVOY_NATS_REPLICAS=3 in every program for the production deployment at the move (plan coordination item 1).",
+    "READY waits for #2228 to merge and the base to become main (plan decision 1)."
   ]
 }
