@@ -2,29 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-141",
-  "completed": "2026-10-27T04:14:30Z",
+  "completed": "2026-10-27T06:37:30Z",
   "generation": 4,
-  "round": "the forward merge 7ce88c7038e8 of main 9b92ac143 (#2302) above retro's 0ef0245f and 105932bd; handoff head 40b3a0e6",
-  "scope": "The architect's ruling (Envoy 9d3da603d1b2b51ebfb026e62d4ee941): confirm, on internal/bus's async.go, confirm.go and nats.go, that this PR's context-bounded publishConfirmed is kept, that main's window.republish passes a context correctly with nothing of #2302 lost, that flushWindowElapsedError satisfies errors.Is against errFlushWindowElapsed and keeps the old text, and that nothing else of this PR changed in the merge. Raise only defects.",
-  "decision": "changes_requested",
-  "fingerprint": "Changed: 6c78c2e4871a3fa23e03e638b0032cd2af156995618ccd7ff06154d838202bc6 at my last approval e5cdb057, 4559281782646a4d203fd386447d149ef41f030eb7258817dbd08a162e2dd1a7 at 40b3a0e6. So this is a new round, with the thermonuclear pair.",
-  "confirmed": [
-    "The remerge diff touches only internal/bus/async.go, confirm.go and nats.go; nothing under internal/dispatch differs from main.",
-    "publishConfirmed(ctx, ...) is kept, and publishCoreTo and publishJetStream keep WithTimeout(ctx, publishBound) and the Within forms.",
-    "window.republish builds a fresh 5 s ctx after waiting for the window's flushes, matching main's deadline; sendCore, sendJetStream, pin, unsent, flushed and answered are as on main. A spent flush window still reaches answered as ErrUnavailable through flushWindowElapsedError's Unwrap.",
-    "flushWindowElapsedError: errors.Is(err, errFlushWindowElapsed) holds and Error() equals errWindowElapsed's text. I confirmed both with a throwaway probe test through go test -overlay.",
-    "go build ./..., go vet ./internal/bus and the bus window, confirm, ended-context and cancel tests pass at the head."
+  "round": "the round after review 5662141896; code commit 73008a116047, handoff head a100169f",
+  "scope": "The architect's ruling (Envoy 63ac5424aaf35c6842614490ef0237ca): confirm only the three items of 5662141896 (the flushWindowElapsedError test fails on the mutant; the two bound comments no longer contradict each other; 'every caller'), and that nothing outside internal/bus and .legion/ changed since 7ce88c70. Approve by SHA if all hold and no defect is found.",
+  "decision": "approved",
+  "verified": [
+    "TestASpentFlushWindowKeepsItsTextAndIsUnavailableToAWindow fails on every confirm.go mutant (go test -overlay): a mutant Error() fails at :44; a nil Unwrap() fails at :47 (not errFlushWindowElapsed) and at :50 (answered not ErrUnavailable); both together fail all three. It passes 5 of 5 runs at the head.",
+    "publishAcknowledgementTimeout's comment is now scoped to a window's sends and the stream context's PublishAsyncTimeout; publishBound's to Publish, PublishCoreTo, PublishReportingDuplicate and the internal publishes of a caller with no deadline. They no longer claim the same scope.",
+    "confirm.go says 'every caller' at both places.",
+    "From 7ce88c70 to a100169f the only paths outside .legion/ are internal/bus/async.go, confirm.go and nats.go (every changed line a // comment) and the new internal/bus/flush_window_elapsed_test.go. No runtime code changed, so this round gets no thermonuclear pass; go vet ./internal/bus is clean."
   ],
-  "ci": "CI head 7ce88c7038e8: every run queued at reading. A request for changes does not wait for CI.",
-  "thermonuclear": "Both run at 40b3a0e6 under the defect-only rule. deep-review: CLEAN of behaviour, with two false comments. code-quality: CHANGES. With a confirm.go mutant whose Error() and Unwrap() are broken, ./internal/bus and ./internal/dispatch/outbox still pass, so no test pins the merge's only new code.",
-  "verdictProvenance": "Read from the session store's transcripts (omp_session_files). This session: anthropic/claude-opus-5-5, 358 of 358 assistant turns. DeepReview11: anthropic/claude-opus-5-5, 25 of 25. CodeQuality11: anthropic/claude-opus-5-5, 19 of 19.",
+  "ci": "CI head d2721c0a3c2e (compare to a100169f: ahead, only .legion/). Required pr-title success (PR Title 40449858707), lint and typecheck success. Tests 40449555509 attempt 1 failed: only the test job, only packages/daemon: the daemon test binary hit its 10-minute timeout while TestThePromptReferenceProbeOnTheRealOhMyPi ran (it drives the real Oh My Pi binary with a fixture plugin). This PR changes no file under packages/daemon (73 packages/envoy files, 1 workflow, 7 docs/solutions), and main's Tests were red on the daemon admission tests until #2317. I re-ran the failed job once; attempt 3 completed with test, lint and typecheck all success.",
+  "verdictProvenance": "Read from the session store's transcript (omp_session_files): this session, which wrote the verdict, anthropic/claude-opus-5-5, 389 of 389 assistant turns. No subagent ran this round.",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
-  "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/bus/confirm.go", "description": "flushWindowElapsedError (confirm.go:60-67) is the merge's only new code, and no test pins it. A mutant whose Error() returns other text and whose Unwrap() returns nil passes ./internal/bus and ./internal/dispatch/outbox. Both properties matter: the text is the one log filters match, and the unwrap makes window.answered report a spent flush as ErrUnavailable, so the outbox releases the event instead of failing it (outbox/publisher.go). implement.json says main's window tests cover it; the surviving mutant shows they do not. Add a test: confirmFlushed with a past deadline gives errWindowElapsed's text and errors.Is errFlushWindowElapsed, and window.answered on a current window gives ErrUnavailable for it."},
-    {"severity": "minor", "file": "packages/envoy/internal/bus/nats.go", "description": "Two 5 s constants with contradicting comments. publishAcknowledgementTimeout's comment (async.go:16-17, main's) says it bounds one publish, its connection wait and its JetStream acknowledgement or core flush. After the merge, Publish, PublishCoreTo, publishJetStream and publishCoreTo use publishBound instead, and publishAcknowledgementTimeout bounds only window sends and the JetStream PublishAsyncTimeout. publishBound's comment (nats.go:877-879) says every publisher with no deadline of its own relies on it, but the Dispatch outbox sends through the window. Keep one constant, or make each comment state its own scope."},
-    {"severity": "minor", "file": "packages/envoy/internal/bus/confirm.go", "description": "The publishConfirmed comment says 'both callers' (confirm.go:26, :36). There are three: publishCoreTo, RequestCoreTo and window.republish."}
-  ],
-  "threads": "65 threads, all resolved; none opened since the last approval; no bot threads."
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "threads": "68 threads, all resolved. I replied 'Accepted: fixed in 73008a116047' on the three threads of 5662141896 (PRRT_kwDORFy7ds6wi6wH, -wi6wJ, -wi6wK), the first with the mutant results. No bot threads."
 }
