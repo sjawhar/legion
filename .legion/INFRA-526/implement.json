@@ -2,40 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-526",
-  "completed": "2026-10-27T03:20:00Z",
-  "round": 2,
+  "completed": "2026-10-27T04:10:00Z",
+  "round": 3,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2310",
   "proof": [
     {
       "criterion": "A1a. A comment holding a callout with a title shows the callout's kind and title (with A2: one-row header, filled badge)",
       "surface": "Issue Conversation tab /issues/<KEY>/conversation, comment thread expanded; real Go Dispatch server (e2e/run-server.sh), production SPA bundle, Postgres 17 + pgvector, Playwright Chromium; projects chromium and iphone",
       "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone",
-      "observed": "Round 2, the whole spec file: 6 passed, including 'a comment's callout shows the document's header with its kind and title' in chromium and iphone ([data-proof-block-name]=callout, [data-proof-block-badge]=warning with a non-transparent background, [data-proof-block-title]=Read this visible with width > 0, header height <= 40)",
-      "headSha": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208",
+      "observed": "Review round, the whole spec file: 6 passed, including 'a comment's callout shows the document's header with its kind and title' in chromium and iphone ([data-proof-block-name]=callout, [data-proof-block-badge]=warning with a non-transparent background, [data-proof-block-title]=Read this visible with width > 0, header height <= 40)",
+      "headSha": "154d6cea2207c992c6cdccfdd5af633d446f33f7",
       "negativeControl": "Same command at base 64e8c890 with only the red test committed: 4 failed; the callout test failed in both projects on section[data-proof-block-type=callout] [data-proof-block-content] 'Body text.' (element(s) not found: the bare section has no content hole or header)"
     },
     {
       "criterion": "A1b. A comment holding an ask block shows its card (with A2: source list folded under rows, 4px accent border)",
       "surface": "Same as A1a",
       "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone",
-      "observed": "'a comment's ask block shows the decision card' passed in chromium and iphone at round 2: [data-dispatch-ask-pill=high] 'High', 'Decision' in [data-dispatch-ask-header], two visible rows A/first and B/second under [data-dispatch-ask-record], [data-proof-block-content] > ul present once and hidden, border-left-width 4px",
-      "headSha": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208",
+      "observed": "'a comment's ask block shows the decision card' passed in chromium and iphone in the review round: [data-dispatch-ask-pill=high] 'High', 'Decision' in [data-dispatch-ask-header], two visible rows A/first and B/second under [data-dispatch-ask-record], [data-proof-block-content] > ul present once and hidden, border-left-width 4px",
+      "headSha": "154d6cea2207c992c6cdccfdd5af633d446f33f7",
       "negativeControl": "Same command at base 64e8c890: the ask test failed in both projects on [data-dispatch-ask-header] (element(s) not found)"
     },
     {
       "criterion": "A3. A comment cannot forge a decision outcome; no provider keeps the options; a malformed block in text names no re-activation",
       "surface": "MarkdownBody, the component every comment, ask, message and reply renders through (happy-dom)",
       "command": "cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx",
-      "observed": "23 pass, 0 fail, including the forged-attribute case (state open, no 'Answered by', no 'sami', no 'Copied from', rows data-selected=false), the no-provider case (source list A: first / B: second, no data-dispatch-ask-options) and the malformed case (Malformed, 'Option 2 has no label', no 're-activates')",
-      "headSha": "b6720fc14297faf0ca8121e725320578760cb65f",
+      "observed": "24 pass, 0 fail, including the forged-attribute case (state open, no 'Answered by', no 'sami', no 'Copied from', rows data-selected=false), the no-provider case (source list A: first / B: second, no data-dispatch-ask-options), the malformed case (Malformed, 'Option 2 has no label', no 're-activates') and the review round's nested-decision case",
+      "headSha": "154d6cea2207c992c6cdccfdd5af633d446f33f7",
       "negativeControl": "With withoutServerAttributes skipped in markdown-engine.ts parse, the forged-attribute case failed: Expected \"open\", Received \"answered\""
     },
     {
       "criterion": "A4. Documents and past versions unchanged",
       "surface": "Document editor, version view, Conversation, Inbox, references (real stack, Playwright chromium and iphone)",
       "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts e2e/typed-blocks.e2e.ts e2e/ask-blocks.e2e.ts e2e/conversation.e2e.ts e2e/inbox.e2e.ts e2e/doc.e2e.ts e2e/document.e2e.ts e2e/references.e2e.ts --project chromium --project iphone",
-      "observed": "Round 2: 216 passed, 2 skipped (phone-only rows on the desktop project) in 18.2m from a fresh build at the head, including the tester's red test 'a reply under a document's decision keeps the lists of the typed blocks it holds' in chromium and iphone",
-      "headSha": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208",
+      "observed": "Review round: 215 passed, 1 failed, 2 skipped from a fresh build at the head. The failure was the iphone row 'decision blocks read as urgency-accented cards in the document and its version view' (ask-blocks.e2e.ts:459), which hit the 30 s test timeout. That row takes 21-25 s on iphone in this pod in every run (21.4 s, 22.6 s and 22.4 s in earlier rounds). Re-run alone with --repeat-each 3 in chromium and iphone: 6 passed (iphone 25.0 s, 23.6 s, 24.5 s). The tester's reply test passed in both projects",
+      "headSha": "154d6cea2207c992c6cdccfdd5af633d446f33f7",
       "negativeControl": "At b6720fc1 (before the round-2 fix) the tester's red test failed in both projects: 'step one' inside the reply's callout resolved hidden, because the outer decision's fold rule reached the reply's typed blocks"
     },
     {
@@ -47,11 +47,19 @@
       "negativeControl": "At b6720fc1, whose fold rule used a descendant combinator before [data-proof-block-content], the same test failed in both projects: getByText('step one') Expected visible, Received hidden (the tester's run, test.json)"
     },
     {
+      "criterion": "Review round (reviewer's finding): a decision written inside another decision's option keeps each card in its own block",
+      "surface": "MarkdownBody, the component every comment, ask, message and reply renders through (happy-dom), under the TextAskCard provider",
+      "command": "cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx -t \"inside another decision\"",
+      "observed": "1 pass: two shells, the inner one inside the outer's first option; the outer shell's own footer (:scope > [data-dispatch-ask-footer]) holds 2 rows labelled A and B; the inner shell's own footer holds 1 row labelled X and no B",
+      "headSha": "154d6cea2207c992c6cdccfdd5af633d446f33f7",
+      "negativeControl": "The same case at 9439f4a8 (slots looked up with a descendant selector) failed: outer footer rows Expected length 2, Received length 0; the inner footer held both records"
+    },
+    {
       "criterion": "A5. The provider does not move the editor's ask-block.ts into the entry chunk",
       "surface": "Built SPA (bun run build:web, web/dist)",
       "command": "cd packages/dispatch && bun run build:web && grep -c dispatch-ask-block-editing web/dist/assets/<entry chunk named by web/dist/index.html>",
-      "observed": "0 occurrences in the entry chunk index-B53mjIhj.js (the PluginKey literal lives in the lazy SubscribedAgents-*.js chunk); entry 762,668 bytes at the head vs 754,920 at base 64e8c890 (+7,748)",
-      "headSha": "b6720fc14297faf0ca8121e725320578760cb65f",
+      "observed": "0 occurrences in the entry chunk index-CiPDrgUb.js (the PluginKey literal is in the lazy SubscribedAgents-*.js chunk); entry 762,758 bytes at the head vs 754,920 at base 64e8c890 (+7,838)",
+      "headSha": "154d6cea2207c992c6cdccfdd5af633d446f33f7",
       "negativeControl": "The grep does find the literal in a lazy chunk (web/dist/assets/SubscribedAgents-B6sCbVZ6.js), so a 0 in the entry is a real absence, not a minified-away string"
     }
   ],
@@ -77,17 +85,19 @@
     "AskBlockCard cannot be imported by useRenderedMarkdown (AskBlockCard -> AskCard/AskOptionList -> AskOptionRow -> MarkdownBody -> useRenderedMarkdown cycle, biome noImportCycles), so the app provides it through the TextAskCard context; without a provider the ask keeps its source list.",
     "The headless engine passes renderBlock the same BlockTypeSchema object Dispatch handed it; only the declared content type differs, so renderTypedBlock takes Pick<BlockTypeSchema, 'attributes'>.",
     "Simplify made AskBlockView build its shell from renderAskBlockShell via DOMSerializer.renderSpec: same elements, attributes and order of children; attribute order on the frame differs (visible only in outerHTML text).",
-    "Round 2: once every typed block in a body has a [data-proof-block-content] hole, any rule written as '.proof-typed-block-ask [data-proof-block-content] ...' reaches the typed blocks of a reply or answer note inside the card's footer. The decision's own hole is a direct child of its section in both drawings (renderAskBlockShell; the schema's toDOM wrapper adds attributes only), so the four rules now use a child combinator."
+    "Round 2: once every typed block in a body has a [data-proof-block-content] hole, any rule written as '.proof-typed-block-ask [data-proof-block-content] ...' reaches the typed blocks of a reply or answer note inside the card's footer. The decision's own hole is a direct child of its section in both drawings (renderAskBlockShell; the schema's toDOM wrapper adds attributes only), so the four rules now use a child combinator.",
+    "Review round: the same reach applied to slot lookups. A nested decision's footer comes before the outer shell's own footer in document order, so slots are found with ':scope >' in both collectAskHosts and AskBlockView's slot(). askBlockShell now returns the frame's stamps and the fold decision once; collectAskHosts only collects, and the layout effect sets data-dispatch-ask-options from foldsOptions."
   ],
   "deviations": [
     "The plan said the comment turn renders the full MarkdownBody (ConversationTab.tsx:737); that line is a targeted message turn, and a comment's full body shows only with its thread expanded. The test expands the thread; acceptance and assertions are as planned.",
     "The renderAskBlockShell spec-shape unit test a worker added was removed (it pinned source shape); its one consumer-visible invariant (no data-dispatch-ask-block in a body) is asserted in MarkdownBody.test.tsx instead.",
-    "The simplify pass applied four findings (one shell spec for editor and text engine, Fragment.replaceChild, the redundant type lookup, two copied shell fields); every check and the e2e set re-ran at the applied head b6720fc1."
+    "The simplify pass applied four findings (one shell spec for editor and text engine, Fragment.replaceChild, the redundant type lookup, two copied shell fields); every check and the e2e set re-ran at the applied head b6720fc1.",
+    "Review round: the reviewer's nested-decision body used ':::ask' for both blocks, where the inner ':::' fence also closes the outer block; the test writes the outer block as '::::ask' (four colons, as the repository's other nested blocks do), which parses into one decision inside the other's option. The reviewer's fast-follow (one shell-stamp source) is done in this round (154d6cea) rather than left as a fast-follow."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "CI carries the webkit, webkit-iphone and firefox projects; a worker pod cannot start them (INFRA-92 note).",
-    "main has a red required check since #2273 (pi-envoy skills-guard reads 2,057 words). This branch's base 7f7edb8d predates it; if that test turns red on this PR after a forward merge, it is main's red, owned by INFRA-366, not this change.",
+    "main had a red required check from #2273 (pi-envoy skills-guard); #2301 fixed it on main at 03:06Z. This branch's base 7f7edb8d predates both and touches no skill, so the check cannot be red here for that reason.",
     "Production check (A1c) after the merge: the deployment's dispatch-production-check.sh with --page /issues/INFRA-526/conversation --route /api/v1/issues/INFRA-526/comments --route /api/v1/schema/blocks."
   ]
 }
