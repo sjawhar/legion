@@ -2,59 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-527",
-  "completed": "2026-10-27T04:09:22Z",
-  "head": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+  "completed": "2026-10-27T05:27:00Z",
+  "round": 2,
+  "head": "146a10cdeffd229402365f01d5f9ca963e3f92d4",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command at 89bf76b8ae03 with the tester lane's ports and database: `cd packages/dispatch && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts e2e/theme.e2e.ts )` → 15 passed, 1 skipped (theme's iPhone-only margin-sheet row on desktop). Re-ran its red leg independently at the fork point 7f7edb8d: 6 failed at toHaveCount(2), Received 0."
+    "how": "Re-ran the implementer's round-2 command at 146a10cdeffd with the tester lane's ports and database: `cd packages/dispatch && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts e2e/theme.e2e.ts e2e/held-sends.e2e.ts --project=chromium --project=iphone )` → 26 passed, 2 skipped. Re-ran its forced-colors negative control myself (block deleted): 3 of 4 rows failed in the first run, and chromium dark passed, so its claim that all four rows failed did not reproduce in that run; chromium dark then failed 3 of 3 repeats."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "A1 (spec) and A4: a comment with one ticked and one unticked task item shows a ticked and an unticked checkbox that cannot be toggled, in light and dark",
-      "surface": "Issue page, Conversation tab (/issues/<KEY>/conversation), expanded thread; Chromium desktop and Chromium as iPhone 13; real Go server, Postgres 17 + pgvector in the issue pod",
-      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts e2e/theme.e2e.ts )",
-      "observed": "15 passed, 1 skipped: rows A1 light/dark in chromium and iphone green (2 checkboxes, ticked/unticked as source, disabled, on the text's first line, list-style none, a mouse click leaves both unchanged).",
-      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
-      "negativeControl": "task-items.e2e.ts copied (with editor.ts) into the fork-point tree /legion/scratch/infra-527-base (styles.css and MarkdownBody.tsx byte-identical to 7f7edb8d, no task-checkboxes.ts) and run with DATABASE_URL=$DB_BASE_URL → 6 failed, each at expect(locator).toHaveCount(2), Received: 0, after the comment's text was visible."
+      "criterion": "Review round 1, important: under forced colors (Windows High Contrast) a ticked and an unticked box look different",
+      "surface": "Issue page, Conversation tab, expanded thread, emulateMedia({ colorScheme, forcedColors: 'active' }); Chromium desktop and Chromium as iPhone 13; real Go server, Postgres 17 + pgvector",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts e2e/theme.e2e.ts e2e/held-sends.e2e.ts --project=chromium --project=iphone )",
+      "observed": "The four forced-colors rows passed. A throwaway probe read the computed style: appearance auto and no mask under forced colors. The pixels showed the Windows High Contrast palettes: disabled ticked box #600000 on white in light, #3FF23F on black in dark, unticked box an empty outline.",
+      "headSha": "146a10cdeffd229402365f01d5f9ca963e3f92d4",
+      "negativeControl": "The `@media (forced-colors: active)` block was deleted from web/src/styles.css (restored byte for byte afterwards). Chromium light failed with Received 0 (needs >=19.6), and iphone light and dark with Received 56 (needs >=176.4). Chromium dark passed in that first run, though both boxes were drawn as empty white outlines (dispatch://INFRA-527/artifact/tester-r2-nofix-chromium-dark-active-png); it then failed 3 of 3 repeats with Received 0."
     },
     {
-      "criterion": "A2 (plan): a reply under a decision inside a document shows one ticked and one unticked disabled checkbox with no bullet",
-      "surface": "Issue page (/issues/<KEY>), spec document, decision block reply thread; Chromium and iPhone 13",
-      "command": "same run as above (task-items.e2e.ts row 'a reply under a decision inside a document shows the checkboxes with no bullet')",
-      "observed": "passed in chromium and iphone.",
-      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
-      "negativeControl": "At the fork point the same row failed in chromium and iphone at toHaveCount(2), Received: 0."
+      "criterion": "Review round 1, important: no hand-written colour in styles.css skips the palette pin; the masked tick still reads",
+      "surface": "Issue page, Conversation tab, expanded thread, light and dark; Chromium, iPhone 13, Firefox desktop, WebKit desktop and WebKit iPhone 13",
+      "command": "the round-2 command above for Chromium/iPhone; for Firefox and WebKit, `bunx playwright test --config e2e/zz-tester.config.ts e2e/task-items.e2e.ts`. That throwaway config (deleted) spread the base config with Desktop Firefox, Desktop Safari and iPhone 13 WebKit projects. WebKit was a private copy of the registry's webkit-2359 whose wrapper found Debian trixie libraries (gtk4, gstreamer, Mesa EGL) unpacked under $TMPDIR, also deleted.",
+      "observed": "A1 light/dark and the decision-reply row passed in Firefox and desktop WebKit, including the >=10% strong-pixel look-different check. In WebKit iPhone every box assertion passed; only the row's final thread screenshot stopped, because my project was not named `iphone` and the spec's Thread-dialog locator matched two elements. Screenshots show the tick cut through the blue fill in WebKit (dispatch://INFRA-527/artifact/tester-r2-webkit-iphone-light-none-png, dispatch://INFRA-527/artifact/tester-r2-webkit-dark-none-png) and Firefox (dispatch://INFRA-527/artifact/tester-r2-firefox-light-none-png). `grep -n '%23[0-9a-fA-F]\\{3,6\\}' web/src/styles.css` printed nothing.",
+      "headSha": "146a10cdeffd229402365f01d5f9ca963e3f92d4",
+      "negativeControl": "Fork-point run (round 1): task-items rows failed at toHaveCount(2), Received 0. At 89bf76b8, the head reviewed in round 1, styles.css held %23ffffff and %230f172b (review.json finding 2)."
     },
     {
-      "criterion": "A3 (plan) on the real surface: ordered, nested (three deep), capital [X], long wrapped, quoted, code- and bold-first, and mixed lists each give every task item exactly one box ticked as its source, and a plain item none",
-      "surface": "Issue page, Conversation tab, one comment holding all shapes; Chromium and iPhone 13, light and dark",
-      "command": "throwaway packages/dispatch/e2e/zz-tester-probe.e2e.ts (deleted after the run), `bun run e2e -- e2e/zz-tester-probe.e2e.ts`, which logged each li's box count, checked state, list-style and the box/first-line rectangles",
-      "observed": "All 13 task items: 1 box each, checked equals data-checked (capital [X] ticked), list-style none, box right edge = li content left, text starts 6px after it on the same line; nested boxes step right 28px per level; plain numbered and plain bullet items keep decimal/disc and no box. Screenshots dispatch://INFRA-527/artifact/tester-shapes-chromium-light-png and dispatch://INFRA-527/artifact/tester-shapes-chromium-dark-png.",
-      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
-      "negativeControl": "`- [ ] ` with no text is not a task item in the parser (rendered as a disc bullet with the literal text \"[ ]\") and drew no box, the same as the document editor's parse; the fork-point run above draws no box for any task."
-    },
-    {
-      "criterion": "A box follows a live edit of its comment",
-      "surface": "Issue page, Conversation tab, open thread; Chromium and iPhone 13",
-      "command": "throwaway probe row: a human comment `- [ ] flip me / - [x] stays`, thread expanded, then editComment (PATCH /api/v1/comments/<id>) to `- [x] flip me / - [x] stays / - [ ] added`",
-      "observed": "The open thread went from 2 boxes (first unticked) to 3 boxes (first ticked, third unticked) without reload; no duplicate boxes. 2 passed.",
-      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
-      "negativeControl": "The same edit sent with an agent token, on an agent-authored comment, was refused 403 HUMAN_ONLY ('only users may perform this action')."
-    },
-    {
-      "criterion": "Other block-Markdown surfaces draw the box and the box is never a keyboard stop",
-      "surface": "Inbox (/) ask card whose question holds a task list; Chromium and iPhone 13",
-      "command": "throwaway probe row: createAsk with question 'Ready to ship?\\n\\n- [x] tests green\\n- [ ] notes written', open /, then 60 Tab presses checking document.activeElement",
-      "observed": "2 boxes on the card, first ticked, second not; no Tab press focused a box. 2 passed. Screenshot dispatch://INFRA-527/artifact/tester-inbox-chromium-png.",
-      "headSha": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
-      "negativeControl": "Fork-point run above: no box exists, so nothing reads a tick."
+      "criterion": "A1 (spec), A2 and A4 at the new head",
+      "surface": "Issue page, Conversation tab and a decision block's reply thread; Chromium and iPhone 13",
+      "command": "the round-2 command above",
+      "observed": "A1 light/dark and A2 passed in chromium and iphone: 2 disabled checkboxes, ticked/unticked as source, on the first line, list-style none; a click changes nothing.",
+      "headSha": "146a10cdeffd229402365f01d5f9ca963e3f92d4",
+      "negativeControl": "Fork point 7f7edb8d (round 1, my own run): 6 failed at toHaveCount(2), Received: 0."
     }
   ],
-  "ci": "Read on GitHub at 89bf76b8ae03 at 2026-10-27T04:08Z: Tests, Docs, Legion Envoy and Contracts, PR Title workflow runs and the changes/lint/typecheck/test/build/pr-title checks all queued; not waited for. db22b792 (handoff-only, skip-checks) carries no runs.",
-  "notes": [
-    "Inline variant and MarkdownPreview (the collapsed one-line turn preview) draw no box by plan D5; the implementer's open question on the preview is with the INFRA-138 architect.",
-    "The read-only task boxes on an Inbox card sit just under the card's own interactive selection checkbox and look alike in shape; the read-only ones are filled in link blue when ticked. Not a defect against the spec."
-  ]
+  "observations": [
+    "Firefox and WebKit under emulated forced colors draw the disabled native checked box light: Firefox uses fill rgb(199,199,206) with a white tick on white, the same in light and dark (dispatch://INFRA-527/artifact/tester-r2-firefox-light-active-png). It is visibly filled against an empty outline, but below the spec's 128-per-channel bar, so the forced-colors rows read 0 strong pixels in those engines (not in CI's matrix for this spec). Chromium's emulation uses the Windows High Contrast palettes and passes. [inference] Real Firefox on Windows High Contrast uses the theme's GrayText, which those palettes make high contrast, and real Safari has no forced-colors mode; WCAG 1.4.11 exempts inactive (disabled) components. Not recorded as a failure.",
+    "expectBoxesLookDifferent compares two element screenshots taken at different positions. In the run with the forced-colors block deleted, the chromium-dark row passed once in 4 runs although both boxes were drawn alike. The other three forced-colors rows caught the regression in every run, so the lock holds, but that one row's oracle is not deterministic on a broken build.",
+    "Round-1 notes stand: the inline variant and MarkdownPreview draw no box (plan D5), and the implementer's open question on the collapsed preview is with the INFRA-138 architect."
+  ],
+  "ci": "Read on GitHub at 146a10cdeffd at 2026-10-27T05:25Z: build, changes, lint, test, typecheck and pr-title check runs queued (one earlier pr-title cancelled); the Tests, Docs, Legion Envoy and Contracts and PR Title workflow runs queued. Not waited for. a9470827 (handoff-only, skip-checks) carries no runs."
 }
