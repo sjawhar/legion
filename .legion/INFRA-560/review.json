@@ -2,28 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-560",
-  "completed": "2026-10-27T08:39:37Z",
-  "round": 2,
-  "reviewedHead": "a186223cf19aade41d32231d8650253b5776a0cf",
-  "codeHead": "c40c8634e0280ba1d7ec2e7ad7cbb8b5e40a8351",
-  "decision": "changes_requested",
+  "completed": "2026-10-27T10:54:30Z",
+  "round": 3,
+  "reviewedHead": "e08898290ab100347e233a2c1407bdf144f8bdb6",
+  "codeHead": "6f5055a09fdf",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
-  "minor": 4,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; no branch protection. CI head 25f958aa (newest pull_request run, code c40c8634); lint, test, typecheck, build, changes queued at 08:29Z; compare 25f958aa...a186223c handoffsOnly true. Not decisive for a request for changes.",
-  "roundOneThreads": "All 9 round-1 threads verified fixed at a186223c and answered with a reply each (accepted): PRRT_kwDORFy7ds6wldf3, PRRT_kwDORFy7ds6wldf9, PRRT_kwDORFy7ds6wldgA, PRRT_kwDORFy7ds6wldgD, PRRT_kwDORFy7ds6wldgF, PRRT_kwDORFy7ds6wldgI, PRRT_kwDORFy7ds6wldgM, PRRT_kwDORFy7ds6wldgQ, PRRT_kwDORFy7ds6wldgW. The implementer had already resolved them.",
-  "census": "Present. Its searches were run again at a186223c and the hits match, except one: the `tailscale-state` search also hits docs/plans/2026-10-14-dispatch-gcp-plan.md, which the row does not list. Deployment-repository hits verified at eaf4da1: dispatch/main.go:429, Pulumi.prod.yaml:41, README.md:82 and :415, Pulumi.yaml pins envoy-infra@0.10.1.",
+  "important": 0,
+  "minor": 3,
+  "scope": "Narrowed by the INFRA-63 architect at the review-round cap (08:42Z): (1) the SIGTERM handler and interruptible sleeps in the advertiser and cert-publish, with tailnet_service.go byte for byte INFRA-549's 8bf4bfe7 and a test that fails without the trap; (2) the four round-2 wording items. A finding that is not a correctness defect goes on the Fast-follow line.",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head 6151bc54 (the newest pull_request run; code 6f5055a0): lint success 10:31Z, typecheck success 10:25Z, test success 10:37Z, pr-title success 10:26Z. compare 6151bc54...e0889829 handoffsOnly true, 1 file. The jobs that are not required (envoy-infra-go, dispatch, envoy-go and others) were still queued at 10:38Z behind a backlog of about 176 queued runs across the repository. GitHub reports the PR CONFLICTING with main (mergeStateStatus DIRTY) at 10:38Z.",
+  "verified": [
+    "tailnet_service.go and tailnet_service_test.go are cmp-identical to legion/INFRA-549@origin (cf8530da), which carries 8bf4bfe7451e",
+    "TestDispatchCertPublishExitsOnSIGTERM, TestTailnetServiceAdvertiserExitsOnSIGTERM and TestDispatchCertPublishExitsWhenTheClaimGateDies pass at this head (run here: 0.06 s, 0.06 s, 3.24 s)",
+    "Both thermonuclear agents reran each test against four mutants: no trap, and a foreground sleep, in each script. All four fail. They also ran each script as PID 1 under unshare in dash and in busybox 1.35 and 1.37: it exits with status 0 at once on SIGTERM.",
+    "Wording: the PR body's window notes give the client grant and tcp:443; the census lists docs/plans/2026-10-14-dispatch-gcp-plan.md; implement.json says 'within about 60 s'; README.md:680-686 says the pod leaves the SOCKS5 endpoints until cert-publish restarts",
+    "kube() --max-time: declined under the architect's narrowing; accepted as Minor hardening with no exploit path; kept in Not proven / risk"
+  ],
+  "threads": "Round 1 threads (9) were answered in round 2. Round 2 threads were answered in this round: PRRT_kwDORFy7ds6wmn0j accepted (09b9025b), PRRT_kwDORFy7ds6wmn0r accepted (cab89af3), PRRT_kwDORFy7ds6wmn0w accepted (6f5055a0), PRRT_kwDORFy7ds6wmn01 accepted as not blocking (hardening, architect's narrowing). All 13 threads are resolved on GitHub.",
   "thermonuclear": {
-    "deep": "CHANGES at a186223c: the PR body's window notes and the reviewer's brief still describe the round-1 move (Medium, body only); no defect in the round-2 code; minor: a dead gate takes a serving pod out of the SOCKS5 endpoints until the restart; hardening: kube() curl has no --max-time; token expirationSeconds 3607 can be extended to a year, as the automount was",
-    "quality": "CHANGES at a186223c: the round-2 rework is sound. Carried cleanup: per-workload replicas and budgets in two structs; the seed-check chain is not a table; the 82-connection figure is written in nine places; localAddrPort is unused; there are two shell-variable renderers; the projected volume has an unread namespace file. The reviewer judged all of it cleanup, not blocking."
+    "deep": "APPROVE at e0889829 (scoped to the round-3 diff). Minor: README.md:684-685 says NATS connections move, but only new connections go to other pods; the cert-publish SIGTERM test signals after the log line and before the sleep forks, so a regression could pass about 1 time in 50.",
+    "quality": "APPROVE at e0889829 (scoped). Minor: startCertPublish takes two positional bools."
   },
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/infra/gcp/tailnet_service.go", "description": "The advertiser (line 358) runs `/bin/sh -c` as its container's PID 1 with no SIGTERM trap. Linux delivers a signal to a PID namespace's init only when init has a handler for it (pid_namespaces(7)), so the kubelet's SIGTERM is dropped, and each front-door pod's termination runs to the 60 s grace and SIGKILL. Fix: trap 'exit 0' TERM and `sleep N & wait $!`, plus a test that fails without them. Take INFRA-549's fix (its commit 8bf4bfe7, not on origin at 08:35Z) byte for byte, since the file is shared. Raised by the INFRA-63 architect from INFRA-549's review. A local unshare test on this gVisor host did not reproduce the drop, so it is no evidence either way."},
-    {"severity": "important", "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go", "description": "cert-publish (dispatchCertPublishLoop, lines 211-221) has the same PID 1 shape: no TERM trap, and a foreground `sleep 60`."},
-    {"severity": "minor", "file": "PR body", "description": "'Notes for the window (INFRA-561)' leaves out the client grant to svc:<hostname> on 443 (or a Service tag) and the tcp:443 port that README.md:172-183 and move step 1 require. The census's tailscale-state row does not list docs/plans/2026-10-14-dispatch-gcp-plan.md."},
-    {"severity": "minor", "file": ".legion/INFRA-560/implement.json", "description": "The proof's observed text says cert-publish exits 'within 30 s' of the gate dying. The loop checks once a pass and each pass ends in `sleep 60`, so the tester measured 57.5-59 s."},
-    {"severity": "minor", "file": "packages/envoy/infra/README.md", "description": "Lines 678-682 do not say that while cert-publish restarts after its gate dies, the pod is not ready and leaves the SOCKS5 Service even though it still hosts the Tailscale Service."},
-    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go", "description": "Hardening: kube() (line 197) runs curl with no --max-time, so a stuck request keeps the gate alive to kill -0 while it decides nothing. Add --max-time 20."}
+    {"severity": "minor", "file": "packages/envoy/infra/README.md", "description": "Lines 684-685: only new NATS connections go to the other pods; established ones stay on the unready pod, whose tailscale still serves SOCKS5."},
+    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_frontdoor_test.go", "description": "Lines 530-536: the SIGTERM is sent once the 'waiting for tailscaled' line appears, before `sleep 60` forks, so a foreground-sleep regression could slip through in that gap; mark from the sleep shim, as the advertiser test does."},
+    {"severity": "minor", "file": "packages/envoy/infra/gcp/dispatch_frontdoor_test.go", "description": "Line 440: startCertPublish's two positional bools hide what each call sets up."}
   ],
-  "fastFollow": "Merge each Deployment's replicas and budget into one dispatchWorkload struct, held as s.app, s.frontDoor and s.listener, so newDispatchDisruption stops taking the three replica counts back."
+  "fastFollow": "As the PR body's Fast-follow line names: one dispatchWorkload struct per Deployment (s.app, s.frontDoor, s.listener) holding its replicas and budget."
 }
