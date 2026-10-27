@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-26T23:11:46Z",
+  "completed": "2026-10-27T00:38:17Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2233",
-  "head": "58b805d967a00e12722289bfd93de702d4000d58",
+  "head": "52159aaf335f522ca3a925d37e2fa1d46d5eae8d",
   "proof": [
+    {
+      "criterion": "Review round 5: text typed between a writable reconnect's authentication and its sync is stored in the browser and survives a reload, on a spec with a heading",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) on the real Go server, production SPA and real Postgres; the real Hocuspocus provider over a scripted socket in pending-sync.test.ts",
+      "command": "bun run e2e -- offline-edits.e2e.ts close-withdraws-asks.e2e.ts --project chromium --project iphone (20 passed); bun test web/src/features/doc (172 pass)",
+      "observed": "The gap browser case types after the reopened page is admitted writable and before its sync, severs, reloads, and the server then holds the typed text. The unit probe stores three rows (read-only heading stamp, gap typing, later typing) that apply in order on the server's state, and the server's acknowledgement clears them; a read-only reconnect stores nothing.",
+      "headSha": "52159aaf335f522ca3a925d37e2fa1d46d5eae8d",
+      "negativeControl": "With the old connection.ts and pending-sync.ts the browser case fails on both projects (Expected >= 32 stored, Received 0); with the gap fix alone the heading spec's restore is refused ('could not be applied: the document was rebuilt since')"
+    },
     {
       "criterion": "Ninth forward merge leaves the change intact and the pull request mergeable",
       "surface": "the merged tree's builds and contract tests, and GitHub's mergeability",
@@ -152,6 +160,7 @@
     }
   ],
   "filesChanged": [
+    "round 7: dispatch web pending-sync.ts (authenticated() flag at authentication, read-only own updates held in memory and stored first on the writable flip), connection.ts, pending-sync.test.ts, e2e/editor.ts (admitWithoutSync), e2e/offline-edits.e2e.ts (gap case on the heading spec)",
     "round 6: ninth forward merge 58b805d9 (pi-envoy and pi-legion CHANGELOGs, both sides kept)",
     "round 5: eighth forward merge 24e90b2c (main's AgentName resolution line now carries the withdrawn wording; actor.ts keeps askResolutionBadge/askResolutionReason); docs/rebuild.go and ask_lifecycle.go (rebuild writes the close's states); dispatch web connection.ts, pending-sync.ts, roots.ts (one admission gate, one own-row helper, shared root names); margin/useMarginSheet.ts (withdrawn folds); docs/service.go settleReloaded carries no err; README/AGENTS.md repair retry list is per process",
     "round 4: docs/service.go and docs/ask_lifecycle.go (settleOutcome, followUpSettlement), dispatch web pending-sync.ts and pending-sync.test.ts (public Yjs reads); sixth and seventh forward merges (89be96d2, 337c577d; main deleted skills/dispatch/references/, the fact stays in the issue-update and resolve-ask --help text)",
@@ -186,5 +195,5 @@
     "R7 local runs at 39c12172 (from a git archive of the head): api ok (1562 s), store ok, cmd/dispatch ok, -tags multiprocess cmd/dispatch ok (350 s); docs failed only TestAHealthyRoomUnderWritesIsNeverRefused ('too few to say anything' under load), which passes alone (ok 6.6 s) and is not in the diff; pmdoc failed only its timing tests and the differential tests that need the workspace's @legion/proof-editor link absent from the archive (pmdoc is not in the diff). bun test packages/contracts packages/envoy-client: one envoy-config timing test failed under load and passes alone. packages/dispatch: typecheck clean; bun test 2388 pass on the re-run (the first run under load had 2 failures not reproduced). biome check of contracts, dispatch, claude-envoy, envoy-client: no errors. claude-envoy check-dist passes. -race was not run locally (the pod has no C compiler); CI's envoy-go-race lane runs it."
   ],
   "openQuestions": [],
-  "round": 6
+  "round": 7
 }
