@@ -544,6 +544,12 @@ type dispatchOptions struct {
 	// one here, and a name not here is added. It is how a test gives the process a GitHub App,
 	// a sign-in issuer or cookie identity without every other test growing those rows.
 	Env map[string]string
+	// Binary is the envoy-dispatch the process runs. Empty builds this tree's own (cmdtest.Build);
+	// the two-build test names an earlier build's binary here (twobuild_test.go).
+	Binary string
+	// WebDist is DISPATCH_WEB_DIST, the web app the process serves. Empty serves the process's own
+	// empty home, which is all a test that loads no page needs.
+	WebDist string
 }
 
 // startDispatchProcess builds Dispatch and starts it on a free loopback port against databaseURL,
@@ -564,7 +570,15 @@ func startDispatchProcessWithSettleDelay(t *testing.T, databaseURL string, settl
 func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatchOptions) *dispatchProcess {
 	t.Helper()
 	home := t.TempDir()
-	cmd := exec.Command(cmdtest.Build(t, "envoy-dispatch"))
+	binary := options.Binary
+	if binary == "" {
+		binary = cmdtest.Build(t, "envoy-dispatch")
+	}
+	webDist := options.WebDist
+	if webDist == "" {
+		webDist = home
+	}
+	cmd := exec.Command(binary)
 	port := cmdtest.FreeTCPPort(t)
 	cmd.Dir = home
 	environment := map[string]string{
@@ -577,7 +591,7 @@ func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatch
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 		"DISPATCH_LISTEN_HOST":             "127.0.0.1",
 		"DISPATCH_PORT":                    strconv.Itoa(port),
-		"DISPATCH_WEB_DIST":                home,
+		"DISPATCH_WEB_DIST":                webDist,
 		"DISPATCH_TEST_HOOKS":              "1",
 	}
 	if options.NATSURL == "" {

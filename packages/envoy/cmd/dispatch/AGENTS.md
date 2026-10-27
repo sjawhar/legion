@@ -589,5 +589,20 @@ and their NATS take minutes rather than seconds:
 env DISPATCH_TEST_DATABASE_URL=… go test -tags multiprocess -count=1 -timeout 30m ./cmd/dispatch
 ```
 
-A developer who runs only the block above runs neither tagged suite, which is why both are named
-here: the evidence for anything about two processes serving one database is in the second one.
+The two-build tests (`twobuild_test.go`, INFRA-558) start one Dispatch server of an earlier build
+and one of this tree on one Postgres and one NATS, as a rolling release runs them: each build's CLI
+against the other's server, each build's corpus documents read, edited, approved and opened on the
+other's document socket, and outbox events, GitHub messages and the stream and consumer settings
+across a stop and restart of each build. They build only under the `twobuild` tag. The earlier
+build is a directory `packages/envoy/scripts/build-dispatch-build.sh` writes, named by
+`DISPATCH_PREVIOUS_BUILD`: the suite skips when that variable is unset, and fails when the
+directory lacks a part it reads. The helpers both process suites share are in `processes_test.go`.
+
+```sh
+bash packages/envoy/scripts/build-dispatch-build.sh --previous-release --out "$TMPDIR/dispatch-previous"   # from the repository root
+env DISPATCH_TEST_DATABASE_URL=… DISPATCH_PREVIOUS_BUILD="$TMPDIR/dispatch-previous" go test -tags twobuild -count=1 -timeout 30m ./cmd/dispatch
+```
+
+A developer who runs only the block above runs none of the tagged suites, which is why each is
+named here: the evidence for anything about two processes serving one database is in the
+multiprocess suite, and for two builds serving it, in the two-build suite.
