@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-629",
-  "completed": "2026-10-27T17:02:16Z",
+  "completed": "2026-10-27T17:45:32Z",
   "pr": "https://github.com/sjawhar/legion/pull/2419",
   "proof": [
+    {
+      "criterion": "Review round 1 (findings 1-4, the architect's land_on_main decision): the deploy key runs only the commit the event fixed; fold-plan never silently skips a fragment; fold-notes is dependency code to the credential check; land_on_main is INFRA-630's text and returns",
+      "surface": "release-push.sh fold-plan / fold-notes / push-fold on a real clone of sjawhar/legion with its real tags, changie v1.26.0 and a local bare origin through the deploy-key path; check-release-credentials.sh and its tests; changelog-fold.yaml",
+      "command": "PATH=$TMPDIR/infra629/bin:$PATH bash $TMPDIR/infra629/proof.sh 6b255451bb62dbf8b678b0fd93852e7018f53ab5 (log: https://github.com/sjawhar/legion/pull/2419#issuecomment-6449345467); bash .github/scripts/release-push.test.sh; uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-release-credentials.test.sh; diff <(sed -n '/^land_on_main() {/,/^}/p' <INFRA-630 release-push.sh>) <(sed -n '/^land_on_main() {/,/^}/p' .github/scripts/release-push.sh)",
+      "observed": "Origin main got one github-actions[bot] fold commit with ## [99.0.0] and ## [main@<12 hex>] blocks; a second run on the same base printed '::notice title=Nothing pushed; a fresh run started::...' and called 'gh workflow run changelog-fold.yaml --repo sjawhar/legion --ref main'; a commit adding unreleased/sjawhar/fix-thing.yaml and INFRA-1-a.yml makes fold-plan fail '::error::release-push.sh fold-plan: packages/contracts/.changes/unreleased/INFRA-1-a.yml packages/contracts/.changes/unreleased/sjawhar at HEAD: ...', rc 1. release-push.test.sh 411/0 (the tester's two blocks unchanged), changelog-fold.test.sh 12/0, check-release-credentials.test.sh 244/0, check-release-credentials.sh green; grep -c '^land_on_main()' = 1, grep -c '^is_commit_sha()' = 1, the land_on_main diff against INFRA-630 empty. changelog-fold.yaml checks out ${{ github.sha }} in both jobs and passes BASE: ${{ github.sha }}.",
+      "headSha": "6b255451bb62dbf8b678b0fd93852e7018f53ab5",
+      "negativeControl": "check-release-credentials.test.sh: a 'release-push.sh fold-notes' step in fold_publish (with a path, with none, behind bash) fails naming it as dependency code, while push-fold there passes; a notes file with a '## ' line is still refused by push-fold with origin unchanged."
+    },
     {
       "criterion": "Tester round 1, failures 1 and 2: a fragment gets the release of the commit that added that very file (glob characters in its name), and a release tag pushed between fold_build and fold_publish does not fail the run or lose the fragment",
       "surface": "release-push.sh fold-plan / fold-notes / push-fold on a real clone of sjawhar/legion with its real tags, changie v1.26.0, a local bare origin through the deploy-key path (the tester's own repro scripts), and the tester's red tests in release-push.test.sh",
@@ -60,7 +68,8 @@
     "changelog-fold.yaml gained a pull_request trigger (paths: the workflow, release-push.sh, install-changie, packages/*/.changie.yaml; not .changes/**) so fold_build runs on GitHub before the merge on the PR's merge commit; fold_publish runs on main only.",
     "Each package's fragments for one release share one notes file per (package, label); fold-plan prints tab-separated lines <package-dir> <label> <date> <path>; specs are <package-dir>[=<tag-prefix>] arguments.",
     "Simplify pass: 5 applied, 1 skipped (git --sort=v:refname for the lowest release tag would order a tag prefix ending in digits differently from sort -V).",
-    "Round 2: push-fold defers, rather than refuses, a version-labelled group whose notes file does not exist at all (its release tag was pushed after the build planned); its fragments stay for a later run (the release's completion starts one, the daily run is the backstop). A missing main@ group's notes stay a refusal. Known limit: a new tag of a LOWER version than an existing one, pushed between the jobs on a commit holding already-planned fragments, would re-label a group and push-fold refuses (exit 1); release tags only go up."
+    "Round 2: push-fold defers, rather than refuses, a version-labelled group whose notes file does not exist at all (its release tag was pushed after the build planned); its fragments stay for a later run (the release's completion starts one, the daily run is the backstop). A missing main@ group's notes stay a refusal. Known limit: a new tag of a LOWER version than an existing one, pushed between the jobs on a commit holding already-planned fragments, would re-label a group and push-fold refuses (exit 1); release tags only go up.",
+    "Round 3 (review round 1): changelog-fold.yaml checks out github.sha in both jobs (no base output); fold-plan refuses every non-regular or non-.yaml entry under unreleased/ (it used to skip them silently), so the shared test fixture's README.md moved into its own refusal cases; check-release-credentials reports release-push.sh fold-notes as dependency code; land_on_main and is_commit_sha are INFRA-630's text byte for byte (architect decision, 17:29Z), land_on_main returns 0 and prints no Pushed line; check_hand_over sets no EXIT trap."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -68,5 +77,5 @@
     "Open pull requests that touch the same scripts: #2358 (INFRA-576) and #2316 (INFRA-520) edit release-push.test.sh and check-release-credentials.sh/.test.sh; INFRA-630 adds land_on_main's twin (whichever merges second takes the other's from main).",
     "Remaining 'Unreleased' hits outside CHANGELOG.md and docs/plans: AGENTS.md's new bullet (names the old heading on purpose), docs/solutions unchanged-diff-fingerprint:105, LEGION-247 forward-merge note :43 and a-name-a-package-stops-shipping :58 (dated records), packages/dispatch/e2e/agent-view.e2e.ts:78 (a chat fixture), daemon Go test names about unreleased child issues."
   ],
-  "round": 2
+  "round": 3
 }
