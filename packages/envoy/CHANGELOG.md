@@ -1418,6 +1418,16 @@
 
 ### Fixed
 
+- A document written through the API or the command line now reads `\&amp;` as the text `&amp;`,
+  as a comment and the browser editor do, where it showed `&`. The server removed every backslash
+  and then decoded HTML's character references by HTML's rules, so it also decoded a reference
+  without its `;` (`AT&T &copy 2024` showed `AT&T © 2024`), one with too many digits, a legacy
+  name used as a prefix (`&notit;`) and one naming a control character or a noncharacter, which
+  the editor shows as written or as U+FFFD; and it read `&#10;` in text as a line break where the
+  editor shows a space. Text, link and image titles, image addresses and footnote labels now read
+  as the editor reads them, and a link or image title or an image address holding `&amp;` is
+  written so that it reads back as `&amp;`. Documents already stored keep the text they hold.
+
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
   Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no

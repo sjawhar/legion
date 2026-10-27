@@ -1743,6 +1743,24 @@ and the parser puts each definition back where it was written and removes the li
 document is read (`definitionsInPlace`). Goldmark's footnote transformer, which would order the
 definitions by first reference, drop the rest and append backlinks, is not used.
 
+Inline text, a link's and an image's title, an image's address and a footnote label are decoded in
+one pass from the left, as CommonMark and the browser editor's parser decode them
+(`decodeMarkdownText`): a backslash before ASCII punctuation is that character, so `\&amp;` is
+the text `&amp;`, and a character reference is decoded only where it is one to that parser
+(`characterReferenceAt`). Goldmark's `util.UnescapePunctuations` and Go's `html.UnescapeString`
+are not used for this, since they read by HTML's rules: escapes went first and the reference
+after (`\&amp;` was `&`), a reference without its `;` decoded (`&copy 2024`), and so did a
+numeric one of more than seven decimal or six hexadecimal digits, a legacy name used as a prefix
+(`&notit;` was `¬it;`) and a control character or noncharacter, which that parser reads as
+U+FFFD. Named references come from Go's HTML table, but for `&nLt;` and `&nGt;`, which it lacks.
+A line feed in text, a decoded `&#10;` among them, is a space, as that parser's import reads every
+line feed in a text node; an image's alt text keeps it. A typed block's attribute values keep
+HTML's attribute rules, as the parser reads them. The title writer (`titleSuffix`) and the image
+address writer (`escapeImageSource`) put a backslash before an `&` that would open a reference,
+and the image address writer doubles a backslash before punctuation in and out of a table, so each
+reads back; an `&` that opens none, as in `&foo;` or `AT&T`, is written as it is. A text link's
+address is still read as written (dispatch://INFRA-425).
+
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node
 against its schema content rule. Schema changes are additive: add a type, add a defaulted
