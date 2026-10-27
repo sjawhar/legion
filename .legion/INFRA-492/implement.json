@@ -2,9 +2,25 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-492",
-  "completed": "2026-10-27T03:58:00Z",
+  "completed": "2026-10-27T04:25:58Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2324",
   "proof": [
+    {
+      "criterion": "Spec acceptance 1 and 2 and the three requirement tests, re-run at the merged head after the conflict merge (fingerprint 4cbe4bb0554dac23387d7d7c754453099dc17a1dd30f86d27927196b84e2c669 unchanged from 96c75e9a)",
+      "surface": "Dispatch in Chromium and iPhone (Playwright) against the merged tree's Go server, fake Envoy and a loopback Postgres 17 + pgvector, production SPA bundle rebuilt from the merged tree",
+      "command": "cd packages/dispatch && bun run build:web && DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e?sslmode=disable bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refetch-budget.e2e.ts e2e/live.e2e.ts e2e/nav.e2e.ts e2e/deep-links.e2e.ts e2e/inbox.e2e.ts e2e/inbox-stability.e2e.ts e2e/references.e2e.ts e2e/hover-preview.e2e.ts e2e/delivery-live.e2e.ts e2e/github-checks.e2e.ts",
+      "observed": "185 passed, 21 skipped by the specs, 0 failed (12.7m). Budget: 0 GETs under /api/ and 0 untouched-issue reads on both projects; sidebar: inbox 1, pinned 1, projects 1; pin 1 pinned-list read; 0 Replies reads for a stranger's thread; 6 board list reads. Also at the merged head: web unit 2412 pass 0 fail, contracts 237 pass, dispatch and contracts tsc OK, biome check . exit 0, go build/vet OK, targeted Go api tests (summaries, event fields, replay header, thread_logins, routes table, broadcasts) ok on the real Postgres.",
+      "headSha": "6436d90fc925a022cfc4dc250d9d85d10a4d1dbb",
+      "negativeControl": "The same refetch-budget file (sha256 253c18d8...7290) at base 16e4bb0f758e fails on the counts: budget Received 1120 against <= 5, sidebar inbox 2, pinned 2, projects 2 against 1 each."
+    },
+    {
+      "criterion": "The head that merges carries the same Dispatch change as the proven head: rebase re-check 6436d90fc925 -> 0df2c9e6a3ed",
+      "surface": "the branch's diff against its fork point, and the Go build of the two modules main's second merge touched",
+      "command": "jj diff --from 'fork_point(\"main\"@origin | <sha>)' --to <sha> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum at both heads; jj diff --from 6436d90f --to 0df2c9e6 --name-only; cd packages/envoy && go build ./... && go vet ./internal/dispatch/...; cd packages/daemon && go build ./...",
+      "observed": "Fingerprint 4cbe4bb0554dac23387d7d7c754453099dc17a1dd30f86d27927196b84e2c669 at 96c75e9a, 6436d90f and 0df2c9e6. The second merge changes only daemon, test-harness (testpg, testnats, tests3, smoke), script, docs and go.mod files, and no file under packages/dispatch, packages/contracts or packages/envoy/internal/dispatch. Both builds and the vet pass.",
+      "headSha": "0df2c9e6a3edac1e490d7c0bbfe8f2750b0176a9",
+      "negativeControl": "The fingerprint check prints nothing and fails when the diff fails (pipefail), so an unresolvable head reads as changed and never as unchanged. The real-surface proof at 6436d90f is the entry above, and the failing base run is its negative control."
+    },
     {
       "criterion": "Spec acceptance 1 (budget and freshness): over 20 title writes to issues the page does not show, at most 5 GETs under /api/ and no read of an untouched issue; a referenced issue's title and a child's status in the open parent's Children tab each show within 2 s; fails at the commit before",
       "surface": "Dispatch in Chromium and iPhone (Playwright) against the branch's Go server, fake Envoy and a loopback Postgres 17 + pgvector, production SPA bundle",
@@ -58,7 +74,8 @@
     "Added beyond the plan: closed_at in issue events' changed; references_changed names targets whose kept edge's excerpt moved and, on a retitle, the parent and blockers; the Inbox refreshes on block.* like the projects badge.",
     "The contracts zod schemas list the new fields, so agents' parsed issue, message and ask notifications carry changed, ancestors and thread_logins (comment payloads already passed them through).",
     "inbox.e2e.ts 'a later Inbox response clears a hidden ask's pending refresh' changed its ordering signal to a pinned-list read, because the held Inbox first load is no longer cancelled (spec item 5); its assertions are unchanged.",
-    "webkit and firefox projects of deep-links/delivery-live cannot launch in this pod (no browser binary); chromium and iphone are 169 passed, 0 failed."
+    "webkit and firefox projects of deep-links/delivery-live cannot launch in this pod (no browser binary); chromium and iphone are 169 passed, 0 failed.",
+    "Conflict round: forward-merged main c3d09eec924c as 6436d90fc925 (the only conflicts were the contracts and envoy changelog lists; both sides kept), then main baadccdc6a9a as 0df2c9e6a3ed at the architect's request so the head carries main's daemon test fix #2317 (no conflicts, no Dispatch files). Fingerprint 4cbe4bb0... unchanged at both. Comments: https://github.com/sjawhar/legion/pull/2324#issuecomment-6433492071 and the one that follows it. The full Go api/docs suites were not re-run locally this round, because the fingerprint is unchanged and only the bare gates are required; CI runs them."
   ],
   "openQuestions": [
     "Memory with kubectl top (dispatch://INFRA-492/comment/8d3d6ac7-d9a7-4187-a9bb-348c88cac96e) is not in the approved acceptance and not done; the architect decides (comment 32 says not added).",
@@ -66,5 +83,6 @@
   ],
   "discoveredComplexity": [
     "A document mention is never named in references_changed, so a document's backlink panel refreshes only on focus/staleTime or a whole-cache refresh, as on main."
-  ]
+  ],
+  "round": "conflict merge of main c3d09eec924c (6436d90fc925), then main baadccdc6a9a (0df2c9e6a3ed) at the architect's request for main's daemon test fix; forward merges, no rebase"
 }
