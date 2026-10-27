@@ -2,11 +2,13 @@
 package admit
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -1012,6 +1014,19 @@ func (a *Admission) Held() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return len(a.pending) > 0
+}
+
+// HeldSummaries is every key's held summary, by key order: what release will apply once the
+// Dispatch consumer catches up. A release records an issue, so it resolves that issue's
+// repository from memory (workflow.Repositories), which answers only a repository whose default
+// branch has been read; the boot-owned poll reads this to ready each held key's repository before
+// it applies a position, as the boot read readies the listing's own (daemon's reconcile). Nothing
+// else reads it: a decision is made inside a transaction, from the record.
+func (a *Admission) HeldSummaries() []dispatch.IssueSummary {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	held := slices.SortedFunc(maps.Values(a.pending), func(x, y dispatch.IssueSummary) int { return cmp.Compare(x.Key, y.Key) })
+	return held
 }
 
 // Target is the notification stream position Held's hold is waiting for: the highest target any

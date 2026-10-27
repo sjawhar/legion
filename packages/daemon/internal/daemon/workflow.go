@@ -776,6 +776,10 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 		if haveLast && position == last {
 			continue
 		}
+		if err := w.prepareHeld(ctx); err != nil {
+			w.log.Warn("ready the repositories of the held keys before releasing them", "error", err)
+			continue
+		}
 		eventID := fmt.Sprintf("dispatch-position:%s:%s:%d:%t", w.dispatchProject, w.bootID, position.AckFloorStream, position.Idle)
 		if _, err := intake.ApplyFact(ctx, w.pool, "dispatch", eventID, position, w.handlers...); err != nil {
 			w.log.Warn("apply Dispatch consumer position failed", "error", err)
@@ -783,6 +787,24 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 		}
 		last, haveLast = position, true
 	}
+}
+
+// prepareHeld readies the repository of every key admission holds, exactly as reconcile's boot
+// read readies each listed todo issue's, before a position fact releases them. A release records
+// an issue, and it records inside the fact's own transaction, where the workflow resolves a
+// repository from memory alone and refuses a served repository whose default branch was never
+// read. The boot's own read of the listing readies only what the mapping served then: a
+// repository the mapping began to serve afterwards (Dispatch's settings.repo_project.updated,
+// which reads no default branch) would otherwise fail the position fact, and every retry of it
+// the same way, so the hold would never release at all. A failure here leaves the hold as it is
+// and is retried on the poll's own schedule, as a failed position apply is.
+func (w *workflowRuntime) prepareHeld(ctx context.Context) error {
+	for _, summary := range w.admission.HeldSummaries() {
+		if _, err := w.prepareIssue(ctx, intake.ListedIssue(summary), false, false); err != nil {
+			return fmt.Errorf("ready the repository of the held %s: %w", summary.Key, err)
+		}
+	}
+	return nil
 }
 
 // defaultReconnectPollInterval is reconnectWatchdog's ticker period.
