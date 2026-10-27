@@ -18,6 +18,7 @@ func TestRenderEscapesBlockMarkerLinesInsideParagraphs(t *testing.T) {
 		"___",
 		"-  -  -",
 		":::callout{kind=\"warning\"}",
+		":::ask{#a1}",
 		":::",
 		"::foo",
 		"::::x{a=\"b\"}",
