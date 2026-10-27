@@ -939,9 +939,15 @@
   a 403 `capability` finishes the row undelivered, and for a merge-queue packet posts a Dispatch
   message naming the refusal. It still re-holds from the role-lane exceptions a listener of an
   earlier release raises. **Release order:** a deployment's Legion daemons take this release
-  before its listeners do. An earlier daemon reads a 504 as a generic error and retries the notice
-  without a cap, holding the architect's later notices behind it until the holder's registration
-  lapses.
+  before its listeners do. An earlier daemon reads both new answers, the 504 and the 403
+  `capability`, as a generic error and retries the notice without a cap, and every later notice to
+  that architect waits behind it (`earlierNoticeFor`): behind a 504 until the holder confirms or its
+  registration lapses, behind a 403 until another session holds the role. Neither answer refuses
+  input an earlier listener accepted: each reports a message that an earlier listener answered
+  200 and then failed to deliver (a forward without a receipt, or a holder that does not advertise
+  the payload's delivery mode). A role held by a session served on a port, which holds no NATS
+  connection to confirm a forward, now answers 504 `receipt_timeout`; an earlier listener answered
+  200 and the forward reached nobody.
 - `POST /v1/interests/subscribe` no longer stores a topic reaching a private stream subject other
   than the session's own agent subject (`bus.ReachesPrivateStreamSubject`): another session's
   `notifications.agent.<id>`, a failed-delivery lane
