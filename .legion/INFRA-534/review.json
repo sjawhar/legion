@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-534",
+  "completed": "2026-10-27T07:07:31Z",
+  "round": 1,
+  "reviewedHead": "5a22c278a5d8a5e4f3de17af5c0e52e95a2395a3",
+  "codeHead": "e2dae381d7f39633fb72d361595dc64858a2127d",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/escape.go:848",
+      "description": "altReadsBack now also requires parseByGoldmarkRules, which reads */_ runs by flanking alone; main's Parse already let a */_ run open or close beside another */_ (rule of three keeps them apart). Correct alt text main stored and re-rendered unchanged now gets fully escaped: ![**a*_](u) -> ![\\*\\*a\\*\\_](u), also ![*a**_](u), ![_**a*](u), ![_*a**](u). Reproduced by Parse+Render at main 448a4100 (same=true) and at the head (same=false)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go:121",
+      "description": "The writer keeps the first spelling that reads back under the head's inlineMarkdown and goldmarkMarkdown. Main escaped some runs because main's own reader misread the plain spelling; the head now drops those escapes from correct stored text: `x ~~\\_\\_\\*\\*é\\_b~~**\\ y [~~\\_\\_\\*\\*é\\_b~~**]\\(u) z` re-renders as `x ~~__**é\\_b~~**\\ y [...]`. Main re-renders it unchanged; engine, main and head read the same tree. The deep reviewer's differential.sh --base 448a4100 over 30,085 targeted documents: GATE churn 5, engine-tree churn 10, lost fixed points 3, FAIL; a 20,085-document run: engine-tree churn 2, FAIL. This breaks the plan's T6 gate (every GATE 0) and the PR body/CHANGELOG/AGENTS.md claim that correctly stored renderings keep their bytes."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "The INFRA-535 paragraph says its three cases are recorded in TestTildeReadingsThatDifferAreRecorded as still differing; round 2 removed that test and implemented the classification in this pull request."
+    }
+  ],
+  "ci": "Code head e2dae381 (handoffs only since, compare handoffsOnly true, 2 files): required lint, typecheck, test, pr-title completed success at 07:07Z; non-required envoy-go, envoy-go-race, dispatch and others still queued.",
+  "thermonuclear": "Pair run once at 5a22c278: deep review Verdict CHANGES (the two important findings above; Security: no sensitive surface); code quality Verdict CHANGES (goldmark-mode parameter in pairTextblock/pairLabel/imageNesting never changes the result since push already groups every goldmark-mode run as emphasisRuns; a second block reader goldmarkBlockReader/parseByGoldmarkRules exists only for the alt check; imageNesting.Parse duplicate branch; 'kind' used for both runGroup and runKind in AGENTS.md). The quality items change no behaviour and are the review's named fast-follow, best folded into the corrective round since the alt-text fix touches the same reader.",
+  "fastFollow": "pmdoc delimiter cleanup: drop the goldmarkRules parameter from pairTextblock/pairLabel and imageNesting; replace parseByGoldmarkRules/goldmarkBlockReader in altReadsBack with an inline read; simplify imageNesting.Parse; say 'group' for runGroup in AGENTS.md; the pair comment at delimiters.go:199-205 overstates the match with micromark's inner attention pass.",
+  "threads": "No review threads or bot comments existed before this round."
+}
