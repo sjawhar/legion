@@ -740,16 +740,16 @@ func refusesBucket(err error, bucket string) bool {
 }
 
 // openDeliveryLease opens the listener state bucket and makes machineID's delivery lease over it
-// for this process, instance. The bucket is opened on a NATS connection of the lease's own
-// (bus.Dial, as the user and through the proxy the environment names), which nats.go reconnects in
-// place for the life of the process: the bus client replaces its connection after a close, and a
-// handle on the replaced one would never renew the lease again. An open that fails for want of a
-// connection is retried every startRetry, so a NATS that answers late does not end the
-// start. An open the NATS user's grant refuses (errListenerStateRefused) returns nil after one
-// ERROR naming the bucket and the missing grant: the listener then delivers without a lease, as
-// the machine's one deliverer receiving only while no other subscriber holds the durable, and says
-// so in /healthz.
-func openDeliveryLease(urls []string, replicas int, machineID, instance string, logger *logging.Logger) *lease {
+// for this process, instance, and returns it with the connection the bucket is on. The bucket is
+// opened on a NATS connection of the lease's own (bus.Dial, as the user and through the proxy the
+// environment names), which nats.go reconnects in place for the life of the process: the bus client
+// replaces its connection after a close, and a handle on the replaced one would never renew the
+// lease again. An open that fails for want of a connection is retried every startRetry, so a NATS
+// that answers late does not end the start. An open the NATS user's grant refuses
+// (errListenerStateRefused) returns no lease and no connection after one ERROR naming the bucket
+// and the missing grant: the listener then delivers without a lease, as the machine's one
+// deliverer receiving only while no other subscriber holds the durable, and says so in /healthz.
+func openDeliveryLease(urls []string, replicas int, machineID, instance string, logger *logging.Logger) (*lease, *nats.Conn) {
 	var conn *nats.Conn
 	for {
 		var err error
@@ -759,7 +759,7 @@ func openDeliveryLease(urls []string, replicas int, machineID, instance string, 
 		if err == nil {
 			var kv bus.KeyValue
 			if kv, err = openListenerState(conn, replicas, listenerStateRequestWait); err == nil {
-				return newLease(kv, machineID, instance, productionLeaseConfig(), time.Now, logger)
+				return newLease(kv, machineID, instance, productionLeaseConfig(), time.Now, logger), conn
 			}
 		}
 		if errors.Is(err, errListenerStateRefused) {
@@ -769,7 +769,7 @@ func openDeliveryLease(urls []string, replicas int, machineID, instance string, 
 				slog.String("error", err.Error()),
 			)
 			conn.Close()
-			return nil
+			return nil, nil
 		}
 		logger.Warn("listener state bucket open failed; retrying",
 			slog.String("bucket", bus.ListenerStateBucket),
@@ -784,6 +784,34 @@ func openDeliveryLease(urls []string, replicas int, machineID, instance string, 
 // a pod waits on another pod's unresolved delivery attempt before it takes the attempt over: the
 // other pod may still be prompting until then, and after it, that pod died without resolving it.
 const ledgerTakeoverMargin = 5 * time.Second
+
+// ledgerReconnectWait bounds how long the durable lane waits for the delivery ledger's connection
+// to come back, to ask the ledger once more, before it NAKs the message for durableRetryDelay.
+const ledgerReconnectWait = 5 * time.Second
+
+// ledgerConnected is the delivery handler's ledgerReconnected over conn, the connection the
+// listener state bucket is on: it waits, polling, until conn is connected, for at most
+// ledgerReconnectWait and while ctx lasts. A listener without the bucket (conn nil) keeps its
+// ledger in process and needs none.
+func ledgerConnected(conn *nats.Conn) func(ctx context.Context) bool {
+	if conn == nil {
+		return nil
+	}
+	return func(ctx context.Context) bool {
+		ctx, cancel := context.WithTimeout(ctx, ledgerReconnectWait)
+		defer cancel()
+		poll := time.NewTicker(50 * time.Millisecond)
+		defer poll.Stop()
+		for !conn.IsConnected() {
+			select {
+			case <-ctx.Done():
+				return conn.IsConnected()
+			case <-poll.C:
+			}
+		}
+		return true
+	}
+}
 
 // newDeliveryLedger makes the delivery ledger every lane asks before it prompts a session or
 // forwards a role-lane message to it: the `delivery.` keys of the listener state bucket, shared by
@@ -947,7 +975,7 @@ func main() {
 	// The delivery lease makes one pod of this machine id its deliverer and every other a standby
 	// (lease.go). It is created here, after the durable check so a refused start opens no bucket,
 	// and started once /v1 serves and the shutdown can release it.
-	deliveryLease := openDeliveryLease(cfg.NATSURLs, cfg.NATSReplicas, cfg.MachineID, instance, logger)
+	deliveryLease, leaseConn := openDeliveryLease(cfg.NATSURLs, cfg.NATSReplicas, cfg.MachineID, instance, logger)
 	// CI-summary aggregation state. Its WatchAll cache warms asynchronously like the registries
 	// below; the summary loop tolerates an empty cache until it fills. It opens ahead of them, as the
 	// one store the webhooks need, and after the durable check, so a refused start opens no bucket.
@@ -1063,6 +1091,7 @@ func main() {
 		machineID:         cfg.MachineID,
 		deliverer:         &deliver,
 		ledger:            ledger,
+		ledgerReconnected: ledgerConnected(leaseConn),
 		logger:            logger,
 		messagesReceived:  messagesReceived,
 		messagesDelivered: messagesDelivered,

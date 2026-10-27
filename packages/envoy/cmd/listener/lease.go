@@ -208,10 +208,11 @@ func (r leaseRecord) encode() ([]byte, error) {
 
 // leaseAcquisition is how a pod took the lease: what the record was when it wrote over it. The
 // receive loop acts on it: over an expired record that was not released (the holder was killed
-// or lost its node, or this pod's own renewals lapsed and then resumed) it waits one AckWait
-// before it subscribes, so the messages the old holder had in hand are redelivered before newer
-// ones, and it counts a durable still push-bound as the dead holder's binding; from an absent or
-// released record it subscribes at once, and counts a push-bound durable as a pre-lease build's.
+// or lost its node, or this pod's own renewals lapsed and then resumed) it subscribes at once but
+// holds what it receives for one AckWait, then delivers it in stream order, so the messages the old
+// holder had in hand, redelivered within that wait, go before newer ones; it counts a durable still
+// push-bound as the dead holder's binding. From an absent or released record it subscribes and
+// delivers at once, and counts a push-bound durable as a pre-lease build's.
 type leaseAcquisition int
 
 const (

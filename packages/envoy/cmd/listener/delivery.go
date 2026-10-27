@@ -63,7 +63,13 @@ type listenerDeliveryHandlerConfig struct {
 	// ledger is the delivery ledger every lane asks before it prompts a session or forwards a
 	// role-lane message to it: the machine's shared one (dedupe.KV), or, without the listener
 	// state bucket, this process's own (dedupe.Memory).
-	ledger            dedupe.Ledger
+	ledger dedupe.Ledger
+	// ledgerReconnected waits, for at most ledgerReconnectWait and while ctx lasts, until the
+	// ledger's own NATS connection is connected, and reports whether it is; nil for a ledger that
+	// needs no connection (dedupe.Memory). The durable lane asks it before it retries a message
+	// whose ledger call failed, so a call that failed in a reconnect's moment is made again at
+	// once rather than costing durableRetryDelay.
+	ledgerReconnected func(ctx context.Context) bool
 	logger            *logging.Logger
 	messagesReceived  *metrics.Counter
 	messagesDelivered *metrics.Counter
@@ -327,13 +333,27 @@ func clearLedgerAttempt(cfg listenerDeliveryHandlerConfig, item contracts.Envelo
 //   - Deferred (another pod's attempt, which may still be prompting) is retried on the durable lane
 //     once that attempt can be taken over, and skipped on a core lane, which retries nothing.
 //   - A ledger that cannot be read retries the message on the durable lane after durableRetryDelay;
-//     a core lane delivers without the ledger, under the zero attempt, which settles nothing.
+//     a core lane delivers without the ledger, under the zero attempt, which settles nothing. The
+//     durable lane first waits for the ledger's connection (ledgerReconnected) and asks once more,
+//     so a call that failed while that connection was reconnecting costs no 30 s.
 //
 // role picks the role lane's skip line, `listener role dedupe skip`, for every skip.
 func ledgerAttempt(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string, role bool) (attempt dedupe.Attempt, deliver bool, retryIn time.Duration) {
+	durable := message.mode == durableDelivery
 	attempt, err := cfg.ledger.Attempt(item.DedupeKey, sessionID)
+	if err != nil && durable && cfg.ledgerReconnected != nil {
+		ctx := message.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if cfg.ledgerReconnected(ctx) {
+			first := err
+			if attempt, err = cfg.ledger.Attempt(item.DedupeKey, sessionID); err == nil {
+				cfg.logger.Info("delivery ledger answered once its connection was back", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("first_error", first.Error()))
+			}
+		}
+	}
 	if err != nil {
-		durable := message.mode == durableDelivery
 		cfg.logger.Warn(ledgerUnavailableLine, slog.String("operation", "attempt"), slog.String("session_id", sessionID), slog.String("topic", item.Topic), slog.String("event_id", item.EventID), slog.Bool("retry", durable), slog.String("error", err.Error()))
 		if durable {
 			return dedupe.Attempt{}, false, durableRetryDelay

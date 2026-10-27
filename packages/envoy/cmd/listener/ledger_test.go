@@ -186,6 +186,61 @@ func TestAnUnavailableLedgerRetriesTheDurableLaneAndLetsACoreLaneDeliver(t *test
 	}
 }
 
+// failingOnceLedger fails its first Attempt, as a call made while the ledger's connection was
+// reconnecting does, and answers from Ledger after that.
+type failingOnceLedger struct {
+	dedupe.Ledger
+	failed atomic.Bool
+}
+
+func (l *failingOnceLedger) Attempt(dedupeKey, sessionID string) (dedupe.Attempt, error) {
+	if l.failed.CompareAndSwap(false, true) {
+		return dedupe.Attempt{}, errLedgerDown
+	}
+	return l.Ledger.Attempt(dedupeKey, sessionID)
+}
+
+// A durable message whose ledger call failed while the ledger's connection was reconnecting is
+// asked about again once the connection is back, and delivered then, rather than NAKed for 30 s:
+// a short drop of the link otherwise held every message in flight for half a minute. A connection
+// that does not come back within the wait still retries the message after the 30 s.
+func TestALedgerCallThatFailedInAReconnectIsMadeAgainOnceTheConnectionIsBack(t *testing.T) {
+	var prompts atomic.Int32
+	harness := newListenerDeliveryHarness(t, countingPrompts(&prompts))
+	const topic = "notifications.github.owner.repo.issue.10"
+	harness.registerFanoutTarget(t, "ses_reconnect", topic, nil)
+	cfg := harness.config
+	cfg.ledger = &failingOnceLedger{Ledger: testDeliveryLedger(t, harness.client.Conn, "test-machine", "boot-reconnect")}
+	var waits atomic.Int32
+	cfg.ledgerReconnected = func(context.Context) bool { waits.Add(1); return true }
+
+	msg, settlement := settledMessage(t, harness.client.Conn, marshalListenerEnvelope(t, listenerTestEnvelope(topic, "ledger-reconnect")))
+	jetStreamDeliveryHandler(cfg)(context.Background(), msg)
+	if got := settlement(t); got != "+ACK" {
+		t.Fatalf("settlement = %q, want the message delivered and acked", got)
+	}
+	if got := prompts.Load(); got != 1 {
+		t.Fatalf("the session was prompted %d times, want 1", got)
+	}
+	if got := waits.Load(); got != 1 {
+		t.Fatalf("the durable lane waited for the ledger's connection %d times, want 1", got)
+	}
+	if logs := harness.logs.String(); strings.Contains(logs, ledgerUnavailableLine) {
+		t.Fatalf("a ledger call that answered on its retry logged %q:\n%s", ledgerUnavailableLine, logs)
+	}
+
+	cfg.ledger = unavailableLedger{}
+	cfg.ledgerReconnected = func(context.Context) bool { waits.Add(1); return false }
+	msg, settlement = settledMessage(t, harness.client.Conn, marshalListenerEnvelope(t, listenerTestEnvelope(topic, "ledger-still-down")))
+	jetStreamDeliveryHandler(cfg)(context.Background(), msg)
+	if delay := nakDelay(t, settlement(t)); delay != durableRetryDelay {
+		t.Fatalf("NAK delay with the connection still down = %s, want %s", delay, durableRetryDelay)
+	}
+	if got := prompts.Load(); got != 1 {
+		t.Fatalf("the session was prompted %d times in all, want only the first message's", got)
+	}
+}
+
 // A session another listener owns, or a self-subscribed one, is never prompted by this listener,
 // so its delivery writes nothing to the ledger, and a message that reaches only such sessions is
 // acked as before.

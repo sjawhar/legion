@@ -206,7 +206,7 @@ func TestADurableMessageReceivedWithoutTheLeaseIsDroppedAndRedeliveredToTheHolde
 	if err != nil {
 		t.Fatalf("create the durable: %v", err)
 	}
-	if err := stray.receiver.begin(info.Config.DeliverSubject); err != nil {
+	if err := stray.receiver.begin(info.Config.DeliverSubject, 0); err != nil {
 		t.Fatalf("subscribe the stray pod: %v", err)
 	}
 
@@ -354,14 +354,14 @@ func TestAGracefulStopNAKsWhatItHeldAndReleasesTheLeaseToTheStandby(t *testing.T
 	}
 }
 
-// A pod that takes the lease over an expired record nobody released waits one ack wait before it
-// subscribes, so what the dead holder had received comes back before newer messages; the dead
-// holder's subscription, still counted by the server, does not stop it subscribing then. A pod that
-// takes a released record subscribes at once.
-func TestAnExpiredTakeOverWaitsOneAckWaitBeforeReceiving(t *testing.T) {
+// A pod that takes the lease over an expired record nobody released subscribes at once, beside the
+// dead holder's subscription the server still counts, and delivers what it receives in stream
+// order once one ack wait has passed: a message the dead holder had received comes back to it
+// after a newer one did, and is still delivered first. A pod that takes a released record holds
+// nothing and delivers at once.
+func TestAnExpiredTakeOverDeliversAMessageRedeliveredAfterANewerOneFirst(t *testing.T) {
 	uri := testnats.URL(t)
 	timing := testReceiveTiming()
-	timing.ackWait = 2 * time.Second
 
 	const expired = "box-expired"
 	putLeaseRecord(t, uri, expired, `{"holder":"pod-dead","boot":"0123456789abcdef"}`)
@@ -376,7 +376,8 @@ func TestAnExpiredTakeOverWaitsOneAckWaitBeforeReceiving(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create the durable: %v", err)
 	}
-	// The dead holder's subscription: a node lost without a FIN keeps its interest on the server.
+	// The dead holder's subscription: a node lost without a FIN keeps its interest on the server,
+	// which goes on pushing messages to it that it never acks.
 	if _, err := setup.Subscribe(info.Config.DeliverSubject, func(*natsgo.Msg) {}); err != nil {
 		t.Fatalf("subscribe as the dead holder: %v", err)
 	}
@@ -384,33 +385,74 @@ func TestAnExpiredTakeOverWaitsOneAckWaitBeforeReceiving(t *testing.T) {
 		info, err := client.JS().ConsumerInfo(bus.Stream, bus.ListenerDurable(expired))
 		return err == nil && info.PushBound
 	})
+	publishDurable(t, client, "older")
+	waitFor(t, 5*time.Second, "the dead holder to have the older message", func() bool {
+		info, err := client.JS().ConsumerInfo(bus.Stream, bus.ListenerDurable(expired))
+		return err == nil && info.NumAckPending == 1
+	})
+	pushed := time.Now()
 
 	handle, received := recordingHandler()
 	rig := startReceiverRig(t, uri, expired, "pod-b", handle, timing, testLeaseTiming())
 	waitFor(t, 10*time.Second, "pod-b to take the expired lease", rig.lease.Holding)
-	taken := time.Now()
 	if status := rig.lease.Status(); status.How != leaseTakenExpired {
 		t.Fatalf("pod-b took the lease from a %s record, want expired", status.How)
 	}
-	if state := rig.receiver.report().State; state != receiveAwaitingAckWait && state != receivePreparing {
-		t.Fatalf("right after the take-over the receive loop is %s, want it waiting one ack wait", state)
+	subscribed := rig.awaitState(t, receiveActive, 5*time.Second)
+	if after := subscribed.Sub(pushed); after >= consumerAckWait {
+		t.Fatalf("pod-b subscribed %s after the older message went to the dead holder, want at once, before its redelivery", after)
 	}
-	receiving := rig.awaitState(t, receiveActive, 10*time.Second)
-	if waited := receiving.Sub(taken); waited < timing.ackWait-100*time.Millisecond {
-		t.Fatalf("pod-b subscribed %s after taking an expired lease, want one ack wait (%s)", waited, timing.ackWait)
+	if !strings.Contains(rig.logs.String(), "receiving beside it") {
+		t.Fatalf("pod-b did not log receiving beside the expired holder:\n%s", rig.logs.String())
 	}
-	publishDurable(t, client, "after the take-over")
-	if message := awaitReceived(t, received, 5*time.Second, "pod-b"); message.data != "after the take-over" {
-		t.Fatalf("pod-b received %q", message.data)
+	// The newer message reaches pod-b at once; the older one only when its ack wait runs out.
+	publishDurable(t, client, "newer")
+
+	first := awaitReceived(t, received, timing.ackWait+receiveHoldMargin+5*time.Second, "pod-b's first message")
+	second := awaitReceived(t, received, 5*time.Second, "pod-b's second message")
+	if first.data != "older" || first.delivered != 2 || second.data != "newer" || second.delivered != 1 {
+		t.Fatalf("pod-b delivered %q (delivery %d) then %q (delivery %d), want the older message redelivered, then the newer one",
+			first.data, first.delivered, second.data, second.delivered)
+	}
+	if held := first.at.Sub(subscribed); held < timing.ackWait {
+		t.Fatalf("pod-b delivered %s after it subscribed, want it to hold what it received for one ack wait (%s)", held, timing.ackWait)
 	}
 
 	const released = "box-released"
 	putLeaseRecord(t, uri, released, `{"holder":"pod-gone","boot":"0123456789abcdef","released":true}`)
-	control := startReceiverRig(t, uri, released, "pod-c", handle, timing, testLeaseTiming())
-	waitFor(t, 10*time.Second, "pod-c to take the released lease", control.lease.Holding)
-	taken = time.Now()
-	if waited := control.awaitState(t, receiveActive, 10*time.Second).Sub(taken); waited >= timing.ackWait {
-		t.Fatalf("pod-c subscribed %s after taking a released lease, want at once", waited)
+	controlHandle, controlReceived := recordingHandler()
+	control := startReceiverRig(t, uri, released, "pod-c", controlHandle, timing, testLeaseTiming())
+	control.awaitState(t, receiveActive, 10*time.Second)
+	publishDurable(t, control.client, "after the release")
+	published := time.Now()
+	for {
+		message := awaitReceived(t, controlReceived, 5*time.Second, "pod-c's message after the release")
+		if message.data != "after the release" {
+			continue
+		}
+		if after := message.at.Sub(published); after >= timing.ackWait {
+			t.Fatalf("pod-c delivered %s after the publish, want it at once", after)
+		}
+		break
+	}
+}
+
+// A held batch is delivered in stream order; a message whose JetStream metadata cannot be read
+// keeps the place it arrived in, and the others are ordered around it.
+func TestSortByStreamSequenceKeepsAnUnreadableMessageInPlace(t *testing.T) {
+	sub := &natsgo.Subscription{}
+	message := func(stream uint64) *natsgo.Msg {
+		return &natsgo.Msg{Sub: sub, Reply: "$JS.ACK.ENVOY_NOTIFICATIONS.listener-box.1." + strconv.FormatUint(stream, 10) + ".1.0.0"}
+	}
+	unreadable := &natsgo.Msg{Sub: sub, Reply: "_INBOX.not-jetstream"}
+	five, three, nine, one := message(5), message(3), message(9), message(1)
+	batch := []*natsgo.Msg{five, unreadable, three, nine, one}
+	sortByStreamSequence(batch)
+	want := []*natsgo.Msg{one, unreadable, three, five, nine}
+	for index := range want {
+		if batch[index] != want[index] {
+			t.Fatalf("position %d holds %q, want %q", index, batch[index].Reply, want[index].Reply)
+		}
 	}
 }
 
