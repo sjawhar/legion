@@ -215,19 +215,28 @@ func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int6
 	return nil
 }
 
-// CountedChangeLimit bounds the targets one event names. A body citing more counted nodes than
-// this is rare enough that carrying an unbounded array on every event is the wrong trade: the
-// event says it was truncated and the reader refreshes its lists wholesale instead.
-const CountedChangeLimit = 20
+// CountedChangeLimit bounds the targets of one kind (issue, ask, artifact, block) an event names,
+// so an event carries at most four times as many. Each kind is capped on its own: an index whose
+// one paragraph cites forty documents still names every one and every issue beside them, and a
+// reader falls back only for the kind it was not told about. A hundred entries of the longest
+// kind, a block (its node id, its reference and its document's uuid, about 200 bytes), is some
+// 20 KB, so a full event of four kinds stays under 100 KB: about what a comment at
+// contracts.DispatchBodyMax already carries, and far under NATS's 1 MiB maximum payload that the
+// outbox publishes it through. A body citing more is rare enough that carrying an unbounded array
+// on every event is the wrong trade.
+const CountedChangeLimit = 100
+
+// countedKinds is the order CountedChanges lists the kinds it truncated in.
+var countedKinds = [...]string{"issue", "ask", "artifact", "block"}
 
 // CountedChanges names the changed targets a reader refreshes by name — an issue (its detail and
 // its count), an ask (every list that carries the ask row, plus the human Inbox), a document or
 // file (its Referenced by panel) and a block of a document (its own panel and every link to it,
 // which read one graph read, and its document's panel, which lists the edges at its blocks) — in
 // the shape those readers are keyed by. Comments, messages and components are dropped: nothing
-// counts them, and their panels refresh on the graph itself. Past CountedChangeLimit named
-// targets, whatever their kinds, it returns truncated, and the reader falls back to refreshing
-// every such list rather than carrying an unbounded array on an event.
+// counts them, and their panels refresh on the graph itself. A kind with more than
+// CountedChangeLimit named targets names none of them and is listed in TruncatedKinds, and the
+// reader falls back to refreshing every read of that kind; the other kinds are still named.
 //
 // A reference the grammar accepts need not address anything: `dispatch://CORE-1/ask/hello`
 // parses and is stored, so every lookup here compares text and a target that resolves to no
@@ -299,13 +308,22 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 			}
 		}
 	}
-	if len(references) > CountedChangeLimit {
-		return model.ReferenceChanges{Truncated: true}, nil
+	named := make(map[string]int, len(countedKinds))
+	for _, reference := range references {
+		named[reference.Kind]++
 	}
-	if len(references) == 0 {
-		return model.ReferenceChanges{}, nil
+	changes := model.ReferenceChanges{}
+	for _, kind := range countedKinds {
+		if named[kind] > CountedChangeLimit {
+			changes.TruncatedKinds = append(changes.TruncatedKinds, kind)
+		}
 	}
-	return model.ReferenceChanges{Targets: references}, nil
+	for _, reference := range references {
+		if named[reference.Kind] <= CountedChangeLimit {
+			changes.Targets = append(changes.Targets, reference)
+		}
+	}
+	return changes, nil
 }
 
 func resolveIssueTargets(ctx context.Context, q Queryer, keys []string) (map[string]struct{}, error) {

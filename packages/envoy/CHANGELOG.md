@@ -21,14 +21,19 @@
   carries `changed`, which of `pinned`, `last_read_seq` and `dismissed` moved. Each is absent from
   an event written before this release. A snooze or an un-snooze of an Inbox row
   (`PUT`/`DELETE /api/v1/me/asks/{id}/snooze`), which appended no event, now appends the writer's
-  `user_state.updated` with `changed: ["snoozed"]` and the ask's `ask_id` when it moves the row,
-  so the writer's other tabs and devices follow it; it names nobody else and wakes no one.
+  `user_state.updated` when it moves the row, so the writer's other tabs and devices refetch their
+  Inbox; its payload is exactly `{login, changed: ["snoozed"]}`, since every signed-in stream
+  replays it, so it names no ask, no issue state and nobody else, and wakes no one.
   `GET /api/v1/events` answers `X-Dispatch-Event-Replay: complete` on a resuming connection whose
   `since` is at or below the log's head, which it replays in full (`cmd/dispatch/README.md`,
   "Routes"). `references_changed` names a cited block of a document as
   `{kind: "block", id, ref, artifact_id}` when a write adds or removes a citation of it, and when a
   version of its document changes or deletes it; a document version also names the target of each
-  mention it kept in a block whose text it changed.
+  mention it kept in a block whose text it changed. `references_changed` is capped at 100 targets
+  of each kind (issue, ask, artifact, block) on its own, where 20 targets of every kind together
+  were: past the cap of a kind the event names none of that kind and lists it in the new
+  `references_changed_truncated_kinds`, still names the targets of the other kinds, and still sets
+  `references_changed_truncated: true` for a reader that predates the kinds.
 - Each block of a Dispatch document is a node of the reference graph. A reference can name one
   block, `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
   `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
@@ -886,10 +891,16 @@
   mounts again. An ancestor's detail refreshes on any write of a descendant, whose activity its
   Children tab shows; the Replies page on a retitle of an issue it lists; the Architecture tab on
   any write of an issue its tree lists; a document's `Referenced by` panel when the event's
-  `references_changed` names the document; and the Inbox on the viewer's own snooze in another
-  tab. A read the server refuses with a 503 carrying `Retry-After` is retried after that many
-  seconds plus a random share of them again, up to twice them, so tabs refused together do not
-  all come back at once; any other failure is still retried after 500 ms.
+  `references_changed` names the document, and when an ask or comment that document owns or
+  holds the anchor of is written, re-anchored or edited; and the whole Inbox on the viewer's own
+  snooze in another tab. An event whose `references_changed_truncated_kinds` names the kinds it
+  cut refreshes every read of those kinds alone (every issue detail and issue panel, every ask
+  read, ask list, ask panel and the Inbox, every document panel, every block read), beside the
+  targets of the other kinds it still names; only a truncated event without the kinds refreshes
+  every count and panel. A read the server refuses with a 503 carrying `Retry-After` is retried
+  after that many seconds, at most 30, plus a random share of them again, so tabs refused together
+  do not all come back at once and a proxy's day-long `Retry-After` still retries within a
+  minute; any other failure is still retried after 500 ms.
   The app's query client (`api/query-client.ts`) gives every mutation's invalidation the same
   never-cancel rule. A reconnect whose replay the server calls complete refreshes nothing beyond
   what its events change, where every reconnect, a tab regaining focus among them, refetched every

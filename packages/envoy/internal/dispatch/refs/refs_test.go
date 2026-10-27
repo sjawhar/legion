@@ -598,9 +598,10 @@ func TestGraphReadsSkipANodeKindThisBuildCannotAddress(t *testing.T) {
 // A cited document or file is named as its Referenced by panel is opened - its uuid and its
 // dispatch:// address, an issue's primary document as its spec - beside the issues and asks; a
 // block of a document by its node id, its reference and its document's uuid, whatever block the
-// document holds now; a citation that resolves to nothing is not named. Documents and blocks count
-// toward the same cap: past CountedChangeLimit named targets of any kind the event names none and
-// says it was truncated.
+// document holds now; a citation that resolves to nothing is not named. Each kind is capped on its
+// own: an index citing 25 documents names every one, and past CountedChangeLimit documents the
+// event names none of them, says documents were cut and still names the issue and the block,
+// with the truncated flag an older reader falls back on set.
 func TestCountedChangesNamesCitedDocumentsWithinTheCap(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
@@ -652,18 +653,31 @@ func TestCountedChangesNamesCitedDocumentsWithinTheCap(t *testing.T) {
 		_, key := createReferenceArtifact(t, tx, "", "CORE", "doc-"+strconv.Itoa(index))
 		documents = append(documents, Target{Kind: "artifact", ID: key})
 	}
-	atCap, err := CountedChanges(ctx, tx, documents[:CountedChangeLimit])
-	if err != nil {
-		t.Fatalf("resolve documents at the cap: %v", err)
+	for _, count := range []int{25, CountedChangeLimit} {
+		named, err := CountedChanges(ctx, tx, documents[:count])
+		if err != nil {
+			t.Fatalf("resolve %d documents: %v", count, err)
+		}
+		if named.Truncated() || len(named.Targets) != count {
+			t.Fatalf("%d documents named %d (truncated kinds %v), want every one", count, len(named.Targets), named.TruncatedKinds)
+		}
 	}
-	if atCap.Truncated || len(atCap.Targets) != CountedChangeLimit {
-		t.Fatalf("%d documents named %d (truncated=%t), want every one", CountedChangeLimit, len(atCap.Targets), atCap.Truncated)
-	}
-	pastCap, err := CountedChanges(ctx, tx, append(documents[:CountedChangeLimit:CountedChangeLimit], Target{Kind: "issue", ID: "CORE-1"}))
+	pastCap, err := CountedChanges(ctx, tx, append(documents[:CountedChangeLimit+1:CountedChangeLimit+1],
+		Target{Kind: "issue", ID: "CORE-1"}, Target{Kind: "block", ID: specKey + "#ship_it"}))
 	if err != nil {
 		t.Fatalf("resolve targets past the cap: %v", err)
 	}
-	if !pastCap.Truncated || pastCap.Targets != nil {
-		t.Fatalf("%d documents and an issue = %#v, want truncated and nothing named", CountedChangeLimit, pastCap)
+	wantPastCap := model.ReferenceChanges{
+		Targets: []model.ChangedReference{
+			{Kind: "issue", ID: "CORE-1"},
+			{Kind: "block", ID: specKey + "#ship_it", ArtifactID: &specID, Ref: "dispatch://CORE-1/spec#b-ship%5Fit"},
+		},
+		TruncatedKinds: []string{"artifact"},
+	}
+	if !reflect.DeepEqual(pastCap, wantPastCap) {
+		t.Fatalf("%d documents, an issue and a block = %#v, want %#v", CountedChangeLimit+1, pastCap, wantPastCap)
+	}
+	if payload := model.NewReferenceChangesPayload(pastCap); !payload.ReferencesChangedTruncated {
+		t.Fatalf("payload past the cap = %#v, want the truncated flag set", payload)
 	}
 }

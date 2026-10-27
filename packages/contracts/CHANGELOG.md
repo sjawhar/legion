@@ -12,14 +12,17 @@
   optional fields saying what a write moved: `IssueEventChanges` (`changed`, `ancestors`,
   `thread_logins`) on `IssueEventPayload`, `ThreadLoginsPayload` (`thread_logins`) on
   `AskEventPayload`, `CommentEventPayload` and `MessageEventPayload`,
-  `UserStateUpdatedEventPayload.changed` (which names `snoozed` for a snooze or an un-snooze) and
-  `UserStateUpdatedEventPayload.ask_id`, the ask a snooze moved; `IssueEventPayloadSchema` and the
-  ask, comment and message event schemas carry the same optional fields. `ChangedReference` gains
-  `kind: "artifact"`, a cited document or file named by its uuid, the optional `ref`, its
-  `dispatch://` address, and `kind: "block"`, a block of a document named by its node id, its
-  `ref` and its document's uuid as `artifact_id`, named when a write moves its citations or its
-  text. Each is absent from an event written before Dispatch sent it, which a reader takes as
-  "anything may have moved" (INFRA-492).
+  `UserStateUpdatedEventPayload.changed` (which names `snoozed` for a snooze or an un-snooze, whose
+  event carries only `login` and `changed`, so `UserStateUpdatedEventPayload.state` is now
+  optional); `IssueEventPayloadSchema` and the ask, comment and message event schemas carry the
+  same optional fields. `ReferenceChangesPayload` gains `references_changed_truncated_kinds`, the
+  kinds a write cut from `references_changed` past the server's cap of 100 targets of each kind,
+  beside the still-named targets of every other kind and `references_changed_truncated: true`.
+  `ChangedReference` gains `kind: "artifact"`, a cited document or file named by its uuid, the
+  optional `ref`, its `dispatch://` address, and `kind: "block"`, a block of a document named by
+  its node id, its `ref` and its document's uuid as `artifact_id`, named when a write moves its
+  citations or its text. Each is absent from an event written before Dispatch sent it, which a
+  reader takes as "anything may have moved" (INFRA-492).
 - Blocks of a Dispatch document as graph nodes: `GraphNode.kind` gains `"block"`, whose node
   carries `block_id`, `document`, `changed_version` and `changed_at`, and, on the node a reference
   read names, `text` and, for a reference pinned to a version (`#b-<id>@v<N>`), `pin` (`BlockPin`:

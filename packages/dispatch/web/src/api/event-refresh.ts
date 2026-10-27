@@ -221,14 +221,18 @@ function appendAnswersPage(targets: RefreshTarget[], event: Event): void {
   }
 }
 
-// An ask or comment that is written or re-anchored in a document is an `anchored_to` edge into it,
-// and one a project document owns an `owned_by` edge: that document's backlink panel lists both.
+// An ask or comment that is written, re-anchored or edited in a document is an `anchored_to` edge
+// into it, and one a project document owns an `owned_by` edge: that document's backlink panel
+// lists both, each row showing the head of the item's text, which an edit moves. A resolution, a
+// reopen, an answer, a hand-back or a suggestion's verdict moves neither the edge nor its text.
 function appendDocumentPanel(targets: RefreshTarget[], event: Event): void {
   if (
     event.type !== "ask.opened" &&
+    event.type !== "ask.edited" &&
     event.type !== "ask.anchor_refreshed" &&
     event.type !== "comment.created" &&
     event.type !== "comment.answered" &&
+    event.type !== "comment.edited" &&
     event.type !== "comment.anchor_refreshed"
   ) {
     return;
@@ -624,8 +628,8 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     // A pin, a read mark, a dismissal or a snooze in another tab or device of this viewer: the
     // state's own read always (its `seq` moved), the pinned list only for a pin. Of these the Inbox
     // reads only a snooze, its row's `snoozed_until`, from which its Later band, its banner and the
-    // Needs-you badge are all counted: the Inbox reads holding the ask's row, or every Inbox read
-    // when the event names no ask. An event without `changed` predates snooze events.
+    // Needs-you badge are all counted: every Inbox read, since the event names no ask (every
+    // signed-in stream carries it). An event without `changed` predates snooze events.
     if (!isViewer(payloadString(event, "login"), viewer)) {
       return [];
     }
@@ -635,8 +639,7 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
       targets.push({ exact: true, queryKey: pinnedKey });
     }
     if (changed?.includes("snoozed") === true) {
-      const askID = payloadString(event, "ask_id");
-      targets.push(askID === undefined ? { queryKey: inboxKey } : inboxRowOfAsk(askID));
+      targets.push({ queryKey: inboxKey });
     }
     return targets;
   }
@@ -824,27 +827,64 @@ function changedReferences(event: Event): readonly ChangedReference[] {
   return Array.isArray(changed) ? (changed as ChangedReference[]) : [];
 }
 
+/** Every read that holds a count or a panel: what an event that says it was cut without saying
+ *  which kinds refreshes, as a server written before `references_changed_truncated_kinds` says. */
+const EVERY_REFERENCE_READ: readonly RefreshTarget[] = [
+  { queryKey: ["issue"] },
+  { queryKey: ["asks"] },
+  { queryKey: ["ask-thread"] },
+  { queryKey: ["artifact"] },
+  { queryKey: inboxKey },
+  { queryKey: ["references", "to"] },
+];
+
+/** The reads that carry the backlinks of every target of one kind, which an event that cut that
+ *  kind from `references_changed` refreshes in place of the targets it no longer names: every
+ *  issue's detail and references tab and every issue panel; every ask's read and thread, every
+ *  ask list (an issue's, and a document's, the `["artifact", id, "asks"]` read whose rows are
+ *  asks), the Inbox and every ask panel; every document panel; every block's graph read and every
+ *  document panel, which lists the edges at its blocks. */
+const TRUNCATED_KIND_READS: Readonly<Partial<Record<string, readonly RefreshTarget[]>>> = {
+  artifact: [referencePanels(({ node }) => node.kind === "artifact")],
+  ask: [
+    { queryKey: ["ask"] },
+    { queryKey: ["ask-thread"] },
+    { queryKey: ["asks"] },
+    {
+      queryKey: ["artifact"],
+      when: (data) => rowsOf<{ question?: unknown }>(data).some((row) => "question" in row),
+    },
+    { queryKey: inboxKey },
+    referencePanels(({ node }) => node.kind === "ask"),
+  ],
+  block: [referencePanels(({ node }) => node.kind === "block" || node.kind === "artifact")],
+  issue: [{ queryKey: ["issue"] }, referencePanels(({ node }) => node.kind === "issue")],
+};
+
 /**
  * The reads that carry a changed target's backlinks, which `refs.ReplaceCounted` names in the
  * transaction that appends the event: an issue's detail (its count), its references tab and its
  * panel; an ask's read, its thread, the list its row lives in (its issue's asks, or its
  * document's), the Inbox row showing its count, and its panel; a document's panel; a block's
  * graph read, which its panel and every link to it share (pinned or not), and its document's
- * panel, which lists the edges at its blocks. Past the server's cap an event names no targets, so
- * every read that holds a count or a panel refreshes.
+ * panel, which lists the edges at its blocks. Past the server's cap of one kind the event names
+ * none of that kind's targets and lists the kind in `references_changed_truncated_kinds`, so every
+ * read of that kind refreshes beside the targets of the other kinds; an event that is truncated
+ * without the list (an older server), or lists a kind this build does not know, refreshes every
+ * read that holds a count or a panel.
  */
 function changedReferenceTargets(event: Event): RefreshTarget[] {
-  if (payloadValue(event, "references_changed_truncated") === true) {
-    return [
-      { queryKey: ["issue"] },
-      { queryKey: ["asks"] },
-      { queryKey: ["ask-thread"] },
-      { queryKey: ["artifact"] },
-      { queryKey: inboxKey },
-      { queryKey: ["references", "to"] },
-    ];
+  const truncatedKinds = payloadStrings(event, "references_changed_truncated_kinds");
+  if (
+    (truncatedKinds === undefined &&
+      payloadValue(event, "references_changed_truncated") === true) ||
+    truncatedKinds?.some((kind) => TRUNCATED_KIND_READS[kind] === undefined) === true
+  ) {
+    return [...EVERY_REFERENCE_READ];
   }
-  const targets: RefreshTarget[] = [];
+  const targets: RefreshTarget[] = (truncatedKinds ?? []).flatMap(
+    (kind) => TRUNCATED_KIND_READS[kind] ?? []
+  );
   for (const target of changedReferences(event)) {
     if (target.kind === "issue") {
       targets.push(

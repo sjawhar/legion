@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -163,8 +162,9 @@ func TestAskSnoozeHoldsOnePersonUnderAnyCasing(t *testing.T) {
 
 // A snooze moves only its writer's Inbox, so only that person's other tabs and devices hear of
 // it: each snooze and un-snooze of an issue's or a project document's ask appends a
-// user_state.updated that names the writer, says the snooze moved and names the ask, and names
-// nobody else - not even another person holding a snooze on the same row. A write that moves
+// user_state.updated that carries exactly the writer's login and `changed: ["snoozed"]`. Every
+// signed-in stream replays it, so it names neither the ask nor the writer's issue state, nor
+// anyone else - not even another person holding a snooze on the same row. A write that moves
 // nothing announces nothing.
 func TestAskSnoozeAnnouncesItselfToItsWriterAlone(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
@@ -206,16 +206,16 @@ func TestAskSnoozeAnnouncesItselfToItsWriterAlone(t *testing.T) {
 		`).Scan(&project, &issueKey, &payload); err != nil {
 			t.Fatalf("read the %s event: %v", write, err)
 		}
-		var event struct {
-			Login   string   `json:"login"`
-			Changed []string `json:"changed"`
-			AskID   string   `json:"ask_id"`
-		}
+		var event map[string]any
 		if err := json.Unmarshal(payload, &event); err != nil {
 			t.Fatalf("decode the %s event %s: %v", write, payload, err)
 		}
-		if event.Login != "alice" || !slices.Equal(event.Changed, []string{"snoozed"}) || event.AskID != askID {
-			t.Fatalf("%s of %s announced %s, want alice's login, changed [snoozed] and the ask", write, askID, payload)
+		changed, _ := event["changed"].([]any)
+		if len(event) != 2 || event["login"] != "alice" || len(changed) != 1 || changed[0] != "snoozed" {
+			t.Fatalf("%s of %s announced %s, want exactly alice's login and changed [snoozed]", write, askID, payload)
+		}
+		if strings.Contains(string(payload), askID) {
+			t.Fatalf("%s of %s names the ask: %s", write, askID, payload)
 		}
 		if project != "CORE" || issueKey != nil {
 			t.Fatalf("%s of %s is owned by project %q issue %v, want project CORE as every user_state.updated", write, askID, project, issueKey)

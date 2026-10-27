@@ -1378,18 +1378,22 @@ write is in, is on `comment.created` and `comment.answered`, on an issue message
 none), on `ask.opened`, `ask.answered` and `ask.resolved`, and on an `issue.updated` or
 `issue.closed` that moved the status: for a close or a reopen, the logins with a row on the issue's
 open asks; for any other status move, `[]`. `user_state.updated` carries `changed`, which of
-`pinned`, `last_read_seq` and `dismissed` the write moved, or `["snoozed"]` beside the ask's
-`ask_id` for a snooze or an un-snooze of one Inbox row (`PUT` or `DELETE
-/api/v1/me/asks/{id}/snooze`, which append it only when the row moved, so the writer's other tabs
-and devices refetch their Inbox). `references_changed` names the targets whose inbound edges the
-write moved that a reader refreshes by name: an issue (`{kind: "issue", id}`), an ask (`{kind:
-"ask", id, issue_key?, artifact_id?}`, with the issue or document whose ask list holds its row) and
-a document or file (`{kind: "artifact", id, ref}`: its uuid, the node id `GET
-/api/v1/references` reports for it, and the `dispatch://` address its Referenced by panel is
-opened on, `ref` absent when its owner names no address), and a block of a document (`{kind:
-"block", id, ref, artifact_id}`: its node id `<document ref_key>#<block id>`, its reference and its
-document's uuid, whose panel lists the edges at its blocks); past 20 targets the event carries
-`references_changed_truncated: true` in its place. It also names a target
+`pinned`, `last_read_seq` and `dismissed` the write moved, or `["snoozed"]` for a snooze or an
+un-snooze of one Inbox row (`PUT` or `DELETE /api/v1/me/asks/{id}/snooze`, which append it only
+when the row moved). A snooze's payload is exactly `{login, changed: ["snoozed"]}`: every signed-in
+caller's event stream replays it, so it names neither the ask nor the writer's issue state, and
+the writer's other tabs and devices refetch their whole Inbox. `references_changed` names the
+targets whose inbound edges the write moved that a reader refreshes by name: an issue (`{kind:
+"issue", id}`), an ask (`{kind: "ask", id, issue_key?, artifact_id?}`, with the issue or document
+whose ask list holds its row) and a document or file (`{kind: "artifact", id, ref}`: its uuid, the
+node id `GET /api/v1/references` reports for it, and the `dispatch://` address its Referenced by
+panel is opened on, `ref` absent when its owner names no address), and a block of a document
+(`{kind: "block", id, ref, artifact_id}`: its node id `<document ref_key>#<block id>`, its
+reference and its document's uuid, whose panel lists the edges at its blocks). Each kind is capped
+on its own at 100 targets: past the cap of a kind the event names none of that kind, lists it in
+`references_changed_truncated_kinds` (of `issue`, `ask`, `artifact` and `block`), still names the
+targets of every other kind, and carries `references_changed_truncated: true`, which a reader that
+does not read the kinds takes as every kind cut. It also names a target
 whose edge the write kept but whose excerpt it moved: an edit of an ask's question or a comment's
 body that changes the head of its text names every target the text still cites, a document version
 names each target whose stored excerpt it changed and each target a block it changed still cites,

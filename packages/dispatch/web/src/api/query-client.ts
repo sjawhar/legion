@@ -12,12 +12,18 @@ import { ApiError } from "./client";
 /** The wait before a failed read's retry when the server asked for none. */
 const RETRY_DELAY_MS = 500;
 
+/** The longest `Retry-After` a retry honours. With its jitter of up to as much again, a read
+ *  refused by a proxy that answers a day (or more than `setTimeout` can hold) still retries within
+ *  a minute rather than spinning with no error and no Retry for as long as it says. */
+const RETRY_AFTER_CEILING_MS = 30_000;
+
 /**
  * The wait before every query's retry (`retryDelay` in `main.tsx`). A server refusing excess load
  * (503 `OVERLOADED`, `DATABASE_BUSY` or `REQUEST_TIMEOUT`) says how long to stay away in
- * `Retry-After`: the retry waits that long plus a random share of it again, `[0, retryAfterMs)`,
- * so the tabs it refused together do not all come back in the same instant. Any other failure
- * waits 500 ms. `random` is a test seam; TanStack calls this with the first two arguments.
+ * `Retry-After`: the retry waits that long, at most `RETRY_AFTER_CEILING_MS`, plus a random share
+ * of it again, so the tabs it refused together do not all come back in the same instant, and the
+ * whole wait stays under a minute. Any other failure waits 500 ms. `random` is a test seam;
+ * TanStack calls this with the first two arguments.
  */
 export function queryRetryDelay(
   _failureCount: number,
@@ -25,7 +31,8 @@ export function queryRetryDelay(
   random: () => number = Math.random
 ): number {
   if (error instanceof ApiError && error.retryAfterMs !== undefined) {
-    return error.retryAfterMs + Math.floor(random() * error.retryAfterMs);
+    const retryAfterMs = Math.min(error.retryAfterMs, RETRY_AFTER_CEILING_MS);
+    return retryAfterMs + Math.floor(random() * retryAfterMs);
   }
   return RETRY_DELAY_MS;
 }

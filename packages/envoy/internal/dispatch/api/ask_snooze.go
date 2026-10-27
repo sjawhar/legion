@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"time"
 
@@ -28,9 +27,9 @@ import (
 // A snooze or an un-snooze moves only its writer's Inbox, so it announces itself only to that
 // person's other tabs and devices: it appends `user_state.updated` (askSnoozeEvent), the event a
 // person's own pin, read mark and dismissal already append, with `changed: ["snoozed"]` and the
-// ask's id. A write that moves nothing - a snooze to the moment the row already holds, an
-// un-snooze of a row nobody snoozed - appends nothing, since each event refetches the Inbox in
-// every tab the person has open.
+// writer's login alone, since every signed-in stream carries it. A write that moves nothing - a
+// snooze to the moment the row already holds, an un-snooze of a row nobody snoozed - appends
+// nothing, since each event refetches the Inbox in every tab the person has open.
 
 // userAskSnooze is one row's snooze for the calling human: when the Inbox stops folding it
 // away. The Inbox's "Until I clear it" is this timestamp set far enough out that only the
@@ -163,34 +162,22 @@ func (s *server) announceAskSnooze(w http.ResponseWriter, r *http.Request, tx pg
 
 // askSnoozeEvent is the `user_state.updated` a snooze or an un-snooze of askID appends, owned
 // by the ask's project (its issue's, or its document's) as every `user_state.updated` is. It
-// names the writer, `changed: ["snoozed"]` and the ask, so the writer's other tabs refetch the
-// Inbox and nothing else. `state` is the field every `user_state.updated` carries: the writer's
-// own row for the ask's issue, which a snooze does not move, read as GET /api/v1/me/state reads
-// it (the default row when there is none, as for an ask on a project document). It names
-// nobody but the writer.
+// carries the writer's login and `changed: ["snoozed"]`, and nothing else: every signed-in
+// person's stream replays it, so it names neither the ask nor any issue state of the writer's,
+// and the writer's other tabs refetch their whole Inbox from it.
 func (s *server) askSnoozeEvent(ctx context.Context, tx pgx.Tx, actor model.Actor, askID string) (model.Event, error) {
 	var project string
-	state := userIssueState{}
-	var dismissed []byte
 	if err := tx.QueryRow(ctx, `
-		select coalesce(i.project_key, ar.project_key),
-		       coalesce(st.pinned, false), coalesce(st.last_read_seq, 0),
-		       coalesce(st.dismissed, '[]'::jsonb), coalesce(st.seq, 0)
+		select coalesce(i.project_key, ar.project_key)
 		from asks a
 		left join issues i on i.key = a.issue_key
 		left join artifacts ar on ar.id = a.artifact_id
-		left join user_issue_state st on st.login = $2 and st.issue_key = a.issue_key
 		where a.id = $1
-	`, askID, actor.ID).Scan(&project, &state.Pinned, &state.LastReadSeq, &dismissed, &state.Seq); err != nil {
-		return model.Event{}, err
-	}
-	if err := json.Unmarshal(dismissed, &state.Dismissed); err != nil {
+	`, askID).Scan(&project); err != nil {
 		return model.Event{}, err
 	}
 	return projectOwner(project).event("user_state.updated", actor, map[string]any{
 		"login":   model.CanonicalLogin(actor.ID),
-		"state":   state,
 		"changed": []string{"snoozed"},
-		"ask_id":  askID,
 	}), nil
 }

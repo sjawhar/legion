@@ -35,6 +35,7 @@ import {
   MessageEventPayloadSchema,
   type MyAnswersResponse,
   type MyRepliesResponse,
+  type ReferenceChangesPayload,
   serviceSubjectLabel,
   type UserStateUpdatedEventPayload,
   type UserThreadStateUpdatedEventPayload,
@@ -369,11 +370,10 @@ test("models the Replies page and the read mark's event", () => {
 });
 
 test("models a snooze's state event and a document named in references_changed", () => {
+  // A snooze's event reaches every signed-in stream, so it carries the writer and the field alone.
   const snoozed = {
     login: "alice",
-    state: { pinned: false, last_read_seq: 0, dismissed: [], seq: 0 },
     changed: ["snoozed"],
-    ask_id: "ask-1",
   } satisfies UserStateUpdatedEventPayload;
   const event = {
     id: 2,
@@ -404,6 +404,16 @@ test("models a snooze's state event and a document named in references_changed",
     ["snoozed"],
     "dispatch://CORE/artifact/runbook",
   ]);
+});
+
+test("a truncated write names the kinds it cut beside the targets of the others", () => {
+  const changes = {
+    references_changed: [{ kind: "issue", id: "CORE-1" }],
+    references_changed_truncated: true,
+    references_changed_truncated_kinds: ["artifact"],
+  } satisfies ReferenceChangesPayload;
+  // A reader validating a comment's payload still sees which kinds were cut and what was named.
+  expect(CommentEventPayloadSchema.parse({ id: "comment-1", ...changes })).toMatchObject(changes);
 });
 
 test("preserves block-pinned and legacy anchors in ask event payloads", () => {

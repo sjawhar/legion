@@ -46,6 +46,15 @@ const READS = {
     data: { edges: [], node: { id: "ask-7", kind: "ask" } },
     key: ["references", "to", "dispatch://CORE/artifact/plan-md/ask/ask-7"],
   },
+  // A project document's ask list and its block listing: the first's rows are asks.
+  docAsks: {
+    data: [{ id: "ask-7", question: "Ship it?" }],
+    key: ["artifact", "artifact-1", "asks"],
+  },
+  docBlocks: {
+    data: [{ from: 0, id: "intro", to: 4, type: "paragraph" }],
+    key: ["artifact", "artifact-1", "blocks"],
+  },
   docSummary: { data: { id: "artifact-1" }, key: documentSummaryQuery("CORE", "plan-md").queryKey },
   documentPage: { data: { id: "artifact-1" }, key: ["artifact-ref", "CORE/plan-md"] },
   documentPanel: {
@@ -659,17 +668,96 @@ const rules: Record<string, Rule> = {
     refreshes: ["summary"],
     spares: ["specBlock", "specBlockPinned", "otherSpecBlock"],
   },
-  "past the server's cap, every count and every panel refreshes": {
-    event: event("message.created", { id: "message-2", references_changed_truncated: true }),
+  "an event cut past the server's cap that names no kinds (an older server) refreshes every count and every panel":
+    {
+      event: event("message.created", { id: "message-2", references_changed_truncated: true }),
+      refreshes: [
+        "unrelatedDetail",
+        "parent",
+        "issuePanel",
+        "unrelatedPanel",
+        "documentPanel",
+        "specBlock",
+        "inbox",
+      ],
+      spares: ["projects"],
+    },
+  "an event that cut only documents refreshes every document panel and still the issue it names": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed: [{ id: "CORE-9", kind: "issue" }],
+      references_changed_truncated: true,
+      references_changed_truncated_kinds: ["artifact"],
+    }),
+    refreshes: [
+      "documentPanel",
+      "specPanel",
+      "specPanelBySlug",
+      "unrelatedDetail",
+      "unrelatedPanel",
+    ],
+    spares: [
+      "parent",
+      "issuePanel",
+      "inbox",
+      "projectInbox",
+      "asks",
+      "askPanel",
+      "docAsks",
+      "specBlock",
+    ],
+  },
+  "an event that cut only issues refreshes every issue detail and issue panel": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed_truncated: true,
+      references_changed_truncated_kinds: ["issue"],
+    }),
     refreshes: [
       "unrelatedDetail",
       "parent",
+      "grandparent",
+      "referencesTab",
       "issuePanel",
       "unrelatedPanel",
-      "documentPanel",
-      "specBlock",
-      "inbox",
+      "parentPanel",
     ],
+    spares: ["inbox", "asks", "askPanel", "documentPanel", "specBlock", "docAsks"],
+  },
+  "an event that cut only asks refreshes every ask read, ask list and panel, and the Inbox": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed_truncated: true,
+      references_changed_truncated_kinds: ["ask"],
+    }),
+    refreshes: [
+      "ask",
+      "otherAsk",
+      "asks",
+      "docAsks",
+      "inbox",
+      "projectInbox",
+      "askPanel",
+      "docAskPanel",
+    ],
+    spares: ["unrelatedDetail", "parent", "issuePanel", "documentPanel", "docBlocks", "specBlock"],
+  },
+  "an event that cut only blocks refreshes every block read and every document panel": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed_truncated: true,
+      references_changed_truncated_kinds: ["block"],
+    }),
+    refreshes: ["specBlock", "specBlockPinned", "otherSpecBlock", "specPanel", "documentPanel"],
+    spares: ["unrelatedDetail", "issuePanel", "inbox", "askPanel", "docAsks", "docBlocks"],
+  },
+  "an event that cut a kind this build does not know refreshes every count and every panel": {
+    event: event("message.created", {
+      id: "message-2",
+      references_changed_truncated: true,
+      references_changed_truncated_kinds: ["component"],
+    }),
+    refreshes: ["unrelatedDetail", "issuePanel", "documentPanel", "specBlock", "inbox"],
     spares: ["projects"],
   },
   "the viewer's pin in another tab refreshes the pinned list": {
@@ -695,29 +783,19 @@ const rules: Record<string, Rule> = {
     refreshes: ["userState", "pinned"],
     spares: ["inbox"],
   },
-  "the viewer's snooze in another tab refreshes the Inbox reads that list the ask": {
+  "the viewer's snooze in another tab refreshes every Inbox read": {
     event: event(
       "user_state.updated",
-      { ask_id: "ask-1", changed: ["snoozed"], login: "alice", state: {} },
+      { changed: ["snoozed"], login: "alice" },
       { issue_key: null }
     ),
     refreshes: ["userState", "inbox", "projectInbox"],
     spares: ["pinned", "detail", "replies"],
   },
-  "the viewer's snooze of an ask no Inbox read lists leaves them alone": {
+  "the viewer's snooze refreshes the Inbox reads whatever rows they hold": {
     event: event(
       "user_state.updated",
-      { ask_id: "ask-1", changed: ["snoozed"], login: "alice", state: {} },
-      { issue_key: null }
-    ),
-    page: { inboxHolds: false },
-    refreshes: ["userState"],
-    spares: ["inbox", "projectInbox", "pinned"],
-  },
-  "the viewer's snooze that names no ask refreshes every Inbox read": {
-    event: event(
-      "user_state.updated",
-      { changed: ["snoozed"], login: "alice", state: {} },
+      { changed: ["snoozed"], login: "alice" },
       { issue_key: null }
     ),
     page: { inboxHolds: false },
@@ -725,11 +803,7 @@ const rules: Record<string, Rule> = {
     spares: ["pinned"],
   },
   "another person's snooze refreshes nothing": {
-    event: event(
-      "user_state.updated",
-      { ask_id: "ask-1", changed: ["snoozed"], login: "bob", state: {} },
-      { issue_key: null }
-    ),
+    event: event("user_state.updated", { changed: ["snoozed"], login: "bob" }, { issue_key: null }),
     refreshes: [],
     spares: ["userState", "inbox", "projectInbox"],
   },
@@ -760,6 +834,34 @@ const rules: Record<string, Rule> = {
     ),
     refreshes: ["documentPanel", "comment"],
     spares: ["inbox", "projects", "issuePanel"],
+  },
+  "an edit of a comment a project document owns refreshes that document's panel": {
+    event: event("comment.edited", { anchor: null, ask_id: null, id: "comment-1" }, documentOwner),
+    refreshes: ["documentPanel", "comment"],
+    spares: ["specPanel", "issuePanel", "inbox"],
+  },
+  "an edit of an ask anchored in an issue's spec refreshes the spec's panel": {
+    event: event("ask.edited", { anchor: { artifact_id: "artifact-3" }, id: "ask-1" }),
+    refreshes: ["specPanel", "specPanelBySlug", "ask", "inbox"],
+    spares: ["documentPanel", "issuePanel"],
+  },
+  "a resolution of a comment on a project document leaves that document's panel alone": {
+    event: event(
+      "comment.resolved",
+      { anchor: { artifact_id: "artifact-1" }, ask_id: null, id: "comment-1" },
+      documentOwner
+    ),
+    refreshes: ["comment"],
+    spares: ["documentPanel"],
+  },
+  "a suggestion's verdict leaves the document's panel alone": {
+    event: event(
+      "suggestion.rejected",
+      { anchor: { artifact_id: "artifact-1" }, ask_id: null, id: "comment-1" },
+      documentOwner
+    ),
+    refreshes: ["comment"],
+    spares: ["documentPanel"],
   },
   "a repository mapping refreshes every issue detail": {
     event: event(

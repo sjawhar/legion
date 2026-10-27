@@ -857,8 +857,9 @@ type AskEventPayload struct {
 // NewReferenceChangesPayload states what a write moved on a typed event payload.
 func NewReferenceChangesPayload(changes ReferenceChanges) ReferenceChangesPayload {
 	return ReferenceChangesPayload{
-		ReferencesChanged:          changes.Targets,
-		ReferencesChangedTruncated: changes.Truncated,
+		ReferencesChanged:               changes.Targets,
+		ReferencesChangedTruncated:      changes.Truncated(),
+		ReferencesChangedTruncatedKinds: changes.TruncatedKinds,
 	}
 }
 
@@ -1143,19 +1144,28 @@ type Suggestion struct {
 }
 
 // ReferenceChanges is what one write moved in the reference graph, in the shape every event
-// that reports it carries: the counted targets it touched, or Truncated when there were more
-// than an event names and the reader refreshes its lists wholesale.
+// that reports it carries: the counted targets it touched, and TruncatedKinds, the kinds (issue,
+// ask, artifact, block) of which it touched more than an event names, for which the reader
+// refreshes every read wholesale while it still refreshes the named targets of the other kinds.
 type ReferenceChanges struct {
-	Targets   []ChangedReference
-	Truncated bool
+	Targets        []ChangedReference
+	TruncatedKinds []string
 }
 
-// The two wire keys every event that reports reference changes carries. A typed payload spells
+// Truncated is whether the write touched more targets of some kind than the event names.
+func (c ReferenceChanges) Truncated() bool {
+	return len(c.TruncatedKinds) > 0
+}
+
+// The three wire keys every event that reports reference changes carries. A typed payload spells
 // them in its struct tags through ReferenceChangesPayload and a map payload through
 // NameReferenceChanges, and model_test.go pins the two spellings together.
+// ReferencesChangedTruncatedKey stays beside the kinds for a reader written before them, which
+// falls back for every kind.
 const (
-	ReferencesChangedKey          = "references_changed"
-	ReferencesChangedTruncatedKey = "references_changed_truncated"
+	ReferencesChangedKey               = "references_changed"
+	ReferencesChangedTruncatedKey      = "references_changed_truncated"
+	ReferencesChangedTruncatedKindsKey = "references_changed_truncated_kinds"
 )
 
 // ReferencedByCountKey is the wire key carrying how many graph_edges rows point at an ask. Ask
@@ -1163,11 +1173,12 @@ const (
 // and model/reference_changes_test.go pins the spelling against the struct.
 const ReferencedByCountKey = "referenced_by_count"
 
-// ReferenceChangesPayload is the pair of fields a typed event payload carries, embedded so every
-// payload spells them once.
+// ReferenceChangesPayload is the fields a typed event payload carries, embedded so every payload
+// spells them once.
 type ReferenceChangesPayload struct {
-	ReferencesChanged          []ChangedReference `json:"references_changed,omitempty"`
-	ReferencesChangedTruncated bool               `json:"references_changed_truncated,omitempty"`
+	ReferencesChanged               []ChangedReference `json:"references_changed,omitempty"`
+	ReferencesChangedTruncated      bool               `json:"references_changed_truncated,omitempty"`
+	ReferencesChangedTruncatedKinds []string           `json:"references_changed_truncated_kinds,omitempty"`
 }
 
 // NameReferenceChanges records what a write moved on a map-shaped event payload, in the same
@@ -1176,8 +1187,9 @@ func NameReferenceChanges(payload map[string]any, changes ReferenceChanges) {
 	if len(changes.Targets) > 0 {
 		payload[ReferencesChangedKey] = changes.Targets
 	}
-	if changes.Truncated {
+	if changes.Truncated() {
 		payload[ReferencesChangedTruncatedKey] = true
+		payload[ReferencesChangedTruncatedKindsKey] = changes.TruncatedKinds
 	}
 }
 
