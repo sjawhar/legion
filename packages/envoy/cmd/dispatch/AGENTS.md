@@ -14,7 +14,7 @@ applies embedded migrations from `internal/dispatch/store/migrations` (refusing
 the whole set, applying nothing, when `pgmigrate.Load` refuses it, and bounding
 every migration's lock waits at `pgmigrate.LockTimeout`; README "Database
 migrations"), then binds its port, registers the process in the registry of
-live server processes (`internal/dispatch/processes`, migration `0129`: a key
+live server processes (`internal/dispatch/processes`, migration `0130`: a key
 set a live process does not share both ways refuses the start, exiting 1
 before anything is served), and starts HTTP serving; shutdown deregisters it
 once HTTP has drained. The Postgres store contains people,
@@ -475,7 +475,7 @@ balancer can hold different builds whose pages' file times say nothing about whi
 rollback serves the older file). A file under `/assets`, Vite's content-hashed output, carries
 `public, max-age=31536000, immutable`. Every server process publishes its web dist's assets into
 Postgres at boot, before it listens (`publishDashboard` in `main.go`, `internal/dispatch/dashboard`,
-migration `0130`): one transaction under a shared advisory lock stores each file not yet stored
+migration `0131`): one transaction under a shared advisory lock stores each file not yet stored
 under its key (`assets/<relative path>`), the build's row and its links, so a restart on a stored
 build writes no bytes. A publish that fails, a file over `routes.MaxRetainedAssetSize` (8 MiB)
 among them, exits the boot before the process is ready; a dist with no `index.html` (the Go test

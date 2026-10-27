@@ -2,6 +2,7 @@ package bus
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -237,7 +238,9 @@ func TestPublishConfirmedReadsTheStateBeforeThePublish(t *testing.T) {
 		return conn.Flush()
 	}
 
-	err := client.publishConfirmed(conn, &nats.Msg{Subject: subject, Data: []byte("{}")}, time.Now().Add(5*time.Second), answered)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := client.publishConfirmed(ctx, conn, &nats.Msg{Subject: subject, Data: []byte("{}")}, answered)
 	if !errors.Is(err, ErrPublishDenied) {
 		t.Fatalf("a publish the server denied while it ran returned %v, want ErrPublishDenied", err)
 	}

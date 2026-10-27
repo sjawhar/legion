@@ -428,7 +428,7 @@ and every stored refresh token is sealed under a key derived from the current ke
 above). Unset, each process mints a key of its own in its own data directory
 (`cmd/dispatch/main.go`, `auth.LoadOrCreateSigningKey`), which no other process holds. The server
 refuses that through the registry of live server processes (`internal/dispatch/processes`,
-migration `0129`): once a process has bound its port, and before it serves, it registers the
+migration `0130`): once a process has bound its port, and before it serves, it registers the
 fingerprint of each of its keys (none reveals its key), and it refuses to start, logging
 `msg="dispatch: register this server process"` at ERROR with an error that names the other process
 and the rotation steps, and exiting 1, when a live process's key set does not share its own both
@@ -499,7 +499,7 @@ What the two processes share, and what each keeps to itself:
   the background (Identity, above); until then only what needs it answers `503`. `/healthz`
   reports each as `nats`, `signin` and `service_tokens`, and none of them fails the probe.
 - Each build's dashboard assets are in the database. Every process publishes its web dist's
-  assets at boot, before it listens (`internal/dispatch/dashboard`, migration `0130`), and answers
+  assets at boot, before it listens (`internal/dispatch/dashboard`, migration `0131`), and answers
   a local miss under `/assets/` from there (Routes, below), so a page of one build served by one
   process is served its chunks by a process of another build. A process that cannot publish (the
   database refuses the write, or the build holds a file over 8 MiB, which CI's
@@ -968,19 +968,19 @@ is written. Its own migration, so its transaction holds `comments` alone: the dr
 `ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds. It
 refuses and rewrites no row; its census answers `0`.
 
-Migration `0129_server_processes` creates two tables: `server_processes`, the registry of live
+Migration `0130_server_processes` creates two tables: `server_processes`, the registry of live
 server processes, and `server_build_announcements`, each build the fleet has announced as
 `server.started` (Running more than one process, above). It reads, locks and rewrites nothing that
 exists, and the release before it neither reads nor writes either table, so that release runs
 over the new schema unchanged and the census answers `0`.
 
-Migration `0130_dashboard_assets` creates `dashboard_builds`, `dashboard_assets` and
+Migration `0131_dashboard_assets` creates `dashboard_builds`, `dashboard_assets` and
 `dashboard_build_assets`, where every server process publishes its dashboard build's assets at
 boot and from which it answers a page of another build that asks it for that build's chunks
 (`internal/dispatch/dashboard`). It creates tables and touches no row; its census answers `0`.
-The release before it never reads or writes these tables, so it serves beside `0130` unaffected
+The release before it never reads or writes these tables, so it serves beside `0131` unaffected
 while both run — its own pages are served from its own image, as before — and rolling Dispatch
-back past `0130` is an image rollback alone, with no schema to restore: the tables are left for
+back past `0131` is an image rollback alone, with no schema to restore: the tables are left for
 the next release that carries them, whose boot prunes what no build still needs.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their

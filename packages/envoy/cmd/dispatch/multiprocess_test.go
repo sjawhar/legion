@@ -1043,13 +1043,17 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Four of the seven leases are observable inside a window a test can wait out:
+// Four of the nine leases are observable inside a window a test can wait out:
 // reference-excerpts, block-index and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other three
+// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other five
 // are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
 // architecture-import's and delivery-reconcile's first pass is jittered uniformly over
 // SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether their passes
-// ever overlap is a coin toss no test should turn into a flake.
+// ever overlap is a coin toss no test should turn into a flake; edit-notices' period is five
+// seconds, so this window holds many of its periods, each served once
+// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for); and
+// server-processes' prune is one delete on the table every process's heartbeat writes, so a lock
+// that held its pass back would hold back the heartbeats that keep both processes live too.
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
@@ -1109,6 +1113,7 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
+		{"edit-notices", "its period is 5 s, so the window holds many periods, each served once"},
 	} {
 		if ran := countLease(pair.a, leaseRan, unobserved.lease) + countLease(pair.b, leaseRan, unobserved.lease); ran > 0 {
 			t.Logf("%s ran %d times in the window, which this row does not hold to a count: %s",
