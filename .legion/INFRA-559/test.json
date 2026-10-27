@@ -2,71 +2,38 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-559",
-  "completed": "2026-10-27T16:07:00Z",
-  "round": 2,
-  "headTested": "0abd535cf74957ca47e9c54467ba81c1c57caa23",
-  "handoffHead": "49814de98123e840e97a02ee1f97bdf9fd0e7644",
-  "fullRound": "The forward merges with main and INFRA-555 renumbered the migrations (0135_server_processes, 0136_dashboard_assets) and changed the harness (held OS-chosen ports), so the diff since round 1 changed; every criterion was driven again at 0abd535c.",
+  "completed": "2026-10-27T16:50:00Z",
+  "round": 3,
+  "headTested": "fc31630412fe4e1365d1a2298ec073d0b2802b80",
+  "handoffHead": "89d1da4d732e26021aa67953910b54d706d5bb11",
+  "scope": "Since round 2's verified head 0abd535cf749, the code changes only routes/router.go and dashboard/dashboard.go (an asset key Postgres text cannot hold is a miss), their tests, and a comment in .github/workflows/envoy-and-contracts.yaml. No web code changed, so the round-2 browser evidence for the reload budget, the notice (including the Vite dev page) and the reconnect spread stands for this head; the A1 spec and the changed server path were driven again here.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its A1 command at 0abd535c on my own database t559_e2e2: 5 passed (1.8m), boot logs A assets=45 written=45, B assets=45 written=30. Re-ran its A4 browser command through e2e/run.ts: 52 passed, 2 skipped. Drove its two round-2 fixes on the real surface independently: the refused paths against a running server, and the dev-server notice under Vite with a round-1 negative control."
+    "how": "Re-ran its A1 command at fc316304 on my own database t559_e2e3: 5 passed (1.6m). Drove its /assets/%ff.js case and four more invalid UTF-8 sequences against a running head server and, side by side, a server built from an export of the round-2 head 0abd535c on the same dist and database."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
       "criterion": "A1: the browser suite against two server processes running two builds loads every page and lazily loaded route with no failed asset and no blank page; fails before, passes after",
-      "surface": "Dispatch web app in Chromium through e2e/round-robin-proxy.ts in front of two real envoy-dispatch processes on one Postgres 17 (A web/dist entry /assets/index-DDcPqk26.js, B web/dist-b entry /assets/index-A2tvJ_q3.js), on main's held-port harness",
-      "command": "cd packages/dispatch && . /legion/harness/env.sh && DATABASE_URL=postgres://postgres@127.0.0.1:5433/t559_e2e2?sslmode=disable bun run e2e:multiprocess -- two-builds.multiprocess.e2e.ts",
-      "observed": "5 passed (1.8m): both cross-pinned route walks (44.0s, 53.9s), every file of both builds 200 with its bytes from A and B, no notice while both live, notice once only A live",
-      "headSha": "0abd535cf74957ca47e9c54467ba81c1c57caa23",
-      "negativeControl": "Round 1, same spec on an export of 47c3ba79d2e4 (no shared store): 3 of 3 failed, every page load's entry chunk answered 404 then net::ERR_ABORTED, 60 files answered 404 from the process lacking them"
+      "surface": "Dispatch web app in Chromium through e2e/round-robin-proxy.ts in front of two real envoy-dispatch processes on one Postgres 17 (A entry /assets/index-Bt9tGM9a.js, B /assets/index-A2tvJ_q3.js)",
+      "command": "cd packages/dispatch && . /legion/harness/env.sh && DATABASE_URL=postgres://postgres@127.0.0.1:5433/t559_e2e3?sslmode=disable bun run e2e:multiprocess -- two-builds.multiprocess.e2e.ts",
+      "observed": "5 passed (1.6m): both cross-pinned route walks (37.5s, 53.1s), every file of both builds 200 with its bytes from A and B, both notice rows; boot logs A assets=45 written=45, B assets=45 written=30",
+      "headSha": "fc31630412fe4e1365d1a2298ec073d0b2802b80",
+      "negativeControl": "Round 1, the same spec on an export of 47c3ba79d2e4 (no shared store): 3 of 3 failed, every page load's entry chunk answered 404"
     },
     {
-      "criterion": "Item 1: every file of either build is served by every process, also after the other build's process is gone",
-      "surface": "Two processes of the head's cmd/dispatch (18801 build A, 18802 build B, database t559_probe2), curl and a Chromium tab through the round-robin proxy on 18800",
-      "command": "$TMPDIR/t559/cross.sh; bun $TMPDIR/t559/stale-tab.ts <B pid> (tab of build B, SIGKILL B, in-app navigation to /agents, /settings, /delivery, /pipeline, /agents/broadcasts, /answers)",
-      "observed": "180 of 180 requests 200 with bytes equal to disk; the tab fetched 10 chunks only B built (AgentsPage-CsCRzTT4.js, broadcast-plan-D5r9bVCP.js, ReplyTurn-Dv42Ztea.js, SourceFreshness-Du_78feX.js, TargetedMessageCard-B729VcA5.js, ...) from A after B died, all 200, no failed request, no pageerror, no reload; both boots logged publish before 'listening'",
-      "headSha": "0abd535cf74957ca47e9c54467ba81c1c57caa23",
-      "negativeControl": "A request for a file no build published, /assets/does-not-exist.js: 404 {\"error\":\"not found\"}"
-    },
-    {
-      "criterion": "Architect's request (round 2): a static path os.Stat refuses answers as a missing file, never 500, and never reaches the asset store",
-      "surface": "the head's cmd/dispatch on 18801 with the Postgres asset store, via curl --path-as-is",
-      "command": "curl /assets/foo%00.js, /assets/<300 a>.js, /assets/AgentArtifactPage-DaGyeLmz.js/x, /index.html%00, /issues/CORE-1%00, /assets/AgentArtifactPage-DaGyeLmz.js",
-      "observed": "404 {\"error\":\"not found\"} for the first four, 200 page for /issues/CORE-1%00, 200 for the B chunk; 0 'retained asset store failed' lines in A's log",
-      "headSha": "0abd535cf74957ca47e9c54467ba81c1c57caa23",
-      "negativeControl": "Round 1 at dc41305784ba: /assets/foo%00.js answered 500 'stat failed'"
-    },
-    {
-      "criterion": "Item 2: recovery from a failed script, module preload or stylesheet is at most 3 reloads per tab in any 5 minutes, renews, and covers the main stylesheet",
-      "surface": "Dispatch web app in Chromium: the single-process browser suite through e2e/run.ts, and a tab whose main stylesheet is aborted on every load",
-      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts shell.e2e.ts delivery-live.e2e.ts doc.e2e.ts live.e2e.ts --project chromium; bun $TMPDIR/t559/css-loop.ts",
-      "observed": "52 passed, 2 skipped (5.0m); stylesheet aborted on every load: 4 document loads (1 + 3 reloads) then stops; seed '{not json': 4 loads",
-      "headSha": "0abd535cf74957ca47e9c54467ba81c1c57caa23",
-      "negativeControl": "Seed of three reload times in the last 5 minutes: 1 document load, no reload"
-    },
-    {
-      "criterion": "Item 3 and review finding 2: no 'A new version is available' while two builds are live or on a page that names no entry chunk; the notice once one other build alone is live",
-      "surface": "A Chromium tab on Vite's dev server (vite --config web/vite.config.ts --host 127.0.0.1 --port 5173, page loads /@vite/client and /src/main.tsx) proxying /api and /auth to the head's cmd/dispatch on 8766 serving build A; and the stale tab above",
-      "command": "bun $TMPDIR/t559/dev-notice.ts (sign in through the dev server, focus, read the notice)",
-      "observed": "the route answered 200 {serving: /assets/index-DDcPqk26.js, live: [/assets/index-DDcPqk26.js]} and the notice was not visible; the stale tab of build B showed the notice once only A was live; A1 rows 4 and 5 passed",
-      "headSha": "0abd535cf74957ca47e9c54467ba81c1c57caa23",
-      "negativeControl": "Vite's dev server run from an export of the round-1 head dc41305784ba, same backend, same answer: notice visible on the first focus"
-    },
-    {
-      "criterion": "Item 4: reconnects after a pod stops are spread out rather than all at once",
-      "surface": "20 Chromium tabs (one browser context each) signed in on process A (DISPATCH_TEST_HOOKS=1) through the round-robin proxy; an init script records Date.now() at each fetch of /api/v1/events",
-      "command": "bun $TMPDIR/t559/spread2.ts 20 (POST /api/v1/events/_test/disconnect drops every stream at once)",
-      "observed": "first reopen per tab after the disconnect answered, sorted: 178, 492, 667, 812, 818, 917, 1073, 1075, 1170, 1200, 1312, 1440, 1561, 1591, 1755, 1810, 1811, 1850, 1860, 2061 ms (14 distinct 100 ms buckets)",
-      "headSha": "0abd535cf74957ca47e9c54467ba81c1c57caa23",
-      "negativeControl": "Round 1, 47c3ba79's dashboard build in the same drop: every tab reopened at 1048-1128 ms (2 buckets)"
+      "criterion": "Round 3 finding: an asset path no Postgres text value can hold (invalid UTF-8, a NUL byte) answers 404 and never a store failure, while a valid non-ASCII name still reaches the store",
+      "surface": "the head's cmd/dispatch on 127.0.0.1:18801 with the Postgres asset store (45 assets published, database t559_probe3), via curl --path-as-is",
+      "command": "curl /assets/%ff.js, /assets/%c3%28.js, /assets/%c0%af.js, /assets/%ed%a0%80.js, /assets/%80.js, /assets/foo%00.js, /assets/caf%C3%A9.js, /assets/%F0%9F%98%80.js, /issues/%ff, the published entry chunk; then 300 concurrent requests (100 at a time) for /assets/%ff<n>.js",
+      "observed": "404 for every invalid or NUL name and for the two valid non-ASCII names (no such row), /issues/%ff 200 (the page), entry chunk 200; 300 of 300 concurrent invalid names 404 and the entry chunk 200 right after; 0 'retained asset store failed' lines in the head's log",
+      "headSha": "fc31630412fe4e1365d1a2298ec073d0b2802b80",
+      "negativeControl": "The round-2 server (0abd535cf749 built from an export, same dist and database, port 18802): 502 for each of the five invalid UTF-8 paths and 5 log lines 'dispatch: retained asset store failed ... invalid byte sequence for encoding \"UTF8\": 0xff (SQLSTATE 22021)'"
     }
   ],
-  "ci": "Read on GitHub at 0abd535c: build, changes, lint, test, typecheck and pr-title queued (one earlier pr-title run cancelled). Read as queued, not waited for. GitHub reports #2323 MERGEABLE (BLOCKED on required checks).",
+  "round2ProofStands": "Round 2 (test.json at a352e6f093ce) proved at 0abd535cf749: the 52-row browser suite, a stale tab of a killed build loading its 10 chunks from the other process, the reload budget on a failing main stylesheet, no notice on the Vite dev page (the round-1 client showed it), and the 20-tab reconnect spread 178-2061 ms; the web code is byte-identical at fc316304.",
+  "ci": "Read on GitHub at fc316304: build, changes, lint, test, typecheck and pr-title queued (one earlier pr-title run cancelled). Read as queued, not waited for. GitHub reports #2323 MERGEABLE (BLOCKED on required checks).",
   "notes": [
-    "A first run of the reconnect-spread probe, taken while the 52-row browser suite ran in the same pod, timed reopens from the Playwright client's request events and read 426-2920 ms with a cluster at 2490 ms. The in-page measurement after the suite finished is the one recorded above; the first run measured the loaded client's event loop, not the page.",
-    "The reviewer's hardening fix (an abandoned store read keeps its reservation until it ends) has no user surface I can drive: store reads are sub-millisecond primary-key lookups. Its regression lock is the implementer's TestStaticHandlerHoldsTheReservationOfAnAbandonedRequestUntilItsReadEnds; the A1 run and the 180-request check drive the path it changes.",
     "#2323 still merges only after INFRA-555's #2390, with one more forward merge then (implementer's open question)."
   ]
 }
