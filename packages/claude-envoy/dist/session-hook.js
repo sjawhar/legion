@@ -20421,6 +20421,7 @@ var REFRESH_READ_MS = 12000;
 var REFRESH_LOCK_STALE_MS = 30000;
 var RefreshOutcome = exports_external.object({
   finished_at: exports_external.number(),
+  dispatch_url: exports_external.string().nullable(),
   text: exports_external.string().nullable()
 });
 var DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude";
@@ -20559,14 +20560,15 @@ function refreshOutcome(file2, since) {
   const outcome = RefreshOutcome.safeParse(value);
   return outcome.success && outcome.data.finished_at >= since ? outcome.data : undefined;
 }
-async function refreshedAnswers(session, cwd, startedAt, by) {
+async function refreshedAnswers(session, cwd, dispatchUrl2, startedAt, by) {
   let directory;
   try {
     directory = sessionDirectory(process.env, session);
   } catch (error48) {
     return { reason: messageFor(error48) };
   }
-  if (!refreshLockHeld(join7(directory, REFRESH_LOCK))) {
+  const lock = join7(directory, REFRESH_LOCK);
+  if (!refreshLockHeld(lock)) {
     Bun.spawn([process.execPath, Bun.main, "answers-refresh", session, cwd], {
       stdin: "ignore",
       stdout: "ignore",
@@ -20577,8 +20579,13 @@ async function refreshedAnswers(session, cwd, startedAt, by) {
   const file2 = join7(directory, REFRESH_OUTCOME);
   for (;; ) {
     const outcome = refreshOutcome(file2, startedAt);
-    if (outcome !== undefined)
-      return { text: outcome.text ?? undefined };
+    if (outcome !== undefined) {
+      if (outcome.dispatch_url === (dispatchUrl2 ?? null))
+        return { text: outcome.text ?? undefined };
+      return {
+        reason: `the refresher read ${outcome.dispatch_url ?? "no Dispatch"}, not the Dispatch envoy.json names now`
+      };
+    }
     const left = remainingUntil(by);
     if (left === 0) {
       return {
@@ -20594,7 +20601,7 @@ async function answersMessage(session, cwd, startedAt, by) {
   let dispatchUrl2;
   if (!dispatch.enabled && dispatch.error !== null) {
     dispatchUrl2 = sessionDispatchUrl(file2, process.env, { cwd });
-    const refreshed = await refreshedAnswers(session, cwd, startedAt, by);
+    const refreshed = await refreshedAnswers(session, cwd, dispatchUrl2, startedAt, by);
     if ("text" in refreshed)
       return refreshed.text;
     dispatch = offWithError(refreshed.reason);
@@ -20649,6 +20656,7 @@ async function answersRefresh(session, cwd) {
       });
       const outcome = {
         finished_at: Date.now(),
+        dispatch_url: dispatch.enabled ? dispatch.url : null,
         text: read.text ?? null
       };
       writeAtomically(join7(directory, REFRESH_OUTCOME), JSON.stringify(outcome));
