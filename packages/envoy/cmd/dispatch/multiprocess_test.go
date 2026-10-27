@@ -1153,9 +1153,9 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Three of the six leases are observable inside a window a test can wait out:
-// reference-excerpts and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other three
+// Four of the seven leases are observable inside a window a test can wait out:
+// reference-excerpts, search-term-stats and webhook-redelivery, whose first pass is immediate,
+// and suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other three
 // are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
 // architecture-import's and delivery-reconcile's first pass is jittered uniformly over
 // SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether their passes
@@ -1163,9 +1163,16 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
+	// The term-statistics refresh writes nothing for a database with no project, so one exists
+	// before either process starts.
+	if _, err := pair.database.Pool.Exec(context.Background(), `insert into projects (key, name) values ('LEASE', 'Lease')`); err != nil {
+		t.Fatalf("create the project the term-statistics refresh rebuilds: %v", err)
+	}
 	// refs is where the reference-excerpt reconciliation's first statement writes
-	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does.
-	gate := lockTables(t, pair.database, "refs", "write_suggestions")
+	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does, and
+	// search_term_totals where the term-statistics refresh's first write for a project goes (its
+	// first statement only reads projects, which an exclusive lock does not hold).
+	gate := lockTables(t, pair.database, "refs", "write_suggestions", "search_term_totals")
 	pair.start(t, githubAppEnv(t, fake.URL()))
 
 	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 60*time.Second); waiting < 1 {
@@ -1175,6 +1182,10 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	waitForLease(t, pair, leaseSkipped, "reference-excerpts", 60*time.Second)
 	if ran := countLease(pair.a, leaseRan, "reference-excerpts") + countLease(pair.b, leaseRan, "reference-excerpts"); ran != 0 {
 		t.Errorf("a reference-excerpt pass reported running %d times while the one holding the lease is still inside the refs lock", ran)
+	}
+	waitForLease(t, pair, leaseSkipped, "search-term-stats", 60*time.Second)
+	if ran := countLease(pair.a, leaseRan, "search-term-stats") + countLease(pair.b, leaseRan, "search-term-stats"); ran != 0 {
+		t.Errorf("a term-statistics pass reported running %d times while the one holding the lease is still inside the search_term_totals lock", ran)
 	}
 
 	// The webhook redelivery sweep's first pass is held in its first GitHub call instead: it
@@ -1192,8 +1203,10 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	}
 	waitForLease(t, pair, leaseRan, "reference-excerpts", 60*time.Second)
 	waitForLease(t, pair, leaseRan, "suggestion-outcomes", 60*time.Second)
+	waitForLease(t, pair, leaseRan, "search-term-stats", 60*time.Second)
 	requireLeasedOnce(t, pair, "reference-excerpts")
 	requireLeasedOnce(t, pair, "suggestion-outcomes")
+	requireLeasedOnce(t, pair, "search-term-stats")
 	for _, unobserved := range []struct{ lease, why string }{
 		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},

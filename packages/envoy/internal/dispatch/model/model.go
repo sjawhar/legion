@@ -432,6 +432,44 @@ type Suggestions struct {
 	TitleMatches []DuplicateCandidate `json:"title_matches,omitempty"`
 }
 
+// RelatedChecksReport is GET /api/v1/related-checks: how the related-item checks recorded in
+// related_checks within one window went (INFRA-568), so a deploy's checks can be counted against
+// its targets. Project, SourceKind, From and To echo the filters, each null when not given (every
+// project, every source kind, no lower or upper bound); From is inclusive and To exclusive.
+//
+// BySourceKind, ByOutcome, BySearch and ByReason count the checks by each column; BySearch counts
+// a check not made under "not_made", and ByReason leaves out the checks that had no reason (those
+// searched by meaning and keywords). Each map holds only the values seen, and is {} for none.
+// Completed is the checks that searched to the end (found or none, whatever the search mode),
+// SkippedForTime those not made because the search ran out of time (reason timeout).
+type RelatedChecksReport struct {
+	Project        *string            `json:"project"`
+	SourceKind     *string            `json:"source_kind"`
+	From           *time.Time         `json:"from"`
+	To             *time.Time         `json:"to"`
+	Total          int                `json:"total"`
+	BySourceKind   map[string]int     `json:"by_source_kind"`
+	ByOutcome      map[string]int     `json:"by_outcome"`
+	BySearch       map[string]int     `json:"by_search"`
+	ByReason       map[string]int     `json:"by_reason"`
+	Completed      int                `json:"completed"`
+	SkippedForTime int                `json:"skipped_for_time"`
+	KeywordMS      RelatedCheckTiming `json:"keyword_ms"`
+	TotalMS        RelatedCheckTiming `json:"total_ms"`
+}
+
+// RelatedCheckTiming summarizes one of related_checks' millisecond columns over the checks that
+// hold a value in it (Count): its 50th and 95th percentiles, each a time some check took (a
+// discrete percentile, never one between two checks), its largest value, and how many took more
+// than 300 ms, the keyword search's target. P50, P95 and Max are null when Count is 0.
+type RelatedCheckTiming struct {
+	Count     int  `json:"count"`
+	P50       *int `json:"p50"`
+	P95       *int `json:"p95"`
+	Max       *int `json:"max"`
+	Over300MS int  `json:"over_300ms"`
+}
+
 // IssueChild is a child item embedded in an issue detail response. The subtree counts
 // include the child itself, every status (icebox included); done is `status = 'done'`.
 // ActiveAt is the newest updated_at anywhere in the child's subtree.
