@@ -2,56 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-560",
-  "completed": "2026-10-27T07:08:58Z",
-  "round": 2,
+  "completed": "2026-10-27T08:25:42Z",
+  "round": 3,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surfaces independently at code head d0e63dd3 (head f3d1ae8c, which adds only the handoff). The plugin rebuilt and read with `pulumi package get-schema` (v3.268.0) lists the 10 new inputs, tailnetService and frontDoorToolsImage are required, and there is no appPriorityClassName. The claim-gate tests (the tester's SkipsAMalformedEpoch unchanged, ReadsOnlyItsOwnAnnotation, DropsAnEntryItCannotWrite) pass under dash and busybox sh. The connection figures in dispatch.go:29-33 and README.md:194-195 match pool.go at the head: 64+4+1+9+1+3 = 82, and 82 x 6 = 492 < 500."
+    "how": "Drove the same surfaces independently at code head c40c8634 (head 25f958aa adds only the handoff). The rendered Role grants exactly get and patch on Secret example-dispatch-tailnet-tls. The front-door pod has automountServiceAccountToken false and one projected volume (serviceAccountToken 3607 s, kube-root-ca.crt ca.crt, namespace) mounted read-only at /var/run/secrets/kubernetes.io/serviceaccount in cert-publish alone. Running the whole rendered cert-publish, it exits 1 with one 'the claim gate (pid N) has exited' line after its gate is killed, and keeps running while the gate lives. The exit comes on the publish loop's next pass, which is up to about 60 s in real time, not the 'within 30 s' the proof states (see observations). The script tests (`go test ./gcp/ -run 'TestDispatchCertificateBudget|TestDispatchCert|TailnetService|FrontDoor'`) pass: 45 tests, 0 fail."
   },
   "failed": 0,
   "failures": [],
-  "roundOneFailures": {
-    "conflict": "Resolved: two forward merges of main (e854d947, 811e6714). GitHub reports the pull request MERGEABLE at f3d1ae8c. CI at f3d1ae8c is queued (build, changes, lint, test, typecheck) and was read as queued, not waited on.",
-    "tierSizing": "Resolved: the default tier text now counts 82 connections per pod and 5 replicas rolling (dispatch.go:29-33 and :77, README.md:194-195, CHANGELOG.md:911, pool.go:157-165).",
-    "malformedEpoch": "Resolved: TestDispatchCertificateBudgetSkipsAMalformedEpoch passes unchanged. Driven live: a loop with claims `08/x 0177/y <23-digit>/z <13-digit>/w` and registry `09/old/NODE1` ran 3 passes with empty stderr, wrote one valid PATCH and dropped the four malformed entries."
-  },
+  "changedSince": "Round 2 tested code head d0e63dd3. Round 3 changes the front door (token projection, Role verbs, the gate-death exit, the shared script helpers), docs, conn_age_test.go and go.work.sum. The server's and listener's non-test code is unchanged, so their round 2 live run at d0e63dd3 stands, and the changed surfaces were tested again.",
   "proof": [
     {
-      "criterion": "The component exposes the new inputs; refusals name the input through the operator's tool",
-      "surface": "pulumi preview, Pulumi CLI v3.268.0, of a Pulumi YAML program that uses envoy-infra:gcp:Dispatch from the plugin built at the head, with the gcp provider's resourceManager, cloudBilling and compute endpoints pointed at a local stub",
-      "command": "cd $TMPDIR/t560/prog && pulumi preview --non-interactive --json (replicas 3, frontDoorReplicas 3, listenerReplicas 2, budgets 2/2/1, priorityClassName example-priority, databaseAvailabilityType REGIONAL, tailnetService svc:example-dispatch)",
-      "observed": "exit 0: create 44, read 1 (the PriorityClass). The three Deployments roll at 3/3/2 replicas with priorityClassName example-priority, and the budgets are minAvailable 2/2/1",
-      "headSha": "d0e63dd365d5b713007122feac9c2aafb40192c3",
-      "negativeControl": "tailnetService svc:secret-other-name gives exit 1 'tailnetService must be svc:example-dispatch … (not echoed)', and the value appears 0 times in the output. databaseAvailabilityType 'Regional' gives 'must be ZONAL or REGIONAL'"
+      "criterion": "The component exposes its inputs and renders the hardened front door; refusals name the input through the operator's tool",
+      "surface": "pulumi preview, Pulumi CLI v3.268.0, of a Pulumi YAML program that uses envoy-infra:gcp:Dispatch from the plugin rebuilt at the head, with the gcp provider's resourceManager, cloudBilling and compute endpoints pointed at a local stub",
+      "command": "cd $TMPDIR/t560/prog && pulumi preview --non-interactive --json (replicas 3/3/2, budgets 2/2/1, priorityClassName example-priority, databaseAvailabilityType REGIONAL, tailnetService svc:example-dispatch)",
+      "observed": "exit 0: create 44, read 1. Role example-dispatch-tailnet-tls has verbs [get, patch], and Deployment example-dispatch-tailnet has automountServiceAccountToken false",
+      "headSha": "c40c8634e0280ba1d7ec2e7ad7cbb8b5e40a8351",
+      "negativeControl": "tailnetService svc:secret-other-name gives exit 1 'tailnetService must be svc:example-dispatch … (not echoed)', and the value appears 0 times in the output"
     },
     {
-      "criterion": "Spreading, budgets, priority, probes and strategy render as valid Kubernetes objects",
+      "criterion": "Every rendered Kubernetes object is valid; only the front door and its Role changed this round",
       "surface": "every Kubernetes object the component registers (dumped from the mock engine at default and scaled inputs), validated against Kubernetes 1.34.1's strict schemas",
-      "command": "kubeconform -strict -summary -kubernetes-version 1.34.1 -ignore-missing-schemas man2-default/kubernetes_*.json man2-scaled/kubernetes_*.json",
-      "observed": "43 resources: 41 valid, 0 invalid, 2 skipped (SecretProviderClass CRD). Compared with round 1's dump, only the front-door Deployment changed, and only the cert-publish script's text",
-      "headSha": "d0e63dd365d5b713007122feac9c2aafb40192c3",
+      "command": "kubeconform -strict -summary -kubernetes-version 1.34.1 -ignore-missing-schemas man3-default/kubernetes_*.json man3-scaled/kubernetes_*.json",
+      "observed": "43 resources: 41 valid, 0 invalid, 2 skipped (SecretProviderClass CRD). Against round 2's dump, only Deployment example-dispatch-tailnet and Role example-dispatch-tailnet-tls differ. In the front-door pod only cert-publish mounts the token; tailscale, advertiser and cert-seed mount none. containerboot needs no token with TS_KUBE_SECRET=\"\": tailscale.com v1.104.1 cmd/containerboot/settings.go:114-122 keeps the explicit empty value, and main.go:461 builds no kube client then",
+      "headSha": "c40c8634e0280ba1d7ec2e7ad7cbb8b5e40a8351",
       "negativeControl": "an app Deployment with topologySpreadConstraints[0].minDomainz and livenessProbe.periodSeconds 'ten' is reported invalid"
     },
     {
-      "criterion": "Liveness fails only when the process does not answer; the server closes a connection older than 60 s after its next response (after main's merge into main.go)",
-      "surface": "the real envoy-dispatch and envoy-listener built at the head, on a fresh Postgres 16.2 + pgvector 0.6.2 database (migrated from empty to schema_version 128) and nats-server 2.11.9 -js",
-      "command": "curl -sS -o /dev/null -w '%{http_code} %{time_total}' http://127.0.0.1:18786/livez through Postgres stopped or frozen and NATS killed; connage.py with one keep-alive socket at 0 s, 30 s and 61.5 s; shutdown_inflight.py with SIGTERM during a request; the listener's /livez and /healthz with NATS killed",
-      "observed": "/healthz reports commit d0e63dd3-probe and schema_version 128. /livez answers 204 in about 1 ms in every state, while /healthz answers 503 and recovers to 200 after the restart. Connection: absent at 0 s and 30 s, 'close' at 61.5 s followed by EOF; an aged 'Upgrade: websocket' request gets no close. The in-flight response at SIGTERM carries Connection: close, and the process exits 1.6 s later. Listener /livez answers 404 in 2 ms with NATS down; its /healthz answers 503 in 3.0 s, under the 6 s readiness timeout",
-      "headSha": "d0e63dd365d5b713007122feac9c2aafb40192c3",
-      "negativeControl": "in round 1, a server built from base 819dc283d's main.go answered /livez 404 and never closed an aged connection"
-    },
-    {
-      "criterion": "Spec item 1: certificates come from the stored Secret under the 3-per-7-days claim budget, and the gate keeps deciding whatever the ledger holds",
-      "surface": "the cert-publish claim gate as rendered in the front-door pod, under dash and busybox sh, against an HTTPS stand-in for the Secret API that answers PartialObjectMetadata and returns 409 on a resourceVersion mismatch",
-      "command": "cd $TMPDIR/t560/GateScriptRecheck && python3 drive.py; python3 extra.py",
-      "observed": "Two pods racing behind a GET barrier for the last claim: exactly one 200 and one 409, one flag, 10 of 10 trials. Budget exhausted: no PATCH. Claims of 7 days or older dropped. A pod's own claim is reused. A certificate with more than 31 days left advertises with no claim. 20 of 20 SAN mismatches refused. API errors and bodies with no resourceVersion handled. Decoy keys (`legionxdev/…`, `xlegion.dev/…`, `…-old`) are not read. Realistic pod names and node ids pass entry(). Malformed epochs are skipped, and the loop keeps running",
-      "headSha": "d0e63dd365d5b713007122feac9c2aafb40192c3",
-      "negativeControl": "3 live claims plus a decoy key holding an empty value gives 'no claim left' and 0 PATCHes. At round-1 code, the malformed-epoch ledger gave '/bin/sh: 91: Illegal number: 09' and the gate died"
+      "criterion": "Spec item 1: certificates come from the stored Secret under the 3-per-7-days claim budget; the gate keeps deciding whatever the ledger holds, and its death restarts the container",
+      "surface": "the rendered cert-publish (gate and publish loop, run whole), cert-seed, advertiser and preStop, under dash and busybox sh, against an HTTPS stand-in Secret API that answers PartialObjectMetadata and returns 409 on a resourceVersion mismatch",
+      "command": "cd $TMPDIR/t560/GateScriptRound3 && python3 drive.py; python3 pub.py; python3 death.py <shell> <scenario>; python3 advsmoke.py",
+      "observed": "Gate: a two-pod race for the last claim gave exactly one 200 and one 409 in 10 of 10 trials. Exhausted budget, the 7-day window, own-claim reuse, the 30-day registry, cached and published certificates (copycert byte-identical, modes 0644/0600), SAN mismatches, API errors, malformed epochs and decoy keys all behave per contract. All 228 requests carried the pod's own Bearer token. Publish loop and cert-seed: 71 of 71 pass. With the gate killed, cert-publish exits rc=1 with one line naming the gate. With the API answering 500, refusing connections, or never completing TLS for 70 s, cert-publish stays up and advertises once the API returns",
+      "headSha": "c40c8634e0280ba1d7ec2e7ad7cbb8b5e40a8351",
+      "negativeControl": "the stand-in served a lookalike CA not signed by the projected ca.crt: the gate logged 'the claim ledger could not be read', set no flag, and no request reached the server"
     }
   ],
   "observations": [
-    "Low, a hand edit only (the gate never writes such a value): annotation() stops at the first quote. A claims value holding an escaped quote in an entry that is NOT last, or using JSON \\t or \\n as separators, hides every entry after it. With 3 live claims behind such an entry, the gate logs '0 of 3', takes a claim and erases the others, so it fails open by up to 3 extra orders a week. Reproduction: $TMPDIR/t560/GateScriptRecheck/quote_repro.py. TestDispatchCertificateBudgetDropsAnEntryItCannotWrite puts the quoted entry last, so its comment ('costs only that entry') holds only for that position. Round 1 recorded this class as a hand-edit-only observation, and this round keeps that judgement.",
-    "Unchanged from round 1: once a pod's flag is set, the check `case \" $nodes \"` reads the raw registry, so an own entry older than 30 days, or a malformed one, counts as present until another pod's write drops it, and the pod then adds it back on its next pass.",
-    "CI at f3d1ae8c was queued when read (2026-10-27T07:08Z), not settled; the reviewer reads it."
+    "Proof wording only: the implementer's proof says cert-publish exits 'within 30 s' of its gate dying. The loop checks `kill -0` once per pass and each pass ends with `sleep 60`, so the measured exit was 57.5-59.0 s after the gate died (5.6 s when the gate died just before a check). The code comment ('the next pass says so') is accurate. TestDispatchCertPublishExitsWhenTheClaimGateDies shortens the sleep, so it does not measure real time.",
+    "PR body staleness: the 'Look at first' line still says the move runbook 'does not yet grant tailnet clients access to svc:<hostname>', but README.md:173-179 and :726-733 now give the grant and the tcp:443 port.",
+    "Hand edit only, as in rounds 1 and 2: a claims value that uses a JSON tab or newline as a separator, or holds an escaped quote before its last entry, is undercounted, so a pod can take a claim that is already spent.",
+    "Self-healing: when the cache holds a certificate later than the Secret's, the publish loop's data PATCH can move the resourceVersion between the gate's GET and its PATCH, so the gate's first PATCH gets 409 and advertising waits 30 s (2 of 10 full runs).",
+    "[INFERENCE] kube() calls curl with no --max-time, so an API connection that never answers after the handshake could hold the gate in one pass while `kill -0` still sees it alive. The API server's own request timeout normally bounds this; not exercised.",
+    "Running go build or go test in packages/envoy/infra at this head rewrites packages/envoy/infra/go.work.sum (restored here). CI's envoy-infra-go lane will show whether that matters.",
+    "CI at 25f958aa was queued when read (2026-10-27T08:25Z): build, changes, lint, test, typecheck. Not settled; the reviewer reads it."
   ]
 }
