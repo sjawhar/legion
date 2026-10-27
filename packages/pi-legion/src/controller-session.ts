@@ -463,6 +463,12 @@ export function createControllerSession(deps: {
       context.sessionManager.getSessionId() === controllerSessionID &&
       context.sessionManager.getSessionFile() === controllerTranscript
     ) {
+      // Back on the session the daemon still holds as the controller: a widget a re-claim showed
+      // for another session (one refused after a `/new`) speaks of that session, not this one.
+      if (claimWidget !== undefined && claimWidget.session !== controllerSessionID) {
+        claimWidget.clear();
+        claimWidget = undefined;
+      }
       return;
     }
     const notices: { readonly message: string; readonly level: "info" | "warning" }[] = [];

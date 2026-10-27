@@ -3194,6 +3194,40 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     expect(roleClaims()).toBe(roleClaimsBefore);
   });
 
+  // A re-claim refused for a new session shows its widget for that session. A `/resume` back to
+  // the session the daemon still holds as the controller needs no claim, and that widget, which
+  // says wakes and set_status fail, is not about the working session: the switch takes it down.
+  test("a re-claim widget shown for a new session comes down when the operator switches back to the registered session", async () => {
+    let refuseRegister = false;
+    const registered = "ses_controller_widget_resume";
+    const controller = await launchedController({
+      sessionId: registered,
+      register: () =>
+        refuseRegister
+          ? Response.json({ error: "daemon unavailable" }, { status: 503 })
+          : undefined,
+    });
+    await startOperatorController(controller, controller.context(registered));
+    const fresh: SessionContext = {
+      ...controller.context("ses_controller_widget_new", "/tmp/ses_controller_widget_new.jsonl"),
+      ui: { notify: () => undefined, setWidget: recordWidget },
+    };
+    refuseRegister = true;
+    await controller.handlers.get("session_switch")?.({ reason: "new" }, fresh);
+    expect(widgetCalls).toHaveLength(1);
+    expect(widgetCalls[0]?.lines?.[0]).toContain(
+      "re-claiming the controller for this session failed"
+    );
+
+    const back: SessionContext = {
+      ...controller.context(registered),
+      ui: { notify: () => undefined, setWidget: recordWidget },
+    };
+    await controller.handlers.get("session_switch")?.({ reason: "resume" }, back);
+
+    expect(widgetCalls.slice(1)).toEqual([{ key: "legion-controller-claim", lines: undefined }]);
+  });
+
   // The widget stays up until the operator moves on: the session's next run takes it down. The
   // run of the start message that session's claim sent does not, since it may begin after the
   // widget went up (here it does), and neither does a `task` subagent's run.
