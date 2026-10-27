@@ -409,7 +409,9 @@ echo "defaults $default_implement_app_id $default_implement_app_key_name"`
     const defaults = (stdout.split("\n").find((l) => l.startsWith("defaults ")) ?? "").split(" ");
     const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
     expect(sources.implement?.appId).toBe(defaults[1]);
-    expect(sources.implement?.privateKeyCommand).toStartWith(`agent-secrets ${defaults[2]} --reason=legion-live-proof-github-app-key -- sh -c '`);
+    expect(sources.implement?.privateKeyCommand).toStartWith(
+      `agent-secrets ${defaults[2]} --reason=legion-live-proof-github-app-key -- sh -c '`
+    );
     expect(sources.review?.appId).toBe("202");
     // The default pair is never asked of GitHub by this test: check_github_apps did not run.
     expect(seen).toEqual([]);
@@ -526,9 +528,13 @@ env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=
     });
     const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
     expect(sources.implement?.appId).toBe("101");
-    expect(sources.implement?.privateKeyCommand).toStartWith("agent-secrets IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c '");
+    expect(sources.implement?.privateKeyCommand).toStartWith(
+      "agent-secrets IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c '"
+    );
     expect(sources.review?.appId).toBe("202");
-    expect(sources.review?.privateKeyCommand).toStartWith("agent-secrets REVIEW_KEY --reason=legion-live-proof-github-app-key -- sh -c '");
+    expect(sources.review?.privateKeyCommand).toStartWith(
+      "agent-secrets REVIEW_KEY --reason=legion-live-proof-github-app-key -- sh -c '"
+    );
   });
 
   test("one role proves that App alone, as Stage 4a runs it", async () => {
@@ -572,7 +578,13 @@ describe("lib/secrets-via-broker.sh", () => {
   };
 
   test("the previous harness's `secrets NAME -- cmd` becomes `agent-secrets NAME --reason=… -- cmd`", async () => {
-    const { stdout, stderr, code } = await shimRun("IMPLEMENT_KEY", "--", "sh", "-c", 'printf %s "$IMPLEMENT_KEY"');
+    const { stdout, stderr, code } = await shimRun(
+      "IMPLEMENT_KEY",
+      "--",
+      "sh",
+      "-c",
+      'printf %s "$IMPLEMENT_KEY"'
+    );
     expect(stderr).toBe("");
     expect(code).toBe(0);
     expect(stdout).toBe("from-broker");
@@ -582,7 +594,11 @@ describe("lib/secrets-via-broker.sh", () => {
   });
 
   test("any other `secrets` call shape is refused, never sent to the broker", async () => {
-    for (const args of [["get", "IMPLEMENT_KEY", "--no-request"], ["IMPLEMENT_KEY", "sh"], ["-x", "--", "true"]]) {
+    for (const args of [
+      ["get", "IMPLEMENT_KEY", "--no-request"],
+      ["IMPLEMENT_KEY", "sh"],
+      ["-x", "--", "true"],
+    ]) {
       const { code, stderr } = await shimRun(...args);
       expect(code).toBe(2);
       expect(stderr).toStartWith("secrets-via-broker: ");

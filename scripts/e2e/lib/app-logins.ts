@@ -104,9 +104,16 @@ async function runKeyCommand(role: AppRole, command: string): Promise<string> {
   for (const name of natsSeedVariables) delete env[name];
   let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
-    child = Bun.spawn(["sh", "-c", command], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    child = Bun.spawn(["sh", "-c", command], {
+      env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
   } catch (error) {
-    throw new Error(`${field} could not run: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `${field} could not run: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
   let stderr = "";
   const decoder = new TextDecoder();
@@ -116,7 +123,11 @@ async function runKeyCommand(role: AppRole, command: string): Promise<string> {
       process.stderr.write(chunk);
     }
   })();
-  const [stdout, status] = await Promise.all([new Response(child.stdout).text(), child.exited, relay]);
+  const [stdout, status] = await Promise.all([
+    new Response(child.stdout).text(),
+    child.exited,
+    relay,
+  ]);
   if (status !== 0) {
     const failed = `${field} failed (exit ${status})`;
     throw new Error(stderr.trim() === "" ? failed : `${failed}: ${stderr.trim()}`);
