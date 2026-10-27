@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -869,8 +870,8 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 	}
 
 	perMessage := map[string]int{}
-	for _, item := range readStreamFrom(t, js, head) {
-		perMessage[item.DedupeKey+" on "+item.Topic]++
+	for _, message := range readStreamFrom(t, js, head) {
+		perMessage[message.item.DedupeKey+" on "+message.item.Topic]++
 	}
 	if len(perMessage) == 0 {
 		t.Fatalf("the notification stream holds nothing this row published")
@@ -922,16 +923,22 @@ func streamHead(t *testing.T, js natsgo.JetStreamContext) uint64 {
 	return info.State.LastSeq
 }
 
-// readStreamFrom is every envelope the stream retains past head, read by sequence rather than
-// through a consumer so the read creates nothing on the server and cannot miss a message a
-// consumer's filter would skip. A sequence the stream no longer holds is passed over.
-func readStreamFrom(t *testing.T, js natsgo.JetStreamContext, head uint64) []contracts.Envelope {
+// streamMessage is one envelope the stream retains and its sequence there.
+type streamMessage struct {
+	seq  uint64
+	item contracts.Envelope
+}
+
+// readStreamFrom is every envelope the stream retains past head, in sequence order, read by
+// sequence rather than through a consumer so the read creates nothing on the server and cannot miss
+// a message a consumer's filter would skip. A sequence the stream no longer holds is passed over.
+func readStreamFrom(t *testing.T, js natsgo.JetStreamContext, head uint64) []streamMessage {
 	t.Helper()
 	info, err := js.StreamInfo(bus.Stream)
 	if err != nil {
 		t.Fatalf("read the notification stream: %v", err)
 	}
-	var items []contracts.Envelope
+	var messages []streamMessage
 	for seq := head + 1; seq <= info.State.LastSeq; seq++ {
 		msg, err := js.GetMsg(bus.Stream, seq)
 		if err != nil {
@@ -944,9 +951,9 @@ func readStreamFrom(t *testing.T, js natsgo.JetStreamContext, head uint64) []con
 		if err := json.Unmarshal(msg.Data, &item); err != nil {
 			t.Fatalf("decode message %d of the notification stream: %v", seq, err)
 		}
-		items = append(items, item)
+		messages = append(messages, streamMessage{seq: seq, item: item})
 	}
-	return items
+	return messages
 }
 
 // drainEnvelopes reads what a subscription has collected and keeps reading until quiet is up with
@@ -1659,6 +1666,229 @@ func TestAKilledPublisherIsReplacedWithin10Seconds(t *testing.T) {
 	stop()
 	scene.waitDelivered(t)
 	scene.requireOnceAndInOrder(t)
+}
+
+// restartedPublishesWithin bounds how long a restarted process takes, from the moment it is
+// healthy, to publish the events the process killed before it left unpublished.
+const restartedPublishesWithin = 10 * time.Second
+
+// The only process is killed while its batch carrying comment 1 of an issue is in flight - its NATS
+// proxy frozen, so the envelope has left the process and reached nothing - with comment 2 of the
+// same issue written behind it. Restarted on the same database and NATS, the process publishes
+// both, comment 1 first: on the issue's topic family the stream holds comment 1 at a lower sequence
+// than comment 2, a session following the issue takes comment 1 before comment 2, and both are
+// marked published within 10 s of the restarted process becoming healthy. What the killed process
+// had in flight is dropped with its connection, as a dead host's sends that never reached the
+// server are, so nothing of comment 1 reaches the stream but what the restarted process publishes.
+func TestAPublisherKilledMidBatchAndRestartedPublishesTheIssuesCommentsInOrderWithin10Seconds(t *testing.T) {
+	pair := newPair(t)
+	proxy := testnats.StartProxy(t, pair.nats)
+	tap := startNATSTap(t, proxy.URL())
+	killed := startDispatchProcessWith(t, pair.databaseURL(t),
+		dispatchOptions{NATSURL: tap.url, SigningKey: multiprocessSigningKey})
+	var restarted *dispatchProcess
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		t.Logf("the killed process's output:\n%s", killed.Output.String())
+		if restarted != nil {
+			t.Logf("the restarted process's output:\n%s", restarted.Output.String())
+		}
+	})
+	killed.waitHealthy(t)
+
+	rig := newSessionRig(t, pair.nats)
+	js, err := rig.conn.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream context: %v", err)
+	}
+	head := streamHead(t, js)
+	project := uniqueProjectKey(t, "KMB")
+	killed.createProject(t, project, "Killed mid-batch "+project)
+	key, _ := killed.createIssueIn(t, project, "Killed mid-batch", "Killed mid-batch.")
+	family := "notifications.dispatch.issue." + key + "."
+	watcher := newTestSession(t, rig, "ses_"+strings.ToLower(project)+"_watcher", family+">")
+	// The process publishes, and has nothing left to publish, when its NATS freezes.
+	waitForEveryEventPublished(t, pair.database, outboxDeliveryWithin)
+
+	proxy.Freeze()
+	first := rig.postComment(killed, key, "Comment 1.")
+	if first.err != nil {
+		t.Fatalf("write comment 1: %v", first.err)
+	}
+	firstEvent := commentEventID(t, pair.database, first.commentID)
+	waitUntil(t, 3*time.Second, "the process sending comment 1's envelope", func() bool {
+		return tap.hasSent(fmt.Sprintf(`"event_id":%q`, firstEvent))
+	})
+	second := rig.postComment(killed, key, "Comment 2.")
+	if second.err != nil {
+		t.Fatalf("write comment 2: %v", second.err)
+	}
+	secondEvent := commentEventID(t, pair.database, second.commentID)
+	killedAt := killed.signal(t, syscall.SIGKILL)
+	killed.WaitExit(t, "SIGKILL")
+	proxy.Cut()
+	proxy.Restore()
+
+	restarted = pair.startProcess(t, nil)
+	restarted.waitHealthy(t)
+	healthy := time.Now()
+	t.Logf("the restarted process was healthy %v after the kill", healthy.Sub(killedAt).Round(time.Millisecond))
+
+	published := map[string]time.Time{}
+	waitUntil(t, 2*outboxDeliveryWithin, "both comments marked published and taken by the session following the issue", func() bool {
+		for _, event := range []string{firstEvent, secondEvent} {
+			if at, ok := eventPublishedAt(t, pair.database, event); ok {
+				published[event] = at
+			}
+		}
+		taken := watcher.takenComments()
+		_, hasFirst := taken[first.commentID]
+		_, hasSecond := taken[second.commentID]
+		return len(published) == 2 && hasFirst && hasSecond
+	})
+
+	sequences := map[string]uint64{}
+	for _, message := range readStreamFrom(t, js, head) {
+		if _, seen := sequences[message.item.EventID]; !seen && strings.HasPrefix(message.item.Topic, family) {
+			sequences[message.item.EventID] = message.seq
+		}
+	}
+	firstSeq, secondSeq := sequences[firstEvent], sequences[secondEvent]
+	t.Logf("on the issue's topic family the stream holds comment 1 (%s) at sequence %d and comment 2 (%s) at %d",
+		firstEvent, firstSeq, secondEvent, secondSeq)
+	switch {
+	case firstSeq == 0 || secondSeq == 0:
+		t.Errorf("the stream does not hold both comments on the issue's topic family: comment 1 at sequence %d, comment 2 at %d", firstSeq, secondSeq)
+	case secondSeq < firstSeq:
+		t.Errorf("the stream holds comment 2 at sequence %d and comment 1 at %d: the restarted process published the issue's comments out of the order they were written",
+			secondSeq, firstSeq)
+	}
+
+	taken := watcher.takenComments()
+	firstTaken, secondTaken := taken[first.commentID], taken[second.commentID]
+	if !secondTaken.at.After(firstTaken.at) {
+		t.Errorf("the session following the issue took comment 2 (%s) %v after the restarted process was healthy and comment 1 (%s) %v after: want comment 1 first",
+			secondEvent, secondTaken.at.Sub(healthy).Round(time.Millisecond), firstEvent, firstTaken.at.Sub(healthy).Round(time.Millisecond))
+	}
+	watcher.requireInOrder(t)
+
+	for _, comment := range []struct {
+		name, event string
+	}{{"comment 1", firstEvent}, {"comment 2", secondEvent}} {
+		after := published[comment.event].Sub(healthy)
+		t.Logf("%s (%s) was marked published %v after the restarted process was healthy", comment.name, comment.event, after.Round(time.Millisecond))
+		if after > restartedPublishesWithin {
+			t.Errorf("%s (%s) was marked published %v after the restarted process was healthy, past the %v bound",
+				comment.name, comment.event, after.Round(time.Millisecond), restartedPublishesWithin)
+		}
+	}
+}
+
+// commentEventID is the event id, dispatch-<row>, of comment id's comment.created event.
+func commentEventID(t *testing.T, database *store.Store, commentID string) string {
+	t.Helper()
+	var row int64
+	if err := database.Pool.QueryRow(context.Background(),
+		`select id from events where type = 'comment.created' and payload ->> 'id' = $1`, commentID).Scan(&row); err != nil {
+		t.Fatalf("read the event row of comment %s: %v", commentID, err)
+	}
+	return fmt.Sprintf("dispatch-%d", row)
+}
+
+// eventPublishedAt is when the event of event id dispatch-<row> was marked published, and false
+// while it is not.
+func eventPublishedAt(t *testing.T, database *store.Store, eventID string) (time.Time, bool) {
+	t.Helper()
+	row, err := strconv.ParseInt(strings.TrimPrefix(eventID, "dispatch-"), 10, 64)
+	if err != nil {
+		t.Fatalf("read the event row of event id %q: %v", eventID, err)
+	}
+	var published *time.Time
+	if err := database.Pool.QueryRow(context.Background(),
+		`select published_at from events where id = $1`, row).Scan(&published); err != nil {
+		t.Fatalf("read event %s's published_at: %v", eventID, err)
+	}
+	if published == nil {
+		return time.Time{}, false
+	}
+	return *published, true
+}
+
+// natsTap relays a process's NATS connections to the NATS URL it fronts and keeps every byte the
+// process sent, so a row sees an envelope leave the process while a proxy behind the tap holds it
+// back (testnats.Proxy.Freeze).
+type natsTap struct {
+	listener net.Listener
+	target   string
+	// url is the NATS URL of the tap's address: the target's, with the host and port the tap
+	// listens on.
+	url string
+
+	mu   sync.Mutex
+	sent []byte
+}
+
+// startNATSTap relays to the NATS URL target on a loopback port of its own until the test ends.
+func startNATSTap(t *testing.T, target string) *natsTap {
+	t.Helper()
+	server, err := url.Parse(target)
+	if err != nil || server.Host == "" {
+		t.Fatalf("read the NATS URL %q the tap relays to: %v", target, err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for the NATS tap: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	tapped := *server
+	tapped.Host = listener.Addr().String()
+	tap := &natsTap{listener: listener, target: server.Host, url: tapped.String()}
+	go tap.serve()
+	return tap
+}
+
+// serve relays each connection the tap accepts until the tap's listener closes.
+func (tap *natsTap) serve() {
+	for {
+		client, err := tap.listener.Accept()
+		if err != nil {
+			return
+		}
+		go tap.relay(client)
+	}
+}
+
+// relay copies client to the target, keeping what it reads, and the target back to client, until
+// either side ends; then it closes both.
+func (tap *natsTap) relay(client net.Conn) {
+	defer client.Close()
+	server, err := net.Dial("tcp", tap.target)
+	if err != nil {
+		return
+	}
+	defer server.Close()
+	go func() {
+		_, _ = io.Copy(client, server)
+		_ = client.Close()
+	}()
+	_, _ = io.Copy(server, io.TeeReader(client, tap))
+}
+
+// Write keeps what the process sent.
+func (tap *natsTap) Write(data []byte) (int, error) {
+	tap.mu.Lock()
+	defer tap.mu.Unlock()
+	tap.sent = append(tap.sent, data...)
+	return len(data), nil
+}
+
+// hasSent reports whether the process has sent text on any of its connections.
+func (tap *natsTap) hasSent(text string) bool {
+	tap.mu.Lock()
+	defer tap.mu.Unlock()
+	return bytes.Contains(tap.sent, []byte(text))
 }
 
 // The publisher loses NATS while comments are written through both processes at 4 a second, and
