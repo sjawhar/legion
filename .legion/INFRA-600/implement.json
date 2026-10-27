@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-600",
+  "completed": "2026-10-27T06:46:03Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2356",
+  "codeHead": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
+  "proof": [
+    {
+      "criterion": "1 Drafts: each test job skips on a draft and ready_for_review starts the run; lint/typecheck/test report skipped on a draft, which cannot merge",
+      "surface": "GitHub Actions in sjawhar/legion, scratch draft PR #2357 at ad659dbb (4773bb61 plus an empty commit)",
+      "command": "gh pr create --draft (04:49:07Z); gh api repos/sjawhar/legion/actions/runs?head_sha=ad659dbb2bdd092b7242ab72add2af5cd16f33b8&event=pull_request and /runs/<id>/jobs; gh pr ready 2357 (04:50:06Z); gh api repos/sjawhar/legion/commits/ad659dbb.../check-runs",
+      "observed": "P1: Tests 40451823409, Envoy 40451823064, Docs 40451823142, Worker Image 40451823134 all skipped, 26 jobs skipped with no runner; lint/typecheck/test check runs 122016119395/122016081720/122016081259 skipped. P2: ready_for_review runs created 04:50:08Z (Tests 40451907109, Envoy 40451907129, Docs 40451907138, Worker Image 40451907126); check runs test 122016349872, lint 122016350194, typecheck 122016350375 queued at 04:50:08Z with ids above the skipped ones; lint and typecheck ended success on runners, Docs success.",
+      "headSha": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
+      "negativeControl": "Before this change a draft ran in full: Tests run 40210282596 of draft #2199 used 31.1 runner minutes (lint, test, typecheck on runners); the before report counts 196 draft runs, 3,952.2 job minutes in 72 h."
+    },
+    {
+      "criterion": "2 Closed pull requests: the close cancels the PR's waiting runs with every job of the closing run skipped; Tests cancelled by tests-closed.yaml (architect's option b) with no passing required check",
+      "surface": "GitHub Actions in sjawhar/legion, scratch PR #2359 closed while head 2c6dc552's runs were queued, and #2357 closed while its ready runs ran",
+      "command": "gh pr close 2359 (closed_at 04:54:10Z); gh pr close 2357 (closed_at 05:45:36Z); gh api .../actions/runs?head_sha=<head>, /runs/<id>/jobs, /check-runs/<job id>/annotations, /commits/<head>/check-runs",
+      "observed": "#2359: closed runs Envoy 40452282972, Docs 40452283024, Worker Image 40452283124 every job skipped, no runner; Tests 40452204228, Envoy 40452203910, Docs 40452203887, Worker Image 40452203905 cancelled 04:54:13-14Z, annotations 'Canceling since a higher priority waiting request for tests-2359 / envoy-and-contracts-2359 / docs-2359 / worker-image-2359 exists'; the Tests cancel came from Tests (closed pull request) run 40452283161 while its cancel-tests job still waited for a runner; check runs at 2c6dc552 after the close: lint/typecheck/test cancelled, no new lint/typecheck/test. #2357: running test job of Tests 40451907109 cancelled 05:46:03Z (tests-2357), Envoy 40451907129 cancelled 05:45:40Z, running Worker Image build 40451907126 cancelled 05:47:13Z (worker-image-2357).",
+      "headSha": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
+      "negativeControl": "Before this change a closed PR's runs kept running: Tests run 40297796351 of unmerged #2235 ran 33.9 runner minutes after closed_at 09:48:17Z and ended success; the before report counts 111 such runs, 4,703 runner minutes after the close in 72 h."
+    },
+    {
+      "criterion": "3 Worker Image: a newer push cancels an older head's build; non-PR events (workflow_call from a push) never cancel",
+      "surface": "GitHub Actions in sjawhar/legion, scratch PR #2359 (three quick pushes) and branch scratch/infra-600-call whose push-triggered workflow calls ./.github/workflows/worker-image.yaml under release-${{ github.ref }}",
+      "command": "jj git push of #2359 heads 33cf600b, ab84cbb9 (04:52:48Z), 2c6dc552 (04:53:16Z); pushes 3f310c2e (04:51:00Z) and 84f9d8f1 (04:51:05Z) to scratch/infra-600-call; gh api .../actions/runs/<id>/jobs and annotations",
+      "observed": "P3: ab84cbb9's Worker Image 40452158988 build was queued, then cancelled 04:53:21Z, the second the newer run 40452203905 was created: 'Canceling since a higher priority waiting request for worker-image-2359 exists'. P5: caller runs 40451991938 and 40451999322 each ran worker_image / build to success (05:34:23Z, 06:43:14Z); neither cancelled by the other, no deadlock, attest created (not skipped) in both.",
+      "headSha": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
+      "negativeControl": "The same two quick pushes on a pull request (P3) cancel the older build; before this change the group had cancel-in-progress false and 207 superseded builds ended success after a newer head's run existed (2,167 build minutes in 72 h, before report)."
+    },
+    {
+      "criterion": "4 Queued runs and runner minutes removed, measured before and after",
+      "surface": "GitHub Actions API through the read-only script dispatch://INFRA-600/artifact/measure-queue-waste-sh",
+      "command": "bash measure-queue-waste.sh 2026-10-24T04:19:53Z 2026-10-27T04:19:53Z sjawhar/legion --json-out measure-before.json (report: dispatch://INFRA-600/artifact/ci-queue-waste-before-2026-10-27-md)",
+      "observed": "Before (72 h): D 196 runs, 506 runner jobs, 3,952.2 job min; C 111 runs unfinished at close, 4,703.3 runner min and 9,963.7 queue min after closed_at (Tests 6 unmerged runs, 187.5 min); W 207 builds, 2,167.0 min. After (scratch): P1 0 runner jobs on a draft; P3 older build cancelled at the newer run's creation; P4 runs cancelled within 4 s of close, closing runs used 0 runners. Table in the PR body.",
+      "headSha": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
+      "negativeControl": "Hand checks against the API: D run 40210282596 (31.1 min, created before #2199's READY_FOR_REVIEW_EVENT) and C run 40297796351 (33.9 runner, 19.6 queue min after #2235's closed_at) match the script to 0.1 min."
+    },
+    {
+      "criterion": "5 Docs and code-comment prose corrected",
+      "surface": "the repository at the PR head",
+      "command": "grep -rn -i -E \"cancel-in-progress: false|completes at both heads|at every push|at each push|serializes runs per pull request|serialize on the PR\" AGENTS.md README.md docs .github skills; grep -rn -i draft docs/site/src/content docs/kubernetes.md",
+      "observed": "AGENTS.md, pr-title.yaml, check-pr-text.sh, check-private-names.sh comments, docs/kubernetes.md and four docs/solutions notes now say drafts skip, a close cancels, and a newer head cancels the older image build; every remaining hit read and true (the release, release-envoy-infra, release-envoy-listener and pages groups keep cancel-in-progress false by design; the two dated solution notes keep the old setting as a past-tense note; docs/plans is design history). README.md has no CI prose.",
+      "headSha": "4773bb61d04893cc7c6193f178bc6f1f467cd815",
+      "negativeControl": "At main 9b92ac14 the first grep hits AGENTS.md:149 'in the required lint job at every push' and the LEGION-631 note's 'it completes at both heads', both false after this change."
+    }
+  ],
+  "filesChanged": [
+    ".github/workflows/pr-and-main.yaml",
+    ".github/workflows/envoy-and-contracts.yaml",
+    ".github/workflows/docs.yaml",
+    ".github/workflows/worker-image.yaml",
+    ".github/workflows/tests-closed.yaml (new)",
+    ".github/workflows/pr-title.yaml (comments)",
+    ".github/scripts/check-image-trigger-paths.sh",
+    ".github/scripts/check-image-trigger-paths.test.sh",
+    ".github/scripts/check-pr-text.sh (comments)",
+    ".github/scripts/check-private-names.sh (comments)",
+    "AGENTS.md",
+    "docs/kubernetes.md",
+    "docs/solutions/daemon/a-dockerfile-self-checks-red-control-is-a-pushed-commit-when-the-only-build-is-ci-LEGION-767.md",
+    "docs/solutions/daemon/prove-a-generated-image-file-with-a-probe-commit-and-its-revert-read-by-crane-and-dpkg-query-INFRA-255.md",
+    "docs/solutions/github/pull-request-trigger-paths-follow-the-pr-head.md",
+    "docs/solutions/legion/an-implement-handoff-push-runs-ci-in-full-and-cancels-the-code-heads-runs-cite-the-tips-runs-and-give-the-lane-the-code-heads-image-LEGION-631.md"
+  ],
+  "trickyParts": [
+    "A merged PR's closed event has github.ref = refs/heads/main, so every pull_request concurrency key is the PR number; docs keeps github.ref for push so a closed run never cancels main's Pages build.",
+    "A job skipped by its own if: enters no job-level group, so Worker Image's group moved to workflow level and the job-level block was deleted (a same-named job group would wait on itself).",
+    "The Tests canceller's job-level group cancels the workflow-level Tests run of another workflow when the job enters the group, before it gets a runner (P4).",
+    "A running docker build stops slowly: the closed run cancelled the running Worker Image build after 97 s (P4b)."
+  ],
+  "deviations": [
+    "Plan D1 replaced by the architect's option (b): tests-closed.yaml (job cancel-tests) joins tests-<number>; Tests' key moved to the PR number.",
+    "The simplify pass ran before the scratch proofs, so every proof ran at the final code head 4773bb61.",
+    "P5's first caller run (40451991938) had its attest cancelled and re-run by another session acting as legion-implementer[bot]; its re-run attempt was cancelled by this implementer to stop a duplicate image build. Both builds had already ended success."
+  ],
+  "openQuestions": [
+    "cancel-tests needs a runner per close; a skipped job under a workflow-level group would need none. Kept job-level as the architect decided."
+  ]
+}
