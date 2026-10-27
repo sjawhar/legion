@@ -309,9 +309,9 @@ const closedSpec = "Ship it after dispatch://CORE-2.\n\n:::ask{#region urgency=\
 // documents and write no version, and no settlement runs while the issue is closed, so such a
 // document stays live ahead of its latest version until the issue reopens. A deploy that marks
 // every document owed (migration 0121), or a rebuild-refs, must still index it: it is indexed at
-// its latest version, from that version's own text, with each block under the id the live
-// document gives it, which those writes leave as it was. Every block of it, an untyped one
-// included, then resolves by its #b- reference.
+// its latest version from its live text, which every reader of the closed issue sees, with each
+// block under the id the live document gives it. Every block of it, an untyped one included, then
+// resolves by its #b- reference.
 func TestBlockIndexIndexesAClosedDocumentWhoseAskStatesAreAheadOfItsVersion(t *testing.T) {
 	database, service := blockIndexService(t)
 	ctx := context.Background()
@@ -383,12 +383,12 @@ func TestBlockIndexIndexesAClosedDocumentWhoseAskStatesAreAheadOfItsVersion(t *t
 	}
 	for _, block := range liveBlocks {
 		blockText, indexed := texts[block.ID]
-		if !indexed || !strings.Contains(stored, blockText) {
-			t.Fatalf("block %s is indexed %v with text %q, want it indexed with its text in version 1 %q", block.ID, indexed, blockText, stored)
+		if !indexed || blockText != live[block.From:block.To] {
+			t.Fatalf("block %s is indexed %v with text %q, want it indexed with its live text %q", block.ID, indexed, blockText, live[block.From:block.To])
 		}
 	}
-	if strings.Contains(texts["region"], `state="resolved"`) {
-		t.Fatalf("the ask block is indexed at version 1 with the sweep's state: %q", texts["region"])
+	if !strings.Contains(texts["region"], `state="resolved"`) {
+		t.Fatalf("the ask block is indexed at version 1 without the sweep's state: %q", texts["region"])
 	}
 	document, found, err := refs.Node(ctx, database.Pool, "artifact", spec, false)
 	if err != nil || !found {
@@ -453,9 +453,9 @@ func TestBlockIndexIndexesAClosedDocumentWithAnUnsettledEdit(t *testing.T) {
 	}
 }
 
-// Twenty-five documents whose ids sort first are skipped as live ahead on a closed issue, which
-// never settles them. The keyset moves past them, so the document that sorts last is indexed in
-// the second batch rather than waiting behind them for good; they stay owed, and the next tick
+// Twenty-five documents of an open issue whose ids sort first are skipped as live ahead, owed a
+// settlement that has not run. The keyset moves past them, so the document that sorts last is
+// indexed in the second batch rather than waiting behind them; they stay owed, and the next tick
 // starts over.
 func TestBlockIndexIsNotHeldByDocumentsItSkips(t *testing.T) {
 	database, service := blockIndexService(t)
@@ -467,9 +467,6 @@ func TestBlockIndexIsNotHeldByDocumentsItSkips(t *testing.T) {
 	}
 	last := createOwedDocument(t, database, service, "ffffffff-ffff-ffff-ffff-ffffffffffff", "spec", shipItSpec, "")
 	settle(t, database, last)
-	if _, err := database.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'CORE-1'`); err != nil {
-		t.Fatal(err)
-	}
 
 	first := reconcileBlockIndex(t, service, "")
 	if first.Documents != 0 || first.LiveAhead != blockIndexDocumentBatch || !first.Full || first.Cursor != skipped[blockIndexDocumentBatch-1] {
@@ -494,8 +491,9 @@ func TestBlockIndexIsNotHeldByDocumentsItSkips(t *testing.T) {
 
 // A loop remembers the documents it found live ahead: one listed again at the same version, with
 // the same pending-settlement mark and no room resident, is counted live ahead without being read,
-// so a closed issue's document is not re-read every tick. A live update, a new version or a
-// resident room has the next tick read it again, and a document indexed elsewhere is forgotten.
+// so an open issue's document whose settlement waits is not re-read every tick. A live update, a
+// new version or a resident room has the next tick read it again, and a document indexed elsewhere
+// is forgotten.
 func TestBlockIndexDoesNotRereadALiveAheadDocumentUntilItMoves(t *testing.T) {
 	database, service := blockIndexService(t)
 	ctx := context.Background()
