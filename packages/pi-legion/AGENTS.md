@@ -377,11 +377,15 @@ Oh My Pi runs command-line words after its startup, once the TUI listens, and th
 | The operator's controller (`LEGION_CONTROLLER=1`, not the daemon's) whose claim has not succeeded in this process | Runs the whole claim: reads and validates `LEGION_CONTROLLER_START_MESSAGE` before any daemon call, reads the daemon's state, registers on `claims/register`, sets `startupTurn` to `{session, sentAt: now}` and sends the start message as the session's first turn — or, when the operator already started a turn (`isIdle()` false), as a follow-up behind that turn (`deliverAs: "followUp"`), which starts no turn of its own — then claims the Envoy role and subscribes to the controller topic |
 | That claim is refused at any step | Logs it (`[legion] the controller claim failed: …`) and shows one warning notice naming the refusal and `/legion-claim-controller`, which claims again and sends the start message once the claim succeeds; the command itself does not fail |
 | The claim already succeeded in this process (the command run again), the session is the daemon-launched controller, or it is a hand-started session | An info notice that there is nothing to do |
+| The command's own claim is still running (Oh My Pi reads the terminal while it runs, so the operator can type the command again) | Waits for that claim, then decides again by the rows above |
 
 A claim run any other way — `/legion-claim-controller`, a re-claim after a session change — sends a
 message still unsent the same way, setting the mark right before the send. The message goes out
 once per process (`startMessageSent`): a retried claim after a failure past the send, and a
-later `/legion-claim-controller`, send nothing more. `startupTurn` names the session until its
+later `/legion-claim-controller`, send nothing more. Claims run one at a time, each waiting for the
+one in flight: every registration replaces the controller secret the daemon holds, so a
+`/legion-claim-controller` typed while the command's claim runs registers after it, and the
+session keeps the secret the daemon issued last. `startupTurn` names the session until its
 first run starts: that session's first `agent_start` (the start turn, or the operator's turn the
 start message follows) clears it, and so does its `session_shutdown`; a `task` subagent's run,
 under its own session id, clears nothing. The daemon-launched controller keeps its whole claim at
