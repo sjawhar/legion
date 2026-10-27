@@ -2,50 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T07:55:00Z",
+  "completed": "2026-10-27T10:41:00Z",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 5 at PR head c66e0039 (code d42147b4). I re-ran `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts`: 8 pass, 0 fail (81.9 s). That count includes my round-4 red test, whose block is byte-identical at 51f87278 and c66e0039 (sha256 equal), and the implementer's new hand-over case. I ran the two /new cases 5 more times (5/5 pass), then 3 more times under heavy CPU contention (3/3 pass; below). I drove the behaviour with my own probe (/legion/scratch/tmp/i511t/probe-r5.test.ts, 7 pass) and my CLI smoke with both plugins re-installed from this head (SMOKE PASS)."
+    "how": "Round 6 at PR head 719b127e (code 9037d3c9). Following the architect's instruction, I first ran the committed real-binary file as it is: it fails 9/9 in this pod (the failure below). The same file, copied with DEADLINE_MS raised from 30 s to 150 s and the case timeouts from 120 s to 600 s, passes 9/9 (359 s). That confirms the implementer's report that the behaviour holds and only the deadlines fail. My round-4 red test block is byte-identical at 51f87278 and 9037d3c9 (sha256 equal). I drove the round's new behaviour with my own probe (/legion/scratch/tmp/i511t/probe-r6.test.ts, 3 pass)."
   },
-  "failed": 0,
-  "failures": [],
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "The pull request's real-binary proof (packages/pi-legion/extensions/controller-start-omp.test.ts, run by CI's pi-legion job and by every later role in its pod) passes on a slow but normal host. The tree's architect said on 2026-10-27 that a test which times out on such a host is a defect of this pull request.",
+      "evidence": "Command, as committed at 9037d3c9: `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts` → 0 pass, 9 fail (285 s). Each case timed out at the file's DEADLINE_MS (30 s) before reaching the changed path: 6 waiting for the start turn's model request, 1 for the claim refusal's warning, 1 for the controller role's claim, 1 for the start claim's registration. In this pod Oh My Pi's startup alone takes longer than that deadline: measured with PI_DEBUG_STARTUP=1, loadExtensions completes at about 27 s of wall time (about 9 s of CPU) for the two extensions the file loads, and a pure-Python loop of 10M additions takes 3.4 s. The same file with only the two deadline constants raised (DEADLINE_MS 150_000, case timeout 600_000) passes 9/9, so the deadlines are the only defect. CI's pi-legion job has not run at 9037d3c9 (every lane queued at 10:31Z), and no earlier head of this pull request has a completed pi-legion run, so CI gives no counter-evidence. No separate red test: the committed file run as it is shows the failure."
+    }
+  ],
   "proof": [
     {
-      "criterion": "Round 4's failure is fixed: after /new, the operator reads the re-claim's warning, and its wording is true for where the re-claim was refused",
-      "surface": "real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins of this head, a stand-in that gives each registration its own secret and refuses grants with any other, real NATS",
-      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test --timeout 900000 ./extensions/zz-tester-probe-r5.test.ts (copy of /legion/scratch/tmp/i511t/probe-r5.test.ts, deadlines raised to 150 s for the contended pod, removed after), cases R4-C",
-      "observed": "Re-claim refused at its registration: the screen shows '✔ New session started', then 'Warning: legion: re-claiming the controller for this session failed (POST /legion/v1/claims/register failed with 403: invalid controller capability). Until a re-claim succeeds … have no controller grant to mint and fail.' That is true: a set_status in the new session returned 'legion is available only to this session's registered claim'. Re-claim refused at its role claim: '✔ New session started', then 'Warning: … (role refused by the stand-in). The session keeps its controller registration, so the `legion` tool's set_status still works …'. Also true: set_status in the new session was written with secret-2, the current secret.",
-      "headSha": "c66e0039bf7dafde82f2f564c701714c30635347",
-      "negativeControl": "At 7dfd25b9, the same R4-C cases showed 'warning on screen: false' for both refusal points, and my red test 'the operator sees a refused re-claim after /new' timed out. At this head that red test passes, unmodified."
+      "criterion": "Review finding 1 (round 5 review): a /new held behind a hung start claim says at once that it waits; the hand-over line then stays after the /new reset and through the start turn, and goes at the operator's next run",
+      "surface": "real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins of this head, a stand-in that gives each registration its own secret, real NATS",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test --timeout 900000 ./extensions/zz-tester-probe-r6.test.ts (copy of /legion/scratch/tmp/i511t/probe-r6.test.ts, deadlines 150 s, removed after), case R6-W",
+      "observed": "While the first registration was held (registrations 1), 'legion: waiting for the controller claim already running to finish.' was on screen. After release: 'New session started' and 'the session changed while the controller claim ran; the claim for the new session follows…' on screen. The line was still on screen after the start turn's reply. After the next typed prompt's run it was gone.",
+      "headSha": "719b127e437d9697f2a5464bf14fb99424ab7100",
+      "negativeControl": "At 55267f34 the wait notice went into the deferred batch and showed nothing while the /new was held (review finding 1; legion.test.ts asserted the deferred order then)."
     },
     {
-      "criterion": "/new during the start claim: the hand-over notice stays on screen, the start message is the new session's first turn, once, and its legion tool works",
+      "criterion": "Round 4's fix in its widget form: after /new, the re-claim refusal is on screen with true wording and goes at the next run",
       "surface": "same rig",
-      "command": "same file, case R4-A; and the implementer's case 'the operator sees the hand-over notice after a /new during the start claim'",
-      "observed": "2 registrations for two different session ids. The first turn carries the start message (count per request [1,1]). That turn's set_status was written with secret-2, the current secret. The info notice 'the session changed while the controller claim ran; the claim for the new session follows…' is on screen after the reset, and no warning is shown.",
-      "headSha": "c66e0039bf7dafde82f2f564c701714c30635347",
-      "negativeControl": "At 7dfd25b9 the same case had the correct outcome, but the notice was not on screen."
+      "command": "same file, cases R6-C (registration and role claim)",
+      "observed": "Re-claim refused at its registration: the screen shows the warning '… have no controller grant to mint and fail', and set_status in the new session returned 'legion is available only to this session's registered claim' (statusWrites 0). Re-claim refused at its role claim: '… The session keeps its controller registration, so the `legion` tool's set_status still works…', and set_status was written (statusWrites 1). In both cases the warning was gone from the screen after the next run.",
+      "headSha": "719b127e437d9697f2a5464bf14fb99424ab7100",
+      "negativeControl": "At 7dfd25b9 neither warning appeared after /new, and my red test 'the operator sees a refused re-claim after /new' timed out. In the raised-deadline copy at this head it passes, unmodified."
     },
     {
-      "criterion": "The notices are shown after the /new reset even when the machine is slow (the fix relies on a host timer firing after the reset)",
-      "surface": "the two /new real-binary cases, in this pod while other roles loaded its 2 CPUs: omp's loadExtensions took about 27 s of wall time for about 9.5 s of CPU, against a few seconds earlier in the session",
-      "command": "the test file copied with DEADLINE_MS raised to 150 s, run 3 times with -t \"refused re-claim after /new|hand-over notice after a /new\"",
-      "observed": "3/3 runs: 2 pass, 0 fail (about 83 s each). Unloaded earlier: 5/5 runs, 2 pass each.",
-      "headSha": "c66e0039bf7dafde82f2f564c701714c30635347",
-      "negativeControl": "With the file's normal 30 s deadlines under the same load, every case, the basic start-turn case included, timed out at startup ('Still starting after 10s — phase: loadExtensions') before reaching the changed path. That timeout comes from the pod's load, not from the change."
-    },
-    {
-      "criterion": "Earlier rounds' fixes and A12 still hold",
-      "surface": "same rig; the built `legion controller start` with plugins re-installed from this head",
-      "command": "probe cases R4-B, R4-P6 (both commands), R4-R; bun /legion/scratch/tmp/i511t/drive.ts pos",
-      "observed": "R4-B: the waiting notice for a second /legion-controller-start, then 'nothing to do', 1 registration. R4-P6: no overlapping registrations, set_status written with the current secret, 1 start message, for both commands. R4-R: after-send warning, the start turn's set_status written, and /legion-claim-controller recovers. Smoke: the argv ends with /legion-controller-start; order is register, then role claim, then the first turn; the start message and Working… are on screen; the command again says 'nothing to do'. SMOKE PASS.",
-      "headSha": "c66e0039bf7dafde82f2f564c701714c30635347",
-      "negativeControl": "Round 1 at d3f73ec4: overlapping registrations and a 403 'invalid controller secret' on set_status."
+      "criterion": "All of the file's behaviour (A2-A5, card and notice ordering, claim refusal, the /new cases, the new focused-subagent /new case) holds once Oh My Pi has had time to start",
+      "surface": "the committed file with only its two deadline constants raised",
+      "command": "sed 's/^const DEADLINE_MS = 30_000;/const DEADLINE_MS = 150_000;/; s/^  120_000$/  600_000/' extensions/controller-start-omp.test.ts > extensions/zz-loaded.test.ts && bun test --timeout 900000 ./extensions/zz-loaded.test.ts (LEGION_TEST_OMP, LEGION_TEST_NATS_URL; copy removed after)",
+      "observed": "9 pass, 0 fail, 359 s",
+      "headSha": "719b127e437d9697f2a5464bf14fb99424ab7100",
+      "negativeControl": "The same file as committed (30 s deadlines): 0 pass, 9 fail, every case at startup."
     }
   ],
   "observations": [
-    "Under CPU contention this pod's real-binary cases fail their 30 s deadlines during Oh My Pi's startup. GitHub's runners are not shared this way, and CI is the authority for the lane.",
-    "My smoke driver's SIGTERM to `legion controller start` stopped neither the CLI nor its Oh My Pi child, and both outlived the driver's exit. I removed my leftovers by exact process id. This is unchanged by this pull request, since the CLI's signal handling and Oh My Pi are not in the diff, so it is not recorded as a failure.",
-    "CI at code head d42147b4: build, changes, lint, typecheck, test and pr-title queued or pending when read at 2026-10-27T07:54Z; not waited on. PR head c66e0039 is handoff-only."
+    "CI at code head 9037d3c9: build, changes, lint, typecheck, test and pr-title queued when read at 2026-10-27T10:31Z; not waited on. PR head 719b127e is handoff-only."
   ]
 }
