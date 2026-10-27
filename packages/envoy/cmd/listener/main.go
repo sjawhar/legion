@@ -528,13 +528,39 @@ func openV1Routes(gate *startingGate, ready *listenerDeps, machineID string, log
 	logger.Info("envoy-listener /v1 open", slog.Int64("since_listening_ms", time.Since(listeningAt).Milliseconds()))
 }
 
+// listenerInstance names this process among the listeners that run for one machine id: the
+// ENVOY_INSTANCE_ID environment variable when it is set, else the host name, which in Kubernetes is
+// the pod's name.
+func listenerInstance() (string, error) {
+	if instance := os.Getenv("ENVOY_INSTANCE_ID"); instance != "" {
+		return instance, nil
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return "", fmt.Errorf("instance: ENVOY_INSTANCE_ID is unset and the host name is unreadable: %w", err)
+	}
+	if hostname == "" {
+		return "", errors.New("instance: ENVOY_INSTANCE_ID is unset and the host name is empty")
+	}
+	return hostname, nil
+}
+
 func main() {
+	instance, err := listenerInstance()
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Go's default logger, which carries internal/bus's lines and the webhooks' plain ones, gets no
+	// instance prefix: the deployed CloudWatch text filters (infra/aws/rendering/metricfilters.go)
+	// match fields by position after the date and time, and a word there would stop three alarms.
+	// The bus's lifecycle lines name the instance in their client name (`envoy-listener <instance>`).
+
 	// Phase 1: Load config (synchronous, fast).
 	cfg, err := config.Load(9020)
 	if err != nil {
 		log.Fatal(err)
 	}
-	logger := logging.New(cfg.MachineID)
+	logger := logging.New(cfg.MachineID, logging.WithInstance(instance))
 	apiToken := os.Getenv("ENVOY_API_TOKEN")
 	oidcIssuer, oidcAudience, err := resolveListenerOIDCConfig(os.Getenv)
 	if err != nil {
@@ -638,7 +664,7 @@ func main() {
 
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener owns
 	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream).
-	client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
+	client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas), bus.WithName("envoy-listener "+instance))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -798,7 +824,7 @@ func main() {
 	// once, rather than in a listener that delivers none of those topics.
 	var live *bus.Client
 	if cfg.SubscribeAllTopics {
-		live, err = openLiveTopics(cfg.NATSURLs, cfg.MachineID, liveDeliveryHandler(deliveryConfig))
+		live, err = openLiveTopics(cfg.NATSURLs, cfg.MachineID, instance, liveDeliveryHandler(deliveryConfig))
 		if err != nil {
 			logger.Error("live topics subscription failed: ENVOY_SUBSCRIBE_ALL_TOPICS=1 needs a NATS user that may subscribe to every notification topic",
 				slog.String("subject", liveTopicsSubject),

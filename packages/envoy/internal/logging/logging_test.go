@@ -140,3 +140,26 @@ func TestLoggerErrorLevel(t *testing.T) {
 		t.Errorf("expected level=ERROR, got %v", logEntry["level"])
 	}
 }
+
+// Both ways a line leaves a Logger, its own calls and the *slog.Logger it hands other packages,
+// carry the instance beside the machine id, so a query can tell two processes of one machine apart.
+func TestLoggerWithInstanceStampsEveryLine(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewWithWriter("box-a", &buf, WithInstance("pod-1"))
+	logger.Info("from the wrapper")
+	logger.Slog().Info("from slog", slog.String("key", "value"))
+
+	lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
+	if len(lines) != 2 {
+		t.Fatalf("want 2 lines, got %d:\n%s", len(lines), buf.String())
+	}
+	for i, want := range []string{"from the wrapper", "from slog"} {
+		var logEntry map[string]any
+		if err := json.Unmarshal(lines[i], &logEntry); err != nil {
+			t.Fatalf("line %d is not valid JSON: %v\n%s", i, err, lines[i])
+		}
+		if logEntry["msg"] != want || logEntry["machine_id"] != "box-a" || logEntry["instance"] != "pod-1" {
+			t.Errorf("line %d: want msg=%q machine_id=box-a instance=pod-1, got %s", i, want, lines[i])
+		}
+	}
+}

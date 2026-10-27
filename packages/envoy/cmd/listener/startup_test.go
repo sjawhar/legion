@@ -542,10 +542,13 @@ func do(t *testing.T, request *http.Request) (int, string) {
 // failures, webhook refusals and dropped stream subjects are space-delimited patterns anchored on
 // that format's date and time prefix (defined in the deployment repository's listener infrastructure), so
 // routing them into the JSON handler with slog.SetDefault stops three alarms without failing
-// anything. This test holds both halves, so reintroducing that SetDefault reds it. The listener
-// mounts the GitHub route, so all three caches warm up.
+// anything. This test holds both halves, so reintroducing that SetDefault reds it. Both halves
+// also name the process (ENVOY_INSTANCE_ID): the JSON records in an instance field, the bus's text
+// lines in their client name, with no word between the date and time and the message, since the
+// text filters match by position. The listener mounts the GitHub route, so all three caches warm up.
 func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 	const machineID = "logger-split"
+	const instance = "logger-split-pod"
 	server, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
@@ -561,7 +564,8 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 	registry.StopWatch()
 	client.Close()
 
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID, githubWebhookEnv...)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID,
+		append([]string{"ENVOY_INSTANCE_ID=" + instance}, githubWebhookEnv...)...)
 	listener.waitHealthy(t)
 
 	restored := listenerJSONRecord(t, listener, "restored role claims")
@@ -570,6 +574,9 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 	}
 	if restored["machine_id"] != machineID {
 		t.Fatalf("the role-restore record's machine_id = %v, want %q; a query keyed on it cannot find this restart", restored["machine_id"], machineID)
+	}
+	if restored["instance"] != instance {
+		t.Fatalf("the role-restore record's instance = %v, want %q", restored["instance"], instance)
 	}
 	if _, ok := restored["restored"].(float64); !ok {
 		t.Fatalf("the role-restore record has no numeric restored field: %v", restored)
@@ -589,8 +596,8 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 		if warmUp == nil {
 			t.Fatalf("internal/kvwatch's %q line is not a JSON record in the listener's output:\n%s", msg, listener.Output.String())
 		}
-		if warmUp["machine_id"] != machineID {
-			t.Fatalf("the %q record's machine_id = %v, want %q", msg, warmUp["machine_id"], machineID)
+		if warmUp["machine_id"] != machineID || warmUp["instance"] != instance {
+			t.Fatalf("the %q record's machine_id, instance = %v, %v, want %q, %q", msg, warmUp["machine_id"], warmUp["instance"], machineID, instance)
 		}
 	}
 
@@ -607,6 +614,12 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 			t.Fatalf("no disconnect line in Go's text format after the server stopped:\n%s", listener.Output.String())
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+	// The text line keeps its shape (date, time, then the message), since the deployed filters are
+	// positional; the process is named there by its NATS client name.
+	instanceLine := regexp.MustCompile(`(?m)^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} INFO envoy nats disconnected name="envoy-listener ` + instance + `"`)
+	if !instanceLine.MatchString(listener.Output.String()) {
+		t.Fatalf("internal/bus's disconnect line is not date, time, message, or does not name the client envoy-listener %s:\n%s", instance, listener.Output.String())
 	}
 }
 

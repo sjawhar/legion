@@ -13,16 +13,17 @@ import (
 // liveTopicsSubject is what the live topics lane subscribes to: every notification topic.
 const liveTopicsSubject = bus.NotificationTopicPrefix + ">"
 
-// openLiveTopics opens the live topics lane: a bus client of its own, since a client holds one
-// core subscription and the main client's is the role lane, subscribed to every notification
+// openLiveTopics opens the live topics lane: a bus client of its own, named
+// `envoy-live-topics <instance>`, since a client holds one core subscription and the main client's
+// is the role lane, subscribed to every notification
 // topic in the machine's live queue group (bus.ListenerLiveQueue), apart from the role lane's
 // group, which NATS would merge across subjects and hand a role message to this lane. It connects
 // as the main client does, as the NATS user, through the proxy and under the remote-NATS rule the
 // environment names, and it reconnects and re-subscribes on its own. It returns once NATS has
 // accepted the subscription: a server that refuses it answers before the flush's PONG, and
 // nats.go records the refusal as the connection's last error.
-func openLiveTopics(urls []string, machineID string, handler nats.MsgHandler) (*bus.Client, error) {
-	live, err := bus.Connect(urls, bus.WithName("envoy-live-topics"))
+func openLiveTopics(urls []string, machineID, instance string, handler nats.MsgHandler) (*bus.Client, error) {
+	live, err := bus.Connect(urls, bus.WithName("envoy-live-topics "+instance))
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
