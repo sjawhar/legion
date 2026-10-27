@@ -26,6 +26,7 @@ below add only what a setting's one line cannot say.
 | `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
 | `DISPATCH_FILE_STORE_BUCKET` | Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres. The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure. The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused. An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version. The version route serves a row still holding bytes from the row and any other from the bucket: it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes; a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole. `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`; it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down. `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below). |
 | `DISPATCH_EMBEDDER`, `DISPATCH_AZURE_EMBED_*`, `DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` | Where meaning search embeds, and with what credential. Every process of one deployment takes the same values, and a model change on Azure takes a new deployment name, since each vector records an identity that names the deployment and not the model behind it (Search, below). A model service or Entra that is down refuses no boot: search answers by keyword and says so, and the queue retries. |
+| `DISPATCH_MAX_LIVE_ROOMS`, `DISPATCH_MAX_DOC_CONNECTIONS` | Each process's own caps on the document rooms it holds in memory and the browser connections to them, so two processes of one deployment hold up to twice each; a document socket past either is refused `503` before it upgrades. The caps are counts the rooms keep as they load and unload and as browsers join and leave, so admission walks no rooms. Boot logs both with the cold reads' cache budget, `dispatch: document rooms' limits` with `max_live_rooms`, `max_doc_connections` and `read_budget_bytes`; that budget is no setting but one sixteenth of the Go memory limit, at least 64 MiB and at most 1 GiB, and 256 MiB when no limit is set. `/debug/vars` (Profiling, below) shows how near each cap a running process is. |
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries. Existing dashboard mappings take
@@ -362,6 +363,32 @@ go tool pprof -seconds 30 http://127.0.0.1:<port>/debug/pprof/profile
 `mutex` and `block` are listed too but record nothing: Dispatch sets no mutex or block sampling
 rate.
 
+The same port serves the process's `expvar` variables at `/debug/vars` (Go's `cmdline` and
+`memstats` among them), and `dispatch_rooms`, the document rooms' figures, computed afresh on each
+read with no database query (`docs.Service.RoomFigures`):
+
+```sh
+curl -s http://127.0.0.1:<port>/debug/vars | jq .dispatch_rooms
+```
+
+- `resident_rooms`: the rooms held in memory, the count `DISPATCH_MAX_LIVE_ROOMS` caps.
+- `room_records`: the room records the document service keeps.
+- `connections`: the browsers connected to rooms, the count `DISPATCH_MAX_DOC_CONNECTIONS` caps.
+- `pending_updates`: the browser updates the rooms' persistence has yet to take.
+- `pending_update_bytes`: the bytes of the updates the rooms' queues hold.
+- `durable_appends`: the updates whose append has not landed.
+- `append_batches`: the append transactions of browser updates committed since the process started, an update stored alone included.
+- `appended_updates`: the browser updates those transactions stored.
+- `append_round_trips`: the round trips those transactions sent from the document's lock to its release, failed ones included.
+- `batch_sizes`: how many committed batches stored how many updates, by bucket (`1`, `2`, `3-4`, … `129-256`).
+- `pools.room_appends`, `pools.rooms`: each pool's connections held (`acquired`) and idle (`idle`), the acquires that found no idle connection (`empty_acquires`), and the time acquires waited in all (`acquire_duration_ns`); zeros for a pool not opened yet.
+- `read_cache`: the cold reads' cache's weight in bytes (`bytes`), its entries (`entries`) and its budget (`budget`).
+- `preloads`: the cold sockets' loaded states waiting for their room's load.
+- `resident_bytes`: the encoded bytes the resident rooms took, each load and every update since.
+- `head_tracker`: whether the head tracker trusts what it heard (`trusted`, false while its LISTEN is down) and how many documents it holds (`entries`).
+- `evictor_queries`: the stale-room evictor's reads of a document's head.
+- `settlement_wakeups`: the wakes of the waits for a room's appends.
+
 ## Running more than one process
 
 Two `envoy-dispatch` processes serve one Postgres and one NATS, so a release rolls instead of
@@ -393,7 +420,7 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Eight periodic maintenance loops run once per period across the processes, not once per process.
+- Ten leased maintenance passes (the names `leasePoolSize`'s comment in `internal/dispatch/store/pool.go` lists) run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -414,14 +441,35 @@ settlement or an ask retraction from a document state it does not hold (`ErrRoom
 a version whose room is behind the head is rendered from the stored document (`storedTree`). What
 is per-process is the live room: while a room is resident in one process it does not receive the
 other's updates, so presence and cursors show only the peers on that process. A write committed
-elsewhere closes the room within a notification round trip
-(`dispatch_doc_changed`, `docs/stale_room.go`), unless that room was evicted less than
+elsewhere closes the room within a notification round trip (`dispatch_doc_head`, which every
+content-changing write sends beside the bare-id `dispatch_doc_changed`; `docs/stale_room.go`),
+unless that room was evicted less than
 `staleRoomEvictInterval` (two seconds) ago, in which case its notification is refused and the
 room is re-examined when that window ends — the case the trailing write of an editing burst
 meets, since the last notification of a burst is one of the refused ones. Either way the browser
 reconnects, re-syncs and shows the current text. A reader sees a brief reconnect, never stale
-text they can act on. Cross-process live co-editing of one document — two rooms with text
-streaming between them — is a follow-up issue, out of scope here.
+text they can act on. A write of an older build, which sends only `dispatch_doc_changed`, closes
+no room of this build during a roll: such a room's next durable write is refused
+(`ErrRoomBehindHead`) and it reloads. Cross-process live co-editing of one document — two rooms
+with text streaming between them — is a follow-up issue, out of scope here.
+
+**Each process holds its own connections, so a second process doubles them.** Every pool's size
+is fixed in code (`internal/dispatch/store/pool.go`), and a serving process opens at most
+64 + 10 + 8 + 4 + 1 + 1 + 3 = 91 connections to Postgres:
+
+| Pool | Connections | What takes them |
+| --- | --- | --- |
+| Shared (`sharedPoolSize`) | 64 | Requests, settlements, and the document writers that hold a room's lock on a connection of their own (`lockRoom`: snapshots, prunes, compactions, deletions). |
+| Leases (`leasePoolSize`) | 10 | The periodic maintenance loops' once-overall leases (`duty.Exclusive`). |
+| Room appends (`roomAppendsPoolSize`) | 8 | The document rooms' batches of browser updates; `application_name=dispatch-room-appends`. |
+| Rooms (`roomsPoolSize`) | 4 | Document loads; `application_name=dispatch-rooms`. |
+| Health (`healthPoolSize`) | 1 | The `/healthz` probe. |
+| Outbox (`outboxPoolSize`) | 1 | The events outbox. |
+| Listeners | 3 | Held for the life of the process: the delivery hub, the event stream relay and the stale-room evictor each LISTEN on a connection of their own. |
+
+Two processes at their ceiling hold 182, past a default Postgres's `max_connections` of 100, so
+size the database's limit for both, with whatever else uses that database counted in, before the
+second process starts.
 
 ## Database migrations
 

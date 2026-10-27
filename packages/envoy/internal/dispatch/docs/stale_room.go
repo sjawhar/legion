@@ -96,11 +96,12 @@ func (p *PgVersioned) notifyDocumentChanged(ctx context.Context, tx pgx.Tx, room
 	return nil
 }
 
-// staleRoomEvictInterval is the least time between two evictions of one room. Every browser
-// update is its own append (New sets PersistCoalesceWindow = -1), so one person typing on the
-// other process notifies several times a second; evicting on each would close the room under its
-// readers again before the first reconnect had finished re-syncing, and a room under steady
-// editing elsewhere would never be readable here at all. Two seconds is the service's own idea of
+// staleRoomEvictInterval is the least time between two evictions of one room. A room's browser
+// updates are stored in batches, each lingering at most roomAppendLinger for the updates after its
+// own and notifying once, so one person typing on the other process notifies several times a
+// second; evicting on each would close the room under its readers again before the first
+// reconnect had finished re-syncing, and a room under steady editing elsewhere would never be
+// readable here at all. Two seconds is the service's own idea of
 // "the writing has paused" - the settle delay New defaults to - and it is far past the round trip
 // an eviction asks of a browser (a close, a reconnect, a sync). What it costs is a room left
 // behind by the writes inside the window, and it costs it only until that window ends: the room

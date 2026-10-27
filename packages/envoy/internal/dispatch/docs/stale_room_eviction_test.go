@@ -166,9 +166,9 @@ func TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip(t *tes
 	waitForPeerDocument(t, again, stored)
 }
 
-// This process's own writes evict nothing: a browser typing here appends several updates a
-// second, each notifying every process, and a room closed on its own write would close under
-// every keystroke. The room's cursor is what tells them apart - its own append advanced it
+// This process's own writes evict nothing: a browser typing here appends several batches of
+// updates a second, each notifying every process, and a room closed on its own write would close
+// under every keystroke. The room's cursor is what tells them apart - its own append advanced it
 // under the lock it appended in, so the room stands at the head - and this waits for each
 // keystroke's own notification to be decided rather than for a moment to pass.
 func TestARoomIsNotEvictedByItsOwnProcessesWrites(t *testing.T) {

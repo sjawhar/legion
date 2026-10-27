@@ -687,8 +687,9 @@ func waitForDurableHolder(t *testing.T, pair *dispatchPair, durable string, with
 
 // A spec tab is open on one process while the other writes the document. The two do not share a
 // live document, so the room A holds would otherwise sit on text the store no longer has: the
-// write announces itself over Postgres (dispatch_doc_changed) and A closes the room it holds
-// behind the durable head, which closes the editor's socket so a browser reconnects and re-syncs.
+// write announces itself over Postgres (dispatch_doc_head, beside the bare-id dispatch_doc_changed)
+// and A closes the room it holds behind the durable head, which closes the editor's socket so a
+// browser reconnects and re-syncs.
 func TestADocumentWriteOnOneProcessClosesTheStaleRoomOnTheOther(t *testing.T) {
 	pair := startPair(t, nil)
 	project := uniqueProjectKey(t, "DOC")

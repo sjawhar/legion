@@ -327,7 +327,7 @@ type coldFold struct {
 // cached rendering nothing has written the document since it was read for is served with no
 // database read at all (documentReads.current): every write that changes a document's content
 // notifies, this process's own reach the tracker before the call that committed them returns, and
-// with LISTEN down nothing is trusted. Otherwise the stamp is read and compared as before, and a
+// with LISTEN down nothing is trusted. Otherwise the stamp is read and compared, and a
 // rendering found or folded keeps the token taken here, so a write the tracker hears of during the
 // read leaves it to be checked against the store again on its next read. The bound is the
 // notification's delivery: another process's write can be read as not yet written for as long as

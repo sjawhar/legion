@@ -77,14 +77,16 @@ type Listener struct {
 	// Backoff is the wait before the attempt-th redial in a row; nil is RedialBackoff.
 	Backoff func(attempt int) time.Duration
 	// NextWake and OnWake are a clock for a caller whose own work has to run on this listener's
-	// goroutine: the evictor of stale document rooms decides everything inside OnNotify, so it
-	// cannot put the work it defers on a time.AfterFunc, which would run it on a goroutine of its
-	// own, beside a notification being decided. NextWake is asked, each time round the wait loop,
-	// how long until that caller next wants waking; zero - or a nil field - is never. When that
-	// is sooner than the next ping is due the wait ends there and OnWake is called on this
-	// goroutine; a wake reaching past the ping is cut short at it (waitFor), because a wake is a
-	// timer on this goroutine and proves nothing about the socket. A notification that arrives
-	// first is reported as any other is, and the wake is asked again on the next round.
+	// goroutine: the evictor of stale document rooms decides inside OnNotify what a notification
+	// costs no query for, hands the rest to one goroutine per room, and re-examines the rooms it
+	// deferred (an eviction interval, a retry) at a wake on this goroutine, rather than on a
+	// time.AfterFunc that would run each on a goroutine of its own. NextWake is asked, each time
+	// round the wait loop, how long until that caller next wants waking; zero - or a nil field - is
+	// never. When that is sooner than the next ping is due the wait ends there and OnWake is
+	// called on this goroutine; a wake reaching past the ping is cut short at it (waitFor), because
+	// a wake is a timer on this goroutine and proves nothing about the socket. A notification
+	// that arrives first is reported as any other is, and the wake is asked again on the next
+	// round.
 	//
 	// A caller that leaves both nil - the delivery hub and the event stream relay - asks for no
 	// wake at all, so its last proven round trip is its last notification or ping and it waits

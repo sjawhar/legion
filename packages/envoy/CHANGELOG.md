@@ -1683,6 +1683,26 @@
 
 ### Fixed
 
+- Typing in a document no longer costs Dispatch a request connection per keystroke (INFRA-605).
+  Each browser update was stored in a transaction of its own on the pool every API request reads
+  through, about ten round trips under the document's lock. A room's queued updates now go to the
+  store together: one transaction per batch of up to 256 updates and 1 MiB, still one row per
+  update, in about three round trips, on a pool of eight connections of the rooms' own
+  (`application_name=dispatch-room-appends`; document loads' connections are `dispatch-rooms`). A
+  keystroke waits at most 50 ms after the room took it for the keystrokes after it, and a
+  settlement or a shutdown waiting on the room waits out none of those 50 ms. A server holds up to
+  91 connections to Postgres, from 83. Every write that changes a document's content also notifies
+  `dispatch_doc_head` with the document's new head and the writing process, beside the bare id on
+  `dispatch_doc_changed`, so a server queries nothing for its own writes' notifications, and a
+  cached cold read of a document nothing has written since reads nothing from the database.
+  Settlement waits wake when the room's appends land rather than polling every millisecond, and
+  opening a document socket reads the issue and the caller once and walks no list of rooms.
+  `DISPATCH_MAX_LIVE_ROOMS` and `DISPATCH_MAX_DOC_CONNECTIONS` (1,000 each) set the caps on a
+  server's document rooms and their browser connections, the cold reads' cache takes a sixteenth of
+  the Go memory limit (at least 64 MiB, at most 1 GiB, and 256 MiB with none), and the profiler
+  port (`DISPATCH_PPROF_PORT`) serves `/debug/vars`, the rooms' figures among them as
+  `dispatch_rooms` (`cmd/dispatch/README.md`, "Profiling").
+
 - A broker outage no longer ends the sessions whose leases ran out during it (INFRA-487). A session
   renews its lease through a broker, so while every broker process was down, or none could reach
   the database, no lease could be renewed, and the first sweep after the outage ended every
