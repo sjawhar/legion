@@ -620,15 +620,24 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // lingers or has closed — the row finishes undelivered with one log line. So does a row whose
 // architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
 // notice either, and, before any publish, a row whose architect stopped with its finished tree
-// (stoppedWithTree). A publish the listener accepts but then cannot forward, to a session that is
-// registered but no longer running, comes back as a role-lane exception and is queued again
-// (rehold, notice_exceptions.go) unless its architect stopped with its finished tree. The runner
-// executes a row it leased from memory, so a row deleted under its lease since (a catch-up a newer
-// ready dropped) is found gone in the tree's snapshot and finishes without a publish, and so does a
-// catch-up a newer one superseded (catchUpSuperseded, read against the snapshot's root and the
-// claim as it runs now): the re-hold reads the claim from memory and writes its copy outside
-// ApplyFact's lock, so it can lose the race to a ready and commit an older copy after the fresh
-// catch-up.
+// (stoppedWithTree). A listener that confirms a role message before it answers says when the
+// architect's session did not take the notice (notify.ErrNotDelivered): when the last forward
+// reached the NATS server and drew no receipt (`receipt_timeout`) — a session that is registered
+// but no longer running, or one whose connection is moving to another server — the notice is
+// queued again from the answer by the re-hold policy (reholdNotice, notice_exceptions.go) and the
+// row finishes; when the listener could not forward it at all (`delivery_failed`), as when the hub
+// is down, the row retries on its backoff as any failed publish does, so an outage drops nothing.
+// A holder that does not advertise the notice's delivery mode (notify.ErrRefusedByHolder) refuses
+// every attempt until another session holds the role, so the row finishes undelivered with one
+// log line rather than hold every later notice to the architect behind the fence. A listener of
+// an earlier release answers 200 and reports a forward that then fails as a role-lane exception,
+// which is queued again by the same policy (rehold). Neither queues a copy when its architect
+// stopped with its finished tree. The runner executes a row it leased from memory, so a row
+// deleted under its lease since (a catch-up a newer ready dropped) is found gone in the tree's
+// snapshot and finishes without a publish, and so does a catch-up a newer one superseded
+// (catchUpSuperseded, read against the snapshot's root and the claim as it runs now): the re-hold
+// reads the claim from memory and writes its copy outside ApplyFact's lock, so it can lose the
+// race to a ready and commit an older copy after the fresh catch-up.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
@@ -673,8 +682,24 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	}
 	notice, key := payload.Published(row.ID)
 	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
+	var notDelivered notify.ErrNotDelivered
+	var refused notify.ErrRefusedByHolder
 	switch {
 	case published == nil:
+		return nil
+	case errors.As(published, &notDelivered) && notDelivered.Reason == notify.ReasonReceiptTimeout:
+		source, ok := record.ParseOutboxKey(key)
+		if !ok {
+			return fmt.Errorf("re-hold notice row %d: its key %q names no outbox row", row.ID, key)
+		}
+		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect}
+		if err := r.reholdNotice(ctx, reported, notDelivered.Reason, notDelivered.Holder, key); err != nil {
+			return fmt.Errorf("re-hold the notice for %s that its architect %s did not take: %w", row.Issue, architect, err)
+		}
+		return nil
+	case errors.As(published, &refused):
+		r.log.Warn("outbox notice finished undelivered: its architect's session does not advertise the delivery mode",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "holder", refused.Holder, "error", published)
 		return nil
 	case !errors.Is(published, notify.ErrNoHolder):
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
@@ -689,10 +714,14 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 
 // mergeQueue publishes the merger's READY packet, or the daemon's withdrawal of it, to the
 // project's merge queue role, keyed by the row so a retried row is one delivery. A role with no
-// live holder refuses every attempt until someone claims it, so waiting would retry forever; the
-// Dispatch message the same READY posted already carries the packet, and the issue's status shows
-// a withdrawal, so the issue is told the role had no holder, as the merger's prompt says the
-// daemon does (internal/prompts/go/merger.md), and the row is done.
+// live holder refuses every attempt until someone claims it, and so does a holder that does not
+// advertise the packet's delivery mode (notify.ErrRefusedByHolder) until another session holds the
+// role, so waiting would retry forever; the Dispatch message the same READY posted already carries
+// the packet, and the issue's status shows a withdrawal, so the issue is told the role had no
+// holder, or that its holder refused the packet, as the merger's prompt says the daemon does
+// (internal/prompts/go/merger.md), and the row is done. A holder that did not confirm the packet
+// in time (notify.ErrNotDelivered) is retried on the row's backoff as any failed publish is: the
+// holder, or the session that next claims the role, can take it.
 func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {
 	if r.notices == nil {
 		return errors.New("merge queue executor has no Envoy publisher")
@@ -700,6 +729,11 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 	err := r.notices.Publish(ctx, notify.RoleTopicPrefix+payload.Role, payload.Packet, payload.Packet, record.OutboxKey(row.ID))
 	if errors.Is(err, notify.ErrNoHolder) {
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
+	}
+	var refused notify.ErrRefusedByHolder
+	if errors.As(err, &refused) {
+		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s refused the packet: its holder %s does not advertise the delivery mode, at %s",
+			payload.Role, refused.Holder, r.now().UTC().Format(time.RFC3339))})
 	}
 	if err != nil {
 		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s: %w", row.Issue, payload.Role, err)

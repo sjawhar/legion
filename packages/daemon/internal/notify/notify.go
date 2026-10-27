@@ -22,14 +22,60 @@ const refusalBodyLimit = 4096
 
 // ErrNoHolder is a role publish the listener refused because no live session holds the role: nobody
 // claimed it, or its holder's registration lapsed (writeRoleHolderError,
-// packages/envoy/cmd/listener/api.go). It is the ordinary state before a role's session claims it,
-// not a broken publish path, so a caller can hold what it published until one does.
+// packages/envoy/cmd/listener/api.go). Every listener release answers it, 404 with one of
+// roleHolderReasons. It is the ordinary state before a role's session claims it, not a broken
+// publish path, so a caller can hold what it published until one does.
 var ErrNoHolder = errors.New("no live session holds the role")
 
 // roleHolderReasons are the reasons the listener's 404 names for a role with no live holder
 // (roleHolderUnclaimed, roleHolderLapsed). A 404 without one of them is some other refusal — a route
 // an older listener lacks — and never ErrNoHolder.
 var roleHolderReasons = []string{"unclaimed", "holder_lapsed"}
+
+// The reasons of a role publish the listener answers 504 (ErrNotDelivered). ReasonReceiptTimeout
+// says the last forward reached the NATS server and the holder's session sent no receipt for it,
+// which a holder that stopped running while its registration lives gives; ReasonDeliveryFailed
+// says the listener found no live holder to forward to, could not read the role or session in
+// time, or could not show that a forward reached the server, which a hub that is down gives.
+const (
+	ReasonReceiptTimeout = "receipt_timeout"
+	ReasonDeliveryFailed = "delivery_failed"
+)
+
+// ErrNotDelivered is a role publish the listener answered 504: it forwarded the message to the
+// role's holder, or tried to, and the holder's session did not confirm it within the listener's
+// delivery window (publishDeliveryWindow, packages/envoy/cmd/listener/confirmed.go). Reason is
+// ReasonReceiptTimeout or ReasonDeliveryFailed; Holder is the session the listener last resolved,
+// "" when it resolved none; EventID and DedupeKey name the envelope it forwarded. Only a listener
+// that confirms a role message before it answers gives it. An earlier listener answers 200 once
+// the NATS server took the message and reports a forward that then fails as a role-lane exception
+// (notifications.envoy.exceptions.notifications.role.*), so a caller that acts on this answer
+// still has to hear those reports while such a listener runs. A 504 without one of the two
+// reasons is a plain refusal, never ErrNotDelivered.
+type ErrNotDelivered struct {
+	Reason    string
+	Holder    string
+	EventID   string
+	DedupeKey string
+}
+
+func (e ErrNotDelivered) Error() string {
+	return fmt.Sprintf("the role's holder %q did not confirm event %s (%s)", e.Holder, e.EventID, e.Reason)
+}
+
+// ErrRefusedByHolder is a role publish the listener answered 403 with reason "capability": the
+// role's holder, the session Holder names, does not advertise the delivery mode of the payload, or
+// the mode cannot be read unambiguously, so the listener forwarded nothing. Sending it again
+// changes nothing until another session holds the role. Only a listener that confirms a role
+// message before it answers gives it; an earlier listener's role lane drops such a message after
+// its 200 without a report.
+type ErrRefusedByHolder struct {
+	Holder string
+}
+
+func (e ErrRefusedByHolder) Error() string {
+	return fmt.Sprintf("the role's holder %q does not advertise the delivery mode", e.Holder)
+}
 
 // RoleTopicPrefix is the Envoy subject a role token is reached on (ROLE_TOPIC_PREFIX,
 // packages/contracts/src/subject.ts): a notice goes to its architect's, and a review-stuck notice
@@ -113,11 +159,22 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
 		refusal := fmt.Errorf("publish notice to %s: listener returned %s: %s", topic, response.Status, strings.TrimSpace(string(body)))
-		var reason struct {
-			Reason string `json:"reason"`
+		var answer struct {
+			Reason    string `json:"reason"`
+			Holder    string `json:"holder"`
+			EventID   string `json:"event_id"`
+			DedupeKey string `json:"dedupe_key"`
 		}
-		if response.StatusCode == http.StatusNotFound && json.Unmarshal(body, &reason) == nil && slices.Contains(roleHolderReasons, reason.Reason) {
+		if json.Unmarshal(body, &answer) != nil {
+			return refusal
+		}
+		switch {
+		case response.StatusCode == http.StatusNotFound && slices.Contains(roleHolderReasons, answer.Reason):
 			return fmt.Errorf("%w: %w", refusal, ErrNoHolder)
+		case response.StatusCode == http.StatusGatewayTimeout && (answer.Reason == ReasonReceiptTimeout || answer.Reason == ReasonDeliveryFailed):
+			return fmt.Errorf("%w: %w", refusal, ErrNotDelivered{Reason: answer.Reason, Holder: answer.Holder, EventID: answer.EventID, DedupeKey: answer.DedupeKey})
+		case response.StatusCode == http.StatusForbidden && answer.Reason == "capability":
+			return fmt.Errorf("%w: %w", refusal, ErrRefusedByHolder{Holder: answer.Holder})
 		}
 		return refusal
 	}

@@ -706,6 +706,39 @@ func TestOutboxMergeQueueWithNoLiveHolderSaysSoOnTheIssue(t *testing.T) {
 	}
 }
 
+// A merge queue holder that does not advertise the packet's delivery mode (403 capability)
+// refuses every attempt until another session holds the role, as a role with no holder does: the
+// issue is told the role refused the packet and which holder did, and the row is done. A holder
+// that did not confirm the packet in time (504 receipt_timeout or delivery_failed) is retried.
+func TestOutboxMergeQueueAnswersOfTheConfirmedPublishRoute(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+	row.ID = 59
+	publisher := &outboxPublisher{err: fmt.Errorf(`publish notice to notifications.role.merge-queue: listener returned 403 Forbidden: {"reason":"capability","holder":"ses_mq"}: %w`,
+		notify.ErrRefusedByHolder{Holder: "ses_mq"})}
+	client := &outboxDispatch{}
+	runner := &outbox{notices: publisher, dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
+
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("execute merge queue publish its holder refused: %v", err)
+	}
+	if got := client.messages; len(got) != 1 ||
+		!strings.HasPrefix(got[0], "merge queue role merge-queue refused the packet: its holder ses_mq does not advertise the delivery mode, at 2026-09-25T03:04:05Z") ||
+		!strings.HasSuffix(got[0], "<!-- legion-outbox:59 -->") {
+		t.Fatalf("Dispatch messages = %q, want one naming the role and the holder that refused the packet", got)
+	}
+
+	for _, reason := range []string{notify.ReasonReceiptTimeout, notify.ReasonDeliveryFailed} {
+		publisher.err = fmt.Errorf("publish notice to notifications.role.merge-queue: listener returned 504 Gateway Timeout: %w", notify.ErrNotDelivered{Reason: reason, Holder: "ses_mq"})
+		var notDelivered notify.ErrNotDelivered
+		if err := runner.execute(context.Background(), row); !errors.As(err, &notDelivered) || notDelivered.Reason != reason {
+			t.Fatalf("merge queue publish answered %s = %v, want the answer as a failure, retried", reason, err)
+		}
+	}
+	if got := client.messages; len(got) != 1 {
+		t.Fatalf("Dispatch messages = %q, want no message for a packet that is retried", got)
+	}
+}
+
 func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()

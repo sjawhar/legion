@@ -111,3 +111,57 @@ func TestHTTPPublisherTellsANoHolderRefusalFromAnyOther(t *testing.T) {
 		})
 	}
 }
+
+// A listener that confirms a role message before it answers says why it did not deliver one:
+// 504 with receipt_timeout or delivery_failed, naming the holder and the envelope it forwarded
+// (roleSendFailure, packages/envoy/cmd/listener/confirmed.go), or 403 with capability when the
+// holder cannot take the payload's delivery mode (capabilityRefusal). Each is told apart from every
+// other failure, and a 504 whose body is not that JSON — a proxy's gateway timeout, a reason this
+// daemon does not know — stays an ordinary failure.
+func TestHTTPPublisherTellsTheConfirmedSendAnswersApart(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		status       int
+		body         string
+		notDelivered *ErrNotDelivered
+		refused      *ErrRefusedByHolder
+	}{
+		{"the holder sent no receipt", http.StatusGatewayTimeout,
+			`{"error":"role legion-demo-architect: event evt-1 was not confirmed by its holder within 4s (receipt_timeout)","reason":"receipt_timeout","event_id":"evt-1","dedupe_key":"legion-outbox:9","holder":"ses_a","attempts":2}`,
+			&ErrNotDelivered{Reason: ReasonReceiptTimeout, Holder: "ses_a", EventID: "evt-1", DedupeKey: "legion-outbox:9"}, nil},
+		{"the forward never reached the server", http.StatusGatewayTimeout,
+			`{"error":"role legion-demo-architect: event evt-2 was not confirmed by its holder within 4s (delivery_failed)","reason":"delivery_failed","event_id":"evt-2","dedupe_key":"legion-outbox:9","holder":"","attempts":0}`,
+			&ErrNotDelivered{Reason: ReasonDeliveryFailed, EventID: "evt-2", DedupeKey: "legion-outbox:9"}, nil},
+		{"the holder does not advertise the delivery mode", http.StatusForbidden,
+			`{"error":"session ses_a (architect) does not advertise prompt","reason":"capability","holder":"ses_a"}`, nil, &ErrRefusedByHolder{Holder: "ses_a"}},
+		{"a gateway timeout that is not JSON", http.StatusGatewayTimeout, `upstream request timeout`, nil, nil},
+		{"a gateway timeout with no reason", http.StatusGatewayTimeout, `{"error":"gateway timeout"}`, nil, nil},
+		{"a gateway timeout with another reason", http.StatusGatewayTimeout, `{"error":"not confirmed","reason":"not_confirmed"}`, nil, nil},
+		{"a forbidden publish with no reason", http.StatusForbidden, `{"error":"forbidden"}`, nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			err := New(server.URL, "").Publish(context.Background(), "notifications.role.legion-demo-architect", "held on DEMO-1", map[string]string{"kind": "held"}, "legion-outbox:9")
+			if err == nil || !strings.Contains(err.Error(), tc.body) {
+				t.Fatalf("publish error = %v, want the listener's answer %s", err, tc.body)
+			}
+			var notDelivered ErrNotDelivered
+			if got := errors.As(err, &notDelivered); got != (tc.notDelivered != nil) || got && notDelivered != *tc.notDelivered {
+				t.Fatalf("errors.As(%v, ErrNotDelivered) = %t with %+v, want %+v", err, got, notDelivered, tc.notDelivered)
+			}
+			var refused ErrRefusedByHolder
+			if got := errors.As(err, &refused); got != (tc.refused != nil) || got && refused != *tc.refused {
+				t.Fatalf("errors.As(%v, ErrRefusedByHolder) = %t with %+v, want %+v", err, got, refused, tc.refused)
+			}
+			if errors.Is(err, ErrNoHolder) {
+				t.Fatalf("errors.Is(%v, ErrNoHolder) = true, want a holder that exists", err)
+			}
+		})
+	}
+}
