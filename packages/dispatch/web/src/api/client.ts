@@ -342,6 +342,29 @@ export function isRetryableQueryError(error: unknown): boolean {
   );
 }
 
+/** The codes of the two `503`s Dispatch answers with a `Retry-After` it means: its database is
+ *  too busy to take the request now (`DATABASE_BUSY`), or the request ran past the time Dispatch
+ *  gives one (`REQUEST_TIMEOUT`). Any other `503` - a gateway's, or Dispatch's own without one of
+ *  these codes - names no wait the page can trust, and keeps the page's own backoff. */
+const BUSY_CODES: ReadonlySet<string> = new Set(["DATABASE_BUSY", "REQUEST_TIMEOUT"]);
+
+/** How long Dispatch asked to be left before this request is asked again, when it was too busy
+ *  for it (`BUSY_CODES`) and said so with a `Retry-After`; `undefined` for anything else. */
+export function busyRetryAfterMs(error: unknown): number | undefined {
+  if (!(error instanceof ApiError) || error.status !== 503) return undefined;
+  return error.code !== undefined && BUSY_CODES.has(error.code) ? error.retryAfterMs : undefined;
+}
+
+/** How long a read waits before the query client asks it again: the wait Dispatch asked for when
+ *  it was too busy for it (`busyRetryAfterMs`), and otherwise `QUERY_RETRY_DELAY_MS`. The query
+ *  client's `retryDelay`, beside `isRetryableQueryError` (`main.tsx`). */
+export function queryRetryDelay(_failureCount: number, error: unknown): number {
+  return busyRetryAfterMs(error) ?? QUERY_RETRY_DELAY_MS;
+}
+
+/** How long a read that failed for any other retryable reason waits before it is asked again. */
+export const QUERY_RETRY_DELAY_MS = 500;
+
 // The reason to show a reader for a failed write: the server's own message when it answered
 // with one, that it did not answer in time when it did not, otherwise the caller's fallback line
 // (the request never reached the server, or died in transit).

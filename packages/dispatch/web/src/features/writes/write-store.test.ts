@@ -1049,6 +1049,31 @@ test("a write waiting its turn and never sent can be discarded; one out cannot",
   });
 });
 
+// INFRA-592. Dispatch answers `503 DATABASE_BUSY` and `503 REQUEST_TIMEOUT` with a `Retry-After`
+// it means, as it does a `429`: a write so answered is made again under its key once that wait
+// is out, and its backoff stays where it was. Any other `503` names no wait the page can trust,
+// so it keeps the 1 s, 2 s, 4 s backoff whatever `Retry-After` it carries.
+test("a write answered 503 DATABASE_BUSY or REQUEST_TIMEOUT waits out its Retry-After, any other 503 backs off", async () => {
+  await onFakeClock(async () => {
+    const gapsAfter = async (code: string, ms: number) => {
+      const { writes } = storeOf();
+      const times: number[] = [];
+      const start = Date.now();
+      void statusWrite(writes, () => {
+        times.push(Date.now() - start);
+        return Promise.reject(new ApiError(503, { code, error: "not now" }, 7_000));
+      }).catch(() => {});
+      await tick(ms);
+      writes.clear();
+      await settle();
+      return times.slice(1).map((at, index) => Math.round((at - (times[index] ?? 0)) / 1_000));
+    };
+    expect(await gapsAfter("DATABASE_BUSY", 21_500)).toEqual([7, 7, 7]);
+    expect(await gapsAfter("REQUEST_TIMEOUT", 21_500)).toEqual([7, 7, 7]);
+    expect(await gapsAfter("UNAVAILABLE", 7_500)).toEqual([1, 2, 4]);
+  });
+});
+
 // W39. Only Dispatch becoming reachable again resets a failing write's backoff. A route that keeps
 // answering 503 while every other request the page makes succeeds backs off 1 s, 2 s, 4 s … to its
 // 30 s cap; once a request on its route has failed to reach Dispatch, the next answer there starts

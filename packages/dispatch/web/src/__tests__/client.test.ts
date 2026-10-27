@@ -12,6 +12,8 @@ import {
   isRetryableQueryError,
   isUnauthorized,
   NetworkError,
+  QUERY_RETRY_DELAY_MS,
+  queryRetryDelay,
   REQUEST_DEADLINE_MS,
   RequestTimeoutError,
   UnreadableAnswerError,
@@ -847,6 +849,38 @@ test("isUnauthorized distinguishes a 401 from a transient 5xx failure", async ()
   expect(isUnauthorized(unauthorizedError)).toBe(true);
   expect(isUnauthorized(serverErrorResult)).toBe(false);
   expect(isUnauthorized(new TypeError("network error"))).toBe(false);
+});
+
+// INFRA-592. Dispatch answers `503 DATABASE_BUSY` and `503 REQUEST_TIMEOUT` with a `Retry-After`
+// it means: a read so answered is asked again once that wait is out (the query client's
+// `retryDelay`), rather than after the page's own 500 ms, which would ask a busy Dispatch again
+// while it is still busy. Any other `503` - a gateway's, or one of Dispatch's without those codes
+// - names no wait the page can trust and keeps the 500 ms.
+test("a read Dispatch answered too-busy waits out its Retry-After, and any other failure does not", async () => {
+  const answered = async (status: number, code: string | undefined, retryAfter?: string) => {
+    const client = createApiClient(
+      stubFetch(
+        () =>
+          new Response(JSON.stringify({ code, error: "not now" }), {
+            headers: retryAfter === undefined ? {} : { "Retry-After": retryAfter },
+            status,
+          })
+      ).fetch
+    );
+    return client.whoAmI().catch((error: unknown) => error);
+  };
+
+  expect(queryRetryDelay(0, await answered(503, "DATABASE_BUSY", "7"))).toBe(7_000);
+  expect(queryRetryDelay(1, await answered(503, "REQUEST_TIMEOUT", "2"))).toBe(2_000);
+  // Dispatch's own code without a `Retry-After`, another service's 503, a 500 and a failed
+  // connection each keep the page's own wait.
+  expect(queryRetryDelay(0, await answered(503, "DATABASE_BUSY"))).toBe(QUERY_RETRY_DELAY_MS);
+  expect(queryRetryDelay(0, await answered(503, "UNAVAILABLE", "7"))).toBe(QUERY_RETRY_DELAY_MS);
+  expect(queryRetryDelay(0, await answered(503, undefined, "7"))).toBe(QUERY_RETRY_DELAY_MS);
+  expect(queryRetryDelay(0, await answered(500, "INTERNAL", "7"))).toBe(QUERY_RETRY_DELAY_MS);
+  expect(queryRetryDelay(0, new TypeError("network error"))).toBe(QUERY_RETRY_DELAY_MS);
+  // Both are still worth asking again: the policy decides whether, the delay decides when.
+  expect(isRetryableQueryError(await answered(503, "DATABASE_BUSY", "7"))).toBe(true);
 });
 
 test(

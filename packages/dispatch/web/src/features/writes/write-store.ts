@@ -479,18 +479,24 @@ export class Writes {
    * until someone signs in. The same person's sign-in takes them up again where they stood, each in
    * its line; anyone else's drops every write not theirs, its trying stopped and its press refused.
    * A sign-out still out (`endsWithSession`) has done what it was for once the session lapses, and
-   * lands. Each kind lets go of what it remembered of the person before (`reset`) whenever who is
-   * signed in changes, and so does every hold this page's sign-out put on writes; another tab's
-   * hold is that tab's to end (`holdFor`).
+   * lands; so has another tab's sign-out of the person whose session lapsed, while it still holds
+   * their writes here (`holdFor`): the lapse is that sign-out landing, whether it reaches this
+   * page before or after that tab's hold ends, so their writes go (`dropLogin`) rather than wait
+   * for a sign-in they were discarded before. A lapse with no such hold keeps them. Each kind lets
+   * go of what it remembered of the person before (`reset`) whenever who is signed in changes,
+   * and so does every hold this page's sign-out put on writes; another tab's hold is that tab's
+   * to end (`holdFor`), or this lapse's.
    */
   signedIn(login: string | undefined): void {
-    if (login !== this.#login) {
+    const before = this.#login;
+    if (login !== before) {
       this.#resetKinds();
       this.#signingOut.clear();
     }
     this.#login = login;
     if (login === undefined) {
       this.#lapsed = true;
+      if (before !== undefined && this.#signingOutElsewhere.has(before)) this.dropLogin(before);
       for (const entry of [...this.#entries.values()]) this.#hold(entry);
       return;
     }

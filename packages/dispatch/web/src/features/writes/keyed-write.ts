@@ -3,6 +3,7 @@ import { IDEMPOTENCY_KEY_TTL_MS, retriesUnderKey } from "@legion/contracts";
 import {
   AnswerNotKeptError,
   ApiError,
+  busyRetryAfterMs,
   isKeyCommitted,
   isKeyInFlight,
   isUnauthorized,
@@ -112,10 +113,16 @@ function retryAfter(
   }
   if (isUnauthorized(error)) return { grows: true, ms: backoff, wakes: false };
   if (!(error instanceof ApiError) || !retriesUnderKey(error.status, error.code)) return undefined;
-  // Dispatch said when to come back: the first request under the key is still running, or it is
-  // turning requests away for now. Nothing the page learns elsewhere changes that, and the wait
-  // is Dispatch's, not the backoff, which stays where it was.
-  if ((error.status === 429 && error.retryAfterMs !== undefined) || isKeyInFlight(error)) {
+  // Dispatch said when to come back: the first request under the key is still running, it is
+  // turning requests away for now (`429`), or it was too busy for this one (`503 DATABASE_BUSY`,
+  // `503 REQUEST_TIMEOUT`, `busyRetryAfterMs`). Nothing the page learns elsewhere changes that,
+  // and the wait is Dispatch's, not the backoff, which stays where it was. Any other `503` keeps
+  // the backoff.
+  if (
+    (error.status === 429 && error.retryAfterMs !== undefined) ||
+    busyRetryAfterMs(error) !== undefined ||
+    isKeyInFlight(error)
+  ) {
     return { grows: false, ms: error.retryAfterMs ?? FIRST_BACKOFF_MS, wakes: false };
   }
   return { grows: true, ms: backoff, wakes: true };

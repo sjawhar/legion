@@ -176,7 +176,9 @@ once under that name however many times the page asks. So a change tried again a
 answer, a timeout or an outage lands exactly once, and the page keeps asking while your connection
 is down, and again at once when Dispatch is reachable again; while Dispatch keeps answering the
 change with an error, or the change keeps failing on its way while the rest of Dispatch answers,
-the tries spread out, up to 30 seconds apart. A change Dispatch is slow to finish is waited
+the tries spread out, up to 30 seconds apart; when Dispatch answers that it is too busy and says
+how long to leave it, the page waits exactly that, for a change and for what the page reads alike.
+A change Dispatch is slow to finish is waited
 for and made once, and an upload still going up is never cut off, however long a slow link takes.
 
 A corner of the screen accounts for the ones still out: **Saving 2 changes…**, and once one has

@@ -118,10 +118,12 @@ interface OtherTab {
 
 /** Another tab of this browser on the sign-in channel, named `id`: it says it opened, records
  *  everything it hears, and answers a sign-out's question with `unsent` - or, `silent`, not at
- *  all. `say` posts a message of its own, naming it; `close` says it went. */
+ *  all. `say` posts a message of its own, naming it; `close` says it went, once however often it
+ *  is called, so a test can close it in its `finally` as well as in its steps. */
 function otherTab(id: string, unsent: readonly UnsentChange[] | "silent" = []): OtherTab {
   const channel = new BroadcastChannel("dispatch-sign-in");
   const told: unknown[] = [];
+  let closed = false;
   channel.addEventListener("message", (event: MessageEvent) => {
     told.push(event.data);
     const data: unknown = event.data;
@@ -132,6 +134,8 @@ function otherTab(id: string, unsent: readonly UnsentChange[] | "silent" = []): 
   channel.postMessage({ hello: true, tab: id });
   return {
     close: () => {
+      if (closed) return;
+      closed = true;
       channel.postMessage({ gone: true, tab: id });
       channel.close();
     },
@@ -452,6 +456,112 @@ test("the writes held for a tab that went go on once whoami still names the pers
     ).toEqual(["CORE-1 set to done"]);
     expect(screen.getByText("Signed in as alice")).toBeTruthy();
   } finally {
+    app.teardown();
+  }
+}, 15_000);
+
+/** The person this page's whoami names while it answers one. */
+type SignedInUser = { event_head: string; kind: "user"; login: string };
+
+/** The app at `/` for alice, holding a write of hers for another tab's sign-out (`tab-2`), its
+ *  whoami answered alice until `signedIn` turns false, and then Dispatch's `401 NO_IDENTITY` -
+ *  except a read `parked` is set for, which waits for the test to answer it. */
+async function holdingForAnotherTab() {
+  const state: {
+    parked?: { promise: Promise<SignedInUser>; resolve: (user: SignedInUser) => void };
+    signedIn: boolean;
+  } = { signedIn: true };
+  const app = renderApp({
+    whoAmI: async () => {
+      const parked = state.parked;
+      if (parked !== undefined) {
+        state.parked = undefined;
+        return parked.promise;
+      }
+      if (!state.signedIn) throw new ApiError(401, { code: "NO_IDENTITY", error: "unauthorized" });
+      return { event_head: "0", kind: "user", login: "alice" };
+    },
+  });
+  const signer = otherTab("tab-2");
+  await screen.findByText("Signed in as alice");
+  await waitFor(() => expect(signer.told).toContainEqual(expect.objectContaining({ here: true })));
+  const attempts: string[] = [];
+  void aliceWrite(app.queryClient, attempts, "CORE-1 set to done");
+  await waitFor(() => expect(attempts.length).toBeGreaterThan(0));
+  signer.say({ signingOut: "alice" });
+  await screen.findByText("CORE-1 set to done — Waiting for a sign-out in another tab");
+  return { app, attempts, signer, state };
+}
+
+/** Whether alice's held write was discarded, here and in what this tab keeps, with nothing of it
+ *  sent after the sign-out and no sign-in page offering it back. */
+async function discardedFor(app: ReturnType<typeof renderApp>, attempts: string[]) {
+  await screen.findByRole("link", { name: "Sign in with Google" });
+  expect(writesOf(app.queryClient).rows()).toEqual([]);
+  expect(keptWrites()).toEqual([]);
+  expect(screen.queryByRole("region", { name: "Kept changes" })).toBeNull();
+  const made = attempts.length;
+  await sleep(2_500);
+  expect(attempts).toHaveLength(made);
+}
+
+// A 401 for a login this tab holds writes for, for another tab's sign-out, is that sign-out
+// landing: Dispatch ended the session the sign-out asked it to end. It discards alice's write
+// whichever reaches this tab first. Here the tab's own sign-in check answers 401 first - Dispatch
+// closed its live socket as it ended the session - while the hold is still on.
+test("a 401 while another tab's sign-out holds the writes discards them, before that tab goes", async () => {
+  const { app, attempts, signer, state } = await holdingForAnotherTab();
+  try {
+    state.signedIn = false;
+    await act(() => app.queryClient.invalidateQueries({ queryKey: ["whoami"] }));
+    await discardedFor(app, attempts);
+    // That tab going afterwards changes nothing: there is nothing of alice's left to hold.
+    signer.close();
+    await sleep(200);
+    expect(writesOf(app.queryClient).rows()).toEqual([]);
+  } finally {
+    signer.close();
+    app.teardown();
+  }
+}, 15_000);
+
+// The other order: the tab goes first, and the whoami read its going starts was sent before
+// Dispatch ended the session, so it answers 200 - but only after this tab's own sign-in check,
+// read after the session ended, answered 401 under the hold. The 401 decided; the late 200
+// lets go of a hold that has nothing left in it.
+test("a 401 while another tab's sign-out holds the writes discards them, after that tab goes", async () => {
+  const { app, attempts, signer, state } = await holdingForAnotherTab();
+  try {
+    const goneRead = Promise.withResolvers<SignedInUser>();
+    state.parked = goneRead;
+    signer.close();
+    await waitFor(() => expect(state.parked).toBeUndefined());
+    state.signedIn = false;
+    await act(() => app.queryClient.invalidateQueries({ queryKey: ["whoami"] }));
+    await act(async () => goneRead.resolve({ event_head: "0", kind: "user", login: "alice" }));
+    await discardedFor(app, attempts);
+  } finally {
+    signer.close();
+    app.teardown();
+  }
+}, 15_000);
+
+// A lapse with no other tab's sign-out holding the writes is a lapse, as before: they are kept
+// for the person's next sign-in.
+test("a 401 with no other tab's sign-out holding the writes keeps them", async () => {
+  const { app, signer, state } = await holdingForAnotherTab();
+  try {
+    signer.say({ stillSignedIn: "alice" });
+    await waitFor(() =>
+      expect(screen.queryByText(/Waiting for a sign-out in another tab/)).toBeNull()
+    );
+    state.signedIn = false;
+    await act(() => app.queryClient.invalidateQueries({ queryKey: ["whoami"] }));
+    const kept = await screen.findByRole("region", { name: "Kept changes" });
+    expect(kept.textContent).toContain("CORE-1 set to done");
+    expect(keptWrites()).toHaveLength(1);
+  } finally {
+    signer.close();
     app.teardown();
   }
 }, 15_000);
