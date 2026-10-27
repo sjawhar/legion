@@ -34,9 +34,10 @@ var (
 // a shim's failed adoption, enrollment or token read. The connection is fine; the agent said no.
 //
 // A refused prompt is runtime.ErrPromptRefused, which is what the supervisor charges a prompt
-// budget on, and a refused token request is runtime.ErrTokenRefused. No other refusal is either —
-// a refused negotiation ahead of the prompt, a refused get_state or adoption — so the match is on
-// the command rather than an unconditional Unwrap.
+// budget on unless Reason is OMP's busy answer (runtime.RefusalReason), and a refused token
+// request is runtime.ErrTokenRefused. No other refusal is either — a refused negotiation ahead of
+// the prompt, a refused get_state or adoption — so the match is on the command rather than an
+// unconditional Unwrap.
 type RefusedError struct {
 	Claim   claim.Token
 	Command string
@@ -49,6 +50,9 @@ func (e *RefusedError) Error() string {
 	}
 	return fmt.Sprintf("worker-stream: %s refused %s: %s", e.Claim, e.Command, e.Reason)
 }
+
+// RefusalReason is the words the far side refused with (runtime.RefusalReason).
+func (e *RefusedError) RefusalReason() string { return e.Reason }
 
 func (e *RefusedError) Is(target error) bool {
 	switch target {
