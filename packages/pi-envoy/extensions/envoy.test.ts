@@ -1,4 +1,13 @@
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  setSystemTime,
+  spyOn,
+  test,
+} from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -167,7 +176,15 @@ const natsState = {
   heldConnect: undefined as Promise<void> | undefined,
   drainHangs: false,
   drainStarted: false,
+  /** Each mocked connection's `status()` readers: a push hands every one of them the status, as
+   *  nats.js reports a reconnect to every reader of the connection's status iterator. */
+  statusReaders: [] as ((status: { readonly type: string; readonly data: unknown }) => void)[],
 };
+
+/** Reports `{ type }` to every reader of a mocked connection's `status()`. */
+function pushNatsStatus(type: string): void {
+  for (const read of natsState.statusReaders) read({ type, data: "" });
+}
 
 const targetedDispatchPayload = readFileSync(
   new URL("../../contracts/fixtures/dispatch-targeted-delivery.json", import.meta.url),
@@ -182,8 +199,9 @@ const clipboardState = {
 // @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports, and a row
 // that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the module
 // before the mock replaces it: a static import's live bindings would read the mock.
-const { connect: realConnect, nkeyAuthenticator, nkeys } = await import("nats");
+const { connect: realConnect, Events, nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
+  Events,
   nkeyAuthenticator,
   nkeys,
   connect: async (options: {
@@ -213,6 +231,34 @@ mock.module("nats", () => ({
       drain: async () => {
         natsState.drainStarted = true;
         if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
+      },
+      // An async iterable of the connection's status events, which a test feeds through
+      // `pushNatsStatus`; it ends once the connection is closed.
+      status: () => {
+        const queued: { readonly type: string; readonly data: unknown }[] = [];
+        let wake: (() => void) | undefined;
+        const reader = (status: { readonly type: string; readonly data: unknown }) => {
+          queued.push(status);
+          wake?.();
+          wake = undefined;
+        };
+        natsState.statusReaders.push(reader);
+        return {
+          [Symbol.asyncIterator]: () => ({
+            next: async (): Promise<
+              IteratorResult<{ readonly type: string; readonly data: unknown }>
+            > => {
+              for (;;) {
+                if (closed) return { done: true, value: undefined };
+                const status = queued.shift();
+                if (status !== undefined) return { done: false, value: status };
+                const pending = Promise.withResolvers<void>();
+                wake = pending.resolve;
+                await pending.promise;
+              }
+            },
+          }),
+        };
       },
       publish: (subject: string, data?: Uint8Array) => {
         if (natsState.failPublishes > 0) {
@@ -437,6 +483,7 @@ afterEach(async () => {
   natsState.realConnect = false;
   natsState.drainHangs = false;
   natsState.drainStarted = false;
+  natsState.statusReaders.length = 0;
   hostBuiltins.length = 0;
 });
 
@@ -756,8 +803,8 @@ function acceptResponse(
  * message call. `entries` are what the session's file already holds, as a restarted session reads
  * them, and `branch` its active branch (the entries by default); every entry the session appends
  * is read back with them. `delivered(n)` resolves once the session has taken `n` deliveries, cards
- * and user turns together, and `recordedWhenDelivered` says how many entries the session had
- * appended when each went out.
+ * and user turns together, and `recordedWhenDelivered` says how many handled-attempt entries the
+ * session had appended when each went out.
  */
 async function bootDirectSession(
   query: string,
@@ -828,6 +875,10 @@ async function bootDirectSession(
   const fixture = createPi();
   const waiters: { readonly count: number; readonly resolve: () => void }[] = [];
   const recordedWhenDelivered: number[] = [];
+  // The attempt records alone: the replay cursors and ledger the session also appends are not
+  // what a delivery has to follow.
+  const handledRecords = () =>
+    fixture.entries.filter((entry) => entry.customType === "envoy-dispatch-handled-attempt").length;
   const inputs: { readonly text: string; readonly options: unknown }[] = [];
   const taken = () => {
     const count = fixture.deliveries.length + fixture.userMessages.length + inputs.length;
@@ -841,20 +892,20 @@ async function bootDirectSession(
     ...fixture.pi,
     sendMessage: (message: never, sendOptions: unknown) => {
       options.beforeSend?.();
-      recordedWhenDelivered.push(fixture.entries.length);
+      recordedWhenDelivered.push(handledRecords());
       fixture.pi.sendMessage(message, sendOptions);
       taken();
     },
     sendUserMessage: (content: string, sendOptions?: unknown) => {
       options.beforeSend?.();
-      recordedWhenDelivered.push(fixture.entries.length);
+      recordedWhenDelivered.push(handledRecords());
       fixture.pi.sendUserMessage(content, sendOptions);
       taken();
     },
     ...(run !== undefined && {
       sendUserInput: (text: string, inputOptions: unknown) => {
         options.beforeSend?.();
-        recordedWhenDelivered.push(fixture.entries.length);
+        recordedWhenDelivered.push(handledRecords());
         inputs.push({ options: inputOptions, text });
         taken();
         return run(text, inputOptions);
@@ -905,12 +956,30 @@ function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
 }
 
+/** A listener that serves replay over a stream holding nothing: every subject's cursor starts. */
+function emptyReplay(init: RequestInit | undefined): Response {
+  const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+    readonly subjects?: readonly { readonly subject: string }[];
+  };
+  return response({
+    stream: { created: "2026-10-01T00:00:00Z", first_seq: 0, last_seq: 0 },
+    subjects: (body.subjects ?? []).map(({ subject }) => ({
+      subject,
+      messages: [],
+      next_after: 0,
+      more: false,
+    })),
+  });
+}
+
 function responseWithRegistration(
   input: string | URL | Request,
   init: RequestInit | undefined,
   fallback: unknown
 ): Response {
-  if (new URL(input.toString()).pathname !== "/v1/interests/subscribe") return response(fallback);
+  const path = new URL(input.toString()).pathname;
+  if (path === "/v1/replay") return emptyReplay(init);
+  if (path !== "/v1/interests/subscribe") return response(fallback);
   const body = JSON.parse(init?.body?.toString() ?? "{}") as {
     readonly session_id: string;
     readonly dir: string;
@@ -1415,8 +1484,11 @@ describe("envoy OMP extension", () => {
       expect.stringMatching(/^<btw>\n[\s\S]*WAITING or PROCEEDING[\s\S]*\n<\/btw>$/),
     ]);
     expect(session.asked[0]?.signal?.aborted).toBe(false);
-    // The arming period lives in memory only: nothing about it reaches the transcript.
-    expect(session.fixture.entries).toEqual([]);
+    // The arming period lives in memory only: nothing about it reaches the transcript, whose only
+    // entries are the replay cursors.
+    expect(
+      session.fixture.entries.filter((entry) => !entry.customType.startsWith("envoy-replay-"))
+    ).toEqual([]);
   });
 
   test("runs the stop-time check on the managed timer, after agent_end has returned", async () => {
@@ -2855,6 +2927,11 @@ describe("envoy OMP extension", () => {
           capabilities: ["aside", "steer"],
           host: machineID(),
         },
+      },
+      // The opened agent subject's first sweep, which starts its cursor.
+      {
+        path: "/v1/replay",
+        body: { session_id: "ses_omp", subjects: [{ subject: "notifications.agent.ses_omp" }] },
       },
       { path: "/v1/roles/set", body: { session_id: "ses_omp", role: "controller" } },
       { path: "/v1/interests/ses_omp", body: undefined },
@@ -9312,6 +9389,40 @@ describe("envoy OMP extension", () => {
       },
     });
   });
+  test("never registers a followed topic reaching a private stream subject", async () => {
+    const registrations: { readonly topics: readonly string[] }[] = [];
+    globalThis.fetch = async (input, init) => {
+      if (new URL(input.toString()).pathname === "/v1/interests/subscribe") {
+        registrations.push(JSON.parse(init?.body?.toString() ?? "{}"));
+      }
+      return response({ session_id: "ses_bounded", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    // Query isolation gives this stateful extension its own module state, as every test here does.
+    const { default: envoyExtension } = await import("./envoy.ts?register-bounded");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_bounded"));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
+    const issue = "notifications.dispatch.issue.KEY-1.ask.opened";
+    const refused = [
+      "notifications.*.x",
+      "notifications.agent.*",
+      "notifications.agent.ses_other",
+      "notifications.envoy.exceptions.notifications.agent.ses_bounded",
+      "notifications.legion.ACME.controller",
+    ];
+
+    await subscribeTool.execute("", { topics: [...refused, issue] });
+
+    // The model follows them live; the listener, which would refuse them, is never sent them.
+    for (const topic of [...refused, issue])
+      expect(natsState.controls.get(topic)?.active()).toBe(true);
+    const topics = registrations.at(-1)?.topics ?? [];
+    expect(topics).toContain("notifications.agent.ses_bounded");
+    expect(topics).toContain(issue);
+    for (const topic of refused) expect(topics).not.toContain(topic);
+  });
   test("answers a targeted BTW delivery ephemerally and registers the capability", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "dispatch-token";
@@ -9495,8 +9606,11 @@ describe("envoy OMP extension", () => {
       expect(fixture.deliveries).toEqual([]);
       expect(posts).toEqual([]);
       // The attempt is in the transcript before the turn goes out, so no crash in between leaves
-      // a delivered attempt a forged frame could still have accepted.
-      expect(fixture.entries).toEqual([
+      // a delivered attempt a forged frame could still have accepted. (The replay cursors and
+      // ledger are the session's other entries.)
+      expect(
+        fixture.entries.filter((entry) => !entry.customType.startsWith("envoy-replay-"))
+      ).toEqual([
         {
           customType: "envoy-dispatch-handled-attempt",
           data: { attempt: 1, message_id: DIRECT_MESSAGE_ID },
@@ -11506,8 +11620,9 @@ describe("envoy OMP extension", () => {
   });
 
   // Dispatch records a BTW answered with an error as failed, and a same-mode re-send of it
-  // repeats the attempt's dedupe key. The agent never answered the first, so the re-send has to
-  // run the side turn again; a repeat of one that was answered is still dropped.
+  // repeats the attempt's dedupe key under the new event id the listener mints for every send.
+  // The agent never answered the first, so the re-send has to run the side turn again; a repeat
+  // of one that was answered is still dropped.
   test("runs a BTW side turn again for a Retry of one whose side turn failed", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "dispatch-token";
@@ -11540,17 +11655,23 @@ describe("envoy OMP extension", () => {
     );
     const agent = natsState.controls.get("notifications.agent.ses_delivery");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
-    const send = async (dedupeKey: string): Promise<void> => {
+    // Each send is a new envelope from the listener: its own event id, the attempt's dedupe key.
+    const btw = (dedupeKey: string, eventID: string) =>
+      JSON.stringify({
+        ...JSON.parse(targetedDispatchEnvelope("btw", dedupeKey)),
+        event_id: eventID,
+      });
+    const send = async (dedupeKey: string, eventID: string): Promise<void> => {
       posted = Promise.withResolvers<void>();
-      agent.push(targetedDispatchEnvelope("btw", dedupeKey));
+      agent.push(btw(dedupeKey, eventID));
       await posted.promise;
     };
 
-    await send("targeted-btw-retry");
-    await send("targeted-btw-retry");
+    await send("targeted-btw-retry", "evt-btw-first");
+    await send("targeted-btw-retry", "evt-btw-retry");
     // Answered now: a third copy is a repeat and runs nothing, so the next reply is the sentinel's.
-    agent.push(targetedDispatchEnvelope("btw", "targeted-btw-retry"));
-    await send("targeted-btw-sentinel");
+    agent.push(btw("targeted-btw-retry", "evt-btw-again"));
+    await send("targeted-btw-sentinel", "evt-btw-sentinel");
 
     expect(sideTurns).toBe(3);
     const actor = { id: "ses_delivery", kind: "session" };
@@ -13632,6 +13753,8 @@ describe("envoy OMP extension", () => {
     expect(drainHadStartedAtDeregistration).toBe(false);
     expect(requests).toEqual([
       { method: "POST", path: "/v1/interests/subscribe" },
+      // The opened agent subject's first sweep.
+      { method: "POST", path: "/v1/replay" },
       { method: "DELETE", path: "/v1/sessions/ses_shutdown" },
     ]);
   });
@@ -13706,7 +13829,9 @@ describe("envoy OMP extension", () => {
 
   test("the heartbeat heals a stale registration when the session ID drifts", async () => {
     const registered: string[] = [];
-    globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      // The sweep the opened agent subject starts is answered as an empty stream, not counted.
+      if (new URL(input.toString()).pathname === "/v1/replay") return emptyReplay(init);
       if (init?.body !== undefined) {
         const body = JSON.parse(init.body.toString());
         if (typeof body.session_id === "string") registered.push(body.session_id);
@@ -13879,5 +14004,1802 @@ describe("envoy OMP extension", () => {
     // A markdown paragraph merge (the bug's actual symptom) would join
     // adjacent lines onto one row; plain-text rendering keeps them apart.
     expect(rendered).not.toContain("- one - two");
+  });
+});
+
+describe("messages missed while the subscription was down", () => {
+  const ISSUE = "INFRA-9";
+  const ISSUE_TOPIC = dispatchIssueSubject(ISSUE, ">");
+  const ISSUE_SUBJECT = dispatchIssueSubject(ISSUE, "issue.updated");
+  const HOUR_MS = 60 * 60 * 1_000;
+  const DAY_MS = 24 * HOUR_MS;
+
+  interface StoredFrame {
+    readonly seq: number;
+    readonly subject: string;
+    readonly time: string;
+    readonly data: string;
+  }
+
+  interface ReplayRequest {
+    readonly session_id: string;
+    readonly subjects: readonly { readonly subject: string; readonly after?: number }[];
+  }
+
+  // Lets every promise and I/O callback queued so far run: a sweep's listener call and its
+  // deliveries settle within a few turns, since nothing in the mocked path waits on a clock.
+  async function settle(): Promise<void> {
+    for (let turn = 0; turn < 25; turn += 1) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setImmediate(resolve);
+      await promise;
+    }
+  }
+
+  // Polls `condition` between event-loop turns. Only the resubscribe path waits on a real timer
+  // (`ENVOY_RESUBSCRIBE_DELAY_MS`, 10 ms here), which no fake clock reaches; the deadline is
+  // measured on the monotonic clock, which `setSystemTime` leaves alone.
+  async function until(condition: () => boolean, what: string): Promise<void> {
+    const deadline = performance.now() + 2_000;
+    while (!condition()) {
+      if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await settle();
+    }
+  }
+
+  // NATS subject matching: `*` is one token, `>` one or more trailing tokens.
+  function subjectMatches(pattern: string, subject: string): boolean {
+    const want = pattern.split(".");
+    const got = subject.split(".");
+    for (const [index, token] of want.entries()) {
+      if (token === ">") return got.length > index;
+      if (index >= got.length || (token !== "*" && token !== got[index])) return false;
+    }
+    return want.length === got.length;
+  }
+
+  /**
+   * `ENVOY_NOTIFICATIONS` as the listener's replay route reads it, and the listener's interest
+   * registry: stored messages with their sequence, subject and time, the first sequence retention
+   * left, and the stream's creation time. It keeps agent and Dispatch subjects only, as the
+   * deployed stream keeps no team topic.
+   */
+  class StreamModel {
+    /** When the stream was created; a recreation changes it. */
+    created = "2026-10-20T00:00:00Z";
+    firstSeq = 1;
+    lastSeq = 0;
+    messages: StoredFrame[] = [];
+    /** False is a listener without the route, which answers 404. */
+    served = true;
+    replays = 0;
+    readonly interests = new Map<string, Set<string>>();
+
+    store(subject: string, data: string, time = new Date().toISOString()): number {
+      this.lastSeq += 1;
+      this.messages.push({ seq: this.lastSeq, subject, time, data });
+      return this.lastSeq;
+    }
+
+    /** Retention drops every message up to `seq`. */
+    expireThrough(seq: number): void {
+      this.messages = this.messages.filter((message) => message.seq > seq);
+      this.firstSeq = seq + 1;
+    }
+
+    /** The route's rules: the watermark, a cursor started without `after`, the eligibility. */
+    answer(request: ReplayRequest) {
+      const watermark = this.lastSeq;
+      const registered = this.interests.get(request.session_id) ?? new Set<string>();
+      return {
+        stream: { created: this.created, first_seq: this.firstSeq, last_seq: watermark },
+        subjects: request.subjects.map(({ subject, after }) => {
+          const refused =
+            subject !== `notifications.agent.${request.session_id}` && !registered.has(subject)
+              ? "not_followed"
+              : !subject.startsWith("notifications.agent.") &&
+                  !subject.startsWith("notifications.dispatch.")
+                ? "not_retained"
+                : undefined;
+          if (refused !== undefined) {
+            return { subject, messages: [], next_after: after ?? 0, more: false, refused };
+          }
+          const messages =
+            after === undefined
+              ? []
+              : this.messages.filter(
+                  (message) =>
+                    message.seq > after &&
+                    message.seq <= watermark &&
+                    subjectMatches(subject, message.subject)
+                );
+          return { subject, messages, next_after: watermark, more: false };
+        }),
+      };
+    }
+  }
+
+  function listenerFetch(
+    model: StreamModel,
+    dispatch?: (url: URL) => Promise<Response | undefined>
+  ): typeof fetch {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input.toString());
+      const answered = await dispatch?.(url);
+      if (answered !== undefined) return answered;
+      const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+        readonly session_id: string;
+        readonly dir?: string;
+        readonly topics: readonly string[];
+      };
+      if (url.pathname === "/v1/replay") {
+        model.replays += 1;
+        if (!model.served) {
+          return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+        }
+        return response(model.answer(body as unknown as ReplayRequest));
+      }
+      if (url.pathname === "/v1/interests/subscribe") {
+        const topics = model.interests.get(body.session_id) ?? new Set<string>();
+        for (const topic of body.topics) topics.add(topic);
+        model.interests.set(body.session_id, topics);
+        return response({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: body.dir,
+          topics: [...topics],
+        });
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") {
+        for (const topic of body.topics) model.interests.get(body.session_id)?.delete(topic);
+        return response({});
+      }
+      if (url.pathname.startsWith("/v1/interests/")) {
+        const id = url.pathname.slice("/v1/interests/".length);
+        return response({
+          session_id: id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: [...(model.interests.get(id) ?? [])],
+        });
+      }
+      return response({});
+    }) as typeof fetch;
+  }
+
+  /** A peer session's message to `sessionID`, under a dedupe key minted once for it. */
+  function peerMessage(sessionID: string, label: string): string {
+    const minted = createHash("sha256").update(label).digest("hex").slice(0, 32);
+    return JSON.stringify({
+      event_id: `evt-${label}`,
+      source: "agent",
+      source_event_id: `source-${label}`,
+      source_session: "ses_peer",
+      topic: `notifications.agent.${sessionID}`,
+      dedupe_key: `agent.ses_peer.${minted}`,
+      issued_at: 1,
+      payload_summary: `peer message ${label}`,
+      trace_id: `trace-${label}`,
+    });
+  }
+
+  /** Dispatch's outbox copy of event `id` on `topic`: every copy carries one event id and key. */
+  function issueEvent(topic: string, id: number, notify = true): string {
+    return JSON.stringify({
+      event_id: `dispatch-${id}`,
+      source: "dispatch",
+      source_event_id: String(id),
+      topic,
+      dedupe_key: `dispatch-${id}`,
+      issued_at: 1,
+      payload_summary: `${ISSUE} moved (${id})`,
+      trace_id: `trace-dispatch-${id}`,
+      payload: JSON.stringify({
+        issue_key: ISSUE,
+        type: "issue.updated",
+        actor: { kind: "user", id: "alice" },
+        notify,
+        payload: { status: "in_progress" },
+      }),
+    });
+  }
+
+  const isNotice = (content: string) => content.includes("message not shown");
+
+  /**
+   * Boots a top-level session against `model`, its transcript `entries` already written (a
+   * restart), with a heartbeat the test ticks. `beforeSend` sees every `pi.sendMessage` first and
+   * may throw, the host refusing it. The host's turn: `streaming` (the default) holds every card
+   * it is handed in memory and writes none, as Oh My Pi holds a card sent mid-turn until the turn
+   * takes it; `idle` writes each card as it starts a turn for it, its `custom_message` entry and
+   * then its `message_end`, as Oh My Pi does. The context reads the host as Oh My Pi's does: idle
+   * (`isIdle`) when its turn is, holding messages (`hasPendingMessages`) while it holds a card.
+   */
+  async function bootReplay(
+    query: string,
+    model: StreamModel,
+    options: {
+      readonly sessionID?: string;
+      readonly entries?: readonly unknown[];
+      readonly beforeSend?: (content: string) => void;
+      readonly dispatch?: (url: URL) => Promise<Response | undefined>;
+      readonly turn?: "idle" | "streaming";
+      /** The host's `pi.sendUserInput`; the session has none without it. */
+      readonly sendUserInput?: (text: string, options: unknown) => Promise<UserInputResult>;
+      /** The host's side turn (`runEphemeralTurn`), which a targeted BTW runs. */
+      readonly runEphemeralTurn?: SessionContext["runEphemeralTurn"];
+    } = {}
+  ) {
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    globalThis.fetch = listenerFetch(model, options.dispatch);
+    const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
+    const fixture = createPi();
+    const notifications: string[] = [];
+    const intervals: (() => void)[] = [];
+    interface SentCard {
+      readonly content: string;
+      readonly customType?: string;
+      readonly display?: boolean;
+      readonly details?: unknown;
+    }
+    // The `custom_message` entries the host wrote, as its session file holds them, and the cards
+    // a streaming turn holds until it takes them (`take`).
+    const written: unknown[] = [];
+    const held: SentCard[] = [];
+    const write = async (message: SentCard) => {
+      // The host starts the turn the card triggers after `sendMessage` returns.
+      await Promise.resolve();
+      const { content, customType, display, details } = message;
+      written.push({ type: "custom_message", customType, content, display, details });
+      await fixture.handlers.get("message_end")?.(
+        {
+          message: { role: "custom", customType, content, display, details, timestamp: Date.now() },
+        },
+        context
+      );
+    };
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message: SentCard, sendOptions: unknown) => {
+        options.beforeSend?.(message.content);
+        fixture.pi.sendMessage(message, sendOptions);
+        if (options.turn === "idle") void write(message);
+        else held.push(message);
+      },
+      ...(options.sendUserInput !== undefined && { sendUserInput: options.sendUserInput }),
+    });
+    const sessionID = options.sessionID ?? "ses_replay";
+    const prior = options.entries ?? [];
+    const base = sessionContext(sessionID);
+    const context: SessionContext = {
+      ...base,
+      sessionManager: {
+        ...base.sessionManager,
+        getBranch: () => [...prior, ...fixture.entries, ...written],
+        getEntries: () => [...prior, ...fixture.entries, ...written],
+      },
+      setInterval: (callback) => {
+        intervals.push(callback);
+      },
+      isIdle: () => options.turn === "idle",
+      hasPendingMessages: () => held.length > 0,
+      ui: { ...base.ui, notify: (message) => notifications.push(message) },
+      ...(options.runEphemeralTurn !== undefined && { runEphemeralTurn: options.runEphemeralTurn }),
+    };
+    const before = model.replays;
+    await fixture.handlers.get("session_start")?.({}, context);
+    await until(() => model.replays > before, "the session's first sweep");
+    await settle();
+    const tool = (name: string) => {
+      const found = fixture.tools.find((candidate) => candidate.name === name);
+      if (found === undefined) throw new Error(`${name} was not registered`);
+      return found;
+    };
+    const session = {
+      fixture,
+      notifications,
+      agentSubject: `notifications.agent.${sessionID}`,
+      entries: () => [...prior, ...fixture.entries, ...written],
+      /** The `envoy-message` cards naming `eventID`, failure notices aside. */
+      cards: (eventID: string) =>
+        fixture.deliveries.filter(
+          (delivery) =>
+            delivery.customType === "envoy-message" &&
+            delivery.content.includes(eventID) &&
+            !isNotice(delivery.content)
+        ),
+      /** The failure notices naming `eventID`. */
+      notices: (eventID: string) =>
+        fixture.deliveries.filter(
+          (delivery) => isNotice(delivery.content) && delivery.content.includes(eventID)
+        ),
+      /** One heartbeat tick, and the sweep it starts run to its end. */
+      tick: async () => {
+        const sweeps = model.replays;
+        for (const interval of intervals) interval();
+        await until(() => model.replays > sweeps, "a heartbeat sweep");
+        await settle();
+      },
+      /** nats.js reports a reconnect, and the sweep it starts runs to its end. */
+      reconnect: async () => {
+        const sweeps = model.replays;
+        pushNatsStatus("reconnect");
+        await until(() => model.replays > sweeps, "a reconnect sweep");
+        await settle();
+      },
+      /** Follows `topic` with envoy_subscribe; its cursor starts at the stream's end. */
+      follow: async (topic: string) => {
+        const sweeps = model.replays;
+        await tool("envoy_subscribe").execute("", { topics: [topic] });
+        await until(() => model.replays > sweeps, "the new follow's sweep");
+        await settle();
+      },
+      unfollow: (topic: string) => tool("envoy_unsubscribe").execute("", { topics: [topic] }),
+      stop: () => fixture.handlers.get("session_shutdown")?.({}, context),
+      /** The streaming turn takes every card it holds: the host writes each, in order. */
+      take: async () => {
+        for (const message of held.splice(0)) await write(message);
+        await settle();
+      },
+      /**
+       * The person interrupts the streaming turn (Escape at the terminal, or RPC
+       * `abort_and_restore_queue`): Oh My Pi's `clearQueue({ forInterrupt: true })` withdraws the
+       * cards the turn held and writes none of them, the run ends aborted (`agent_end`), and the
+       * host is idle from then on, writing each card it is handed.
+       */
+      interrupt: async () => {
+        held.splice(0);
+        options = { ...options, turn: "idle" };
+        await fixture.handlers.get("agent_end")?.(
+          { messages: [{ role: "assistant", stopReason: "aborted", content: [] }] },
+          context
+        );
+        await settle();
+      },
+      /**
+       * The host switches to another session (`/new`) while the turn streams, withdrawing the cards
+       * it held unwritten, then back to this one, its turn streaming again. What the extension
+       * appends while the host is on the other session goes to that session's file, not this one.
+       */
+      switchAwayAndBack: async (otherSessionID: string) => {
+        held.splice(0);
+        const other: SessionContext = {
+          ...sessionContext(otherSessionID),
+          setInterval: (callback) => {
+            intervals.push(callback);
+          },
+        };
+        const mark = fixture.entries.length;
+        await fixture.handlers.get("session_switch")?.({ reason: "new" }, other);
+        await settle();
+        fixture.entries.splice(mark);
+        await fixture.handlers.get("session_switch")?.({ reason: "resume" }, context);
+        await settle();
+      },
+      /** The host writes a user message, the turn a person's Send became: its `message_end`. */
+      writeUserTurn: async (text: string, tag?: string) => {
+        const message = {
+          role: "user",
+          content: [{ type: "text", text }],
+          timestamp: Date.now(),
+          ...(tag === undefined ? {} : { tag }),
+        };
+        written.push({ type: "message", message });
+        await fixture.handlers.get("message_end")?.({ message }, context);
+        await settle();
+      },
+      /**
+       * The person aborts the streaming turn (RPC `abort`): the run ends aborted (`agent_end`), and
+       * the host, idle at its end, still holds the cards the turn held, for the run it starts next
+       * to take (`take`), as Oh My Pi 18.8.9 does.
+       */
+      abort: async () => {
+        options = { ...options, turn: "idle" };
+        await fixture.handlers.get("agent_end")?.(
+          { messages: [{ role: "assistant", stopReason: "aborted", content: [] }] },
+          context
+        );
+        await settle();
+      },
+      live: (subject: string) => {
+        const controls = natsState.controls.get(subject);
+        if (controls === undefined) throw new Error(`${subject} was never subscribed`);
+        return controls;
+      },
+      /** Two more heartbeat sweeps and the live copy pushed too: the frame is still shown once. */
+      stillOnce: async (subject: string, data: string, eventID: string) => {
+        await session.tick();
+        await session.tick();
+        expect(session.cards(eventID)).toHaveLength(1);
+        session.live(subject).push(data);
+        await settle();
+        expect(session.cards(eventID)).toHaveLength(1);
+      },
+    };
+    return session;
+  }
+
+  describe("on the session's own topic", () => {
+    test("a frame stored while its subscription's iterator was down is shown once it resubscribes", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-own-iterator", model);
+      const frame = peerMessage("ses_replay", "own-iterator");
+
+      session.live(session.agentSubject).fail(new Error("connection lost"));
+      model.store(session.agentSubject, frame);
+      await until(() => session.cards("evt-own-iterator").length > 0, "the replayed card");
+
+      const [card] = session.cards("evt-own-iterator");
+      expect(card?.content).toContain("while this session's connection was down");
+      expect(card?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+      await session.stillOnce(session.agentSubject, frame, "evt-own-iterator");
+    });
+
+    test("a frame stored while NATS was away is shown once nats.js reports its reconnect", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-own-reconnect", model);
+      const frame = peerMessage("ses_replay", "own-reconnect");
+
+      model.store(session.agentSubject, frame);
+      await session.reconnect();
+
+      expect(session.cards("evt-own-reconnect")).toHaveLength(1);
+      await session.stillOnce(session.agentSubject, frame, "evt-own-reconnect");
+    });
+
+    test("a frame stored while the session was stopped is shown once by a fresh instance restoring its entries", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-own-restart-a", model);
+      await first.stop();
+      const frame = peerMessage("ses_replay", "own-restart");
+      model.store(first.agentSubject, frame);
+
+      const second = await bootReplay("replay-own-restart-b", model, { entries: first.entries() });
+
+      expect(second.cards("evt-own-restart")).toHaveLength(1);
+      await second.stillOnce(second.agentSubject, frame, "evt-own-restart");
+    });
+
+    test("a stream that answers the same id after a restart is the same stream, though its creation time moved", async () => {
+      // The listener answers the stream's id, which a leader election or a restore keeps.
+      class IdentifiedStream extends StreamModel {
+        override answer(request: ReplayRequest) {
+          const answered = super.answer(request);
+          return { ...answered, stream: { ...answered.stream, id: "stream-1" } };
+        }
+      }
+      const model = new IdentifiedStream();
+      const first = await bootReplay("replay-own-same-id-a", model);
+      await first.stop();
+      model.created = "2026-10-21T00:00:00Z";
+      const frame = peerMessage("ses_replay", "own-same-id");
+      model.store(first.agentSubject, frame);
+
+      const second = await bootReplay("replay-own-same-id-b", model, {
+        entries: first.entries(),
+        turn: "idle",
+      });
+      await second.tick();
+
+      expect(second.cards("evt-own-same-id")).toHaveLength(1);
+      expect(
+        [
+          ...second.fixture.deliveries.map((delivery) => delivery.content),
+          ...second.notifications,
+        ].filter((text) => text.includes("recreated"))
+      ).toEqual([]);
+    });
+
+    test("a frame delivered live is not shown again when the same envelope arrives after a restart", async () => {
+      const model = new StreamModel();
+      // An idle host writes the live card as it takes it.
+      const first = await bootReplay("replay-own-repeat-a", model, { turn: "idle" });
+      const frame = peerMessage("ses_replay", "own-repeat");
+      model.store(first.agentSubject, frame);
+      first.live(first.agentSubject).push(frame);
+      await until(() => first.cards("evt-own-repeat").length > 0, "the live card");
+      await first.stop();
+
+      const second = await bootReplay("replay-own-repeat-b", model, {
+        entries: first.entries(),
+        turn: "idle",
+      });
+      second.live(second.agentSubject).push(frame);
+      await settle();
+      await second.tick();
+
+      expect(first.cards("evt-own-repeat")).toHaveLength(1);
+      expect(second.cards("evt-own-repeat")).toHaveLength(0);
+    });
+
+    test("a listener without the replay route shows nothing and says so once", async () => {
+      const model = new StreamModel();
+      model.served = false;
+      const session = await bootReplay("replay-own-not-served", model);
+      model.store(session.agentSubject, peerMessage("ses_replay", "own-not-served"));
+
+      await session.reconnect();
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("evt-own-not-served")).toHaveLength(0);
+      expect(
+        session.notifications.filter((message) =>
+          message.includes("messages published while its connection is down are not recovered")
+        )
+      ).toHaveLength(1);
+    });
+  });
+
+  // While a turn streams, omp holds a card sent with `deliverAs: "steer"` in memory and writes
+  // its `custom_message` entry to the session file only once the turn takes it. A process that
+  // ends in between (a SIGKILL, a pod stopped mid-turn) leaves a session file without the card,
+  // so the card never reached the session: the restarted session must show it.
+  describe("a card the host had not written to the transcript when the process ended", () => {
+    /** The `custom_message` entry omp writes once a turn takes a card: what a shown card leaves. */
+    function writtenCard(
+      session: {
+        readonly cards: (
+          eventID: string
+        ) => readonly { content: string; customType?: string; display?: boolean }[];
+      },
+      eventID: string
+    ) {
+      const [card] = session.cards(eventID);
+      if (card === undefined) throw new Error(`no card for ${eventID}`);
+      return {
+        type: "custom_message",
+        customType: card.customType,
+        content: card.content,
+        display: card.display,
+      };
+    }
+
+    test("a replayed card still queued is shown again after the restart; one written is not", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-queued-replayed-a", model);
+      model.store(first.agentSubject, peerMessage("ses_replay", "queued-written"));
+      model.store(first.agentSubject, peerMessage("ses_replay", "queued-held"));
+      await first.reconnect();
+      expect(first.cards("evt-queued-written")).toHaveLength(1);
+      expect(first.cards("evt-queued-held")).toHaveLength(1);
+      await first.stop();
+
+      // The turn took the first card before the process ended; the second was still queued.
+      const second = await bootReplay("replay-queued-replayed-b", model, {
+        entries: [...first.entries(), writtenCard(first, "evt-queued-written")],
+      });
+      await second.tick();
+
+      expect(second.cards("evt-queued-written")).toHaveLength(0);
+      expect(second.cards("evt-queued-held")).toHaveLength(1);
+    });
+
+    test("a live card still queued is shown again after the restart; one written is not", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-queued-live-a", model);
+      for (const label of ["live-written", "live-held"]) {
+        const frame = peerMessage("ses_replay", label);
+        model.store(first.agentSubject, frame);
+        first.live(first.agentSubject).push(frame);
+      }
+      await until(() => first.cards("evt-live-held").length > 0, "the live cards");
+      await first.tick();
+      expect(first.cards("evt-live-written")).toHaveLength(1);
+      expect(first.cards("evt-live-held")).toHaveLength(1);
+      await first.stop();
+
+      const second = await bootReplay("replay-queued-live-b", model, {
+        entries: [...first.entries(), writtenCard(first, "evt-live-written")],
+      });
+      await second.tick();
+
+      expect(second.cards("evt-live-written")).toHaveLength(0);
+      expect(second.cards("evt-live-held")).toHaveLength(1);
+    });
+  });
+
+  // A card the host held behind a streaming turn can also leave without ever being written while
+  // the process lives on: an interrupt withdraws it, as a switch away does.
+  describe("a card the host withdrew without writing it", () => {
+    test("one a person's interrupt withdrew is shown again in the same process, once", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-withdrawn-interrupt", model);
+      const replayed = peerMessage("ses_replay", "withdrawn-replayed");
+      const live = peerMessage("ses_replay", "withdrawn-live");
+      model.store(session.agentSubject, replayed);
+      await session.reconnect();
+      model.store(session.agentSubject, live);
+      session.live(session.agentSubject).push(live);
+      await until(() => session.cards("evt-withdrawn-live").length > 0, "the live card");
+
+      await session.interrupt();
+      await session.tick();
+      await session.tick();
+
+      // Handed again after the interrupt, and written this time: the session saw each once.
+      expect(session.cards("evt-withdrawn-replayed")).toHaveLength(2);
+      expect(session.cards("evt-withdrawn-live")).toHaveLength(2);
+      await session.tick();
+      expect(session.cards("evt-withdrawn-replayed")).toHaveLength(2);
+      expect(session.cards("evt-withdrawn-live")).toHaveLength(2);
+    });
+
+    test("one a switch away withdrew is not recorded shown when it is handed again after the switch back", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-withdrawn-switch-a", model);
+      // An earlier message the turn took, so the session's replay state is written to its file.
+      model.store(first.agentSubject, peerMessage("ses_replay", "withdrawn-switch-earlier"));
+      await first.reconnect();
+      await first.take();
+      await first.tick();
+      const frame = peerMessage("ses_replay", "withdrawn-switch");
+      model.store(first.agentSubject, frame);
+      first.live(first.agentSubject).push(frame);
+      await until(() => first.cards("evt-withdrawn-switch").length > 0, "the live card");
+
+      await first.switchAwayAndBack("ses_elsewhere");
+      await first.tick();
+      // Handed again after the switch back, and still held by the streaming turn when the
+      // process ends: it never reached the transcript.
+      await first.stop();
+
+      const second = await bootReplay("replay-withdrawn-switch-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.cards("evt-withdrawn-switch")).toHaveLength(1);
+    });
+  });
+
+  // What the host held is shown from when it writes it: a card a turn takes later, a failure
+  // notice, and a person's Send run as a turn, which the host writes as a user message.
+  describe("a card or turn the host writes only once a turn takes it", () => {
+    test("a replayed card the turn takes later is shown once, and not again after a restart", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-taken-later-a", model);
+      const frame = peerMessage("ses_replay", "taken-later");
+      model.store(first.agentSubject, frame);
+      await first.reconnect();
+      await first.tick();
+      expect(first.cards("evt-taken-later")).toHaveLength(1);
+
+      await first.take();
+      await first.stillOnce(first.agentSubject, frame, "evt-taken-later");
+      await first.stop();
+
+      const second = await bootReplay("replay-taken-later-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.cards("evt-taken-later")).toHaveLength(0);
+    });
+
+    test("one a plain abort left in the host's queue is shown once, by the run the host starts next", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-abort-queued-a", model);
+      const replayed = peerMessage("ses_replay", "abort-replayed");
+      const live = peerMessage("ses_replay", "abort-live");
+      model.store(first.agentSubject, replayed);
+      await first.reconnect();
+      model.store(first.agentSubject, live);
+      first.live(first.agentSubject).push(live);
+      await until(() => first.cards("evt-abort-live").length > 0, "the live card");
+
+      // The host is idle at the aborted run's end and still holds both cards: not handed again.
+      await first.abort();
+      await first.tick();
+      await first.tick();
+      expect(first.cards("evt-abort-replayed")).toHaveLength(1);
+      expect(first.cards("evt-abort-live")).toHaveLength(1);
+
+      await first.take();
+      await first.tick();
+      await first.tick();
+      expect(first.cards("evt-abort-replayed")).toHaveLength(1);
+      expect(first.cards("evt-abort-live")).toHaveLength(1);
+      await first.stop();
+
+      const second = await bootReplay("replay-abort-queued-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.cards("evt-abort-replayed")).toHaveLength(0);
+      expect(second.cards("evt-abort-live")).toHaveLength(0);
+    });
+
+    test("a frame shown before the host moved to this session is recorded here only once its card is written", async () => {
+      const model = new StreamModel();
+      // A session that followed the issue, left before the event was published.
+      const left = await bootReplay("replay-moved-left", model, { sessionID: "ses_moved" });
+      await left.follow(ISSUE_TOPIC);
+      await left.stop();
+      const leftEntries = left.entries();
+      // Another session follows the issue too and is shown the event live: its turn takes the card.
+      const session = await bootReplay("replay-moved-a", model);
+      await session.follow(ISSUE_TOPIC);
+      const frame = issueEvent(ISSUE_SUBJECT, 30);
+      model.store(ISSUE_SUBJECT, frame);
+      session.live(ISSUE_TOPIC).push(frame);
+      await until(() => session.cards("dispatch-30").length > 0, "the live card");
+      await session.take();
+
+      // The host resumes the session it left, its turn streaming: that session's sweep hands it
+      // the event's card, which the turn holds until the process ends.
+      const mark = session.fixture.entries.length;
+      const file = () => [...leftEntries, ...session.fixture.entries.slice(mark)];
+      const resumed = sessionContext("ses_moved");
+      await session.fixture.handlers.get("session_switch")?.(
+        { reason: "resume" },
+        {
+          ...resumed,
+          sessionManager: { ...resumed.sessionManager, getBranch: file, getEntries: file },
+        }
+      );
+      await until(() => session.cards("dispatch-30").length > 1, "the resumed session's card");
+      await settle();
+      await session.stop();
+
+      const restarted = await bootReplay("replay-moved-b", model, {
+        sessionID: "ses_moved",
+        entries: file(),
+      });
+
+      expect(restarted.cards("dispatch-30")).toHaveLength(1);
+    });
+
+    test("a frame whose failure notice was still held when the process ended is shown after the restart", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-notice-held-a", model, {
+        beforeSend: (content) => {
+          if (content.includes("evt-notice-held") && !isNotice(content)) {
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      model.store(first.agentSubject, peerMessage("ses_replay", "notice-held"));
+      await first.reconnect();
+      await first.tick();
+      await first.tick();
+      await first.tick();
+      expect(first.notices("evt-notice-held")).toHaveLength(1);
+      await first.stop();
+
+      const second = await bootReplay("replay-notice-held-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.cards("evt-notice-held")).toHaveLength(1);
+      expect(second.notices("evt-notice-held")).toHaveLength(0);
+    });
+
+    for (const [via, slug] of [
+      ["typed input", "typed"],
+      ["a user message", "text"],
+    ] as const) {
+      describe(`a person's Send run as a turn through ${via}`, () => {
+        async function bootSend(query: string, model: StreamModel, entries?: readonly unknown[]) {
+          process.env.DISPATCH_URL = "http://dispatch.test";
+          process.env.DISPATCH_TOKEN = "dispatch-token";
+          const inputs: string[] = [];
+          return {
+            inputs,
+            session: await bootReplay(query, model, {
+              sessionID: "ses_delivery",
+              ...(entries === undefined ? {} : { entries }),
+              dispatch: async (url) =>
+                url.pathname.endsWith("/accept")
+                  ? acceptResponse(
+                      Number(url.pathname.split("/").at(-2)),
+                      { accepted: true },
+                      url.pathname.split("/").at(-4)
+                    )
+                  : undefined,
+              ...(via === "typed input" && {
+                sendUserInput: async (text: string): Promise<UserInputResult> => {
+                  inputs.push(text);
+                  return { handled: "prompt" };
+                },
+              }),
+            }),
+          };
+        }
+
+        // The person's Send arrives live and becomes a turn the host is handed; the stream keeps
+        // its copy, which a sweep shows as a card when the turn never reached the transcript.
+        async function sendTurn(label: string) {
+          const model = new StreamModel();
+          const first = await bootSend(`replay-turn-${label}-a`, model);
+          const send = directDispatchEnvelope("steer", `turn-${label}`);
+          model.store(first.session.agentSubject, send);
+          first.session.live(first.session.agentSubject).push(send);
+          await until(
+            () => first.inputs.length + first.session.fixture.userMessages.length > 0,
+            "the person's turn"
+          );
+          return { first: first.session, inputs: first.inputs, model };
+        }
+
+        test("one the host had not written when the process ended is shown as a card after the restart", async () => {
+          const { first, model } = await sendTurn(`held-${slug}`);
+          await first.tick();
+          await first.stop();
+
+          const second = await bootSend(`replay-turn-held-${slug}-b`, model, first.entries());
+          await second.session.tick();
+
+          const cards = second.session.cards(`dispatch-turn-held-${slug}`);
+          expect(cards).toHaveLength(1);
+          expect(cards[0]?.content).toContain("while this session's connection was down");
+        });
+
+        test("one the host wrote is not shown again after the restart", async () => {
+          const { first, model } = await sendTurn(`written-${slug}`);
+          await first.writeUserTurn(
+            DIRECT_MESSAGE_BODY,
+            slug === "typed" ? DIRECT_MESSAGE_ID : undefined
+          );
+          await first.tick();
+          await first.stop();
+
+          const second = await bootSend(`replay-turn-written-${slug}-b`, model, first.entries());
+          await second.session.tick();
+
+          expect(second.session.cards(`dispatch-turn-written-${slug}`)).toHaveLength(0);
+        });
+
+        // Oh My Pi 18.8.9 hands a typed input the streaming turn held back to whoever interrupted
+        // (RPC `abort_and_restore_queue` answers it in its `steering` list) and never writes it.
+        if (slug === "typed") {
+          test("one a person's interrupt withdrew unwritten is shown as a card that runs nothing, once", async () => {
+            const { first, inputs } = await sendTurn("withdrawn-typed");
+
+            await first.interrupt();
+            await first.tick();
+
+            const cards = first.cards("dispatch-turn-withdrawn-typed");
+            expect(cards).toHaveLength(1);
+            expect(cards[0]?.content).toContain("while this session's connection was down");
+            // A card alone: the input is not typed again, and no user message is sent.
+            expect(inputs).toHaveLength(1);
+            expect(first.fixture.userMessages).toHaveLength(0);
+            await first.tick();
+            await first.tick();
+            expect(first.cards("dispatch-turn-withdrawn-typed")).toHaveLength(1);
+          });
+        }
+      });
+    }
+  });
+
+  describe("on a followed issue topic", () => {
+    test("a frame stored while the topic's iterator was down is shown once it resubscribes", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-iterator", model);
+      await session.follow(ISSUE_TOPIC);
+      const frame = issueEvent(ISSUE_SUBJECT, 1);
+
+      session.live(ISSUE_TOPIC).fail(new Error("connection lost"));
+      model.store(ISSUE_SUBJECT, frame);
+      await until(() => session.cards("dispatch-1").length > 0, "the replayed card");
+
+      expect(session.cards("dispatch-1")).toHaveLength(1);
+      await session.stillOnce(ISSUE_TOPIC, frame, "dispatch-1");
+    });
+
+    test("a frame stored while NATS was away is shown once nats.js reports its reconnect", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-reconnect", model);
+      await session.follow(ISSUE_TOPIC);
+      const frame = issueEvent(ISSUE_SUBJECT, 2);
+
+      model.store(ISSUE_SUBJECT, frame);
+      await session.reconnect();
+
+      expect(session.cards("dispatch-2")).toHaveLength(1);
+      await session.stillOnce(ISSUE_TOPIC, frame, "dispatch-2");
+    });
+
+    test("a frame stored while the session was stopped is shown once by a fresh instance restoring its entries", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-issue-restart-a", model);
+      await first.follow(ISSUE_TOPIC);
+      await first.stop();
+      const frame = issueEvent(ISSUE_SUBJECT, 3);
+      model.store(ISSUE_SUBJECT, frame);
+
+      const second = await bootReplay("replay-issue-restart-b", model, {
+        entries: first.entries(),
+      });
+
+      expect(second.cards("dispatch-3")).toHaveLength(1);
+      await second.stillOnce(ISSUE_TOPIC, frame, "dispatch-3");
+    });
+
+    test("the issue topic's copy and the agent subject's copy of one event are shown once together", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-both-copies", model);
+      await session.follow(ISSUE_TOPIC);
+
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 4));
+      model.store(session.agentSubject, issueEvent(session.agentSubject, 4));
+      await session.reconnect();
+      await session.tick();
+
+      expect(session.cards("dispatch-4")).toHaveLength(1);
+    });
+
+    test("a notify:false issue copy does not keep the eligible agent-subject copy from showing, once", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-notify-false", model);
+      await session.follow(ISSUE_TOPIC);
+
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 5, false));
+      model.store(session.agentSubject, issueEvent(session.agentSubject, 5));
+      await session.reconnect();
+      await session.tick();
+
+      expect(session.cards("dispatch-5")).toHaveLength(1);
+      expect(session.cards("dispatch-5")[0]?.content).toContain("you (ses_replay)");
+    });
+
+    test("a topic followed after a frame was stored shows nothing older than the follow", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-followed-later", model);
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 6));
+
+      await session.follow(ISSUE_TOPIC);
+      await session.reconnect();
+      await session.tick();
+
+      expect(session.cards("dispatch-6")).toHaveLength(0);
+    });
+
+    test("a restart after the listener reaped the session's interests follows the topic again from the transcript and recovers it", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-issue-reaped-a", model);
+      await first.follow(ISSUE_TOPIC);
+      await first.stop();
+      model.interests.clear();
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 7));
+
+      const second = await bootReplay("replay-issue-reaped-b", model, {
+        entries: first.entries(),
+      });
+
+      expect(second.live(ISSUE_TOPIC).active()).toBe(true);
+      expect([...(model.interests.get("ses_replay") ?? [])]).toContain(ISSUE_TOPIC);
+      expect(second.cards("dispatch-7")).toHaveLength(1);
+    });
+
+    test("a session back four days later shows a frame from an hour before its restart once, and says older ones may be missing", async () => {
+      const restartAt = Date.now();
+      try {
+        setSystemTime(new Date(restartAt - 4 * DAY_MS));
+        const model = new StreamModel();
+        const first = await bootReplay("replay-issue-four-days-a", model);
+        await first.follow(ISSUE_TOPIC);
+        await first.stop();
+        // Three days on, retention has dropped what was stored while the session was away.
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 8));
+        model.expireThrough(model.lastSeq);
+        setSystemTime(new Date(restartAt));
+        model.store(
+          ISSUE_SUBJECT,
+          issueEvent(ISSUE_SUBJECT, 9),
+          new Date(restartAt - HOUR_MS).toISOString()
+        );
+
+        const second = await bootReplay("replay-issue-four-days-b", model, {
+          entries: first.entries(),
+          turn: "idle",
+        });
+        await second.tick();
+        await second.tick();
+
+        expect(second.cards("dispatch-9")).toHaveLength(1);
+        expect(second.cards("dispatch-9")[0]?.content).toContain(
+          new Date(restartAt - HOUR_MS).toISOString()
+        );
+        expect(second.cards("dispatch-8")).toHaveLength(0);
+        expect(
+          second.fixture.deliveries.filter((delivery) =>
+            delivery.content.includes("messages older than 72 hours may be missing")
+          )
+        ).toHaveLength(1);
+      } finally {
+        setSystemTime();
+      }
+    });
+
+    test("a retention gap found while the host's turn streams is told once, at the first idle heartbeat", async () => {
+      const restartAt = Date.now();
+      try {
+        setSystemTime(new Date(restartAt - 4 * DAY_MS));
+        const model = new StreamModel();
+        const first = await bootReplay("replay-issue-gap-busy-a", model);
+        await first.follow(ISSUE_TOPIC);
+        await first.stop();
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 8));
+        model.expireThrough(model.lastSeq);
+        setSystemTime(new Date(restartAt));
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 9));
+        // Read by the host context at each call, so the turn can end mid-test.
+        const host: { readonly entries: readonly unknown[]; turn: "idle" | "streaming" } = {
+          entries: first.entries(),
+          turn: "streaming",
+        };
+        const second = await bootReplay("replay-issue-gap-busy-b", model, host);
+        const gapNotices = () =>
+          second.fixture.deliveries.filter((delivery) =>
+            delivery.content.includes("messages older than 72 hours may be missing")
+          );
+        await second.tick();
+        // A card handed while the turn streams is steered into it, and runs a model turn for it.
+        expect(gapNotices()).toHaveLength(0);
+
+        // The turn takes what it held and ends: the host is idle, and the next heartbeat tells it.
+        await second.take();
+        host.turn = "idle";
+        await second.tick();
+        expect(gapNotices()).toHaveLength(1);
+        expect(gapNotices()[0]?.details).toEqual(LOCAL_ENVOY_NOTICE);
+        await second.tick();
+        expect(gapNotices()).toHaveLength(1);
+      } finally {
+        setSystemTime();
+      }
+    });
+
+    test("a retention gap held while the host's turn streams is told after a restart that cut the hold short", async () => {
+      const restartAt = Date.now();
+      try {
+        setSystemTime(new Date(restartAt - 4 * DAY_MS));
+        const model = new StreamModel();
+        const first = await bootReplay("replay-issue-gap-killed-a", model);
+        await first.follow(ISSUE_TOPIC);
+        await first.stop();
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 11));
+        model.expireThrough(model.lastSeq);
+        setSystemTime(new Date(restartAt));
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 12));
+        // The notice is held for the streaming turn, and the process ends before the turn does.
+        const second = await bootReplay("replay-issue-gap-killed-b", model, {
+          entries: first.entries(),
+          turn: "streaming",
+        });
+        await second.tick();
+        await second.stop();
+
+        const third = await bootReplay("replay-issue-gap-killed-c", model, {
+          entries: second.entries(),
+          turn: "idle",
+        });
+        await third.tick();
+        await third.tick();
+
+        // Told once, by the session that came back, since the session it was raised in never was.
+        expect(
+          third.fixture.deliveries.filter((delivery) =>
+            delivery.content.includes("messages older than 72 hours may be missing")
+          )
+        ).toHaveLength(1);
+      } finally {
+        setSystemTime();
+      }
+    });
+
+    test("a retention gap held while the host's turn streams is told once after the process is killed", async () => {
+      const model = new StreamModel();
+      // Read by the host context at each call, so the turn can start mid-test.
+      const host: { turn: "idle" | "streaming" } = { turn: "idle" };
+      const first = await bootReplay("replay-issue-gap-sigkill-a", model, host);
+      await first.follow(ISSUE_TOPIC);
+      // A message shown and recorded: the session has written its replay state just now.
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 13));
+      await first.reconnect();
+      await first.tick();
+      expect(first.cards("dispatch-13")).toHaveLength(1);
+
+      // A turn streams; the stream drops everything it held, on subjects the session does not
+      // follow, so the sweep only moves the session's cursor past the gap and holds the notice.
+      host.turn = "streaming";
+      const unfollowed = dispatchIssueSubject("OTHER-1", "issue.updated");
+      model.store(unfollowed, issueEvent(unfollowed, 14));
+      model.store(unfollowed, issueEvent(unfollowed, 15));
+      model.expireThrough(model.lastSeq);
+      await first.tick();
+      const gapNotices = (session: { readonly fixture: typeof first.fixture }) =>
+        session.fixture.deliveries.filter((delivery) =>
+          delivery.content.includes("messages older than 72 hours may be missing")
+        );
+      expect(gapNotices(first)).toHaveLength(0);
+
+      // SIGKILL: no session_shutdown runs; the session file holds what was appended before it.
+      const restarted = await bootReplay("replay-issue-gap-sigkill-b", model, {
+        entries: first.entries(),
+        turn: "idle",
+      });
+      await restarted.tick();
+      await restarted.tick();
+
+      // One gap, told once: not once for the recorded held notice and again for the gap the
+      // restored cursor finds a second time.
+      expect(gapNotices(restarted)).toHaveLength(1);
+    });
+
+    test("a retention gap on the followed topic held while the host's turn streams is told once after the process is killed showing its page", async () => {
+      const model = new StreamModel();
+      // The session file as it stood when the process was killed.
+      let killedWith: readonly unknown[] | undefined;
+      // Read by the host context at each call, so the turn can start mid-test.
+      const host: { turn: "idle" | "streaming"; readonly beforeSend: (content: string) => void } = {
+        turn: "idle",
+        beforeSend: (content) => {
+          // SIGKILL while the gapped page's surviving frame is being handed to the turn.
+          if (content.includes("dispatch-33")) killedWith ??= first.entries();
+        },
+      };
+      const first = await bootReplay("replay-issue-gap-sigkill-page-a", model, host);
+      await first.follow(ISSUE_TOPIC);
+      // A message shown and recorded: the session has written its replay state just now.
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 30));
+      await first.reconnect();
+      await first.tick();
+      expect(first.cards("dispatch-30")).toHaveLength(1);
+
+      // A turn streams; the stream drops two messages on the followed topic, and one stored after
+      // them is on the page the sweep finds the gap on.
+      host.turn = "streaming";
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 31));
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 32));
+      model.expireThrough(model.lastSeq);
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 33));
+      await first.tick();
+      const gap = "messages older than 72 hours may be missing";
+      expect(first.fixture.deliveries.filter(({ content }) => content.includes(gap))).toEqual([]);
+      expect(killedWith).toBeDefined();
+
+      // No session_shutdown runs; the session file holds what was appended before the kill.
+      const restarted = await bootReplay("replay-issue-gap-sigkill-page-b", model, {
+        entries: killedWith ?? [],
+        turn: "idle",
+      });
+      await restarted.tick();
+      await restarted.tick();
+
+      // One gap, told once: not once for the recorded held notice and again for the gap the
+      // restored cursor finds a second time. The frame the turn never took is shown after all.
+      expect(
+        restarted.fixture.deliveries.filter(({ content }) => content.includes(gap))
+      ).toHaveLength(1);
+      expect(restarted.cards("dispatch-33")).toHaveLength(1);
+    });
+
+    test("a retention gap held while the host's turn streams is told once after the host switches away and back", async () => {
+      const restartAt = Date.now();
+      try {
+        setSystemTime(new Date(restartAt - 4 * DAY_MS));
+        const model = new StreamModel();
+        const first = await bootReplay("replay-issue-gap-switch-a", model);
+        await first.follow(ISSUE_TOPIC);
+        await first.stop();
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 13));
+        model.expireThrough(model.lastSeq);
+        setSystemTime(new Date(restartAt));
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 14));
+        const second = await bootReplay("replay-issue-gap-switch-b", model, {
+          entries: first.entries(),
+          turn: "streaming",
+        });
+        await second.tick();
+
+        // The notice is held for the session it was raised in, through the switch and back, until
+        // the turn the host streams again ends and the host is idle with nothing queued.
+        await second.switchAwayAndBack("ses_replay_other");
+        await second.interrupt();
+        await second.tick();
+        await second.tick();
+
+        const gapNotices = second.fixture.deliveries.filter((delivery) =>
+          delivery.content.includes("messages older than 72 hours may be missing")
+        );
+        expect(gapNotices).toHaveLength(1);
+        expect(gapNotices[0]?.details).toEqual(LOCAL_ENVOY_NOTICE);
+      } finally {
+        setSystemTime();
+      }
+    });
+
+    test("a topic the session unfollowed stays unfollowed after a restart", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-issue-unfollowed-a", model);
+      await first.follow(ISSUE_TOPIC);
+      await first.unfollow(ISSUE_TOPIC);
+      await first.stop();
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 10));
+
+      const second = await bootReplay("replay-issue-unfollowed-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.live(ISSUE_TOPIC).active()).toBe(false);
+      expect([...(model.interests.get("ses_replay") ?? [])]).not.toContain(ISSUE_TOPIC);
+      expect(second.cards("dispatch-10")).toHaveLength(0);
+    });
+
+    /** Dispatch's `subscription.removed` for this session's follow of the issue, event `id`. */
+    const removal = (id: number) =>
+      JSON.stringify({
+        event_id: `dispatch-${id}`,
+        source: "dispatch",
+        source_event_id: String(id),
+        topic: "notifications.agent.ses_replay",
+        dedupe_key: `dispatch-${id}`,
+        issued_at: 1,
+        payload_summary: `unsubscribed from ${ISSUE}`,
+        trace_id: `trace-dispatch-${id}`,
+        payload: JSON.stringify({
+          issue_key: ISSUE,
+          type: "subscription.removed",
+          actor: { kind: "user", id: "alice" },
+          notify: true,
+          payload: {
+            session_id: "ses_replay",
+            by: { kind: "user", id: "alice" },
+            topics: [ISSUE_TOPIC],
+          },
+        }),
+      });
+
+    test("a replayed removal closes the topic only when it was stored after the session followed it", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-removal", model);
+
+      // A removal from before the session followed the topic (again) says nothing of that follow.
+      model.store(session.agentSubject, removal(11));
+      await session.follow(ISSUE_TOPIC);
+      expect(session.live(ISSUE_TOPIC).active()).toBe(true);
+
+      model.store(session.agentSubject, removal(12));
+      await session.reconnect();
+
+      expect(session.live(ISSUE_TOPIC).active()).toBe(false);
+      await session.tick();
+      expect(session.live(ISSUE_TOPIC).active()).toBe(false);
+    });
+
+    test("a removal replayed after a resume re-registered the topic takes it out of the registry, so the next restart does not follow it", async () => {
+      const model = new StreamModel();
+      let unsubscribes = 0;
+      const countUnsubscribes = async (url: URL) => {
+        if (url.pathname === "/v1/interests/unsubscribe") unsubscribes += 1;
+        return undefined;
+      };
+      const first = await bootReplay("replay-issue-removal-resumed-a", model);
+      await first.follow(ISSUE_TOPIC);
+      await first.stop();
+      // A person removes the follow while the session is stopped.
+      model.store(first.agentSubject, removal(13));
+
+      // The resume follows the topic again from its transcript, and registers it, before its
+      // first sweep replays the removal.
+      const second = await bootReplay("replay-issue-removal-resumed-b", model, {
+        entries: first.entries(),
+        dispatch: countUnsubscribes,
+      });
+
+      expect(second.live(ISSUE_TOPIC).active()).toBe(false);
+      expect(unsubscribes).toBe(1);
+      expect([...(model.interests.get("ses_replay") ?? [])]).not.toContain(ISSUE_TOPIC);
+      await second.stop();
+
+      const third = await bootReplay("replay-issue-removal-resumed-c", model, {
+        entries: second.entries(),
+      });
+      await third.tick();
+
+      expect(third.live(ISSUE_TOPIC).active()).toBe(false);
+      expect([...(model.interests.get("ses_replay") ?? [])]).not.toContain(ISSUE_TOPIC);
+    });
+  });
+
+  describe("a frame the host cannot show", () => {
+    test("is shown by the next sweep after one failed try", async () => {
+      let refusals = 1;
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-once", model, {
+        beforeSend: (content) => {
+          if (content.includes("evt-fail-once") && refusals > 0) {
+            refusals -= 1;
+            throw new Error("host busy");
+          }
+        },
+      });
+      model.store(session.agentSubject, peerMessage("ses_replay", "fail-once"));
+
+      await session.reconnect();
+      expect(session.cards("evt-fail-once")).toHaveLength(0);
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("evt-fail-once")).toHaveLength(1);
+      expect(session.notices("evt-fail-once")).toHaveLength(0);
+    });
+
+    test("gets one notice naming it on its third failure, and none after another sweep or a restart", async () => {
+      const model = new StreamModel();
+      const refuseCards = (content: string) => {
+        if (content.includes("evt-fail-always") && !isNotice(content)) {
+          throw new Error("host refuses the card");
+        }
+      };
+      // An idle host writes the notice as it takes it.
+      const first = await bootReplay("replay-fail-always-a", model, {
+        beforeSend: refuseCards,
+        turn: "idle",
+      });
+      model.store(first.agentSubject, peerMessage("ses_replay", "fail-always"));
+
+      await first.reconnect();
+      await first.tick();
+      expect(first.notices("evt-fail-always")).toHaveLength(0);
+      await first.tick();
+      expect(first.notices("evt-fail-always")).toHaveLength(1);
+      expect(first.notices("evt-fail-always")[0]?.content).toContain("host refuses the card");
+      await first.tick();
+      expect(first.notices("evt-fail-always")).toHaveLength(1);
+      await first.stop();
+
+      const second = await bootReplay("replay-fail-always-b", model, {
+        entries: first.entries(),
+        turn: "idle",
+      });
+      await second.tick();
+
+      expect(second.notices("evt-fail-always")).toHaveLength(0);
+      expect(second.cards("evt-fail-always")).toHaveLength(0);
+    });
+
+    test("whose notice fails too warns in the UI, and the next sweep shows the notice", async () => {
+      let noticesFail = true;
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-notice", model, {
+        beforeSend: (content) => {
+          if (!content.includes("evt-fail-notice")) return;
+          if (!isNotice(content) || noticesFail) throw new Error("host refuses everything");
+        },
+      });
+      model.store(session.agentSubject, peerMessage("ses_replay", "fail-notice"));
+
+      await session.reconnect();
+      await session.tick();
+      await session.tick();
+      expect(session.notices("evt-fail-notice")).toHaveLength(0);
+      expect(
+        session.notifications.filter(
+          (message) => message.includes("evt-fail-notice") && message.includes("was not shown")
+        )
+      ).toHaveLength(1);
+
+      noticesFail = false;
+      await session.tick();
+      expect(session.notices("evt-fail-notice")).toHaveLength(1);
+      await session.tick();
+      expect(session.notices("evt-fail-notice")).toHaveLength(1);
+    });
+
+    test("a live role forward that fails after its receipt gets the notice at once and is never replayed", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-role-forward", model, {
+        beforeSend: (content) => {
+          if (!isNotice(content)) throw new Error("host refuses the card");
+        },
+      });
+      const forward = forwardedRoleEnvelope("reviewer", "review this", "role-forward");
+      // The stream captures the agent subject, so it keeps the forward too.
+      model.store(session.agentSubject, forward);
+
+      session.live(session.agentSubject).push(forward, "_INBOX.role-forward");
+      await until(() => session.notices("evt-role-forward").length > 0, "the notice");
+
+      expect(natsState.published.map((message) => message.subject)).toContain(
+        "_INBOX.role-forward"
+      );
+      await session.tick();
+      await session.tick();
+      expect(session.notices("evt-role-forward")).toHaveLength(1);
+      expect(session.cards("evt-role-forward")).toHaveLength(0);
+    });
+
+    test("a live frame on the session's own topic that fails while the listener does not replay gets the notice at once", async () => {
+      const model = new StreamModel();
+      model.served = false;
+      const session = await bootReplay("replay-fail-not-served", model, {
+        beforeSend: (content) => {
+          if (content.includes("evt-live-not-served") && !isNotice(content)) {
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      const frame = peerMessage("ses_replay", "live-not-served");
+      model.store(session.agentSubject, frame);
+
+      session.live(session.agentSubject).push(frame);
+      await until(() => session.notices("evt-live-not-served").length > 0, "the notice");
+
+      expect(session.notices("evt-live-not-served")[0]?.content).toContain("host refuses the card");
+      await session.tick();
+      expect(session.notices("evt-live-not-served")).toHaveLength(1);
+      expect(session.cards("evt-live-not-served")).toHaveLength(0);
+    });
+
+    test("a live frame still pending while its stored copy is swept, then failing, is shown once later", async () => {
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      const accepting = Promise.withResolvers<void>();
+      let accepts = 0;
+      let refusals = 1;
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-pending", model, {
+        sessionID: "ses_delivery",
+        dispatch: async (url) => {
+          if (!url.pathname.endsWith("/accept")) return undefined;
+          accepts += 1;
+          await accepting.promise;
+          return new Response(JSON.stringify({ code: "ACCEPT_ALREADY_ACCEPTED", error: "no" }), {
+            status: 409,
+          });
+        },
+        beforeSend: (content) => {
+          if (content.includes("dispatch-held") && refusals > 0) {
+            refusals -= 1;
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      const held = directDispatchEnvelope("steer", "held");
+      model.store(session.agentSubject, held);
+      session.live(session.agentSubject).push(held);
+      await until(() => accepts === 1, "the held accept");
+      model.store(session.agentSubject, peerMessage("ses_delivery", "newer"));
+
+      // The sweep leaves the frame the live path holds, and shows the newer one past it.
+      await session.reconnect();
+      expect(session.cards("evt-newer")).toHaveLength(1);
+      expect(session.cards("dispatch-held")).toHaveLength(0);
+
+      // The held delivery fails: the stream's copy is the next sweep's to show.
+      accepting.resolve();
+      await until(() => refusals === 0, "the failed live injection");
+      await settle();
+      expect(session.notices("dispatch-held")).toHaveLength(0);
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("dispatch-held")).toHaveLength(1);
+      expect(session.cards("dispatch-held")[0]?.content).toContain(
+        "while this session's connection was down"
+      );
+      expect(session.cards("evt-newer")).toHaveLength(1);
+      // The replayed copy is a card alone: Dispatch is asked nothing more.
+      expect(accepts).toBe(1);
+    });
+
+    // The frame behind a held delivery is stamped when it arrived, not when its turn to be
+    // delivered came: the cursor a stream recreation restarted meanwhile stands past it, so no
+    // sweep reads it, and its failure is noticed at once.
+    test("a live frame that arrived behind a held delivery before a stream recreation restarted its cursor gets one notice when it fails", async () => {
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      const accepting = Promise.withResolvers<void>();
+      let accepts = 0;
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-queued-recreated", model, {
+        sessionID: "ses_delivery",
+        dispatch: async (url) => {
+          if (!url.pathname.endsWith("/accept")) return undefined;
+          accepts += 1;
+          await accepting.promise;
+          return new Response(JSON.stringify({ code: "ACCEPT_ALREADY_ACCEPTED", error: "no" }), {
+            status: 409,
+          });
+        },
+        beforeSend: (content) => {
+          if (content.includes("evt-queued-behind") && !isNotice(content)) {
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      const held = directDispatchEnvelope("steer", "held-recreated");
+      model.store(session.agentSubject, held);
+      session.live(session.agentSubject).push(held);
+      await until(() => accepts === 1, "the held accept");
+      // The stream is recreated, and a frame published to the new one arrives behind the held one.
+      model.created = "2026-10-21T00:00:00Z";
+      const behind = peerMessage("ses_delivery", "queued-behind");
+      model.store(session.agentSubject, behind);
+      session.live(session.agentSubject).push(behind);
+      await settle();
+      try {
+        // A second later the reconnect sweep restarts every cursor at the new stream's end.
+        setSystemTime(new Date(Date.now() + 1_000));
+        await session.reconnect();
+        accepting.resolve();
+        await until(() => session.notices("evt-queued-behind").length > 0, "the notice");
+        await session.tick();
+        await session.tick();
+      } finally {
+        setSystemTime();
+      }
+
+      expect(session.notices("evt-queued-behind")).toHaveLength(1);
+      expect(session.notices("evt-queued-behind")[0]?.content).toContain("host refuses the card");
+      expect(session.cards("evt-queued-behind")).toHaveLength(0);
+    });
+  });
+
+  // A BTW answered with an error was handled: Dispatch shows the person that error, and the
+  // stream's copy must not come back as a card that starts a turn on it. A same-mode Retry is a
+  // new event under the same dedupe key, and must still reach the session.
+  describe("a BTW refused live", () => {
+    /**
+     * Boots `ses_delivery` with the host side turn `runEphemeralTurn` (none: a host without one).
+     * Dispatch answers the `n`th reply with `answerReply(n)` (200 by default); every other request
+     * goes to `dispatch` first. `entries`: the transcript already written (a resume).
+     */
+    async function bootBTW(
+      query: string,
+      model: StreamModel,
+      runEphemeralTurn: SessionContext["runEphemeralTurn"],
+      options: {
+        readonly answerReply?: (n: number) => Promise<Response>;
+        readonly dispatch?: (url: URL) => Promise<Response | undefined>;
+        readonly entries?: readonly unknown[];
+      } = {}
+    ) {
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      const replies: unknown[] = [];
+      const session = await bootReplay(query, model, {
+        sessionID: "ses_delivery",
+        dispatch: async (url) => {
+          const answered = await options.dispatch?.(url);
+          if (answered !== undefined) return answered;
+          if (!url.pathname.endsWith("/reply")) return undefined;
+          replies.push(url.pathname);
+          return options.answerReply?.(replies.length) ?? response({});
+        },
+        ...(runEphemeralTurn !== undefined && { runEphemeralTurn }),
+        ...(options.entries !== undefined && { entries: options.entries }),
+      });
+      return { replies, session };
+    }
+
+    test("whose side turn failed is not shown by a sweep, and its Retry still runs the side turn", async () => {
+      const model = new StreamModel();
+      let sideTurns = 0;
+      const { replies, session } = await bootBTW("replay-btw-refused", model, async () => {
+        sideTurns += 1;
+        if (sideTurns === 1) throw new Error("No active model on session");
+        return { replyText: `Answer ${sideTurns}` };
+      });
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-refused");
+      model.store(session.agentSubject, btw);
+      session.live(session.agentSubject).push(btw);
+      await until(() => replies.length === 1, "the refusal");
+
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("dispatch-replay-btw-refused")).toHaveLength(0);
+      expect(sideTurns).toBe(1);
+
+      const retry = JSON.stringify({ ...JSON.parse(btw), event_id: "dispatch-replay-btw-retry" });
+      model.store(session.agentSubject, retry);
+      session.live(session.agentSubject).push(retry);
+      await until(() => replies.length === 2, "the Retry's reply");
+      await session.tick();
+
+      expect(sideTurns).toBe(2);
+      expect(session.cards("dispatch-replay-btw-refused")).toHaveLength(0);
+      expect(session.cards("dispatch-replay-btw-retry")).toHaveLength(0);
+    });
+
+    test("by a host without a side turn is not shown by a sweep", async () => {
+      const model = new StreamModel();
+      const { replies, session } = await bootBTW("replay-btw-no-side-turn", model, undefined);
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-no-side-turn");
+      model.store(session.agentSubject, btw);
+      session.live(session.agentSubject).push(btw);
+      await until(() => replies.length === 1, "the refusal");
+
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("dispatch-replay-btw-no-side-turn")).toHaveLength(0);
+    });
+
+    test("whose refusal Dispatch answers 503 is not shown by a sweep, and its Retry still runs the side turn", async () => {
+      const model = new StreamModel();
+      let sideTurns = 0;
+      const { replies, session } = await bootBTW(
+        "replay-btw-reply-503",
+        model,
+        async () => {
+          sideTurns += 1;
+          if (sideTurns === 1) throw new Error("No active model on session");
+          return { replyText: `Answer ${sideTurns}` };
+        },
+        {
+          answerReply: async (n) =>
+            n === 1
+              ? new Response(JSON.stringify({ error: "unavailable" }), { status: 503 })
+              : response({}),
+        }
+      );
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-reply-503");
+      model.store(session.agentSubject, btw);
+      session.live(session.agentSubject).push(btw);
+      await until(() => replies.length === 1, "the refusal");
+
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("dispatch-replay-btw-reply-503")).toHaveLength(0);
+      expect(session.notices("dispatch-replay-btw-reply-503")).toHaveLength(0);
+
+      const retry = JSON.stringify({
+        ...JSON.parse(btw),
+        event_id: "dispatch-replay-btw-retry-503",
+      });
+      model.store(session.agentSubject, retry);
+      session.live(session.agentSubject).push(retry);
+      await until(() => replies.length === 2, "the Retry's reply");
+      await session.tick();
+
+      expect(sideTurns).toBe(2);
+      expect(session.cards("dispatch-replay-btw-reply-503")).toHaveLength(0);
+      expect(session.cards("dispatch-replay-btw-retry-503")).toHaveLength(0);
+    });
+
+    test("is not shown by a sweep that runs while its refusal is still being posted", async () => {
+      const model = new StreamModel();
+      const posting = Promise.withResolvers<void>();
+      const { replies, session } = await bootBTW("replay-btw-reply-held", model, undefined, {
+        answerReply: async () => {
+          await posting.promise;
+          return response({});
+        },
+      });
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-reply-held");
+      model.store(session.agentSubject, btw);
+      session.live(session.agentSubject).push(btw);
+      await until(() => replies.length === 1, "the refusal's POST");
+
+      await session.tick();
+      await session.tick();
+      expect(session.cards("dispatch-replay-btw-reply-held")).toHaveLength(0);
+
+      posting.resolve();
+      await settle();
+      await session.tick();
+      expect(session.cards("dispatch-replay-btw-reply-held")).toHaveLength(0);
+    });
+
+    test("refused while its session shuts down is not shown after a resume of that session", async () => {
+      const model = new StreamModel();
+      // Deregistration hangs, so the shutdown handler is still running when the frame drains in.
+      const deregistration = Promise.withResolvers<Response>();
+      let sideTurns = 0;
+      const first = await bootBTW(
+        "replay-btw-shutdown-a",
+        model,
+        async () => {
+          sideTurns += 1;
+          return { replyText: "too late" };
+        },
+        {
+          dispatch: async (url) =>
+            url.pathname === "/v1/sessions/ses_delivery" ? deregistration.promise : undefined,
+        }
+      );
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-shutdown");
+      model.store(first.session.agentSubject, btw);
+
+      const stopping = first.session.stop();
+      first.session.live(first.session.agentSubject).push(btw);
+      await until(() => first.replies.length === 1, "the refusal");
+      deregistration.resolve(response({}));
+      await stopping;
+      expect(sideTurns).toBe(0);
+
+      const resumed = await bootBTW("replay-btw-shutdown-b", model, undefined, {
+        entries: first.session.entries(),
+      });
+      await resumed.session.tick();
+      await resumed.session.tick();
+
+      expect(resumed.session.cards("dispatch-replay-btw-shutdown")).toHaveLength(0);
+    });
+
+    test("whose side turn answered is not shown after a restart that cut its reply's POST short", async () => {
+      const model = new StreamModel();
+      // The answer's POST never completes: the process ends while it is in flight.
+      const never = Promise.withResolvers<Response>();
+      let sideTurns = 0;
+      const first = await bootBTW(
+        "replay-btw-answer-cut-a",
+        model,
+        async () => {
+          sideTurns += 1;
+          return { replyText: "an answer the process never posted" };
+        },
+        { answerReply: () => never.promise }
+      );
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-answer-cut");
+      model.store(first.session.agentSubject, btw);
+      first.session.live(first.session.agentSubject).push(btw);
+      await until(() => first.replies.length === 1, "the answer's POST");
+      expect(sideTurns).toBe(1);
+
+      const restarted = await bootBTW("replay-btw-answer-cut-b", model, undefined, {
+        entries: first.session.entries(),
+      });
+      await restarted.session.tick();
+      await restarted.session.tick();
+
+      // A BTW never falls back to a steering card that starts a turn.
+      expect(restarted.session.cards("dispatch-replay-btw-answer-cut")).toHaveLength(0);
+    });
+
+    test("one the session never received live reaches replay as at most one card that starts no turn", async () => {
+      const model = new StreamModel();
+      let sideTurns = 0;
+      const { replies, session } = await bootBTW("replay-btw-never-live", model, async () => {
+        sideTurns += 1;
+        return { replyText: "late answer" };
+      });
+      // Published while the session's subscription was down (or its process stopped, or killed
+      // between the frame's arrival and its record): only the stream holds it.
+      model.store(session.agentSubject, targetedDispatchEnvelope("btw", "replay-btw-never-live"));
+      await session.reconnect();
+      await session.tick();
+
+      const cards = session.cards("dispatch-replay-btw-never-live");
+      expect(cards.length).toBeLessThanOrEqual(1);
+      for (const card of cards) {
+        expect(card.options).not.toMatchObject({ triggerTurn: true });
+      }
+      expect(sideTurns).toBe(0);
+      expect(replies).toHaveLength(0);
+    });
+
+    test("whose replayed card the host refuses three times gets a failure notice that starts no turn", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-btw-notice", model, {
+        sessionID: "ses_delivery",
+        turn: "idle",
+        beforeSend: (content) => {
+          if (content.includes("dispatch-replay-btw-notice") && !isNotice(content)) {
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      model.store(session.agentSubject, targetedDispatchEnvelope("btw", "replay-btw-notice"));
+
+      await session.reconnect();
+      await session.tick();
+      await session.tick();
+
+      const notices = session.notices("dispatch-replay-btw-notice");
+      expect(notices).toHaveLength(1);
+      expect(notices[0]?.options).toMatchObject({ triggerTurn: false });
+    });
   });
 });

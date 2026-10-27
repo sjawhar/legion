@@ -1790,9 +1790,15 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
 - every notification topic, `notifications.>`: the subjects of the `ENVOY_NOTIFICATIONS` stream,
   the role lanes, every exception lane, and the ad-hoc topics `/v1/messages/publish` sends over
   core NATS (any `notifications.` topic the stream does not capture);
-- the stream's `$JS.API.STREAM.INFO`, `CREATE` and `UPDATE`, its durable consumer
-  `listener-<m>`'s `$JS.API.CONSUMER.INFO` and `CREATE`, the durable's acknowledgements
-  `$JS.ACK.ENVOY_NOTIFICATIONS.listener-<m>.>`, and `$JS.API.INFO`;
+- the stream's `$JS.API.STREAM.INFO`, `CREATE` and `UPDATE`, its stored-message get
+  `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, its durable consumer `listener-<m>`'s
+  `$JS.API.CONSUMER.INFO` and `CREATE`, the durable's acknowledgements
+  `$JS.ACK.ENVOY_NOTIFICATIONS.listener-<m>.>`, and `$JS.API.INFO`. The stored-message get is the
+  read `POST /v1/replay` makes to return the retained notifications a session missed while its
+  NATS subscription was down; it reads one stored message at a time and can create, change or
+  delete nothing. `HostPermissions` and `DispatchPermissions` hold it through
+  `ListenerPermissions`; `SessionPermissions` does not, so a session holding that set alone reads
+  what it missed only through the listener;
 - for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
   `envoy_ci_state`, the calls nats.go's key-value store makes: the info and create of the bucket's
   stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its watchers'
@@ -1820,7 +1826,9 @@ host, holds the whole grant above, host sessions included, since sessions run as
 that already reads the host's seed. This repository's listener and a session, connected as one
 user holding `HostPermissions`, and connected as a user holding `ListenerPermissions` beside a
 credential-free session user holding `SessionPermissions`, are checked against real nats-server
-2.10 and 2.15.1 servers; `AGENTS.md` in this directory says how.
+2.10 and 2.15.1 servers, the listener's `/v1/replay` read of a send stored while its session had
+no subscription open and the session user's refusal of that JetStream read included; `AGENTS.md`
+in this directory says how.
 
 `HostPermissions` is also the one set under which a listener may set `ENVOY_SUBSCRIBE_ALL_TOPICS=1`
 (`host:Listener`'s and `aws:WebhookListener`'s `subscribeAllTopics`). The listener then holds a
