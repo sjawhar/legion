@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -39,7 +40,7 @@ const (
 // readPeriod answers two things, both from the database's clock: the aligned start of the period
 // the tick about to run falls in - to_timestamp(floor(epoch / period) * period) - and whether a
 // pass has already served that period. recordPass stores that boundary, with the period it was
-// computed from, once the pass has run (migration 0115).
+// computed from, in the lease's row for that period once the pass has run (migration 0115).
 //
 // Boundaries rather than a window measured back from now, because a loop whose period is its
 // ticker's interval skipped about a third of its ticks under one: the ticker fires every
@@ -52,21 +53,36 @@ const (
 // has to be chosen to make that true.
 //
 // The period is stored and compared beside the boundary because a boundary means nothing on
-// another period's scale. docs.RunReferenceExcerptReconciliation varies its own period between
-// ticks - two seconds while drift remains, five minutes when none does - and its two-second
-// boundary lies at or after the current five-minute one for all but the first two seconds of
-// every five-minute bucket, so a comparison that ignored the scale would refuse that loop's
-// interval tick about 149 times in 150 (measured; and under the bucket-number form this
-// replaces, which was scale-dependent in the same way, it refused every later tick for ever).
-// A record made on another scale therefore serves nothing: the first tick of a changed period
-// runs, and the loop is on its own scale from then on. That costs one pass at each change, which
-// is the direction to err in - the other direction is a loop that stops.
+// another period's scale, and each period a lease runs at keeps a row of its own, keyed
+// <name>/<period_ns> (passKey). Many processes of two builds serve one database during a release,
+// and a loop's period can differ between the two builds. With one row per lease, each build's pass
+// overwrote the other's, so every tick after a pass at the other period ran. With one row per
+// period, the processes at one period make one pass per period between them, whatever the
+// processes at another period do. docs.RunReferenceExcerptReconciliation varies its own period
+// between ticks - two seconds while drift remains, five minutes when none does - and its two-second
+// boundary lies at or after the current five-minute one for all but the first two seconds of every
+// five-minute bucket, so a comparison that ignored the scale would refuse that loop's interval tick
+// about 149 times in 150 (measured; and under the bucket-number form this replaces, which was
+// scale-dependent in the same way, it refused every later tick for ever). A record made at another
+// period therefore serves nothing, so a change of period costs at most one pass. That is the
+// direction to err in - the other direction is a loop that stops.
+//
+// The previous build keeps one row per lease, keyed by the name alone, and reads and writes only
+// that row. A process counts that row as serving its tick when the row's period is its own. It
+// writes that row, beside its own, only when the row is absent or carries its own period. So the
+// processes of two builds at one period make one pass per period between them, as one build does.
+// And no process overwrites the previous build's record of another period, which would make the
+// previous build run on every tick after it.
 //
 // Everything is read in the database because two processes' wall clocks differ by whatever their
 // hosts' do, and the database's is the one clock every pass is judged by. The period crosses as
 // the whole number of nanoseconds a Go duration is, stored and compared as that integer, and the
 // seconds the boundary arithmetic needs are derived from it in numeric: a scale equality decided
 // by a float's rounding would be this same defect in a new coat.
+//
+// readPeriod takes the period's row key ($1), the period ($2) and the lease's name ($3), the key
+// of the previous build's row. recordPass takes the period's row key ($1), the boundary ($2), the
+// period ($3) and the lease's name ($4). It writes both rows in one statement.
 const (
 	readPeriod = `with tick as (
 			select to_timestamp(
@@ -74,12 +90,21 @@ const (
 				* ($2::numeric / 1000000000)) as boundary)
 		select tick.boundary, exists (
 			select 1 from duty_passes
-			where lease = $1 and duty_passes.period_ns = $2
+			where lease in ($1, $3) and duty_passes.period_ns = $2
 			  and duty_passes.boundary >= tick.boundary) from tick`
-	recordPass = `insert into duty_passes (lease, boundary, period_ns) values ($1, $2, $3)
-		on conflict (lease) do update set boundary = excluded.boundary,
-			period_ns = excluded.period_ns`
+	recordPass = `with own as (
+			insert into duty_passes (lease, boundary, period_ns) values ($1, $2, $3)
+			on conflict (lease) do update set boundary = excluded.boundary)
+		insert into duty_passes (lease, boundary, period_ns) values ($4, $2, $3)
+		on conflict (lease) do update set boundary = excluded.boundary
+			where duty_passes.period_ns = excluded.period_ns`
 )
+
+// passKey is the duty_passes row that records name's passes at period: <name>/<period_ns>. No
+// lease name holds a slash, so a period's key is never another lease's name.
+func passKey(name string, period time.Duration) string {
+	return name + "/" + strconv.FormatInt(period.Nanoseconds(), 10)
+}
 
 // teardownTimeout bounds the three calls a pass makes once its own work is over: the record of the
 // pass, the unlock that gives the lease back, and the close of a connection whose unlock failed.
@@ -93,13 +118,13 @@ const (
 // lease with a session this process can no longer reach.
 //
 // Five seconds is far longer than any of the three takes on a connection that works, and that is
-// the point: it has to exceed a slow round trip, not a slow query. The record is one upsert on
-// duty_passes' primary key (lease, migration 0115); the unlock is pg_advisory_unlock on a lock
-// this very session holds, which touches Postgres's in-memory lock table and no relation at all;
-// and the close is a Terminate message and a socket close. It is the same five seconds
-// pglisten.DefaultPingTimeout gives the keepalive ping and the close of a connection that
-// listener gives up on (internal/pglisten/listener.go), chosen there against this same
-// half-open connection.
+// the point: it has to exceed a slow round trip, not a slow query. The record is one statement of
+// two upserts on duty_passes' primary key (lease, migration 0115); the unlock is
+// pg_advisory_unlock on a lock this very session holds, which touches Postgres's in-memory lock
+// table and no relation at all; and the close is a Terminate message and a socket close. It is the
+// same five seconds pglisten.DefaultPingTimeout gives the keepalive ping and the close of a
+// connection that listener gives up on (internal/pglisten/listener.go), chosen there against this
+// same half-open connection.
 const teardownTimeout = 5 * time.Second
 
 // errLeaseNotHeld is pg_advisory_unlock answering false: the session this pass ran on did not hold
@@ -115,11 +140,11 @@ var errLeaseNotHeld = errors.New("the unlock reports this session did not hold t
 // would let every process run the whole pass every period.
 //
 // period is the loop's own interval, the time it means to leave between passes, and is compared
-// against the database's record of when this lease's last pass began (duty_passes, migration
-// 0115). A period of zero or less is no period at all - mutual exclusion and nothing else - which
-// is what the delivery consumers' reconciliation wants: it is not a periodic loop, since it runs
-// on every bind poll, and it carries a throttle of its own (delivery.bindThrottle). Such a pass
-// reads and records nothing.
+// against the database's record of when this lease's last pass at that period began (duty_passes,
+// migration 0115; readPeriod). A period of zero or less is no period at all - mutual exclusion and
+// nothing else - which is what the delivery consumers' reconciliation wants: it is not a periodic
+// loop, since it runs on every bind poll, and it carries a throttle of its own
+// (delivery.bindThrottle). Such a pass reads and records nothing.
 //
 // The lease is a session-level two-key advisory lock, leaseNamespace and the name's hashtext, taken
 // on a connection of its own with pg_try_advisory_lock: a lease the database reports held elsewhere
@@ -207,18 +232,20 @@ func Exclusive(ctx context.Context, leases Leases, name string, period time.Dura
 // Both sides of the comparison are boundaries, never an instant: a boundary compared against
 // now() would let the acquire-delay jitter back in through a different door. And a stored
 // boundary counts only against a tick of the same period, since a boundary carries no record of
-// the scale that produced it (readPeriod).
+// the scale that produced it: the period's own row, or the previous build's row when it carries
+// this period (readPeriod).
 func periodServed(ctx context.Context, conn *pgxpool.Conn, name string, period time.Duration) (boundary time.Time, served bool, err error) {
 	if period <= 0 {
 		return time.Time{}, false, nil
 	}
-	err = conn.QueryRow(ctx, readPeriod, name, period.Nanoseconds()).Scan(&boundary, &served)
+	err = conn.QueryRow(ctx, readPeriod, passKey(name, period), period.Nanoseconds(), name).Scan(&boundary, &served)
 	return boundary, served, err
 }
 
 // recordPassOn records that this pass served its period, as the boundary the gate read and the
-// period that produced it. It writes that boundary rather than one computed again: a second read
-// could land in the next period and leave this one looking unserved.
+// period that produced it, in the period's own row and in the previous build's row when that row
+// is absent or carries this period (readPeriod). It writes that boundary rather than one computed
+// again: a second read could land in the next period and leave this one looking unserved.
 //
 // It runs on the lease's own connection and before the lease is given back, on a context of its
 // own because the pass's own may already be cancelled - a context that is cancelled is also the
@@ -235,7 +262,7 @@ func recordPassOn(conn *pgxpool.Conn, name string, boundary time.Time, period ti
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
 	defer cancel()
-	if _, err := conn.Exec(ctx, recordPass, name, boundary, period.Nanoseconds()); err != nil {
+	if _, err := conn.Exec(ctx, recordPass, passKey(name, period), boundary, period.Nanoseconds(), name); err != nil {
 		slog.Error("dispatch duty: record the pass", "lease", name, "error", err)
 	}
 }
