@@ -36,6 +36,7 @@ const knownEventTypes: Record<EventType, true> = {
   "issue.deployed": true,
   "artifact.created": true,
   "artifact.version": true,
+  "artifact.human_edited": true,
   "artifact.approved": true,
   "artifact.changes_requested": true,
   "ask.opened": true,

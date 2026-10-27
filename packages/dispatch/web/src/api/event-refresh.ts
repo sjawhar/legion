@@ -711,6 +711,11 @@ function ownerTargets(event: Event, viewer: string | undefined): RefreshTarget[]
     // line in the issue's log and nothing the lists or rollups read.
     return targets;
   }
+  if (event.type === "artifact.human_edited") {
+    // The notice a person's settled edits send to the document's agents, after each edit's own
+    // `artifact.version` refreshed what it changed: a line in the issue's log and nothing more.
+    return targets;
+  }
   if (event.type === "artifact.created" || event.type === "artifact.version") {
     targets.push(
       { queryKey: ["artifacts", key] },

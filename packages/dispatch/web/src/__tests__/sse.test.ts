@@ -519,6 +519,16 @@ const rules: Record<string, Rule> = {
     refreshes: ["detail", "log", "projectList"],
     spares: ["summary", "pinned", "inbox", "referencePicker", "projects", "replies", "userState"],
   },
+  "a person's edit notice refreshes the issue's log only, since each edit's version refreshed the rest":
+    {
+      event: event("artifact.human_edited", {
+        artifact_id: "artifact-1",
+        from_version: 4,
+        to_version: 7,
+      }),
+      refreshes: ["detail", "log", "projectList"],
+      spares: ["summary", "pinned", "inbox", "referencePicker", "projects", "replies", "userState"],
+    },
   "a message refreshes the issue's message reads, and the Replies of those in its thread": {
     event: event("message.created", { id: "message-2", thread_logins: ["alice"] }),
     refreshes: ["detail", "log", "message", "rootMessage", "conversationMessages", "replies"],
@@ -932,6 +942,11 @@ const eventsByType: Record<EventType, Event> = {
   }),
   "artifact.created": event("artifact.created", { artifact: { id: "artifact-3" } }),
   "artifact.version": event("artifact.version", { artifact_id: "artifact-3" }),
+  "artifact.human_edited": event("artifact.human_edited", {
+    artifact_id: "artifact-3",
+    from_version: 4,
+    to_version: 7,
+  }),
   "ask.anchor_refreshed": event("ask.anchor_refreshed", { anchor: null, id: "ask-1" }),
   "ask.answered": event("ask.answered", { anchor: null, id: "ask-1" }),
   "ask.edited": event("ask.edited", { anchor: null, id: "ask-1" }),
