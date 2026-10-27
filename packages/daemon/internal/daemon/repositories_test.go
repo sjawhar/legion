@@ -33,12 +33,14 @@ import (
 )
 
 // installations answers each App's installation on each repository, by "<role> <owner/name>";
-// a repository it does not name is installed for both Apps, and fail answers an error. delay is
-// how long each read takes, as a GitHub that answers slowly; reads wait it out side by side.
+// a repository it does not name is installed for both Apps, fail answers an error for every read
+// and failing an error for the reads it names. delay is how long each read takes, as a GitHub
+// that answers slowly; reads wait it out side by side.
 type installations struct {
 	mu      sync.Mutex
 	missing map[string]bool
 	fail    error
+	failing map[string]error
 	asked   []string
 	delay   time.Duration
 }
@@ -58,7 +60,35 @@ func (i *installations) InstalledOn(ctx context.Context, role appauth.AppRole, r
 	if i.fail != nil {
 		return false, i.fail
 	}
+	if err := i.failing[key]; err != nil {
+		return false, err
+	}
 	return !i.missing[key], nil
+}
+
+// setFailing makes the reads keys names fail with err, or answer again when err is nil.
+func (i *installations) setFailing(err error, keys ...string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.failing == nil {
+		i.failing = map[string]error{}
+	}
+	for _, key := range keys {
+		i.failing[key] = err
+	}
+}
+
+// reads is how many installation reads were asked of key ("<role> <owner/name>").
+func (i *installations) reads(key string) int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	count := 0
+	for _, asked := range i.asked {
+		if asked == key {
+			count++
+		}
+	}
+	return count
 }
 
 // mappingDispatch is a Dispatch whose repository mapping is mappings.
@@ -134,19 +164,43 @@ func TestTheMappingServesOnlyRepositoriesBothAppsAreInstalledOn(t *testing.T) {
 	}
 }
 
-// A repository both Apps lack names both; an installation read that fails is no answer, and fails
-// the whole read rather than leaving the repository out on a guess.
-func TestTheMappingNamesEveryMissingAppAndFailsOnAFailedRead(t *testing.T) {
+// A repository both Apps lack names both. An installation read that fails, transient or not, is no
+// answer: it leaves only its own repository out for now, naming the App, the repository and the
+// failure, and marked as a failed read so it is read again, and the rest of the mapping is checked
+// as it stands.
+func TestTheMappingNamesEveryMissingAppAndLeavesOutOnlyARepositoryWhoseReadFailed(t *testing.T) {
 	client := &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/gadgets", Project: "LEGION"}}}
 	installs := &installations{missing: map[string]bool{"implement acme/gadgets": true, "review acme/gadgets": true}}
 	accepted, refused, err := readMapping(context.Background(), client, "LEGION", installs)
-	if err != nil || len(accepted) != 0 || len(refused) != 1 || refused[0].Reason != "the implement and review Apps are not installed on acme/gadgets" {
+	if err != nil || len(accepted) != 0 || len(refused) != 1 || refused[0].Reason != "the implement and review Apps are not installed on acme/gadgets" || refused[0].readErr != nil {
 		t.Fatalf("readMapping = %#v, %#v, %v; want acme/gadgets left out naming both Apps", accepted, refused, err)
 	}
 
-	installs = &installations{fail: &appauth.TransientError{Err: errors.New("GitHub answered 502")}}
-	if _, _, err := readMapping(context.Background(), client, "LEGION", installs); err == nil || !strings.Contains(err.Error(), "acme/gadgets") {
-		t.Fatalf("readMapping with a failed installation read = %v, want an error naming acme/gadgets", err)
+	for _, failure := range []error{&appauth.TransientError{Err: errors.New("GitHub answered 502")}, errors.New("GitHub answered 403")} {
+		client := &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION", Default: true}, {Repo: "acme/gadgets", Project: "LEGION"}}}
+		installs := &installations{}
+		installs.setFailing(failure, "review acme/gadgets")
+		accepted, refused, err := readMapping(context.Background(), client, "LEGION", installs)
+		if err != nil {
+			t.Fatalf("readMapping with %v on acme/gadgets = %v, want acme/gadgets left out and the rest checked", failure, err)
+		}
+		if len(accepted) != 1 || accepted[0].Repo != ghrepo.MustParse("acme/widgets") {
+			t.Fatalf("accepted = %#v, want acme/widgets", accepted)
+		}
+		want := "the review App's installation on acme/gadgets could not be read: " + failure.Error() + "; Legion reads it again"
+		if len(refused) != 1 || refused[0].Repo != "acme/gadgets" || refused[0].Reason != want || !errors.Is(refused[0].readErr, failure) {
+			t.Fatalf("refused = %#v, want acme/gadgets refused for now with %q", refused, want)
+		}
+	}
+
+	// An App GitHub answered is missing leaves the repository out as today, whatever the other
+	// App's read says: no read again of its own.
+	installs = &installations{missing: map[string]bool{"review acme/gadgets": true}}
+	installs.setFailing(errors.New("GitHub answered 502"), "implement acme/gadgets")
+	_, refused, err = readMapping(context.Background(), client, "LEGION", installs)
+	want := "the review App is not installed on acme/gadgets; the implement App's installation on acme/gadgets could not be read: GitHub answered 502"
+	if err != nil || len(refused) != 1 || refused[0].Reason != want || refused[0].readErr != nil {
+		t.Fatalf("readMapping = %#v, %v; want acme/gadgets refused with %q and no read again", refused, err, want)
 	}
 }
 
@@ -208,7 +262,7 @@ func (d *unreadyDispatch) ListRepoProjects(ctx context.Context) ([]dispatch.Repo
 // listing for admission does: bounded at appMintRetry's attempts, it exited the daemon, whose
 // supervisor restarted it straight back into the same refusal. Here Dispatch refuses two reads more
 // than appMintRetry's budget allows and then answers, and the boot serves the mapped repository.
-// GitHub's installation reads keep appMintRetry's budget: one that keeps failing is refused at its end.
+// GitHub's installation reads never refuse the boot (TestABootServesTheRepositoriesWhoseInstallationReadsAnswer).
 func TestTheBootWaitsForTheMappingWhileDispatchRefusesEveryDial(t *testing.T) {
 	quickAppMints(t)
 	fastReadiness(t, bootprobe.Retry{Initial: time.Millisecond, Max: 4 * time.Millisecond})
@@ -233,13 +287,62 @@ func TestTheBootWaitsForTheMappingWhileDispatchRefusesEveryDial(t *testing.T) {
 	if !strings.Contains(logged.String(), "connect: connection refused") {
 		t.Fatalf("the waits do not name the refused dial:\n%s", logged.String())
 	}
+}
 
-	w = &workflowRuntime{dispatch: &mappingDispatch{mappings: mapped}, dispatchProject: "LEGION",
-		installs:     &installations{fail: &appauth.TransientError{Err: errors.New("GitHub answered 502")}},
-		repositories: newRepositories("LEGION"), log: quietLogger()}
-	want := "the repository installation check probe never completed within its retry budget (3 attempts): "
-	if err := w.loadMapping(context.Background()); err == nil || !strings.HasPrefix(err.Error(), want) || !strings.Contains(err.Error(), "GitHub answered 502") {
-		t.Fatalf("loadMapping with GitHub's installation reads failing = %v, want %q naming GitHub's 502", err, want)
+// A boot whose installation read fails for one repository, transient or not, serves the
+// repositories GitHub answered for and leaves that one out for now, naming the App, the repository
+// and the failure, where it refused the whole boot and its supervisor restarted it straight back
+// into GitHub's same failure. The state shows the refusal.
+func TestABootServesTheRepositoriesWhoseInstallationReadsAnswer(t *testing.T) {
+	for _, failure := range []error{&appauth.TransientError{Err: errors.New("GitHub answered 502")}, errors.New("read whether the implement App is installed on acme/gadgets failed (403)")} {
+		installs := &installations{}
+		installs.setFailing(failure, "implement acme/gadgets")
+		var logged bytes.Buffer
+		w := &workflowRuntime{dispatch: &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION", Default: true}, {Repo: "acme/gadgets", Project: "LEGION"}}},
+			dispatchProject: "LEGION", installs: installs, repositories: newRepositories("LEGION"), log: slog.New(slog.NewTextHandler(&logged, nil))}
+		if err := w.loadMapping(context.Background()); err != nil {
+			t.Fatalf("loadMapping with %v on acme/gadgets = %v, want the boot to go on", failure, err)
+		}
+		if got := w.repositories.Accepted(); len(got) != 1 || got[0] != ghrepo.MustParse("acme/widgets") {
+			t.Fatalf("Accepted = %v, want acme/widgets", got)
+		}
+		view := w.repositories.view(nil)
+		want := "the implement App's installation on acme/gadgets could not be read: " + failure.Error() + "; Legion reads it again"
+		if len(view.Refused) != 1 || view.Refused[0] != (api.RefusedRepositoryView{Repo: "acme/gadgets", Reason: want}) {
+			t.Fatalf("state's refused = %#v, want acme/gadgets with %q", view.Refused, want)
+		}
+		if !strings.Contains(logged.String(), "level=WARN") || strings.Contains(logged.String(), "level=ERROR") {
+			t.Fatalf("boot log = %s, want one warning and no error while acme/widgets is served", logged.String())
+		}
+	}
+}
+
+// A boot whose every repository's installation read fails still comes up, serving none, and logs
+// one ERROR line naming the first failure: its API and recovery stay up, and the read again heals it.
+func TestABootWhoseEveryInstallationReadFailsServesNoneAndLogsOneError(t *testing.T) {
+	installs := &installations{}
+	installs.setFailing(errors.New("GitHub answered 403: Resource not accessible by integration"), "implement acme/widgets", "review acme/widgets", "implement acme/gadgets", "review acme/gadgets")
+	var logged bytes.Buffer
+	w := &workflowRuntime{dispatch: &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION", Default: true}, {Repo: "acme/gadgets", Project: "LEGION"}}},
+		dispatchProject: "LEGION", installs: installs, repositories: newRepositories("LEGION"), log: slog.New(slog.NewTextHandler(&logged, nil))}
+	if err := w.loadMapping(context.Background()); err != nil {
+		t.Fatalf("loadMapping with every installation read failing = %v, want a boot serving none", err)
+	}
+	if got := w.repositories.Accepted(); len(got) != 0 {
+		t.Fatalf("Accepted = %v, want none", got)
+	}
+	if got := readFailures(w.repositories.Refused()); len(got) != 2 {
+		t.Fatalf("refused for a failed read = %#v, want both repositories", got)
+	}
+	var errorLines []string
+	for line := range strings.SplitSeq(logged.String(), "\n") {
+		if strings.Contains(line, "level=ERROR") {
+			errorLines = append(errorLines, line)
+		}
+	}
+	if len(errorLines) != 1 || !strings.Contains(errorLines[0], "every mapped repository's GitHub App installation read failed") ||
+		!strings.Contains(errorLines[0], "check the implement App's installation on acme/widgets: GitHub answered 403: Resource not accessible by integration") {
+		t.Fatalf("ERROR lines = %q, want one naming the first failure (acme/widgets' implement read)", errorLines)
 	}
 }
 

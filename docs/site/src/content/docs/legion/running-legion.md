@@ -43,8 +43,17 @@ The daemon reads the mapping at boot and again whenever it changes in Dispatch. 
 mapped repository both the implement and the review App are installed on, and leaves out one either
 App is missing from: the boot logs it, `legion state --json` lists it under `repositories.refused`
 with the App it lacks, and an issue on it is not admitted until the App is installed, when moving
-the issue to `todo` again admits it. A project with no repository mapped does not boot; one whose
-every repository lacks an App boots serving none and admits nothing until an App is installed. A
+the issue to `todo` again admits it. A repository whose installation GitHub does not answer for
+(any failure but a 404, a read longer than 5 seconds included) is left out for now the same way,
+its refusal naming the App, the repository and GitHub's failure, and the daemon reads the mapping
+again, 30 seconds doubling to 10 minutes between reads, until GitHub answers, then serves it with no
+restart; an issue handed to Legion on it meanwhile waits for that read rather than being refused.
+A served repository whose read fails stays served on its last answer and is read again the same
+way. A project with no repository mapped does not boot; one whose every repository lacks an App
+boots serving none and admits nothing until an App is installed, and one whose every repository's
+installation read fails boots serving none, logs one ERROR line with the first failure, and heals
+once GitHub answers. The boot's own reads of the Apps (their logins and tokens) still refuse the
+boot when they fail. A
 Dispatch that does not answer the boot's read of the mapping delays the boot rather than ending it:
 the daemon reads it again, one second doubling to one minute between reads, for as long as Dispatch
 stays unreachable, logs each wait, and serves nothing until the read passes.

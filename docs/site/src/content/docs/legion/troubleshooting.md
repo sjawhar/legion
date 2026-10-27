@@ -48,6 +48,10 @@ cluster and the image:
   `stage=repositories` lists it under `refused`, `legion state --json | jq .repositories.refused`
   names it with the App it lacks, and its issues are not admitted, each saying so, until the App
   is installed there and the issue moves to `todo` again.
+  A refusal that reads `the <role> App's installation on <owner>/<repo> could not be read: …;
+  Legion reads it again` is GitHub not answering, not a missing App: the daemon reads the mapping
+  again on its own, 30 s doubling to 10 min, and serves the repository once GitHub answers; an
+  issue handed to Legion on it waits and is admitted then, with nothing to move.
 - **Records with no repository.** `<n> issue records have no repository and Dispatch resolves none
   for them (<KEY>, …): set the project's default repository in Dispatch …`: the first boot of this
   release records each issue it already runs on the repository Dispatch resolves for it, and these
