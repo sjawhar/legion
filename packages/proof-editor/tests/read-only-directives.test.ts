@@ -207,3 +207,71 @@ test("a refused directive without source offsets throws", () => {
     'container directive "note" has no source position'
   );
 });
+
+const askBlockSchema: BlockSchema = {
+  version: 1,
+  types: [
+    ...blockSchema.types,
+    { name: "ask", content: "paragraph+ bullet_list?", render: "host", attributes: {} },
+  ],
+};
+
+async function readOnlyAskParse(markdown: string) {
+  const proof = await createHeadlessProof({ blockSchema: askBlockSchema, readOnly: true });
+  return proof.parseMarkdown(markdown);
+}
+
+test("read-only draws a typed block whose content breaks its rule as text", async () => {
+  const doc = await readOnlyAskParse(":::ask{#a1}\n# Heading\n\nBody text\n:::\n");
+  expect(blocks(doc)).toEqual([
+    ["paragraph", ":::ask{#a1}"],
+    ["heading", "Heading"],
+    ["paragraph", "Body text"],
+    ["paragraph", ":::"],
+  ]);
+});
+
+test("read-only keeps a typed block whose content fits its rule typed", async () => {
+  const doc = await readOnlyAskParse(":::ask{#a1}\nWhich option?\n\n- first\n- second\n:::\n");
+  expect(blocks(doc)).toEqual([["ask", "Which option?firstsecond"]]);
+  expect(blocks(doc.child(0)).map(([type]) => type)).toEqual(["paragraph", "bullet_list"]);
+  expect(doc.child(0).attrs.blockId).toBe("a1");
+});
+
+test("read-only draws the drawn directive and the typed block it breaks, in order", async () => {
+  const doc = await readOnlyAskParse(
+    "Lead\n\n::::ask\nWhich option?\n\n- first\n\n:::note\nA note line\n:::\n::::\n"
+  );
+  expect(blocks(doc)).toEqual([
+    ["paragraph", "Lead"],
+    ["paragraph", "::::ask"],
+    ["paragraph", "Which option?"],
+    ["bullet_list", "first"],
+    ["paragraph", ":::note"],
+    ["paragraph", "A note line"],
+    ["paragraph", ":::"],
+    ["paragraph", "::::"],
+  ]);
+});
+
+test("read-only draws an outer typed block a drawn inner block's content breaks", async () => {
+  const doc = await readOnlyAskParse("::::callout\n:::ask\n# Heading\n\nBody\n:::\n::::\n");
+  expect(blocks(doc)).toEqual([
+    ["paragraph", "::::callout"],
+    ["paragraph", ":::ask"],
+    ["heading", "Heading"],
+    ["paragraph", "Body"],
+    ["paragraph", ":::"],
+    ["paragraph", "::::"],
+  ]);
+});
+
+test("read-only keeps an outer typed block typed when a drawn directive's lines fit it", async () => {
+  const doc = await readOnlyAskParse("::::callout\n:::note\ninner\n:::\n::::\n");
+  expect(blocks(doc)).toEqual([["callout", ":::noteinner:::"]]);
+  expect(blocks(doc.child(0))).toEqual([
+    ["paragraph", ":::note"],
+    ["paragraph", "inner"],
+    ["paragraph", ":::"],
+  ]);
+});

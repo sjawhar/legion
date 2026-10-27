@@ -154,7 +154,7 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
     // lines with a space or splits them around a `break` node, which the commonmark preset's
     // hardbreak parser takes.
     parseProcessor.use(softBreaks === 'line' ? remarkSoftBreakAsLine : remarkSoftBreakAsSpace);
-    if (options.readOnly) parseProcessor.use(remarkReadOnlyDirectives, options.blockSchema);
+    if (options.readOnly) parseProcessor.use(remarkReadOnlyDirectives, options.blockSchema, schema);
     else if (options.blockSchema) parseProcessor.use(remarkTypedBlocks, options.blockSchema);
     return ParserState.create(schema as never, parseProcessor as never) as unknown as (
       markdown: string,
