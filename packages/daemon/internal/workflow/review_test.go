@@ -1009,6 +1009,49 @@ func TestAHeadArrivingReasksAStuckRoundInEitherOrder(t *testing.T) {
 	}
 }
 
+// An approval of a head the record has not reached - the reviewer approved its own head while the
+// synchronize that brings it was still on its way - leaves the round stuck at the head the record
+// holds. That head's arrival re-asks the round, and the approval of the head itself ends it; any
+// other head arriving re-asks the round stuck at that head, which the architect is told.
+func TestTheArrivalOfTheApprovedHeadEndsTheRound(t *testing.T) {
+	complete := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", HandoffRecord: "review-1", HandoffVersion: 1}
+	approve := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-2", Author: testReviewApp, Body: "approved"}
+	sync := func(head string) intake.Fact {
+		return intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
+	}
+	for _, tc := range []struct {
+		name string
+		head string
+		want phase.Phase
+		told []string
+	}{
+		{name: "the approved head arrives", head: "head-2", want: phase.Accepting, told: []string{byCompletion}},
+		{name: "a head above the approved one arrives", head: "head-3", want: phase.Reviewing, told: []string{byCompletion, byPush}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedReviewOf(t, pool, "head", "green")
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+			for i, fact := range []intake.Fact{approve, complete, sync(tc.head)} {
+				if result := apply(fmt.Sprintf("step-%d", i), fact); result.Refusal != nil {
+					t.Fatalf("step %d (%T) was refused: %+v", i, fact, result.Refusal)
+				}
+			}
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("the issue is in %s, want %s", got, tc.want)
+			}
+			got := reviewStuckNotices(t, pool)
+			summaries := make([]string, 0, len(got))
+			for _, notice := range got {
+				summaries = append(summaries, notice.Summary)
+			}
+			if fmt.Sprint(summaries) != fmt.Sprint(tc.told) {
+				t.Fatalf("the architect was told by %q, want by %q", summaries, tc.told)
+			}
+		})
+	}
+}
+
 // reviewStuckNotices is every review-stuck notice the outbox holds, in order.
 func reviewStuckNotices(t *testing.T, pool *pgxpool.Pool) []record.Notice {
 	t.Helper()
