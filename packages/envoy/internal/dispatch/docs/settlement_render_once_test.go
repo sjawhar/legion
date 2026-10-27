@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
@@ -18,7 +20,7 @@ import (
 // in place, and a peer can have written the same attributes into the room first, so the repair
 // writes nothing into the room. The version still holds the repaired block, with the answered
 // state, and its indexed blocks are the room's: reusing the rendering made before the repair would
-// version the block as still open and index the open block's text (LEGION/INFRA-647). An answer
+// version the block as still open and index the open block's text (INFRA-647). An answer
 // that selects nothing is versioned as the room holds it, an empty list.
 func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 	service, artifactID := newTestService(t)
@@ -26,15 +28,10 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n\n- Yes: Monday.\n- No: Later.\n:::\n\nContext before.\n")
 	service.settleRoom(artifactID, 0)
 	answer := answerBlockAsk(t, service, artifactID)
-	ask, err := ScanAsk(service.store.Pool.QueryRow(context.Background(), `
-		select `+AskColumns+` from asks a where a.block_artifact_id = $1
-	`, artifactID))
-	if err != nil {
-		t.Fatalf("read the answered ask: %v", err)
-	}
+	ask := blockAskOn(t, service, artifactID, "ask-block")
 	// A content edit, so the settlement has something to version.
 	editAsPeer(t, service, artifactID, replaceRun("Context before.", "Context after."))
-	if repairs := pmdoc.BlockIDRepairCount(roomTree(t, service, artifactID)); repairs != 0 {
+	if repairs := pmdoc.BlockIDRepairCount(liveTree(t, service, artifactID)); repairs != 0 {
 		t.Fatalf("the room has %d blocks to stamp, want none: the settlement must reconcile the tree it read", repairs)
 	}
 	versionsBefore := latestVersionNumber(t, service, artifactID)
@@ -88,7 +85,7 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 // nothing into the room, and the tree it reconciles and versions is still the stamp's, not the
 // read. The version holds the ids the room's document holds, rendered and indexed: reusing the
 // rendering of the read would index no row for the appended paragraph, and version and index the
-// pasted callout under the id of the callout it copies (LEGION/INFRA-647).
+// pasted callout under the id of the callout it copies (INFRA-647).
 func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -99,7 +96,7 @@ func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
 	// room's rendering, which the hold below needs.
 	editLiveTree(t, service, artifactID, appendUnidentifiedBlocks(t, "added"))
 	editLiveTree(t, service, artifactID, appendBlockWithCraftedID(t, ":::callout{kind=\"note\" title=\"\"}\nCopied.\n:::\n", "note"))
-	if repairs := pmdoc.BlockIDRepairCount(roomTree(t, service, artifactID)); repairs == 0 {
+	if repairs := pmdoc.BlockIDRepairCount(liveTree(t, service, artifactID)); repairs == 0 {
 		t.Fatal("the room has no block to stamp, so nothing here is tested")
 	}
 	versionsBefore := latestVersionNumber(t, service, artifactID)
@@ -136,7 +133,7 @@ func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
 	if stamped == "" || stamped == "note" {
 		t.Fatalf("the other writer left the pasted callout id %q, want one of its own", stamped)
 	}
-	tree := roomTree(t, service, artifactID)
+	tree := liveTree(t, service, artifactID)
 	if repairs := pmdoc.BlockIDRepairCount(tree); repairs != 0 {
 		t.Fatalf("the room has %d blocks left to stamp, want none", repairs)
 	}
@@ -151,21 +148,11 @@ func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
 	requireLatestVersionMarkdown(t, service, artifactID, markdown)
 }
 
-// roomTree is the room's live document as it stands, read under its lock.
-func roomTree(t *testing.T, service *Service, artifactID string) *pmdoc.Node {
-	t.Helper()
-	tree, err := service.liveTree(artifactID, service.srv.GetDoc(artifactID))
-	if err != nil {
-		t.Fatalf("read live tree: %v", err)
-	}
-	return tree
-}
-
 // roomRendering is the room's live document rendered with its block offsets, as a settlement
 // renders the tree it versions.
 func roomRendering(t *testing.T, service *Service, artifactID string) (string, []pmdoc.BlockOffset) {
 	t.Helper()
-	markdown, offsets, err := renderTreeWithOffsets(roomTree(t, service, artifactID))
+	markdown, offsets, err := renderTreeWithOffsets(liveTree(t, service, artifactID))
 	if err != nil {
 		t.Fatalf("render live tree: %v", err)
 	}
@@ -177,13 +164,7 @@ func roomRendering(t *testing.T, service *Service, artifactID string) (string, [
 // offsets, with that block's type and the sha256 of its text, and no other row.
 func requireIndexedBlocks(t *testing.T, service *Service, artifactID, markdown string, offsets []pmdoc.BlockOffset) {
 	t.Helper()
-	ctx := context.Background()
-	var indexedAt *int
-	if err := service.store.Pool.QueryRow(ctx, `
-		select version from document_block_versions where artifact_id = $1
-	`, artifactID).Scan(&indexedAt); err != nil {
-		t.Fatalf("read the version the document's blocks are indexed at: %v", err)
-	}
+	indexedAt := blockIndexAt(t, service.store, artifactID)
 	if latest := latestVersionNumber(t, service, artifactID); indexedAt == nil || *indexedAt != latest {
 		t.Fatalf("the document's blocks are indexed at version %v, want the latest, %d", indexedAt, latest)
 	}
@@ -197,22 +178,18 @@ func requireIndexedBlocks(t *testing.T, service *Service, artifactID, markdown s
 		sum := sha256.Sum256([]byte(markdown[offset.From:offset.To]))
 		want = append(want, offset.ID+" "+offset.Type+" "+hex.EncodeToString(sum[:]))
 	}
-	rows, err := service.store.Pool.Query(ctx, `
+	rows, err := service.store.Pool.Query(context.Background(), `
 		select block_id, type, text_sha256 from document_blocks where artifact_id = $1
 	`, artifactID)
 	if err != nil {
 		t.Fatalf("read the document's indexed blocks: %v", err)
 	}
-	defer rows.Close()
-	var got []string
-	for rows.Next() {
+	got, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (string, error) {
 		var id, kind, sum string
-		if err := rows.Scan(&id, &kind, &sum); err != nil {
-			t.Fatalf("scan an indexed block: %v", err)
-		}
-		got = append(got, id+" "+kind+" "+sum)
-	}
-	if err := rows.Err(); err != nil {
+		err := row.Scan(&id, &kind, &sum)
+		return id + " " + kind + " " + sum, err
+	})
+	if err != nil {
 		t.Fatalf("read the document's indexed blocks: %v", err)
 	}
 	slices.Sort(want)
