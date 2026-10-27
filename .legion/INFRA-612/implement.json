@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-612",
-  "completed": "2026-10-27T14:52:00Z",
+  "completed": "2026-10-27T16:12:00Z",
   "proof": [
+    {
+      "criterion": "Conflict with main (INFRA-565 #2388 and others) resolved by a forward merge that keeps both sides; the server-attribute drop still runs after the schema refusal on main's remarkDecideTypedBlocks; PR MERGEABLE",
+      "surface": "Dispatch SPA (production build) on the real Go Dispatch server with Postgres 17 + pgvector, Playwright chromium and iphone (pod harness, implementer lane); bun test and tsc for proof-editor and dispatch; gh pr view",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts e2e/ask-blocks.e2e.ts e2e/typed-blocks.e2e.ts e2e/typed-block-content-rule.e2e.ts e2e/task-items.e2e.ts --project chromium --project iphone; cd packages/proof-editor && bun run test && bun run typecheck; cd packages/dispatch && bun test web/src/features/refs web/src/features/doc && bun run typecheck; gh pr view 2405 --json mergeable",
+      "observed": "94 passed (8.4m); proof-editor 147 pass 0 fail; dispatch refs/doc 430 pass 0 fail; both typechecks exit 0; biome no diagnostics; mergeable MERGEABLE. Fingerprint 61437fd9… -> 22760bf3… (changed: read-only-directives.ts now runs dropServerAttributes after main's remarkDecideTypedBlocks; lib-headless.ts readOnly doc and proof-editor AGENTS.md row keep main's text plus this branch's clause), posted as PR comment 6447099241.",
+      "headSha": "7fd9f9e4e288",
+      "negativeControl": "With the dropServerAttributes call skipped, proof-editor case 'read-only reads a kept typed block's server attributes at their schema defaults' fails: Expected \"open\" Received \"answered\" (33 pass, 1 fail); call restored."
+    },
     {
       "criterion": "Review round 1 (five findings on PR #2405): the shared reply setup is one helper, the blank option is found by position, the server-attribute drop fails closed, AskBlockStamps is private, the drop's rationale is written once; nothing a reader sees changes",
       "surface": "Dispatch SPA (production build) on the real Go Dispatch server with Postgres 17 + pgvector, Playwright chromium and iphone (pod harness, implementer lane); bun test and tsc for proof-editor and dispatch",
