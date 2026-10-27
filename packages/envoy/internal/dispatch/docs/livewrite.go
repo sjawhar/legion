@@ -163,8 +163,8 @@ func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 }
 
 // openLiveWrite takes artifactID's writer slot for the transaction, first waiting for the
-// transaction holding it, if one does. A room a close has reserved because it stands behind the
-// durable head (reserveRoomCloseLocked) gives its slot to no one: a write admitted then would be
+// transaction holding it, if one does. A room a close has reserved because its stored history was
+// replaced under it (reserveRoomCloseLocked) gives its slot to no one: a write admitted then would be
 // forgotten with the room's state, and the room that replaces it would load knowing nothing of the
 // write. The transaction does not wait for that close, whose persistence flush takes the
 // document's advisory lock (awaitRoomRecovery says why no transaction waits for such work): it
@@ -173,7 +173,7 @@ func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 //
 // Taking the slot moves the room's generation, which ends a settlement already running or about to
 // run: one whose timer fired whose settleRoomWithin has not yet read the generation, or one past
-// that read whose supersession check or reload (reloadRoomBehindHead) then meets the moved
+// that read whose supersession check or reload (reloadReplacedRoom) then meets the moved
 // generation and writes nothing. The write takes that settlement over (settleDeferred), as it takes
 // over an armed timer it stops, and finishing it arms the settlement again, whether or not the write
 // changed anything: a write that changed nothing publishes no update whose observer would arm one.
@@ -185,7 +185,7 @@ func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 		state := s.lockState(artifactID)
 		if state.reloading {
 			s.unlockState(artifactID, state)
-			slog.Warn("dispatch: refuse a write on a document room closing behind the durable head", "room", artifactID)
+			slog.Warn("dispatch: refuse a write on a document room closing on a replaced stored history", "room", artifactID)
 			return nil, fmt.Errorf("%w: room %s", errRoomReloading, artifactID)
 		}
 		if state.liveWriter == nil {
@@ -242,14 +242,15 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // forked from the store instead (coldFork).
 //
 // A room behind the durable head is forked from the store too, by the same cold path. The other
-// envoy-dispatch process appended what this room never took, so a write made on this room's
-// document would be refused at its append (the gate in appendUpdateTxClass) and the agent's edit
-// would answer 503; the stored document holds every update, so the write is made on that instead
-// and succeeds against the current text. Which room that is has to be read exactly, under the
-// document's advisory lock (roomBehindHead): a healthy room judged behind is forked from a store
-// that holds less of the document than the room does. Uploads and conditional edits hold that
-// lock from before this read until they commit (ReplaceText, ApplyOps), so for them the head this
-// compares against is the head their append meets from the first read on.
+// envoy-dispatch process appended what this room's catch-up has not taken in yet, so a write made
+// on this room's document would be refused at its append (the gate's derived rule in
+// appendUpdateTxClass) and the agent's edit would answer 503; the stored document holds every
+// update, so the write is made on that instead and succeeds against the current text. Which room
+// that is has to be read exactly, under the document's advisory lock (roomBehindHead): a healthy
+// room judged behind is forked from a store that holds less of the document than the room does.
+// Uploads and conditional edits hold that lock from before this read until they commit
+// (ReplaceText, ApplyOps), so for them the head this compares against is the head their append
+// meets from the first read on.
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
 	live := s.srv.GetDoc(write.artifactID)
 	if live == nil {
@@ -266,26 +267,26 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 }
 
 // roomBehindHead reports whether live, the room resident for write's document, stands behind the
-// durable head - an update the other process appended that this room never took. The head is read
-// in the caller's own transaction, which a write always has (liveWrite): a read of its own would
-// be a second pooled connection taken under that transaction (store.ErrNestedAcquire). That head
-// includes the versions this transaction has appended itself, which are in no room until it
-// publishes, so the room's cursor is read with them folded in (liveWrite.withOwnAppends);
-// without that every operation after a transaction's first append would judge its own room
-// behind. A document whose room kept no cursor is not judged behind: nothing says it is.
+// durable head - an update the other process appended that this room has not caught up yet. The
+// head is read in the caller's own transaction, which a write always has (liveWrite): a read of
+// its own would be a second pooled connection taken under that transaction
+// (store.ErrNestedAcquire). That head includes the versions this transaction has appended itself,
+// which are in no room until it publishes, so the room's cursor is read with them folded in
+// (liveWrite.withOwnAppends); without that every operation after a transaction's first append
+// would judge its own room behind. A document whose room kept no cursor is not judged behind:
+// nothing says it is.
 //
-// A difference the first read sees is not the answer, for the reason the stale-room evictor reads
-// twice as well (documentChanged): every durable writer of this process advances the room's
-// cursor inside the document's advisory lock, after the commit that raised the head
-// (PgVersioned.appendUpdate, Ledger.takeRoomCursors), so a reader holding no lock lands between a
-// browser append's commit and its cursor advance and reads a healthy room as one another process
-// left behind. The confirmation takes that lock in the caller's own transaction, which holds it
-// until the transaction ends, as an upload and a conditional edit already hold it from before
-// their fork read (ReplaceText, ApplyOps): under it no write of this process sits between its
-// commit and its cursor, and no append lands between the cursor read and the head read beside it.
-// It costs that lock only where the cheap read saw a difference, which a healthy room under its
-// own browsers' writes sees rarely and a room another process left behind sees once and then
-// always.
+// A difference the first read sees is not the answer: every durable writer of this process
+// advances the room's cursor inside the document's advisory lock, after the commit that raised the
+// head (PgVersioned.appendUpdate, Ledger.takeRoomCursors), so a reader holding no lock lands
+// between a browser append's commit and its cursor advance and reads a healthy room as one another
+// process left behind. The confirmation takes that lock in the caller's own transaction, which
+// holds it until the transaction ends, as an upload and a conditional edit already hold it from
+// before their fork read (ReplaceText, ApplyOps): under it no write of this process sits between
+// its commit and its cursor, and no append lands between the cursor read and the head read beside
+// it. It costs that lock only where the cheap read saw a difference, which a healthy room under
+// its own browsers' writes sees rarely and a room another process left behind sees until its
+// catch-up lands.
 //
 // Why the false verdict is worth a lock. It sent the write down the cold path (forkLive), which
 // reads the stored document - and the store of a room still writing is behind the room by
@@ -293,9 +294,10 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 // than the order the room applied them (consumeUpdateClass). A version prefix of that is not a
 // state the document ever held: an update whose deletes landed without the inserts they replaced
 // leaves a tree with no block in it at all, which every write starting from it refuses
-// (ErrDocOutsideSchema). A room confirmed behind the head has no such store: nothing it still
-// owes can become durable, because the gate refuses its every append (refuseRoomBehindHead) until
-// it is reloaded, so the stored document is the whole of what this process can still write from.
+// (ErrDocOutsideSchema). A room confirmed behind the head forks from that same store, which its
+// own browsers' appends still reach (the gate admits them, appendBrowser), so the cold path costs
+// it the same exposure for the moment until its catch-up lands; a warm fork from a room missing
+// the other process's rows would instead be refused at its append.
 func (s *Service) roomBehindHead(ctx context.Context, write *liveWrite, live *crdt.Doc) (bool, error) {
 	cursor := s.cursorOf(live)
 	tx, joined := txFromContext(ctx)
@@ -427,7 +429,7 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	}
 	write.fork, write.cold, write.forkSeq = fork, true, 0
 	write.forkHold = &roomHold{loaded: int64(loaded.Version)}
-	// No cursor, so no gate: the gate is about a room (refuseRoomBehindHead), and this write
+	// No cursor, so no gate: the gate is about a room (gateAppend), and this write
 	// holds none. Its update is a Yjs update, which commutes with whatever landed between this
 	// read and its append, and the room that loads after its publish reads the store, which by
 	// then holds both. A private cursor at the head this read loaded would refuse the write for
@@ -492,7 +494,7 @@ func applyTransactionWrites(fork *crdt.Doc, updates [][]byte) error {
 }
 
 // heldThrough is the durable version the document this write's operations run on holds every
-// update through, which gates each of its appends (refuseRoomBehindHead): its fork's basis, read
+// update through, which gates each of its appends (gateAppend, appendDerived): its fork's basis, read
 // now so that a peer's append into the same room, which the fork takes in at its next read,
 // counts, with the versions this transaction has appended itself folded in (withOwnAppends). It
 // is the cursor of a write whose fork came from a room, and only appendingCursor reads it, which

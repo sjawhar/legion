@@ -326,33 +326,14 @@ func (s *Service) hasDurableAppend(room string) bool {
 	return state.durableAppends.Load() > 0
 }
 
-// hasOpenLiveWrite is whether an open live-write transaction of this process is writing room's
-// document (liveWrite). The stale-room evictor asks it before it closes a room another process's
-// write left behind, because that writer alone is out of reach of the confirmation the evictor
-// makes under the document's advisory lock (roomBehindDurableHead): an open write holds no lock
-// between its operations, and between its commit and its publish it has moved the cursor of the
-// room it forked past what that room holds (Ledger.takeRoomCursors, publish), so the room it
-// publishes into is the room the evictor would close.
-//
-// The other writers of this process take the document's lock and are ordered by that
-// confirmation instead, so they are not asked about here. A browser's append (appendUpdate,
-// under withRoomLock) and a settlement (settleRoomWithin, under lockSettlementCursor) each either
-// advance the instance's cursor before they drop the lock or are refused by the gate on a room
-// behind the head (ErrRoomBehindHead), and a cursor moves only by the version after the one it
-// stands at (advanceRoomCursor), so a room the confirmation finds behind is one none of them can
-// bring back to the head.
-func (s *Service) hasOpenLiveWrite(room string) bool {
-	state := s.lockExistingState(room)
-	if state == nil {
-		return false
-	}
-	defer s.unlockState(room, state)
-	return state.openLiveWriteLocked()
-}
-
-// openLiveWriteLocked is hasOpenLiveWrite for a state its caller holds state.mu on: the close of
-// a room behind the durable head reads it again under the hold that reserves the close, so no
-// write is admitted between the evictor's own unlocked read and the reservation.
+// openLiveWriteLocked is whether an open live-write transaction of this process is writing the
+// document of state (liveWrite), for a caller holding state.mu: the close of a room whose stored
+// history was replaced reads it under the hold that reserves the close (closeRoomBehindHead), so
+// no write is admitted between the check and the reservation. That writer alone is out of reach of
+// the document's advisory lock the catch-up confirms its verdict under (historyReplacedUnderLock):
+// an open write holds no lock between its operations, and between its commit and its publish it
+// has moved the cursor of the room it forked past what that room holds (Ledger.takeRoomCursors,
+// publish), so the room it publishes into is the room the close would retire.
 func (state *roomState) openLiveWriteLocked() bool {
 	return state.liveWriter != nil
 }

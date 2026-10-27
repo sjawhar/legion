@@ -83,11 +83,12 @@ func editAsConnectedPeer(t *testing.T, service *Service, artifactID string, conn
 }
 
 // editAsBrowserPeer is editAsConnectedPeer for a document two processes serve, where a room can
-// stand behind the durable head. Such a room is refused its browser's append (ErrRoomBehindHead)
-// and fails, which closes its browsers; a browser's provider then reconnects, syncs the reloaded
-// room and sends its own state again, so the edit it made is not lost. A test peer is a document,
-// not a provider, so this does that for it: while the store does not hold the peer's edit it waits
-// for the room's recovery and sends the peer's state to the room that replaced it.
+// stand behind the durable head or on a stored history the other process replaced. The second is
+// refused its browser's append (ErrRoomBehindHead) and is closed and reloaded, which closes its
+// browsers; a browser's provider then reconnects, syncs the reloaded room and sends its own state
+// again, so the edit it made is not lost. A test peer is a document, not a provider, so this does
+// that for it: while the store does not hold the peer's edit it waits for the room's recovery and
+// sends the peer's state to the room that replaced it.
 func editAsBrowserPeer(t *testing.T, service *Service, artifactID string, connection uint64, actor model.Actor, edit func(*pmdoc.Node) *pmdoc.Node) {
 	t.Helper()
 	ctx := context.Background()
@@ -565,7 +566,7 @@ func TestAnUploadClearsOnlyTheEditsItsForkHeld(t *testing.T) {
 // An upload whose room is behind the durable head is made on the stored document, which holds
 // every update: bob's paragraph, typed on task B after task A's room loaded, is in the text the
 // uploader replaced, so his row goes with the upload's commit and no version lists him. Before
-// INFRA-66's stale-room gate task A uploaded from its own room, which never held that paragraph:
+// INFRA-66's behind-the-head gate task A uploaded from its own room, which never held that paragraph:
 // the replacement deleted only what the room held, the paragraph survived the merge, and the
 // document kept text no version recorded while bob stayed owed for it.
 func TestAnUploadOnOneProcessClearsTheAuthorItReadFromTheStore(t *testing.T) {

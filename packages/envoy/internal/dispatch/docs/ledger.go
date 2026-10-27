@@ -48,6 +48,53 @@ type Ledger struct {
 	// copies are the documents showing a copy of an ask this transaction answered or resolved,
 	// whose settlement it marked owed (SettleCopiesOf); Commit arms each once it has committed.
 	copies []string
+	// announced is, for each document this transaction appended to, the last version it appended,
+	// in the order it first appended to each: what its commit announces to every process, once
+	// per document (announceAppends), rather than once per append (appendUpdateTxClass).
+	announced []ledgerAnnouncement
+}
+
+// ledgerAnnouncement is one document a transaction appended to and the last version it appended.
+type ledgerAnnouncement struct {
+	artifactID string
+	head       persistence.Version
+}
+
+// deferAnnouncement records that the transaction appended version to artifactID, for its commit
+// to announce (announceAppends). A later append of the same document replaces the version.
+func (l *Ledger) deferAnnouncement(artifactID string, version persistence.Version) {
+	for index := range l.announced {
+		if l.announced[index].artifactID == artifactID {
+			l.announced[index].head = version
+			return
+		}
+	}
+	l.announced = append(l.announced, ledgerAnnouncement{artifactID: artifactID, head: version})
+}
+
+// announceAppends announces, in the transaction about to commit, each document it appended to
+// with the last version it appended (announceDocumentHead): one statement for all of them, under
+// the advisory locks the appends took and the transaction still holds, so a listener that hears
+// it reads a head at or past that version, and hears nothing of a transaction that rolls back.
+func (l *Ledger) announceAppends(ctx context.Context) error {
+	if len(l.announced) == 0 {
+		return nil
+	}
+	rooms := make([]string, 0, len(l.announced))
+	heads := make([]int64, 0, len(l.announced))
+	for _, announced := range l.announced {
+		rooms = append(rooms, announced.artifactID)
+		heads = append(heads, int64(announced.head))
+	}
+	if _, err := l.tx.Exec(ctx, `
+		select `+announceDocumentHead("announced.room", "announced.head", "$3::text")+`
+		from unnest($1::text[], $2::bigint[]) with ordinality as announced(room, head, position)
+		order by announced.position
+	`, rooms, heads, l.service.processID); err != nil {
+		return fmt.Errorf("announce the documents the transaction appended to: %w", err)
+	}
+	l.announced = nil
+	return nil
 }
 
 type ledgerVersion struct {
@@ -142,7 +189,11 @@ func (l *Ledger) publishEvents() {
 // commit is Commit up to the publish. Another transaction can run between the two, and tests
 // call them apart to hold that window open.
 func (l *Ledger) commit(ctx context.Context) error {
-	if err := l.recordSettlementCredit(ctx); err != nil {
+	err := l.recordSettlementCredit(ctx)
+	if err == nil {
+		err = l.announceAppends(ctx)
+	}
+	if err != nil {
 		_ = l.tx.Rollback(context.Background())
 		l.endRebuilds()
 		l.fail(err)
@@ -154,16 +205,16 @@ func (l *Ledger) commit(ctx context.Context) error {
 	}
 	// The cursors before the commit, not after it: this transaction holds the document's advisory
 	// lock until the commit drops it, and the writers queued on that lock take it the instant it
-	// goes. Recorded after the commit, a browser's append would read the head this commit wrote
-	// against a cursor still standing one version behind it and be refused (ErrRoomBehindHead),
-	// which fails a healthy room over this process's own write and drops the browser's edit with
-	// it. Nothing can read a cursor standing at a version this commit has not yet made durable
-	// and write durable state from it: every durable writer of the document takes that lock
-	// first, and the stale-room evictor, which reads the cursor to decide whether to close the
-	// room, closes none this write is open on (documentChanged, hasOpenLiveWrite). A commit that
-	// fails fails these rooms (fail), so the instance holding such a cursor is dropped with them.
+	// goes. Recorded after the commit, a derived write - a settlement - would read the head this
+	// commit wrote against a cursor still standing one version behind it and be refused
+	// (ErrRoomBehindHead), and a browser's append would land past a gap this process's own write
+	// left in its room's cursor. Nothing can read a cursor standing at a version this commit has
+	// not yet made durable and write durable state from it: every durable writer of the document
+	// takes that lock first, and catch-up, which reads the cursor without it, only skips the rows
+	// such a cursor already names (catchUpRoom). A commit that fails fails these rooms (fail), so
+	// the instance holding such a cursor is dropped with them.
 	l.takeRoomCursors()
-	err := l.service.commitConsuming(ctx, l.tx, captures, func(error) {
+	err = l.service.commitConsuming(ctx, l.tx, captures, func(error) {
 		// The transaction has ended whichever way the commit went, so a rebuild's room reads the
 		// history the commit left from here.
 		l.endRebuilds()
@@ -189,11 +240,13 @@ func (l *Ledger) commit(ctx context.Context) error {
 // publish has returned, which defers its room's settlement (settleRoomWithin's supersession
 // check) and holds off every other transaction's write and version (awaitLiveWriter). What does
 // run in that window is a browser's append queued on the document's advisory lock, which takes it
-// the instant this commit drops it: refused there, this process's own committed write would fail
-// its own room and drop the browser's edit (TestSettlementBetweenCommitAndPublishWaitsForTheWrite,
-// TestABrowserAppendQueuedBehindThisProcessesWriteIsNotRefused). The stale-room evictor reads the
-// cursor, so a room left standing at the head here is also a room this process's own change does
-// not close (documentChanged, whose other guard is hasOpenLiveWrite).
+// the instant this commit drops it and lands past the commit's versions, and a catch-up of the
+// room, which skips the rows these versions name, since the publish applies them
+// (TestSettlementBetweenCommitAndPublishWaitsForTheWrite,
+// TestABrowserAppendQueuedBehindThisProcessesWriteIsNotRefused). A catch-up that reads in the
+// moment between this record and the commit sees a head below the cursor, a replaced history, and
+// confirms that verdict under the document's lock before it closes anything
+// (historyReplacedUnderLock), by which time this commit has landed.
 //
 // The two instances are one and the same for a warm write whose room is still resident. They are
 // not for a cold write, which has no cursor of its own at all (coldFork): the room it publishes

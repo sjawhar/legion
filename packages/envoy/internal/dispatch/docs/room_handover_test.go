@@ -25,8 +25,8 @@ import (
 // them listed no author for them.
 //
 // Every path that closes a room and settles its record itself is covered. The first two are
-// closeReservedRoom's (a settlement refused because its room is behind the durable head, and the
-// stale-room evictor's close); the last three are evictRoom's (Evict, Quiesce and a failed room's
+// closeReservedRoom's (a settlement whose room's stored history was replaced, and the catch-up's
+// close of such a room); the last three are evictRoom's (Evict, Quiesce and a failed room's
 // eviction).
 func TestAForcedCloseKeepsTheBrowserThatJoinedWhileItRan(t *testing.T) {
 	bob := model.Actor{Kind: "user", ID: "bob"}
@@ -40,21 +40,21 @@ func TestAForcedCloseKeepsTheBrowserThatJoinedWhileItRan(t *testing.T) {
 		loads bool
 		force func(t *testing.T, service *Service, artifactID string, live *crdt.Doc)
 	}{
-		{"a settlement refused from a room behind the head", true, func(t *testing.T, service *Service, artifactID string, live *crdt.Doc) {
+		{"a settlement on a replaced history", true, func(t *testing.T, service *Service, artifactID string, live *crdt.Doc) {
 			state := service.room(artifactID)
 			state.mu.Lock()
 			generation := state.roomGeneration
 			state.mu.Unlock()
-			service.reloadRoomBehindHead(context.Background(), artifactID, state, generation, live,
-				errors.New("the document's room is behind its durable head"))
+			service.reloadReplacedRoom(context.Background(), artifactID, state, generation, live,
+				errors.New("the document's stored history was replaced under its room"))
 		}},
-		{"the stale-room evictor's close", true, func(t *testing.T, service *Service, artifactID string, live *crdt.Doc) {
+		{"the catch-up's close of a replaced history", true, func(t *testing.T, service *Service, artifactID string, live *crdt.Doc) {
 			closed, err := service.closeRoomBehindHead(context.Background(), artifactID, live)
 			if err != nil {
-				t.Fatalf("close the room the evictor found behind the head: %v", err)
+				t.Fatalf("close the room the catch-up found on a replaced history: %v", err)
 			}
 			if !closed {
-				t.Fatal("the evictor's close closed no room")
+				t.Fatal("the catch-up's close closed no room")
 			}
 		}},
 		{"Evict", true, func(t *testing.T, service *Service, artifactID string, _ *crdt.Doc) {
@@ -392,9 +392,9 @@ func TestAForcedCloseKeepsTheFailuresOfTheRoomThatReplacedIt(t *testing.T) {
 		name  string
 		force func(t *testing.T, service *Service, artifactID string, live *crdt.Doc)
 	}{
-		{"the stale-room evictor's close", func(t *testing.T, service *Service, artifactID string, live *crdt.Doc) {
+		{"the catch-up's close of a replaced history", func(t *testing.T, service *Service, artifactID string, live *crdt.Doc) {
 			if _, err := service.closeRoomBehindHead(context.Background(), artifactID, live); err != nil {
-				t.Fatalf("close the room the evictor found behind the head: %v", err)
+				t.Fatalf("close the room the catch-up found on a replaced history: %v", err)
 			}
 		}},
 		{"Evict", func(t *testing.T, service *Service, artifactID string, _ *crdt.Doc) {
@@ -524,8 +524,7 @@ func TestAFailedRoomsUnstoredUpdatesGoToTheRecordThatReplacesIt(t *testing.T) {
 // room that replaces this one, and the work the record counts for it ends there. Left counted, it
 // is an append no callback can ever finish, and the record - or the one registered in its place,
 // which carries what the room's persistence never took - waits on it for ever: its settlement
-// retries without end, never closing a room behind the head (reloadRoomBehindHead), and the
-// record is never released (unusedLocked).
+// retries without end, and the record is never released (unusedLocked).
 //
 // The other is handed on after the hand-over, by ygo's stranded persistence once the eviction has
 // cleared the failure. That one is stored, and it must still carry the class and the credit its

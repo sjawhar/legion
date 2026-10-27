@@ -201,9 +201,9 @@ func TestShutdownSettlesEveryOtherRoomWhileOneRoomsQueuedAppendIsHeld(t *testing
 func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
-	first := &appendGate{entered: make(chan struct{}), release: make(chan struct{})}
-	second := &appendGate{entered: make(chan struct{}), release: make(chan struct{})}
-	appends := &burstStore{VersionedStore: NewPgVersioned(database), room: artifactID, gates: []*appendGate{first, second}}
+	first := &burstGate{entered: make(chan struct{}), release: make(chan struct{})}
+	second := &burstGate{entered: make(chan struct{}), release: make(chan struct{})}
+	appends := &burstStore{VersionedStore: NewPgVersioned(database), room: artifactID, gates: []*burstGate{first, second}}
 	t.Cleanup(func() {
 		first.let()
 		second.let()
@@ -480,15 +480,15 @@ func (s *heldStore) AppendUpdateWithCredit(ctx context.Context, room string, upd
 	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }
 
-// appendGate pairs the channel a burstStore closes once an append reaches it with the channel a
+// burstGate pairs the channel a burstStore closes once an append reaches it with the channel a
 // test closes, at most once, to let that append complete.
-type appendGate struct {
+type burstGate struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
 }
 
-func (g *appendGate) let() { g.once.Do(func() { close(g.release) }) }
+func (g *burstGate) let() { g.once.Do(func() { close(g.release) }) }
 
 // burstStore holds a room's durable appends one at a time, in the order they reach the store,
 // against the gates a test supplies - standing in for a burst of writes that keeps landing while
@@ -504,14 +504,14 @@ type burstStore struct {
 	room  string
 	armed atomic.Bool
 	mu    sync.Mutex
-	gates []*appendGate
+	gates []*burstGate
 	next  int
 }
 
 func (s *burstStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if room == s.room && s.armed.Load() {
 		s.mu.Lock()
-		var gate *appendGate
+		var gate *burstGate
 		if s.next < len(s.gates) {
 			gate = s.gates[s.next]
 			s.next++

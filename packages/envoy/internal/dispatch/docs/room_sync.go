@@ -2,15 +2,21 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"weak"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
+	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/pglisten"
@@ -31,14 +37,24 @@ import (
 //     of that pool's transactions sends through it without taking a second (store.ErrNestedAcquire).
 //
 // A document's durable change is still announced inside the transaction that made it
-// (notifyDocumentChanged, appendUpdateTxClass), not through the sender: Postgres delivers it only
-// if that transaction commits, which is the guarantee a listener reading the head relies on.
+// (announceDocumentChange, appendUpdateTxClass, Ledger.announceAppends), not through the sender:
+// Postgres delivers it only if that transaction commits, which is the guarantee a listener
+// reading the stored rows relies on. What a process does with it is catch its own room of the
+// document up to the stored head (roomCatchUps), so a room another process's write left behind
+// takes that write in and stays open; only a room whose stored history was replaced under it is
+// closed and reloaded.
 
-// documentChangedChannel carries the artifact id of a document whose stored history has just
-// changed, to every envoy-dispatch process. Its payload is the bare artifact id, which is what
-// every build that listens on it reads. A process whose room for that document is now behind the
-// stored head closes it (staleRoomEvictor), and the browser reconnects and re-syncs from the
-// durable document.
+// documentHeadChannel carries each stored change of a document to every envoy-dispatch process,
+// as JSON: {"r": artifact id, "v": the head the change left, "p": the sending process's id
+// (Service.ProcessID)} (announceDocumentHead). A process drops its own and catches its room of
+// that document up when the head is past what the room holds (roomCatchUps.headNotified).
+const documentHeadChannel = "dispatch_doc_head"
+
+// documentChangedChannel carries the bare artifact id of a document whose stored history has just
+// changed, which is what the builds before documentHeadChannel send and read; every change is
+// still announced on it too, beside its documentHeadChannel twin, so those builds keep hearing
+// this one's during a roll. A bare notification that is not the twin of this process's own head
+// announcement wakes a catch-up (roomCatchUps.changed).
 const documentChangedChannel = "dispatch_doc_changed"
 
 // The room-sync channels beside documentChangedChannel. Each has a slot in roomSync.handlers;
@@ -94,36 +110,42 @@ func roomSyncMembers(ctx context.Context, q Queryer) ([]string, error) {
 	return members, nil
 }
 
-// roomSyncHandler is one room-sync channel and what runs its notifications. Every func runs on
-// the channel's own goroutine (roomSyncLane), never on the hub's, so a handler that waits - on a
-// lock, on the database - delays only its own channel's notifications, and the hub keeps reading
-// and pinging the process's listener connection for every subsystem registered on it.
+// roomSyncHandler is one lane's room-sync channels and what runs their notifications. Every func
+// runs on the handler's own goroutine (roomSyncLane), never on the hub's, so a handler that waits
+// - on a lock, on the database - delays only its own lane's notifications, and the hub keeps
+// reading and pinging the process's listener connection for every subsystem registered on it.
 type roomSyncHandler struct {
-	channel string
-	// notified runs once per notification on channel, in the order they arrived; nil drops them.
-	notified func(ctx context.Context, payload string)
+	// channels are the channels whose notifications run on this lane, interleaved in the order
+	// they arrived.
+	channels []roomSyncChannel
 	// connected runs after each LISTEN stands, ahead of every notification that connection
-	// carries; nil for a channel with nothing to catch up.
+	// carries; nil for a lane with nothing to catch up.
 	connected func(ctx context.Context)
 	// nextWake and woke are a clock on the lane's goroutine: nextWake is how long until the
 	// handler next wants woke run when no notification comes first, zero for never. Both or
 	// neither.
 	nextWake func() time.Duration
 	woke     func(ctx context.Context)
+	// attach, when set, is handed the lane once it exists, for a handler that queues work of its
+	// own on it (roomCatchUps.request).
+	attach func(lane *roomSyncLane)
+}
+
+// roomSyncChannel is one channel and what runs each of its notifications; nil drops them.
+type roomSyncChannel struct {
+	name     string
+	notified func(ctx context.Context, payload string)
 }
 
 // roomSync is a process's room-sync handlers, registered on the process's listener hub
 // (pglisten.Hub) for every room-sync channel. What the hub calls only queues a notification on
-// its channel's lane; the handlers run there (handlers).
+// its handler's lane; the handlers run there (handlers).
 type roomSync struct {
 	service *Service
-	// evictor decides documentChangedChannel's notifications: it closes a room another
-	// process's write left behind the stored head.
-	evictor *staleRoomEvictor
-	// awareness, issueOpenChanged, query and answer handle the four channels beside
-	// documentChangedChannel (handlers): documentAwarenessChannel, issueOpenChangedChannel,
-	// documentQueryChannel and documentAnswerChannel. Nil drops that channel's notifications, and
-	// nothing sets them yet outside tests.
+	// awareness, issueOpenChanged, query and answer handle the four channels beside the
+	// document-change channels the service's catch-up follows (handlers): documentAwarenessChannel,
+	// issueOpenChangedChannel, documentQueryChannel and documentAnswerChannel. Nil drops that
+	// channel's notifications, and nothing sets them yet outside tests.
 	awareness, issueOpenChanged, query, answer func(ctx context.Context, payload string)
 	// listening runs after each LISTEN's connected work has run (connected). Nil outside tests: a
 	// test waits on it before the write whose notification it expects, since a notification sent
@@ -132,7 +154,7 @@ type roomSync struct {
 }
 
 func newRoomSync(service *Service) *roomSync {
-	return &roomSync{service: service, evictor: newStaleRoomEvictor(service)}
+	return &roomSync{service: service}
 }
 
 // ProcessID is this process's id among the envoy-dispatch processes on its database, minted once
@@ -154,57 +176,74 @@ func (s *Service) RegisterRoomSync(hub *pglisten.Hub) (run func(ctx context.Cont
 }
 
 // handlers is every channel room sync LISTENs on and what runs each one's notifications: the one
-// place a channel is tied to its handler.
+// place a channel is tied to its handler. documentHeadChannel and documentChangedChannel share
+// the catch-up's lane, because the follower tells a write's bare announcement from an old build's
+// by the head announcement right before it (roomCatchUps.changed).
 func (r *roomSync) handlers() []roomSyncHandler {
+	catchUps := r.service.catchUps
 	return []roomSyncHandler{
 		{
-			channel:   documentChangedChannel,
-			notified:  r.evictor.notified,
+			channels: []roomSyncChannel{
+				{name: documentHeadChannel, notified: catchUps.headNotified},
+				{name: documentChangedChannel, notified: catchUps.changed},
+			},
 			connected: r.connected,
-			nextWake:  r.evictor.wakeIn,
-			woke:      r.evictor.woke,
+			nextWake:  catchUps.wakeIn,
+			woke:      catchUps.woke,
+			attach:    catchUps.attach,
 		},
-		{channel: documentAwarenessChannel, notified: r.awareness},
-		{channel: issueOpenChangedChannel, notified: r.issueOpenChanged},
-		{channel: documentQueryChannel, notified: r.query},
-		{channel: documentAnswerChannel, notified: r.answer},
+		{channels: []roomSyncChannel{{name: documentAwarenessChannel, notified: r.awareness}}},
+		{channels: []roomSyncChannel{{name: issueOpenChangedChannel, notified: r.issueOpenChanged}}},
+		{channels: []roomSyncChannel{{name: documentQueryChannel, notified: r.query}}},
+		{channels: []roomSyncChannel{{name: documentAnswerChannel, notified: r.answer}}},
 	}
 }
 
-// connected is what runs after each LISTEN stands, on documentChangedChannel's lane: every
-// notification sent while the hub had no connection reached nobody and is never sent again, so
-// each room this process has loaded is examined again (staleRoomEvictor.sweep). The test hook
-// runs after it, so a test that waits on the hook waits for the sweep too.
+// connected is what runs after each LISTEN stands, on the catch-up's lane: every notification sent
+// while the hub had no connection reached nobody and is never sent again, so each room this
+// process has loaded is caught up (roomCatchUps.sweep). The test hook runs after it, so a test
+// that waits on the hook waits for the sweep too.
 func (r *roomSync) connected(ctx context.Context) {
-	r.evictor.sweep(ctx)
+	r.service.catchUps.sweep(ctx)
 	if r.listening != nil {
 		r.listening()
 	}
 }
 
-// register registers every handler's channel on hub and returns what runs the lanes. Each handler
+// register registers every handler's channels on hub and returns what runs the lanes. Each handler
 // with work to do gets a lane of its own, and what the hub calls - on its own goroutine, which
-// must not block - only queues work there. A channel whose handler is all nil gets no lane: it is
-// still listened on, and its notifications are dropped as they arrive.
+// must not block - only queues work there. A channel with no func is still listened on, and its
+// notifications are dropped as they arrive; a handler with no work at all gets no lane.
 func (r *roomSync) register(hub *pglisten.Hub) (run func(ctx context.Context)) {
 	handlers := r.handlers()
 	lanes := make([]*roomSyncLane, 0, len(handlers))
 	for _, handler := range handlers {
-		if handler.notified == nil && handler.connected == nil && handler.woke == nil {
-			hub.Handle(handler.channel, func(string) {})
+		working := handler.connected != nil || handler.woke != nil
+		for _, channel := range handler.channels {
+			working = working || channel.notified != nil
+		}
+		if !working {
+			for _, channel := range handler.channels {
+				hub.Handle(channel.name, func(string) {})
+			}
 			continue
 		}
 		lane := newRoomSyncLane(handler)
 		lanes = append(lanes, lane)
-		if notified := handler.notified; notified != nil {
-			hub.Handle(handler.channel, func(payload string) {
-				lane.push(func(ctx context.Context) { notified(ctx, payload) })
-			})
-		} else {
-			hub.Handle(handler.channel, func(string) {})
+		for _, channel := range handler.channels {
+			if notified := channel.notified; notified != nil {
+				hub.Handle(channel.name, func(payload string) {
+					lane.push(func(ctx context.Context) { notified(ctx, payload) })
+				})
+			} else {
+				hub.Handle(channel.name, func(string) {})
+			}
 		}
 		if connected := handler.connected; connected != nil {
 			hub.OnConnected(func() { lane.push(connected) })
+		}
+		if handler.attach != nil {
+			handler.attach(lane)
 		}
 	}
 	return func(ctx context.Context) {
@@ -221,10 +260,10 @@ func (r *roomSync) register(hub *pglisten.Hub) (run func(ctx context.Context)) {
 	}
 }
 
-// roomSyncLane runs one channel's work in arrival order on a goroutine of its own. Its queue has
+// roomSyncLane runs one handler's work in arrival order on a goroutine of its own. Its queue has
 // no bound, so the hub never waits on a handler: it is as long as the notifications the handler
-// has yet to reach. The evictor's timed wake (roomSyncHandler.nextWake, woke) is this lane's own
-// timer too, so no part of the evictor runs on the hub's goroutine.
+// has yet to reach. The catch-up's timed wake (roomSyncHandler.nextWake, woke) is this lane's own
+// timer too, so no part of the catch-up runs on the hub's goroutine.
 type roomSyncLane struct {
 	handler roomSyncHandler
 	mu      sync.Mutex
@@ -388,363 +427,584 @@ func (s *roomSyncSender) close() {
 	s.drop()
 }
 
-// notifyDocumentChangedStatement names the channel itself, not a parameter, so the statement
-// reads as what it is; the artifact id is the parameter, because it is a value.
-const notifyDocumentChangedStatement = `select pg_notify('` + documentChangedChannel + `', $1)`
+// announceDocumentHead is the select list that announces a document's stored change to every
+// envoy-dispatch process, given the SQL expressions of the document's id (text), the head the
+// change leaves (bigint) and the sending process's id (text): a documentHeadChannel notification
+// whose payload is {"r": room, "v": head, "p": process}, then the bare id on
+// documentChangedChannel, which is what the builds before documentHeadChannel read. Head first and
+// bare second, in one select list, so a listener hears the two one after the other (Postgres
+// delivers one transaction's notifications together, in the order they were sent): that is how
+// room sync tells the bare twin of its own process's announcement from an old build's bare
+// announcement (roomCatchUps.changed).
+//
+// The channels are named in the statement, not passed, so the statement reads as what it is.
+func announceDocumentHead(room, head, process string) string {
+	return `pg_notify('` + documentHeadChannel + `', json_build_object('r', ` + room + `, 'v', ` + head + `, 'p', ` + process + `)::text), ` +
+		`pg_notify('` + documentChangedChannel + `', ` + room + `)`
+}
 
-// notifyDocumentChanged announces room's durable change inside tx, the transaction that made it,
-// which holds the document's advisory lock (lockDocumentRoom). It is a rebuild's announcement,
-// one per rebuild; an append folds the same pg_notify into its own insert rather than spending a
-// second round trip on it under that lock (appendUpdateTxClass).
+// announceDocumentChangeStatement announces room ($2, as text) at the head its history stands at
+// now in the transaction ($1 is the same id as the uuid the rows are keyed by), for the sender $3.
+var announceDocumentChangeStatement = `select ` + announceDocumentHead(
+	"$2::text", "(select coalesce(max(version), 0) from doc_updates where artifact_id = $1)", "$3::text")
+
+// announceDocumentChange announces room's durable change inside tx, the transaction that made it,
+// which holds the document's advisory lock (lockDocumentRoom), with the head that transaction
+// leaves and processID, the sending process. It is a rebuild's, a prune's and a deletion's
+// announcement, one per transaction; an append folds the same announcement into its own insert
+// rather than spending a second round trip on it under that lock (appendUpdateTxClass), and a
+// transaction a caller joined announces once at its commit (Ledger.announceAppends). A compaction
+// announces nothing: it changes neither the document's state nor its head.
 //
 // Inside that transaction for two reasons. Postgres delivers a notification only if the
 // transaction that sent it commits, so an append the gate refused (ErrRoomBehindHead), or one
-// whose commit failed, evicts nobody's room: nothing announces a change the store does not hold.
-// And the lock orders the announcement with the history it announces - a listener that hears this
-// and reads the head (currentUpdateCursor) reads one at or past the version this transaction
-// wrote, never one before it.
+// whose commit failed, wakes nobody's catch-up: nothing announces a change the store does not
+// hold. And the lock orders the announcement with the history it announces - a listener that
+// hears this and reads the stored rows (catchUpRoom) reads a head at or past the version this
+// transaction wrote, never one before it.
 //
 // It is a statement, not a trigger on doc_updates, and there is no queue table: a trigger or a
 // table would need a migration, and Dispatch's pre-deploy census refuses a migration touching a
 // table at or above 1 GiB, which doc_updates is. Nothing durable is wanted either. What a process
-// does with this - close the room it holds - is worth nothing once that process is gone, so rows
-// nobody would ever read back are the whole cost of a table.
-func notifyDocumentChanged(ctx context.Context, tx pgx.Tx, room string) error {
-	if _, err := tx.Exec(ctx, notifyDocumentChangedStatement, room); err != nil {
-		return fmt.Errorf("notify the document's change: %w", err)
+// does with this - catch up the room it holds - is worth nothing once that process is gone, so
+// rows nobody would ever read back are the whole cost of a table.
+func announceDocumentChange(ctx context.Context, tx pgx.Tx, room, processID string) error {
+	if _, err := tx.Exec(ctx, announceDocumentChangeStatement, room, room, processID); err != nil {
+		return fmt.Errorf("announce the document's change: %w", err)
 	}
 	return nil
 }
 
-// staleRoomEvictInterval is the least time between two evictions of one room. Every browser
-// update is its own append (New sets PersistCoalesceWindow = -1), so one person typing on the
-// other process notifies several times a second; evicting on each would close the room under its
-// readers again before the first reconnect had finished re-syncing, and a room under steady
-// editing elsewhere would never be readable here at all. Two seconds is the service's own idea of
-// "the writing has paused" - the settle delay New defaults to - and it is far past the round trip
-// an eviction asks of a browser (a close, a reconnect, a sync). What it costs is a room left
-// behind by the writes inside the window, and it costs it only until that window ends: the room
-// is remembered as the interval refuses it and re-examined then (woke), whether or not anything
-// writes the document again - the last notification of a burst is one of the refused ones, and
-// nothing else comes back for it. Meanwhile every durable write from that room is refused
-// (ErrRoomBehindHead), so what a reader of it sees is stale, never written over the document.
-const staleRoomEvictInterval = 2 * time.Second
+// documentHead is a documentHeadChannel payload: the document (R), the head its change left (V)
+// and the process that made it (P).
+type documentHead struct {
+	R string `json:"r"`
+	V int64  `json:"v"`
+	P string `json:"p"`
+}
 
-// staleRoomEvictor closes the rooms this process holds for documents another process has written.
-// It decides documentChangedChannel's notifications on that channel's lane (roomSync.handlers),
-// one goroutine of its own, and that decision is two reads of max(version), not one: an unlocked
-// read through the pool, which holds nothing, and - for a room that read finds behind - a second
-// read under the document's advisory xact lock (roomBehindDurableHead), which waits for whatever
-// writer holds that lock, the other process's append among them. Every decision runs on that one
-// lane - each notification, the sweep after each LISTEN, and each wake - so no two decisions of
-// the evictor ever run side by side, and one such wait is every other room's document-changed
-// notification waiting too. The hub's own goroutine waits for none of it: it only queues.
+// remoteUpdateOrigin tags the Yjs transaction a catch-up applies to a room (catchUpRoom): rows
+// another process stored, already durable, which the room's persistence must not store again. It
+// carries the suppression slot that holds them from it, finished by the room's update observer
+// before ygo's persistence observer hands the update on (onLoadDocument), exactly as a published
+// live write's is (liveWriteOrigin). Being non-zero sized keeps each origin distinct, since ygo
+// compares origins by interface equality.
+type remoteUpdateOrigin struct{ slot *suppressSlot }
+
+// catchUpOutcome is what one catch-up of a room found (catchUpRoom).
+type catchUpOutcome int
+
+const (
+	// catchUpCurrent: the room already held every stored row; nothing was applied.
+	catchUpCurrent catchUpOutcome = iota
+	// catchUpApplied: the room took in the stored rows it lacked, as one batch.
+	catchUpApplied
+	// catchUpReplaced: the stored history is no longer the one the room holds a prefix of
+	// (historyReplaced), so no row can bring it up to date: the room is closed and reloaded.
+	catchUpReplaced
+	// catchUpGone: the room no longer holds the instance asked about, or none at all.
+	catchUpGone
+)
+
+// catchUpStatement reads, in one statement and so one snapshot, the bounds of room $1's stored
+// history - its lowest version and its head (a prune's checkpoint ceiling while one stands, as
+// headVersion has it) - and every row past $2, the version the room's instance holds every update
+// through, up to that head. The bounds come back on every row, and on a row of their own with no
+// version when there is nothing past $2.
+const catchUpStatement = `
+	with bounds as (
+		select coalesce(min(version), 0) as low,
+		       coalesce((select ceiling from doc_checkpoints where artifact_id = $1), max(version), 0) as high
+		from doc_updates where artifact_id = $1
+	)
+	select bounds.low, bounds.high, stored.version, stored.update
+	from bounds
+	left join doc_updates stored
+		on stored.artifact_id = $1 and stored.version > $2 and stored.version <= bounds.high
+	order by stored.version`
+
+// storedRow is one stored update a catch-up read.
+type storedRow struct {
+	version int64
+	update  []byte
+}
+
+// readCatchUp is catchUpStatement through q: the lowest stored version and the head (0 for none),
+// and the rows past through in version order.
+func readCatchUp(ctx context.Context, q Queryer, room string, through int64) (low, high int64, rows []storedRow, err error) {
+	result, err := q.Query(ctx, catchUpStatement, room, through)
+	if err != nil {
+		return 0, 0, nil, fmt.Errorf("read the document's stored updates past its room: %w", err)
+	}
+	defer result.Close()
+	for result.Next() {
+		var version *int64
+		var update []byte
+		if err := result.Scan(&low, &high, &version, &update); err != nil {
+			return 0, 0, nil, fmt.Errorf("read the document's stored updates past its room: %w", err)
+		}
+		if version != nil {
+			rows = append(rows, storedRow{version: *version, update: update})
+		}
+	}
+	if err := result.Err(); err != nil {
+		return 0, 0, nil, fmt.Errorf("read the document's stored updates past its room: %w", err)
+	}
+	return low, high, rows, nil
+}
+
+// catchUpRoom brings live, room's resident instance, up to the stored head: it reads the stored
+// rows past the instance's cursor through q (catchUpStatement, one snapshot), skips the ones the
+// instance already holds - its own browsers' appends and published live writes made while it was
+// behind (roomCursor.above) - and applies the rest as one batch, the way publishLiveUpdate applies
+// a committed write: a Yjs transaction tagged remoteUpdateOrigin, under a suppression slot so the
+// room's persistence does not store again what is already stored, then a broadcast to the room's
+// peers. Each applied row then enters the instance's hold (so an upload on this process consumes
+// its pending-author rows, as for a reload) and its cursor, which folds whatever the instance
+// appended past the gap. The hold and the cursor move after the update is in the document, not
+// before: a derived write reads the cursor under the document's advisory lock, which this does not
+// hold, and a cursor ahead of the document would let a settlement version text missing the rows
+// it says are held.
 //
-// The locked confirmation is real and it stays, because without it a write of this process's
-// own, between its commit and its own cursor advance, reads as another process's and a healthy
-// room is closed mid-write (documentChanged). The interval (staleRoomEvictInterval) is asked
-// before it, so a burst on the other process does not pay for one locked confirmation per
-// notification only to be refused afterwards: the notifications that reach the lock are the ones
-// an eviction can follow, and the eviction itself is a room close, which is rare and is work the
-// close must do anyway.
-type staleRoomEvictor struct {
+// It writes through srv.GetDoc and roomServer.holdOpen, never Server.Apply, which would load an
+// absent room and wait on a failed one: a room that has gone, or that a close holds, is left
+// alone (catchUpGone), and the room that replaces it loads at the head. One catch-up of an
+// instance runs at a time (roomInstance.catchUp); the caller holds the document's advisory lock
+// only when it already did (a settlement, reading through its own transaction), and the follower
+// (roomCatchUps) never takes it while it holds that mutex. A history that is no longer the one the
+// instance holds a prefix of is reported, not applied (catchUpReplaced): the caller closes the
+// room. A batch that cannot be merged, applied or broadcast fails the room, which reloads from
+// the store, and is returned as the error.
+//
+// After a batch the document must have nothing pending: every row past the cursor was applied,
+// and each depends only on rows before it, so an item left waiting for a missing dependency is a
+// store that holds a state the document never held (plan D3.8). That is logged at ERROR, naming
+// the room and the versions, and the room is left as it is.
+func (s *Service) catchUpRoom(ctx context.Context, q Queryer, room string, live *crdt.Doc) (catchUpOutcome, error) {
+	instance := s.instanceOf(live)
+	if instance == nil {
+		return catchUpGone, nil
+	}
+	instance.catchUp.Lock()
+	defer instance.catchUp.Unlock()
+	if s.srv.GetDoc(room) != live {
+		return catchUpGone, nil
+	}
+	through, above := instance.cursor.held()
+	low, high, rows, err := readCatchUp(ctx, q, room, through)
+	if s.catchUps.afterRead != nil {
+		s.catchUps.afterRead(room)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if historyReplaced(through, high, low != 0 && low <= through) {
+		return catchUpReplaced, nil
+	}
+	versions := make([]int64, 0, len(rows))
+	updates := make([][]byte, 0, len(rows))
+	for _, row := range rows {
+		if _, held := slices.BinarySearch(above, row.version); held {
+			continue
+		}
+		versions = append(versions, row.version)
+		updates = append(updates, row.update)
+	}
+	if len(updates) == 0 {
+		return catchUpCurrent, nil
+	}
+	batch, err := mergeUpdates(updates)
+	if err != nil {
+		err = fmt.Errorf("merge the stored updates a catch-up applies: %w", err)
+		s.failRoom(room, err)
+		return 0, err
+	}
+	applied, open, err := s.applyRemoteBatch(room, live, batch)
+	if !open {
+		return catchUpGone, nil
+	}
+	if err != nil {
+		err = fmt.Errorf("apply the stored updates a catch-up read: %w", err)
+		s.failRoom(room, err)
+		return 0, err
+	}
+	for _, version := range versions {
+		instance.hold.add(version)
+		advanceRoomCursor(&instance.cursor, persistence.Version(version))
+	}
+	if pending := live.PendingStats(); pending.Items > 0 || pending.DeleteRanges > 0 {
+		slog.Error("dispatch: a document room holds updates it cannot place after catching up to the stored head",
+			"room", room, "versions", versions, "pending_items", pending.Items, "pending_delete_ranges", pending.DeleteRanges)
+	}
+	if applied == nil {
+		return catchUpApplied, nil
+	}
+	if err := s.srv.BroadcastUpdate(withOwnerVerified(WithoutRecoveryWait(ctx)), room, applied); err != nil &&
+		!errors.Is(err, websocket.ErrRoomNotFound) && !errors.Is(err, websocket.ErrServerShutdown) && !errors.Is(err, ErrServiceUnavailable) {
+		// The room holds what its browsers did not receive; failing it closes them, and they sync
+		// the stored document when they reconnect.
+		err = fmt.Errorf("broadcast the stored updates a catch-up applied: %w", err)
+		s.failRoom(room, err)
+		return 0, err
+	}
+	return catchUpApplied, nil
+}
+
+// applyRemoteBatch applies batch to live under a suppression slot of its own, holding the room
+// open (holdOpen) so no close retires its persistence worker under the commit. It returns what the
+// room recorded for the batch's transaction - nil when the batch changed nothing, whose slot it
+// cancels, since a slot left queued holds the worker at the room's next update - and whether the
+// room still held live; a room that does not writes nothing.
+func (s *Service) applyRemoteBatch(room string, live *crdt.Doc, batch []byte) (applied []byte, open bool, err error) {
+	release, open := s.srv.holdOpen(room, live)
+	if !open {
+		return nil, false, nil
+	}
+	defer release()
+	slot := s.prepareSuppressedPersistence(room)
+	origin := &remoteUpdateOrigin{slot: slot}
+	unsubscribe := live.OnUpdate(func(update []byte, updateOrigin any) {
+		if updateOrigin == origin {
+			applied = append([]byte(nil), update...)
+		}
+	})
+	err = crdt.ApplyUpdateV1(live, batch, origin)
+	unsubscribe()
+	if applied == nil {
+		s.cancelSuppressedPersistence(room, slot)
+	}
+	return applied, true, err
+}
+
+// historyReplacedUnderLock reads, under the document's advisory lock, whether room's stored history
+// is replaced under live's cursor (historyReplaced), for the follower to confirm a verdict before
+// it closes the room. Read without the lock the verdict can be this process's own write between
+// its cursor advance and its commit - a live write records its versions on the cursor before it
+// commits (Ledger.takeRoomCursors), and so does settlement's own repair - which reads as a head
+// below the cursor; under the lock no such write is in flight. The follower calls it holding no
+// catch-up mutex, so the lock order (advisory lock, then that mutex) holds.
+func (s *Service) historyReplacedUnderLock(ctx context.Context, room string, live *crdt.Doc) (bool, error) {
+	cursor := s.cursorOf(live)
+	if cursor == nil {
+		return false, nil
+	}
+	tx, err := s.store.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+		return false, err
+	}
+	through := cursor.heldThrough()
+	var low, high int64
+	if err := tx.QueryRow(ctx, `
+		select coalesce(min(version), 0), coalesce(max(version), 0) from doc_updates where artifact_id = $1
+	`, room).Scan(&low, &high); err != nil {
+		return false, fmt.Errorf("read the document's stored bounds: %w", err)
+	}
+	return historyReplaced(through, high, low != 0 && low <= through), nil
+}
+
+// scheduleCatchUp queues one catch-up of live, room's instance that is still loading
+// (keepInstance): ygo publishes it once its load hook returns, and the catch-up waits for that
+// (roomCatchUps.takeLoading).
+func (s *Service) scheduleCatchUp(room string, live *crdt.Doc) {
+	s.catchUps.schedule(room, live)
+}
+
+// catchUpRetryInterval is the first wait before a room whose catch-up reached no verdict - a read
+// that failed, a close of a replaced history that failed or that something of this process held
+// off - is tried again, doubling for each such attempt in a row up to catchUpRetryBackoffMax.
+// Nothing else comes back for such a room: the notification that brought it here is spent, and a
+// document nobody writes again notifies nobody again. At the ceiling a room that keeps getting no
+// answer costs one wake a minute rather than one every interval for the life of the process. It
+// adds no jitter, for it is one process re-reading one of its own rooms, which nothing else is in
+// step with.
+const (
+	catchUpRetryInterval   = 2 * time.Second
+	catchUpRetryBackoffMax = time.Minute
+)
+
+// catchUpRetryBackoff is the wait before the attempt-th try in a row (from 1) of a room whose
+// catch-ups reach no verdict.
+func catchUpRetryBackoff(attempt int) time.Duration {
+	wait := catchUpRetryInterval
+	for n := 1; n < attempt && wait < catchUpRetryBackoffMax; n++ {
+		wait *= 2
+	}
+	return min(wait, catchUpRetryBackoffMax)
+}
+
+// catchUpLoadingWait is how often, and catchUpLoadingTimeout for how long, a catch-up scheduled for
+// a room still loading (keepInstance) looks again for ygo to publish it.
+const (
+	catchUpLoadingWait    = 10 * time.Millisecond
+	catchUpLoadingTimeout = 5 * time.Second
+)
+
+// roomCatchUps is the follower: it keeps this process's rooms at the stored head as other
+// processes append, on documentChangedChannel's lane (roomSync.handlers), one goroutine that also
+// carries documentHeadChannel, so the two channels' notifications are decided in the order they
+// arrived. What wakes a catch-up of a room:
+//
+//   - a documentHeadChannel notification from another process for a head past the room's cursor
+//     (headNotified); this process's own (p is its id) and one the room already holds wake none;
+//   - a bare documentChangedChannel notification (changed): an old build's write during a roll
+//     sends only that, and so does every write as the twin of its documentHeadChannel
+//     notification, which is dropped when the head before it was this process's own;
+//   - each LISTEN that stands, for every room this process has loaded (sweep): a notification
+//     sent while the hub had no connection reached nobody;
+//   - each room instance that starts (schedule), whose load can have raced an append;
+//   - a browser append the gate refused because the room's history was replaced
+//     (servicePersistenceAdapter.StoreUpdateContext), whose catch-up closes the room;
+//   - a retry, for a room whose last catch-up reached no verdict (woke).
+//
+// Requests coalesce per room: a burst of notifications for one room that arrive before its
+// catch-up runs costs that one catch-up, and a catch-up that finds the room at the head ends with
+// that one read.
+type roomCatchUps struct {
 	service *Service
-	// now is the clock the interval is measured on, the service's; a test moves its own.
+	// now is the clock retries are timed on, the service's; a test moves its own.
 	now func() time.Time
-	// handled runs after each notification is decided. Nil outside tests: a test reads it to
-	// know that notification was decided, and how.
-	handled func(artifactID string, evicted bool)
+	// decided runs after each notification is decided, afterRead after each catch-up's read. Nil
+	// outside tests: a test reads them to know a notification was decided and whether it read.
+	decided   func(room string)
+	afterRead func(room string)
+	// ownHead is the room of the last documentHeadChannel notification, when this process sent it:
+	// the bare notification right after it is its twin (announceDocumentHead). Only the lane reads
+	// and writes it.
+	ownHead string
 
 	mu sync.Mutex
-	// evicted is when each room was last evicted, holding only the rooms evicted within the
-	// interval: every record drops the entries past it, so this is at most the rooms evicted in
-	// the last staleRoomEvictInterval.
-	evicted map[string]time.Time
-	// deferred is when each room waiting to be re-examined may be: a room the interval refused,
-	// at its last eviction plus staleRoomEvictInterval (mayEvict), and a room whose
-	// re-examination reached no verdict, one backoff past the attempt that got no answer
-	// (armRetry). The wake takes out every room whose window has passed (dueRooms), and only a
-	// re-examination that reached a verdict leaves it out, so this holds at most one entry per
-	// room resident here.
+	// lane is the lane that runs the catch-ups (attach), nil until room sync is registered.
+	lane *roomSyncLane
+	// pending holds each room whose catch-up is queued on the lane and has not started: a request
+	// for it meanwhile adds nothing.
+	pending map[string]bool
+	// loading holds, for each room whose instance scheduled a catch-up while still loading, that
+	// instance and how long to wait for ygo to publish it.
+	loading map[string]loadingRoom
+	// deferred is when each room waiting to be tried again may be, and attempts how many tries in
+	// a row reached no verdict for it; a verdict takes the room out of both (settled).
 	deferred map[string]time.Time
-	// attempts is how many re-examinations in a row have reached no verdict for each room: what
-	// armRetry backs that room's next window off by. The first such attempt makes the entry, and
-	// that room's next verdict takes it out (reachedVerdict, recordEviction), so this holds at
-	// most one entry per room in deferred.
 	attempts map[string]int
 }
 
-func newStaleRoomEvictor(service *Service) *staleRoomEvictor {
-	return &staleRoomEvictor{
+// loadingRoom is a room instance that scheduled its own catch-up while ygo was still loading it.
+type loadingRoom struct {
+	instance weak.Pointer[crdt.Doc]
+	until    time.Time
+}
+
+func newRoomCatchUps(service *Service) *roomCatchUps {
+	return &roomCatchUps{
 		service:  service,
 		now:      service.now,
-		evicted:  map[string]time.Time{},
+		pending:  map[string]bool{},
+		loading:  map[string]loadingRoom{},
 		deferred: map[string]time.Time{},
 		attempts: map[string]int{},
 	}
 }
 
-// sweep re-examines every room this process has loaded; it runs after each LISTEN stands
-// (roomSync.connected). It covers the hub's own window rather than leaving the room behind
-// to its idle timeout - roomIdleTimeout is how long a room stays resident after its last peer
-// leaves, so a room with a browser in it never reaches it. The notifications sent while the
-// hub had no connection - a redial backs off as far as thirty seconds
-// (pglisten.RedialBackoff) - each reached nobody, nothing sends them again, and a document nobody
-// writes again notifies nobody again. service.roomLoads is every room this process has loaded,
-// and nothing here takes an entry out of it: an entry goes when its document is collected and not
-// before (keepInstance), so this ranges over every room loaded since the last collection. An
-// entry whose room has gone costs the interval's lookup and the server's (mayEvict, srv.GetDoc)
-// and no database read, since the head is read only for a room that is still resident.
-func (e *staleRoomEvictor) sweep(ctx context.Context) {
-	e.service.roomLoads.Range(func(room, _ any) bool {
-		e.documentChanged(ctx, room.(string))
+// attach makes lane the one that runs the catch-ups.
+func (c *roomCatchUps) attach(lane *roomSyncLane) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lane = lane
+}
+
+// schedule queues a catch-up of live, room's instance still loading (keepInstance). Before room
+// sync is registered there is no lane and nothing to queue: the sweep after its first LISTEN
+// catches the room up.
+func (c *roomCatchUps) schedule(room string, live *crdt.Doc) {
+	c.mu.Lock()
+	if c.lane == nil {
+		c.mu.Unlock()
+		return
+	}
+	c.loading[room] = loadingRoom{instance: weak.Make(live), until: c.now().Add(catchUpLoadingTimeout)}
+	c.mu.Unlock()
+	c.request(room)
+}
+
+// request queues one catch-up of room on the lane, unless one is queued already. Before room sync
+// is registered there is no lane, and nothing is queued: the sweep after its first LISTEN catches
+// up every room this process has loaded.
+func (c *roomCatchUps) request(room string) {
+	c.mu.Lock()
+	if c.pending[room] || c.lane == nil {
+		c.mu.Unlock()
+		return
+	}
+	c.pending[room] = true
+	lane := c.lane
+	c.mu.Unlock()
+	lane.push(func(ctx context.Context) {
+		c.mu.Lock()
+		delete(c.pending, room)
+		c.mu.Unlock()
+		c.catchUp(ctx, room)
+	})
+}
+
+// headNotified is documentHeadChannel's handler.
+func (c *roomCatchUps) headNotified(_ context.Context, payload string) {
+	var head documentHead
+	if err := json.Unmarshal([]byte(payload), &head); err != nil || head.R == "" {
+		c.ownHead = ""
+		slog.Warn("dispatch: drop a document head notification that does not decode", "payload", payload, "error", err)
+		return
+	}
+	defer c.noteDecided(head.R)
+	if head.P == c.service.processID {
+		c.ownHead = head.R
+		return
+	}
+	c.ownHead = ""
+	if live := c.service.srv.GetDoc(head.R); live != nil {
+		if cursor := c.service.cursorOf(live); cursor != nil && head.V <= cursor.heldThrough() {
+			return
+		}
+	}
+	c.request(head.R)
+}
+
+// changed is documentChangedChannel's handler: the bare artifact id. It is the twin of the
+// documentHeadChannel notification right before it when that one was this process's own, and is
+// dropped; any other is an old build's write, or a new build's whose head this process had no
+// reason to read for - a prune lowering the head reads as a head the room already holds - and
+// asks for a catch-up, which a burst coalesces.
+func (c *roomCatchUps) changed(_ context.Context, room string) {
+	defer c.noteDecided(room)
+	own := c.ownHead == room
+	c.ownHead = ""
+	if own {
+		return
+	}
+	c.request(room)
+}
+
+func (c *roomCatchUps) noteDecided(room string) {
+	if c.decided != nil {
+		c.decided(room)
+	}
+}
+
+// sweep catches up every room this process has loaded; it runs after each LISTEN stands
+// (roomSync.connected). service.roomLoads is every room loaded since its document was last
+// collected (keepInstance), so this ranges over every resident room; an entry whose room has gone
+// costs a lookup and no database read.
+func (c *roomCatchUps) sweep(ctx context.Context) {
+	c.service.roomLoads.Range(func(room, _ any) bool {
+		c.catchUp(ctx, room.(string))
 		return true
 	})
 }
 
-// woke is the lane's wake (roomSyncHandler.woke, asked of wakeIn): the rooms waiting to be
-// re-examined, re-examined on the lane once their windows have passed. Nothing else would
-// re-examine them - every notification inside the window is refused, the last of a burst is one
-// of those, and a document nobody writes again notifies nobody again - so without this the
-// refusal is a notification dropped.
-//
-// This is inside the interval's rule, not around it: the rule is the least time between two
-// evictions of one room (staleRoomEvictInterval), and a room re-examined here has waited out
-// exactly that window. It then goes through the whole decision again - GetDoc, the cursor, the
-// open live write, the unlocked read and the locked confirmation - so a room that is no longer
-// behind, no longer resident or no longer this process's evicts nothing and simply leaves the set.
-// A room whose re-examination reaches no verdict - a read that failed, an eviction that failed, an
-// open live write of this process - does not leave it either: dueRooms has spent that room's
-// window, and armRetry gives it another, further out for each attempt in a row, so the next wake
-// tries it again, and a room that goes on getting no answer is tried once a minute rather than
-// every window for the life of the process (staleRoomRetryBackoffMax).
-func (e *staleRoomEvictor) woke(ctx context.Context) {
-	for _, room := range e.dueRooms() {
-		e.documentChanged(ctx, room)
+// woke is the lane's wake (roomSyncHandler.woke, asked of wakeIn): each room whose retry is due,
+// caught up again.
+func (c *roomCatchUps) woke(ctx context.Context) {
+	for _, room := range c.dueRooms() {
+		c.catchUp(ctx, room)
 	}
 }
 
-// notified is documentChangedChannel's handler: each notification's artifact id, decided on the
-// lane.
-func (e *staleRoomEvictor) notified(ctx context.Context, artifactID string) {
-	evicted := e.documentChanged(ctx, artifactID)
-	if e.handled != nil {
-		e.handled(artifactID, evicted)
+// catchUp is one catch-up of room's resident instance on the lane (catchUpRoom, read through the
+// pool), and what follows from it: a replaced history closes the room (closeReplaced), and a
+// catch-up that reached no verdict is tried again later (armRetry). A room with no instance
+// resident has nothing to catch up, but one still loading is looked for again shortly.
+func (c *roomCatchUps) catchUp(ctx context.Context, room string) {
+	service := c.service
+	live := service.srv.GetDoc(room)
+	if !c.takeLoading(room, live) {
+		return
 	}
-}
-
-// documentChanged closes this process's room for artifactID when the write that announced the
-// change left that room behind the document's durable head, and reports whether it did.
-//
-// Every append notifies, this process's own included: the statement cannot tell who will hear it.
-// The room's cursor is what tells them apart - the durable version the resident instance holds
-// every update through (roomCursor). This process's own write advances it before it drops the
-// document's advisory lock: a browser's append inside the session lock it appended under
-// (appendUpdate), a transaction's write before the commit that drops its lock
-// (Ledger.takeRoomCursors), a settlement's own repair likewise (settleRoomWithin). The publish
-// of a committed write records its version again as it lands in the room (publishLiveUpdate).
-// Another process's write advances no cursor here, so its room stands behind the head.
-//
-// The read through the pool is the cheap half: it holds nothing, and a room it finds at the head
-// is a room nothing is wrong with. A room it finds behind is read again under that lock
-// (roomBehindDurableHead), where this process's own writes are either finished - cursor advanced
-// - or still holding the lock, so a difference seen there is one no write of this process
-// explains. Without the second read the window between a write's commit and its own cursor
-// advance reads as another process's change, and the evictor closes a healthy room mid-write.
-//
-// Equality, not `cursor < head`, for refuseRoomBehindHead's reason: a prune or a deletion lowers
-// the head, and a room resident across one stands ahead of a history the store no longer has,
-// which is as stale as standing behind it.
-//
-// A return from here is one of three things, and which of them it is decides whether a deferred
-// room's window is spent. The interval's refusal is neither a verdict nor an attempt: it read
-// nothing, so it says nothing about the room, and it touches neither reachedVerdict nor armRetry
-// - mayEvict has already deferred the room on a window of its own, and a burst of refusals that
-// armed the retry instead would push the backoff out for a room nothing is wrong with. A verdict
-// - no room here, no cursor, the room at the head, a room behind the head that the close
-// (closeRoomBehindHead) closed, a room that no longer holds the instance this decision read, or a
-// room another close answers for (one that failed, which its own eviction reloads, or one a
-// refused settlement reserved for the instance this decision read) - says what was to become of
-// the room, so the window that brought it here has done its work, and the run of attempts that
-// got no answer before it, if there was one, ends with it (reachedVerdict). A head read that
-// failed, a close that failed, or a close something of this process held off (an open live
-// write, or a reservation for an instance this room no longer holds) is an attempt that got no
-// answer, so the room is armed again (armRetry) and the next wake tries it: the notification that
-// brought it here is already spent - the last of a burst is one the interval refuses - and a
-// dropped attempt leaves a connected reader holding text the store replaced, with nothing left to
-// re-examine the room (roomIdleTimeout counts from the last peer leaving, and that reader has not
-// left).
-func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID string) bool {
-	// The interval first, ahead of the room lookup, the unlocked head read, and the locked
-	// confirmation behind that: a room the interval refuses evicts nothing whatever those reads
-	// find, so asking it here gives every notification the same answer - and the same handled
-	// note - as asking it last did. What it saves is the waiting. A burst on the other process
-	// is several notifications a second for a room that really is behind, so the unlocked read
-	// passes each of them through to the confirmation under the document's lock, behind the
-	// append that is writing it, only for the interval to refuse them.
-	if !e.mayEvict(artifactID) {
-		return false
-	}
-	service := e.service
-	live := service.srv.GetDoc(artifactID)
 	if live == nil {
-		// No room here for that document: the notification was for a room the other process
-		// holds, or for a document nobody has open.
-		e.reachedVerdict(artifactID)
-		return false
+		c.settled(room)
+		return
 	}
-	cursor := service.cursorOf(live)
-	if cursor == nil {
-		// A resident document no room load listed (keepInstance): nothing says what it holds,
-		// and a room is not closed on a guess.
-		e.reachedVerdict(artifactID)
-		return false
-	}
-	// An open live write of this process is still landing: it moves this room's cursor at its
-	// commit and then publishes into the room, and a room closed under it would take its publish
-	// with it. The lock the confirmation below takes would wait for a write that holds it, but an
-	// open write holds no lock between its operations, and the room it forked is the room this
-	// would close.
-	//
-	// This process's other writers are not asked about here. A settlement or a browser append
-	// takes the document's lock, and either advances this instance's cursor before it drops it or
-	// is refused on a room behind the head, so the confirmation under that lock already orders the
-	// evictor with them (hasOpenLiveWrite). Deferring to them as well phase-locked the evictor
-	// with a settlement's retry (dispatch://INFRA-396): a room whose window ended in the
-	// millisecond the settlement its reload armed began was deferred one staleRoomEvictInterval,
-	// the settlement was refused by the gate and retried on the same two-second cadence, and the
-	// two met again, leaving a reader on text the store replaced for a second window, or until the
-	// settlement's third refusal failed the room.
-	//
-	// An attempt, not a verdict: the room is left exactly as stale as it was found, and a live
-	// write that appends nothing (no changes, a mutate that failed, an operation rolled back)
-	// commits no history and so announces none. Dropped here, that room is left behind the head
-	// with a connected reader on it and its window spent. Armed, it costs one more re-examination
-	// a window later, by which time the write is finished. The close reads it again under the
-	// state lock that reserves it (closeRoomBehindHead), so a write that opens in between is not
-	// closed under either.
-	if service.hasOpenLiveWrite(artifactID) {
-		e.armRetry(artifactID)
-		return false
-	}
-	head, err := currentUpdateCursor(ctx, service.store.Pool, artifactID)
-	if err != nil {
+	outcome, err := service.catchUpRoom(ctx, service.store.Pool, room, live)
+	switch {
+	case err != nil:
 		if ctx.Err() == nil {
-			slog.Warn("dispatch: read the head of a document that changed", "room", artifactID, "error", err)
+			slog.Warn("dispatch: catch up a document room to the stored head", "room", room, "error", err)
 		}
-		e.armRetry(artifactID)
-		return false
+		c.armRetry(room)
+	case outcome == catchUpReplaced:
+		c.closeReplaced(ctx, room, live)
+	default:
+		c.settled(room)
 	}
-	if cursor.heldThrough() == head {
-		e.reachedVerdict(artifactID)
-		return false
+}
+
+// takeLoading reports whether the catch-up of room should run now, live being the instance the
+// room holds (nil for none): a room whose instance scheduled this catch-up while loading and is
+// not published yet is looked for again in catchUpLoadingWait, until that instance is collected or
+// catchUpLoadingTimeout passes.
+func (c *roomCatchUps) takeLoading(room string, live *crdt.Doc) bool {
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	loading, ok := c.loading[room]
+	if !ok {
+		return true
 	}
-	through, head, err := service.roomBehindDurableHead(ctx, artifactID, cursor)
-	if err != nil {
-		if ctx.Err() == nil {
-			slog.Warn("dispatch: read the head of a document that changed under its lock", "room", artifactID, "error", err)
+	if live == nil {
+		if instance := loading.instance.Value(); instance != nil && now.Before(loading.until) {
+			c.deferred[room] = now.Add(catchUpLoadingWait)
+			return false
 		}
-		e.armRetry(artifactID)
-		return false
 	}
-	if through == head {
-		e.reachedVerdict(artifactID)
-		return false
-	}
-	// The service's own forced reload, of the instance this decision read: it closes the room,
-	// flushing what the room still owes the store, and settles the resident record, so the next
-	// access loads the durable document. The room's browsers are closed with it and reconnect to
-	// the reloaded room. It reserves the room before it closes it, so a write that opens in the
-	// window between this decision and the close is refused rather than dropped with the closed
-	// room (reserveRoomCloseLocked), and it closes live alone: a room that replaced live (a
-	// settlement's own reload, reloadRoomBehindHead, a failed room's eviction, or ygo's idle sweep
-	// and a load) is left as it is.
-	closed, err := service.closeRoomBehindHead(ctx, artifactID, live)
-	if errors.Is(err, errRoomCloseHeldOff) {
-		// Something of this process holds the room open for now: a live write opened on it
-		// between the check above and the hold that reserves the close, or a close reserved for
-		// the instance live replaced has yet to return. The same attempt with no answer as that
-		// check's, so the room is armed again.
-		e.armRetry(artifactID)
-		return false
-	}
-	if err != nil {
-		slog.Warn("dispatch: close a document room another process's write left behind", "room", artifactID, "error", err)
-		e.armRetry(artifactID)
-		return false
-	}
-	if !closed {
-		// Another close or another instance answers for the room now, so this window has done
-		// its work. The room no longer holds live - something closed it after this decision read
-		// it, and whatever instance is there now loaded from the store after that read, so a write
-		// that leaves it behind notifies again; closed by name, that instance would be taken from
-		// the browser that has just reconnected to it - or the room holds live but is another
-		// close's: it failed, and its own eviction reloads it (evictFailed), or a refused
-		// settlement has reserved live itself, and that close either closes it or arms the
-		// settlement again on it (reloadRoomBehindHead, closeReservedRoom).
-		e.reachedVerdict(artifactID)
-		return false
-	}
-	e.recordEviction(artifactID)
-	slog.Info("dispatch: closed a document room another process's write left behind",
-		"room", artifactID, "room_through", through, "head", head)
+	delete(c.loading, room)
 	return true
 }
 
-// roomBehindDurableHead reads cursor, room's instance cursor, against the document's durable head
-// under the document's advisory lock, and returns the two: equal is a room that holds the whole
-// stored history, and anything else is a room an append this process never made left behind.
-//
-// The lock is what makes the answer exact. Every durable writer of this process takes it and
-// advances the instance's cursor before it drops it, so under it no write of this process's own
-// sits between its commit and its cursor; and no append can land between the head read here and
-// the cursor read beside it. The transaction ends with this read, before the caller closes the
-// room: a close flushes what the room still owes the store, whose appends take that same lock.
-func (s *Service) roomBehindDurableHead(ctx context.Context, room string, cursor *roomCursor) (int64, int64, error) {
-	tx, err := s.store.Pool.Begin(ctx)
+// closeReplaced closes live, room's instance whose stored history was replaced (catchUpReplaced),
+// once a read under the document's lock confirms it (historyReplacedUnderLock), so the next access
+// loads the document at the head. A verdict the locked read does not confirm was this process's
+// own write in flight, and the room is caught up again instead. The close is closeRoomBehindHead's,
+// which an open live write of this process holds off; held off or failed, the room is tried again.
+func (c *roomCatchUps) closeReplaced(ctx context.Context, room string, live *crdt.Doc) {
+	service := c.service
+	replaced, err := service.historyReplacedUnderLock(ctx, room, live)
 	if err != nil {
-		return 0, 0, err
+		if ctx.Err() == nil {
+			slog.Warn("dispatch: confirm a document room's stored history was replaced", "room", room, "error", err)
+		}
+		c.armRetry(room)
+		return
 	}
-	defer tx.Rollback(ctx)
-	if err := lockDocumentRoom(ctx, tx, room); err != nil {
-		return 0, 0, err
+	if !replaced {
+		c.settled(room)
+		c.request(room)
+		return
 	}
-	head, err := currentUpdateCursor(ctx, tx, room)
-	if err != nil {
-		return 0, 0, err
+	closed, err := service.closeRoomBehindHead(ctx, room, live)
+	switch {
+	case errors.Is(err, errRoomCloseHeldOff):
+		c.armRetry(room)
+	case err != nil:
+		slog.Warn("dispatch: close a document room whose stored history was replaced", "room", room, "error", err)
+		c.armRetry(room)
+	case closed:
+		c.settled(room)
+		slog.Info("dispatch: closed a document room whose stored history was replaced", "room", room)
+	default:
+		// Another close or another instance answers for the room now (closeRoomBehindHead).
+		c.settled(room)
 	}
-	return cursor.heldThrough(), head, nil
-}
-
-// mayEvict is the interval's check: it reports whether artifactID may be evicted now, and defers
-// the room it refuses - the room and the moment its window ends - so that refusal is a wait
-// rather than a notification dropped (wakeIn, woke). It is a wait the room keeps: the wake
-// spends a room's window only on a re-examination that reached a verdict, and one that got no
-// answer arms the room again (documentChanged, armRetry). One map lookup for a room it lets
-// through, which is what lets documentChanged ask it before it reads the database at all; a room
-// it refuses pays one store beside that, and that room is one no eviction can follow anyway.
-func (e *staleRoomEvictor) mayEvict(artifactID string) bool {
-	now := e.now()
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	last, evicted := e.evicted[artifactID]
-	if !evicted || now.Sub(last) >= staleRoomEvictInterval {
-		return true
-	}
-	e.deferred[artifactID] = last.Add(staleRoomEvictInterval)
-	return false
 }
 
 // wakeIn is the lane's clock (roomSyncHandler.nextWake): how long until the earliest room waiting
-// to be re-examined may be - one the interval refused, or one armed again after an attempt that
-// reached no verdict - and zero, never, while none waits. The scan is of those rooms, at most one
-// entry per room resident here, once each time the lane runs out of queued notifications.
-func (e *staleRoomEvictor) wakeIn() time.Duration {
-	now := e.now()
-	e.mu.Lock()
-	defer e.mu.Unlock()
+// to be tried again may be, and zero, never, while none waits.
+func (c *roomCatchUps) wakeIn() time.Duration {
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	var earliest time.Time
-	for _, at := range e.deferred {
+	for _, at := range c.deferred {
 		if earliest.IsZero() || at.Before(earliest) {
 			earliest = at
 		}
@@ -752,123 +1012,41 @@ func (e *staleRoomEvictor) wakeIn() time.Duration {
 	if earliest.IsZero() {
 		return 0
 	}
-	// A window that has already passed - one room's re-examination can outlast another's window -
-	// asks for the shortest wait there is, rather than the zero that would read as "never".
+	// A time already passed asks for the shortest wait there is, rather than the zero that would
+	// read as "never".
 	return max(earliest.Sub(now), time.Nanosecond)
 }
 
-// dueRooms takes the rooms whose window has passed out of the deferred set, for the wake to
-// re-examine. Taking them out here is what drains the set: documentChanged puts a room back only
-// through a refusal of its own or an attempt of its own that reached no verdict (mayEvict,
-// armRetry), and each of those carries a window of its own.
-func (e *staleRoomEvictor) dueRooms() []string {
-	now := e.now()
-	e.mu.Lock()
-	defer e.mu.Unlock()
+// dueRooms takes the rooms whose retry is due out of the deferred set, for the wake to catch up.
+func (c *roomCatchUps) dueRooms() []string {
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	var due []string
-	for room, at := range e.deferred {
+	for room, at := range c.deferred {
 		if !now.Before(at) {
 			due = append(due, room)
-			delete(e.deferred, room)
+			delete(c.deferred, room)
 		}
 	}
 	return due
 }
 
-// recordEviction stamps artifactID's eviction, and drops every room whose last eviction is past
-// the interval as it goes. The pruning is here rather than in mayEvict because this is the only
-// method that adds an entry: every call leaves behind only the entries inside the interval, so
-// the map holds at most the rooms this process evicted within one staleRoomEvictInterval, and
-// once the evictions stop it stops growing with them. It also keeps mayEvict to its one lookup,
-// which is the point of asking it first.
-//
-// Only an eviction that happened is stamped (closeRoomBehindHead closed the room): a close that
-// failed left the stale room resident, and stamping it would refuse that room for the rest of
-// the interval over an eviction this process never made. Nor is such a room left to its next
-// notification, which may never come - the write that announced this one can be the last: the
-// failed close arms it for the next window instead (armRetry), so it is a wake away.
-func (e *staleRoomEvictor) recordEviction(artifactID string) {
-	now := e.now()
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	for room, at := range e.evicted {
-		if now.Sub(at) >= staleRoomEvictInterval {
-			delete(e.evicted, room)
-		}
-	}
-	e.evicted[artifactID] = now
-	// The eviction is the re-examination a deferred window for this room was waiting for, so that
-	// window is spent, and so is any run of attempts that got no answer before it: a write that
-	// leaves the reloaded room behind again notifies again, the refusal that would follow defers
-	// a window of its own, and the next attempt that gets no answer is armed one
-	// staleRoomEvictInterval out, like the first (armRetry).
-	delete(e.deferred, artifactID)
-	delete(e.attempts, artifactID)
+// armRetry gives room another try after one that reached no verdict, further out for each such
+// try in a row (catchUpRetryBackoff).
+func (c *roomCatchUps) armRetry(room string) {
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.attempts[room]++
+	c.deferred[room] = now.Add(catchUpRetryBackoff(c.attempts[room]))
 }
 
-// staleRoomRetryBackoffMax is the ceiling of armRetry's backoff, and what it bounds is one
-// room's retry rate. A room whose re-examinations keep reaching no verdict is armed again after
-// each of them with no notification in between, so without a ceiling climbing away from
-// staleRoomEvictInterval such a room would re-read the head through the pool - and, while it is
-// still behind, read it again under the document's lock - every two seconds for the life of the
-// process. At the ceiling it costs one wake a minute instead, which is as often as a room
-// nothing is writing to needs looking at.
-//
-// The wake is a timer on documentChangedChannel's lane (roomSyncLane.run), not on the hub's
-// goroutine, so it neither cuts short nor stands in for the hub's ping: that ping keeps to
-// the time since the connection last proved a round trip whatever the lane does.
-const staleRoomRetryBackoffMax = time.Minute
-
-// staleRoomRetryBackoff is the wait before the attempt-th re-examination in a row of one room
-// whose attempts keep reaching no verdict (from 1): one staleRoomEvictInterval, doubling to
-// staleRoomRetryBackoffMax. It is pglisten.RedialBackoff's shape written out rather than that
-// function called, because this one starts at the evictor's own interval rather than a second,
-// and adds no jitter: the jitter is there to keep the tasks of a rolling deploy from redialing
-// one database in step, and this is one process re-reading one of its own rooms, which nothing
-// else is in step with.
-func staleRoomRetryBackoff(attempt int) time.Duration {
-	wait := staleRoomEvictInterval
-	for n := 1; n < attempt && wait < staleRoomRetryBackoffMax; n++ {
-		wait *= 2
-	}
-	return min(wait, staleRoomRetryBackoffMax)
-}
-
-// armRetry gives artifactID a window to be re-examined in after an attempt that reached no
-// verdict - a head read that failed, a close that failed, or a close something of this process
-// held off (documentChanged). The room is as stale as that attempt found it, the
-// notification that carried the attempt is spent, and a document nobody writes again notifies
-// nobody again, so the wake this window asks for is the only thing that comes back for it
-// (wakeIn, woke).
-//
-// The first window is one staleRoomEvictInterval from now, rather than the window that has just
-// passed: wakeIn asks for the shortest wait there is for a window already behind it, so a room
-// re-armed at that moment would have the lane re-run the whole decision as fast as it loops for
-// as long as whatever failed keeps failing. On the interval, a room that goes on failing is
-// retried as often as a burst's notifications are refused and no oftener. Each attempt in a row
-// after the first is further out than the last (staleRoomRetryBackoff), to a ceiling that bounds
-// one room's retry rate and nothing besides: a room that keeps getting no answer costs one wake a
-// minute instead of one every staleRoomEvictInterval for the life of the process
-// (staleRoomRetryBackoffMax). The count is the room's own and ends at that room's next verdict
-// (reachedVerdict), so the ordinary case - one read that failed, answered at the next window - is
-// armed one interval out every time.
-//
-// Through the evictor's one mutex, on the lane, like every other decision here: nothing is armed
-// from a timer or a goroutine of its own.
-func (e *staleRoomEvictor) armRetry(artifactID string) {
-	now := e.now()
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.attempts[artifactID]++
-	e.deferred[artifactID] = now.Add(staleRoomRetryBackoff(e.attempts[artifactID]))
-}
-
-// reachedVerdict ends artifactID's run of attempts that reached none, so the next one is armed
-// one staleRoomEvictInterval out again (armRetry): the backoff answers a room whose
-// re-examinations go on getting no answer, and a verdict is an answer - the reads worked, or
-// there is no room left to read for.
-func (e *staleRoomEvictor) reachedVerdict(artifactID string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	delete(e.attempts, artifactID)
+// settled ends room's run of tries that reached no verdict, and any retry still waiting for it:
+// the try that got here answered for the room.
+func (c *roomCatchUps) settled(room string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.attempts, room)
+	delete(c.deferred, room)
 }

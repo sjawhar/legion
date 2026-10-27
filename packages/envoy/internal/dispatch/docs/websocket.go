@@ -93,10 +93,15 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 
 // StoreUpdateContext appends a room's update with the in-flight credit its update observer
 // recorded (AppendUpdateWithCredit), and with that observer's record of which room instance the
-// update was made in (documentUpdateClass.cursor): the append is gated on that instance standing
-// at the durable head, and advances it when it commits (appendUpdate). An update that never
-// reaches the store - its room failed, or a live write or a settlement already made it durable -
-// lands its credit here instead: the room drops it with the update, which the browser resends.
+// update was made in (documentUpdateClass.cursor): the append is a browser's (appendBrowser), so
+// the gate admits it from a room behind the head with its history intact - it lands at the head,
+// and the instance's cursor folds it in once catch-up fills the gap (appendUpdate) - and refuses
+// it only when the room's stored history was replaced under it. That refusal does not fail the
+// room: it asks for the room's catch-up, which finds the history replaced and closes and reloads
+// the room (roomCatchUps.closeReplaced), and the browser resends the update to the reloaded room.
+// An update that never reaches the store - its room failed, or a live write, a settlement or a
+// catch-up already made it durable - lands its credit here instead: the room drops it with the
+// update, which the browser resends.
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
 	if a.service.roomFailed(room) {
 		// The failed room's update is dropped and its browser resends it to the room that
@@ -104,8 +109,8 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		// for it ends here. Left counted, it would be an append no callback can ever finish:
 		// the record - or the one registered in its place, which carries the updates the room's
 		// persistence never took (handOverFailedRoomLocked) - would wait on it for ever, so its
-		// settlement would retry without end, never closing a room behind the head
-		// (reloadRoomBehindHead), and the record would never be released (unusedLocked).
+		// settlement would retry without end, and the record would never be released
+		// (unusedLocked).
 		class, counted, found := a.service.consumeUpdateClass(room, update)
 		if found && class.durable {
 			a.service.finishDurableAppend(room, counted)
@@ -122,7 +127,11 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		return nil
 	}
 	a.service.hooks.awaitPersistenceHold(ctx, room)
-	if _, err := a.store.AppendUpdateWithCredit(withRoomCursor(ctx, class.cursor), room, update, class.contentChanged, class.credit); err != nil {
+	if _, err := a.store.AppendUpdateWithCredit(withBrowserAppend(ctx, class.cursor), room, update, class.contentChanged, class.credit); err != nil {
+		if errors.Is(err, ErrRoomBehindHead) {
+			a.service.catchUps.request(room)
+			return err
+		}
 		a.service.failRoom(room, err)
 		return err
 	}
@@ -491,12 +500,19 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	instance := s.keepInstance(room, doc)
 	hold := &instance.hold
 	doc.OnUpdate(func(update []byte, origin any) {
-		// A published write's update is already durable. Its suppression slot is finished here,
-		// before ygo's persistence observer, which the room registers after OnLoadDocument, hands
-		// the update on: to the room's worker, or, once CloseRoom has retired the worker, to
-		// stranded persistence on this goroutine, which waits on that slot (publishLiveUpdate).
-		if published, ok := origin.(*liveWriteOrigin); ok {
-			s.finishSuppressedPersistence(published.slot, update)
+		// A published write's update is already durable, and so is a catch-up's batch of another
+		// process's rows (remoteUpdateOrigin). Its suppression slot is finished here, before ygo's
+		// persistence observer, which the room registers after OnLoadDocument, hands the update on:
+		// to the room's worker, or, once CloseRoom has retired the worker, to stranded persistence
+		// on this goroutine, which waits on that slot (publishLiveUpdate, catchUpRoom). Both are
+		// then classified like any other update, and neither is credited to a local peer
+		// (creditContentChange) nor names one as the author of the ask blocks it introduces
+		// (observeAskBlocksForUpdate).
+		switch durable := origin.(type) {
+		case *liveWriteOrigin:
+			s.finishSuppressedPersistence(durable.slot, update)
+		case *remoteUpdateOrigin:
+			s.finishSuppressedPersistence(durable.slot, update)
 		}
 		repair, identityRepair := origin.(*identityClosureOrigin)
 		if identityRepair {
@@ -528,7 +544,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			}
 			classified = true
 			if tree != nil {
-				s.observeAskBlocksForUpdate(room, tree)
+				s.observeAskBlocksForUpdate(room, tree, logged.Origin)
 			}
 			// The cursor is this instance's, taken here rather than looked up when the update
 			// reaches the store: a room evicted and reloaded in between is a different instance,
@@ -589,12 +605,18 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 // the order the replica took them, so the room's record of its ask blocks moves forward only. The
 // tree walk that lists those ask blocks runs only once the cheap markdown comparison inside
 // observe already showed a real change, so the no-op path, the common one, pays for neither.
-func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
+//
+// An update another process stored, which a catch-up applied (origin is a remoteUpdateOrigin),
+// introduced its blocks on that process: none of this room's connected peers wrote them, so the
+// blocks are recorded with no author here, as the blocks a room loads with are.
+func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node, origin any) {
 	askBlocks := askBlockIDs(tree)
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	var author *model.Actor
-	if sole, ambiguous := soleConnectedActor(state.connected); ambiguous {
+	if _, remote := origin.(*remoteUpdateOrigin); remote {
+		author = nil
+	} else if sole, ambiguous := soleConnectedActor(state.connected); ambiguous {
 		author = new(SettlementActor)
 	} else {
 		author = sole
@@ -605,17 +627,20 @@ func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node) {
 // creditContentChange credits an observed content change to its authors. A service repair (origin
 // registered by serviceTransact) is credited to no one; a browser that was only connected while it
 // happened is not credited either. A committed transaction's live write, which Ledger.Commit
-// applies, was credited when the transaction committed and is not credited again. Any other update
-// is a browser edit by one of the peers, which ygo applies while that peer's connection is
-// registered. ygo does not say which connection sent it, so every connected peer is credited with
-// it: when exactly one is connected it is the latest edit source and replaces `lastActor`, and
-// otherwise the edit cannot be pinned on a single peer and no older actor may stand in for it.
+// applies, was credited when the transaction committed and is not credited again; another
+// process's update, which a catch-up applies (remoteUpdateOrigin), was credited on that process,
+// whose append recorded its authors, and none of this room's peers made it. Any other update is a
+// browser edit by one of the peers, which ygo applies while that peer's connection is registered.
+// ygo does not say which connection sent it, so every connected peer is credited with it: when
+// exactly one is connected it is the latest edit source and replaces `lastActor`, and otherwise
+// the edit cannot be pinned on a single peer and no older actor may stand in for it.
 //
 // The credit goes to F, the room's in-flight credits, until the edit's append lands it
 // (AppendUpdateWithCredit): the returned UpdateCredit is how that append reaches it. This takes
 // no advisory lock and touches no database: nothing reads F without holding state.mu.
 func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *UpdateCredit {
-	if _, published := origin.(*liveWriteOrigin); published {
+	switch origin.(type) {
+	case *liveWriteOrigin, *remoteUpdateOrigin:
 		return nil
 	}
 	if _, service := s.serviceOrigins.Load(origin); service {

@@ -1275,15 +1275,15 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 // (LEGION-503). The room is taken inside the Apply that loads and as docTree reads it: a room
 // looked up again once that Apply returned can have been evicted in between.
 //
-// A version is never rendered from a room behind the durable head (refuseRoomBehindHead): with two
-// envoy-dispatch processes on one Postgres, that room lacks what the other process appended, and
-// the version would record that update's cursor over text missing it, so no later settlement
-// would version those words (INFRA-218). A room found behind the head inside the Apply, under the
-// document's advisory lock this transaction holds, is versioned from the stored document instead,
-// as a write behind the head forks from it (coldFork); so is a write's fork that came from the
-// store. Neither holds a change still in flight in the room, so the version lists none of the
-// room's in-flight credits (withoutInflight): a credit whose append lands later is owed then, and
-// one whose append the gate refuses is credited again when its browser resends the edit.
+// A version is never rendered from a room behind the durable head (the gate's derived rule,
+// appendDerived): with two envoy-dispatch processes on one Postgres, that room can lack what the
+// other process appended until its catch-up takes it in, and the version would record that
+// update's cursor over text missing it, so no later settlement would version those words
+// (INFRA-218). A room found behind the head inside the Apply, under the document's advisory lock
+// this transaction holds, is versioned from the stored document instead, as a write behind the
+// head forks from it (coldFork); so is a write's fork that came from the store. Neither holds a
+// change still in flight in the room, so the version lists none of the room's in-flight credits
+// (withoutInflight): a credit whose append lands later is owed then.
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (renderedTree, authorCapture, error) {
 	tx, _ := txFromContext(ctx)
 	write := joinedLiveWrite(ctx, room)
@@ -1357,7 +1357,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		var readErr error
 		var behind bool
 		err = s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
-			if cursor := s.cursorOf(live); cursor != nil && refuseRoomBehindHead(room, cursor, head) != nil {
+			if cursor := s.cursorOf(live); cursor != nil && cursor.heldThrough() != head {
 				behind = true
 				return
 			}
@@ -1396,7 +1396,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 // holds the document's advisory lock, so no append lands between the head it compared against
 // and this read. A load that fails does not fail the room, where coldFork's does: coldFork reads
 // the store in place of a room, so its failure is the document's, while here the room is sound
-// and only behind, and its settlement or the stale-room evictor reloads it. The version's
+// and only behind, and its catch-up brings it to the head (roomCatchUps). The version's
 // transaction answers ErrServiceUnavailable instead, and its caller retries.
 func (s *Service) storedTree(ctx context.Context, artifactID string) (*pmdoc.Node, error) {
 	loaded, err := s.persistence.LoadDocument(ctx, artifactID)

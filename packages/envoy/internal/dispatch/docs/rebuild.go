@@ -57,11 +57,12 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	// versions only increase, so its room holds the rebuilt update and none it would mistake for it.
 	//
 	// This refusal is this server's rooms alone, and that is all it can be: the other
-	// envoy-dispatch process's rooms are not in this server's. What covers them is the stale-room
-	// gate. RebuildTx replaces the whole history with one update at head+1, so an instance over
-	// there no longer stands at the head, and its next durable write is refused
-	// (ErrRoomBehindHead): its settlement closes the room (reloadRoomBehindHead), and its
-	// browser's append fails it outright, and either way the reload reads the rebuilt document.
+	// envoy-dispatch process's rooms are not in this server's. What covers them is room sync.
+	// RebuildTx replaces the whole history with one update at head+1 and announces it, so an
+	// instance over there finds its stored history replaced (historyReplaced): its catch-up
+	// closes and reloads the room (roomCatchUps.closeReplaced), and until then its settlement and
+	// its browser's append are refused (ErrRoomBehindHead) and lead to the same close, and the
+	// reload reads the rebuilt document.
 	if s.srv.GetDoc(artifactID) != nil {
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in this server; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
 	}

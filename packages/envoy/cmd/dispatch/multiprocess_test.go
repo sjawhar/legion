@@ -805,58 +805,33 @@ func waitForDurableHolder(t *testing.T, pair *dispatchPair, durable string, with
 
 // ───── documents ───────────────────────────────────────────────────────────
 
-// A spec tab is open on one process while the other writes the document. The two do not share a
-// live document, so the room A holds would otherwise sit on text the store no longer has: the
-// write announces itself over Postgres (dispatch_doc_changed) and A closes the room it holds
-// behind the durable head, which closes the editor's socket so a browser reconnects and re-syncs.
-func TestADocumentWriteOnOneProcessClosesTheStaleRoomOnTheOther(t *testing.T) {
+// A spec tab is open on one process while the other writes the document. The write announces
+// itself over Postgres (dispatch_doc_head, with dispatch_doc_changed beside it for older builds)
+// and A catches the room it holds up from the stored rows: the editor sees the write in its open
+// socket, nobody is disconnected, A closes no room, and the reader that comes next reads the
+// current document.
+func TestADocumentWriteOnOneProcessReachesTheOpenEditorOnTheOther(t *testing.T) {
 	pair := startPair(t, nil)
 	project := uniqueProjectKey(t, "DOC")
 	pair.a.createProject(t, project, "Documents")
 	_, artifactID := pair.a.createIssueIn(t, project, "Open here, written there", "before")
 
-	editor := openSyncedEditor(t, pair, artifactID, "before\n")
+	editor := pair.a.openEditor(t, artifactID, "before\n")
 	wrote := time.Now()
 	pair.b.call(t, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits",
 		`{"ops":[{"op":"replace","find":"before","with":"after"}]}`, http.StatusOK)
-
-	select {
-	case <-editor.Ended:
-		t.Logf("the room A held closed %v after B's write", time.Since(wrote))
-	case <-time.After(30 * time.Second):
-		t.Fatalf("the room A held never closed after B wrote the document:\nA:\n%s", pair.a.Output.String())
+	if err := editor.WaitForText(markdown, "after\n", 10*time.Second); err != nil {
+		t.Fatalf("the editor on A never saw B's write: %v; %s\nA:\n%s", err, pair.roomCloses(t, artifactID), pair.a.Output.String())
 	}
-	// The eviction's own line is written after the room has closed, which is what ended the
-	// editor's socket, so it is waited for rather than read the moment the socket went.
-	pair.a.waitForLog(t, 10*time.Second,
-		`msg="dispatch: closed a document room another process's write left behind"`, "room="+artifactID)
-	// The reader that comes next reads the document the store holds, not what the closed room
-	// still had.
+	t.Logf("B's write reached the editor on A %v after it began", time.Since(wrote))
+	pair.requireConnected(t, artifactID, "the editor on A", editor, "after B's write")
+	pair.requireNoRoomCloses(t, artifactID)
 	if text := pair.a.documentText(t, artifactID); text != "after\n" {
 		t.Errorf("A serves %q after B's write; want the current document, %q", text, "after\n")
 	}
 }
 
-// evictionsOf is how many rooms this process has closed behind another process's write, for one
-// document.
-func evictionsOf(p *dispatchProcess, artifactID string) int {
-	return len(p.logLines(`msg="dispatch: closed a document room another process's write left behind"`, "room="+artifactID))
-}
-
-// settlementOwedFor reports whether the document owes a settlement right now, which is the
-// condition the two rows below are told apart by.
-func settlementOwedFor(t *testing.T, pair *dispatchPair, artifactID string) bool {
-	t.Helper()
-	var owed bool
-	if err := pair.database.Pool.QueryRow(context.Background(),
-		`select exists(select 1 from doc_settlements_pending where artifact_id = $1)`, artifactID).Scan(&owed); err != nil {
-		t.Fatalf("read whether %s owes a settlement: %v", artifactID, err)
-	}
-	return owed
-}
-
-// storedHead is the version of the document's latest durable update, which is the version a room
-// of it must stand at to append anything (ErrRoomBehindHead).
+// storedHead is the version of the document's latest durable update.
 func storedHead(t *testing.T, pair *dispatchPair, artifactID string) int64 {
 	t.Helper()
 	var head int64
@@ -865,339 +840,6 @@ func storedHead(t *testing.T, pair *dispatchPair, artifactID string) int64 {
 		t.Fatalf("read the stored head of %s: %v", artifactID, err)
 	}
 	return head
-}
-
-// openSyncedEditor opens a spec tab on A, as openEditor does, and returns once the update the tab
-// sends as it syncs is stored, so that whatever B writes next is the only thing that can leave A's
-// room behind the durable head.
-//
-// A browser's provider answers the room's sync step 1 with its own state (docstest.Peer.read, as
-// y-websocket does), and the room appends that update even when it changes nothing, since ygo runs
-// the room's update observer for every transaction it commits. An append from a room standing
-// behind the head is refused by the durable gate, and the refusal fails the room
-// (ErrRoomBehindHead; docs/stale_room.go names this path): the room closes and the browser
-// reconnects. That is correct for a browser, but a row timing which path closes A's room reads it
-// as some other path. So a tab whose update is still on its way when B's write lands closes its
-// own socket within milliseconds of that write, which is how the refused-notification row failed
-// 2 of 20 runs on a development machine (dispatch://INFRA-396).
-//
-// The head is read before the dial, and nothing else writes the document while the tab connects:
-// B writes only after this returns, and a settlement is at least the settle delay away (2 s by
-// default). So the head moves by exactly one, the tab's own update, and anything more fails the
-// row rather than letting it run on with that update still on its way. The wait is openEditor's
-// own ten seconds: on a loaded development machine 52 such updates were stored 16-294 ms after
-// the dial, and one was not stored within a second. A tab whose update is not stored in ten fails
-// the row: either the room stopped storing an update for a sync that changes nothing, and this
-// wait has outlived its reason, or the machine is too slow for the row. How much of the eviction
-// window a reconnect spent is the gap burstLeavingTheRoomBehind asserts.
-func openSyncedEditor(t *testing.T, pair *dispatchPair, artifactID, want string) *docstest.Peer {
-	t.Helper()
-	const within = 10 * time.Second
-	before := storedHead(t, pair, artifactID)
-	dialled := time.Now()
-	editor := pair.a.openEditor(t, artifactID, want)
-	for {
-		head := storedHead(t, pair, artifactID)
-		switch {
-		case head == before+1:
-			t.Logf("the tab's own sync update was stored %v after it dialled the room", time.Since(dialled))
-			return editor
-		case head > before+1:
-			t.Fatalf("the document moved from update %d to %d while a tab connected, and only the tab's own sync update was to be stored: something else wrote it, and the tab's update may still be on its way",
-				before, head)
-		case time.Since(dialled) >= within:
-			t.Fatalf("the tab's own sync update was not stored within %v of its dial: the document still stands at update %d. Either the room no longer stores an update for a sync that changes nothing, which makes this wait unnecessary, or the machine is too slow for this row.",
-				within, before)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// writeThroughRetrying503s makes one edit through the process's own API, repeating a 503 as a
-// client is told to. A write whose own room is failed or reloading is answered
-// 503 DOC_SERVICE_UNAVAILABLE, and the contract is that the caller repeats the same call
-// (`dispatch doc-edit --help`, and the skills/dispatch/SKILL.md opening list). A rig that
-// read that 503 as a failure would report a correct contract as a defect, which one run of this
-// row's first draft did.
-func writeThroughRetrying503s(t *testing.T, p *dispatchProcess, artifactID, find, with string) int {
-	t.Helper()
-	body := fmt.Sprintf(`{"ops":[{"op":"replace","find":%q,"with":%q}]}`, find, with)
-	for attempts := 1; ; attempts++ {
-		response, err := p.send(http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", body)
-		if err != nil {
-			t.Fatalf("write %q over %q: %v", with, find, err)
-		}
-		status := response.StatusCode
-		_ = response.Body.Close()
-		switch {
-		case status == http.StatusOK:
-			return attempts
-		case status != http.StatusServiceUnavailable || attempts >= 20:
-			t.Fatalf("write %q over %q answered %d after %d attempts", with, find, status, attempts)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// staleRoomEvictInterval is the length of the window one eviction of a room opens: the least
-// time between two evictions of that room, so a notification arriving inside it is one the
-// interval refuses. It is a copy of docs/stale_room.go's own staleRoomEvictInterval, because
-// that constant is unexported and this is another package. The rows below rest on a trailing
-// write whose notification lands inside this window, and burstLeavingTheRoomBehind asserts
-// that, so a change to that constant which is not made here shows up as that assertion failing
-// rather than as a row quietly measuring something else.
-const staleRoomEvictInterval = 2 * time.Second
-
-// burstLeavingTheRoomBehind drives the shape both rows below are about: a first write on B that
-// evicts A's room, A's browser reconnecting as a browser does, and a second write landing inside
-// the two-second eviction interval the first one started, so its notification is one the interval
-// refuses. Afterwards nothing writes that document again, which is the whole point: the last
-// write of a burst is one of the refused ones, and nothing comes back for it.
-//
-// That the second write does land inside the window is the construction, not a given, and it is
-// asserted here: everything between the first eviction and that write - the wait for the
-// eviction's line, A's reconnect, the write's own 503 retries - spends the window, and a row
-// whose sum passed it would be evicted on the spot by a notification the interval allowed, which
-// is a different scenario wearing this one's name. This row's first construction went wrong that
-// way once.
-func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID string) (*docstest.Peer, time.Time) {
-	t.Helper()
-	editor := openSyncedEditor(t, pair, artifactID, "before\n")
-	writeThroughRetrying503s(t, pair.b, artifactID, "before", "middle")
-	var evicted time.Time
-	select {
-	case <-editor.Ended:
-		// Where the interval's window starts, as closely as this side can see it: the evictor's
-		// close (closeRoomBehindHead) closes the room - which is what ends this socket - and the
-		// stamp the interval reads is taken as that call returns (recordEviction,
-		// docs/stale_room.go). This stamp is on the test's side of that close, so it is the
-		// later of the two, and the gap measured at the end of this helper reads shorter than
-		// the window the write really spent, by the close's trip
-		// out to this process. The error runs towards under-reading, which makes the assertion
-		// below permissive rather than conservative: a write that landed a hair past the
-		// interval could still read under it. That is acceptable for what this guard is for -
-		// catching a run that drifted out of the window altogether - because the gaps it reads
-		// are 91-164 ms against a 2 s interval, and no trip of a loopback socket close brings a
-		// run that really spent the interval back under it. Stamped here rather than after the
-		// wait below, which polls at 50 ms, because that stamp would be later still and would
-		// hide up to a further 50 ms of the window.
-		evicted = time.Now()
-	case <-time.After(30 * time.Second):
-		t.Fatalf("the room A held never closed after B's first write:\n%s", pair.a.Output.String())
-	}
-	// The tab reconnects the moment its socket closes, as the dashboard's document provider does
-	// (@hocuspocus/provider's initialDelay is 0, features/doc/connection.ts), so the reloaded room's
-	// load - which arms the settlement the document owes, the settle delay out - lands with the
-	// eviction that starts the window. A reconnect that waited for the eviction's log line first
-	// put up to that poll's 50 ms between the two, so the evictor's re-examination at the window's
-	// end and that settlement met less often than they do for a browser (dispatch://INFRA-396). Its
-	// own sync update is stored before the trailing write (openSyncedEditor), so that write alone
-	// leaves the room behind the head.
-	//
-	// Dialling this early can land in ygo's own window between a close's peer hang-up and its
-	// removal of the room, where the dial is refused: a real browser's reconnect has the same
-	// window, and the row then fails at its open, naming the refusal, rather than passing on
-	// something it did not measure.
-	reconnected := openSyncedEditor(t, pair, artifactID, "middle\n")
-	// The eviction's own line is written after the room has closed, so it is waited for rather
-	// than read the moment the socket went.
-	pair.a.waitForLog(t, 10*time.Second,
-		`msg="dispatch: closed a document room another process's write left behind"`, "room="+artifactID)
-	if evictions := evictionsOf(pair.a, artifactID); evictions != 1 {
-		t.Fatalf("want one eviction after the first write, got %d", evictions)
-	}
-	wrote := time.Now()
-	writeThroughRetrying503s(t, pair.b, artifactID, "middle", "after")
-	// Measured to the write's own answer, not to the moment it was begun: the notification is
-	// sent by the transaction that made the change, so it is committed before that answer comes
-	// back, and the retries before it spend the window too. Logged either way, so every run
-	// reports how much of the window it had left.
-	gap := time.Since(evicted)
-	t.Logf("the trailing write landed %v after the first eviction, out of the %v the eviction interval allows it", gap, staleRoomEvictInterval)
-	if gap >= staleRoomEvictInterval {
-		t.Fatalf("the trailing write landed %v after the first eviction, which is past the %v eviction interval: its notification is not one the interval refuses, so it was allowed, the room was evicted where it stood, and this row measured an immediate eviction rather than the deferred re-examination it is named for. What spends that window is the wait for the eviction's line (polled at 50 ms), A's reconnect and the write's own 503 retries.",
-			gap, staleRoomEvictInterval)
-	}
-	return reconnected, wrote
-}
-
-// requireTheRoomClosed waits for the room A holds to close and reports how long after the
-// trailing write it took, which is the measurement: the eviction interval's own length means the
-// deferred re-examination, since nothing notified this process again. A room that stays open is
-// reported with the evictor's own lines, which tell a wake that never reached the room from a
-// re-examination that reached no verdict. within is what tells the window's close from the other
-// path that could have closed this room, so each row sets its own; the close itself is credited
-// to the window only by requireTheSecondEviction below.
-func requireTheRoomClosed(t *testing.T, p *dispatchProcess, editor *docstest.Peer, artifactID string, wrote time.Time, within time.Duration, what string) {
-	t.Helper()
-	select {
-	case <-editor.Ended:
-		t.Logf("%s: the room closed %v after the trailing write", what, time.Since(wrote))
-	case <-time.After(within):
-		t.Fatalf("%s: the reader kept a room the trailing write of the burst left behind - no second eviction in %v.\nThe evictor's own lines, which say whether the re-examination ran and reached no verdict or never reached the room:\n%v\n%v\nThe process's output:\n%s",
-			what, within,
-			p.logLines("close a document room another process's write left behind"),
-			p.logLines("read the head of a document that changed"),
-			p.Output.String())
-	}
-	requireTheSecondEviction(t, p, artifactID, what)
-}
-
-// requireTheSecondEviction is what credits the close above to the window: editor.Ended says the
-// socket went, not who ended it, and both rows below have other paths that end it - a browser
-// append the durable gate refused (ErrRoomBehindHead), which fails the room, that settlement's
-// own close of a room the durable gate finds behind the head (reloadRoomBehindHead,
-// docs/service.go), an unload for either - so the close is the window's only if the evictor
-// closed that room a second time. The first eviction is asserted in burstLeavingTheRoomBehind,
-// so the count here is two. The line is written after the room has closed, so it is waited for
-// rather than counted the moment the socket went; ten seconds is the budget the eviction's other
-// waits in this file use, and it is spent only by a row that is already failing.
-func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what string) {
-	t.Helper()
-	const budget = 10 * time.Second
-	deadline := time.Now().Add(budget)
-	for {
-		evictions := evictionsOf(p, artifactID)
-		switch {
-		case evictions == 2:
-			return
-		case evictions > 2:
-			t.Fatalf("%s: the evictor closed this room %d times, and the burst leaves it exactly two - the first write's and the refused notification's window - so something else wrote this document:\n%v",
-				what, evictions, p.logLines("closed a document room another process's write left behind", "room="+artifactID))
-		case time.Now().After(deadline):
-			t.Fatalf("%s: the room closed but the evictor has closed it %d time(s) in %v, not the two this burst leaves, so what closed it is some other path - a browser append the durable gate refused, the owed settlement's close of a room behind the head, or an unload - and not the window of the notification the interval refused.\nThis room's evictions, then the closes and the head reads that failed:\n%v\n%v\n%v\nThe process's output:\n%s",
-				what, evictions, budget,
-				p.logLines("closed a document room another process's write left behind", "room="+artifactID),
-				p.logLines("close a document room another process's write left behind", "room="+artifactID),
-				p.logLines("read the head of a document that changed", "room="+artifactID),
-				p.Output.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// owedSettlementDelay is process A's settle delay in the row below, which holds its owed
-// settlement past the window. That settlement is armed when A's reconnecting browser loads the
-// room, because the document owes one (onLoadDocument), and it is the other path that closes this
-// room: the durable gate refuses it from a room behind the head, and the refusal closes the room
-// (reloadRoomBehindHead, INFRA-218). At the default two seconds it fired 10-50 ms after the
-// window's own close, close enough on a loaded runner to come first, and its close is not the
-// evictor's, so the row failed on requireTheSecondEviction. Ten seconds keeps the settlement clear
-// of the window and of refusedWindowClosesWithin below, so the window is what closes the room
-// whenever the window works, and the settlement is what closes it only when it does not.
-const owedSettlementDelay = 10 * time.Second
-
-// refusedWindowClosesWithin bounds the row below between the two paths that could close its
-// room, since a bound above both would be green on either. The window's own re-examination
-// closes it a little under two seconds after the trailing write - what the write left of the
-// interval, plus the close - which was 1.9486 s in this row's green run here and 1.88 s when it
-// was built. The owed settlement closes it no sooner than owedSettlementDelay after A's reconnect
-// (every later arm restarts its timer), which is before the trailing write, so about ten seconds
-// or more from that write.
-//
-// Both of those figures are taken from the trailing write; this budget is not counted from
-// there. It is spent by requireTheRoomClosed's own time.After, which starts when that helper is
-// entered: after burstLeavingTheRoomBehind returned, so after the trailing write's answer came
-// back, and after the row's settlementOwedFor query. The wrote stamp the helper is also passed
-// only labels its log line. That origin is later than wrote by the trailing write's own
-// duration plus that one query, which is inside the 91-164 ms the helper logs for the whole
-// stretch from the first eviction, the write included. So in the terms the two figures above
-// use, the deadline falls at about 4.1 s: some 2.2 s past the window's close and some 5.9 s
-// short of the settlement's. This row still goes red when the wake is gone instead of green on
-// the settlement's clock.
-const refusedWindowClosesWithin = 4 * time.Second
-
-// The deferred re-examination, in the branch where something else could also have rescued the
-// room. A notification the eviction interval refuses is remembered and re-examined when that
-// room's window ends; here the room also owes a settlement, which the durable gate refuses from
-// a room behind the head, and that refusal closes the room too (reloadRoomBehindHead). A's settle
-// delay (owedSettlementDelay) puts that settlement well after the window, so the window is what
-// closes the room, which is why this row is bounded below the settlement's own time
-// (refusedWindowClosesWithin) and why the close must be the evictor's second eviction of this
-// room rather than any close at all.
-func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
-	pair := newPair(t)
-	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
-		NATSURL: pair.nats, SigningKey: multiprocessSigningKey, SettleDelay: owedSettlementDelay,
-	})
-	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
-		NATSURL: pair.nats, SigningKey: multiprocessSigningKey,
-	})
-	pair.a.waitHealthy(t)
-	pair.b.waitHealthy(t)
-	project := uniqueProjectKey(t, "OWD")
-	pair.a.createProject(t, project, "Owes a settlement")
-	_, artifactID := pair.a.createIssueIn(t, project, "Written in a burst elsewhere", "before")
-
-	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID)
-	if !settlementOwedFor(t, pair, artifactID) {
-		t.Fatalf("this document owes no settlement, so this row is not the branch it is named for")
-	}
-	requireTheRoomClosed(t, pair.a, reconnected, artifactID, wrote, refusedWindowClosesWithin, "owes a settlement")
-}
-
-// The branch the deferred re-examination was built for, and the one nothing else covers: a room
-// no settlement of this process's will ever close. A settlement is what could rescue the room in
-// the row above - refused by the durable gate from a room behind the head, it closes that room
-// (reloadRoomBehindHead) - and a reader with the tab open who has typed nothing has no such
-// rescuer, so the window's re-examination is the only path that closes its room, and without it
-// that reader holds text the store replaced for as long as the tab stays open (roomIdleTimeout is
-// how long a room stays resident *after its last peer leaves*, which a room with a browser in it
-// never reaches).
-//
-// How that room is made, and what the construction is and is not. The document is created and
-// written on B, and A only ever reads it, which removes the rescuer rather than the condition -
-// the stronger of the two for what this row asks, since it leaves the window as the only
-// remaining path whatever else is armed. A's thirty-minute settle delay
-// (DISPATCH_TEST_SETTLE_DELAY, under the test hooks) is not by itself that removal, and the
-// claim that no settlement of A's can fire under it would be false: s.settle gates only the
-// timer-armed path (scheduleSettleLocked), while settleLastPeer - wired as OnLastPeer - settles
-// at once when the last browser leaves whatever timer is armed, retrySettleSoon re-arms at a
-// fixed 10 ms, and a mark's expiry arms its own. What makes the delay enough here is that the
-// close this row measures, the evictor's (closeRoomBehindHead), stops the room's armed settle
-// timer as it reserves the room and arms it again at A's own thirty-minute delay, and that the
-// row then excludes the settlements that could themselves have closed the room: a settlement the
-// durable gate refused from this room behind the head logs a line naming "its settlement found
-// behind the durable head" for every outcome that can close it - only a service stopping, a
-// shutdown's skip and a room already closed or failed log otherwise or not at all, and none of
-// those closes a room - and a failed one logs "dispatch: settle document". A settlement that
-// committed logs neither, and it closes no room either, so the evictor's second close
-// (requireTheSecondEviction) is still what credits the close to the window.
-//
-// The condition itself was tried first and did not hold: B was given a settle delay short enough
-// to clear the pending row before A's reconnect loaded the room, and the row asserted that row
-// absent at the load - which passed, and the room still settled, because A's own reconnecting
-// peer appends as it syncs and arms a settlement of its own. With the wake wired that assertion
-// passed only because the window (1.88 s) beat the settle delay (2 s), which is a vacuous pass;
-// the control with the wake unwired is what exposed it. Hence this shape, and hence the
-// assertion below that A logged no settlement that could have closed this room, which under a
-// 30-minute delay is a real condition rather than a race the window happens to win.
-//
-// Its budget stays at thirty seconds, which already discriminates: with the wake unwired nothing
-// closes this room at all, so no bound is needed to tell the window from a rescuer it has none
-// of.
-func TestTheRefusedNotificationClosesARoomNoSettlementWillClose(t *testing.T) {
-	pair := newPair(t)
-	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
-		NATSURL: pair.nats, SigningKey: multiprocessSigningKey, SettleDelay: 30 * time.Minute,
-	})
-	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
-		NATSURL: pair.nats, SigningKey: multiprocessSigningKey,
-	})
-	pair.a.waitHealthy(t)
-	pair.b.waitHealthy(t)
-
-	project := uniqueProjectKey(t, "OWN")
-	pair.b.createProject(t, project, "No settlement will close it")
-	_, artifactID := pair.b.createIssueIn(t, project, "Open here, typed into never", "before")
-
-	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID)
-	requireTheRoomClosed(t, pair.a, reconnected, artifactID, wrote, 30*time.Second, "no settlement will close it")
-	settled := pair.a.logLines("dispatch: settle document", artifactID)
-	settled = append(settled, pair.a.logLines("its settlement found behind the durable head", artifactID)...)
-	if len(settled) > 0 {
-		t.Errorf("A ran a settlement of this room that could have closed it, so something other than the window could have:\n%v", settled)
-	}
 }
 
 // ───── the leased maintenance loops ────────────────────────────────────────
@@ -1545,8 +1187,10 @@ const liveWithin = time.Second
 // come through the agent token (dispatchAgentToken).
 const multiprocessAgentSession = "multiprocess-agent"
 
-// roomClosedLine is what the stale-room evictor logs when it closes a room another process's
-// write left behind; a process that keeps its rooms live never writes it.
+// roomClosedLine begins what a process logs when it closes a document room itself because its
+// stored history was replaced under it (docs/room_sync.go); before INFRA-556 the stale-room
+// evictor logged it for every room another process's write left behind. A process that keeps its
+// rooms live writes it only after a rebuild, a prune or a compaction under a room.
 const roomClosedLine = "closed a document room"
 
 // asUser is the header a signed-in person's request carries (X-Dispatch-User, which these
@@ -1659,12 +1303,12 @@ func (p *dispatchProcess) holdsRoom(t *testing.T, artifactID string) bool {
 	return slices.Contains(p.residentRooms(t), artifactID)
 }
 
-// roomCloses names what closed rooms of the document on either process so far - the evictor's
-// logged closes and the room failures the hook counted - for a failure to show beside what it saw.
-// An eviction's line is written once the room has closed, so one a moment old may be missing.
+// roomCloses names what closed rooms of the document on either process so far - the logged closes
+// of a replaced history and the room failures the hook counted - for a failure to show beside what
+// it saw. A close's line is written once the room has closed, so one a moment old may be missing.
 func (p *dispatchPair) roomCloses(t *testing.T, artifactID string) string {
 	t.Helper()
-	return fmt.Sprintf("rooms of the document failed %d times on A and %d on B; closes the evictor logged on A: %q; on B: %q",
+	return fmt.Sprintf("rooms of the document failed %d times on A and %d on B; room closes logged on A: %q; on B: %q",
 		p.a.roomCounters(t, artifactID).RoomFailures, p.b.roomCounters(t, artifactID).RoomFailures,
 		p.a.logLines(roomClosedLine, "room="+artifactID), p.b.logLines(roomClosedLine, "room="+artifactID))
 }
@@ -1766,8 +1410,10 @@ func (p *dispatchProcess) reconnectEditor(t *testing.T, login, artifactID string
 }
 
 // openStoredEditor is openEditorAs that also waits, up to ten seconds, for the update the tab's
-// sync appends (openSyncedEditor says why there is one) to be stored, so the next thing the row
-// does is the only thing that moves the document.
+// sync appends to be stored - a browser's provider answers the room's sync step 1 with its own
+// state, and the room appends that update even when it changes nothing, since ygo runs the room's
+// update observer for every transaction it commits - so the next thing the row does is the only
+// thing that moves the document.
 func (p *dispatchPair) openStoredEditor(t *testing.T, process *dispatchProcess, login, artifactID, want string) *docstest.Peer {
 	t.Helper()
 	before := storedHead(t, p, artifactID)

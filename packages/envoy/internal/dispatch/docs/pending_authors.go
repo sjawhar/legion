@@ -102,10 +102,10 @@ func (credit *UpdateCredit) held(version persistence.Version) {
 
 // roomHold is which durable updates one instance of a room holds: every update through loaded,
 // the head the instance loaded at, and each later update the instance itself took whose write
-// can have recorded a pending author - a browser update it appended, and a committed live write
-// it published. Another process's append after the load is in neither, since only a reload brings
-// it into this instance. An upload deletes only the pending-author rows whose writing update its
-// room's instance holds (heldUpdates).
+// can have recorded a pending author - a browser update it appended, a committed live write it
+// published, and another process's append its catch-up applied (Service.catchUpRoom). An upload
+// deletes only the pending-author rows whose writing update its room's instance holds
+// (heldUpdates).
 //
 // It stays bounded: an update just past loaded folds into loaded, with the run of updates since
 // that follows it, and an upload's commit drops the updates it consumed the rows of (consumed).
@@ -176,14 +176,21 @@ func (hold *roomHold) snapshot() heldUpdates {
 
 // roomInstance is what one resident room instance records about the durable history behind its
 // document: hold, the updates whose writes can have recorded a pending author (roomHold), and
-// cursor, the durable version the instance's document stands at (roomCursor). They are different
+// cursor, the durable versions the instance's document holds (roomCursor). They are different
 // sets, which is why the cursor is kept beside the hold rather than read off it: a browser append
 // that changed no rendered content carries a nil credit and never enters the hold, and
 // settlement's own repair append carries none either, so a hold equal to the head would say
 // nothing about whether the instance holds it.
+//
+// catchUp is held by the one catch-up of this instance that may run at a time (catchUpRoom): it
+// reads the cursor, reads the stored rows past it and applies them, and two of those side by side
+// would apply one row twice. Lock order: the document's advisory lock (only a caller that already
+// holds it, a settlement), then catchUp, then the room's state.mu; the catch-up itself never takes
+// the advisory lock.
 type roomInstance struct {
-	hold   roomHold
-	cursor roomCursor
+	hold    roomHold
+	cursor  roomCursor
+	catchUp sync.Mutex
 }
 
 // roomLoad is one room load's record of the durable history behind the room it loads, kept from
@@ -192,10 +199,9 @@ type roomInstance struct {
 // goroutine, ygo's loadRoom). ygo publishes no document for a room while it loads (Server.GetDoc
 // reports a loading room as absent), so a version this process appends in that window reaches no
 // instance of its own: it reaches this instead (took), and the instance takes it in with the head
-// the load read. Without that the fresh room would stand at the head of the read alone while the
-// store stood one past it, and the gate would refuse its every durable write until it reloaded -
-// a room born behind, which no reload is guaranteed to fix, since the next load can lose the same
-// race.
+// the load read. Without that the fresh room would hold the head of the read alone while the
+// store stood one past it, and a derived write would be refused until a catch-up applied, from
+// the store, the update the room already holds.
 type roomLoad struct {
 	mu   sync.Mutex
 	head int64
@@ -236,22 +242,18 @@ func (load *roomLoad) took(version persistence.Version) {
 	load.appended = append(load.appended, int64(version))
 }
 
-// start is the instance this load leaves behind: it stands at the head the load read, with every
-// version took recorded since folded in, in order and only where each follows the one before, as
-// every advance of a cursor is (advanceRoomCursor). The load holds it from here, so a version
-// appended before ygo publishes the loaded room still reaches it.
+// start is the instance this load leaves behind: it holds the head the load read, and every
+// version took recorded since, added to its cursor as every advance is (advanceRoomCursor). The
+// load holds it from here, so a version appended before ygo publishes the loaded room still
+// reaches it.
 func (load *roomLoad) start() *roomInstance {
 	load.mu.Lock()
 	defer load.mu.Unlock()
-	through := load.head
-	slices.Sort(load.appended)
+	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: load.head}}
 	for _, version := range load.appended {
-		if version == through+1 {
-			through = version
-		}
+		advanceRoomCursor(&load.instance.cursor, persistence.Version(version))
 	}
 	load.appended = nil
-	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: through}}
 	return load.instance
 }
 
@@ -274,6 +276,11 @@ func (s *Service) tookResidentVersion(room string, version persistence.Version) 
 // load read, and every version this process appended while it ran (roomLoad). The load's record
 // goes with the document, as the listing does: until then took still reaches this instance
 // through it, which is what ygo's loading window needs it for.
+//
+// It also schedules one catch-up of the instance (scheduleCatchUp): a load reads the store with
+// no lock, so another process's append can commit between that read and the moment this room is
+// resident, and its notification can be decided while the room is still loading, when there is no
+// room to catch up. Without this the room would be born behind with nothing left to come for it.
 func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
 	value, ok := s.roomLoads.Load(room)
 	if !ok {
@@ -285,6 +292,7 @@ func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
 	instance := load.start()
 	listResident(&s.instances, live, instance)
 	runtime.AddCleanup(live, func(load *roomLoad) { s.roomLoads.CompareAndDelete(room, load) }, load)
+	s.scheduleCatchUp(room, live)
 	return instance
 }
 
@@ -304,27 +312,30 @@ func (s *Service) cursorOf(live *crdt.Doc) *roomCursor {
 	return nil
 }
 
-// roomCursor is the durable version one instance of a room stands at: the head its load read, and
-// every version appended since whose update that instance applied - a browser update its own
-// append stored, a committed live write published into it, and settlement's own repair. Two
-// processes serve one database, and a room resident in this one never receives the updates the
-// other appended, so an append that raised the head elsewhere is in no cursor here: only a reload
-// brings it in. Every write that renders durable state from a room - a settlement's version and
-// its ask reconciliation, an upload's or a conditional edit's version, a rebuild - is refused
-// while this is not the durable head (ErrRoomBehindHead), because what it would write is rendered
-// from a document missing that update.
+// roomCursor is which durable versions one instance of a room holds: every version through
+// through - the head its load read, raised as the versions after it arrive - and the versions in
+// above, each past through+1, that the instance holds with a gap below them. A version reaches it
+// when that instance applied its update: a browser update its own append stored, a committed live
+// write published into it, settlement's own repair, and another process's append its catch-up
+// applied from the store (Service.catchUpRoom).
 //
-// It advances only by the version that follows the one it stands at, through advanceRoomCursor.
-// A version with a gap before it - another process's append this instance never took - leaves the
-// cursor where it was, since the instance does not hold the history through that version, and
-// only a reload fills the gap: every gate refuses until then, which is the point.
+// Two processes serve one database, and a room resident in this one receives the other's appends
+// only through catch-up, so between that append's commit and its catch-up the room is behind: its
+// through is short of the head. Its own browsers' appends land at the head meanwhile, past the
+// gap, and wait in above until the catch-up fills the gap and they fold into through, exactly as
+// roomHold.since folds into roomHold.loaded. Every write that renders durable state from a room -
+// a settlement's version and its ask reconciliation, an upload's or a conditional edit's version,
+// a rebuild - is refused while through is not the durable head (the gate's appendDerived), because
+// what it would write is rendered from a document missing that update.
 type roomCursor struct {
 	mu      sync.Mutex
 	through int64
+	above   []int64
 }
 
 // advanceRoomCursor records that cursor's room instance now holds the durable update stored at
-// version. It is the one funnel every advance goes through, so the sites that have to advance a
+// version: added to the cursor, and folded into through with the run above it when it fills the
+// gap there. It is the one funnel every advance goes through, so the sites that have to advance a
 // cursor are one grep away. They are every site that makes a version durable for a document a
 // room of this process holds:
 //
@@ -334,7 +345,8 @@ type roomCursor struct {
 //   - a live write's commit, for the versions its publish is about to apply to the room
 //     (Ledger.takeRoomCursors), and that publish itself (publishLiveUpdate);
 //   - settlement's own repair append, its superseded path included (settleRoomWithin);
-//   - the block-id backfill's stamp (backfillBlockIDs).
+//   - the block-id backfill's stamp (backfillBlockIDs);
+//   - catch-up, for each stored row it applied (catchUpRoom).
 //
 // Only one of them records its version on a second instance as well: a live write's commit,
 // which follows this call with Service.tookResidentVersion so the room its publish is about to
@@ -344,14 +356,13 @@ type roomCursor struct {
 //
 // The repair appends - settlement's two and the backfill's - are the opposite case, and none of
 // them calls tookResidentVersion. Their update is written into one room instance before it is
-// stored (applySuppressed), and nothing replays it into a room that loaded since: a room that
-// read the store before the repair committed does not hold the repair, so this advance must
-// reach the instance the repair was written into and no other. Crediting a room load in flight
-// with the version would say a document holds an update it does not, and the first durable
-// write rendered from it would be written over text this process never saw - the whole point of
-// the gate (refuseRoomBehindHead). Such a room is behind the head and has to be: the refusal
-// fails it, and the reload reads the repair from the store
-// (TestARoomLoadingWhileAStampCommitsStandsBehindTheHeadAndReloads).
+// stored (applySuppressed), and nothing replays it into a room that loaded since but catch-up: a
+// room that read the store before the repair committed does not hold the repair, so this advance
+// must reach the instance the repair was written into and no other. Crediting a room load in
+// flight with the version would say a document holds an update it does not, so its catch-up would
+// skip the row and the first derived write rendered from it would be written over text this
+// process never saw. Such a room is behind the head and has to be: its catch-up reads the repair
+// from the store (TestARoomLoadingWhileAStampCommitsCatchesUpToIt).
 //
 // A nil cursor is a document no room instance holds, whose writes no cursor gates.
 func advanceRoomCursor(cursor *roomCursor, version persistence.Version) {
@@ -360,9 +371,21 @@ func advanceRoomCursor(cursor *roomCursor, version persistence.Version) {
 	}
 	cursor.mu.Lock()
 	defer cursor.mu.Unlock()
-	if int64(version) == cursor.through+1 {
-		cursor.through = int64(version)
+	at := int64(version)
+	if at <= cursor.through {
+		return
 	}
+	// Versions mostly arrive in ascending order, so the search lands at the end.
+	index, found := slices.BinarySearch(cursor.above, at)
+	if !found {
+		cursor.above = slices.Insert(cursor.above, index, at)
+	}
+	folded := 0
+	for folded < len(cursor.above) && cursor.above[folded] == cursor.through+1 {
+		cursor.through++
+		folded++
+	}
+	cursor.above = slices.Delete(cursor.above, 0, folded)
 }
 
 // heldThrough is the durable version the instance holds every update through.
@@ -370,6 +393,13 @@ func (cursor *roomCursor) heldThrough() int64 {
 	cursor.mu.Lock()
 	defer cursor.mu.Unlock()
 	return cursor.through
+}
+
+// held is the cursor as of one moment: through, and a copy of the versions above it.
+func (cursor *roomCursor) held() (through int64, above []int64) {
+	cursor.mu.Lock()
+	defer cursor.mu.Unlock()
+	return cursor.through, slices.Clone(cursor.above)
 }
 
 // documentCursor is the durable version the document a write was made on holds every update
@@ -380,76 +410,178 @@ type documentCursor interface {
 	heldThrough() int64
 }
 
-// ErrRoomBehindHead refuses a write that would record durable state for a document from a room
-// whose instance does not stand at the durable head: with two envoy-dispatch processes on one
-// Postgres, the room resident here never received the updates the other process appended, and a
-// version, an ask reconciliation or a conditional edit rendered from it would be written over text
-// this process has never seen. It is ErrServiceUnavailable, which is what it is for a caller: this
-// process cannot serve that write until the room reloads.
+// ErrRoomBehindHead refuses an append the gate cannot admit from the room it was made in
+// (gateAppend): a derived write from a room whose instance does not hold the durable head - with
+// two envoy-dispatch processes on one Postgres, an update the other process appended has not been
+// caught up into it yet, and a version, an ask reconciliation or a conditional edit rendered from
+// it would be written over text this process has not seen - and any append from a room whose
+// stored history was replaced under it (historyReplaced). It is ErrServiceUnavailable, which is
+// what it is for a caller: this process cannot serve that write until the room catches up, or for
+// a replaced history until it reloads.
 var ErrRoomBehindHead = fmt.Errorf("%w: the document's room is behind its durable head", ErrServiceUnavailable)
 
-// refuseRoomBehindHead is the gate itself: cursor, the durable version the document the write was
-// made on holds every update through, must be the head, read in the same transaction under the
-// document's advisory lock so no append can land between the two reads.
-//
-// Equality, not `cursor < head`: a prune lowers the head (PruneAfter's checkpoint, finished by
-// recoverPruneTx) and a document's deletion removes it altogether, so a room resident across one
-// of those stands ahead of the head and holds a history the store no longer has; `<` would admit
-// it. A nil cursor is a write with no room's document behind it to be behind the head - a new
-// document's seed (SeedText), a test's own append - and is not gated.
-func refuseRoomBehindHead(room string, cursor documentCursor, head int64) error {
-	if cursor == nil {
-		return nil
-	}
-	if at := cursor.heldThrough(); at != head {
-		return fmt.Errorf("%w: room %s holds the document through update %d, the stored document stands at %d",
-			ErrRoomBehindHead, room, at, head)
-	}
-	return nil
+// appendKind is which rule the gate applies to an append (appendGate.head).
+type appendKind int
+
+const (
+	// appendBrowser is a raw client delta (servicePersistenceAdapter.StoreUpdateContext): a Yjs
+	// update commutes with whatever landed since, so it is admitted from a room that is behind
+	// with its history intact, at the head, and its room's cursor folds it in once catch-up fills
+	// the gap. Only a replaced history refuses it.
+	appendBrowser appendKind = iota
+	// appendDerived is an update computed from the room's content - settlement's repair append
+	// (settleRoomWithin), a live write's fork (applyLive through the transaction's liveWrite),
+	// the block-id backfill's stamp - and keeps the strict rule: the room must hold the head.
+	appendDerived
+)
+
+// appendGateStatement is the gate's one read, under the document's advisory lock the appending
+// transaction holds: the head (max(version), 0 for none) and whether any stored row at or below
+// the room's cursor ($2) remains, which tells a room behind an intact history from one whose
+// history a rebuild, a prune or a compaction replaced (historyReplaced). It is one indexed scan of
+// one document's rows at each end. The issue-open check (plan D5) is a column this select gains,
+// so a browser append on a closed issue is refused by the same round trip.
+const appendGateStatement = `
+	select coalesce(max(version), 0), coalesce(min(version) <= $2, false)
+	from doc_updates where artifact_id = $1`
+
+// appendGate is one append's gate: the read queueAppendGate put on a batch, and the decision head
+// makes once the batch's results are read.
+type appendGate struct {
+	room    string
+	through int64
+	kind    appendKind
+	// latest and intact are the read's answer: the head, and whether a stored row at or below
+	// through remains. read is whether the batch reached the read at all; err is its failure.
+	latest int64
+	intact bool
+	read   bool
+	err    error
 }
 
-// roomCursorContextKey marks a context with the cursor of the room instance whose document an
-// append's update was made on.
+// queueAppendGate queues the gate's one read on b for an append to room from a room instance
+// whose cursor holds every version through through, ruled by kind. The caller holds the document's
+// advisory lock in the transaction it sends b on, so no append can land between this read and its
+// own; it reads the decision from head once the batch's results are read.
+func queueAppendGate(b *pgx.Batch, room string, through int64, kind appendKind) *appendGate {
+	gate := &appendGate{room: room, through: through, kind: kind}
+	b.Queue(appendGateStatement, room, through).QueryRow(func(row pgx.Row) error {
+		if err := row.Scan(&gate.latest, &gate.intact); err != nil {
+			gate.err = fmt.Errorf("read the document's head for the append gate: %w", err)
+			return gate.err
+		}
+		gate.read = true
+		return nil
+	})
+	return gate
+}
+
+// head is the gate's decision: the version the append goes after (it is stored at head+1), or
+// ErrRoomBehindHead. An appendDerived append is refused unless the room holds the head exactly;
+// an appendBrowser append is refused only when the room's history was replaced (historyReplaced).
+// Equality for the derived rule, not `through < head`: a room standing past the head holds a
+// history the store no longer has.
+func (g *appendGate) head() (int64, error) {
+	if g.err != nil {
+		return 0, g.err
+	}
+	if !g.read {
+		return 0, fmt.Errorf("read the document's head for the append gate: the batch never reached the read")
+	}
+	switch {
+	case historyReplaced(g.through, g.latest, g.intact):
+		return 0, fmt.Errorf("%w: room %s holds the document through update %d, and the stored history was replaced under it (head %d)",
+			ErrRoomBehindHead, g.room, g.through, g.latest)
+	case g.kind == appendDerived && g.through != g.latest:
+		return 0, fmt.Errorf("%w: room %s holds the document through update %d, the stored document stands at %d",
+			ErrRoomBehindHead, g.room, g.through, g.latest)
+	}
+	return g.latest, nil
+}
+
+// gateAppend is the gate for a caller that batches nothing: queueAppendGate's read as a batch of
+// one statement on tx, and its decision.
+func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind appendKind) (int64, error) {
+	batch := &pgx.Batch{}
+	gate := queueAppendGate(batch, room, through, kind)
+	if err := tx.SendBatch(ctx, batch).Close(); err != nil && gate.err == nil {
+		return 0, fmt.Errorf("read the document's head for the append gate: %w", err)
+	}
+	return gate.head()
+}
+
+// historyReplaced is whether the stored history under a room instance holding every version
+// through through is no longer the one it loaded and caught up from: latest, the head, is below
+// through (a prune or a deletion lowered it), or through is past nothing and no stored row at or
+// below it remains (intact false): a rebuild deleted every row and seeded head+1, or a compaction
+// folded the rows the room holds into a later one. Neither leaves a row the room could take in on
+// its own, so the room is closed and reloaded instead (catchUpRoom, closeRoomBehindHead). A
+// compaction with compactKeep = 1 keeps the head row, so a room at the head is unaffected.
+func historyReplaced(through, latest int64, intact bool) bool {
+	return latest < through || (through > 0 && !intact)
+}
+
+// roomAppend is what a room's append marks its context with: the cursor of the room instance the
+// update was made in, and the rule the gate applies to it.
+type roomAppend struct {
+	cursor *roomCursor
+	kind   appendKind
+}
+
+// roomCursorContextKey marks a context with the room append its update was made in.
 type roomCursorContextKey struct{}
 
-// withRoomCursor marks ctx with cursor for the gate in appendUpdateTxClass. The appends made from
-// a room outside any live write mark their own context, since no ledger of theirs names the
-// document they were made on: the room's own appends (servicePersistenceAdapter.StoreUpdateContext,
-// which takes the cursor the update's observer recorded with it), settlement's repairs
-// (settleRoomWithin) and the block-id backfill's stamp (backfillBlockIDs).
+// withRoomCursor marks ctx with cursor for the gate in appendUpdateTxClass, as a derived append
+// (appendDerived). The appends made from a room outside any live write mark their own context,
+// since no ledger of theirs names the document they were made on: settlement's repairs
+// (settleRoomWithin) and the block-id backfill's stamp (backfillBlockIDs) through this, and the
+// room's own browser appends through withBrowserAppend.
 func withRoomCursor(ctx context.Context, cursor *roomCursor) context.Context {
+	return markRoomAppend(ctx, cursor, appendDerived)
+}
+
+// withBrowserAppend marks ctx with cursor for a browser's append (appendBrowser), the cursor the
+// update's observer recorded with it (servicePersistenceAdapter.StoreUpdateContext).
+func withBrowserAppend(ctx context.Context, cursor *roomCursor) context.Context {
+	return markRoomAppend(ctx, cursor, appendBrowser)
+}
+
+func markRoomAppend(ctx context.Context, cursor *roomCursor, kind appendKind) context.Context {
 	if cursor == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, roomCursorContextKey{}, cursor)
+	return context.WithValue(ctx, roomCursorContextKey{}, roomAppend{cursor: cursor, kind: kind})
 }
 
-// roomCursorFrom is the cursor withRoomCursor marked ctx with, nil for a context no room marked.
+// roomCursorFrom is the cursor withRoomCursor or withBrowserAppend marked ctx with, nil for a
+// context no room marked.
 func roomCursorFrom(ctx context.Context) *roomCursor {
-	cursor, _ := ctx.Value(roomCursorContextKey{}).(*roomCursor)
-	return cursor
+	marked, _ := ctx.Value(roomCursorContextKey{}).(roomAppend)
+	return marked.cursor
 }
 
-// appendingCursor is the cursor the gate reads for an append to room: the calling transaction's
-// own write to room when it has one, whose fork is what the write was made on, otherwise the room
-// cursor its caller marked the context with. Nil is an append no cursor gates.
+// appendingCursor is the cursor the gate reads for an append to room, and the rule it applies:
+// the calling transaction's own write to room when it has one, whose fork is what the write was
+// made on (appendDerived), otherwise the room cursor its caller marked the context with. Nil is an
+// append no cursor gates.
 //
 // A transaction's write decides for itself: a cold write, whose fork came from the store because
-// no room of this process held the document (coldFork), carries no cursor and is not gated. The
-// gate refuses a write rendered from a room behind the head, and a cold write renders from the
-// store instead - it holds no room, its update commutes with whatever landed since its read, and
-// the room that loads after its publish reads the store, which holds both by then.
-func appendingCursor(ctx context.Context, room string) documentCursor {
+// no room of this process held the document or its room was behind (coldFork), carries no cursor
+// and is not gated. The gate refuses a write rendered from a room behind the head, and a cold
+// write renders from the store instead - it holds no room, its update commutes with whatever
+// landed since its read, and the room that loads after its publish reads the store, which holds
+// both by then.
+func appendingCursor(ctx context.Context, room string) (documentCursor, appendKind) {
 	if write := ledgerFrom(ctx).liveWriteFor(room); write != nil {
 		if write.forkCursor == nil {
-			return nil
+			return nil, appendDerived
 		}
-		return write
+		return write, appendDerived
 	}
-	if cursor := roomCursorFrom(ctx); cursor != nil {
-		return cursor
+	if marked, ok := ctx.Value(roomCursorContextKey{}).(roomAppend); ok && marked.cursor != nil {
+		return marked.cursor, marked.kind
 	}
-	return nil
+	return nil, appendDerived
 }
 
 // authorCapture is whom a version credits and what its commit takes out of the pending authors:
@@ -520,10 +652,11 @@ func captureAuthors(state *roomState, owed map[string]model.Actor, write *liveWr
 // room: a room behind the durable head (captureLiveTextAndAuthors), or a write whose fork came from
 // the store (coldFork). The store holds no change still in flight in the room, so the version
 // lists none of the room's in-flight credits and its commit consumes none: each stays in F, to
-// reach R when its append lands, or, when the gate refuses that append from a room behind the
-// head, to be credited again when its browser resends the edit to the reloaded room. Listed here,
-// that author would be listed again on the version holding the resent edit. The pending authors
-// it read (R), the write's own credits and actor stay, as captureAuthors gave them.
+// reach R when its append lands, or, when the gate refuses that append from a room whose stored
+// history was replaced, to be credited again when its browser resends the edit to the reloaded
+// room. Listed here, that author would be listed again on the version holding the resent edit.
+// The pending authors it read (R), the write's own credits and actor stay, as captureAuthors gave
+// them.
 func (capture authorCapture) withoutInflight(write *liveWrite, actor *model.Actor) authorCapture {
 	authors := make(map[string]model.Actor, len(capture.rAuthors)+1)
 	for _, author := range capture.rAuthors {
