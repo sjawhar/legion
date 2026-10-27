@@ -13,9 +13,11 @@
 # for `release-push.sh push-tag`, which pushes a tag with the deploy
 # key; for `release-push.sh push-built`, which lands a changed build of the
 # Claude Envoy plugin on main through land_on_main, or starts a fresh run, and
-# refuses a doctored one; for `release-push.sh handed`, which checks the version
-# and the files a build job hands a publish job and prints the release tag; and
-# for `release-push.sh no-credential`, the build job's tripwire.
+# refuses a doctored one; for `release-push.sh check-built`, which refuses
+# what push-built refuses without a checkout or a credential; for
+# `release-push.sh handed`, which checks the version and the files a build job
+# hands a publish job and prints the release tag; and for `release-push.sh
+# no-credential`, the build job's tripwire.
 #
 # Each push-main case builds a bare origin holding one seed commit
 # (packages/pkg at 1.0.0 plus a README) and two clones, a and b. Clone a plays
@@ -59,9 +61,13 @@
 # a `..`, an absolute path, a member outside dist/ and legion/ or with another
 # character, an executable member, a missing bundle, manifest or agent, a base
 # that is not 40 lower-case hex, a HEAD not at the base, a dirty tree — leaves
-# origin, the clone and its work tree as they were. The `handed` cases fill a
-# directory with the archives a release ships, change one thing as a
-# compromised build job could, and run `handed` on it. The `no-credential`
+# origin, the clone and its work tree as they were. The `check-built` cases run
+# it on the good tar and on refused ones (an executable member, a skill script
+# among them, a symlink, a name with a space, a missing dist/dispatch.js) from
+# an empty directory outside any repository, and check it writes nothing there,
+# in TMPDIR or beside the tars. The `handed` cases fill a directory with the
+# archives a release ships, change one thing as a compromised build job could,
+# and run `handed` on it. The `no-credential`
 # cases run it under `env -i` with a throwaway HOME, plant one credential at a
 # time, and check it is named but never shown.
 #
@@ -1337,6 +1343,54 @@ push_built "$pb/r/a" "$rbase" "$pb/trees/no-such.tar"
 built_refused "a tar that does not exist" "listing .*no-such\.tar failed"
 
 echo
+echo "Case: check-built accepts what push-built accepts and refuses what it refuses, writing nothing"
+# The tars above, plus a skill script made executable (as `cp -R` stages a skill's mode into
+# legion/) and a build lacking the dispatch bundle (a renamed entry in BUNDLE_ENTRYPOINTS). Each
+# run is from an empty directory outside any repository, with an empty TMPDIR, and the tar's
+# directory is compared before and after: check-built needs no checkout and writes nothing.
+cb="$pb/cb"
+# check_built <tar> [<arg>...]: runs `release-push.sh check-built <tar> [<arg>...]` from the empty
+# directory $cb/run with TMPDIR=$cb/tmp; leaves its exit code in rc, its combined output in out,
+# and in written how many entries those two directories hold afterwards and whether the trees
+# directory's listing and checksums changed.
+check_built() {
+  local before
+  rm -rf "$cb" && mkdir -p "$cb/run" "$cb/tmp"
+  before=$(cd "$tars" && find . -printf '%m %p\n' | sort && find . -type f -exec sha256sum {} + | sort)
+  set +e
+  out=$(cd "$cb/run" && env TMPDIR="$cb/tmp" "$release_push" check-built "$@" 2>&1)
+  rc=$?
+  set -e
+  written="$(find "$cb/run" "$cb/tmp" -mindepth 1 | wc -l)|$(is "$(cd "$tars" && find . -printf '%m %p\n' | sort && find . -type f -exec sha256sum {} + | sort)" "$before")"
+}
+# check_refused <description> <regex>: exit 1, an ::error:: of check-built matching <regex>, and
+# nothing written.
+check_refused() {
+  check "check-built, $1: exits 1, writing nothing" "$(is "$rc|$written" "1|0|true")"
+  check "check-built, $1: the error names it" "$(contains "$out" "^::error::release-push\.sh check-built: $2")"
+}
+check_built "$tars/good.tar"
+check "check-built, a good build: exits 0, printing nothing and writing nothing" "$(is "$rc|$out|$written" "0||0|true")"
+check_built "$tars/executable.tar"
+check_refused "an executable member" "member dist/envoy-channel\.js of .*executable\.tar has the mode -rwx[-rwx]*, with an execute"
+built_tar skill-script rebuilt 'mkdir legion/skills/legion-worker/scripts && printf "x\n" > legion/skills/legion-worker/scripts/x.sh && chmod 755 legion/skills/legion-worker/scripts/x.sh'
+check_built "$tars/skill-script.tar"
+check_refused "an executable skill script" "member legion/skills/legion-worker/scripts/x\.sh of .* has the mode -rwxr-xr-x, with an execute"
+check_built "$tars/symlink.tar"
+check_refused "a symlink member" "member dist/link\.js of .*symlink\.tar is a symlink"
+check_built "$tars/space.tar"
+check_refused "a member whose name holds a space" 'member .\{0,1\}dist/a\\\{0,1\} b\.js.\{0,1\} of .* is not dist, legion or a path under them'
+built_tar no-dispatch rebuilt 'rm dist/dispatch.js'
+check_built "$tars/no-dispatch.tar"
+check_refused "a tar missing dist/dispatch.js" ".*no-dispatch\.tar lacks dist/dispatch\.js, a file every build of the plugin holds"
+check_built "$tars/no-agents.tar"
+check_refused "a tar with no file under legion/agents/" ".*no-agents\.tar holds no file under legion/agents/"
+check_built "$tars/no-such.tar"
+check_refused "a tar that does not exist" "listing .*no-such\.tar failed"
+check_built "$tars/good.tar" extra
+check_refused "a second argument" "usage: release-push\.sh check-built <tar>$"
+
+echo
 echo "Case: push-tag holds GitHub's host keys and refuses any other"
 # These reach github.com over SSH with a throwaway key no repository trusts, so each push is
 # refused; what matters is which refusal. Without the network they are skipped, not counted.
@@ -1586,5 +1640,5 @@ no_credential GIT_CONFIG_GLOBAL="$nc/bad.gitconfig"
 check "an unreadable git configuration: exits 1, naming git config's exit code" \
   "$(is "$rc|$(contains "$out" '^::error::git config --get-regexp exited 128, so the git configuration could not be read$')" '1|true')"
 
-summary "release-push.sh version, push-main, tagged, tag, release, push-tag, push-built, handed and no-credential"
+summary "release-push.sh version, push-main, tagged, tag, release, push-tag, push-built, check-built, handed and no-credential"
 

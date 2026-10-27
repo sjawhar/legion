@@ -262,12 +262,19 @@ every third-party package they inline, written from Bun's metafile by
   a hook or server entry that names a bundle the previous build lacks; add a bundle in one pull
   request and the entry that runs it in a later one. `scripts/build.ts` takes exactly one mode
   and refuses a run that names none (exit 2): `--in-place` rewrites the package's own `dist/` and
-  `legion/` (that workflow's build, `bun run build -- --in-place`); `--check` (`bun run
-  check-dist`) builds into a scratch directory and fails when the committed files differ from it;
-  `--out <dir>` makes a new or empty directory outside the repository a runnable copy of the
-  plugin built from the tree (its manifests, `.mcp.json`, `bin/`, `hooks/`, `package.json` and
-  skills, the skill links dereferenced, with a fresh `dist/` and `legion/`), which is how to run
-  an unmerged tree.
+  `legion/`; `--check` (`bun run check-dist`) builds into a scratch directory and fails when the
+  committed files differ from it; `--out <dir>` makes a new or empty directory outside the
+  repository a runnable copy of the plugin built from the tree (its manifests, `.mcp.json`,
+  `bin/`, `hooks/`, `package.json` and skills, the skill links dereferenced, with a fresh `dist/`
+  and `legion/`), which is how to run an unmerged tree.
+- `bun run verify-build <tar>` (`scripts/verify-build.sh`) is that workflow's build step: it builds
+  in place, checks a second build matches the first, runs the private-name check over `dist/` and
+  `legion/`, refuses a generated file git ignores (`git add -A` would skip it, so main would
+  silently lack it), packs the two directories into `<tar>`, and runs `release-push.sh check-built`
+  over it, the member checks the push job's `push-built` runs before it commits. The required
+  `test` job and the `claude-envoy` job run the same command on a pull request, so a skill file
+  that is executable, a symlink or named with a space, or a bundle `BUNDLE_ENTRYPOINTS` no longer
+  names, fails there instead of failing every rebuild on main.
 - The build is `Bun.build`, target `bun`, `minify: false`, no sourcemap, notices included. Minification is off entirely, not case by case: the partial-disable form (`{whitespace: false, identifiers: false, syntax: false}`) still routes through Bun 1.3.14's minifying code-generation path, which picks a non-deterministic CJS/ESM interop check on repeated builds of this exact module graph — on top of the syntax minifier's own separate bug, truncating constant-folded multi-operand string concatenation in CI builds, that made the partial form necessary before this. A plain `false` bypasses that whole path; whitespace and identifiers stay readable as a side effect, so independent changes still merge at line level.
 - Every mode builds only on the Bun version pinned in the repo-root `.bun-version`, because
   the bundler's own output depends on the exact Bun build, not only the declared version. Two

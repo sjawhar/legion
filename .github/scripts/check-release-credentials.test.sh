@@ -89,9 +89,9 @@ REBUILD=.github/workflows/claude-envoy-rebuild.yaml
 # `if:`. The listener: a docker build job (`packages: write`, a build-push) and release_publish in
 # its concurrency group, with `docker buildx imagetools create`. Infra: a build job
 # (install-pulumi, `pulumi package get-schema`, tripwire) and a publish job. The rebuild: a build
-# job (setup-bun, `bun run build`, `bun run check-dist`, the private-name check, upload, tripwire)
-# with an `if:` of its own, and a push job (`actions: write`, the deploy key in the env of its
-# `push-built` step) whose `if:` calls `always()` and tests build's result.
+# job (setup-bun, `bun run verify-build`, upload, tripwire) with an `if:` of its own, and a push job
+# (`actions: write`, the deploy key in the env of its `push-built` step) whose `if:` calls
+# `always()` and tests build's result.
 write_green() {
   local dir=$1
   cat > "$dir/release.yaml" <<'YAML'
@@ -367,6 +367,7 @@ on:
     paths:
       - ".github/workflows/claude-envoy-rebuild.yaml"
       - ".github/scripts/release-push.sh"
+      - "packages/claude-envoy/scripts/verify-build.sh"
 permissions: {}
 concurrency:
   group: claude-envoy-rebuild-${{ github.ref }}
@@ -388,22 +389,14 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - name: Install dependencies
         run: bun install --frozen-lockfile
-      - name: Build the plugin in place
-        run: bun run build -- --in-place
+      - name: Build, check and pack the plugin
+        run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
-      - name: Check a second build matches the first
-        run: bun run check-dist
-        working-directory: packages/claude-envoy
-      - name: Check the built plugin names nothing private
-        run: .github/scripts/check-private-names.sh packages/claude-envoy/dist packages/claude-envoy/legion
       - name: Record the base and whether the build changed the tracked files
         id: state
         run: |
           echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "changed=true" >> "$GITHUB_OUTPUT"
-      - name: Pack the build
-        if: steps.state.outputs.changed == 'true'
-        run: tar -cf "$RUNNER_TEMP/claude-envoy-built.tar" -C packages/claude-envoy dist legion
       - uses: actions/upload-artifact@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: steps.state.outputs.changed == 'true'
         with:
@@ -413,7 +406,7 @@ jobs:
         run: .github/scripts/release-push.sh no-credential
   push:
     needs: build
-    if: always() && needs.build.result == 'success' && needs.build.outputs.changed == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: always() && needs.build.result == 'success' && needs.build.outputs.changed == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: read

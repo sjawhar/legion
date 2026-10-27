@@ -96,12 +96,13 @@
 # variable in command position, `xargs`, `nohup`, an unlisted program, a `bun` behind `docker -Dl
 # debug run`) is accepted on that ground.
 #
-# Scope: exactly the four workflows named in WORKFLOWS: the three release workflows (release.yaml,
-# release-envoy-listener.yaml, release-envoy-infra.yaml) and claude-envoy-rebuild.yaml, which is no
-# release but pushes to main with the deploy key, so the same split binds it. Rules 1-3 read every
-# job that has `steps:`; a job that calls a reusable workflow (`uses:` and no steps, release.yaml's
-# worker_image) is out of their scope, since what it runs is that workflow's own jobs. Rules 4-5
-# read the jobs they name. Rule 6 reads every job's `if:`, steps or not.
+# Scope: exactly the four workflows WORKFLOWS lists, the keys of PUSH_COMMANDS: the three release
+# workflows (release.yaml, release-envoy-listener.yaml, release-envoy-infra.yaml) and
+# claude-envoy-rebuild.yaml, which is no release but pushes to main with the deploy key, so the
+# same split binds it. Rules 1-3 read every job that has `steps:`; a job that calls a reusable
+# workflow (`uses:` and no steps, release.yaml's worker_image) is out of their scope, since what it
+# runs is that workflow's own jobs. Rules 4-5 read the jobs they name. Rule 6 reads every job's
+# `if:`, steps or not.
 #
 # Run from anywhere: .github/scripts/check-release-credentials.sh
 # CI runs it in the lint job of pr-and-main.yaml, and its tests in that workflow's test job.
@@ -142,7 +143,6 @@ RELEASE = Path(".github/workflows/release.yaml")
 LISTENER = Path(".github/workflows/release-envoy-listener.yaml")
 INFRA = Path(".github/workflows/release-envoy-infra.yaml")
 REBUILD = Path(".github/workflows/claude-envoy-rebuild.yaml")
-WORKFLOWS = [RELEASE, LISTENER, INFRA, REBUILD]
 
 # What makes a job credentialed: one of these scopes, or the deploy key's name anywhere in it, by
 # dot or by index (`secrets.DEPLOY_KEY`, `secrets['DEPLOY_KEY']`, `secrets["DEPLOY_KEY"]`), in any
@@ -156,7 +156,8 @@ DEPLOY_KEY_VALUE = re.compile(r"\$\{\{\s*secrets\.DEPLOY_KEY\s*\}\}", re.IGNOREC
 RELEASE_PUSH = ".github/scripts/release-push.sh"
 TRIPWIRE = f"{RELEASE_PUSH} no-credential"
 # The release-push.sh commands a step holding the deploy key may run, by workflow: a release pushes
-# its tag and its version bump, the rebuild lands its build, and neither runs the other's push.
+# its tag and its version bump, the rebuild lands its build, and neither runs the other's push. Its
+# keys are the workflows this check reads, in this order: a workflow joins the check here.
 RELEASE_PUSHES = ("release-push.sh push-tag", "release-push.sh push-main")
 PUSH_COMMANDS = {
     RELEASE: RELEASE_PUSHES,
@@ -164,6 +165,7 @@ PUSH_COMMANDS = {
     INFRA: RELEASE_PUSHES,
     REBUILD: ("release-push.sh push-built",),
 }
+WORKFLOWS = list(PUSH_COMMANDS)
 # A secret other than GITHUB_TOKEN, which a build job must not hold: `secrets.X` or `secrets['X']`
 # for any X but GITHUB_TOKEN, `toJSON(secrets)` (the context and functions are case-insensitive,
 # as are secret names), or a bare `secrets` inside a `${{ … }}` expression (`${{ secrets }}`,

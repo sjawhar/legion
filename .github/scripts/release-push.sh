@@ -6,9 +6,9 @@
 # The workflows split each release into a build job, which runs the
 # dependencies' code and holds no credential, and a publish job, which holds
 # the credentials and runs no dependency code (the rebuild workflow's push job
-# is one). `version` and `no-credential` are the build job's; `tag`,
-# `release`, `restart`, `push-main`, `push-tag` and `push-built` the publish
-# job's; `tagged` and `handed` serve both.
+# is one). `version`, `check-built` and `no-credential` are the build job's;
+# `tag`, `release`, `restart`, `push-main`, `push-tag` and `push-built` the
+# publish job's; `tagged` and `handed` serve both.
 #
 # version:   the one version step every build job calls: print the release
 #            this checkout gets, as the three lines `version=`, `tag=` and
@@ -157,26 +157,36 @@
 #            the pinned ones; GitHub publishes them at `gh api meta --jq
 #            .ssh_keys`, which release-push.test.sh compares with these when it
 #            can reach GitHub.
+# check-built: check <tar>, a build of the Claude Envoy plugin, for what
+#            push-built accepts, holding no credential and writing nothing. The
+#            rebuild's build job runs it, and so do pr-and-main.yaml's required
+#            test job and envoy-and-contracts.yaml's claude-envoy job, all
+#            through packages/claude-envoy/scripts/verify-build.sh, so a pull
+#            request fails for whatever main's push job would refuse. <tar>
+#            holds the package's dist/ and legion/ (`tar -cf <tar> -C
+#            packages/claude-envoy dist legion`) and is checked from its listing:
+#            every member a regular file or a directory (no symlink, no hard
+#            link, nothing else); every name dist or legion, then path
+#            components of letters, digits, '.', '_' and '-' only, so no
+#            absolute path, no member outside the two directories, and no '..'
+#            component; no regular member with an execute, setuid, setgid or
+#            sticky bit; and the files every build holds present:
+#            dist/envoy-channel.js, dist/session-hook.js,
+#            dist/session-title-hook.js, dist/dispatch.js,
+#            dist/THIRD_PARTY_NOTICES, legion/.claude-plugin/plugin.json and a
+#            file under each of legion/skills/ and legion/agents/. Each refusal
+#            is an ::error:: naming the member, and exit 1.
 # push-built: land a build of the Claude Envoy plugin on main, for
 #            claude-envoy-rebuild.yaml's push job. <tar> is what its build
 #            job built from <base-sha>, main's tip when that job started: the
 #            package's dist/ and legion/. HEAD must be <base-sha>, 40
-#            lower-case hex, and the work tree clean. The tar is checked from
-#            its listing before anything changes: every member a regular file
-#            or a directory (no symlink, no hard link, nothing else); every
-#            name dist or legion, then path components of letters, digits, '.',
-#            '_' and '-' only, so no absolute path, no member outside the two
-#            directories, and no '..' component; no regular member with an
-#            execute, setuid, setgid or sticky bit; and the files every build
-#            holds present: dist/envoy-channel.js, dist/session-hook.js,
-#            dist/session-title-hook.js, dist/dispatch.js,
-#            dist/THIRD_PARTY_NOTICES, legion/.claude-plugin/plugin.json and a
-#            file under each of legion/skills/ and legion/agents/. Each refusal
-#            is an ::error:: naming the member, with nothing changed. Then
-#            packages/claude-envoy/dist and packages/claude-envoy/legion are
-#            replaced by the tar's content and only those two are staged. A
-#            build main's files already match stages nothing: a ::notice says
-#            so and nothing is pushed. Otherwise github-actions[bot], as `tag`
+#            lower-case hex, and the work tree clean. The tar is then checked as
+#            check-built checks it, each refusal an ::error:: naming the member
+#            with nothing changed. Then packages/claude-envoy/dist and
+#            packages/claude-envoy/legion are replaced by the tar's content and
+#            only those two are staged. A build main's files already match
+#            stages nothing: a ::notice says so and nothing is pushed.
+#            Otherwise github-actions[bot], as `tag`
 #            commits, commits them as `chore(claude-envoy): rebuild dist/ and
 #            legion/ from <the base's first 12 hex> [skip ci]`: GitHub's skip
 #            keyword, so the commit starts no CI or release run (the build job
@@ -218,7 +228,7 @@
 #            credential wired into a build job by mistake.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh no-credential}
+command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh no-credential}
 
 # is_plain_version <value>: true when <value> is X.Y.Z, each field a number
 # without leading zeros (release-bump.sh does arithmetic on the fields, where a
@@ -318,6 +328,67 @@ fail_outstanding() {
     printf '**Version bump for %s v%s did not land on main.** %s\n' "$package_dir" "$version" "$message" >> "$GITHUB_STEP_SUMMARY"
   fi
   exit 1
+}
+
+# check_built <tar>: refuse <tar> unless it is a build push-built accepts (the
+# header's check-built paragraph), reading only its listing; every refusal is an
+# ::error:: naming the member, and exit 1.
+check_built() {
+  local tar_file=$1 shown_tar names listing i member mode shown need dir found
+  local -a members modes
+  local -A regular=()
+  shown_tar=$(quote_all "$tar_file")
+  # Every member's name from -t, one per line (GNU tar escapes a newline in a
+  # name), and its type and mode from the first field of the same line of -tv.
+  names=$(tar -tf "$tar_file") || fail_error "listing $shown_tar failed"
+  listing=$(tar -tvf "$tar_file") || fail_error "listing $shown_tar failed"
+  [ -n "$names" ] || fail_error "$shown_tar holds no member"
+  mapfile -t members <<<"$names"
+  mapfile -t modes <<<"$listing"
+  if [ "${#members[@]}" != "${#modes[@]}" ]; then
+    fail_error "$shown_tar lists ${#members[@]} names but ${#modes[@]} entries; refusing it"
+  fi
+  for i in "${!members[@]}"; do
+    member=${members[i]} mode=${modes[i]%% *}
+    shown="member $(quote_all "$member") of $shown_tar"
+    case $mode in
+      -* | d*) ;;
+      l*) fail_error "$shown is a symlink; only regular files and directories are accepted" ;;
+      h*) fail_error "$shown is a hard link; only regular files and directories are accepted" ;;
+      *) fail_error "$shown is of type '${mode:0:1}', not a regular file or a directory" ;;
+    esac
+    if [[ $member == /* ]]; then
+      fail_error "$shown is an absolute path"
+    fi
+    if [[ /$member/ == */../* ]]; then
+      fail_error "$shown has a '..' component"
+    fi
+    if ! [[ $member =~ ^(dist|legion)(/[A-Za-z0-9._-]+)*/?$ ]]; then
+      fail_error "$shown is not dist, legion or a path under them in letters, digits, '.', '_' and '-'"
+    fi
+    if [[ $mode == -* ]]; then
+      # The owner's, the group's and the others' execute places of the mode.
+      if [ "${mode:3:1}${mode:6:1}${mode:9:1}" != --- ]; then
+        fail_error "$shown has the mode $mode, with an execute, setuid, setgid or sticky bit; no file of the plugin is executable"
+      fi
+      regular[$member]=1
+    fi
+  done
+  for need in dist/envoy-channel.js dist/session-hook.js dist/session-title-hook.js dist/dispatch.js \
+    dist/THIRD_PARTY_NOTICES legion/.claude-plugin/plugin.json; do
+    if [ -z "${regular[$need]:-}" ]; then
+      fail_error "$shown_tar lacks $need, a file every build of the plugin holds"
+    fi
+  done
+  for dir in legion/skills legion/agents; do
+    found=false
+    for member in "${!regular[@]}"; do
+      if [[ $member == "$dir"/* ]]; then found=true; break; fi
+    done
+    if ! "$found"; then
+      fail_error "$shown_tar holds no file under $dir/, which every build of the plugin fills"
+    fi
+  done
 }
 
 # land_on_main <base-sha> <workflow-file>: land HEAD, exactly one commit whose
@@ -730,6 +801,10 @@ case "$command" in
     deploy_key_env
     git push "$remote" "refs/tags/$tag"
     ;;
+  check-built)
+    [ $# -eq 2 ] || fail_error "usage: release-push.sh check-built <tar>"
+    check_built "$2"
+    ;;
   push-built)
     [ $# -eq 3 ] || fail_error "usage: release-push.sh push-built <base-sha> <tar>"
     base=$2 tar_file=$3
@@ -749,58 +824,7 @@ case "$command" in
     case $tar_file in /*) ;; *) tar_file=$PWD/$tar_file ;; esac
     shown_tar=$(quote_all "$tar_file")
     cd "$(git rev-parse --show-toplevel)"
-    # Every member's name from -t, one per line (GNU tar escapes a newline in a
-    # name), and its type and mode from the first field of the same line of -tv.
-    names=$(tar -tf "$tar_file") || fail_error "listing $shown_tar failed"
-    listing=$(tar -tvf "$tar_file") || fail_error "listing $shown_tar failed"
-    [ -n "$names" ] || fail_error "$shown_tar holds no member"
-    mapfile -t members <<<"$names"
-    mapfile -t modes <<<"$listing"
-    if [ "${#members[@]}" != "${#modes[@]}" ]; then
-      fail_error "$shown_tar lists ${#members[@]} names but ${#modes[@]} entries; refusing it"
-    fi
-    declare -A regular=()
-    for i in "${!members[@]}"; do
-      member=${members[i]} mode=${modes[i]%% *}
-      shown="member $(quote_all "$member") of $shown_tar"
-      case $mode in
-        -* | d*) ;;
-        l*) fail_error "$shown is a symlink; only regular files and directories are accepted" ;;
-        h*) fail_error "$shown is a hard link; only regular files and directories are accepted" ;;
-        *) fail_error "$shown is of type '${mode:0:1}', not a regular file or a directory" ;;
-      esac
-      if [[ $member == /* ]]; then
-        fail_error "$shown is an absolute path"
-      fi
-      if [[ /$member/ == */../* ]]; then
-        fail_error "$shown has a '..' component"
-      fi
-      if ! [[ $member =~ ^(dist|legion)(/[A-Za-z0-9._-]+)*/?$ ]]; then
-        fail_error "$shown is not dist, legion or a path under them in letters, digits, '.', '_' and '-'"
-      fi
-      if [[ $mode == -* ]]; then
-        # The owner's, the group's and the others' execute places of the mode.
-        if [ "${mode:3:1}${mode:6:1}${mode:9:1}" != --- ]; then
-          fail_error "$shown has the mode $mode, with an execute, setuid, setgid or sticky bit; no file of the plugin is executable"
-        fi
-        regular[$member]=1
-      fi
-    done
-    for need in dist/envoy-channel.js dist/session-hook.js dist/session-title-hook.js dist/dispatch.js \
-      dist/THIRD_PARTY_NOTICES legion/.claude-plugin/plugin.json; do
-      if [ -z "${regular[$need]:-}" ]; then
-        fail_error "$shown_tar lacks $need, a file every build of the plugin holds"
-      fi
-    done
-    for dir in legion/skills legion/agents; do
-      found=false
-      for member in "${!regular[@]}"; do
-        if [[ $member == "$dir"/* ]]; then found=true; break; fi
-      done
-      if ! "$found"; then
-        fail_error "$shown_tar holds no file under $dir/, which every build of the plugin fills"
-      fi
-    done
+    check_built "$tar_file"
     # The tar is the whole of both directories: a file it lacks is deleted.
     rm -rf packages/claude-envoy/dist packages/claude-envoy/legion
     tar -xf "$tar_file" -C packages/claude-envoy --no-same-owner || fail_error "extracting $shown_tar into packages/claude-envoy failed"

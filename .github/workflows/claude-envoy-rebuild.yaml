@@ -9,11 +9,13 @@ name: Rebuild Claude Envoy plugin
 #
 # The repository's release-credential rule (AGENTS.md, Conventions) binds it, since it pushes with
 # the deploy key, and check-release-credentials.sh pins its shape. `build` runs the dependencies'
-# code (install, the bundler, the notices) and holds no write scope and no secret; it hands the
-# build over as one tar and ends in the no-credential tripwire. `push` holds the deploy key and
-# actions: write, runs no dependency code and restores no cache: release-push.sh push-built checks
-# the tar, member by member, before anything acts on it, commits it over the commit it was built
-# from and lands that one commit.
+# code (install, the bundler, the notices) and holds no write scope and no secret; it builds and
+# checks the plugin with packages/claude-envoy/scripts/verify-build.sh, the one statement of what
+# `push` accepts, which the pull request's required test job runs too, hands the build over as the
+# one tar that script packs, and ends in the no-credential tripwire. `push` holds the deploy key
+# and actions: write, runs no dependency code and restores no cache: release-push.sh push-built
+# checks the tar, member by member, as verify-build's check-built did, before anything acts on it,
+# commits it over the commit it was built from and lands that one commit.
 #
 # `build` checks out main's tip when it starts, not the commit that started the run, so the newest
 # pending run, the one the concurrency group below keeps, builds the newest main. `push` lands only
@@ -28,8 +30,8 @@ name: Rebuild Claude Envoy plugin
 # commit carrying GitHub's skip keyword, such as a release's version bump, that changed a build
 # input.
 #
-# A pull request that changes this workflow or release-push.sh runs `build` on its merge commit, its
-# own proof before merge; `push` runs only on main.
+# A pull request that changes this workflow, release-push.sh or verify-build.sh runs `build` on its
+# merge commit, its own proof before merge; `push` runs only on main.
 on:
   push:
     branches: [main]
@@ -40,6 +42,7 @@ on:
     paths:
       - ".github/workflows/claude-envoy-rebuild.yaml"
       - ".github/scripts/release-push.sh"
+      - "packages/claude-envoy/scripts/verify-build.sh"
 
 # Every job declares its own permissions (build, push below); nothing runs under this workflow-level
 # default.
@@ -53,7 +56,8 @@ concurrency:
 
 jobs:
   # Builds the plugin from main's tip (a pull request's merge commit on a pull request), checks the
-  # build, and hands it over when it differs from the tracked files. No write scope, no secret.
+  # build and packs it (verify-build), and hands it over when it differs from the tracked files. No
+  # write scope, no secret.
   build:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -70,16 +74,12 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - name: Install dependencies
         run: bun install --frozen-lockfile
-      - name: Build the plugin in place
-        run: bun run build -- --in-place
+      # The in-place build, a second build byte-compared with the first, the private-name check, no
+      # generated file git ignores, the tar and release-push.sh check-built over it: everything
+      # push-built checks, here, where a refusal fails the build job instead of the push.
+      - name: Build, check and pack the plugin
+        run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
-      # A second build, byte-compared with the first: what lands is what the source builds to, not
-      # one run's accident.
-      - name: Check a second build matches the first
-        run: bun run check-dist
-        working-directory: packages/claude-envoy
-      - name: Check the built plugin names nothing private
-        run: .github/scripts/check-private-names.sh packages/claude-envoy/dist packages/claude-envoy/legion
       # base is the commit this job built from, the only commit push lands onto. The build may
       # change the two directories and nothing else.
       - name: Record the base and whether the build changed the tracked files
@@ -96,9 +96,6 @@ jobs:
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Pack the build
-        if: steps.state.outputs.changed == 'true'
-        run: tar -cf "$RUNNER_TEMP/claude-envoy-built.tar" -C packages/claude-envoy dist legion
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.state.outputs.changed == 'true'
         with:
@@ -112,10 +109,11 @@ jobs:
   # Lands build's tar on main as one commit over the commit build built from, or starts a fresh run
   # when main has moved on (release-push.sh push-built). It runs no dependency code: only
   # release-push.sh, git, gh and tar, and the two pinned actions below. Its condition runs on
-  # `always()` and tests build's result before reading its outputs.
+  # `always()` and tests build's result before reading its outputs. It needs no test of the event:
+  # a pull_request run's github.ref is refs/pull/<number>/merge, never refs/heads/main.
   push:
     needs: build
-    if: always() && needs.build.result == 'success' && needs.build.outputs.changed == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: always() && needs.build.result == 'success' && needs.build.outputs.changed == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     # actions: write is for `gh workflow run`, which starts the fresh run; the push itself uses the
     # deploy key, held only by the "Land the build on main" step's env.
