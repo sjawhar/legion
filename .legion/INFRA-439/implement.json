@@ -2,43 +2,21 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-27T03:40:55Z",
+  "completed": "2026-10-27T05:54:21Z",
   "pr": 2228,
-  "round": "tester round 17 fail: a stream that keeps its envoy_stream_id but stands behind a session's cursor passed new messages over in silence",
+  "round": "review round 7 (changes requested for CI alone at 465a078b): forward merge of main so the pull_request merge ref carries main's #2317 fix for the daemon admission test",
   "proof": [
     {
-      "criterion": "A stream restored behind a session's cursor (same id) shows what was published after the restore, with one notice and no duplicate",
-      "surface": "the tester's sidm.sh and sid3.sh (unchanged) on real omp 18.12.2, natscli v0.5.1, natsd and the listener built from this head: stream restored from a backup at seq 1 with the cursor at 4; stream re-added empty from its exported config with the cursor at 5",
-      "command": "bash /legion/scratch/tmp/adv/sidm.sh; bash /legion/scratch/tmp/adv/sid3.sh (https://github.com/sjawhar/legion/pull/2228#issuecomment-6433160492)",
-      "observed": "SID RESULT: M:PASS (424 shown once, cursor at 2) and B3:PASS (415 and 416 shown once); in each session file every Dispatch message appears exactly once and one 'notice: stream moved back' card",
-      "headSha": "fcc7d0087be41e9cc7146aafa0ebc0eed44cd8f9",
-      "negativeControl": "at 067a15af the same scripts gave M:LOSS and B3:LOSS (tester's round 17 run)"
-    },
-    {
-      "criterion": "Red test 46751dc66075 passes unmodified; the moved-back rule re-reads every subject, passes over what was shown, tells one durable notice",
-      "surface": "envoy-client bun test (replay.test.ts)",
-      "command": "cd packages/envoy-client && bun test (924 pass, 0 fail)",
-      "observed": "red test passes; shown messages still stored are not shown again and the new one is shown once with one stream_moved_back notice; a session ending during the async write is told once after the restart; retention-gapped backup, no-id and upgrade cases behave the same",
-      "headSha": "fcc7d0087be41e9cc7146aafa0ebc0eed44cd8f9",
-      "negativeControl": "against 067a15af's replay.ts the red test and the five new tests fail (45 pass / 6 fail)"
+      "criterion": "The forward merge changes nothing of this branch's diff and brings main's fix for the only red required check",
+      "surface": "the unchanged-diff fingerprint (jj diff from the fork point, .legion and docs/solutions excluded) and the merge's parents",
+      "command": "fingerprint at 465a078b (and at code head fcc7d008) vs at merge 34b3e846cb6e (https://github.com/sjawhar/legion/pull/2228#issuecomment-6434885121); jj log -r 'baadccdc & ::main@origin'",
+      "observed": "fingerprint fcfbc288f05b54a8f89461975c53a87e0da717f16b03149df2a0cf507b638fcf before and after, unchanged; no conflicts; #2317 (baadccdc) is an ancestor of the merged main 448a41003a17; locally tsc, go build (envoy, daemon), check-dist and biome are green, and pi-envoy bun test gives 1016 pass with the skills guard green",
+      "headSha": "34b3e846cb6e35bb661f02261d2fab236a2ca3f0",
+      "negativeControl": "at fcc7d008 the required test job failed 'Test the Go daemon' (read a slotted issue ... got 20 and 31) in runs 40445205215 job 121994721541 and its rerun 122015255071, from main's #2289 in the old merge ref"
     }
   ],
-  "filesChanged": [
-    "packages/envoy-client/src/replay.ts",
-    "packages/envoy-client/src/__tests__/replay.test.ts",
-    "packages/envoy-client/README.md",
-    "packages/envoy-client/CHANGELOG.md",
-    "packages/pi-envoy/AGENTS.md",
-    "packages/claude-envoy/dist/envoy-channel.js"
-  ],
-  "trickyParts": [
-    "The moved-back check runs after the id rule, so a changed id still resets and an upgrade first adopts the id; on a moved-back stream the rest of that page's answer is discarded so no subject takes a stale next_after.",
-    "Each cursor keeps its since: it only marks which replayed removal frames predate a follow."
-  ],
+  "filesChanged": [],
   "deviations": [
-    "The upgrade test that pinned 'a state stored before stream ids whose cursor stands past the stream's end restarts at its end' was replaced: by the architect's rule the upgrade adopts the id and re-reads from first_seq - 1 with a stream_moved_back notice."
-  ],
-  "openQuestions": [
-    "The window the rule cannot see is stated in the PR body: a restored stream that grows past the cursor before the session's next sweep is not caught; INFRA-14's procedure must close it."
+    "Two tests fail in this pod, in files this PR does not change: envoy-client envoy-config.test.ts 'still running after 10 s' and claude-envoy session-title.test.ts 'queryTmux is bounded'."
   ]
 }
