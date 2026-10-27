@@ -611,6 +611,50 @@ test("a container directive the schema refuses shows its fence lines and the bod
   }
 });
 
+test("a decision the read-only parse refuses leaves the valid decision beside it its own card", async () => {
+  // A heading breaks an ask's content rule, so the read-only parse draws that block as its fence
+  // lines around its content and makes no `ask` node of it; the card must still find the valid
+  // decision's node, whichever side of the refused block it sits on.
+  const refused = ":::ask\n## Heading\n\nWhich?\n\n- X: x\n:::\n";
+  const valid = `:::ask{urgency="high"}\n${askBody}`;
+  for (const markdown of [`${refused}\n${valid}`, `${valid}\n${refused}`]) {
+    const view = render(withAskCard(<MarkdownBody markdown={markdown} />));
+
+    try {
+      const shell = await findAskShell(view.container);
+      const shells = view.container.querySelectorAll('section[data-proof-block-type="ask"]');
+      expect(shells).toHaveLength(1);
+      // The refused block reads as its source lines, outside the one shell.
+      const fence = within(view.container).getByText(":::ask", { selector: "p" });
+      expect(shell.contains(fence)).toBe(false);
+      const heading = within(view.container).getByText("Heading", { selector: "h2" });
+      expect(heading.closest("section")).toBeNull();
+
+      const header = shell.querySelector<HTMLElement>(
+        ":scope > [data-dispatch-ask-header]"
+      ) as HTMLElement;
+      expect(await within(header).findByText("Decision")).toBeDefined();
+      expect(header.querySelector('[data-dispatch-ask-pill="high"]')?.textContent).toBe("High");
+      const footer = shell.querySelector<HTMLElement>(
+        ":scope > [data-dispatch-ask-footer]"
+      ) as HTMLElement;
+      await waitFor(() => {
+        const rows = Array.from(
+          footer.querySelectorAll<HTMLElement>("[data-dispatch-ask-record] li")
+        );
+        expect(rows).toHaveLength(2);
+        expect(within(rows[0] as HTMLElement).getByText("A")).toBeDefined();
+        expect(within(rows[1] as HTMLElement).getByText("B")).toBeDefined();
+      });
+      expect(shell.getAttribute("data-dispatch-ask-options")).toBe("rows");
+      expect(within(footer).queryByText("X")).toBeNull();
+      expect(view.container.querySelector("[data-markdown-fallback]")).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  }
+});
+
 test("a Pandoc fenced div reads as text and the body still formats", async () => {
   const view = render(<MarkdownBody markdown={"Some **bold** text\n\n::: warning\nBody\n:::\n"} />);
 
