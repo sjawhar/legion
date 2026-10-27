@@ -2,42 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T23:52:00Z",
-  "round": 15,
-  "headSha": "6eba519ff6672fe881656aa83aab31f4aaa0b9aa",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6430135156",
+  "completed": "2026-10-27T01:12:00Z",
+  "round": 16,
+  "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6431096471",
   "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp 18.12.2 turn",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-drove leg gap-b live at this head: one notice after the resume, still one three heartbeats later. The session file holds the held envoy-replay-notice (23:39:25.713) and the moved cursor (envoy-replay-state 23:39:25.714) before the kill, and the notice's handed mark after the resume. Red test cf65bda2468a is unchanged and passes."
+    "how": "The implementer proved the cut-short gap with unit tests only (its deviation). I drove it live with a kill inside that window; it passes. I re-ran notice4.sh and notice5.sh at this head: all legs pass. Smoke passes in both modes."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Round 14 failure: a retention-gap notice held for a streaming turn is told once after a SIGKILL, and is not lost",
-      "surface": "real omp --mode rpc 18.12.2 with this checkout's pi-envoy, natsd -js and the listener built from this head; ENVOY_NOTIFICATIONS purged (after messages on an unfollowed subject) while a fresh session's long turn streams",
-      "command": "/legion/scratch/tmp/adv/notice4.sh (legs gap-a, gap-b)",
-      "observed": "gap-a: held through 3 heartbeats, written once after the turn, 1 agent_start and 1 turn_start, no assistant message after it. gap-b: killed while held (streaming, 0 notices, 1 held record) -> 1 notice after the resume, still 1 three heartbeats later",
-      "headSha": "6eba519ff6672fe881656aa83aab31f4aaa0b9aa",
-      "negativeControl": "the same leg at 489fd64d (round 14) showed 2 notices after the resume"
+      "criterion": "Review 5660734397's important item: a retention gap is told once when its sweep is cut short after the notice",
+      "surface": "real omp --mode rpc 18.12.2 with this checkout's pi-envoy, natsd -js and the listener built from this head",
+      "command": "/legion/scratch/tmp/adv/cut.sh",
+      "observed": "omp was killed; 260 own messages were stored behind 3 unfollowed fillers, and the stream was purged below the first of them; omp was resumed and SIGKILLed as soon as the gap was recorded, with 85 of the 260 cards written; after the second resume: 1 gap notice in total, 0 of the 260 messages missing, 0 shown twice",
+      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
+      "negativeControl": "the implementer's engine test against 6eba519f's replay.ts gives ['retention_gap','retention_gap']"
     },
     {
-      "criterion": "The 'stream recreated' notice: held mid-turn and shown once, and killed while held, shown once",
-      "surface": "same rig; ENVOY_NOTIFICATIONS deleted and added back",
-      "command": "/legion/scratch/tmp/adv/notice5.sh (idle control, legs a and b)",
-      "observed": "idle: 1 notice; a: held through 3 heartbeats, written once after the turn, no extra turn; b: killed while held -> 1 notice after the resume, still 1 later",
-      "headSha": "6eba519ff6672fe881656aa83aab31f4aaa0b9aa",
-      "negativeControl": "at 232a541e (round 13) the killed-while-held leg showed 0 notices after the resume"
+      "criterion": "The earlier kill legs: retention gap and stream recreated, each held mid-turn and killed while held",
+      "surface": "same rig",
+      "command": "/legion/scratch/tmp/adv/notice4.sh; /legion/scratch/tmp/adv/notice5.sh",
+      "observed": "gap-a, gap-b, recreate-idle, recreate-a, recreate-b: all PASS (each notice once, no extra turn)",
+      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
+      "negativeControl": "gap-b at 489fd64d showed 2 notices; recreate-b at 232a541e showed 0"
     },
     {
-      "criterion": "Bare gates: smoke in both modes and the red tests",
-      "surface": "real omp, natsd -js and the listener built from this head",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh (local; and remote with SMOKE_REPLAY_ENVOY_URL/SMOKE_REPLAY_NATS_URL on a loopback listener); bun test extensions/envoy.test.ts -t \"a retention gap|a BTW refused live\"; go test ./cmd/listener -run 'TestReplayNeverReturnsAnotherSessions…'",
-      "observed": "SMOKE REPLAY PASS in both modes; 12 pass 0 fail; listener red tests pass",
-      "headSha": "6eba519ff6672fe881656aa83aab31f4aaa0b9aa",
+      "criterion": "Bare gates",
+      "surface": "real omp, natsd -js and the listener built from this head; the plugin and listener suites",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh (local and remote as committed); bun test extensions/envoy.test.ts -t \"a retention gap|a BTW refused live\"; go test ./cmd/listener -run 'TestReplayNeverReturnsAnotherSessions…'",
+      "observed": "SMOKE REPLAY PASS in both modes; 13 pass 0 fail (red tests cf65bda2 and bddc5c2a unchanged); listener red tests pass",
+      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
       "negativeControl": "the released plugin loses its messages in the smoke's controls"
     }
   ],
-  "ci": "At 6eba519f when read: Tests, Legion Envoy and Contracts and Docs queued; Worker Image pending."
+  "minors": "Fork re-queue keyed by session and id (unit test); nats-hub.md names the replay read; the PR body's no-auth NATS user sentence is conditional on sessionUser.",
+  "ci": {
+    "head": "c95305504d295746517ef9dbc9b21b36147d685d",
+    "observed": "Tests, Legion Envoy and Contracts, Docs and Worker Image queued when read (the repository's runner queue is backed up).",
+    "envoyConfigTest": "envoy-client 'a ! command in envoy.json > still running after 10 s …' passes in CI: job 121528826179 (run 40301975592, e0ed6d23, the last completed envoy-client job on this branch), 10026 ms, 897 pass 0 fail. Its file is untouched by this PR; its failure is specific to the pod."
+  }
 }
