@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-630",
+  "completed": "2026-10-27T17:09:29Z",
+  "round": 1,
+  "headReviewed": "85120d98fbad3dff0c6a1c917cafe2b73dff57c5",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 3,
+  "ci": "Code head 85120d98 (only .legion/ above it, compare handoffsOnly true): every check queued at 17:05Z, required lint, typecheck, test and pr-title included. Not waited for: this round requests changes.",
+  "thermonuclear": {
+    "deepReview": "Verdict: CHANGES at 85120d98 (one Medium: the scheduled run's false red; Minors: private-name check of the bundle only in a non-required job, PUSH_COMMANDS global across the four workflows, non-built plugin files live beside the previous build during the lag)",
+    "codeQuality": "Verdict: CHANGES at 85120d98 (the age heuristic; push-built's unreachable staged-path loop and land_on_main's repeated sha regex; the bot identity duplicated from tag)"
+  },
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/workflows/claude-envoy-rebuild.yaml",
+      "description": "Lines 143-154: the scheduled run's red step decides 'a push run missed it' from the base commit's age. A scheduled run that replaces a pending push run in the main concurrency group (cancel-in-progress false) lands the repair after its own two runner queues, so under the measured 15-80 minute Actions backlog it ends red when no run missed anything. Test the fact (a failed or absent push run, a cancelled one being displacement, a skip-keyword base such as a release bump being no miss) or delete the step, since a failed push run is red on its own run. The hourly cadence adds 24 install-and-double-build runs a day to that backlog while every push to main already runs and only a newer run replaces a pending one; reduce it."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "No '## Contract change census': build.ts now refuses a run with no mode (exit 2), where 'bun run build' used to build in place. List the search commands, every hit with its disposition (implement.json searchReasons is the material), and the rollout line: an immediate refusal, naming what it closes (a modeless in-place rewrite that jj snapshots into a pull request's commit)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/claude-envoy/AGENTS.md",
+      "description": "Line 120 (and README.md:258-259, CHANGELOG.md:40) says main's files lag by one run '(minutes)'. A run is two jobs, each waiting for a runner, so under the measured backlog the lag is over an hour, and during it hooks/hooks.json, .mcp.json and bin/ from the merge are live beside the previous dist/ and legion/ (a new bundle and its hook entry ship a hook naming a missing file). State the lag as it is and that hazard."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/workflows/pr-and-main.yaml",
+      "description": "Only the non-required claude-envoy job runs the private-name check and the two-build byte compare over the bundle on a pull request; main's rebuild still refuses a bad bundle, so main stays clean and keeps the previous build. Not a defect."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/scripts/check-release-credentials.sh",
+      "description": "PUSH_COMMANDS (line 157) is global, so push-built is allowed with the deploy key in the release workflows and push-tag/push-main in the rebuild workflow; the PR body says 'only in its push-built step'. Hardening, no exploit path."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/scripts/release-push.sh",
+      "description": "Fast-follow: push-built's staged-path loop (805-810) cannot fire after the clean-tree check and a pathspec-limited git add; land_on_main repeats push-built's sha regex; the github-actions[bot] identity is duplicated from tag."
+    }
+  ]
+}
