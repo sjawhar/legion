@@ -8,7 +8,7 @@
 #                           initdb, write stack.json. Idempotent: a rerun rebuilds incrementally.
 #   stack.sh start          start Postgres, the proxy, NATS and the listener (one already running is
 #                           kept); refuses a port another process holds, naming it.
-#   stack.sh seed [--force] seed through Dispatch (about 17 min on 2 vCPU), drain the outbox, vacuum,
+#   stack.sh seed [--force] seed through Dispatch (18 to 27 min on 2 vCPU), drain the outbox, vacuum,
 #                           install the commit-time trigger, write seed.meta.json and keep the result as
 #                           the template database dispatch_seed. --force drops an existing seed first.
 #   stack.sh reset [LOG]    what run-step.sh does before each step: stop Dispatch and the listener,
@@ -31,19 +31,16 @@
 # DISPATCH_URL, ENVOY_URL, ENVOY_NATS_URL, AWS_*, HOME and XDG_* never reach it, and every process is
 # stopped by the pid in its pidfile ($LOADTEST_ROOT/run/<name>.pid), never by name.
 #
-# setup, start, seed, reset and stop take the root's run lock (lock.sh) for their run, and are
+# setup, start, seed, reset and stop take the root's run lock (common.sh) for their run, and are
 # refused while another run holds it; run-step.sh's and run-series.sh's own calls pass. status,
 # build-info and loadgen take no lock.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck source=packages/envoy/loadtest/lock.sh
-source "$here/lock.sh"
-SRC=${LOADTEST_SRC:-$(cd -- "$here/../../.." && pwd -P)}
+# shellcheck source=packages/envoy/loadtest/common.sh
+source "$here/common.sh"
+resolve_paths
 ENVOY_SRC=$SRC/packages/envoy
-ROOT=${LOADTEST_ROOT:-${TMPDIR:-/tmp}/dispatch-loadtest}
-mkdir -p -- "$ROOT"
-ROOT=$(cd -- "$ROOT" && pwd -P)
 BIN=$ROOT/bin
 RUN=$ROOT/run
 LOGS=$ROOT/logs
@@ -227,7 +224,7 @@ spawn() {
   mkdir -p -- "$RUN" "$(dirname -- "$log")" "$ROOT/tmp"
   rm -f -- "$f"
   # The shell writes its own pid and execs CMD, so the pidfile names CMD's process. Descriptor 9,
-  # the run lock (lock.sh), is closed, so a stack process never holds the lock.
+  # the run lock (common.sh), is closed, so a stack process never holds the lock.
   # shellcheck disable=SC2016
   setsid -f env -i "${spawn_env[@]}" /bin/sh -c 'echo "$$" >"$0.tmp" && mv -f -- "$0.tmp" "$0" && exec "$@"' \
     "$f" "$@" >"$log" 2>&1 </dev/null 9>&-
@@ -524,7 +521,7 @@ cmd_seed() {
   trap 'stop_one dispatch' EXIT
   start_dispatch "$LOGS/dispatch-seed.log"
 
-  note "seeding through Dispatch (about 17 min on 2 vCPU); log $LOGS/seed.log"
+  note "seeding through Dispatch (18 to 27 min on 2 vCPU); log $LOGS/seed.log"
   loadgen seed -out "$ROOT/seed.json" 2>&1 | tee "$LOGS/seed.log" >&2
 
   note "waiting for the outbox to publish every seed event"

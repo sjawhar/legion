@@ -5,9 +5,12 @@
 #     [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>]
 #     [--route-mix <file>] [--human 0.1] [--sse <n>] [--rng-seed <n>] [--out <dir>]
 #
-# From a fresh checkout it sets up, starts and seeds the stack (stack.sh). Then, every step: it
-# rebuilds the binaries from this checkout (incremental), refuses a build whose highest migration is
-# older than the seed's, resets the stack to the seed (stack.sh reset: database recreated from
+# From a fresh checkout it sets up, starts and seeds the stack (stack.sh). Then, every step that is
+# not part of a series: it rebuilds the binaries from this checkout (stack.sh setup, incremental) and
+# refuses a build whose highest migration is older than the seed's. A step of run-series.sh skips
+# that: the series did it once, before its first step, and passes its build's commit and dirty flag
+# in LOADTEST_SERIES_BUILD, which a run-step.sh that does not hold the series' lock (common.sh)
+# ignores. Every step then resets the stack to the seed (stack.sh reset: database recreated from
 # dispatch_seed, NATS on a fresh store, listener and Dispatch restarted), runs `loadgen run` and
 # renders `loadgen tables` in the step directory, $LOADTEST_ROOT/runs/<name>/ unless --out names
 # another (it must not exist or be empty). Dispatch's log is the step's dispatch.log.
@@ -15,21 +18,17 @@
 # Dispatch is stopped when the step ends, pass or fail, so the box is idle between steps; Postgres,
 # the proxy, NATS and the listener keep running (stack.sh stop stops them).
 #
-# One run at a time per LOADTEST_ROOT (lock.sh): a run-step.sh or run-series.sh on a root that
+# One run at a time per LOADTEST_ROOT (common.sh): a run-step.sh or run-series.sh on a root that
 # another run holds is refused before it touches the stack. A step in which a stack process exited
-# fails: loadgen run exits non-zero, and so does this script, naming the process; it still renders
+# fails: loadgen run exits non-zero naming the process, and so does this script; it still renders
 # TABLES.md, where the row carries the mark.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 stack=$here/stack.sh
-# shellcheck source=packages/envoy/loadtest/lock.sh
-source "$here/lock.sh"
-SRC=${LOADTEST_SRC:-$(cd -- "$here/../../.." && pwd -P)}
-ROOT=${LOADTEST_ROOT:-${TMPDIR:-/tmp}/dispatch-loadtest}
-mkdir -p -- "$ROOT"
-ROOT=$(cd -- "$ROOT" && pwd -P)
-export LOADTEST_ROOT=$ROOT LOADTEST_SRC=$SRC
+# shellcheck source=packages/envoy/loadtest/common.sh
+source "$here/common.sh"
+resolve_paths
 
 die() {
   printf 'run-step.sh: %s\n' "$*" >&2
@@ -86,26 +85,15 @@ if [ -e "$out" ] && [ -n "$(ls -A -- "$out")" ]; then
 fi
 
 started=$SECONDS
-"$stack" setup
-"$stack" start
-"$stack" seed
-
-# A build cannot start on a seed a newer build migrated: compare the highest migration file of this
-# checkout with the seed's level.
-migrations=$SRC/packages/envoy/internal/dispatch/store/migrations
-build_file=$(cd -- "$migrations" && printf '%s\n' [0-9]*.up.sql | sort -n | tail -n1)
-build_level=$((10#${build_file%%_*}))
-seed_level=$(jq -er .migration "$ROOT/seed.meta.json")
-if ((build_level < seed_level)); then
-  die "this build's highest migration is $build_level ($migrations/$build_file), older than the seed's $seed_level (seed made by $(jq -r .build_commit "$ROOT/seed.meta.json")); reseed with this build (stack.sh seed --force) or run a newer one"
+if $LOCK_INHERITED && [ -n "${LOADTEST_SERIES_BUILD:-}" ]; then
+  # A step of run-series.sh, which holds the lock this script inherited: the series set up, started
+  # and seeded the stack once, and every step runs that build.
+  BUILD=$LOADTEST_SERIES_BUILD
+else
+  unset LOADTEST_SERIES_BUILD
+  prepare_stack run-step.sh
 fi
-if ((build_level > seed_level)); then
-  printf 'run-step.sh: note: the seed is at migration %s and this build at %s. Dispatch migrates the step'"'"'s copy forward at start, and any backfill those migrations start runs inside the step; reseed with this build (stack.sh seed --force) to measure it alone\n' \
-    "$seed_level" "$build_level" >&2
-fi
-
-build_info=$("$stack" build-info)
-read -r commit dirty <<<"$build_info"
+read -r commit dirty <<<"$BUILD"
 
 mkdir -p -- "$out"
 # The box's busy share before this step starts anything: Dispatch is stopped (the last step stopped
@@ -121,12 +109,10 @@ trap - EXIT
 cp -- "$ROOT/logs/listener.out" "$out/listener.log"
 cp -- "$ROOT/logs/nats.out" "$out/nats.log"
 if ((rc != 0)); then
-  # loadgen writes summary.json once the step has run, also when a stack process exited in it.
-  [ -f "$out/summary.json" ] || die "step $name failed: loadgen run exited $rc before it wrote summary.json; see $out/run.log"
+  # loadgen run printed why above (a stack process that exited during the step, or its error).
+  [ -f "$out/summary.json" ] || die "step $name failed: loadgen run exited $rc before it wrote summary.json (its message above says why); see $out/run.log"
   "$stack" loadgen tables "$out" || true
-  exits=$(jq -r '[(.stack_exits // [])[] | "\(.name) (pid \(.pid))"] | join(", ")' "$out/summary.json")
-  [ -n "$exits" ] || die "step $name failed: loadgen run exited $rc; see $out/run.log"
-  die "step $name failed: $exits exited during the step, so its row in $out/TABLES.md does not measure the load"
+  die "step $name failed: loadgen run exited $rc (its message above says why); $out/TABLES.md holds the step's row for diagnosis; see $out/run.log"
 fi
 "$stack" loadgen tables "$out"
 printf 'run-step.sh: step %s done in %d s: %s\n' "$name" "$((SECONDS - started))" "$out" >&2

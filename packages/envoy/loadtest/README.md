@@ -36,9 +36,10 @@ same step before and after its change, and compares the two rows.
 | `stack.sh` | The local stack: `setup`, `start`, `seed`, `reset`, `stop`, `status`, `build-info`, `loadgen` |
 | `run-step.sh` | The one command for a named step |
 | `run-series.sh` | The series of six steps, 0.25x to 10x |
-| `lock.sh` | The run lock of a `LOADTEST_ROOT` (One run at a time, below). The three scripts source it. |
+| `common.sh` | What the three scripts share, sourced by each: the `LOADTEST_ROOT` and `LOADTEST_SRC` paths, the run lock (One run at a time, below), and the setup, start, seed and migration check before a step |
 | `*_test.go` | Unit tests. They need no Postgres and no NATS: `cd packages/envoy && go test ./loadtest/` |
 | `run-step.test.sh` | The test of the run lock. It fakes `go` and `uv` and needs no stack: `cd packages/envoy && bash loadtest/run-step.test.sh` |
+| `common.test.sh` | The test of `lock_root`: a series step keeps the lock after its parent dies, a refusal names the live holder, and a token without the holder's descriptor is refused. It needs no stack: `cd packages/envoy && bash loadtest/common.test.sh` |
 
 ## Requirements
 
@@ -134,13 +135,16 @@ from the RNG seed, so two runs of one step with one seed offer the same arrivals
    the checkout's current code.
 2. `stack.sh start`, then `stack.sh seed`. Each one does nothing when its work is already done. So
    `run-step.sh` is the one command from a fresh checkout. On the first run, the seed alone takes
-   about 17 minutes.
+   18 to 27 minutes.
 3. The migration check (Before and after across commits, below).
 4. `stack.sh reset`, with Dispatch's log in the step directory (The reset, below).
 5. `loadgen run`. It writes the step's files.
 6. It stops Dispatch. It also stops Dispatch when the step fails. Postgres, the proxy, NATS and the
    listener keep running. `stack.sh stop` stops them.
 7. It copies the listener and NATS logs into the step directory and runs `loadgen tables` there.
+
+A step of a series skips steps 1 to 3: `run-series.sh` did them once, before its first step (Run
+the series, below).
 
 Before step 1, `run-step.sh` takes the run lock of the root (One run at a time, below).
 
@@ -151,9 +155,9 @@ process is alive while `/proc/<pid>` exists and is not a zombie. When one has ex
 time it was first seen gone), and the other files that it can take. Then it exits with status 1:
 `loadgen run: dispatch (pid N) exited during the step (first seen gone at T); this row does not
 measure the load`. `run-step.sh` renders `TABLES.md` for diagnosis, with the mark
-`(dispatch exited)` after the step name, and exits with status 1, naming the process. A Dispatch
-crash or out-of-memory kill at a high step thus never reads as the overload that the series
-measures.
+`(dispatch exited)` after the step name, and exits with status 1, pointing at `loadgen run`'s
+message and at `run.log`. A Dispatch crash or out-of-memory kill at a high step thus never reads as
+the overload that the series measures.
 
 To run a step name again, remove its step directory first.
 
@@ -167,15 +171,22 @@ series at a time. A second `run-step.sh` on the root of a running step would sto
 Dispatch and listener in its reset, and the first step would finish as a row of connection
 failures.
 
-`run-step.sh` and `run-series.sh` take an exclusive `flock` on `$LOADTEST_ROOT/.run.lock` before
-they touch the stack, and hold it until they exit. The holder writes its pid, command, start time
-and a random token into the lock file. Another run on the root is refused with status 1, and the
-refusal names the root and the holder. So are `stack.sh setup`, `start`, `seed`, `reset` and
-`stop`; `stack.sh status`, `build-info` and `loadgen` take no lock. The holder's own children pass:
-the holder exports the token as `LOADTEST_LOCK_TOKEN`, and a caller whose token equals the lock
-file's goes on without locking. Thus the series' own `run-step.sh` calls, and the `stack.sh` calls
-of a run, are not refused. The lock is released when the holder exits. No stack process holds it:
-`stack.sh` starts each one with the lock's file descriptor closed.
+`run-step.sh` and `run-series.sh` take an exclusive `flock` on `$LOADTEST_ROOT/.run.lock`, on file
+descriptor 9, before they touch the stack. The lock lasts until every process that holds that
+descriptor has exited: the holder and the children that inherit it. Once locked, the holder empties
+the lock file and writes its pid, command, start time and a random token into it. Another run on
+the root is refused with status 1, and the refusal names the root and the live holder: the pid in
+the lock file, or, when that run has exited and its children still hold the lock, those
+processes. So are `stack.sh setup`, `start`, `seed`, `reset` and `stop`; `stack.sh status`,
+`build-info` and `loadgen` take no lock.
+
+The holder's own children pass: the holder exports the token as `LOADTEST_LOCK_TOKEN`, and a caller
+whose token equals the lock file's and whose descriptor 9 is the holder's locked one keeps that
+descriptor and goes on without locking. Thus the series' own `run-step.sh` calls, and the
+`stack.sh` calls of a run, are not refused, and a series step, with the `loadgen run` that it
+starts, keeps the root when `run-series.sh` is killed. A caller with the token but without the
+descriptor is refused. No stack process holds the lock: `stack.sh` starts each one with
+descriptor 9 closed.
 
 ## Run the series
 
@@ -204,8 +215,13 @@ series directory.
 - The series passes every other step flag to each step: `--duration`, `--warmup`, `--grace`,
   `--event-mix`, `--route-mix`, `--human`, `--rng-seed`. It refuses `--events`, `--sessions`,
   `--requests`, `--sse` and `--out`, because it sets them.
-- With the default window, a step takes about 5 minutes and a series about 30 minutes. The setup
-  and the seed run once, before the series directory exists.
+- With the default window, a step takes about 5 minutes and a series about 30 minutes.
+- `run-series.sh` runs the setup (one build of the checkout), the start, the seed and the migration
+  check once, before the series directory exists, and reads the build's commit and dirty flag once
+  (`stack.sh build-info`). It passes them to its steps in `LOADTEST_SERIES_BUILD`. Its steps skip
+  the setup and record that build in `meta.json`, so every step of a series runs one build, even
+  when the checkout changes during the series. A `run-step.sh` that does not hold the series' lock
+  ignores `LOADTEST_SERIES_BUILD` and builds the checkout.
 - The series holds the run lock for its whole run.
 - A failed step stops the series. `run-series.sh` still writes the series `TABLES.md`, over the
   steps that ran (the failed step included when it wrote `summary.json`), and exits with status 1,
@@ -251,8 +267,9 @@ every pid. It is mode 600. `loadgen` reads every endpoint and token from it.
 
 ## The seed
 
-`stack.sh seed` makes the database that every step starts from. It took 1,025 s (about 17 minutes)
-on a 2-vCPU pod. It does these steps:
+`stack.sh seed` makes the database that every step starts from. It takes 18 to 27 minutes on a
+2-vCPU pod: 1,086 s and 1,600 s in two seeds on 2026-10-27, with the wait for the block index. It
+does these steps:
 
 1. It creates database `dispatch` and starts Dispatch (log: `$LOADTEST_ROOT/logs/dispatch-seed.log`).
 2. `loadgen seed` writes through Dispatch's API with 8 writers (log: `$LOADTEST_ROOT/logs/seed.log`):

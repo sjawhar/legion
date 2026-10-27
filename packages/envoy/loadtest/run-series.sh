@@ -18,19 +18,20 @@
 # `loadgen series-sessions <f>`. Any other run-step.sh flag (--duration, --warmup, --grace,
 # --event-mix, --route-mix, --human, --rng-seed) is passed to every step.
 #
-# The series holds LOADTEST_ROOT for its whole run (lock.sh); its own run-step.sh calls pass. A
-# failed step stops the series: the series TABLES.md covers the steps that ran, the failed one
-# included when it wrote summary.json, and the script exits 1 naming the step.
+# The series holds LOADTEST_ROOT for its whole run (common.sh); its own run-step.sh calls pass, and
+# keep the lock if the series is killed. It sets up (builds this checkout), starts and seeds the
+# stack and runs the migration check once, before its first step, and passes that build's commit
+# and dirty flag to every step in LOADTEST_SERIES_BUILD; its steps skip setup, so every step of a
+# series runs one build, even when the checkout changes during the series. A failed step stops the
+# series: the series TABLES.md covers the steps that ran, the failed one included when it wrote
+# summary.json, and the script exits 1 naming the step.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 stack=$here/stack.sh
-# shellcheck source=packages/envoy/loadtest/lock.sh
-source "$here/lock.sh"
-ROOT=${LOADTEST_ROOT:-${TMPDIR:-/tmp}/dispatch-loadtest}
-mkdir -p -- "$ROOT"
-ROOT=$(cd -- "$ROOT" && pwd -P)
-export LOADTEST_ROOT=$ROOT
+# shellcheck source=packages/envoy/loadtest/common.sh
+source "$here/common.sh"
+resolve_paths
 
 die() {
   printf 'run-series.sh: %s\n' "$*" >&2
@@ -50,9 +51,8 @@ done
 lock_root "$ROOT" run-series.sh
 
 # Setup and seed once, before the series directory exists, so a failed setup leaves no empty series.
-"$stack" setup
-"$stack" start
-"$stack" seed
+prepare_stack run-series.sh
+export LOADTEST_SERIES_BUILD=$BUILD
 
 series=$ROOT/runs/series-$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p -- "$series"
