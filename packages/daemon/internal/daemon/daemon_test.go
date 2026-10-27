@@ -1219,6 +1219,46 @@ func TestRunWaitsThroughADispatch503BeforeServing(t *testing.T) {
 	}
 }
 
+// The boot's first Dispatch read is the repository mapping. A Dispatch with no ready endpoint,
+// fronted here by a proxy that answers 503 for it, fails that read for as long as it has none, and
+// the boot waits that out (readinessRetry, without limit) as it waits out the listing for
+// admission, and comes up once Dispatch answers. Bounded at appMintRetry's attempts, the read
+// exited the daemon, and its supervisor restarted it straight back into the same refusal. Here
+// Dispatch fails the mapping read two times more than appMintRetry's budget allows.
+func TestRunWaitsForTheRepositoryMappingThroughADispatchOutage(t *testing.T) {
+	quickAppMints(t)
+	fastReadiness(t, bootprobe.Retry{Initial: time.Millisecond, Max: 4 * time.Millisecond})
+	cfg := workflowConfig(t, workflowNATS(t))
+	refusals := int64(appMintRetry.Attempts + 2)
+	var reads atomic.Int64
+	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/settings/repo-projects" && reads.Add(1) <= refusals {
+			http.Error(w, "no healthy upstream", http.StatusServiceUnavailable)
+			return
+		}
+		if servedMapping(t, w, r, cfg.Project) {
+			return
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
+			t.Errorf("Dispatch request = %s %s", r.Method, r.URL.Path)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode([]any{}); err != nil {
+			t.Errorf("write Dispatch issues: %v", err)
+		}
+	}))
+	t.Cleanup(dispatchServer.Close)
+	cfg.DispatchURL = dispatchServer.URL
+
+	if err := bootsOrExits(t, cfg, &workflowTokenRecorder{}, 60*time.Second); err != nil {
+		t.Fatalf("boot = %v, want it to wait out %d failed mapping reads and come up", err, refusals)
+	}
+	if got := reads.Load(); got <= refusals {
+		t.Fatalf("Dispatch saw %d mapping reads, want the %d it failed and the one the daemon booted on", got, refusals)
+	}
+}
+
 // workflowConfig is a Stage 3 configuration over natsURL and a Dispatch that lists no issues.
 func workflowConfig(t *testing.T, natsURL string) config.Config {
 	t.Helper()

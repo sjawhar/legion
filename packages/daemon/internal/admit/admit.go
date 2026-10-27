@@ -2,6 +2,7 @@
 package admit
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -416,7 +417,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []intake
 
 	caughtUp := position.Reached(target)
 	deferred := make(map[string]intake.DispatchIssue)
-	for _, summary := range summaries {
+	for _, summary := range parentsFirst(summaries) {
 		stored, err := a.store.Issue(ctx, tx, summary.Key)
 		if err != nil {
 			return fmt.Errorf("read reconciled issue %s: %w", summary.Key, err)
@@ -455,6 +456,35 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []intake
 		return err
 	}
 	return a.wakeForFreeSlot(ctx, tx, append(released, returned...))
+}
+
+// parentsFirst orders a Dispatch listing by how many of each issue's ancestors the listing itself
+// holds, so every issue comes after its parent, and keeps the listing's own order among the issues
+// of one such depth. The workflow records a child only under a recorded parent, so an unrecorded
+// todo child under an unrecorded todo parent of a live tree is recorded in the same pass as that
+// parent, at any depth. A recorded issue is ordered by the same rule, so a root's own listed move —
+// a close, a re-admission — is applied before its children's, which is the order the tree's own
+// events carry: a child's re-entry then reads the tree as that move left it.
+func parentsFirst(summaries []intake.DispatchIssue) []intake.DispatchIssue {
+	parents := make(map[string]string, len(summaries))
+	for _, summary := range summaries {
+		parents[summary.Key] = summary.Parent
+	}
+	depth := make(map[string]int, len(summaries))
+	for _, summary := range summaries {
+		// The bound stops a parent cycle Dispatch should never hold; such a cycle only orders late.
+		for parent, steps := summary.Parent, 0; parent != "" && steps < len(summaries); steps++ {
+			next, listed := parents[parent]
+			if !listed {
+				break
+			}
+			depth[summary.Key]++
+			parent = next
+		}
+	}
+	ordered := slices.Clone(summaries)
+	slices.SortStableFunc(ordered, func(x, y intake.DispatchIssue) int { return cmp.Compare(depth[x.Key], depth[y.Key]) })
+	return ordered
 }
 
 // putNewRoot records an unrecorded root or orphan handed to Legion in todo, on the repository its
@@ -511,7 +541,8 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 
 // applySummary applies one Dispatch boot-listing summary to admission's own record of the issue
 // it names, exactly as it would if nothing had ever deferred it: a still-unrecorded key is
-// admitted only when the summary itself shows it todo and handed to Legion, and a recorded key a
+// recorded only when the summary itself shows it todo — into its parent's live tree as the
+// workflow records a child, else as a root when it is handed to Legion — and a recorded key a
 // live event has already carried strictly past the summary's own sequence is left alone —
 // reapplying the summary would overwrite fresher information with stale. Both Reconcile,
 // immediately when the consumer is already caught up, and release, once the consumer catches up
@@ -526,6 +557,32 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary intake.
 	if stored == nil {
 		if summary.Status != "todo" {
 			return nil
+		}
+		// An unrecorded todo child of a live tree is the workflow's to record, as its own todo event
+		// would (the engine's recordChildUnderLiveTree, which runs before admission on every live
+		// event), from the parent the listing shows now. Without this, a child no event of it ever
+		// recorded stays unrecorded under its running tree, and no later event of it need come:
+		// Dispatch already shows it todo, so nothing writes that status again. Two ways that
+		// happens — an event the daemon never received (a durable consumer created fresh takes only
+		// what is published after it, and the notification stream drops a message 72 hours old
+		// whether or not anyone read it), and one it received while the child's parent had no
+		// record or its tree was not live, where the workflow records nothing. It runs before the
+		// root path, so a labelled child of a live tree is recorded as that tree's member, never as
+		// a root of its own that the line then adopts (adoptQueuedRoots). A child the workflow does
+		// not record here — its tree is not live, or its parent has no record — is left to the root
+		// path below, as an orphan handed to Legion is: one whose Dispatch chain reaches a live root
+		// waits in the line held under that tree's unreleased child (its Ancestry).
+		if summary.Parent != "" {
+			if _, err := a.engine.Apply(ctx, tx, summary); err != nil {
+				return fmt.Errorf("record %s under its parent's tree: %w", summary.Key, err)
+			}
+			recorded, err := a.store.Issue(ctx, tx, summary.Key)
+			if err != nil {
+				return fmt.Errorf("re-read %s after recording it under its parent's tree: %w", summary.Key, err)
+			}
+			if recorded != nil {
+				return nil
+			}
 		}
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", summary.Key, "label", dispatch.LegionLabel)
@@ -1292,7 +1349,8 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 		for _, slot := range slots {
 			slotted[slot.Issue] = struct{}{}
 		}
-		for _, summary := range releasing {
+		held := slices.SortedFunc(maps.Values(releasing), func(x, y intake.DispatchIssue) int { return cmp.Compare(x.Key, y.Key) })
+		for _, summary := range parentsFirst(held) {
 			if err := a.applySummary(ctx, tx, summary, slotted); err != nil {
 				return nil, err
 			}

@@ -192,18 +192,33 @@ func cacheView(cache sandbox.CacheStatus) api.CacheView {
 	return view
 }
 
-// readMapping reads Dispatch's repository mapping of project and checks, for each repository, that
-// both GitHub Apps are installed on it (installs, under each App's JWT; per repository, since an
-// installation on an owner may cover only some of its repositories). A repository an App is not
-// installed on is refused, naming the App; any read that fails is an error that fails the whole
-// read, so nothing is left out on a guess. Accepted repositories carry Dispatch's spelling until
-// nameAccepted reads GitHub's. The installation reads run at once, mappingReads at a time, so a
-// read of the mapping takes about as long as its slowest read rather than the sum of them.
+// readMapping reads Dispatch's repository mapping (listMapping) and checks it for project against
+// both GitHub Apps' installations (checkMapping).
 func readMapping(ctx context.Context, client dispatch.Client, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, error) {
+	mappings, err := listMapping(ctx, client)
+	if err != nil {
+		return nil, nil, err
+	}
+	return checkMapping(ctx, mappings, project, installs)
+}
+
+// listMapping is Dispatch's repository mapping, every project's.
+func listMapping(ctx context.Context, client dispatch.Client) ([]dispatch.RepoProject, error) {
 	mappings, err := client.ListRepoProjects(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read the repository mapping from Dispatch: %w", err)
+		return nil, fmt.Errorf("read the repository mapping from Dispatch: %w", err)
 	}
+	return mappings, nil
+}
+
+// checkMapping checks, for each repository mappings maps to project, that both GitHub Apps are
+// installed on it (installs, under each App's JWT; per repository, since an installation on an
+// owner may cover only some of its repositories). A repository an App is not installed on is
+// refused, naming the App; any read that fails is an error that fails the whole check, so nothing
+// is left out on a guess. Accepted repositories carry Dispatch's spelling until nameAccepted reads
+// GitHub's. The installation reads run at once, mappingReads at a time, so a check takes about as
+// long as its slowest read rather than the sum of them.
+func checkMapping(ctx context.Context, mappings []dispatch.RepoProject, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, error) {
 	type mapped struct {
 		mapping dispatch.RepoProject
 		repo    ghrepo.Repository
@@ -292,21 +307,36 @@ func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defau
 	return out, nil
 }
 
-// loadMapping is the boot's read of the repository mapping, run again after a failure GitHub or
-// Dispatch reports as its own trouble (appauth.TransientError, dispatch.Unreachable) on the App
-// mint's schedule; any other failure refuses the boot. A project with no repository mapped refuses
-// it too. One whose every mapped repository lacks an App boots serving none, each left out and
-// reported: it admits nothing, saying why on each issue, until an App is installed and a read of
-// the mapping finds it, one the next mapping change or an issue held for it asks for
+// loadMapping is the boot's read of the repository mapping, in two steps, each run again after a
+// failure its own dependency reports as its own trouble; any other failure refuses the boot.
+// Dispatch's read (listMapping) waits out an unreachable Dispatch (dispatch.Unreachable) on
+// readinessRetry, without limit, as the boot's Dispatch listing for admission does: a Dispatch
+// down for longer than any bound (no ready endpoint, every dial refused) would otherwise exit the
+// daemon into a supervisor that restarts it straight back into the same refusal, and the API does
+// not listen until the read passes, so the daemon serves nothing meanwhile. The installation check
+// (checkMapping) is run again after a failure GitHub reports as its own trouble
+// (appauth.TransientError) on the App mint's schedule. A project with no repository mapped refuses
+// the boot too. One whose every mapped repository lacks an App boots serving none, each left out
+// and reported: it admits nothing, saying why on each issue, until an App is installed and a read
+// of the mapping finds it, one the next mapping change or an issue held for it asks for
 // (requestMappingRead). nameMapping, once the Apps' tokens are minted, reads GitHub's spelling.
 func (w *workflowRuntime) loadMapping(ctx context.Context) error {
+	var mappings []dispatch.RepoProject
+	err := bootprobe.Run(ctx, "repository mapping read", readinessRetry, w.log, readinessAttempt(func(ctx context.Context) error {
+		var err error
+		mappings, err = listMapping(ctx, w.dispatch)
+		return err
+	}, appMintAttempt, dispatch.Unreachable))
+	if err != nil {
+		return err
+	}
 	var accepted []mappedRepository
 	var refused []refusedRepository
-	err := bootprobe.Run(ctx, "repository mapping read", appMintRetry, w.log, readinessAttempt(func(ctx context.Context) error {
+	err = bootprobe.Run(ctx, "repository installation check", appMintRetry, w.log, readinessAttempt(func(ctx context.Context) error {
 		var err error
-		accepted, refused, err = readMapping(ctx, w.dispatch, w.dispatchProject, w.installs)
+		accepted, refused, err = checkMapping(ctx, mappings, w.dispatchProject, w.installs)
 		return err
-	}, appMintAttempt, func(err error) bool { return appTransient(err) || dispatch.Unreachable(err) }))
+	}, appMintAttempt, appTransient))
 	if err != nil {
 		return err
 	}
