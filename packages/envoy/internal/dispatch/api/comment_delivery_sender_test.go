@@ -512,6 +512,77 @@ func TestMentionRecoverySendsAStrandedAttemptOnceAndLeavesALiveClaimAlone(t *tes
 	}
 }
 
+// A process killed with mention sends in flight leaves their attempts pending with a claim that
+// is still live when the next process starts. Its recovery pass leaves such an attempt alone at
+// start and sends it once, when the claim lapses. An attempt whose claim a live sender has since
+// taken again is that sender's, and the pass does not send it: here it is the older comment to
+// the same recipient, so the pass would have sent it first, ahead of the one it does send.
+func TestMentionRecoverySendsAnAttemptAKilledProcessHeldOnceItsClaimLapses(t *testing.T) {
+	listener, state := newMentionListener(t)
+	stopping, stop := context.WithCancel(t.Context())
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL, lifetime: stopping})
+	issue := createInteractionIssue(t, handler, "TEST", "Mentions a killed process held", "before")
+	stop()
+	retaken := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "Taken again by a live sender.", "mentions": []map[string]any{{"target": "session:s1"}},
+	}))
+	stranded := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "In flight when the process was killed.", "mentions": []map[string]any{{"target": "session:s1"}},
+	}))
+	// Both claims were taken by the killed process two seconds short of a lease ago.
+	var killedClaim time.Time
+	if err := database.Pool.QueryRow(context.Background(), `
+		update comment_deliveries set claimed_at = now() - interval '`+claimLease+`' + interval '2 seconds'
+		where comment_id = any($1)
+		returning claimed_at
+	`, []string{retaken.ID, stranded.ID}).Scan(&killedClaim); err != nil {
+		t.Fatalf("leave both attempts claimed by the killed process: %v", err)
+	}
+
+	read := make(chan struct{}, 4)
+	lifetime, end := context.WithCancel(t.Context())
+	next := newMentionSender(lifetime, served.sendCommentMention,
+		func(ctx context.Context, limit int, claimedBefore *time.Time) (strandedRead, error) {
+			defer func() { read <- struct{}{} }()
+			return served.strandedCommentMentions(ctx, limit, claimedBefore)
+		})
+	defer func() {
+		end()
+		next.wait()
+	}()
+	next.recoverStranded()
+	select {
+	case <-read:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the recovery pass at start never read the stranded attempts")
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		update comment_deliveries set claimed_at = now() where comment_id = $1
+	`, retaken.ID); err != nil {
+		t.Fatalf("take the older attempt again as a live sender: %v", err)
+	}
+
+	waitForCommentDeliveries(t, database, stranded.ID, "the stranded attempt sent", allSent)
+	if sent := state.sent(); len(sent) != 1 || sent[0] != (mentionListenerSend{"s1", "In flight when the process was killed."}) {
+		t.Fatalf("sends = %#v, want the stranded attempt's one send to s1 and none of the attempt a live sender holds", sent)
+	}
+	var resumedAfterTheLease bool
+	if err := database.Pool.QueryRow(context.Background(), `
+		select claimed_at >= $2::timestamptz + interval '`+claimLease+`'
+		from comment_deliveries where comment_id = $1 and attempt = 1
+	`, stranded.ID, killedClaim).Scan(&resumedAfterTheLease); err != nil {
+		t.Fatalf("read the stranded attempt's claim: %v", err)
+	}
+	if !resumedAfterTheLease {
+		t.Fatal("the recovery pass resumed the stranded attempt while the killed process's claim was still live")
+	}
+	if attempts := waitForCommentDeliveries(t, database, retaken.ID, "the retaken attempt", func([]model.CommentDelivery) bool {
+		return true
+	}); len(attempts) != 1 || attempts[0].State != "pending" {
+		t.Fatalf("the attempt a live sender holds = %#v, want it left pending for that sender", attempts)
+	}
+}
+
 // A mention past the sender's queue bound is not queued: its attempt stays pending and
 // unclaimed, and the recovery pass the sender runs once its queue has drained sends it, once.
 func TestAMentionPastTheQueueBoundIsSentOnceTheQueueDrains(t *testing.T) {

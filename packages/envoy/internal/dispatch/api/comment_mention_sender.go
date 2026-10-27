@@ -30,6 +30,22 @@ const mentionDrainTimeout = 10 * time.Second
 // that a late delivery is worse than the retry the author already has.
 const strandedMentionWindow = "1 hour"
 
+// strandedClaimMargin is how long after a claim lapses by the database's clock the recovery pass
+// that waits for it runs, so the pass reads that claim as lapsed (claimLapsed).
+const strandedClaimMargin = time.Second
+
+// strandedRead is what one read of the recovery pass found.
+type strandedRead struct {
+	// sends are the attempts to resume, oldest first.
+	sends []mentionSend
+	// held reports whether a stranded attempt is held by a live claim taken before the read's
+	// cutoff, and lapse is how long, by the database's clock, until the newest such claim lapses.
+	held  bool
+	lapse time.Duration
+	// at is the database's clock when the read began.
+	at time.Time
+}
+
 // mentionSend is one comment mention for the mention sender to deliver.
 type mentionSend struct {
 	comment model.Comment
@@ -59,14 +75,17 @@ func (m mentionSend) lane() string {
 // Sends run on the server's Lifetime without its cancellation: once the Lifetime ends no queued
 // send starts, and the sends in flight get mentionDrainTimeout before their context is
 // cancelled. A send that never started leaves its attempt pending with no claim, for the next
-// process's recovery pass.
+// process's recovery pass. A process killed with sends in flight leaves their attempts pending
+// with a live claim, which the next process's recovery pass sends once that claim lapses
+// (recoverStrandedLocked). Order is kept within one process only: an attempt the recovery pass
+// resumes can reach its recipient after comments accepted later.
 type mentionSender struct {
 	// lifetime ends when the server shuts down; ctx is what sends run on.
 	lifetime context.Context
 	ctx      context.Context
 	cancel   context.CancelFunc
 	send     func(context.Context, mentionSend)
-	stranded func(ctx context.Context, limit int) ([]mentionSend, error)
+	stranded func(ctx context.Context, limit int, claimedBefore *time.Time) (strandedRead, error)
 	// capacity is maxQueuedMentionSends; only a test lowers it.
 	capacity int
 
@@ -82,6 +101,12 @@ type mentionSender struct {
 	// recoverOnDrain is set when a send was refused for the bound, so the recovery pass runs once
 	// the queue is empty.
 	recoverOnDrain bool
+	// started is the database's clock at the sender's first recovery read. A claim taken before it
+	// is not this sender's: it belongs to a process that ran before this one, or one beside it.
+	started *time.Time
+	// lapsed is the recovery pass waiting for the newest claim from before started to lapse; nil
+	// while none waits.
+	lapsed *time.Timer
 	// closed is set by wait; nothing starts after it.
 	closed bool
 	done   sync.WaitGroup
@@ -90,7 +115,7 @@ type mentionSender struct {
 func newMentionSender(
 	lifetime context.Context,
 	send func(context.Context, mentionSend),
-	stranded func(ctx context.Context, limit int) ([]mentionSend, error),
+	stranded func(ctx context.Context, limit int, claimedBefore *time.Time) (strandedRead, error),
 ) *mentionSender {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(lifetime))
 	context.AfterFunc(lifetime, func() { time.AfterFunc(mentionDrainTimeout, cancel) })
@@ -188,12 +213,13 @@ func (m *mentionSender) next(lane string) (mentionSend, string, bool) {
 	return item, lane, true
 }
 
-// recoverStranded runs the recovery pass: it queues the stranded attempts
-// (strandedCommentMentions), each sent through the claim protocol, so an attempt another sender
-// holds is not sent twice.
+// recoverStranded runs the recovery pass: at start, and when the claims a pass waits for lapse
+// (recoverStrandedLocked). It queues the stranded attempts (strandedCommentMentions), each sent
+// through the claim protocol, so an attempt another sender holds is not sent twice.
 func (m *mentionSender) recoverStranded() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.lapsed = nil
 	if !m.stoppedLocked() {
 		m.recoverStrandedLocked()
 	}
@@ -202,20 +228,42 @@ func (m *mentionSender) recoverStranded() {
 // recoverStrandedLocked reads one stranded attempt past the queue's free room, so when more are
 // stranded than fit, at least one is refused for the bound and the pass runs again once the queue
 // drains (queueLocked).
+//
+// A stranded attempt held by a live claim taken before the sender's first read was claimed by a
+// process that ran before this one - killed with that send in flight - or by one running beside
+// it. The pass leaves it alone and runs once more when the newest such claim lapses, and that
+// pass applies the same rule, so passes stop once no claim from before the first read holds a
+// stranded attempt: a minute after start, unless a claim is moved, which only a live sender does.
+// A claim this sender takes is never waited for, so a busy sender schedules nothing. A live
+// process's attempt is not sent twice: its claim, once it lapses, is resumed through the claim
+// protocol, and an attempt it settled is no longer pending. An attempt the killed process had
+// already handed to the listener is resent under its own number and idempotency key (the
+// comment, target and mode, deliverResolvedCommentMention), which the listener makes the
+// envelope's dedupe key (agent.<session>.<key>, sendHandler in cmd/listener/api.go); the
+// notification stream stores a repeat of a Dispatch key no second time and each host drops it
+// (contracts.DedupeKeyNamesTheUpstreamEvent; DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts
+// states for how long, and where that fails).
 func (m *mentionSender) recoverStrandedLocked() {
 	limit := max(m.capacity-m.queued, 0) + 1
+	started := m.started
 	m.done.Go(func() {
-		stranded, err := m.stranded(m.ctx, limit)
+		read, err := m.stranded(m.ctx, limit, started)
 		if err != nil {
 			slog.Error("dispatch: read stranded comment mentions", "error", err)
 			return
 		}
 		refused := 0
 		m.mu.Lock()
-		for _, item := range stranded {
+		if m.started == nil {
+			m.started = &read.at
+		}
+		for _, item := range read.sends {
 			if m.queueLocked(item) {
 				refused++
 			}
+		}
+		if read.held && m.lapsed == nil && !m.stoppedLocked() {
+			m.lapsed = time.AfterFunc(read.lapse+strandedClaimMargin, m.recoverStranded)
 		}
 		m.mu.Unlock()
 		if refused > 0 {
@@ -226,10 +274,14 @@ func (m *mentionSender) recoverStrandedLocked() {
 }
 
 // wait stops the sender from starting anything more and waits for the sends in flight and a
-// recovery pass that is running. Call it once the Lifetime has ended, before the pool closes.
+// recovery pass that is running; a pass waiting for a claim to lapse never runs. Call it once the
+// Lifetime has ended, before the pool closes.
 func (m *mentionSender) wait() {
 	m.mu.Lock()
 	m.closed = true
+	if m.lapsed != nil {
+		m.lapsed.Stop()
+	}
 	m.mu.Unlock()
 	m.done.Wait()
 	m.cancel()
@@ -253,8 +305,29 @@ func (s *server) sendCommentMention(ctx context.Context, item mentionSend) {
 // oldest first. Each is sent as its comment's author, the actor its comment.created event names,
 // read once per comment; an attempt whose event cannot be read is logged and left for its
 // author's retry.
-func (s *server) strandedCommentMentions(ctx context.Context, limit int) ([]mentionSend, error) {
+//
+// Beside them it reads whether an attempt in that window is held by a live claim taken before
+// claimedBefore, or before the read when claimedBefore is nil, and when the newest such claim
+// lapses. Postgres judges both against the claimed_at it wrote, as claimLapsed does. The held
+// claims are read first: a claim that lapses between the two statements is then read as held, and
+// the pass that waits for it finds it resumed or still stranded, rather than read by neither.
+func (s *server) strandedCommentMentions(
+	ctx context.Context, limit int, claimedBefore *time.Time,
+) (strandedRead, error) {
 	ctx = store.WithTransactionTracking(ctx)
+	var result strandedRead
+	var lapse *float64
+	if err := s.deps.Store.Pool.QueryRow(ctx, `
+		select now(), extract(epoch from max(claimed_at) + interval '`+claimLease+`' - now())::float8
+		from comment_deliveries
+		where state = 'pending' and not `+claimLapsed+` and claimed_at < coalesce($1, now())
+		  and created_at > now() - interval '`+strandedMentionWindow+`'
+	`, claimedBefore).Scan(&result.at, &lapse); err != nil {
+		return strandedRead{}, err
+	}
+	if lapse != nil {
+		result.held, result.lapse = true, time.Duration(*lapse*float64(time.Second))
+	}
 	rows, err := s.deps.Store.Pool.Query(ctx, `
 		select d.comment_id::text, c.issue_key, c.artifact_id::text, d.target, d.delivery, d.session_id
 		from comment_deliveries d
@@ -265,7 +338,7 @@ func (s *server) strandedCommentMentions(ctx context.Context, limit int) ([]ment
 		limit $1
 	`, limit)
 	if err != nil {
-		return nil, err
+		return strandedRead{}, err
 	}
 	found, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (mentionSend, error) {
 		var item mentionSend
@@ -276,14 +349,14 @@ func (s *server) strandedCommentMentions(ctx context.Context, limit int) ([]ment
 		return item, err
 	})
 	if err != nil {
-		return nil, err
+		return strandedRead{}, err
 	}
 	type createdEvent struct {
 		event model.Event
 		err   error
 	}
 	events := make(map[string]createdEvent)
-	stranded := make([]mentionSend, 0, len(found))
+	result.sends = make([]mentionSend, 0, len(found))
 	for _, item := range found {
 		created, read := events[item.comment.ID]
 		if !read {
@@ -296,7 +369,7 @@ func (s *server) strandedCommentMentions(ctx context.Context, limit int) ([]ment
 			continue
 		}
 		item.created, item.actor = created.event, created.event.Actor
-		stranded = append(stranded, item)
+		result.sends = append(result.sends, item)
 	}
-	return stranded, nil
+	return result, nil
 }

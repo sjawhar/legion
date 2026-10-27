@@ -135,7 +135,7 @@ func deliveryErrorText(err error) string {
 
 // claimLapsed is the predicate a claim transaction selects beside the pending attempt it locks:
 // whether that attempt is free for this sender to take, because nobody holds it or whoever
-// claimed it never came back within the lease. The lease is a minute. A send is bounded by the
+// claimed it never came back within the lease (claimLease). A send is bounded by the
 // listener client's own window (five seconds by default, DepsInput.EnvoyTimeout in a test) and
 // the short transaction that records its outcome, so a claim older than the lease was left by a
 // process that died between the two. A retry beside a live claim takes an attempt of its own
@@ -151,7 +151,11 @@ func deliveryErrorText(err error) string {
 // Postgres judges it, against the claimed_at Postgres itself wrote. A Dispatch task whose clock
 // ran ahead of the database would otherwise read every live claim as lapsed, and one that ran
 // behind could never resume a stranded attempt.
-const claimLapsed = `(claimed_at is null or claimed_at < now() - interval '1 minute')`
+const claimLapsed = `(claimed_at is null or claimed_at < now() - interval '` + claimLease + `')`
+
+// claimLease is how long a claim outlives its sender, as the Postgres interval claimLapsed and
+// the mention sender's recovery pass (strandedCommentMentions) both read.
+const claimLease = "1 minute"
 
 // attemptClaim is the attempt one sender owns and the claim it holds on it. The two travel
 // together because every statement of that sender's settle transaction is scoped to the pair.

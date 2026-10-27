@@ -1288,7 +1288,15 @@ past that bound is not queued and stays `pending` and unclaimed. Once the server
 no queued send starts, and the sends in flight get 10 s (`mentionDrainTimeout`) before their
 context is cancelled. A recovery pass at startup, and again once an overflowed queue drains,
 resumes the attempts that are `pending`, unclaimed or with a lapsed claim, and created in the last
-hour, through the same claim, so an attempt a live sender holds is not sent twice. A targeted
+hour, through the same claim, so an attempt a live sender holds is not sent twice. A process
+killed with sends in flight leaves their attempts `pending` under a claim that is still live when
+the next process starts; a pass that finds one held by a claim taken before the sender's first
+pass runs once more when the newest such claim lapses (a minute after it was taken, plus a
+second), and that pass repeats the rule, so the passes end about a minute after startup and a busy
+sender's own claims schedule none. Such a resend repeats the attempt's idempotency key, so a send
+the killed process had already handed over is dropped as a repeat (`DELIVERY_DUPLICATE_WINDOW_MS`
+says by whom, and where that fails). Order holds within one process only: a resumed attempt can
+reach its recipient after comments accepted later. A targeted
 message is the same shape on `message_deliveries`, resolved before the claim rather than after it:
 `recordPendingMessageDelivery` claims or opens the attempt and commits it `pending` carrying that
 resolution, the send follows, and `completeMessageDelivery` settles it with the `message.delivery`
