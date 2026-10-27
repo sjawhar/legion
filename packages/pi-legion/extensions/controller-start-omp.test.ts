@@ -866,13 +866,21 @@ test.skipIf(skip)(
       }
     }
     await session.shows("the start turn's reply", "Start procedure done.");
-    // Oh My Pi focuses only a subagent that has started its run: Enter in the hub before its
-    // first model request reaches a subagent with nothing to show ("cannot be revived"). Its
-    // request carries its assignment and not the start message, and stays held.
-    await session.until("the subagent's first model request", () =>
+    // Oh My Pi focuses only a subagent whose session is attached: Enter in the hub before that
+    // reaches a running entry with no session ("cannot be revived"). The subagent's own first
+    // model request comes from that session, so the case waits for it. It carries the assignment
+    // and not the start message, and stays held. Oh My Pi's task-label request also carries the
+    // assignment, but it is sent at spawn, before the session is attached (task/executor.ts,
+    // task/label.ts), and its system prompt is the label prompt, so it does not count.
+    await session.until("the subagent's own first model request", () =>
       session.turns.some((turn) => {
         const messages = JSON.stringify(turn.request.body.messages ?? []);
-        return messages.includes("Reply with done.") && !messages.includes(START_MESSAGE_JSON);
+        const system = JSON.stringify(turn.request.body.system ?? null);
+        return (
+          messages.includes("Reply with done.") &&
+          !messages.includes(START_MESSAGE_JSON) &&
+          !system.includes("Label the delegated work")
+        );
       })
         ? true
         : undefined
