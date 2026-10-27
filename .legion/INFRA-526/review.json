@@ -2,27 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-526",
-  "completed": "2026-10-27T06:57:23Z",
+  "completed": "2026-10-27T08:10:31Z",
   "round": 2,
-  "reviewedHead": "2497adefd872c64ad0cdf4b27d062b472a4531d4 (code: forward merge of main 448a4100 into 8740e472; handoff heads above it change only .legion/)",
-  "decision": "approved",
+  "reviewedHead": "b57365830bc38e45c202a8b7b390e9d84acd65ff (code: forward merge of main 32b6dd9f into c9d865ec; handoff head 8902a7e5)",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 2,
+  "important": 1,
+  "minor": 0,
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/styles.css:366-371 vs :518-524",
-      "description": "Spacing only: in a reply shown in a document decision's footer, a nested decision card's question gets the footer's paragraph top margin (specificity (0,4,1) is higher than the first-child rule's (0,4,0)). Not a defect; recorded in the PR body's 'Not proven / risk'."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/doc/typed-block-drawing.ts (askBlockShell contentClass)",
-      "description": "Cosmetic: in a body, a blank option of a malformed decision shows an empty bullet, because paintBlock removes the tight item's <p>. Not a defect; recorded in the PR body."
+      "severity": "important",
+      "file": "packages/proof-editor/src/lib-headless.ts; packages/proof-editor/AGENTS.md; packages/dispatch/web/src/features/refs/markdown-engine.ts; packages/dispatch/AGENTS.md",
+      "description": "GitHub reports #2310 CONFLICTING (read 08:09Z) with main b08a56bc, #2303 (INFRA-529, 'render a body holding an unknown colon-fenced block formatted, its fences as text', merged 07:11:45Z, 6 minutes after the b5736583 push). With a conflicting head GitHub builds no merge ref, so the required lint/typecheck/test/pr-title at b5736583 stayed queued for 68 minutes and will not run. The required checks cannot go green, so no approval. #2303 changes the same seam: lib-headless.ts adds a `readOnly` option (remarkReadOnlyDirectives in place of remarkTypedBlocks); markdown-engine.ts passes `readOnly: true`; proof-editor/AGENTS.md also raises fifteen to sixteen allowed edit kinds and adds a tenth own file. The resolution must keep both options (`createHeadlessProof({ blockSchema, readOnly: true, renderBlock })`), both lib-headless.ts changes, seventeen allowed edit kinds with both entries (INFRA-526 and INFRA-529) and both counts, and both AGENTS.md paragraphs. The tests must also show that a refused or rule-breaking ask (now literal fences) still pairs shells with ask nodes."
     }
   ],
-  "continuation": "Round 2 continued: the fingerprint of the PR diff is 5051300770a6dd6d111c0f4dbd52d8014cb466caf440a0a08aafe4b82bbecfef at my last review's commit 8740e472 (fork point 7f7edb8d) and at d2e74755 (fork point 448a4100). Equal, and my last review was REQUEST_CHANGES (only for CI), so this continues that round against the new head, with no new thermonuclear pass.",
-  "ci": "Required (rulesets): lint, typecheck, test, pr-title. CI head 2497adef: lint, typecheck, test and pr-title completed success (read at 06:57Z); compare 2497adef...d2e74755: handoffsOnly true, 2 files.",
-  "threads": "PRRT_kwDORFy7ds6wiYih (mine, round 1): fixed in a1faafec, accepted in my reply (discussion_r4385090019), resolved by the implementer. No other threads.",
-  "thermonuclear": "Round 2 pair at 154d6cea, unchanged diff since: deep review approves (no Medium or High; security rows untrusted-input and agent-def hold); the code-quality findings are cleanup, carried as the fast-follow that INFRA-612 owns."
+  "fingerprint": "5051300770a6dd6d111c0f4dbd52d8014cb466caf440a0a08aafe4b82bbecfef at c9d865ec (my approval) and at 8902a7e5: the b5736583 merge left the PR diff unchanged. The conflict with #2303 is new since then.",
+  "ci": "Required: lint, typecheck, test, pr-title. CI head b5736583 (compare to 8902a7e5: handoffsOnly true, 2 files): every required check was still queued at 08:09Z (runs created 07:01:49Z), and the head conflicts, so GitHub will not run them.",
+  "verifiedLocally": "cd packages/dispatch && bun test web/src/features/refs web/src/features/doc at b5736583: 426 pass, 0 fail.",
+  "threads": "PRRT_kwDORFy7ds6wiYih: answered and resolved. No new threads."
 }
