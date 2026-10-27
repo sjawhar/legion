@@ -27,11 +27,12 @@ const (
 	// How often an attached viewer re-arms the session. Well inside the session's own watch
 	// window (AGENT_STREAM_WATCH_TTL_MS), so a live viewer never lets it lapse.
 	agentStreamWatchInterval = 10 * time.Second
-	// Frames held for a browser that is reading slower than the session is producing. Each frame
-	// is a whole-message snapshot, so when this fills the oldest is dropped: the newest snapshot
-	// of a message is the one that renders correctly, and an older one it supersedes is worth
-	// nothing.
-	agentStreamBuffer = 64
+	// The most frame bytes a viewer holds for a browser that is reading slower than the session
+	// is producing, counted as each frame's payload length from the moment it is queued until it
+	// has been written. A session publishes a message's snapshot at most every 100 ms and a viewer
+	// queues for up to agentStreamReplayTimeout before its first write, so 20 snapshots of 400 KiB
+	// fit; NATS's 1 MiB max_payload caps one frame, so a single frame always fits.
+	agentStreamBufferBytes = 8 << 20
 )
 
 // agentStreamSessionID is the one place a caller-supplied session id becomes part of a NATS
@@ -73,7 +74,7 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Subscribing before anything else is what makes the replay below safe to stitch on: a frame
-	// published while the replay request is in flight lands in this buffer rather than falling
+	// published while the replay request is in flight lands in this queue rather than falling
 	// between the two.
 	//
 	// A viewer that cannot keep up ends its stream rather than losing a frame. The relay never
@@ -81,9 +82,7 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 	// frame of an earlier message, and dropping the wrong one leaves a tool call reading
 	// "running…" until the page is reloaded. Closing here costs a reconnect, and the reconnect
 	// rebuilds from the session's own replay, which is exactly the state that was lost.
-	frames := make(chan agentstream.Frame, agentStreamBuffer)
-	overflow := make(chan struct{})
-	var overflowOnce sync.Once
+	queue := newAgentStreamQueue()
 	// The relay ending this viewer's stream, which only the in-memory source's test hook does
 	// (agentstream.Memory.Drop): a session's own frame is never nil. The e2e suite has no other
 	// way to make a browser rebuild its transcript from a second replay, which is the one event
@@ -95,11 +94,7 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 			droppedOnce.Do(func() { close(dropped) })
 			return
 		}
-		select {
-		case frames <- frame:
-		default:
-			overflowOnce.Do(func() { close(overflow) })
-		}
+		queue.push(frame)
 	})
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -149,21 +144,25 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 			// The server is shutting down: as streamEvents does, end the stream rather than hold
 			// http.Server.Shutdown open. The reconnect rebuilds from the session's own replay.
 			return
-		case <-overflow:
-			// The viewer fell behind far enough to lose a frame. Draining what is buffered
-			// first would stitch a gap into the middle of the conversation; the reconnect's
-			// replay is the honest answer.
+		case <-queue.overflow:
+			// The viewer fell behind far enough to lose a frame. Draining what is queued first
+			// would stitch a gap into the middle of the conversation; the reconnect's replay is
+			// the honest answer.
 			return
 		case <-dropped:
 			// The relay dropped this viewer, as a lost connection does: the reconnect rebuilds
 			// from the session's own replay, which is what every other end of this stream
 			// leaves the viewer to do.
 			return
-		case frame := <-frames:
-			if err := writeStreamEvent(w, "frame", frame); err != nil {
-				return
+		case <-queue.wake:
+			frames, size := queue.take()
+			for _, frame := range frames {
+				if err := writeStreamEvent(w, "frame", frame); err != nil {
+					return
+				}
 			}
 			flusher.Flush()
+			queue.release(size)
 		case <-watch.C:
 			if err := source.Watch(sessionID); err != nil {
 				return
@@ -199,6 +198,70 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 			flusher.Flush()
 		}
 	}
+}
+
+// agentStreamQueue holds the frames a viewer has been delivered and not yet written, in the order
+// they arrived, within agentStreamBufferBytes.
+type agentStreamQueue struct {
+	// wake has one slot: a push fills it, and the loop takes every queued frame when it fires.
+	wake chan struct{}
+	// overflow closes once, when a frame would take the viewer past its budget.
+	overflow chan struct{}
+
+	mu     sync.Mutex
+	frames []agentstream.Frame
+	// size is the bytes of the queued frames plus those taken and not yet released.
+	size       int
+	overflowed bool
+}
+
+func newAgentStreamQueue() *agentStreamQueue {
+	return &agentStreamQueue{wake: make(chan struct{}, 1), overflow: make(chan struct{})}
+}
+
+// push queues frame, or ends the stream when frame would take the viewer past its budget. Once
+// the stream has overflowed it queues nothing more and holds nothing. It never blocks: it runs on
+// the transport's own goroutine.
+func (q *agentStreamQueue) push(frame agentstream.Frame) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.overflowed {
+		return
+	}
+	if q.size+len(frame) > agentStreamBufferBytes {
+		q.overflowed = true
+		q.frames = nil
+		close(q.overflow)
+		return
+	}
+	q.frames = append(q.frames, frame)
+	q.size += len(frame)
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+// take hands over every queued frame in order, and their bytes. Those bytes stay counted against
+// the budget until release, so the budget bounds what the viewer holds while the frames are being
+// written too. After an overflow it hands over nothing.
+func (q *agentStreamQueue) take() ([]agentstream.Frame, int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	frames := q.frames
+	q.frames = nil
+	size := 0
+	for _, frame := range frames {
+		size += len(frame)
+	}
+	return frames, size
+}
+
+// release returns the bytes of frames take handed over once they have been written.
+func (q *agentStreamQueue) release(size int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.size -= size
 }
 
 // replayAgentStream asks the session for its history, reporting separately whether anyone

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -248,30 +249,104 @@ func TestAgentStreamRefusesASessionIdThatIsNotAUUID(t *testing.T) {
 	}
 }
 
-// A viewer that falls behind ends its stream rather than losing a frame. The relay never parses
-// a frame, so it cannot tell a superseded snapshot from a tool result or from the settled frame
-// of an earlier message; dropping the wrong one would leave a tool call reading "running…" with
-// nothing later to correct it. Ending the response costs a reconnect, and the reconnect rebuilds
-// from the session's own replay.
-func TestAgentStreamEndsTheStreamWhenAViewerFallsBehind(t *testing.T) {
-	source := agentstream.NewMemory()
+// gatedReplaySource is a session whose answer to the viewer's replay request waits until the test
+// closes release. A viewer writes no frame before that answer, so every frame published
+// meanwhile is held for it unread, exactly as during a slow session's replay.
+type gatedReplaySource struct {
+	*agentstream.Memory
+	release chan struct{}
+}
+
+func newGatedReplaySource() *gatedReplaySource {
+	source := &gatedReplaySource{Memory: agentstream.NewMemory(), release: make(chan struct{})}
+	source.SetReplay(plannerSessionID, agentstream.Frame(`{"v":1,"kind":"replay-body"}`))
+	return source
+}
+
+func (s *gatedReplaySource) Replay(ctx context.Context, sessionID string) (agentstream.Frame, error) {
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+	}
+	return s.Memory.Replay(ctx, sessionID)
+}
+
+// paddedFrame is a frame of exactly size bytes that names its place in the sequence.
+func paddedFrame(seq, size int) agentstream.Frame {
+	head := fmt.Sprintf(`{"seq":%d,"pad":"`, seq)
+	return agentstream.Frame(head + strings.Repeat("x", size-len(head)-len(`"}`)) + `"}`)
+}
+
+// openGatedAgentStream connects a viewer to a session whose replay waits on source.release.
+func openGatedAgentStream(t *testing.T, source *gatedReplaySource) (*http.Response, *bufio.Reader) {
+	t.Helper()
 	handler, _, _ := newTestServer(t, testServerOptions{agentStream: source})
 	server := httptest.NewServer(handler)
-	defer server.Close()
-
+	t.Cleanup(server.Close)
 	response, reader := openAgentStream(t, server, plannerSessionID, "cookie")
-	defer response.Body.Close()
-	// Overrun the buffer without reading anything.
-	for index := range agentStreamBuffer * 4 {
-		source.Publish(plannerSessionID, agentstream.Frame(fmt.Sprintf(`{"seq":%d}`, index)))
+	t.Cleanup(func() { response.Body.Close() })
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("open stream: %d", response.StatusCode)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return
-		}
-		_ = line
+	return response, reader
+}
+
+// A viewer's budget is bytes, not frames. Everything published while it waits on the session's
+// replay is held, up to the whole budget, and reaches the browser in order behind the replay.
+func TestAgentStreamHoldsFramesWithinTheViewersBudget(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		frames int
+		size   int
+	}{
+		{name: "200 small frames", frames: 200, size: 1 << 10},
+		// A session snapshots a message at most every 100 ms, so a two-second replay wait on a
+		// large message queues about this many snapshots of it.
+		{name: "20 snapshots of a large message", frames: 20, size: 300 << 10},
+		{name: "the whole budget", frames: agentStreamBufferBytes / (1 << 20), size: 1 << 20},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := newGatedReplaySource()
+			_, reader := openGatedAgentStream(t, source)
+			for index := range test.frames {
+				source.Publish(plannerSessionID, paddedFrame(index, test.size))
+			}
+			close(source.release)
+
+			if event, data := readStreamEvent(t, reader); event != "responder" || data != `{"v":1,"responding":true}` {
+				t.Fatalf("first event is %q %q, want the responder verdict", event, data)
+			}
+			if event, data := readStreamEvent(t, reader); event != "replay" || data != `{"v":1,"kind":"replay-body"}` {
+				t.Fatalf("second event is %q %q, want the session's replay", event, data)
+			}
+			for index := range test.frames {
+				event, data := readStreamEvent(t, reader)
+				if event != "frame" || data != string(paddedFrame(index, test.size)) {
+					t.Fatalf("live event %d is %q (%d bytes, %.20q), want frame seq %d",
+						index, event, len(data), data, index)
+				}
+			}
+		})
 	}
-	t.Fatal("the stream stayed open after the viewer fell behind")
+}
+
+// A viewer that falls further behind than its budget ends its stream rather than losing a frame.
+// The relay never parses a frame, so it cannot tell a superseded snapshot from a tool result or
+// from the settled frame of an earlier message; dropping the wrong one would leave a tool call
+// reading "running…" with nothing later to correct it. Ending the response costs a reconnect,
+// and the reconnect rebuilds from the session's own replay.
+func TestAgentStreamEndsTheStreamWhenAViewerFallsPastItsBudget(t *testing.T) {
+	source := newGatedReplaySource()
+	response, reader := openGatedAgentStream(t, source)
+	for index := range agentStreamBufferBytes / (1 << 20) {
+		source.Publish(plannerSessionID, paddedFrame(index, 1<<20))
+	}
+	source.Publish(plannerSessionID, paddedFrame(agentStreamBufferBytes/(1<<20), 64))
+	close(source.release)
+
+	stayedOpen := time.AfterFunc(5*time.Second, func() { response.Body.Close() })
+	defer stayedOpen.Stop()
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("the stream stayed open after the viewer fell past its budget: %v", err)
+	}
 }
