@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-581",
+  "completed": "2026-10-27T15:35:22Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "8c392590d7342cf852aa97534522bda00ddf0747",
+  "critical": 0,
+  "important": 6,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/proof-editor/src/directive-container.ts:376",
+      "description": "The exit placement moves a directive exit before an open flow token (fenced code, HTML flow): `1. x\\n   :::callout{}\\n   ```\\n\\ny\\n`, `- x\\n\\n  :::callout{}\\n  ~~~\\n  code\\n\\nafter\\n` and `- :::a{}\\n  ~~~\\n\\nx\\n` now throw `Cannot close directiveContainer ... codeFenced is open` in both engine modes (the body falls back to raw text); the old construct read them and Go ParseForWrite accepts them. Reproduced by the reviewer with the headless engine."
+    },
+    {
+      "severity": "important",
+      "file": "packages/proof-editor/src/directive-container.ts:553",
+      "description": "A closed block stays on micromark's container stack and its continuation answers nok, so the line after a closing fence is lazy: `:::callout{}\\n:::\\n    h\\n    i\\n` reads two code blocks `h`,`i` (old construct and Go: one `h\\ni`); and `- ~~~\\n\\n\\n:::callout{}\\n:::\\n` reads code `\\n` (old and Go: empty). Go accepts both for write."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/render.go:158",
+      "description": "Before this change render.go wrote `---` before a top-level typed block; stored version markdown of that shape now reads (ParseRendering, the browser's VersionView) as a rule and a paragraph holding the fences. Consumers: docs/rebuild.go:89, approval_carry.go:406/450, edit_notices.go:287, api/write_advice.go:277. Needs a backfill of stored rows or evidence none exist."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "The PR adds a refusal at the API boundary (400 INVALID_MARKDOWN for a typed block inside 32) and carries no `## Contract change census`."
+    },
+    {
+      "severity": "important",
+      "file": "packages/proof-editor/src/directive-container.ts:27",
+      "description": "A third reading change is undocumented: a link reference definition inside a `:::` block now defines a reference for text before the block (`[r]\\n\\n:::callout{}\\n[r]: https://u.example\\n:::\\n`); the comment and CHANGELOG say two readings differ."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/e2e/nested-directive.e2e.ts:32",
+      "description": "The 1,000 ms heartbeat window starts at navigation, so it measures bundle load and first render as well as the parse; the implementer measured 748 ms on the iphone project. The browser suite runs in CI (envoy-and-contracts.yaml:974), so this is a flake risk on a required check."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/proof-editor/src/directive-container.ts:691",
+      "description": "The MIT-licensed factory copies sit inside a legion-owned file; the package's convention is a file boundary between copied and legion-owned code. Also `?? 0` at :601 hides a broken invariant rather than failing."
+    }
+  ],
+  "thermonuclear": {
+    "head": "8c392590d7342cf852aa97534522bda00ddf0747",
+    "deepReview": "CHANGES: 2 High (engine throws on fence inside directive in list; lazy line after closing fence splits indented code), 1 Medium (stored `---` + typed block version markdown), 3 Minor",
+    "codeQuality": "CHANGES: 2 Important (1,113-line file mixing licenses; 155-line resolveContentExits), 6 Minor"
+  },
+  "ci": "Required set lint, typecheck, test, pr-title; CI head 8c392590 runs queued at review time (compare to 89308def: handoffsOnly true, 2 files). Changes requested on code findings, not CI.",
+  "threads": "none open"
+}
