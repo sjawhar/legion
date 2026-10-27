@@ -100,7 +100,7 @@
   session. It said a claim delivers no comments. Routing the issue to the session (and clearing
   the route on release), or subscribing to the issue's topic, stays the way to get everything
   else, and its Legion sentence forbids writing the status or route of a `legion` issue or one
-  under it (INFRA-596).
+  under it.
 
 - The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
   daemon records. The daemon now refuses a completion of a run the issue has left before it applies
