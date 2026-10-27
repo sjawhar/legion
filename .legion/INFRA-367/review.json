@@ -2,40 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-367",
-  "completed": "2026-10-27T10:25:00Z",
+  "completed": "2026-10-27T11:01:30Z",
   "decision": "changes_requested",
-  "reviewedHead": "9386d55648029c5fefaf811446f2064202db2c4e",
+  "round": 2,
+  "reviewedHead": "b3b3f1e0a4ce4a9ba75d1ea1eb651f2e48f6f70b",
   "critical": 0,
   "important": 2,
   "minor": 3,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/refs/graph.go",
-      "description": "storedActors (726-746) guesses one actor or a list from the first byte, and turns a malformed actor column, or an element with no kind or id, into [] ('nobody recorded') with no error. Every caller knows its column's shape (single actor: issues.created_by, events.actor, artifacts.created_by, asks.author, comments.author, messages.author, ask.edited payload edited_by; list: artifact_versions.authors), all jsonb not null and written from model.Actor, and refs/refs.go:388-393 decodes the same artifacts.created_by and artifact_versions.authors strictly and returns the error. Decode each column as its shape (for example jsonb_build_array on the single-actor columns in SQL, then json.Unmarshal into []model.Actor), keep SQL NULL from a left join as [], and return a decode error as refs.go does."
+      "file": "packages/envoy/internal/dispatch/store/migrations/0129_comments_written_version.up.sql",
+      "description": "Migration numbers collide with main: main has 0129_document_edit_notices (merged in #2137), and the INFRA-156 PR #2394 takes 0130_block_pointer_links. After any merge of main, pgmigrate.Load refuses two migrations that share version 129 (internal/pgmigrate/set.go:44-47,131-139), so the store fails before it applies anything (store/store.go:95-97). GitHub also reports the PR CONFLICTING (packages/envoy-client/CHANGELOG.md). Merge main forward, renumber 0129-0133 (up and census files) above main's highest, and update node_facts_migration_test.go:10-15 and the numbers quoted in packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md, packages/envoy/cmd/dispatch/AGENTS.md, packages/envoy/cmd/dispatch/README.md, the migrations' own comments and the PR body."
     },
     {
       "severity": "important",
-      "file": "packages/dispatch/e2e/acceptance/block-graph.sh",
-      "description": "No '## Contract change census' in the PR body. The driver now refuses to start without COMPONENT_SOURCE (line 40) and, for fixture, FAKE_GITHUB_PORT; its callers include the INFRA-156 tree plan's invocations (dispatch://INFRA-156/artifact/plan-md, Task 2.9 and the coordinator's production run, with DISPATCH_URL/DISPATCH_TOKEN/PROJECT only) and the sibling slices that extend the driver. contracts GraphNode.changed_at widened from string to string | null. The census lists the search commands, every hit with a disposition, and a rollout line (warn-first, or an immediate refusal with its reason)."
+      "file": "(CI)",
+      "description": "No CI has run for code 69d138bb. The implementer's push ended at 5ad3589f, whose message carries 'skip-checks: true' although the push also carried code (33cc1fec, 69d138bb), so GitHub started no workflow for it. The newest pull_request runs are at 9386d556 and were still queued at 10:53Z. The corrective push (the merge of main) must carry no trailer, so that CI runs on the code."
     },
     {
       "severity": "minor",
       "file": "PR body",
-      "description": "'components that existed before this release answer null until they change' is wrong for made_at: 0131 seeds made_at null and the importer upsert (architecture/importer.go:583-588) never sets made_at on an existing row, so it stays null permanently; only changed_at is filled by a later change."
+      "description": "The census says dispatch-execute.ts is the only TypeScript reader of GraphNode. The dashboard also reads graph nodes through GraphReferences/GraphEdge (re-exported at packages/dispatch/web/src/api/types.ts:137-138): features/refs/ReferencedBy.tsx, RefPreview.tsx:344-357, reference-target.ts:262. None reads changed_at, and the new fields are optional, so nothing breaks. Add them as hits with a disposition. The Size line is also wrong: +3215/-219 at b3b3f1e0, not +3270/-225."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/refs/blocks.go",
-      "description": "Cleanup, no behaviour change: RemovedBlockFacts (349) fills four fields of a node api/references.go:141-154 built, through a pointer parameter; return the facts (or the whole node) instead."
+      "description": "Cleanup, no behaviour change (fast-follow): RemovedBlockFacts returns a facts-only GraphNode with no Kind or ID, and api/references.go:141-160 copies the six facts out one by one. A RemovedBlockNode that builds the whole block node, as loadBlockNodes does, would remove the copy."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/refs/graph.go",
-      "description": "Cleanup, no behaviour change: the comment parent order (reply, then ask thread, then document) is written both in the SQL join condition (575) and the Go switch (596-605); drop 'c.reply_to is null and c.ask_id is null' from the join and leave the order to the switch."
+      "file": "packages/dispatch/e2e/acceptance/block-graph.sh",
+      "description": "Cleanup, no behaviour change (fast-follow): the script branches on component_source in three places (the R12 case at 671, the if at 728, the inner if at 736). Moving the component-node read into a function called from the fixture and existing arms would leave one branch."
     }
   ],
-  "ci": "At 9386d556 (the CI head: the tester's push carried code, e39017e4) every required check (lint, typecheck, test, pr-title) was queued when this was written; the request for changes does not wait on it.",
-  "thermo": "thermonuclear-deep-review at 9386d556: Verdict APPROVE (two Minors). thermonuclear-code-quality at 9386d556: Verdict CHANGES (storedActors; RemovedBlockFacts pointer; comment parent rule twice).",
-  "threads": "No review threads before this round."
+  "threads": "My four round-1 threads (PRRT_kwDORFy7ds6wpCni, ...Cnn, ...Cnu, ...Cnx): each replied to as accepted. The implementer had already resolved all four. No other threads.",
+  "ci": "CI head 9386d556 (the newest pull_request run); compare 9386d556...b3b3f1e0 handoffsOnly false, 10 files. No run exists for code 69d138bb, because the push's head 5ad3589f carried skip-checks.",
+  "thermo": "At b3b3f1e0: thermonuclear-deep-review Verdict CHANGES (the migration collision; three body Minors); thermonuclear-code-quality Verdict CHANGES (structural only: the RemovedBlockFacts facts-only node and the driver's three branches). Previous findings storedActors and the comment join: withdrawn as fixed."
 }
