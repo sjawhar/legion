@@ -2,8 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-220",
-  "completed": "2026-10-27T03:32:02Z",
+  "completed": "2026-10-27T05:11:15Z",
   "proof": [
+    {
+      "criterion": "Round 8 failure 1: with LEGION_E2E_APP_KEY_RUNNER set, claude-backend-tmux.sh's prerequisites never ask the box's own secrets store for an App key, and require the runner, not `secrets`",
+      "surface": "scripts/e2e/claude-backend-tmux.sh run by bash with stand-in tools (the tester's red test ed9e8789, unmodified), in this issue pod",
+      "command": "cd scripts/e2e/lib && bun test claude-backend-key-runner.test.ts",
+      "observed": "1 pass 0 fail (run three times); the script no longer contains `secrets get` or a tier check; bash -n ok; scripts/e2e/lib bun test 656 pass, 2 fail (docker-only nats-stream)",
+      "headSha": "52602649ddfa489c41134beab3817596a978f378",
+      "negativeControl": "At f576ded1 (before the fix) the same test fails: the prerequisites called the stand-in `secrets get LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 --no-request` and stopped with 'FAIL prerequisites: secrets get \u2026 does not resolve' (the tester's round 7, and the Proofs220c tmux run at 036a7ffa, dispatch://INFRA-220/artifact/infra220-036a7ffa-tmux-transcript-log)"
+    },
+    {
+      "criterion": "Round 8 failure 2 and the CI red: main's #2289 bug ('got 20 and 31') in the daemon this branch builds is gone after merging main's #2317 (baadccdc)",
+      "surface": "the Go daemon's PG-backed API package against a real Postgres 18.4 in this pod",
+      "command": "LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:54329/postgres?sslmode=disable CGO_ENABLED=0 go test -count=1 ./internal/api/ ./internal/store/...",
+      "observed": "ok internal/api (255.7s), ok internal/store (118.6s) at 52602649ddfa489c41134beab3817596a978f378; go build/vet/gofmt ok; runtime/sandbox, launcher, claudelaunch, runtime ok; claude-worker.json golden still byte-identical to worker.json; claude-envoy check-dist ok",
+      "headSha": "52602649ddfa489c41134beab3817596a978f378",
+      "negativeControl": "At 036a7ffa the required `test` job failed in internal/api, internal/admit and internal/daemon with 375 of 380 failing names matching main's own red run 40444755828 (the tester's ci reading), and the sandbox proof's daemon failed architect-registers-the-gate with the same bug"
+    },
     {
       "criterion": "N1/N3: a Claude Code implementer under tmux registers, is reminded by the Stop hook while its phase is open, completes through the legion MCP tool, and resumes the same session after its pane is killed",
       "surface": "devbox, real Go daemon with tmux runtime, real Claude Code, real Envoy/Dispatch/NATS, sjawhar/legion-smoke, Theorem's role Apps 5341240/5341243",
@@ -29,18 +45,20 @@
     "scripts/e2e/lib/bridge-tunnel.sh (watchdog guarded kills, bridge_down with the pod's or node's events, bridge_priority_class)",
     "scripts/e2e/README.md, .legion/INFRA-220/r1-state.md (M4 docs)",
     "packages/claude-envoy/src/session-title.ts, src/envoy-channel-server.ts, tests/session-title.test.ts, tests/envoy-channel-handoff.test.ts, CHANGELOG.md, dist/ (queryTmux bounded by a timer)",
-    "merge resolutions: packages/daemon/internal/api/version.go (contract 41), packages/contracts/fixtures/daemon-api/version.json, packages/pi-legion/package.json, packages/claude-envoy/package.json, both CHANGELOGs, packages/pi-legion/AGENTS.md, packages/claude-envoy/src/envoy-channel-server.ts (abort signal), packages/daemon/internal/claudelaunch/claudelaunch.go, internal/runtime/paneenv.go, internal/runtime/tmux/claude.go, internal/capabilities/image.go, cmd/legion/probe_image.go, internal/daemon/bootgate.go, deploy/kubernetes/daemon/legion.yaml.example, skills/legion-worker/SKILL.md and its claude-envoy copy, sandbox golden claude-worker.json"
+    "merge resolutions: packages/daemon/internal/api/version.go (contract 41), packages/contracts/fixtures/daemon-api/version.json, packages/pi-legion/package.json, packages/claude-envoy/package.json, both CHANGELOGs, packages/pi-legion/AGENTS.md, packages/claude-envoy/src/envoy-channel-server.ts (abort signal), packages/daemon/internal/claudelaunch/claudelaunch.go, internal/runtime/paneenv.go, internal/runtime/tmux/claude.go, internal/capabilities/image.go, cmd/legion/probe_image.go, internal/daemon/bootgate.go, deploy/kubernetes/daemon/legion.yaml.example, skills/legion-worker/SKILL.md and its claude-envoy copy, sandbox golden claude-worker.json",
+    "round 8: scripts/e2e/claude-backend-tmux.sh (key check through LEGION_E2E_APP_KEY_RUNNER, runner required, no secrets/tier check), scripts/e2e/README.md (its paragraph); merge of main 448a4100"
   ],
   "openQuestions": [
-    "ARCHITECT'S REQUIREMENT FOR THE TESTER (architect, 2026-10-27T02:02Z): both live proofs ran and passed at 7a93f98f (the proof entries above are that earlier record), but the code head is now 036a7ffae8379032442104d7018255d2c5c29602 and 66f1d28f changed how every Claude Code worker's channel server starts (sessionTitle is awaited at start, in a pod as in a tmux pane). Both proofs must run again at the final code head 036a7ffae8379032442104d7018255d2c5c29602, the tester having the Proofs2229 lane (INFRA lead session 01a13c57-d826-7242-80fe-5f0670188b11) run them with the same commands as at 7a93f98f:",
-    "(a) tmux: agent-secrets register --exec -- env LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file fetched fresh from broker key LEGION_ANTHROPIC_API_KEY> LEGION_E2E_CLAUDE_KEY_FILE=<same file> LEGION_E2E_APP_KEY_RUNNER=$(mise which agent-secrets) bash scripts/e2e/claude-backend-tmux.sh, from a checkout of 036a7ffae8379032442104d7018255d2c5c29602 (the review App key's grant must be live first; no new grant request may be made).",
-    "(b) sandbox: agent-secrets register --exec -- env LEGION_E2E_POD_REACHABILITY=bridge LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_STORAGE_CLASS=standard-rwo LEGION_E2E_CLAUDE_MODEL=claude-sonnet-5 LEGION_E2E_CLAUDE_KEY_FILE=<same file> LEGION_E2E_RUNTIME_KUBECONFIG=<kubeconfig copy with --use_application_default_credentials> GOOGLE_APPLICATION_CREDENTIALS=<ADC copy> LEGION_E2E_APP_KEY_RUNNER=$(mise which agent-secrets) LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@<digest of Worker Image run 40444593180, tag sha-036a7ffae837, whose org.opencontainers.image.revision label must read 036a7ffae8379032442104d7018255d2c5c29602> with the lane's ports 13380-13385 bash scripts/e2e/claude-backend-sandbox.sh; no LEGION_E2E_PRIORITY_CLASS (the INFRA lead declined legion-daemon-priority: it would preempt production agents).",
-    "(c) the SIGINT control at the same head, with job control on: Ctrl-C after 'ok prerequisites', want exit 130, no 'FAIL cleanup', and `ls -d $XDG_RUNTIME_DIR/legion-e2eccs-app-keys.*` finding nothing."
+    "ARCHITECT'S REQUIREMENT FOR THE TESTER (round 8): both live proofs and the SIGINT control run again at the code head 52602649ddfa489c41134beab3817596a978f378 on the Proofs220c lane (INFRA lead session 01a13c57-d826-7242-80fe-5f0670188b11, told the head at 05:10Z), with the commands below. The 7a93f98f entries above remain the earlier record.",
+    "(a) tmux: agent-secrets register --exec -- env LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file fetched fresh from broker key LEGION_ANTHROPIC_API_KEY> LEGION_E2E_CLAUDE_KEY_FILE=<same file> LEGION_E2E_APP_KEY_RUNNER=$(mise which agent-secrets) bash scripts/e2e/claude-backend-tmux.sh, from a checkout of 52602649ddfa489c41134beab3817596a978f378 (the review App key's grant must be live first; no new grant request may be made). The box's own `secrets` store no longer needs either key.",
+    "(b) sandbox: agent-secrets register --exec -- env LEGION_E2E_POD_REACHABILITY=bridge LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_STORAGE_CLASS=standard-rwo LEGION_E2E_CLAUDE_MODEL=claude-sonnet-5 LEGION_E2E_CLAUDE_KEY_FILE=<same file> LEGION_E2E_RUNTIME_KUBECONFIG=<kubeconfig copy with --use_application_default_credentials> GOOGLE_APPLICATION_CREDENTIALS=<ADC copy> LEGION_E2E_APP_KEY_RUNNER=$(mise which agent-secrets) LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@<digest of Worker Image run 40453756325, tag sha-52602649ddfa, whose org.opencontainers.image.revision must read 52602649ddfa489c41134beab3817596a978f378> with the lane's ports 13380-13385 bash scripts/e2e/claude-backend-sandbox.sh; no LEGION_E2E_PRIORITY_CLASS.",
+    "(c) the SIGINT control at the same head, with job control on: Ctrl-C after 'ok prerequisites', want exit 130, no 'FAIL cleanup', and `ls -d $XDG_RUNTIME_DIR/legion-e2eccs-app-keys.*` finding nothing.",
+    "sjawhar/legion#2304 (CONFLICTING, lint red at 04:52Z) rewrites the same tmux-script lines with a hard-wired agent-secrets; #2186's edit has the same shape with $app_key_runner, so whichever merges second resolves to one mechanism. Its author was told through the INFRA lead (no session for it found)."
   ],
   "deviations": [
     "The sandbox runtime identity is the devbox's own service account through an ADC kubeconfig copy, not the daemon's restricted identity: the runs prove the runtime, the Claude lane and the session table, not that the daemon's restricted RBAC alone suffices.",
     "LEGION_E2E_PRIORITY_CLASS exists as an optional input (unset by default) but no run used it: the deployment's only high class would preempt production agent pods.",
-    "Three forward merges of main after the proven head, each for a GitHub-reported CONFLICTING (fingerprint comments on the PR); this branch's daemon API contract is 41 (main took 40)."
+    "Four forward merges of main after the 7a93f98f proofs: three for a GitHub-reported CONFLICTING and one (round 8, 71190310) for main's own red required check and the proof daemon's bug, which main's #2317 fixes; fingerprint comments on the PR. This branch's daemon API contract is 41 (main is at 40)."
   ],
   "trickyParts": [
     "Bun 1.3.14's synchronous spawn timeout (execFileSync/spawnSync/Bun.spawnSync) does not reliably fire on this host: about half of 8 runs of a 1 s timeout on `sleep 5` returned after 5 s with status 0. queryTmux now uses an async spawn bounded by a timer that SIGKILLs and cancels the stdout read; cancelling the read is what lets the process exit when a grandchild holds the pipe.",
