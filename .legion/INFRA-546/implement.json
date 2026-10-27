@@ -2,49 +2,51 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-546",
-  "completed": "2026-10-27T11:45:00Z",
-  "round": 3,
+  "completed": "2026-10-27T13:05:00Z",
+  "round": 4,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2362",
   "answers": {
-    "review1": "All seven inline threads answered (Fixed in <commit>) and resolved: findings 1, 4, 6, 7 in fcd91e242074; findings 2, 3, 5 in 7dbbc0462606. Finding 8: '## Contract change census' added to the PR body with search commands, hits, dispositions and a rollout line (immediate refusal). Finding 9: the red `test` lane was a packages/daemon timeout outside this diff; the push of 40e1a16643ee starts new runs.",
-    "architectDesignChange": "Spec decision 'a full stream refuses new messages': streamCfg uses DiscardNew; start and keeper set it; bus.ErrStreamFull (not ErrRefused) wraps the server's 'maximum bytes exceeded' (10077); the webhook answers 503 (TestA...FullStream test in internal/webhook); #2228's notice rewording reverted (envoy-client, pi-envoy, claude-envoy are now unchanged from c78a4e925318; #2228's implementer told); the redelivery sweep is left to INFRA-493 per the architect, and packages/envoy/AGENTS.md says so."
+    "review2": "Per the INFRA-14 architect's narrowing at the review cap: findings 1 and 2 fixed in e572c5be3cba; the six missing census hits added to the PR body (finding 3); the four Minor threads (4, 5, 6, 7) declined to the Fast-follow line with finding 9's test duplication; finding 8 (go.work.sum churn) restored to the merged base in fc60505cc364. All six round-2 threads answered and resolved."
   },
   "proof": [
     {
-      "criterion": "Copies, the byte limit and envoy_stream_id end right after two programs with different settings start at the same moment (mixed-settings race), every round",
-      "surface": "Real envoy-listener and envoy-dispatch binaries against three nats-server v2.15.1 processes clustered on loopback with the rendered grants (the tester's harness)",
-      "command": "bash /legion/scratch/tmp/r546/race.sh /legion/workspaces/sjawhar/legion/infra-546 4 75 (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6440756443)",
-      "observed": "8/8 pairs PASS: replicas 3 on 3 current peers, max_bytes 2000000, discard new, an id, buckets 3 3 3, both programs alive; the race lowered the stream in 6 pairs and the keeper logged restored=\"replicas 1 -> 3, max_bytes -1 -> 2000000\" each time.",
-      "headSha": "40e1a16643ee24ce958b2cba89cbe6a16c00bdd0",
-      "negativeControl": "The same harness at 0681b1218da2 (no keeper) ended 7 of 8 pairs at {\"replicas\":1,\"max_bytes\":-1} (tester, https://github.com/sjawhar/legion/pull/2362#issuecomment-6434935100)"
+      "criterion": "No start or keeper lowers a deployed byte limit: an operator's raise of a full stream's limit stands, a lower one is raised to the setting",
+      "surface": "Real envoy-listener binary running against three nats-server v2.15.1 processes clustered on loopback, read with natscli v0.5.1",
+      "command": "bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (P5; log https://github.com/sjawhar/legion/pull/2362#issuecomment-6442429631)",
+      "observed": "With the listener at ENVOY_STREAM_MAX_BYTES=44023414784 running, an operator raise to 50 GiB (53687091200) stood 40 s with no keeper write; an operator lowering to 1000000 was put back to 44023414784 by the keeper ('restored=\"max_bytes 1000000 -> 44023414784\"').",
+      "headSha": "e572c5be3cba2196811964240ccea603f040764b",
+      "negativeControl": "At 40e1a16643ee the tester saw the keeper put a raised limit (200000) back to 20000 about 33 s after the raise (round-3 test.json); here the lowered limit 1000000 is the control that the keeper still restores the floor"
     },
     {
-      "criterion": "A stream update from the listener and Dispatch keeps three copies, the byte limit, DiscardNew and envoy_stream_id; R1 stream and bucket raised to three; a full stream refuses a publish and keeps every stored message",
-      "surface": "Real envoy-listener and envoy-dispatch binaries (Postgres 17 on the issue volume) against three nats-server v2.15.1 processes and one standalone v2.15.1 server, read with natscli v0.5.1",
-      "command": "bash /legion/scratch/tmp/p546/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (log in https://github.com/sjawhar/legion/pull/2362#issuecomment-6440756443)",
-      "observed": "P1: R1 stream and KV_envoy_interests raised to 3 current peers, max_bytes 44023414784, discard new, one id over two reads, messages kept, durable at 3. P2: restart at setting 1 with no limit changed nothing. P3: envoy-dispatch put back 3 dropped subjects (5 -> 8) keeping copies, limit, discard and id. P4: a stream at ENVOY_STREAM_MAX_BYTES=3000 acknowledged 10 of 30 JetStream publishes and refused 20 with 'nats: error: maximum bytes exceeded (10077)'; it kept messages 1-10, full-1 first.",
-      "headSha": "40e1a16643ee24ce958b2cba89cbe6a16c00bdd0",
-      "negativeControl": "Standalone v2.15.1: ENVOY_NATS_REPLICAS=3 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode'; ENVOY_STREAM_MAX_BYTES=44023414784 on its 29 GB store -> exit 1 '...: insufficient storage resources available'; ENVOY_NATS_REPLICAS=0 -> 'invalid ENVOY_NATS_REPLICAS \"0\": want a whole number of copies from 1 to 5'"
+      "criterion": "A retry of a publish a full clustered stream refused is never acknowledged as stored when the server holds no copy",
+      "surface": "The bus's real publish path and async window against an in-process three-server nats-server v2.10.29 cluster (the server where the duplicate is staged; v2.15.1 does not stage it)",
+      "command": "cd packages/envoy && go test ./internal/bus/ -run TestARetryOfAPublishTheFullClusterStreamRefusedFailsUntilTheStreamStoresIt -count=1",
+      "observed": "Refused with ErrStreamFull when full; both retries (Publish and the window) return ErrNotStored, still after a purge; after a stream leader step-down both are stored with Sequence > 0 and their Nats-Msg-Id.",
+      "headSha": "e572c5be3cba2196811964240ccea603f040764b",
+      "negativeControl": "With either guard removed the retry returns nil while the stream does not hold the message, and the test fails ('... succeeded and the stream does not hold its message')"
+    },
+    {
+      "criterion": "Earlier proofs still hold: raise to three copies, limit, DiscardNew and id kept across listener and Dispatch starts; a full stream refuses and keeps what it holds",
+      "surface": "Real envoy-listener and envoy-dispatch binaries against three nats-server v2.15.1 processes and one standalone v2.15.1 server",
+      "command": "bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (P1-P4)",
+      "observed": "P1 R1 -> 3 current peers, limit 44023414784, discard new, one id, durable at 3; P2 unchanged at setting 1; P3 Dispatch restores subjects 5 -> 8 keeping copies, limit and id; P4 10 of 30 publishes acknowledged, 20 refused 'maximum bytes exceeded (10077)', messages 1-10 kept.",
+      "headSha": "e572c5be3cba2196811964240ccea603f040764b",
+      "negativeControl": "Standalone v2.15.1: ENVOY_NATS_REPLICAS=3 -> exit 1 naming ENVOY_NATS_REPLICAS=3; ENVOY_STREAM_MAX_BYTES=44023414784 on a 29 GB store -> exit 1 'insufficient storage resources available'; ENVOY_NATS_REPLICAS=0 refused at load"
     }
   ],
   "filesChanged": [
-    "fcd91e242074: internal/bus/keeper.go, stream.go (ownedStream, keptSubjects, updateStream), kv.go, nats.go, keeper_test.go; CHANGELOG, AGENTS.md, docs/site dispatch/envoy.md, docs/solutions nats-jetstream-stream-ensure-only-adds-subjects.md",
-    "7dbbc0462606: bus.MaxReplicas/ParseNATSReplicas/ParseStreamMaxBytes (nats.go, settings_test.go), bus.ListenerBuckets (stream.go), internal/config, cmd/dispatch main.go and redeliver.go, cmd/listener/main.go, infra/aws/rendering/listener.go, infra/core/permissions.go; internal/testnats/streams.go and internal/bus/bustest (shared test helpers) with every duplicate removed",
-    "7edb9e78a505: streamCfg DiscardNew, bus.ErrStreamFull (nats.go, async.go), internal/webhook (503 test), bus tests; docs and setting descriptions; envoy-client, pi-envoy, claude-envoy restored to c78a4e925318",
-    "40e1a16643ee: packages/envoy/AGENTS.md (full stream's GitHub deliveries come back through the redelivery sweep, INFRA-493)"
+    "e572c5be3cba: internal/bus/nats.go (ErrNotStored, notStored, guard in publishJetStream), async.go (guard in the window), stream.go (ownedStream never lowers a deployed limit), keeper.go docs, publish_not_stored_test.go (new), stream_replicas_test.go, keeper_test.go; docs: CHANGELOG, AGENTS.md, cmd/dispatch/AGENTS.md, settings.go row, deploy/README.md, docs/architecture.md, docs/site dispatch/envoy.md and running-dispatch.md, docs/solutions nats-jetstream-stream-ensure-only-adds-subjects.md, .dispatch/architecture/envoy-listener.md",
+    "fc60505cc364: packages/envoy/infra/go.work.sum restored to the merged base c78a4e925318"
   ],
   "trickyParts": [
-    "The keeper's subjects are add-only; a read still holding a role lane makes it send nothing, since only a start moves role lanes (after the consumer filters).",
-    "A full-stream publish error is nats APIError code 10077 'maximum bytes exceeded'; bus.ErrStreamFull wraps it and is not ErrRefused, so the webhook answers 503 and the send routes 500.",
-    "Proof harnesses: /legion/scratch/tmp/p546/proof.sh (now with P4) and /legion/scratch/tmp/r546/race.sh (the tester's harness, cleanup fixed to wait only on started programs). Two runs back to back can collide on Postgres's postmaster.pid.",
-    "Restore go.work.sum and packages/envoy/infra/go.work.sum after go tooling runs."
+    "Another role in the pod holds ports 14221-14223, so this round's proof runs from /legion/scratch/tmp/p546b on ports 15321-15323 (client), 15421-15423 (routes), 15330 (standalone), 15390/15391 (listener), 15777 (Dispatch); Postgres stays on 14433 from /legion/scratch/tmp/pg546.",
+    "On nats-server v2.10.29 a purge does not clear the staged sequence-0 id; a stream leader step-down does."
   ],
   "deviations": [
-    "Test fixture package internal/bus/bustest added beside testnats, because testnats cannot import bus.",
-    "The redelivery sweep's 5-attempt cap (~30 min) is not changed here: the architect assigned it to INFRA-493."
+    "Review-2 Minors 4-7 and 9 are on the Fast-follow line per the architect's narrowing, not fixed here."
   ],
   "openQuestions": [
-    "Who sets ENVOY_STREAM_MAX_BYTES and ENVOY_NATS_REPLICAS=3 in every program for the production deployment at the move (plan coordination item 1).",
-    "READY waits for #2228 to merge and the base to become main (plan decision 1)."
+    "READY waits for #2228 to merge and the base to become main (plan decision 1).",
+    "Who sets both settings in every program for the production deployment at the move (plan coordination item 1)."
   ]
 }
