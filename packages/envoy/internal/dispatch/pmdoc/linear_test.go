@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -67,6 +68,42 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 			})
 		})
 	}
+	// Two-part shapes: an opener half repeated, then a closer half repeated, so each closer looks
+	// back past every run before it. goldmark's ProcessDelimiters walks a closer back over every
+	// earlier run of either character, so `~~a ` then `a* ` and `*a ` then `a~ ` took 3.8-4.2 s at
+	// 112 KB, and pairing `~` runs by length makes `~~a ` then `a~ ` and `~a ` then `a~~ ` the same
+	// walk (dispatch://INFRA-534). Each is read as a rendering is and as a caller's write is; a
+	// write of a mebibyte may be refused for the elements it makes, and a shape nesting past
+	// maxInlineNesting for that, each timed all the same.
+	for _, shape := range []struct{ before, open, close, after string }{
+		{"", "~~a ", "a~ ", ""},
+		{"", "~a ", "a~~ ", ""},
+		{"", "~~a ", "a* ", ""},
+		{"", "*a ", "a~ ", ""},
+		{"~a [", "~~a ", "a~ ", "](u)"},
+		{"", "*~a", "~*", ""},
+	} {
+		pair := len(shape.open) + len(shape.close)
+		full := parseFullTarget / pair
+		small := full / growthStep
+		name := fmt.Sprintf("%s%s…%s…%s", shape.before, shape.open, shape.close, shape.after)
+		for _, reader := range []struct {
+			name  string
+			parse func(string) (*Node, error)
+		}{{"ParseRendering", ParseRendering}, {"Parse", Parse}} {
+			t.Run(reader.name+" "+name, func(t *testing.T) {
+				growsLinearly(t, fmt.Sprintf("%s of %q", reader.name, name), []int{small * pair, full * pair}, linearSlack, func(size int) (time.Duration, error) {
+					repeats := size / pair
+					text := shape.before + strings.Repeat(shape.open, repeats) + strings.Repeat(shape.close, repeats) + shape.after
+					return cpuTimeOf(func() {
+						if _, err := reader.parse(text); err != nil && !refusedForItsMarks(err) {
+							t.Fatalf("%s of %d bytes of %q: %v", reader.name, size, name, err)
+						}
+					})
+				})
+			})
+		}
+	}
 	for _, shape := range []string{"[a", "a_b&", "<a", "[^a"} {
 		full := renderFullTarget / len(shape)
 		small := full / growthStep
@@ -84,6 +121,13 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 			})
 		})
 	}
+}
+
+// refusedForItsMarks reports whether err refuses markdown for the inline marks it makes: more
+// elements than a write may make, or marks nested past maxInlineNesting.
+func refusedForItsMarks(err error) bool {
+	nesting := nestingError{}
+	return errors.Is(err, ErrTooManyElements) || errors.As(err, &nesting) && nesting.inline
 }
 
 // growthStep is the size ratio TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText's two
@@ -174,12 +218,24 @@ func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 			t.Errorf("render of 4 MiB of %s took %s, want under 30 s", test.name, elapsed)
 		}
 	}
-	started := time.Now()
-	if _, err := Parse("a" + strings.Repeat("~", 1<<20)); err != nil {
-		t.Fatalf("parse a run of 1 MiB of ~: %v", err)
-	}
-	if elapsed := time.Since(started); elapsed > 30*time.Second {
-		t.Errorf("parse of a run of 1 MiB of ~ took %s, want under 30 s", elapsed)
+	// A run after an escaped `~` may open or close, so its run is scanned rather than refused. A
+	// write of a mebibyte of escapes is refused for the elements they make, so `a\~~` repeated is
+	// read as a rendering is, which counts none and reads all of it.
+	for _, test := range []struct {
+		name, markdown string
+		parse          func(string) (*Node, error)
+	}{
+		{"a run of 1 MiB of ~", "a" + strings.Repeat("~", 1<<20), Parse},
+		{"\\~ and a run of 1 MiB of ~", "\\~" + strings.Repeat("~", 1<<20), Parse},
+		{"a\\~~ repeated to 1 MiB", strings.Repeat("a\\~~", (1<<20)/4), ParseRendering},
+	} {
+		started := time.Now()
+		if _, err := test.parse(test.markdown); err != nil {
+			t.Fatalf("parse %s: %v", test.name, err)
+		}
+		if elapsed := time.Since(started); elapsed > 30*time.Second {
+			t.Errorf("parse of %s took %s, want under 30 s", test.name, elapsed)
+		}
 	}
 }
 
