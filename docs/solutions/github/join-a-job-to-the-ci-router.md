@@ -130,3 +130,5 @@ push's diff holds the jobs a dropped run would have selected. A merge group is l
 its own per commit and is never cancelled. A cancelled main run would leave its commit untested for
 good. Keep a new job inside the workflow's group; do not give it a `concurrency:` that cancels on
 push.
+
+<!-- scratch INFRA-520 none -->
