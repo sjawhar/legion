@@ -780,6 +780,33 @@ func TestBuildChildEnvKeepsOnlyTheSessionIdentity(t *testing.T) {
 	}
 }
 
+// A value stored as one line plus one trailing newline (an `echo`-written secret) reaches the
+// child without that newline: an HTTP client rejects a header value that ends in "\n" and may put
+// the whole value in its error. Every other value, multi-line ones included, is passed unchanged.
+// Failures name the case only, never the value.
+func TestBuildChildEnvTrimsOneTrailingNewlineFromSingleLineValues(t *testing.T) {
+	cases := []struct{ name, value, want string }{
+		{"lf", "fake-token\n", "fake-token"},
+		{"crlf", "fake-token\r\n", "fake-token"},
+		{"no newline", "fake-token", "fake-token"},
+		{"two lines", "line-one\nline-two\n", "line-one\nline-two\n"},
+		{"two lines no final newline", "line-one\nline-two", "line-one\nline-two"},
+		{"two trailing newlines", "fake-token\n\n", "fake-token\n\n"},
+		{"only a newline", "\n", "\n"},
+		{"only crlf", "\r\n", "\r\n"},
+		{"trailing space", "fake-token \n", "fake-token "},
+		{"lone cr", "fake-token\r", "fake-token\r"},
+		{"cr inside the line", "fake\rtoken\n", "fake\rtoken\n"},
+		{"empty", "", ""},
+	}
+	for _, tc := range cases {
+		got := buildChildEnv(nil, map[string]string{"GRANT_ME": tc.value})
+		if len(got) != 1 || got[0] != "GRANT_ME="+tc.want {
+			t.Errorf("%s: the injected value is not the expected one", tc.name)
+		}
+	}
+}
+
 // runExecForm runs the exec form of GRANT_ME against broker from keyDir with no helper to fall
 // back to (the runtime dir is empty and AGENT_SECRETS_HELPER_SOCK is empty), returning its exit
 // code, stderr and how long it took. extraEnv comes last, so it can override any of that.

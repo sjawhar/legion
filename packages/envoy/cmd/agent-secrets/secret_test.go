@@ -249,6 +249,25 @@ func useStdin(t *testing.T, value string) {
 	t.Cleanup(func() { secretStdin = restore })
 }
 
+// TestPipedValueDropsOneTrailingLineEnding pins that a piped value loses one final "\n" or
+// "\r\n" (a file saved on Windows), never a lone "\r" kept from a "\r\n". Failures name the case,
+// never the value.
+func TestPipedValueDropsOneTrailingLineEnding(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"lf", "fake-token\n", "fake-token"},
+		{"crlf", "fake-token\r\n", "fake-token"},
+		{"none", "fake-token", "fake-token"},
+		{"two lf", "fake-token\n\n", "fake-token\n"},
+		{"multi-line crlf", "line-one\r\nline-two\r\n", "line-one\r\nline-two"},
+	} {
+		useStdin(t, tc.in)
+		got, err := readSecretValue("NAME", "agent-secrets secret set NAME", io.Discard)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: the stored value is not the expected one (err %v)", tc.name, err)
+		}
+	}
+}
+
 // runSecret runs `agent-secrets secret <args>` in-process.
 func runSecret(args ...string) (stdout, stderr string, code int) {
 	var out, errOut bytes.Buffer
