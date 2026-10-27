@@ -2361,6 +2361,16 @@ export interface CreateCommentInput {
 
 export interface EditCommentInput {
   readonly body: string;
+  /** The comment's revision the editor read its blocks at. Required with `blocks`; when it is not
+   *  the comment's current revision (another edit saved first), `blocks` is ignored and the
+   *  server matches the new body's blocks to the comment's by their text. */
+  readonly base_revision?: number;
+  /** Each block id the editor carried through the edit, in body order, with `from`, where the
+   *  block's span starts in `body`, in UTF-16 code units (a JavaScript string index). The new
+   *  body's block holding a carried `from` keeps that id. `400 INVALID_COMMENT` naming the field
+   *  for an id that is not a block of the comment at `base_revision`, an id twice, a `from`
+   *  outside `body` or before the one ahead of it, or `blocks` without `base_revision`. */
+  readonly blocks?: readonly { readonly id: string; readonly from: number }[];
 }
 
 export interface CreateMessageInput {

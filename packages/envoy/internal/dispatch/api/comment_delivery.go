@@ -761,7 +761,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", reply.ID, reply.Body)
+	referenceChanges, err := refs.ReplaceCountedItem(r.Context(), tx, refs.ItemComment, reply.ID, reply.Body, s.deps.ServerURL, reply.CreatedAt, nil)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

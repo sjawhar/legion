@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -128,8 +129,16 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// blocks and base_revision are the ids the dashboard editor carried through the edit: each
+	// block's id and where its span starts in body, in UTF-16 code units, against the comment's
+	// revision the editor read them at (refs.IndexItem). Without them the ids follow the text.
 	var input struct {
-		Body string `json:"body"`
+		Body         string `json:"body"`
+		BaseRevision *int   `json:"base_revision"`
+		Blocks       []struct {
+			ID   string `json:"id"`
+			From int    `json:"from"`
+		} `json:"blocks"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -142,6 +151,17 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	if length := len16(input.Body); length > contracts.DispatchBodyMax {
 		capExceeded(w, "body", length, contracts.DispatchBodyMax)
 		return
+	}
+	var carried *refs.CarriedEdit
+	if input.Blocks != nil {
+		if input.BaseRevision == nil {
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "blocks: requires base_revision, the comment's revision the blocks were read at")
+			return
+		}
+		carried = &refs.CarriedEdit{BaseRevision: *input.BaseRevision, Blocks: make([]itemblocks.Carried, len(input.Blocks))}
+		for index, block := range input.Blocks {
+			carried.Blocks[index] = itemblocks.Carried{ID: block.ID, From: block.From}
+		}
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -177,6 +197,15 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	}
 	comment.Body = input.Body
 	comment.EditedAt = timestampPtr(&editedAt)
+	referenceChanges, err := refs.ReplaceCountedItem(r.Context(), tx, refs.ItemComment, comment.ID, comment.Body, s.deps.ServerURL, editedAt, carried)
+	if carriedErr := (*itemblocks.CarriedError)(nil); errors.As(err, &carriedErr) {
+		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, carriedErr.Error())
+		return
+	}
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if comment.Anchor != nil {
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
 		if err != nil {
@@ -192,11 +221,6 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-	}
-	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", comment.ID, comment.Body)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
 	}
 	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, referenceChanges)
 	if err != nil {

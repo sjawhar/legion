@@ -207,7 +207,9 @@ func OwedItems(ctx context.Context, q Queryer, limit int) ([]OwedItem, error) {
 // owed for the next pass. A new edge takes the time the text was written (sourceText) and no
 // source_seq, since no event introduced it, as a rebuild's does; a re-index of text no one
 // rewrote appends no event, as rebuild-refs appends none. An item whose source is gone has its
-// edges deleted with its owed row.
+// edges deleted with its owed row. A comment or message has its blocks indexed too (IndexItem,
+// which takes the item's block state row after the source row), so the mentions its blocks hold
+// are read with the same grammar as its own.
 func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -219,7 +221,13 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 		return err
 	}
 	if found {
-		if _, err := replaceRefs(ctx, tx, item.Kind, item.ID, text.Extract(body, serverURL), &writtenAt); err != nil {
+		located := text.ExtractAt(body, serverURL)
+		if kind := ItemKind(item.Kind); kind == ItemComment || kind == ItemMessage {
+			if _, _, err := IndexItem(ctx, tx, kind, item.ID, body, writtenAt, located, nil); err != nil {
+				return fmt.Errorf("index the blocks of %s %s: %w", item.Kind, item.ID, err)
+			}
+		}
+		if _, err := replaceRefs(ctx, tx, item.Kind, item.ID, locatedRefs(located), &writtenAt); err != nil {
 			return fmt.Errorf("index %s %s: %w", item.Kind, item.ID, err)
 		}
 	} else if _, err := tx.Exec(ctx, `delete from refs where from_kind = $1 and from_id = $2`, item.Kind, item.ID); err != nil {

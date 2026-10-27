@@ -854,12 +854,15 @@ func (s *server) insertSessionReply(
 	if err != nil {
 		return model.Message{}, model.Event{}, err
 	}
+	// A direct message writes no mention, so its blocks hold none either.
 	var referenceChanges model.ReferenceChanges
 	if reply.IssueKey != nil {
-		referenceChanges, err = s.replaceReferences(ctx, tx, "message", reply.ID, reply.Body)
-		if err != nil {
-			return model.Message{}, model.Event{}, err
-		}
+		referenceChanges, err = refs.ReplaceCountedItem(ctx, tx, refs.ItemMessage, reply.ID, reply.Body, s.deps.ServerURL, reply.CreatedAt, nil)
+	} else {
+		_, _, err = refs.IndexItem(ctx, tx, refs.ItemMessage, reply.ID, reply.Body, reply.CreatedAt, nil, nil)
+	}
+	if err != nil {
+		return model.Message{}, model.Event{}, err
 	}
 	thread, err := messageReplyParentOf(parent).thread(ctx, tx)
 	if err != nil {

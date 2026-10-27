@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -523,6 +524,10 @@ func (s *server) writeBroadcast(
 			returning `+messageColumns+`
 		`, author, body, target, sent.ID, position))
 		if err != nil {
+			return broadcastRead{}, nil, err
+		}
+		// Each copy is a direct message: its blocks are indexed, and it writes no mention.
+		if _, _, err := refs.IndexItem(ctx, tx, refs.ItemMessage, message.ID, message.Body, message.CreatedAt, nil, nil); err != nil {
 			return broadcastRead{}, nil, err
 		}
 		// A broadcast message is a thread root that answers nothing, so its event says what

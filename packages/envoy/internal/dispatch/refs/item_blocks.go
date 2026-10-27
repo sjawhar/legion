@@ -1,0 +1,529 @@
+package refs
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/itemblocks"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
+)
+
+// ItemKind is the kind of item whose blocks IndexItem writes, a comment or a message. It names the
+// tables a call writes and is never caller input.
+type ItemKind string
+
+const (
+	ItemComment ItemKind = "comment"
+	ItemMessage ItemKind = "message"
+)
+
+// itemTables is the storage of one item kind's blocks: the blocks table, the column naming the
+// item in every table, the state table and the block mentions table.
+type itemTables struct {
+	blocks, item, state, refs string
+}
+
+func (kind ItemKind) tables() (itemTables, error) {
+	switch kind {
+	case ItemComment:
+		return itemTables{blocks: "comment_blocks", item: "comment_id", state: "comment_block_state", refs: "comment_block_refs"}, nil
+	case ItemMessage:
+		return itemTables{blocks: "message_blocks", item: "message_id", state: "message_block_state", refs: "message_block_refs"}, nil
+	}
+	return itemTables{}, fmt.Errorf("index the blocks of a %q: not an item kind", string(kind))
+}
+
+// CarriedEdit is the block ids an edit of a comment carries (PATCH /api/v1/comments/{id}'s
+// `blocks` and `base_revision`): the comment's revision the editor read its blocks at, and each
+// carried block's id with its From in UTF-16 code units into the body the edit writes, in body
+// order.
+type CarriedEdit struct {
+	BaseRevision int
+	Blocks       []itemblocks.Carried
+}
+
+// IndexedBlock is one current block of the body IndexItem indexed, in body order: its id, type
+// and text (body[From:To], byte offsets), and whether its text is new, changed or restored in this
+// call's revision.
+type IndexedBlock struct {
+	ID, Type, Text string
+	From, To       int
+	Changed        bool
+}
+
+// BodySHA256 is the hex SHA-256 of an item's body as stored, byte for byte: the state row's
+// body_sha256, which says which body the item's blocks were last indexed from.
+func BodySHA256(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
+}
+
+// ReplaceCountedItem indexes a comment's or an issue message's body, which the calling
+// transaction has just written: its blocks and the mentions each holds (IndexItem), then the
+// item's own references (ReplaceCountedRefs), from one extraction of body. The counted targets it
+// resolves are those either moved, so the event the caller appends names a link that moved between
+// two blocks of the item as well as one the item gained or lost. A direct message, which writes no
+// mention, calls IndexItem alone with no located mentions.
+func ReplaceCountedItem(
+	ctx context.Context,
+	tx pgx.Tx,
+	kind ItemKind,
+	itemID, body, serverURL string,
+	at time.Time,
+	carried *CarriedEdit,
+) (model.ReferenceChanges, error) {
+	located := text.ExtractAt(body, serverURL)
+	_, moved, err := IndexItem(ctx, tx, kind, itemID, body, at, located, carried)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return ReplaceCountedRefs(ctx, tx, string(kind), itemID, locatedRefs(located), nil, moved)
+}
+
+// locatedRefs is the references of located, without their offsets.
+func locatedRefs(located []text.Located) []text.Ref {
+	found := make([]text.Ref, len(located))
+	for i, mention := range located {
+		found[i] = mention.Ref
+	}
+	return found
+}
+
+// IndexItem records body, written at `at` (the created_at of an insert, the edited_at of an
+// edit), as the current revision of the blocks of comment or message itemID, in the caller's
+// transaction. The caller holds the item's owner row and the item row (its insert or update, or a
+// read `for no key update`); IndexItem takes the item's state row after them (inserting it when
+// missing, then `for no key update`), so every writer takes owner, item, state in that order and
+// the reconciliation, which takes no owner, takes item then state.
+//
+// The body splits into blocks (itemblocks.Split) and each takes an id: when carried is given, its
+// base revision is the comment's stored revision and the item is a comment, each block takes the
+// id of the carried span starting in it (itemblocks.Carry, after itemblocks.ReadCarried refuses an
+// id that is not a current block, an id named twice, or a From outside the body or out of order,
+// with a *itemblocks.CarriedError naming the field); otherwise, and for a carried edit made
+// against another revision, the ids follow the text (itemblocks.Align over every block the item
+// ever held, removed ones included). A new block takes made_at = at, except at the first indexing
+// of a comment already edited, whose blocks' making time was never recorded (null); a new, changed
+// (identity hash) or restored block takes the new revision as changed_revision and `at` as
+// changed_at; an unchanged one moves only its position, type and excerpt; a current block the body
+// no longer holds is removed (position null, removed_at = at). A comment records the text of each
+// new, changed or restored block, and null for each removed one, in comment_block_texts at the new
+// revision.
+//
+// Revisions: a comment's revision counts its indexed revisions, 1 the first indexing. A call bumps
+// it by one when it is the first indexing, when body differs byte for byte from the body last
+// indexed (body_sha256), or when the blocks changed (a parser that reads the same body otherwise);
+// a call that finds none of those writes no block and no text row and keeps the revision. A
+// message has no revisions.
+//
+// Every call reconciles the item's block mentions from located (text.ExtractAt(body, …)): each
+// mention to the block whose [From, To) holds its offset, one row per (block, target), so a
+// reindex with a new grammar re-reads them even when the body is unchanged. A new row takes `at`,
+// or at the item's first indexing its own refs row's created_at and source_seq for that target;
+// Stamp gives the others their event. A direct message passes no located mentions and holds none.
+// It stores the revision, the next block number and BodySHA256(body) and clears owed_at.
+//
+// It returns the item's current blocks and the targets of the block mentions it inserted or
+// deleted, which the caller's event counts (ReplaceCountedRefs' moved).
+func IndexItem(
+	ctx context.Context,
+	tx pgx.Tx,
+	kind ItemKind,
+	itemID, body string,
+	at time.Time,
+	located []text.Located,
+	carried *CarriedEdit,
+) ([]IndexedBlock, []Target, error) {
+	tables, err := kind.tables()
+	if err != nil {
+		return nil, nil, err
+	}
+	state, err := lockItemState(ctx, tx, kind, tables, itemID)
+	if err != nil {
+		return nil, nil, err
+	}
+	stored, err := storedItemBlocks(ctx, tx, kind, tables, itemID)
+	if err != nil {
+		return nil, nil, err
+	}
+	counter := state.nextBlock
+	for _, block := range stored {
+		if number, ok := blockNumber(block.ID); ok && number >= counter {
+			counter = number + 1
+		}
+	}
+
+	next := itemblocks.Split(body)
+	var ids []string
+	if carried != nil && kind == ItemComment && carried.BaseRevision == state.revision {
+		spans, err := itemblocks.ReadCarried(stored, body, carried.Blocks)
+		if err != nil {
+			return nil, nil, err
+		}
+		ids, counter = itemblocks.Carry(stored, next, spans, counter)
+	} else {
+		ids, counter = itemblocks.Align(stored, next, counter)
+	}
+
+	byID := make(map[string]itemblocks.Stored, len(stored))
+	for _, block := range stored {
+		byID[block.ID] = block
+	}
+	bodySum := BodySHA256(body)
+	changed := !state.indexed || state.bodySHA256 != bodySum
+	blocks := make([]IndexedBlock, len(next))
+	var written, kept []itemBlockRow
+	for index, block := range next {
+		row := itemBlockRow{
+			id: ids[index], position: index, nodeType: block.Type, sum: itemblocks.Hash(block.Text),
+			excerpt: text.HeadRunes(block.Text, BlockExcerptRunes), text: block.Text,
+		}
+		previous, held := byID[row.id]
+		delete(byID, row.id)
+		blocks[index] = IndexedBlock{ID: row.id, Type: block.Type, Text: block.Text, From: block.From, To: block.To}
+		if held && previous.Position >= 0 && previous.Hash == row.sum {
+			kept = append(kept, row)
+			if previous.Position != index || previous.Type != block.Type {
+				changed = true
+			}
+			continue
+		}
+		blocks[index].Changed = true
+		written = append(written, row)
+		changed = true
+	}
+	var removed []string
+	for _, block := range stored {
+		if _, untaken := byID[block.ID]; untaken && block.Position >= 0 {
+			removed = append(removed, block.ID)
+			changed = true
+		}
+	}
+
+	revision := state.revision
+	if changed {
+		revision++
+		madeAt := &at
+		if !state.indexed && kind == ItemComment && state.edited {
+			madeAt = nil
+		}
+		if err := writeItemBlocks(ctx, tx, kind, tables, itemID, revision, at, madeAt, written, kept, removed); err != nil {
+			return nil, nil, err
+		}
+	}
+	moved, err := replaceItemBlockRefs(ctx, tx, kind, tables, itemID, at, !state.indexed, itemBlockPairs(next, ids, located))
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := storeItemState(ctx, tx, kind, itemID, revision, counter, bodySum); err != nil {
+		return nil, nil, err
+	}
+	return blocks, moved, nil
+}
+
+// itemState is an item's state row as IndexItem found it: whether a block-aware build indexed
+// it before (a comment's revision above 0, a message's body_sha256 set), its revision and next
+// block number (a comment's; a message's are 0 and 1), the body it was last indexed from, and
+// whether the comment was edited (edited_at set).
+type itemState struct {
+	indexed    bool
+	revision   int
+	nextBlock  int
+	bodySHA256 string
+	edited     bool
+}
+
+// lockItemState inserts the item's state row when it has none and locks it `for no key update`.
+func lockItemState(ctx context.Context, tx pgx.Tx, kind ItemKind, tables itemTables, itemID string) (itemState, error) {
+	if _, err := tx.Exec(ctx, `
+		insert into `+tables.state+` (`+tables.item+`) values ($1::uuid) on conflict do nothing
+	`, itemID); err != nil {
+		return itemState{}, fmt.Errorf("create the block state of %s %s: %w", kind, itemID, err)
+	}
+	state := itemState{nextBlock: 1}
+	var sum *string
+	var err error
+	if kind == ItemComment {
+		err = tx.QueryRow(ctx, `
+			select s.revision, s.next_block, s.body_sha256, c.edited_at is not null
+			from comment_block_state s join comments c on c.id = s.comment_id
+			where s.comment_id = $1::uuid
+			for no key update of s
+		`, itemID).Scan(&state.revision, &state.nextBlock, &sum, &state.edited)
+		state.indexed = state.revision > 0
+	} else {
+		err = tx.QueryRow(ctx, `
+			select body_sha256 from message_block_state where message_id = $1::uuid for no key update
+		`, itemID).Scan(&sum)
+		state.indexed = sum != nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return itemState{}, fmt.Errorf("lock the block state of %s %s: the %s is gone", kind, itemID, kind)
+	}
+	if err != nil {
+		return itemState{}, fmt.Errorf("lock the block state of %s %s: %w", kind, itemID, err)
+	}
+	if sum != nil {
+		state.bodySHA256 = *sum
+	}
+	return state, nil
+}
+
+// storedItemBlocks is every block the item ever held, current ones first in body order, then
+// removed ones, the most recently removed first, so Align's first untaken match prefers the block
+// in place and, among removed blocks of equal text, the last removed.
+func storedItemBlocks(ctx context.Context, tx pgx.Tx, kind ItemKind, tables itemTables, itemID string) ([]itemblocks.Stored, error) {
+	rows, err := tx.Query(ctx, `
+		select block_id, type, text_sha256, coalesce(position, -1) from `+tables.blocks+`
+		where `+tables.item+` = $1::uuid
+		order by position nulls last, removed_at desc, length(block_id), block_id
+	`, itemID)
+	if err != nil {
+		return nil, fmt.Errorf("read the blocks of %s %s: %w", kind, itemID, err)
+	}
+	defer rows.Close()
+	stored := []itemblocks.Stored{}
+	for rows.Next() {
+		var block itemblocks.Stored
+		if err := rows.Scan(&block.ID, &block.Type, &block.Hash, &block.Position); err != nil {
+			return nil, fmt.Errorf("scan a block of %s %s: %w", kind, itemID, err)
+		}
+		stored = append(stored, block)
+	}
+	return stored, rows.Err()
+}
+
+// blockNumber is the number of block id b<N>.
+func blockNumber(id string) (int, bool) {
+	digits, ok := strings.CutPrefix(id, "b")
+	if !ok {
+		return 0, false
+	}
+	number, err := strconv.Atoi(digits)
+	return number, err == nil
+}
+
+// itemBlockRow is one current block IndexItem writes: its id, position, type, identity hash,
+// excerpt and text.
+type itemBlockRow struct {
+	id       string
+	position int
+	nodeType string
+	sum      string
+	excerpt  string
+	text     string
+}
+
+// writeItemBlocks stores one new revision of the item's blocks: written (new, changed or restored
+// blocks) take the revision and `at` as their changed facts, and a new one madeAt; kept blocks
+// move their position, type and excerpt; removed ones lose their position at `at`. A comment
+// records each written block's text, and null for each removed one, at the revision.
+func writeItemBlocks(
+	ctx context.Context,
+	tx pgx.Tx,
+	kind ItemKind,
+	tables itemTables,
+	itemID string,
+	revision int,
+	at time.Time,
+	madeAt *time.Time,
+	written, kept []itemBlockRow,
+	removed []string,
+) error {
+	if len(removed) > 0 {
+		if _, err := tx.Exec(ctx, `
+			update `+tables.blocks+` set position = null, removed_at = $2
+			where `+tables.item+` = $1::uuid and block_id = any($3)
+		`, itemID, at, removed); err != nil {
+			return fmt.Errorf("remove the blocks %s %s no longer holds: %w", kind, itemID, err)
+		}
+	}
+	if len(written) > 0 {
+		ids, positions, types, sums, excerpts := itemBlockColumns(written)
+		var err error
+		if kind == ItemComment {
+			_, err = tx.Exec(ctx, `
+				insert into comment_blocks (comment_id, block_id, node_id, position, type, text_sha256, excerpt, made_at, changed_revision, changed_at)
+				select $1::uuid, b.id, 'comment/' || $1::uuid::text || '#' || b.id, b.position, b.type, b.sum, b.excerpt, $2, $3, $4
+				from unnest($5::text[], $6::int[], $7::text[], $8::text[], $9::text[]) as b (id, position, type, sum, excerpt)
+				on conflict (comment_id, block_id) do update set
+					position = excluded.position,
+					type = excluded.type,
+					text_sha256 = excluded.text_sha256,
+					excerpt = excluded.excerpt,
+					changed_revision = excluded.changed_revision,
+					changed_at = excluded.changed_at,
+					removed_at = null
+			`, itemID, madeAt, revision, at, ids, positions, types, sums, excerpts)
+		} else {
+			// A message is never edited, so its blocks are made and last changed when it was
+			// written; a reindex under another parser moves only those of new text.
+			_, err = tx.Exec(ctx, `
+				insert into message_blocks (message_id, block_id, node_id, position, type, text_sha256, excerpt, made_at, changed_at)
+				select $1::uuid, b.id, 'message/' || $1::uuid::text || '#' || b.id, b.position, b.type, b.sum, b.excerpt, $2, $2
+				from unnest($3::text[], $4::int[], $5::text[], $6::text[], $7::text[]) as b (id, position, type, sum, excerpt)
+				on conflict (message_id, block_id) do update set
+					position = excluded.position,
+					type = excluded.type,
+					text_sha256 = excluded.text_sha256,
+					excerpt = excluded.excerpt,
+					changed_at = excluded.changed_at,
+					removed_at = null
+			`, itemID, at, ids, positions, types, sums, excerpts)
+		}
+		if err != nil {
+			return fmt.Errorf("record the blocks of %s %s: %w", kind, itemID, err)
+		}
+	}
+	if len(kept) > 0 {
+		ids, positions, types, _, excerpts := itemBlockColumns(kept)
+		if _, err := tx.Exec(ctx, `
+			update `+tables.blocks+` b set position = k.position, type = k.type, excerpt = k.excerpt
+			from unnest($2::text[], $3::int[], $4::text[], $5::text[]) as k (id, position, type, excerpt)
+			where b.`+tables.item+` = $1::uuid and b.block_id = k.id
+		`, itemID, ids, positions, types, excerpts); err != nil {
+			return fmt.Errorf("move the unchanged blocks of %s %s: %w", kind, itemID, err)
+		}
+	}
+	if kind != ItemComment || len(written)+len(removed) == 0 {
+		return nil
+	}
+	textIDs := make([]string, 0, len(written)+len(removed))
+	texts := make([]*string, 0, len(written)+len(removed))
+	for i := range written {
+		textIDs, texts = append(textIDs, written[i].id), append(texts, &written[i].text)
+	}
+	for _, id := range removed {
+		textIDs, texts = append(textIDs, id), append(texts, nil)
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into comment_block_texts (comment_id, block_id, revision, text)
+		select $1::uuid, t.id, $2, t.text from unnest($3::text[], $4::text[]) as t (id, text)
+		on conflict (comment_id, block_id, revision) do update set text = excluded.text
+	`, itemID, revision, textIDs, texts); err != nil {
+		return fmt.Errorf("record the block texts of revision %d of comment %s: %w", revision, itemID, err)
+	}
+	return nil
+}
+
+// itemBlockColumns is rows as the parallel arrays an unnest reads.
+func itemBlockColumns(rows []itemBlockRow) (ids []string, positions []int32, types, sums, excerpts []string) {
+	for _, row := range rows {
+		ids = append(ids, row.id)
+		positions = append(positions, int32(row.position))
+		types = append(types, row.nodeType)
+		sums = append(sums, row.sum)
+		excerpts = append(excerpts, row.excerpt)
+	}
+	return ids, positions, types, sums, excerpts
+}
+
+// itemBlockPairs is each distinct link the mentions in located write from the block of next
+// (whose ids are ids) whose [From, To) holds the mention's start. A mention no block holds, and
+// an external URL, write none.
+func itemBlockPairs(next []itemblocks.Block, ids []string, located []text.Located) []blockPair {
+	pairs := make([]blockPair, 0, len(located))
+	seen := make(map[blockPair]struct{}, len(located))
+	for _, mention := range located {
+		holder := -1
+		for index, block := range next {
+			if block.From <= mention.Offset && mention.Offset < block.To {
+				holder = index
+				break
+			}
+		}
+		if holder < 0 {
+			continue
+		}
+		target, ok := targetOf(mention.Ref)
+		if !ok {
+			continue
+		}
+		pair := blockPair{blockID: ids[holder], kind: "mentions", target: target}
+		if _, dup := seen[pair]; dup {
+			continue
+		}
+		seen[pair] = struct{}{}
+		pairs = append(pairs, pair)
+	}
+	return pairs
+}
+
+// replaceItemBlockRefs reconciles the item's block mentions with pairs, matching on the columns
+// of their key, and returns the targets of the pairs it deleted and inserted. A pair that survives
+// keeps its created_at and source_seq; a new one takes `at`, or at the item's first indexing the
+// item's own refs row for that target's created_at and source_seq, when one exists.
+func replaceItemBlockRefs(
+	ctx context.Context,
+	tx pgx.Tx,
+	kind ItemKind,
+	tables itemTables,
+	itemID string,
+	at time.Time,
+	firstIndexing bool,
+	pairs []blockPair,
+) ([]Target, error) {
+	blockIDs := make([]string, len(pairs))
+	kinds := make([]string, len(pairs))
+	toKinds := make([]string, len(pairs))
+	toIDs := make([]string, len(pairs))
+	for i, pair := range pairs {
+		blockIDs[i], kinds[i], toKinds[i], toIDs[i] = pair.blockID, pair.kind, pair.target.Kind, pair.target.ID
+	}
+	moved, err := scanTargets(tx.Query(ctx, `
+		delete from `+tables.refs+` r
+		where r.`+tables.item+` = $1::uuid and not exists (
+			select 1 from unnest($2::text[], $3::text[], $4::text[], $5::text[]) as p (block_id, kind, to_kind, to_id)
+			where p.block_id = r.block_id and p.kind = r.kind and p.to_kind = r.to_kind and p.to_id = r.to_id)
+		returning r.to_kind, r.to_id
+	`, itemID, blockIDs, kinds, toKinds, toIDs))
+	if err != nil {
+		return nil, fmt.Errorf("delete the block mentions %s %s dropped: %w", kind, itemID, err)
+	}
+	if len(pairs) == 0 {
+		return moved, nil
+	}
+	added, err := scanTargets(tx.Query(ctx, `
+		insert into `+tables.refs+` (`+tables.item+`, block_id, from_node, to_kind, to_id, kind, created_at, source_seq)
+		select $1::uuid, p.block_id, $6::text || '/' || $1::uuid::text || '#' || p.block_id, p.to_kind, p.to_id, p.kind,
+		       coalesce(case when $8::boolean then r.created_at end, $7::timestamptz), case when $8::boolean then r.source_seq end
+		from unnest($2::text[], $3::text[], $4::text[], $5::text[]) as p (block_id, kind, to_kind, to_id)
+		left join refs r on r.from_kind = $6 and r.from_id = $1::uuid::text
+		                and r.to_kind = p.to_kind and r.to_id = p.to_id
+		on conflict (`+tables.item+`, block_id, to_kind, to_id, kind) do nothing
+		returning to_kind, to_id
+	`, itemID, blockIDs, kinds, toKinds, toIDs, string(kind), at, firstIndexing))
+	if err != nil {
+		return nil, fmt.Errorf("record the block mentions of %s %s: %w", kind, itemID, err)
+	}
+	return append(moved, added...), nil
+}
+
+// storeItemState records the item indexed from the body whose BodySHA256 is bodySum, at revision
+// with next as the next block number for a comment, and settles its owed_at.
+func storeItemState(ctx context.Context, tx pgx.Tx, kind ItemKind, itemID string, revision, next int, bodySum string) error {
+	var err error
+	if kind == ItemComment {
+		_, err = tx.Exec(ctx, `
+			update comment_block_state set revision = $2, next_block = $3, body_sha256 = $4, owed_at = null
+			where comment_id = $1::uuid
+		`, itemID, revision, next, bodySum)
+	} else {
+		_, err = tx.Exec(ctx, `
+			update message_block_state set body_sha256 = $2, owed_at = null where message_id = $1::uuid
+		`, itemID, bodySum)
+	}
+	if err != nil {
+		return fmt.Errorf("record the blocks of %s %s indexed: %w", kind, itemID, err)
+	}
+	return nil
+}

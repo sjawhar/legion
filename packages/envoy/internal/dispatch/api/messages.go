@@ -160,12 +160,15 @@ func (s *server) createStoredMessage(
 	if err != nil {
 		return model.Message{}, nil, err
 	}
+	// A direct message writes no mention, so its blocks hold none either.
 	var referenceChanges model.ReferenceChanges
 	if message.IssueKey != nil {
-		referenceChanges, err = s.replaceReferences(ctx, tx, "message", message.ID, message.Body)
-		if err != nil {
-			return model.Message{}, nil, err
-		}
+		referenceChanges, err = refs.ReplaceCountedItem(ctx, tx, refs.ItemMessage, message.ID, message.Body, s.deps.ServerURL, message.CreatedAt, nil)
+	} else {
+		_, _, err = refs.IndexItem(ctx, tx, refs.ItemMessage, message.ID, message.Body, message.CreatedAt, nil, nil)
+	}
+	if err != nil {
+		return model.Message{}, nil, err
 	}
 	eventType := "message.created"
 	if message.InReplyTo != nil {
