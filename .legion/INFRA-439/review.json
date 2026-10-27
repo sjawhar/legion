@@ -2,56 +2,51 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-439",
-  "completed": "2026-10-26T21:38:41Z",
-  "round": 4,
-  "reviewedHead": "2f95f13f3965f11b0ac5e0ae0630dcfa4d9a2057",
-  "decision": "approved",
+  "completed": "2026-10-27T00:07:08Z",
+  "round": 5,
+  "reviewedHead": "6eba519ff6672fe881656aa83aab31f4aaa0b9aa",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 5,
+  "important": 1,
+  "minor": 3,
   "verifiedFixed": [
-    "Round 3 finding 1: UnwrittenFrames.sendCard hands an inert card only to a settled host (hostSettled: idle, no pending message, not shutting down, same session) and handBackWithdrawn hands a held one at the first settled heartbeat; every inert path (replayed BTW, failure notice naming a BTW, hand-back) goes through it; smoke leg 7 on omp 18.12.2 (tester round 11/12) shows nothing queued during the turn and one inert card after idle with no turn run.",
-    "Round 3 finding 2: readArrivals yields every frame it read before a clean end or an error and returns the source when the caller stops; delivery-arrivals.test.ts drives nats.js's own QueuedIteratorImpl.",
-    "Round 3 minors: trust sentence names the API credential and ended sessions; pump comment says a BTW's outcome is Dispatch's record; the cursorStarts window is documented (stated, not closed: accepted, a margin trades it for duplicate notices after every reconnect).",
-    "smoke-replay.sh remote mode: replay_read reads its cursor from $1 and both callers match; tester round 12 SMOKE REPLAY PASS in remote and local mode at 2f95f13f."
+    "handBackWithdrawn reads host.settled() itself; the only caller and every test migrated.",
+    "ReplayDeliveryOutcome 'queued' text names the keyless held inert card, matching sendCard.",
+    "The trust sentence in docs/site dispatch/envoy.md and packages/envoy/AGENTS.md names ENVOY_ALLOWED_HOSTS and the GCP hub's tailnet name, and matches apiauth.go and gcp/natshub.go.",
+    "Replay notices are held until the host is settled (sendNotice, handBackWithdrawn); recorded held and marked handed in the transcript; requeued on restore; no path hands one to a busy host. Tester round 13/14/15 legs N2, gap-a, gap-b live on omp 18.12.2.",
+    "smoke-replay.sh defines card_jq once; leg 7's local-only mid-turn check is stated in the header and scripts/README.md."
   ],
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "docs/site/src/content/docs/dispatch/envoy.md",
-      "description": "The trust sentence names loopback as the only open-/v1 caller; ENVOY_ALLOWED_HOSTS names are served too, and the GCP hub serves its tailnet name with no bearer, so any tailnet peer reaching port 9020 can replay any session's inbox (already able to read live traffic via the hub's no-auth NATS user). Wording: Fast-follow; stated under Not proven / risk."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/pi-envoy/src/unwritten-frames.ts",
-      "description": "handBackWithdrawn takes `settled` as a parameter while sendCard reads host.settled(); production passes the same function, so no behaviour differs, but the two can drift. Fast-follow."
-    },
-    {
-      "severity": "minor",
+      "severity": "important",
       "file": "packages/envoy-client/src/replay.ts",
-      "description": "ReplayDeliveryOutcome's `queued` text does not name the keyless held inert card (claim released, re-shown each sweep until the host settles). Fast-follow."
+      "description": "The retention-gap fix still repeats the notice when the sweep is cut short. notify(retention_gap) runs at 734-741, before the page's frames are handled (762-775, each awaiting host.deliver and a flush per shown frame), and the moved cursor is written only at 787; a kill, a shutdown or a session switch (alive() false at 768/777 returns without the write) in between leaves the notice recorded held and the cursor below first_seq - 1, so after the resume the requeued notice and the re-found gap tell it twice. Both thermonuclear agents reproduced it with throwaway engine tests (notices: ['retention_gap','retention_gap']). The PR's SIGKILL test passes only because its expired messages are on an unfollowed subject. Fix: when the gap is found, lift the gapped subject's cursor to max(after, first_seq - 1), await flush(alive, true), then notify; that skips nothing and lets the atOnce plumbing go. Add an engine test that cuts the sweep while a frame of the gapped page is delivered."
     },
     {
       "severity": "minor",
-      "file": "packages/pi-envoy/AGENTS.md",
-      "description": "The stream_recreated / retention_gap notice card is handed directly as a steer with triggerTurn false, so a streaming turn runs one more model turn for it; AGENTS.md says it starts no turn. Not this round's code; no person's instruction in it. Wording: Fast-follow; stated under Not proven / risk."
+      "file": "packages/pi-envoy/extensions/envoy.ts",
+      "description": "restoreLocalSessionState calls requeueNotices (903) before releaseOtherSessions (916), and requeueNotices skips an id already held for any session; on a fork that copies the held notice's entry, the new session's requeue is skipped and the old session's copy is then dropped, so the forked session is not shown the notice until a restart. Release first, or dedupe on (sessionID, id)."
     },
     {
       "severity": "minor",
-      "file": "packages/pi-envoy/scripts/smoke-replay.sh",
-      "description": "Leg 7 proves the mid-turn hold only in local mode (remote mode has no evidence the sweep ran during the turn); the entry-matching jq predicate has four copies. Fast-follow; stated under Not proven / risk."
+      "file": "packages/envoy/infra/docs/nats-hub.md",
+      "description": "'The hub's listener' (201-208) lists what a credential-less caller of port 9020 gets (publish, claim a role, list and delete sessions) and omits reading any session's stored inbox for 72 hours by id, which this PR adds."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "Not proven / risk line 16 says those tailnet peers 'can already read live traffic through the hub's no-auth NATS user'; gcp/natshub.go sets NoAuthUser only when sessionUser is configured. Make it conditional."
     }
   ],
   "ci": {
-    "codeHead": "2f95f13f3965f11b0ac5e0ae0630dcfa4d9a2057",
+    "codeHead": "6eba519ff6672fe881656aa83aab31f4aaa0b9aa",
     "required": ["lint", "typecheck", "test", "pr-title"],
-    "observed": "lint success, typecheck success, test success, pr-title success at 2f95f13f (read 21:37Z); newest pull_request run head is 2f95f13f; compare 2f95f13f...335ddbef changes only .legion/ (2 files)."
+    "observed": "All queued when read; compare 6eba519f...02ad91e9 changes only .legion/. A request for changes does not wait on CI."
   },
-  "threads": "All 19 threads answered by me and resolved; the five round-3 threads (PRRT_kwDORFy7ds6wY0Nj, Nr, Nz, N8, OF) accepted in this round.",
+  "threads": "19 threads, all answered and resolved; none opened since round 4.",
   "thermonuclear": {
-    "head": "335ddbef91177b33967421c8804dd847639dd3fa",
-    "deepReview": "APPROVE, two minors (trust sentence callers, replay notice card claim). Provider: anthropic/claude-opus-5-5, 73 turns, no other provider.",
-    "codeQuality": "CHANGES on structure only: settled read two ways, queued contract text, optional host probes, smoke leg 7 remote proof and jq duplication; none changes behaviour on supported omp, batched into Fast-follow and Not proven / risk. Provider: anthropic/claude-opus-5-5, 24 turns, no other provider."
-  },
-  "fastFollow": "handBackWithdrawn reads host.settled(); queued outcome text names the keyless held card; trust sentence names ENVOY_ALLOWED_HOSTS and the GCP hub's tailnet name; pi-envoy AGENTS.md on the replay notice card; smoke-replay.sh jq predicate once and leg 7 local-only statement."
+    "head": "02ad91e90016b46651dad28bf4e612212aca4b64",
+    "deepReview": "APPROVE with three minors (gap repeat on a cut-short sweep, fork requeue order, census NATS claim). I raise the gap repeat to important: it breaks the guarantee this round's item claims. Provider: anthropic/claude-opus-5-5, 55 turns, no other provider.",
+    "codeQuality": "CHANGES: gap repeat (important, adopted), nats-hub.md omission (minor, adopted). Provider: anthropic/claude-opus-5-5, 44 turns, no other provider."
+  }
 }
