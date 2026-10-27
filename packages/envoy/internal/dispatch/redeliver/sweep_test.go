@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -581,6 +582,195 @@ func TestConcurrentSweepersRequestEachDeliveryOnce(t *testing.T) {
 	unique := slices.Compact(slices.Sorted(slices.Values(requests)))
 	if len(requests) != 20 || len(unique) != 20 {
 		t.Fatalf("requests %d (%d distinct), want each of 20 deliveries once", len(requests), len(unique))
+	}
+}
+
+// claimDeadline is how long a sweeper's claim on a delivery stands: three of the App client's
+// request timeouts, longer than a live claimant's request to GitHub can take.
+var claimDeadline = 3 * githubapp.RequestTimeout
+
+// diesInRedeliver is the App webhook API as a sweeper sees it when its process is SIGKILLed inside
+// a redelivery request: Redeliver ends the sweeping goroutine (runtime.Goexit), so nothing the
+// sweeper would do once GitHub answered happens. With landed set the request reaches GitHub
+// first, as when the process dies after GitHub accepted it; without, it never leaves the process.
+type diesInRedeliver struct {
+	redeliver.GitHub
+	landed bool
+}
+
+func (d diesInRedeliver) Redeliver(ctx context.Context, deliveryID int64) error {
+	if d.landed {
+		_ = d.GitHub.Redeliver(ctx, deliveryID)
+	}
+	runtime.Goexit()
+	return nil
+}
+
+// sweepAndDie runs one sweep, on the harness's bucket and clock, that dies in its first
+// redelivery request, and returns once that sweep's goroutine has ended.
+func (h *harness) sweepAndDie(landed bool) {
+	h.t.Helper()
+	dying := h.sweeper()
+	dying.GitHub = diesInRedeliver{GitHub: h.client, landed: landed}
+	returned := make(chan bool, 1)
+	go func() {
+		finished := false
+		defer func() { returned <- finished }()
+		_, _ = dying.Sweep(context.Background(), redeliver.Options{})
+		finished = true
+	}()
+	if <-returned {
+		h.t.Fatal("the dying sweep returned: it never reached a redelivery request")
+	}
+}
+
+// A sweeper killed between its claim on a delivery and its request (a SIGKILL, an OOM kill, a
+// lost node) never asked GitHub for it. Its claim stands for claimDeadline, longer than any live
+// request takes; past that, the next sweep asks GitHub for the delivery as its first attempt.
+func TestADeliveryWhoseSweeperDiedBeforeItsRequestIsRequestedPastTheClaimDeadline(t *testing.T) {
+	h := newHarness(t)
+	failed := h.fail("guid-orphaned", http.StatusServiceUnavailable, time.Minute)
+	h.sweepAndDie(false)
+	if got := h.requests(); len(got) != 0 {
+		t.Fatalf("the killed sweeper's request reached GitHub: %v", got)
+	}
+
+	h.clock.advance(claimDeadline + time.Second)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-orphaned"); got != redeliver.Redelivered {
+		t.Fatalf("past the claim deadline: outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("redelivery requests %v, want %v", got, want)
+	}
+	if h.logs.count("webhook redelivered", "guid=guid-orphaned", "attempt=1") != 1 {
+		t.Fatalf("the redelivery is not logged as the delivery's first attempt:\n%s", h.logs)
+	}
+}
+
+// The same once the delivery's failed attempt is older than the sweep's hour: the listing no
+// longer returns it, and the dead sweeper's claim is all that brings it back.
+func TestADeliveryWhoseSweeperDiedBeforeItsRequestIsRequestedOutsideTheWindow(t *testing.T) {
+	h := newHarness(t)
+	failed := h.fail("guid-orphaned", http.StatusServiceUnavailable, 50*time.Minute)
+	h.sweepAndDie(false)
+
+	h.clock.advance(time.Hour)
+	report := h.sweep(redeliver.Options{})
+	if report.Listed != 0 {
+		t.Fatalf("the listing still returned %d failed attempts, so this measures nothing", report.Listed)
+	}
+	if got := outcome(report, "guid-orphaned"); got != redeliver.Redelivered {
+		t.Fatalf("outside the window: outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("redelivery requests %v, want %v", got, want)
+	}
+}
+
+// A sweeper killed after GitHub accepted its request, before it recorded the answer: GitHub made
+// the redelivery and logged it OK under the same GUID, so the sweep past the claim deadline finds
+// the delivery delivered and asks GitHub nothing more, then or later.
+func TestADeliveryWhoseSweeperDiedAfterGitHubAcceptedItsRequestIsNotRequestedAgain(t *testing.T) {
+	h := newHarness(t)
+	failed := h.fail("guid-landed", http.StatusServiceUnavailable, time.Minute)
+	h.sweepAndDie(true)
+	if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("the killed sweeper's requests %v, want %v", got, want)
+	}
+
+	h.clock.advance(claimDeadline + time.Second)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-landed"); got != redeliver.Delivered {
+		t.Fatalf("past the claim deadline: outcome %q, want %q", got, redeliver.Delivered)
+	}
+	h.clock.advance(2 * time.Hour)
+	h.sweep(redeliver.Options{})
+	if got := len(h.requests()); got != 1 {
+		t.Fatalf("redelivery requests %d, want 1: a delivery GitHub redelivered was asked for again", got)
+	}
+}
+
+// heldRedeliver is the App webhook API whose redelivery request waits to be released before it
+// goes to GitHub: a live sweeper whose request is still in flight.
+type heldRedeliver struct {
+	redeliver.GitHub
+	entered, release chan struct{}
+}
+
+func (h heldRedeliver) Redeliver(ctx context.Context, deliveryID int64) error {
+	close(h.entered)
+	<-h.release
+	return h.GitHub.Redeliver(ctx, deliveryID)
+}
+
+// A sweeper whose request is still in flight holds its claim: another sweep inside the claim
+// deadline counts the delivery claimed elsewhere and asks GitHub nothing, and GitHub's answer,
+// once the claimant has it, is what the record keeps. Here the redelivery fails again, so the
+// record's backoff, not the claim, is what the next sweep past the deadline waits on.
+func TestALiveClaimantsDeliveryIsClaimedElsewhereInsideTheDeadline(t *testing.T) {
+	h := newHarness(t)
+	failed := h.fail("guid-in-flight", http.StatusServiceUnavailable, time.Minute)
+	h.webhook.SetRedeliver(func(githubapptest.Attempt) int { return http.StatusServiceUnavailable })
+	held := heldRedeliver{GitHub: h.client, entered: make(chan struct{}), release: make(chan struct{})}
+	claimant := h.sweeper()
+	claimant.GitHub = held
+	reports := make(chan redeliver.Report, 1)
+	go func() {
+		report, err := claimant.Sweep(context.Background(), redeliver.Options{})
+		if err != nil {
+			t.Errorf("the claimant's sweep: %v", err)
+		}
+		reports <- report
+	}()
+	<-held.entered
+
+	h.clock.advance(claimDeadline - time.Second)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-in-flight"); got != redeliver.ClaimedElsewhere {
+		t.Fatalf("inside the claim deadline: outcome %q, want %q", got, redeliver.ClaimedElsewhere)
+	}
+	if got := h.requests(); len(got) != 0 {
+		t.Fatalf("a sweep asked GitHub for a delivery another sweeper holds: %v", got)
+	}
+
+	close(held.release)
+	if got := outcome(<-reports, "guid-in-flight"); got != redeliver.Redelivered {
+		t.Fatalf("the claimant: outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	h.clock.advance(2 * time.Second)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-in-flight"); got != redeliver.Waiting {
+		t.Fatalf("past the claim deadline, inside the backoff: outcome %q, want %q", got, redeliver.Waiting)
+	}
+	if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("redelivery requests %v, want %v", got, want)
+	}
+}
+
+// A dry run reports a dead sweeper's claim inside its deadline as claimed elsewhere and a void
+// one as a redelivery it would request, and requests nothing and writes nothing over the claim.
+func TestADryRunReportsAClaimByItsDeadline(t *testing.T) {
+	h := newHarness(t)
+	failed := h.fail("guid-orphaned", http.StatusServiceUnavailable, time.Minute)
+	h.sweepAndDie(false)
+	dryRun := func() redeliver.Report {
+		return h.sweep(redeliver.Options{Since: h.clock.Now().Add(-time.Hour), DryRun: true})
+	}
+
+	h.clock.advance(claimDeadline - time.Second)
+	if got := outcome(dryRun(), "guid-orphaned"); got != redeliver.ClaimedElsewhere {
+		t.Fatalf("inside the claim deadline: outcome %q, want %q", got, redeliver.ClaimedElsewhere)
+	}
+	h.clock.advance(2 * time.Second)
+	if got := outcome(dryRun(), "guid-orphaned"); got != redeliver.WouldRedeliver {
+		t.Fatalf("past the claim deadline: outcome %q, want %q", got, redeliver.WouldRedeliver)
+	}
+	if got := h.requests(); len(got) != 0 {
+		t.Fatalf("a dry run requested %v", got)
+	}
+
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-orphaned"); got != redeliver.Redelivered {
+		t.Fatalf("the sweep after the dry runs: outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("redelivery requests %v, want %v", got, want)
 	}
 }
 

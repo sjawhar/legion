@@ -24,9 +24,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -37,9 +40,12 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -2187,4 +2193,148 @@ func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
 		backDatePendingAttempts(t, pair.database)
 		requireDeliveredOnce(t, pair, listener, 30*time.Second, direct, mention)
 	})
+}
+
+// ───── webhook redelivery ───────────────────────────────────────────────────
+
+// heldRedeliveryProxy stands between the redelivery command and the GitHub webhook fake. It
+// forwards every call but the first redelivery request, which it holds and never forwards: held is
+// closed when that request arrives, and the hold ends when its caller goes away (a killed process)
+// or after githubHoldCap, answered 502 so a process that outlived it records a refusal.
+type heldRedeliveryProxy struct {
+	server *httptest.Server
+	held   chan struct{}
+	once   sync.Once
+}
+
+func startHeldRedeliveryProxy(t *testing.T, upstream string) *heldRedeliveryProxy {
+	t.Helper()
+	target, err := url.Parse(upstream)
+	if err != nil {
+		t.Fatalf("parse the GitHub fake's URL: %v", err)
+	}
+	forward := httputil.NewSingleHostReverseProxy(target)
+	proxy := &heldRedeliveryProxy{held: make(chan struct{})}
+	proxy.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/attempts") {
+			first := false
+			proxy.once.Do(func() {
+				first = true
+				close(proxy.held)
+			})
+			if first {
+				select {
+				case <-r.Context().Done():
+				case <-time.After(githubHoldCap):
+					http.Error(w, `{"message":"held by the test"}`, http.StatusBadGateway)
+				}
+				return
+			}
+		}
+		forward.ServeHTTP(w, r)
+	}))
+	t.Cleanup(proxy.server.Close)
+	return proxy
+}
+
+// startRedeliverWebhooks starts `envoy-dispatch redeliver-webhooks --since 1h` with env, in a home
+// of its own and nothing from the caller's environment.
+func startRedeliverWebhooks(t *testing.T, binary string, env map[string]string) *cmdtest.Process {
+	t.Helper()
+	home := t.TempDir()
+	cmd := exec.Command(binary, "redeliver-webhooks", "--since", "1h")
+	cmd.Dir = home
+	environment := map[string]string{"HOME": home, "XDG_CONFIG_HOME": home, "XDG_DATA_HOME": home}
+	maps.Copy(environment, env)
+	for name, value := range environment {
+		cmd.Env = append(cmd.Env, name+"="+value)
+	}
+	slices.Sort(cmd.Env)
+	return cmdtest.Start(t, "redeliver-webhooks", cmd)
+}
+
+// backDateRedeliveryClaim moves the claimed_at of guid's record in the redelivery KV bucket back
+// by, through the test's own NATS client, so a row does not wait out a claim's deadline.
+func backDateRedeliveryClaim(t *testing.T, natsURL, guid string, by time.Duration) {
+	t.Helper()
+	nc, err := natsgo.Connect(natsURL)
+	if err != nil {
+		t.Fatalf("connect NATS: %v", err)
+	}
+	defer nc.Close()
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	state, err := redeliver.OpenState(js)
+	if err != nil {
+		t.Fatalf("open the redelivery bucket: %v", err)
+	}
+	key := "guid." + guid
+	entry, err := state.Get(key)
+	if err != nil {
+		t.Fatalf("read the redelivery record of %s: %v", guid, err)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(entry.Value(), &stored); err != nil {
+		t.Fatalf("decode the redelivery record of %s: %v", guid, err)
+	}
+	stored["claimed_at"] = time.Now().Add(-by).UTC().Format(time.RFC3339Nano)
+	data, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.Update(key, data, entry.Revision()); err != nil {
+		t.Fatalf("back-date the redelivery claim of %s: %v", guid, err)
+	}
+}
+
+// A webhook redelivery whose process was killed between claiming the delivery and recording
+// GitHub's answer is requested again by the next sweep once the claim's deadline (three GitHub
+// request timeouts, a minute) has passed. Two `envoy-dispatch redeliver-webhooks --since 1h` runs
+// share one NATS and one GitHub; the first is SIGKILLed while its redelivery request is held on
+// the way to GitHub, the test moves the claim's time back past the deadline rather than waiting
+// it out, and the second run asks GitHub for the delivery, once.
+func TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain(t *testing.T) {
+	natsURL := multiprocessNATS(t)
+	key, pemText := githubapptest.Key(t)
+	const clientID = "Iv1.multiprocess"
+	webhook := githubapptest.NewWebhook(t, &key.PublicKey, clientID, nil)
+	failed := webhook.Record(githubapptest.Attempt{GUID: "guid-orphaned-claim", Event: "push", Payload: []byte(`{}`)},
+		"", 7, http.StatusServiceUnavailable, time.Now().Add(-time.Minute))
+	proxy := startHeldRedeliveryProxy(t, webhook.URL())
+	env := githubAppEnv(t, proxy.server.URL)
+	env["DISPATCH_APP_CLIENT_ID"] = clientID
+	env["DISPATCH_APP_PEM_B64"] = base64.StdEncoding.EncodeToString([]byte(pemText))
+	env["NATS_URLS"] = natsURL
+	binary := cmdtest.Build(t, "envoy-dispatch")
+
+	first := startRedeliverWebhooks(t, binary, env)
+	select {
+	case <-proxy.held:
+	case <-first.Exited:
+		t.Fatalf("the first run exited before it asked GitHub for the delivery:\n%s", first.Output.String())
+	case <-time.After(60 * time.Second):
+		t.Fatalf("the first run asked GitHub for no delivery within a minute:\n%s", first.Output.String())
+	}
+	if err := first.Cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill the first run: %v", err)
+	}
+	<-first.Exited
+	if got := webhook.Requests(); len(got) != 0 {
+		t.Fatalf("the killed run's held request reached GitHub: %v", got)
+	}
+
+	backDateRedeliveryClaim(t, natsURL, failed.GUID, 2*3*githubapp.RequestTimeout)
+	second := startRedeliverWebhooks(t, binary, env)
+	second.WaitExit(t, "it started")
+	if code := second.Cmd.ProcessState.ExitCode(); code != 0 {
+		t.Fatalf("the second run exited %d:\n%s", code, second.Output.String())
+	}
+	if got, want := webhook.Requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("GitHub got redelivery requests %v, want %v once:\n%s", got, want, second.Output.String())
+	}
+	if !strings.Contains(second.Output.String(), " redelivered=1") {
+		t.Fatalf("the second run does not report the delivery redelivered:\n%s", second.Output.String())
+	}
 }
