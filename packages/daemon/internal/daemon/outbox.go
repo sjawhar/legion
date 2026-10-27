@@ -96,6 +96,11 @@ type outbox struct {
 	now       func() time.Time
 	clock     supervise.Clock
 	provision func(context.Context, workspace.Request) (workspace.Workspace, error)
+	// feed is the directory every provision of this host clones and fetches from
+	// (workspace.FromFeed), in place of GitHub: only a workflow integration test sets it, so that
+	// the daemon's own launches provision without the network. Empty, in production, is GitHub
+	// with the implement App's token.
+	feed string
 	// remove removes a workspace from the daemon's host, handed its repository's store lock, which
 	// it holds for every step on the shared clone and lets go before it deletes the workspace's
 	// files (workspace.Remove).
@@ -1222,24 +1227,15 @@ func (r *outbox) provisionIn(ctx context.Context, key string, repo ghrepo.Reposi
 		}
 		r.log.Warn("provisioning the workspace a claim's launch found missing or not checked out", "issue", key, "repository", repo.String(), "found", found)
 	}
-	if r.tokens == nil {
-		return errors.New("supervise executor has no GitHub App token manager")
-	}
-	// The token is minted when the provision opens GitHub, under the repository's store lock
-	// (workspace.FromGitHub), never here: a provision may wait on that lock behind its
-	// repository's whole queue, longer than a cached token has left to live.
-	mint := func() (string, error) {
-		lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
-		if err != nil {
-			return "", fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), key, err)
-		}
-		return lease.Token, nil
+	source, err := r.source(ctx, key, repo)
+	if err != nil {
+		return err
 	}
 	store, releaseStore := r.provisions.stores.take(located.Clone)
 	defer releaseStore()
 	if _, err := r.provision(ctx, workspace.Request{
 		StateDir: r.stateDir, Repo: repo, Issue: key, DefaultBranch: defaultBranch, CredentialHelper: workspace.GitHubCredentialHelper,
-		Source:       workspace.FromGitHub(mint, r.stateDir),
+		Source:       source,
 		Log:          func(line string) { r.log.Warn("provisioning: "+line, "issue", key) },
 		StoreLock:    store,
 		CheckoutSlot: r.provisions.slot,
@@ -1247,6 +1243,28 @@ func (r *outbox) provisionIn(ctx context.Context, key string, repo ghrepo.Reposi
 		return fmt.Errorf("provision workspace for %s: %w", key, err)
 	}
 	return nil
+}
+
+// source is where a provision of this host reaches repo from: GitHub with the implement App's
+// token, in production, or the feed directory a workflow integration test gave the daemon
+// (workspace.FromFeed), which clones and fetches with no credential and no network.
+func (r *outbox) source(ctx context.Context, key string, repo ghrepo.Repository) (workspace.Source, error) {
+	if r.feed != "" {
+		return workspace.FromFeed(r.feed), nil
+	}
+	if r.tokens == nil {
+		return nil, errors.New("supervise executor has no GitHub App token manager")
+	}
+	// The token is minted when the provision opens GitHub, under the repository's store lock
+	// (workspace.FromGitHub), never here: a provision may wait on that lock behind its
+	// repository's whole queue, longer than a cached token has left to live.
+	return workspace.FromGitHub(func() (string, error) {
+		lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+		if err != nil {
+			return "", fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), key, err)
+		}
+		return lease.Token, nil
+	}, r.stateDir), nil
 }
 
 func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload record.GateSeed) error {

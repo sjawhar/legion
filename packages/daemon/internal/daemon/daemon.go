@@ -141,6 +141,12 @@ type overrides struct {
 	// required-checks reads and its issue branches' creates); empty, in production, is
 	// https://api.github.com.
 	githubAPI string
+	// workspaceFeed is the feed directory a workflow integration test provisions every workspace
+	// from (workspace.FromFeed, the shape an issue pod's feed has: <feed>/<owner>/<name>.git),
+	// in place of GitHub: such a test drives the daemon's own launches, which provision, and no
+	// test may clone over the network. Empty, in production, is GitHub itself with the implement
+	// App's token (workspace.FromGitHub).
+	workspaceFeed string
 	// listen opens the API listener; nil is net.Listen.
 	listen func(network, address string) (net.Listener, error)
 	// strandedReported runs once the boot's report of the claims nothing will wake has finished,
@@ -273,6 +279,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 		defer cancelAfterMint()
 		workflow.controllerFirstWake = o.controllerFirstWake
+		workflow.workspaceFeed = o.workspaceFeed
 		plan.identity = workflow.identity
 		plan.repository = workflow.issueRepository
 		plan.ensureWorkspace = workflow.ensureWorkspace

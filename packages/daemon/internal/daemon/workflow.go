@@ -101,6 +101,9 @@ type workflowRuntime struct {
 	// the outbox's issue_branch rows create branches under it. Empty, in production, is
 	// https://api.github.com, and a test points it at a stand-in.
 	githubAPI string
+	// workspaceFeed is the feed directory every provision of this daemon's host clones and fetches
+	// from (outbox.feed): empty, in production, is GitHub itself. Only a test sets it.
+	workspaceFeed string
 	// defaultBranches is each repository as GitHub names it and its default branch, read under
 	// githubAPI and kept defaultBranchTTL: what an issue's record takes its repository and default
 	// branch from when it is first recorded (ResolveRepository), and what the mapping serves each
@@ -529,6 +532,7 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
 		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		supervision.plan.tools, w.log)
+	w.outbox.feed = w.workspaceFeed
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)
 }
