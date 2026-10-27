@@ -1,9 +1,12 @@
 // The `chromium-plain-http` project's origin (e2e/plain-http-origin.ts): a plain-HTTP name the
 // browser maps to this listener, forwarded to the server under test at that server's own loopback
-// origin, which its dev sign-in host fence requires.
+// origin, which its dev sign-in host fence requires. It listens on PLAIN_HTTP_PORT, or with that
+// unset on a port the OS chooses, and derives its own origin from the port it bound: the
+// `plainHttpOrigin` other modules read comes from the report it prints below, which
+// e2e/harness-start.ts reads. It starts after the server, so the server's origin is known here.
 import { baseUrl } from "./api";
 import { harnessPorts } from "./harness-ports";
-import { plainHttpOrigin } from "./plain-http-origin";
+import { plainHttpOriginAt } from "./plain-http-origin";
 
 interface ProxySocket {
   readonly headers: Record<string, string>;
@@ -19,7 +22,6 @@ const BunWebSocket = WebSocket as unknown as new (
 ) => WebSocket;
 
 const target = new URL(baseUrl);
-const browserHost = new URL(plainHttpOrigin).host;
 const hopByHopHeaders = new Set([
   "connection",
   "host",
@@ -41,7 +43,7 @@ function forwardedHeaders(source: Headers, websocket: boolean): Headers {
   }
   // The page's origin is the plain-HTTP name; the dev sign-in server accepts its own loopback
   // origin, so writes are forwarded as same-origin requests to the server under test.
-  if (headers.get("origin") === plainHttpOrigin) headers.set("origin", target.origin);
+  if (headers.get("origin") === browserOrigin) headers.set("origin", target.origin);
   return headers;
 }
 
@@ -62,12 +64,12 @@ function sendUpstream(socket: ProxySocket, message: ArrayBuffer | string | Uint8
   }
 }
 
-Bun.serve<ProxySocket>({
+const listener = Bun.serve<ProxySocket>({
   hostname: "127.0.0.1",
   // The workspace event stream is silent between the server's 15 s heartbeats, and Bun's default
   // 10 s idle timeout would cut it before the first one.
   idleTimeout: 0,
-  port: harnessPorts.plainHttp.port,
+  port: harnessPorts().plainHttp.port,
   async fetch(request, server) {
     // Under dev sign-in the server answers only its own dashboard Host, so a page that reached it
     // by another name (a DNS-rebinding page, a tunnel) is told so
@@ -132,4 +134,7 @@ Bun.serve<ProxySocket>({
   },
 });
 
-console.log(`plain-HTTP proxy on ${plainHttpOrigin} for ${target.origin}`);
+// Set before any request can arrive: a handler runs on a later turn of the event loop.
+const browserOrigin = plainHttpOriginAt(Number(listener.url.port));
+const browserHost = new URL(browserOrigin).host;
+console.log(`plain-HTTP proxy on ${browserOrigin} for ${target.origin}`);

@@ -288,7 +288,7 @@ Project issue filters live once, in the URL, and apply to both views (`?unclaime
 The text filter is capped at `SEARCH_QUERY_MAX` (`@legion/contracts/dispatch-tools`, 1,000 characters), because `?q=` lands in the page URL the load balancer refuses past 16 K: typing and pasting stop at the limit, and a longer `?q=` from a link is cut to it, on a code point, at the first edit.
 Once open, the strip stays as the reader left it while they filter in it — clearing the search box or removing the last chip included — until they close it or leave the project or its Issues tab, both of which unmount it (`ProjectPage` keys the strip by project and renders it only while Issues is showing). The stored preference is the only owner of that state: the strip reads it when it mounts, which covers the filters a route from another page, tab or project brings, and again when the signed-in identity resolves, never because the filter count moved. On a strip that is up the count also moves when the view toggle folds a `?status=` in or out (the List counts it, the Board does not) and when Back or Forward crosses entries of the Issues tab (the project key pill pushes a filterless entry beside a filtered one); none of these opens or closes the strip, whose trigger and chips keep every active filter visible and removable. Closing an empty strip stores `collapsed`, so filters arriving on a strip the reader closed show as chips beside a closed trigger instead of opening it. An active-filter chip longer than its row ends in an ellipsis and carries its whole text as `title`, so a 1,000-character search never widens the page.
 
-Resolved asks leave the Inbox and open-ask badges, but their thread and Conversation card remain available with the actor and reason. `features/refs/MarkdownBody.tsx` renders every question, answer, comment, reply, message and broadcast through Proof's own parser, in every surface that shows one (Inbox, margin, Conversation, the Agents and Broadcast pages, the phone review sheet, and the live view's turns of every kind, the session's own, the viewer's, another sender's and a reply sent through Dispatch, each re-parsed as the streamed text grows, at most once an animation frame); its `inline` variant drops the wrapping block for option labels and a resolution reason inline in a metadata line. A surface that cuts text to a line or two - a search hit's snippet, a reference hover card's body, an unfurl card, a reply quote, the margin's collapsed thread roots, the Broadcasts list and the per-recipient Sends strip - renders through `features/refs/MarkdownPreview.tsx` instead: the same engine and schema, every inline mark kept across every block (a heading's words, then the paragraph's bold, code, links and references, then each list item, on one line), and a CSS `line-clamp` on the rendered element after the parse, so a cut the preview makes never leaves half a mark and no surface shows the syntax of the text it formats. A fragment the server cut before the client saw it (a search hit's `ts_headline` snippet at its 24-word window) can arrive with a mark open on one side; `features/refs/markdown-fragment.ts` balances only such a fragment (`searchSnippetMarkdown`: a body under the window came back whole, and every character in it is the author's), pairs delimiter runs as CommonMark would and drops only the run or part of a run that could have matched across the cut, so a `**`, `*` or `` ` `` the parser reads as literal text (`Use ** for bold`, `2 * 3`, `press the \` key`) and anything inside a code span stay as written; a search hit's matched words are re-marked on the rendered text (`highlight`), and a reply quote's `Replying to <author> —` is a plain `lead` the parse never sees. Both components are one `useRenderedMarkdown` (`features/refs/useRenderedMarkdown.tsx`: the layout-phase parse, the literal-text fallback, the reference link pass, the `RefLink` portals and the `DispatchPicture` portals) over a paint function of their own, and load through `features/refs/markdown-engine.ts` (one headless engine per schema version, its soft-break policy chosen per parse: `softBreaks="space"`, the default, reads a single newline inside a paragraph as a space, as a hard-wrapped document means it, and `"line"`, which the live view's turns use, keeps it as a line break, as a model's prose means it; the headless parser drops its own ParserState on a parse it refuses, so the next parse builds a fresh one and a body the parser refuses never blanks the formatting of the next turn or card someone else is reading; the engine is built read-only (`createHeadlessProof({ blockSchema, readOnly: true })`), so a container directive the block schema refuses (`:::note` … `:::`), or a typed block whose content breaks its content rule (an ask holding a heading), is drawn as its literal fence lines around its formatted content and a Pandoc `::: warning` fence or a `::leaf` / `:text{` line reads as paragraph text, where a refused directive or such a line once sent the whole body to the literal-text fallback, which raw HTML still takes, and a typed block whose content broke its rule vanished with its text; `@legion/proof-editor`'s headless parser resolves CommonMark's reference-style links and images, `[text][id]` with its `[id]: url`, which Milkdown's preset has no node for, to the link or image they name, and leaves an undefined reference as the literal text its author wrote; `useMarkdownHeadline` projects Markdown to the plain words a link's text or a card's title can hold, which is what a reference link to an ask or comment shows), and `features/refs/reference-target.ts` holds the reference queries `RefLink`, `Unfurl`, `RefPreview` and `issue/useItemLanding.ts` share, outside `Unfurl.tsx` so the preview's import of `RefLink` closes no cycle. `features/refs/markdown-surfaces.test.tsx` lists each clamped surface and every kind of transcript turn, fails on a literal markdown character for one formatted fixture, and holds a Dispatch picture to its shape on each: a block `<img>` captioned by its file name on a transcript turn, a 40 px thumbnail beside the caption on the six preview surfaces (the hover card, the unfurl card, a reply quote, the margin's thread preview, a search snippet, the broadcasts list). Once the schema and the headless engine are loaded (the first body on the page loads them), a body renders synchronously in the layout phase of the commit that mounts it, so a list inserting a turn sees the turn's full height in that commit and `ViewportAnchor` compensates in one measurement; the browser's own scroll anchoring never has to adjust for growth landing in the frame after a programmatic scroll. Only the very first render on a page, or a schema that failed to load, takes the asynchronous path.
+Resolved asks leave the Inbox and open-ask badges, but their thread and Conversation card remain available with the actor and reason. `features/refs/MarkdownBody.tsx` renders every question, answer, comment, reply, message and broadcast through Proof's own parser, in every surface that shows one (Inbox, margin, Conversation, the Agents and Broadcast pages, the phone review sheet, and the live view's turns of every kind, the session's own, the viewer's, another sender's and a reply sent through Dispatch, each re-parsed as the streamed text grows, at most once an animation frame); its `inline` variant drops the wrapping block for option labels and a resolution reason inline in a metadata line. In the block variant a task item (`- [x] done`) draws a disabled checkbox ticked as its source is (`features/refs/task-checkboxes.ts`), while the `inline` variant and `MarkdownPreview` draw no list and so no box. A surface that cuts text to a line or two - a search hit's snippet, a reference hover card's body, an unfurl card, a reply quote, the margin's collapsed thread roots, the Broadcasts list and the per-recipient Sends strip - renders through `features/refs/MarkdownPreview.tsx` instead: the same engine and schema, every inline mark kept across every block (a heading's words, then the paragraph's bold, code, links and references, then each list item, on one line), and a CSS `line-clamp` on the rendered element after the parse, so a cut the preview makes never leaves half a mark and no surface shows the syntax of the text it formats. A fragment the server cut before the client saw it (a search hit's `ts_headline` snippet at its 24-word window) can arrive with a mark open on one side; `features/refs/markdown-fragment.ts` balances only such a fragment (`searchSnippetMarkdown`: a body under the window came back whole, and every character in it is the author's), pairs delimiter runs as CommonMark would and drops only the run or part of a run that could have matched across the cut, so a `**`, `*` or `` ` `` the parser reads as literal text (`Use ** for bold`, `2 * 3`, `press the \` key`) and anything inside a code span stay as written; a search hit's matched words are re-marked on the rendered text (`highlight`), and a reply quote's `Replying to <author> —` is a plain `lead` the parse never sees. Both components are one `useRenderedMarkdown` (`features/refs/useRenderedMarkdown.tsx`: the layout-phase parse, the literal-text fallback, the reference link pass, the `RefLink` portals and the `DispatchPicture` portals) over a paint function of their own, and load through `features/refs/markdown-engine.ts` (one headless engine per schema version, its soft-break policy chosen per parse: `softBreaks="space"`, the default, reads a single newline inside a paragraph as a space, as a hard-wrapped document means it, and `"line"`, which the live view's turns use, keeps it as a line break, as a model's prose means it; the headless parser drops its own ParserState on a parse it refuses, so the next parse builds a fresh one and a body the parser refuses never blanks the formatting of the next turn or card someone else is reading; the engine is built read-only (`createHeadlessProof({ blockSchema, readOnly: true })`), so a container directive the block schema refuses (`:::note` … `:::`), or a typed block whose content breaks its content rule (an ask holding a heading), is drawn as its literal fence lines around its formatted content and a Pandoc `::: warning` fence or a `::leaf` / `:text{` line reads as paragraph text, where a refused directive or such a line once sent the whole body to the literal-text fallback, which raw HTML still takes, and a typed block whose content broke its rule vanished with its text; `@legion/proof-editor`'s headless parser resolves CommonMark's reference-style links and images, `[text][id]` with its `[id]: url`, which Milkdown's preset has no node for, to the link or image they name, and leaves an undefined reference as the literal text its author wrote; `useMarkdownHeadline` projects Markdown to the plain words a link's text or a card's title can hold, which is what a reference link to an ask or comment shows), and `features/refs/reference-target.ts` holds the reference queries `RefLink`, `Unfurl`, `RefPreview` and `issue/useItemLanding.ts` share, outside `Unfurl.tsx` so the preview's import of `RefLink` closes no cycle. `features/refs/markdown-surfaces.test.tsx` lists each clamped surface and every kind of transcript turn, fails on a literal markdown character for one formatted fixture, and holds a Dispatch picture to its shape on each: a block `<img>` captioned by its file name on a transcript turn, a 40 px thumbnail beside the caption on the six preview surfaces (the hover card, the unfurl card, a reply quote, the margin's thread preview, a search snippet, the broadcasts list). Once the schema and the headless engine are loaded (the first body on the page loads them), a body renders synchronously in the layout phase of the commit that mounts it, so a list inserting a turn sees the turn's full height in that commit and `ViewportAnchor` compensates in one measurement; the browser's own scroll anchoring never has to adjust for growth landing in the frame after a programmatic scroll. Only the very first render on a page, or a schema that failed to load, takes the asynchronous path.
 
 A fenced `mermaid` code block in a `MarkdownBody` of the block form (a comment, a reply, a message, an ask's question and answer, a live-view turn, every other full body) draws as the diagram the document editor draws (`features/refs/mermaid-diagrams.ts`, INFRA-528): `useRenderedMarkdown` runs it last, after the reference, decorate and picture passes, so a `dispatch://` in a node label is never linkified or collected. The renderer is `renderMermaidMarkup` from `@legion/proof-editor/mermaid-render` (upstream's `renderProofMermaidSvg`: its validation, beautiful-mermaid and ELK), and it never runs on the page's main thread: ELK's layout time grows faster than the diagram (a flowchart of 400 nodes with 2 edges each took 10.7 s on that thread), and any comment, ask or message reaches readers who did not choose it. It runs in one shared Web Worker, `features/refs/mermaid-render.worker.ts`, created with Vite's `new Worker(new URL(…), { type: "module" })` once a body holds a mermaid block not drawn before, so the entry and the headless engine's chunks carry none of the renderer (the worker's bundle and the editor's lazy chunk do; `web/vite.config.ts` adds each worker bundle's inputs to `THIRD_PARTY_NOTICES.txt`). The worker draws one source at a time, in the order bodies asked, and the page turns its markup into an element with `mermaidSvgElement` from `@legion/proof-editor/mermaid` (a stricter allowlist sanitizer, `packages/proof-editor/AGENTS.md`). A source the worker has not answered 5 seconds (`RENDER_TIME_LIMIT_MS`) after it started on it is refused with `Unable to render Mermaid diagram: it did not finish within 5 seconds`, and the worker is terminated, which is the only way to stop a layout already running, and a fresh one takes the sources still waiting; in Chromium's worker a 50-edge flowchart draws in under 0.4 s and a 100-node one with 2 edges each in about 1.2 s, so only a diagram far past what a comment holds meets the limit. The worker clock starts once its module has loaded (it posts `{ ready: true }`), never while its chunk downloads. A worker that fails to start or load (its `error` event, or a constructor that throws) leaves every block as code and logs one `console.error`, and no worker is started again until the window's next `online` event, so a live-view turn re-painted every frame does not retry or log on each paint. Inside the worker, `self` reads as undefined while a source draws: ELK's bundled engine, finding `self` and no `document`, would take the worker for an ELK worker of its own and refuse every flowchart, and beautiful-mermaid's own `delete globalThis.self` does not reach a browser's `WorkerGlobalScope.prototype` accessor. The block becomes a `figure.dispatch-mermaid`: the SVG in an open shadow root, so the diagram's own `<style>` reaches only that diagram and its marker ids resolve inside it, then on a refusal a `role="status"` line `Unable to render Mermaid diagram: <reason>`, then the original code block in a `Mermaid source` disclosure, closed once the diagram drew and open on a refusal. `.dispatch-mermaid` in `styles.css` gives the SVG `--bg-color: transparent` and `--text-color: currentColor`, on the figure rather than `.dispatch-markdown`, which also sits inside documents. What stays code: `MarkdownPreview` and the `inline` variant, which write no `<pre>`, and a mermaid block whose fence the parser still reads as open (checked by re-parsing the body with a probe line after it, inside the last line's quote or list item), which is still being streamed (the live view re-parses every frame, and drawing each frame would run the renderer and flash a refusal). Drawn results (the sanitized SVG, cloned per use, or the refusal) are cached by source, the newest 32. A cached source draws in the layout effect that painted its body; every other one shows as code and is drawn when the worker answers, after the layout effect, so the content below a diagram moves once when it first draws. `drawMermaidDiagrams` returns the cancel for those late draws, which the layout effect's cleanup runs: it takes that call's own draws off each source's waiting list, so a body that re-painted or unmounted is never drawn into and holds none of its DOM while the worker works. A source no body waits for any more is then dropped and never sent, and one the worker is drawing is stopped (the worker terminated, nothing cached for it, a fresh worker taking the sources still waiting), so a reader who leaves a page of slow diagrams does not wait for them on the next; that check runs on a microtask, so a body re-painted with the same block in one commit (the live view, every frame while text after a finished diagram streams) keeps its source's place and the draw in flight.
 
@@ -969,10 +969,11 @@ import each other under `web/src`, confirm `bun run lint` fails naming both, and
 ## End-to-end tests
 
 `bun run e2e` drives Playwright against the real Go Dispatch server and
-Postgres. The harness runs `e2e/run-server.sh` unless
-`PLAYWRIGHT_BASE_URL` selects an already deployed server. The harness defaults
-to `DISPATCH_E2E_PORT=8777`, which keeps its temporary server separate from
-the production listener on port 8766, but `DATABASE_URL` is required: the
+Postgres. It runs Playwright through `e2e/run.ts`, which starts the harness
+(`e2e/run-server.sh` and its fakes) unless `PLAYWRIGHT_BASE_URL` selects an
+already deployed server. Every harness server serves on a port the OS chooses
+unless its variable sets one (below), so the temporary server never meets the
+production listener on port 8766, but `DATABASE_URL` is required: the
 database must be isolated because `e2e/seed.ts` truncates it before every
 scenario and never falls back to `dispatch_c`. It runs the server in cookie
 identity, the production mode, and signs `alice` and `bob` in through the
@@ -1001,9 +1002,17 @@ project's title `grep`; its fallback is the one-time manual check beside the `we
 environment, and execs the binary with every server
 setting pinned. It execs the binary rather than `go run`: the go command ignores
 only SIGINT and SIGQUIT, so a SIGTERM to `go run` ends the go command and leaves
-its server listening. Playwright kills the whole process group and the
+its server listening. The harness stops each process group it started and the
 skill-scenarios rig the whole process tree, so neither noticed, but a caller
-that signals the one pid it started (`kill $!`) needs it to be the server. The binary is one per
+that signals the one pid it started (`kill $!`) needs it to be the server. With
+`DISPATCH_E2E_PORT` unset the script execs the server through
+`scripts/e2e/lib/held-port.py exec --fd-env DISPATCH_LISTEN_FD`, which holds a
+socket on `127.0.0.1:0` from the moment the kernel chooses its port, sets
+`DISPATCH_PORT` and `DISPATCH_SERVER_URL` from it and execs in place, so the pid
+is still the server's; the server serves on that socket and reports it on
+stderr as `msg="dispatch: listening" addr=127.0.0.1:<port>`, the line a caller
+reads the port from (`e2e/harness-start.ts` does). Set, the server binds that
+port, and an occupied one fails with `address already in use`. The binary is one per
 checkout, `packages/envoy/dispatch-e2e` (gitignored), built under
 `flock packages/envoy/.dispatch-e2e.lock` so two harnesses starting at once in
 one checkout serialise their builds; Go rewrites it only when the source
@@ -1014,11 +1023,12 @@ key, passes no cookie signing key (the server generates one for its process, as
 directory. A caller's environment or `~/.config/legion/envoy.json` /
 `~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
 test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
-exports `ENVOY_URL`). The harness ports stay inputs because the server script reads them too; on
-the TypeScript side `e2e/harness-ports.ts` is the one place they are resolved. The secrets broker
+exports `ENVOY_URL`). `FAKE_ENVOY_PORT` and `FAKE_GITHUB_PORT` are required inputs, the fakes'
+reported ports; on the TypeScript side `e2e/harness-ports.ts` is the one place the harness ports
+are resolved. The secrets broker
 the server relays credential requests to is one switch, `DISPATCH_E2E_AGENT_SECRETS_URL`, which
 `run-server.sh` and `e2e/harness-broker.ts` read alike (`${VAR-default}`, so empty and unset
-differ): unset, the default, is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (default `9024`), which
+differ): unset, the default, is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (then required), which
 verifies no caller, so the server presents the throwaway token in
 `e2e/fake-broker-account-token` and the credential-request feature is on; empty is no broker, the
 feature off as in a deployment that configures none (`DISPATCH_E2E_AGENT_SECRETS_URL= bun run
@@ -1027,7 +1037,7 @@ lists the ServiceAccount whose token `run-server.sh` hands the server by
 `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, a path it makes absolute against the caller's
 directory before it changes into `packages/envoy`. The broker's docs rig
 (`docs/site/media/broker/rig.sh`) sets a URL, and keeps that token with
-`packages/envoy/cmd/dev-oidc-issuer`, the local issuer its broker trusts. Playwright starts the
+`packages/envoy/cmd/dev-oidc-issuer`, the local issuer its broker trusts. The harness starts the
 fake broker only for the default, and the skill-scenarios rig sets the switch empty.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
@@ -1037,8 +1047,8 @@ post-update text selection; Yjs document transport and local editing remain acti
 `e2e/failed-room.e2e.ts` is opt-in and skipped without `DISPATCH_FAILED_ROOM_PROBE=1`: it holds
 the room's next durable append for 20 s with a `doc_updates` trigger and cancels that backend, so
 it costs about 40 s and does not belong in the suite CI runs. Run it as
-`DISPATCH_FAILED_ROOM_PROBE=1 bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/failed-room.e2e.ts`.
-That recipe loads the same config, so it refuses the harness ports while another run holds them.
+`DISPATCH_FAILED_ROOM_PROBE=1 bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/failed-room.e2e.ts`,
+which starts a harness of its own on ports the OS chooses.
 It is the end-to-end check for a failed document room: the writer inside the docs layer when the
 room fails is answered `503 DOC_SERVICE_UNAVAILABLE` rather than waiting for a recovery that
 cannot finish, the writer behind it is answered the same way or admitted once the room has
@@ -1049,11 +1059,12 @@ behind. Run it on a change and on its base whenever the docs layer's locking, re
 paths move; the two runs' `FAILED-ROOM` lines are the comparison.
 
 `e2e/fake-envoy.ts` is a stub Envoy listener the harness starts on
-`FAKE_ENVOY_PORT` (default `9021`) and the only Envoy a local harness server talks to:
-`run-server.sh` builds `ENVOY_URL` from that port alone. Playwright starts the same listener for a
-deployed run; `deploy/compose/dispatch.acceptance.compose.yml` requires `FAKE_ENVOY_PORT` and
-derives the target's Envoy URL from it. Before any row runs, `e2e/preflight.ts` (the config's
-`globalSetup`, which runs once the web servers are up) puts a session in this run's fake and
+`FAKE_ENVOY_PORT` (unset, a port the OS chooses, which it reports) and the only Envoy a local
+harness server talks to: `run-server.sh` builds `ENVOY_URL` from that port alone. The harness
+starts the same listener for a deployed run; `deploy/compose/dispatch.acceptance.compose.yml`
+requires `FAKE_ENVOY_PORT` and derives the target's Envoy URL from it, so a deployed run sets it.
+Before any row runs, `e2e/preflight.ts` (the config's `globalSetup`) puts a session in this run's
+fake and
 requires the target's `GET /api/v1/agents` to list it, then clears the fake: a target that reads
 another Envoy listener refuses the run naming the fake's port, rather than answering every row
 from sessions none of them seeded. Tests seed live sessions and their capabilities with
@@ -1160,49 +1171,61 @@ a Dispatch server from an earlier run still listening on `DISPATCH_E2E_PORT`, ma
 `resetDatabase` throw in `beforeEach`. Because it throws in the hook, **every** spec in the file
 reports failed, each carrying the `psql … DO $$` lock step and the holders it names in its message,
 which reads as a catastrophic regression in the change under test. Recognise that shape as the
-rig: stop whatever holds those tables (most often whatever holds the port) and run again. With
-reuse off a run cannot reach that shape through the port at all, and this paragraph is where the
-harness-port rule lives — `README.md` and the `docs/solutions` learning point here rather than
-restating it.
+rig: stop whatever holds those tables and run again. A run through `e2e/run.ts` cannot reach
+that shape through a port at all, since its servers serve on ports the OS chose for it alone, and
+this paragraph is where the harness-port rule lives — `README.md` and the `docs/solutions`
+learnings point here rather than restating it.
 
-`e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
-`9021`), `FAKE_GITHUB_PORT` (default `9022`), `PLAIN_HTTP_PORT` (default `9023`) and
-`FAKE_BROKER_PORT` (default `9024`) once for every reader in `e2e/`, the Playwright config and the
-four Bun listeners included. An empty value means the default for all five alike, matching
-`run-server.sh`'s `${VAR:-default}` for the four ports it reads; anything that is not a port in
-canonical decimal is
-refused naming its variable (so `1e4`, `8777.0`, `0x2249`, `+8777`, `" 8777"` and a leading-zero
-`08777` are all refused, rather than binding one port while every URL built from the raw string
-points somewhere else, or writing one port two ways). Two variables naming one port are refused
-together, naming both: each port passes a per-port check on its own, and every consumer would
-otherwise fail in its own words — Playwright refusing the second `webServer` without naming a
-variable, the second Bun listener dying on `EADDRINUSE`. Because the check lives with the
-resolution, those listeners refuse it too, not only the Playwright config.
+`e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `FAKE_GITHUB_PORT`,
+`PLAIN_HTTP_PORT` and `FAKE_BROKER_PORT` for every reader in `e2e/`, the Playwright config and the
+four Bun listeners included. `harnessPorts()` reads the environment when it is called, not when the
+module is imported, because the starters import it before the listeners have reported. Unset or
+empty is port `0`: the listener serves on a port the OS chooses and holds until it serves (the
+server on a socket `scripts/e2e/lib/held-port.py` hands it, each Bun listener by binding port 0)
+and prints it on its listening line. A set value is used as given: its listener binds exactly
+that port, and an occupied one fails with `address already in use`, never replaced by another.
+A set value that is not a port in canonical decimal is
+refused naming its variable (so `0`, `1e4`, `8777.0`, `0x2249`, `+8777`, `" 8777"` and a
+leading-zero `08777` are all refused, rather than binding one port while every URL built from the
+raw string points somewhere else, or writing one port two ways). Two set variables naming one port
+are refused together, naming both: each port passes a per-port check on its own, and every
+consumer would otherwise fail in its own words — the second Bun listener dying on `EADDRINUSE`.
+Because the check lives with the resolution, those listeners refuse it too, not only the
+Playwright config.
 
-`e2e/playwright.config.ts` probes every port it starts before any web server starts and fails the
-run with one message listing every taken port beside its own variable, before a single spec runs.
-One table, `e2e/harness-listeners.ts`, names each listener, its command, its port's variable and
-whether a deployed run starts it; the config's probe and `webServer` read the rows it starts: all
-five ports for a local run, and `FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The
-probe is `e2e/port-probe.ts`: `isPortUsed` is Playwright's own predicate, and `takenPorts` lists
-the taken ports of a set of rows, which the config and `e2e/local-instance.ts` both refuse on. The
-refusal names only the variables the run probes. Its remedies are
-to stop whatever listens there, or to move a local run to free ports **and its own
-`DATABASE_URL`** — moving only the ports starts this run's servers elsewhere and still truncates
-the database the leftover server holds, and `e2e/seed.ts`'s quiesce reaches only the server at the
-new port, so that server's live rooms stay open across the truncate. Reuse is
-opt-in through `DISPATCH_E2E_REUSE_SERVERS`, whose only accepted value is `1`: unset or empty
-starts this run's own servers, and any other value is refused at config load naming the variable
-and the value. `CI` takes no part in that decision, so a shell that exports it and one that does
-not behave alike; a lane that shares one hand-started harness across runs sets
-`DISPATCH_E2E_REUSE_SERVERS=1`. A deployed run passes `FAKE_ENVOY_PORT` to the acceptance Compose
-file, which derives the target's `ENVOY_URL` from that same value; the README's acceptance recipe
-wires the pair. A listing run starts no web server, so it skips the probe. The port validation above
-is not gated on that mode, so a malformed or duplicated port is refused in every invocation.
+`e2e/harness-start.ts` is the harness's one starter. It starts the rows of
+`e2e/harness-listeners.ts` a run needs, in the table's order — the fakes, then the server (its
+environment names the fakes' ports), then the plain-HTTP proxy (it forwards to the server's
+origin) — each as the leader of a process group of its own, reads each row's report line for its
+port, waits for the server's `/healthz`, and returns the ports by variable with a stop function.
+A row that exits before it reports fails the start with its last lines, naming the variable when
+its set port was taken. A deployed run (`PLAYWRIGHT_BASE_URL`) starts only the rows marked
+`deployed`, the fake Envoy and the plain-HTTP proxy. `e2e/run.ts`
+(`bun e2e/run.ts -- <command>`) starts it, exports the ports and
+`DISPATCH_E2E_REUSE_SERVERS=1`, runs the command, stops the harness when the command exits (a
+Ctrl-C reaches the command, a SIGTERM to the wrapper is passed on), and exits with the command's
+status; `bun run e2e`, `bun run e2e:deployed` and CI's browser step run Playwright through it, so
+the config, every worker that re-imports it and every helper that reads a port at import
+(`e2e/api.ts`'s `baseUrl`, `e2e/plain-http-origin.ts`'s `plainHttpOrigin`) see the real ports.
+
+`e2e/playwright.config.ts` starts no server. It refuses, before a single spec runs, a run whose
+targeted ports are not all set — all five for a local run, `FAKE_ENVOY_PORT` and
+`PLAIN_HTTP_PORT` for a deployed run — naming the unset variables and `e2e/run.ts`, and a run
+without `DISPATCH_E2E_REUSE_SERVERS=1`, whose only accepted value is `1` (any other is refused
+naming the variable and the value). Every port set by hand plus that flag runs against a harness
+a person started and left listening; pair it with that harness's own `DATABASE_URL`, since
+`e2e/seed.ts` truncates the database the server holds. `CI` takes no part in that decision. A
+deployed run passes `FAKE_ENVOY_PORT` to the acceptance Compose file, which derives the target's
+`ENVOY_URL` from that same value; the README's acceptance recipe wires the pair. A listing
+(`--list`, with no `--ui`) with every harness port unset is the one exception: it targets nothing,
+so the config lets it evaluate with no harness. The argv test is loose, and Playwright reads the
+`--list` of `--grep --list` as `--grep`'s value, a real run; with no port set that run fails at
+`e2e/preflight.ts`, and with any port set a listing meets the reuse refusal like any other run, so
+it asks for `DISPATCH_E2E_REUSE_SERVERS=1` or the ports unset.
 
 `bun run dispatch:local` (`e2e/local-instance.ts`) is that harness, left running and seeded: it
-starts every row of `e2e/harness-listeners.ts`, each as the leader of a process group of its own,
-waits for the server's `/healthz` and every other listener's port, empties the database with
+starts the harness through `e2e/harness-start.ts`, then imports the e2e modules that read a port
+(they read it once, at import) with the reported ports in its environment, empties the database with
 `resetDatabase`, seeds `e2e/workspace.ts`, and prints the signed-in URL; `README.md`'s "Local
 instance" section is its user's guide. Its database is `DATABASE_URL` or the `dispatch_local`
 database on `packages/envoy/scripts/dev-postgres.sh`'s container. Before it hands out the URL its
@@ -1213,8 +1236,9 @@ assertion, so the command has to start on a server without that fix for the spec
 against it. What it runs on lives in `e2e/local-instance-support.ts`, which runs nothing on
 import: `Supervisor`, which starts each process and stops them all (Ctrl-C, a SIGTERM, a failure
 at any step), signalling every process group, SIGKILLing whatever still runs after 10 s, aborting
-the signal its psql calls carry, and returning once every leader has exited; `databaseUrlRefusal`,
-its own `DATABASE_URL` check; and `shellQuote`, for the commands it prints.
+the signal its psql calls carry, and returning once every leader has exited, and which
+`e2e/harness-start.ts` starts the harness's processes on, their output piped to it;
+`databaseUrlRefusal`, its own `DATABASE_URL` check; and `shellQuote`, for the commands it prints.
 `e2e/__tests__/local-instance-support.test.ts` (`bun run test`) drives them with real processes
 and no server. That check reads the URL with `new URL`, as libpq would only in part; the order
 closes the gap, since the reset runs only after the server's `/healthz` answered, and the server
