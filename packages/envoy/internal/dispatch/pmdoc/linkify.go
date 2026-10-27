@@ -49,7 +49,8 @@ func linkifyParsers() []util.PrioritizedValue {
 // mdast-util-gfm-autolink-literal's transform then searches each text node the tokenizer left,
 // outside links, decoded: its URL pattern over every one first, then its email pattern over the
 // text left, each refusal searched again one character later (mdast-util-find-and-replace). That
-// is CloseBlock's (linkTextAddresses), over each run of goldmark's text nodes between other nodes.
+// is each block's CloseBlock's (linkTextAddresses), over each run of its text nodes between other
+// nodes.
 //
 // Asking the guard at a character no other parser is asked at ends the text goldmark is building
 // there: a line asked at a `.` and nowhere else becomes two texts. The guard records the last such
@@ -214,17 +215,23 @@ func readLiteralAddress(parent ast.Node, block text.Reader, pc parser.Context, s
 				ast.MergeOrAppendTextSegment(parent, segment.WithStop(at))
 			}
 			block.Advance(segment.Padding + at - segment.Start + length)
-			link := ast.NewAutoLink(kind, ast.NewTextSegment(text.NewSegment(at, at+length)))
-			if www {
-				link.Protocol = []byte("http")
-			}
-			return link
+			return bareAutolink(kind, www, at, at+length)
 		}
 		char, width := utf8.DecodeRune(source[at:stop])
 		previous = char
 		at += width
 	}
 	return nil
+}
+
+// bareAutolink is the autolink of a bare address of kind at source offsets [start, end), whose
+// href takes an `http://` before a www URL.
+func bareAutolink(kind ast.AutoLinkType, www bool, start, end int) *ast.AutoLink {
+	link := ast.NewAutoLink(kind, ast.NewTextSegment(text.NewSegment(start, end)))
+	if www {
+		link.Protocol = []byte("http")
+	}
+	return link
 }
 
 // literalAddress is the length of the address the tokenizer reads from text's start, the source's
@@ -272,7 +279,8 @@ func (underscoreEmail) Parse(parent ast.Node, block text.Reader, pc parser.Conte
 	return ast.NewAutoLink(ast.AutoLinkEmail, ast.NewTextSegment(segment.WithStop(segment.Start+length)))
 }
 
-// gfmAtext reports whether c is a character of an email's local part to the tokenizer.
+// gfmAtext reports whether c is a character of an email's local part to both readers: to the
+// tokenizer, and to the transform's email pattern, `[-.\w+]`.
 func gfmAtext(c byte) bool {
 	return c == '+' || c == '-' || c == '.' || c == '_' || isASCIIAlphaNumeric(c)
 }
@@ -300,7 +308,7 @@ func literalEmail(text []byte) int {
 		c := text[at]
 		if c == '.' && at+1 < len(text) && isASCIIAlphaNumeric(text[at+1]) {
 			dot = true
-		} else if c == '-' || c == '_' || isASCIIAlphaNumeric(c) {
+		} else if emailDomainCharacter(c) {
 			data = true
 		} else {
 			break
@@ -311,6 +319,12 @@ func literalEmail(text []byte) int {
 		return 0
 	}
 	return at
+}
+
+// emailDomainCharacter reports whether c is a character of an email's domain other than its dots
+// to both readers, `[-\w]`.
+func emailDomainCharacter(c byte) bool {
+	return c == '-' || c == '_' || isASCIIAlphaNumeric(c)
 }
 
 // literalURLFollows reports whether the tokenizer begins a URL after previous, the character before
@@ -573,11 +587,13 @@ func emailHref(address string) string {
 
 // linkTextAddresses links what mdast-util-gfm-autolink-literal's transform links in parent's
 // text: each run of goldmark's text nodes between other nodes, outside a link, an image, a code
-// span or an autolink, is one of the engine's text nodes (linkRuns).
+// span or an autolink, is one of the engine's text nodes (linkRuns). A block inside parent is left
+// to its own CloseBlock, which goldmark calls on every block after its children's: the engine
+// searches each text once, and a second search would read the text beside a link it made alone.
 func linkTextAddresses(parent ast.Node, source []byte) {
 	var run []ast.Node
 	for node := parent; node != nil; {
-		opaque := false
+		opaque := node != parent && node.Type() == ast.TypeBlock
 		switch node.(type) {
 		case *ast.Link, *ast.Image, *ast.CodeSpan, *ast.AutoLink:
 			opaque = true
@@ -639,11 +655,12 @@ type textPiece struct {
 	value string
 }
 
-// foundLink is an address the transform found in a run's decoded text, at [start, end); after is
-// where its pattern's match ended, which a URL's trail runs to.
+// foundLink is an address of kind the transform found in a run's decoded text, at [start, end);
+// after is where its pattern's match ended, which a URL's trail runs to.
 type foundLink struct {
 	start, end, after int
-	email, www        bool
+	kind              ast.AutoLinkType
+	www               bool
 }
 
 // linkRun links the addresses the transform finds in the decoded text of run, one of the engine's
@@ -731,7 +748,7 @@ func findURLs(value string) []foundLink {
 		if end = splitURL(value, domainStart, after); end == domainStart {
 			continue
 		}
-		found = append(found, foundLink{start: start, end: end, after: after, www: value[start]|0x20 == 'w'})
+		found = append(found, foundLink{start: start, end: end, after: after, kind: ast.AutoLinkURL, www: value[start]|0x20 == 'w'})
 		at = after
 	}
 	return found
@@ -759,7 +776,7 @@ func nextURLPattern(value string, at int) (start, domain int) {
 
 // urlWordCharacter reports whether c is one of the URL pattern's domain characters, `[-.\w]`.
 func urlWordCharacter(c byte) bool {
-	return c == '-' || c == '.' || c == '_' || isASCIIAlphaNumeric(c)
+	return c == '.' || emailDomainCharacter(c)
 }
 
 // urlDomain is the run of the URL pattern's domain characters last read, from where a domain began
@@ -843,15 +860,20 @@ func splitURL(value string, start, after int) int {
 }
 
 // transformPrevious reports whether the transform takes a match at value[at] for what comes
-// before it (previous): nothing, whitespace, or punctuation or a symbol, judged by one UTF-16
-// code unit, so a character outside the Basic Multilingual Plane is neither; an email takes no
-// `/` before it either.
+// before it (previous): nothing or a transformBoundary; an email takes no `/` before it either.
 func transformPrevious(value string, at int, email bool) bool {
 	if at == 0 {
 		return true
 	}
 	char, _ := utf8.DecodeLastRuneInString(value[:at])
-	return !(email && char == '/') && (literalEnd(char) || literalPunctuation(char))
+	return !(email && char == '/') && transformBoundary(char)
+}
+
+// transformBoundary reports whether char is one the transform takes a match after: whitespace, or
+// punctuation or a symbol, judged by one UTF-16 code unit, so a character outside the Basic
+// Multilingual Plane is neither.
+func transformBoundary(char rune) bool {
+	return literalEnd(char) || literalPunctuation(char)
 }
 
 // findEmails is found with the emails the transform's email pattern,
@@ -862,22 +884,17 @@ func transformPrevious(value string, at int, email bool) bool {
 func findEmails(found []foundLink, value string, from, to int) []foundLink {
 	var local emailRun
 	for at := from; at < to; at++ {
-		if !emailCharacter(value[at]) || at > from && !transformPrevious(value, at, true) {
+		if !gfmAtext(value[at]) || at > from && !transformPrevious(value, at, true) {
 			continue
 		}
 		end := local.read(value, at, to)
 		if end == 0 || strings.IndexByte("-_0123456789", value[end-1]) >= 0 {
 			continue
 		}
-		found = append(found, foundLink{start: at, end: end, after: end, email: true})
+		found = append(found, foundLink{start: at, end: end, after: end, kind: ast.AutoLinkEmail})
 		at = end - 1
 	}
 	return found
-}
-
-// emailCharacter reports whether c is one of the email pattern's local-part characters, `[-.\w+]`.
-func emailCharacter(c byte) bool {
-	return c == '+' || urlWordCharacter(c)
 }
 
 // emailRun is the run of local-part characters last read, and the email domain after its `@`:
@@ -894,14 +911,14 @@ func (r *emailRun) read(value string, at, to int) int {
 		return r.domainEnd
 	}
 	r.from, r.end, r.domainEnd = at, at, 0
-	for r.end < to && emailCharacter(value[r.end]) {
+	for r.end < to && gfmAtext(value[r.end]) {
 		r.end++
 	}
 	if r.end == to || value[r.end] != '@' {
 		return 0
 	}
 	part := func(at int) int {
-		for at < to && (value[at] == '-' || value[at] == '_' || isASCIIAlphaNumeric(value[at])) {
+		for at < to && emailDomainCharacter(value[at]) {
 			at++
 		}
 		return at
@@ -933,7 +950,8 @@ func linkFound(pieces []textPiece, found []foundLink, value string, source []byt
 		first, last *ast.Text
 		start, end  int // source offsets
 		label       string
-		email, www  bool
+		kind        ast.AutoLinkType
+		www         bool
 	}
 	links := make([]placed, 0, len(found))
 	offsets := pieceOffsets{source: source}
@@ -952,7 +970,7 @@ func linkFound(pieces []textPiece, found []foundLink, value string, source []byt
 		}
 		lastText, end, endOK := offsets.at(pieces[last], link.end-pieces[last].start)
 		if ok && endOK {
-			links = append(links, placed{first: first, last: lastText, start: start, end: end, label: value[link.start:link.end], email: link.email, www: link.www})
+			links = append(links, placed{first: first, last: lastText, start: start, end: end, label: value[link.start:link.end], kind: link.kind, www: link.www})
 		}
 		index = last
 	}
@@ -962,14 +980,7 @@ func linkFound(pieces []textPiece, found []foundLink, value string, source []byt
 			parent.InsertBefore(parent, link.first, ast.NewTextSegment(link.first.Segment.WithStop(link.start)))
 			link.first.Segment = text.NewSegment(link.start, link.first.Segment.Stop)
 		}
-		kind := ast.AutoLinkURL
-		if link.email {
-			kind = ast.AutoLinkEmail
-		}
-		autolink := ast.NewAutoLink(kind, ast.NewTextSegment(text.NewSegment(link.start, link.end)))
-		if link.www {
-			autolink.Protocol = []byte("http")
-		}
+		autolink := bareAutolink(link.kind, link.www, link.start, link.end)
 		autolink.SetAttributeString(decodedLabelAttr, link.label)
 		autolink.SetPos(link.start)
 		parent.InsertBefore(parent, link.first, autolink)
@@ -1062,7 +1073,7 @@ func referenceLength(value []byte) int {
 		if hex {
 			at++
 		}
-		for at < len(value) && (isASCIIDigit(value[at]) || hex && strings.IndexByte("abcdef", value[at]|0x20) >= 0) {
+		for at < len(value) && (util.IsNumeric(value[at]) || hex && util.IsHexDecimal(value[at])) {
 			at++
 		}
 		if at < len(value) && value[at] == ';' {
@@ -1080,8 +1091,4 @@ func referenceLength(value []byte) int {
 		at++
 	}
 	return at
-}
-
-func isASCIIDigit(c byte) bool {
-	return '0' <= c && c <= '9'
 }

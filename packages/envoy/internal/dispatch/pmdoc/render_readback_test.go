@@ -414,7 +414,7 @@ func TestURLReadingsAgreeWithTheEngine(t *testing.T) {
 			t.Fatalf("Parse(%q) = %v", markdown, err)
 		}
 		if readings[index] == nil || !doc.Equal(readings[index]) {
-			t.Errorf("%q: Go reads %s, the engine %s; recorded as agreeing: true", markdown, readingSummary(doc), readingSummary(readings[index]))
+			t.Errorf("%q: Go reads %s, the engine %s", markdown, readingSummary(doc), readingSummary(readings[index]))
 		}
 		if index < len(tests) && tests[index].writtenAsIs {
 			if rendered, err := Render(doc); err != nil || rendered != markdown {

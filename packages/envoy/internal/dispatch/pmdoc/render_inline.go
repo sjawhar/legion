@@ -232,12 +232,15 @@ func writesBareURL(nodes []*Node, escapePipes bool) bool {
 // colon (urlSchemeColon) and an `@`, where the readers may read an address from plain text.
 func writesAddressSyntax(nodes []*Node) (colons, ats bool) {
 	for _, node := range nodes {
-		if node.Type != "text" || nodeHasMark(node, "inlineCode") || containsMark(visibleMarks(node.Marks), "link") {
+		if node.Type != "text" || nodeHasMark(node, "inlineCode") || nodeHasMark(node, "link") {
 			continue
 		}
 		for offset := range len(node.Text) {
 			colons = colons || node.Text[offset] == ':' && urlSchemeColon(node.Text, offset)
 			ats = ats || node.Text[offset] == '@'
+			if colons && ats {
+				return colons, ats
+			}
 		}
 	}
 	return colons, ats
@@ -342,7 +345,7 @@ func opensLabel(marks, following []Mark, after *Node) bool {
 // wwwMayFollow reports whether the markdown written so far ends where the browser editor's engine,
 // and Go with it, reads a www URL from bare text: at a line's head or after whitespace,
 // punctuation or a symbol, where its tokenizer begins one (literalURLFollows) or its transform finds
-// one in the decoded text (transformPrevious). After a letter or a digit neither reads one, so a www
+// one in the decoded text (transformBoundary). After a letter or a digit neither reads one, so a www
 // link is written as an explicit link there.
 func (r *renderer) wwwMayFollow() bool {
 	written := r.b.Bytes()
@@ -350,7 +353,7 @@ func (r *renderer) wwwMayFollow() bool {
 		return true
 	}
 	char, _ := utf8.DecodeLastRune(written)
-	return literalEnd(char) || literalPunctuation(char)
+	return transformBoundary(char)
 }
 
 // writeInlineRun writes nodes in spelling, reporting whether it fused two delimiter runs: closed a
