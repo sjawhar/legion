@@ -226,7 +226,8 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 
 // listenerPoolSize bounds the pool Listener and Dedicated take their connections from. Four
 // permanent connections dial through it - the delivery hub's and the event stream relay's
-// listeners, and the document rooms' room-sync listener and NOTIFY sender - and each connection
+// listeners, the process's shared listener hub (pglisten.Hub, which the document rooms' room sync
+// is registered on) and the document rooms' NOTIFY sender - and each connection
 // is hijacked as soon as it is opened, so it leaves with its caller and the pool holds none
 // between dials: what one bounds is dials in flight, not connections held. A caller redialling
 // while another dials waits that dial out, which is what a loop that dials and then waits for
@@ -256,9 +257,10 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // applicationName. The caller closes it. It is outside the nested-acquire guard
 // (ErrNestedAcquire) for the reason the other separate pools are: a connection that belongs to no
 // shared-pool caller cannot close the cycle the guard prevents, so a request holding one of the
-// shared pool's transactions may use one. The document rooms (docs/room_sync.go) hold two: the
-// room-sync listener, whose name is how every Dispatch process reads which processes are
-// listening, and the NOTIFY sender, which a request inside a transaction sends through.
+// shared pool's transactions may use one. Two such connections are held per process: the shared
+// listener hub that cmd/dispatch dials, whose name is how every Dispatch process reads which
+// processes are listening (docs.ListenerApplicationPrefix), and the document rooms' NOTIFY sender
+// (docs/room_sync.go), which a request inside a transaction sends through.
 func (p *Pool) Dedicated(ctx context.Context, applicationName string) (*pgx.Conn, error) {
 	conn, err := p.Listener(ctx)
 	if err != nil {

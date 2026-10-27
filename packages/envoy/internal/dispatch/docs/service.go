@@ -2131,8 +2131,8 @@ func (s *Service) closeReservedRoom(ctx context.Context, reservation roomCloseRe
 // head, and left open. The Apply waits for no failed room's recovery (WithoutRecoveryWait): a
 // failed room's own eviction closes it. It is the service's own injection, not a caller's write,
 // so it carries the service's mark (withOwnerVerified): allowInject refuses an unmarked injection
-// on a closed issue, and this close has to run on one - a room loaded while the issue was open and
-// left behind the head by the other process's write is closed whenever its issue closed, rather
+// on a closed issue, and this close has to run on one - a room loaded while the issue was open,
+// whose stored history another process then replaced, is closed whenever its issue closed, rather
 // than kept resident with text the store no longer holds until its idle minute runs out.
 func (s *Service) closeRoomInstance(ctx context.Context, room string, live *crdt.Doc) (closed bool, err error) {
 	if s.srv.GetDoc(room) != live {

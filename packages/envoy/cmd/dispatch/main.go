@@ -390,14 +390,15 @@ func main() {
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document. One process per period arms them (docs.RunSettlementResumption).
 	go documentService.RunSettlementResumption(ctx, leases)
-	// INFRA-66, INFRA-556: this process's one shared LISTEN connection. Every subsystem that
-	// learns of another envoy-dispatch process's work through a NOTIFY channel registers that
-	// channel on this hub before it runs, and its connection's name is what makes this process a
-	// member (docs/room_sync.go). The document rooms register first: a document written by another
-	// process is announced over Postgres, and the room this process holds for it catches up from
-	// the stored updates within that round trip, so its browsers see the write without a
-	// reconnect. Both stop with ctx, like the loops beside them; the service's NOTIFY sender
-	// stays open until documentService.Shutdown has drained the rooms.
+	// INFRA-66, INFRA-556: this process's one shared LISTEN connection. Its name is what makes
+	// this process a member: the other envoy-dispatch processes read it in pg_stat_activity
+	// (docs/room_sync.go). The document rooms' room sync is registered on it: a document written
+	// by another process is announced over Postgres, and the room this process holds for it
+	// catches up from the stored updates within that round trip, so its browsers see the write
+	// without a reconnect. The delivery hub and the event stream relay still hold listener
+	// connections of their own (store.Pool.Listener). Both stop with ctx, like the loops beside
+	// them; the service's NOTIFY sender stays open until documentService.Shutdown has drained the
+	// rooms.
 	listenerHub := &pglisten.Hub{
 		Owner: "dispatch",
 		Dial: func(ctx context.Context) (*pgx.Conn, error) {

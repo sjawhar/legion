@@ -26,12 +26,12 @@ import (
 // work (INFRA-556). Postgres is the only channel between them (the message bus can be down while
 // the server serves), so each process holds two connections of its own beside its pools:
 //
-//   - the process's one shared LISTEN connection (a pglisten.Hub that cmd/dispatch builds and
-//     every listening subsystem registers its channels on), on which the room-sync channels
-//     below are registered (Service.RegisterRoomSync). It is named in pg_stat_activity as
-//     ListenerApplicationPrefix and the process's id (Service.ProcessID). Holding it is what
-//     makes a process a member (roomSyncMembers): a process that dies drops it with its socket,
-//     so membership needs no heartbeat and nothing to collect.
+//   - the process's one shared LISTEN connection (a pglisten.Hub that cmd/dispatch builds; the
+//     delivery hub and the event stream relay keep listeners of their own), on which the
+//     room-sync channels below are registered (Service.RegisterRoomSync). It is named in
+//     pg_stat_activity as ListenerApplicationPrefix and the process's id (Service.ProcessID).
+//     Holding it is what makes a process a member (roomSyncMembers): a process that dies drops
+//     it with its socket, so membership needs no heartbeat and nothing to collect.
 //   - one NOTIFY connection (roomSyncSender), which sends what a process announces outside a
 //     transaction of its own. It is not a connection of the shared pool, so a request holding one
 //     of that pool's transactions sends through it without taking a second (store.ErrNestedAcquire).

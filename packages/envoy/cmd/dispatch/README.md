@@ -393,35 +393,93 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Six periodic maintenance loops run once per period across the processes, not once per process.
+- Seven periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
   lands between another's passes — the ordinary case, since each ticker draws its phase at boot
   and a rolling update starts the second process minutes after the first — finds the period
-  already served and logs the same skip. The settlement resumption, the delivery live hub, the
-  event-stream relay, the stale-room evictor and the document rooms' timers stay per-process by
-  design, and the embedding queue, the task progress reconciliation and the outbox's own scan
-  claim their own work; the embedding queue's coverage pass runs in every process with no lease,
-  each of its steps safe beside another process's, and drops every vector its own embedder did not
-  make, so every process takes the same embedder settings (Search, below); `cmd/dispatch/main.go`
-  says at the call site which loop is which and why.
+  already served and logs the same skip. The settlement resumption is one of the seven: a
+  settlement reads the store under the document's lock whichever process runs it, so one process
+  per minute arms every owed settlement. The delivery live hub, the event-stream relay, the
+  process's shared listener connection with the document rooms' room sync on it, and the document
+  rooms' timers stay per-process by design, and the embedding queue, the task progress
+  reconciliation and the outbox's own scan claim their own work; the embedding queue's coverage
+  pass runs in every process with no lease, each of its steps safe beside another process's, and
+  drops every vector its own embedder did not make, so every process takes the same embedder
+  settings (Search, below); `cmd/dispatch/main.go` says at the call site which loop is which and
+  why.
 
-**Two processes do not share a live document session.** Durable convergence is unconditional:
-every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
-history is the union of them, so no edit is lost whichever process took it, no process writes a
-settlement or an ask retraction from a document state it does not hold (`ErrRoomBehindHead`), and
-a version whose room is behind the head is rendered from the stored document (`storedTree`). What
-is per-process is the live room: while a room is resident in one process it does not receive the
-other's updates, so presence and cursors show only the peers on that process. A write committed
-elsewhere closes the room within a notification round trip
-(`dispatch_doc_changed`, `docs/stale_room.go`), unless that room was evicted less than
-`staleRoomEvictInterval` (two seconds) ago, in which case its notification is refused and the
-room is re-examined when that window ends — the case the trailing write of an editing burst
-meets, since the last notification of a burst is one of the refused ones. Either way the browser
-reconnects, re-syncs and shows the current text. A reader sees a brief reconnect, never stale
-text they can act on. Cross-process live co-editing of one document — two rooms with text
-streaming between them — is a follow-up issue, out of scope here.
+**Two processes share a live document session through Postgres.** Durable convergence does not
+depend on it: every edit is appended under the document's advisory lock, Yjs updates commute, and
+the stored history is the union of them, so no edit is lost whichever process took it. Each
+process holds its own room for a document. Postgres is the only channel between the rooms
+(`docs/room_sync.go`), so the message bus can be down and the rooms still sync:
+
+- **Edits.** Every durable change notifies `dispatch_doc_head` (`{"r": artifact id, "v": head,
+  "p": process id}`) and `dispatch_doc_changed` (the bare artifact id, which the earlier build
+  reads) from inside the transaction that wrote it. Every other process that holds a room of the
+  document reads the stored rows its room does not hold from `doc_updates` and applies them as one
+  batch. The room stays open, and its browsers see the edit on the socket they already have.
+- **A room is closed and reloaded only when its stored history is replaced:** a rebuild, a prune,
+  a delete, or a compaction that folds rows the room has not taken in yet. A compaction keeps the
+  head row, so it closes only a room that is behind at that moment. The browser then reconnects
+  and syncs the reloaded room.
+- **Appends from a room that is behind.** A browser's edit is accepted: it is stored at the head,
+  and the room's cursor takes it in when the catch-up fills the gap. A write computed from the
+  room's content (a settlement's repair, a live write's fork, a version's capture) still needs a
+  room at the head (`ErrRoomBehindHead`). A settlement catches its room up under the document's
+  lock and then continues. A version whose room is behind is rendered from the stored document
+  (`storedTree`).
+- **Cursors and presence.** Each process relays its rooms' awareness on `dispatch_doc_awareness`
+  through its NOTIFY connection. It sends the changes of one room once per 50 ms at most. A room
+  that loads for a reader, and a reader that joins a loaded room, ask the other processes for
+  their readers' states, so a reader who opens second sees the first reader's cursor at once. A
+  room forgets a client it hears nothing from for 30 seconds (`AwarenessExpiry`), so a cursor
+  relayed from a process that stopped without a word goes away.
+- **Issue close and reopen.** Migration `0121`'s trigger notifies `dispatch_issue_open_changed`
+  when an issue's `closed_at` changes, whichever process or build wrote it. Every process of this
+  build then closes its rooms of the issue's documents, and their browsers reconnect read-only or
+  read-write as the issue now allows. A browser's append also reads the issue's state in its own
+  transaction and is refused while the issue is closed.
+- **Questions about a room.** A process asks the other processes about a room on
+  `dispatch_doc_query`, and each one answers on `dispatch_doc_answer`. An agent's write asks every
+  process that holds the room to store its updates before the write forks, so the write sees what
+  a person on another process typed. The lost-edit check after the commit asks again, and
+  `409 EDIT_LOST_TO_CONCURRENT_CHANGE` names the people connected on every process. A rebuild asks
+  whether any process holds the room and answers `409 DOCUMENT_LIVE` when one does. A process
+  waits 500 ms at most for the answers. Then it continues without the processes that did not
+  answer, and logs a WARN that names them.
+- **Reads.** A read compares the room with the stored head. When the room is behind, the read
+  takes the stored document and does not wait for the catch-up, so no read returns text older
+  than the store.
+- **Ask authors and the edit queue.** The author of an ask block is stored
+  (`doc_ask_block_authors`, migration `0122`), so a settlement on any process names who wrote it.
+  The cap of 32 queued conditional edits of one document counts every process's queue
+  (`doc_conditional_edit_queue`, migration `0123`).
+- **Which process served a socket.** Every answer to a `/ws/doc/{room}` request, the `101`
+  upgrade included, carries `X-Dispatch-Process: <host name>`: the pod's name in production. A
+  check that opens sockets through a load balancer reads it to record which process each socket
+  reached. A host name the process cannot read, or one that holds bytes a header cannot carry,
+  sends no header.
+
+The processes a question waits for are the members: the processes whose listener connection is
+named `dispatch-listener <process id>` in `pg_stat_activity`. Each process makes its id when it
+starts. A process that stops loses that connection, and with it its membership, so nothing has to
+be cleaned up.
+
+While a process's listener connection redials (it waits up to 30 seconds between attempts), live
+sync to that process pauses. Its rooms do not catch up and do not receive the other processes'
+awareness, and it is not a member, so no question waits for it. Reads stay fresh, because a read
+compares with the stored head. Appends stay correct, because the append gate reads the head and
+the issue's state under the document's lock. When the LISTEN stands again, the process catches up
+every room it holds and reads the issue state of each one again.
+
+During the roll that releases this behaviour, processes of the earlier build still close a room
+that falls behind (its browsers reconnect), relay no awareness, and are not members, so no question
+waits for them. Every change this build writes still notifies `dispatch_doc_changed`, which the
+earlier build reads, and an issue that the earlier build closes still closes this build's rooms
+through the trigger.
 
 ## Database migrations
 
@@ -800,6 +858,29 @@ back past it is an image rollback alone, with no schema to restore and no backup
 the release before it runs over the new schema unchanged, and the trigger gives every review that
 release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
 schema has moved it refuses to start the previous tag, and recovery there is forward.
+
+Migrations `0121`–`0123` let the document rooms of every process follow each other (Running more
+than one process, above). Each one is additive, so the release before them runs over the new
+schema unchanged, and each census answers `0`, since none of them refuses or rewrites a row.
+
+- `0121_issue_open_notify` adds the function `issues_open_notify` and an `after update of
+  closed_at` row trigger on `issues`. The trigger notifies `dispatch_issue_open_changed` with the
+  issue's key when `closed_at` changes, so an issue that any process closes or reopens, one of the
+  earlier release included, reaches the rooms of every process of this release. `create trigger`
+  takes `SHARE ROW EXCLUSIVE` on `issues` for milliseconds: a write to `issues` waits behind it,
+  and a read does not. The trigger is in a migration of its own, so the transaction never holds
+  that lock while it waits for another table's.
+- `0122_doc_ask_block_authors` creates `doc_ask_block_authors`, the author of each ask block that
+  no settlement has indexed yet, keyed by document and block id. A settlement on any process reads
+  the author from it, and deletes the rows of the blocks it indexes. The earlier release neither
+  writes nor deletes a row.
+- `0123_doc_conditional_edit_queue` creates `doc_conditional_edit_queue`, the count of queued
+  conditional edits of each document per process, which the cap of 32 sums over the members. The
+  earlier release neither reads nor writes it, and keeps its own cap per process.
+
+`0122` and `0123` each take `ACCESS EXCLUSIVE` on the new table, which nothing else reads yet, and
+`SHARE ROW EXCLUSIVE` on `artifacts` for the foreign key to it (`on delete cascade`): a write to
+`artifacts` waits behind the migration's short transaction, and a read does not.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -1196,7 +1277,13 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`files`; null when it is not). A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. `files` is reported and never decides `ok` or the status: a bucket that stops answering is `200` with `files: false`, so a bucket outage fails uploads and downloads and nothing else, and a deploy check that wants the bucket asserts `files: true` itself. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). |
 | `/api/v1/events` | GET | cookie, trusted header, or bearer | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every live document and wait for the settlements in flight; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
+| `/api/v1/artifacts/_test/rooms` | GET | as above, plus `DISPATCH_TEST_HOOKS=1` | List the documents this process holds a room of now: `{"rooms": [artifact id, ...]}`. Not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/artifacts/{id}/_test/outside-schema` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Write the crafted malformed tree e2e uses; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
+| `/api/v1/artifacts/{id}/_test/room-counters` | GET | as above, plus `DISPATCH_TEST_HOOKS=1` | Count this process's room failures and lock-waiting compactions of the document since the process started: `{"room_failures": n, "lock_waiting_compactions": n}`. Not mounted unless `DISPATCH_TEST_HOOKS=1`. |
+| `/api/v1/artifacts/{id}/_test/hold-persistence` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Take `{"duration": "<Go duration>"}` and hold every append of a browser update that this process's rooms of the document make, for that long from now; `204` once the hold is set, `400 DURATION_INPUT` for a duration that is not positive. Not mounted unless `DISPATCH_TEST_HOOKS=1`. |
+| `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` | PUT | as above, plus `DISPATCH_TEST_HOOKS=1` | Park the document's next live write on this process at `{point}`: `after-first-append` (it holds the document's lock) or `after-commit` (before its publish). `204` once armed, `409 PAUSE_ARMED` when a pause is armed already, `400 PAUSE_POINT_INPUT` for another point. Not mounted unless `DISPATCH_TEST_HOOKS=1`. |
+| `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` | GET | as above, plus `DISPATCH_TEST_HOOKS=1` | Wait up to `?wait` (a Go duration, 10 s when absent) for a write to park at the armed pause: `{"parked": true}`, or `{"parked": false}` when none did. `404 PAUSE_NOT_ARMED` when no pause is armed. Not mounted unless `DISPATCH_TEST_HOOKS=1`. |
+| `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` | DELETE | as above, plus `DISPATCH_TEST_HOOKS=1` | Disarm the pause and let the write parked there continue: `{"parked": bool}`, whether a write had parked. `404 PAUSE_NOT_ARMED` when no pause is armed. Not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/events/_test/disconnect` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every open SSE connection; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/inbox?project=&assignee=` | GET | cookie or trusted header (human only) | List open asks newest-first, including their issue key, title, and assignee. `assignee=me\|unassigned\|<email>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that person; an email nobody has signed in with is `400 ASSIGNEE_NOT_ALLOWED`. |
 | `/api/v1/me/answers?limit=&offset=` | GET | cookie or trusted header (human only) | List the caller's answers and replies on asks, newest first. A row is either an answer with `current`, or a reply, and carries the ask's question, kind, state, owner and deep link. Answers come from user-authored `ask.answered` events whose actor is the answer's user; a restored answered block adds no row. `limit` is 1–200 (default 50), `offset` is 0 or more, and an invalid value is `400 INVALID_QUERY`. |
@@ -1369,7 +1456,7 @@ node type weighs:
 | `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. A Markdown document nests at most 100 blocks (quotes, lists and their items, typed blocks, and footnote definitions), and one textblock's inline markdown at most 100 marks (emphasis, strong, strikethrough, links, images, and code); deeper content is refused naming the line. An accepted suggestion whose blocks nest within that bound but land deep enough that the document would nest past it is `INVALID_OP` on `replace_with`, naming how many blocks the result nests. Malformed edit replacements report `INVALID_OP`. |
 | `409 DOC_SCHEMA` | A stored tree is outside the Proof schema, such as one holding a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99; settlement writes no version of such a tree. Every route that starts from that tree answers it alike, with one message - reading its text or blocks (`/text`, `/blocks`), editing it (`POST /edits`) and naming a version (`POST /versions`) - and a schema refusal of a tree the request itself produced is a `500`. Replace it by uploading markdown under the same document name; an upload preserves every open ask block, and is refused `400 INVALID_ASK_BLOCK` for an ask block that breaks the ask content rule, as a new document is. The document websocket admits no connection to such a room: it completes the upgrade and closes with code `4409` (reason `DOC_SCHEMA`, `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`, generated into Go) before any sync, so a browser editor never receives a tree it would normalize and write back. |
 | `409 DOCUMENT_UNLOADABLE` | A document's stored history does not decode, so nothing can read or open it. Rebuild it from its latest saved version (`POST /api/v1/artifacts/{id}/rebuild`); the dashboard offers that rebuild for this code alone. A room or store that could not serve the document stays `503 DOC_SERVICE_UNAVAILABLE`, which is retried, not rebuilt. |
-| `409 DOCUMENT_LIVE` | A rebuild found the document resident in this server: open in an editor, or left by its last editor less than 90 seconds ago (a room stays resident a minute after its last peer leaves, and the sweep that evicts it runs every 30 seconds). Close its editors and retry two minutes later, or repair a schema-invalid tree by replacing it from markdown. |
+| `409 DOCUMENT_LIVE` | A rebuild found the document resident in this server or in another server process on the database (it asks every member, and waits 500 ms at most for the answers): open in an editor, or left by its last editor less than 90 seconds ago (a room stays resident a minute after its last peer leaves, and the sweep that evicts it runs every 30 seconds). Close its editors and retry two minutes later, or repair a schema-invalid tree by replacing it from markdown. A rebuild also answers this code when the document's head moved while it ran, because of another rebuild or an edit: read the document again before you rebuild it. |
 | `409 DOCUMENT_LOADS` | A rebuild found that the document's durable history loads. Nothing was deleted; replace a schema-invalid document from markdown instead. |
 
 ## Comment errors

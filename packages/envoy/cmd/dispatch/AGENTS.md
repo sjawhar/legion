@@ -534,10 +534,16 @@ the table says human only.
 | `/api/v1/me/agents/{session_id}/state` | PUT | identity | Clear an agent's conversation (`cleared_before`), mark it read (`read_through`, which only moves forward and covers every reply up to it), and/or mark some of its replies read by id (`read_replies`, messages the path's session wrote, covering those alone, each in any form `uuid.Parse` reads) for this user: at least one; 400 `INVALID_STATE` when none is given, a cutoff is malformed or more than a minute ahead of the server clock, or a `read_replies` id is not a uuid or not a message that session wrote (nothing is written then); an accepted cutoff is stored no later than the server's now. Appends `user_agent_state.updated` (`{login, session_id}`) for the viewer's other devices, except for a request naming only replies already read by id or passed by the read mark, which changes nothing (a reply the Clear hides but the read mark has not passed is neither: the first request naming it writes its row and appends the event), and answers the session's state. |
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
+| `/api/v1/artifacts/_test/rooms` | GET | user or bearer, `DISPATCH_TEST_HOOKS=1` only | List the documents this process holds a room of now; not mounted otherwise. |
+| `/api/v1/artifacts/{id}/_test/room-counters` | GET | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Count this process's room failures and lock-waiting compactions of the document since it started; not mounted otherwise. |
+| `/api/v1/artifacts/{id}/_test/hold-persistence` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Hold, for `{"duration"}` from now, every append of a browser update that this process's rooms of the document make; not mounted otherwise. |
+| `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` | PUT | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Park the document's next live write on this process at `after-first-append` (holding the document's lock) or `after-commit` (before its publish); not mounted otherwise. |
+| `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` | GET | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Wait up to `?wait` (10 s when absent) for a write to park at the armed pause; not mounted otherwise. |
+| `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` | DELETE | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Disarm the pause and let the parked write continue; not mounted otherwise. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
 | `/api/v1/delivery/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/delivery` socket; not mounted otherwise. |
 | `/api/v1/agents/{session_id}/stream/_test/publish` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Feed the in-memory agent relay: one frame, `?as=replay` what the next connection is answered with, `?as=responder` whether anyone answers on the control subject, `?as=drop` end every open viewer stream so the page's reconnect rebuilds from that replay; not mounted otherwise. |
-| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/api/v1/events` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. |
+| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. Every answer, the `101` upgrade included, carries `X-Dispatch-Process: <host name>` (the pod's name in production), so a check through a load balancer can record which process served each socket; a host name the process cannot read or a header cannot carry sends none. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/api/v1/events` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. |
 | `/ws/delivery` | GET | user or bearer | The Delivery and Pipeline pages' live updates: a subscribe frame names a view; Dispatch answers a snapshot, then only what changed, and a resume with the page's revisions answers what changed since (packages/contracts DeliveryLive*). A `heartbeat` frame goes out every `StreamHeartbeat` (15 s), so a client tells a quiet socket from a dead one. |
 
 ## Dispatch topics
@@ -577,13 +583,18 @@ default ten-minute deadline:
 env DISPATCH_TEST_DATABASE_URL=… go test -tags memory -count=1 -timeout 60m ./cmd/dispatch
 ```
 
-The two-process tests (`multiprocess_test.go`, INFRA-66) start two real Dispatch servers on one
-Postgres and one NATS and drive the properties a rolling release depends on — one pass per period
-across the leased maintenance loops, the delivery intake's standby and takeover, each outbox row
-published once, a live event stream fed from the other process, and a document room closed when
-the other process writes it. They build only under the `multiprocess` tag and run in their own CI
-job (`dispatch-multiprocess` in `.github/workflows/envoy-and-contracts.yaml`), because two servers
-and their NATS take minutes rather than seconds:
+The two-process tests (`multiprocess_test.go`, INFRA-66, INFRA-556) start two real Dispatch
+servers on one Postgres and one NATS and drive the properties a rolling release depends on — one
+pass per period across the leased maintenance loops, the delivery intake's standby and takeover,
+each outbox row published once, a live event stream fed from the other process — and the live
+document session across processes: edits and cursors reach an editor on the other process with no
+reconnect, an issue's close and reopen change every process's rooms, an ask block keeps its
+author when the other process settles it, an agent's write sees edits in flight on the other
+process, a read is never older than the store, rebuild, resumption and the conditional-edit queue
+hold across processes, and each document socket names its serving process. They build only under
+the `multiprocess` tag and run in their own CI job (`dispatch-multiprocess` in
+`.github/workflows/envoy-and-contracts.yaml`), because two servers and their NATS take minutes
+rather than seconds:
 
 ```sh
 env DISPATCH_TEST_DATABASE_URL=… go test -tags multiprocess -count=1 -timeout 30m ./cmd/dispatch

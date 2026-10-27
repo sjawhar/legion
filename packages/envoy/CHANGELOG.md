@@ -4,6 +4,11 @@
 
 ### Added
 
+- Every answer to a document socket's request, the `101` upgrade included, carries
+  `X-Dispatch-Process: <host name>`, the pod's name in production, so a check that opens sockets
+  through a load balancer can record which `envoy-dispatch` process served each one (INFRA-556). A
+  host name the process cannot read, or one that holds bytes a header cannot carry, sends no
+  header.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -796,6 +801,64 @@
 
 ### Changed
 
+- Two people on one Dispatch document, each connected to a different `envoy-dispatch` process on
+  one Postgres, now see each other's edits live, and nobody is disconnected (INFRA-556). Every
+  durable change notifies `dispatch_doc_head`, and `dispatch_doc_changed` for the earlier build,
+  from the transaction that wrote it. Every other process that holds a room of the document reads
+  the rows its room lacks from `doc_updates` and applies them as one batch. A room is closed and
+  reloaded only when its stored history is replaced under it: a rebuild, a prune, a delete, or a
+  compaction that folds rows the room has not taken in yet. A browser's edit from a room that is
+  behind is stored at the head, and a settlement catches its room up under the document's lock and
+  continues. Editors on two processes who type in turn get one version per burst, and it names the
+  last typist whichever process settles it. Before, another process's write closed the room, and
+  every browser in it reconnected. During the roll that releases this, processes of the earlier
+  build still close their rooms that fall behind.
+- Cursors and presence cross processes. Each process relays its rooms' awareness on
+  `dispatch_doc_awareness`, at most once per 50 ms per room. A reader who opens a document second
+  sees the first reader's cursor at once, and a reader who leaves on one process leaves on the
+  other. A room forgets a client it hears nothing from for 30 s, so a cursor relayed from a process
+  that stopped without a word goes away. Processes of the earlier build relay none.
+- Closing or reopening an issue changes the document rooms of every process, the patching one
+  included, and reopening now does too: migration `0121`'s trigger notifies
+  `dispatch_issue_open_changed` when `closed_at` changes, whoever wrote it, and each process closes
+  its rooms of the issue's documents, so their browsers reconnect read-only or editable to match. A
+  browser's append also reads the issue's state in its own transaction and is refused while the
+  issue is closed. Before, only the process that took the `PATCH` changed its rooms, and only on a
+  close.
+- An ask block keeps its author when another process settles it, or when the process that saw the
+  edit stops first: the author is stored in `doc_ask_block_authors` (migration `0122`) in the
+  transaction that makes the block durable. Before, a settlement on another process named its own
+  actor.
+- An agent's document write sees the edits a person on another process made before it. Before the
+  write forks, every other process that holds the document's room stores its room's updates, and an
+  open write's fork follows the stored head. A `409 EDIT_LOST_TO_CONCURRENT_CHANGE` names the
+  people connected on every process, and the `200`'s `lost_ops` is judged on the document at the
+  stored head. A process asks the others on `dispatch_doc_query` and waits 500 ms at most for their
+  answers on `dispatch_doc_answer`. Then it continues and logs a WARN that names the processes that
+  did not answer.
+- A document read never returns text older than the stored head. A read whose room is behind the
+  head reads the stored document and waits for no catch-up. Before, a read on one process could
+  return a room's text from before another process's write.
+- Rebuild, settlement resumption and the conditional-edit queue hold across processes. A rebuild
+  answers `409 DOCUMENT_LIVE` when a room of the document is resident on any process, and of two
+  rebuilds of one document at once one answers `409 DOCUMENT_LIVE`. The settlement resumption runs
+  once per minute across the processes, under the lease `settlement-resumption`, not once per
+  process. The cap of 32 queued conditional edits of one document counts every process's queue
+  (`doc_conditional_edit_queue`, migration `0123`), so the 33rd answers `429 EDIT_QUEUE_FULL`
+  whichever process takes it. An agent's write to a document that no room holds on its process no
+  longer loads a room there.
+- Each `envoy-dispatch` process opens up to two more Postgres connections: the lease pool grows
+  from 8 to 9 for the settlement resumption, and a dedicated NOTIFY connection sends the document
+  rooms' cursors and queries. The process's shared listener connection, named
+  `dispatch-listener <process id>`, replaces the stale-room listener; the processes read that name
+  in `pg_stat_activity` to know which processes are listening. One process holds up to 34
+  connections at its ceiling, up from 32.
+- Migrations `0121`–`0123` are additive, and each census answers `0`. `0121` adds a trigger on
+  `issues`, which takes `SHARE ROW EXCLUSIVE` on `issues` for milliseconds: a write to `issues`
+  waits behind it, and a read does not. `0122` creates `doc_ask_block_authors` and `0123` creates
+  `doc_conditional_edit_queue`. Each takes `ACCESS EXCLUSIVE` on its new table and
+  `SHARE ROW EXCLUSIVE` on `artifacts` for its foreign key. The earlier release runs over the new
+  schema unchanged.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
