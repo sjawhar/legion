@@ -27,6 +27,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +38,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -1523,4 +1527,1438 @@ func whoami(t *testing.T, p *dispatchProcess, session *http.Cookie) (string, int
 	defer response.Body.Close()
 	body, _ := io.ReadAll(response.Body)
 	return strings.TrimSpace(string(body)), response.StatusCode
+}
+
+// ───── one document, readers on two processes (INFRA-556) ──────────────────
+//
+// The rows below are dispatch://INFRA-556's: two people, or a person and an agent, on one
+// document whose readers are on different processes. Each drives real editors (docstest.Peer
+// speaks the dashboard's Hocuspocus framing) and the processes' own API, hooks and logs, and
+// arranges each race it is about with a test hook (DISPATCH_TEST_HOOKS) - a held persistence, a
+// parked live write - or a lock of its own, never with a sleep that hopes.
+
+// liveWithin is how soon a change on one process must reach a reader on the other: the spec's
+// "at once", which the plan pins at one second.
+const liveWithin = time.Second
+
+// multiprocessAgentSession is the session an agent's writes name (actor.kind session) when they
+// come through the agent token (dispatchAgentToken).
+const multiprocessAgentSession = "multiprocess-agent"
+
+// roomClosedLine is what the stale-room evictor logs when it closes a room another process's
+// write left behind; a process that keeps its rooms live never writes it.
+const roomClosedLine = "closed a document room"
+
+// asUser is the header a signed-in person's request carries (X-Dispatch-User, which these
+// processes trust).
+func asUser(login string) http.Header {
+	return http.Header{"X-Dispatch-User": {login}}
+}
+
+// asAgent is the header an agent's request carries: the agent token and no person.
+func asAgent() http.Header {
+	return http.Header{"Authorization": {"Bearer " + dispatchAgentToken}}
+}
+
+// httpAnswer is one answer of a process's API.
+type httpAnswer struct {
+	status int
+	body   []byte
+}
+
+// code is the answer's error code ({"code": ...}), or "" for an answer that names none.
+func (a httpAnswer) code() string {
+	var coded struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(a.body, &coded)
+	return coded.Code
+}
+
+func (a httpAnswer) String() string {
+	return fmt.Sprintf("%d %s", a.status, strings.TrimSpace(string(a.body)))
+}
+
+// request sends body to path with header and answers whatever the process answers. It never
+// fails the test, so a goroutine may call it.
+func (p *dispatchProcess) request(method, path, body string, header http.Header) (httpAnswer, error) {
+	request, err := http.NewRequest(method, p.url(path), strings.NewReader(body))
+	if err != nil {
+		return httpAnswer{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	for name, values := range header {
+		request.Header[name] = values
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return httpAnswer{}, err
+	}
+	defer response.Body.Close()
+	answer, err := io.ReadAll(response.Body)
+	if err != nil {
+		return httpAnswer{}, err
+	}
+	return httpAnswer{status: response.StatusCode, body: answer}, nil
+}
+
+// mustRequest is request on the test's goroutine: a process it cannot reach fails the test.
+func (p *dispatchProcess) mustRequest(t *testing.T, method, path, body string, header http.Header) httpAnswer {
+	t.Helper()
+	answer, err := p.request(method, path, body, header)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	return answer
+}
+
+func editPath(artifactID string) string {
+	return "/api/v1/artifacts/" + artifactID + "/edits"
+}
+
+// editBody is the body of an edit replacing find with with: an agent's when agent is set (a bearer
+// names its session in actor), and conditional on the document's token when token is not "".
+func editBody(t *testing.T, find, with, token string, agent bool) string {
+	t.Helper()
+	body := struct {
+		Ops          []model.EditOp          `json:"ops"`
+		Precondition *model.EditPrecondition `json:"precondition,omitempty"`
+		Actor        *model.Actor            `json:"actor,omitempty"`
+	}{Ops: []model.EditOp{{Op: "replace", Find: find, With: with}}}
+	if token != "" {
+		body.Precondition = &model.EditPrecondition{Document: token}
+	}
+	if agent {
+		body.Actor = &model.Actor{Kind: "session", ID: multiprocessAgentSession}
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("encode the edit: %v", err)
+	}
+	return string(encoded)
+}
+
+// textAndToken is the document as the process reads it now and the token a conditional edit
+// against that reading passes (GET /api/v1/artifacts/{id}/text).
+func (p *dispatchProcess) textAndToken(t *testing.T, artifactID string) (string, string) {
+	t.Helper()
+	answer := p.call(t, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", "", http.StatusOK)
+	var document struct {
+		Markdown string `json:"markdown"`
+		Token    string `json:"token"`
+	}
+	if err := json.Unmarshal(answer, &document); err != nil || document.Token == "" {
+		t.Fatalf("decode the document's text and token: %v: %s", err, answer)
+	}
+	return document.Markdown, document.Token
+}
+
+// holdsRoom reports whether the process holds a room of the document now (the rooms test hook).
+func (p *dispatchProcess) holdsRoom(t *testing.T, artifactID string) bool {
+	t.Helper()
+	return slices.Contains(p.residentRooms(t), artifactID)
+}
+
+// roomCloses names what closed rooms of the document on either process so far - the evictor's
+// logged closes and the room failures the hook counted - for a failure to show beside what it saw.
+// An eviction's line is written once the room has closed, so one a moment old may be missing.
+func (p *dispatchPair) roomCloses(t *testing.T, artifactID string) string {
+	t.Helper()
+	return fmt.Sprintf("rooms of the document failed %d times on A and %d on B; closes the evictor logged on A: %q; on B: %q",
+		p.a.roomCounters(t, artifactID).RoomFailures, p.b.roomCounters(t, artifactID).RoomFailures,
+		p.a.logLines(roomClosedLine, "room="+artifactID), p.b.logLines(roomClosedLine, "room="+artifactID))
+}
+
+// requireNoRoomCloses fails the test when either process logged closing a room of the document.
+func (p *dispatchPair) requireNoRoomCloses(t *testing.T, artifactID string) {
+	t.Helper()
+	if len(p.a.logLines(roomClosedLine, "room="+artifactID))+len(p.b.logLines(roomClosedLine, "room="+artifactID)) > 0 {
+		t.Errorf("a process closed a room of the document another process's write left behind: %s", p.roomCloses(t, artifactID))
+	}
+}
+
+// ───── editors that reconnect as a browser does ─────────────────────────────
+
+func peerEnded(editor *docstest.Peer) bool {
+	select {
+	case <-editor.Ended:
+		return true
+	default:
+		return false
+	}
+}
+
+// requireConnected fails the test when the editor's connection has ended, naming who and when.
+func (p *dispatchPair) requireConnected(t *testing.T, artifactID, who string, editor *docstest.Peer, when string) {
+	t.Helper()
+	if peerEnded(editor) {
+		t.Fatalf("%s was disconnected %s (close code %d): the process closed the room it held rather than keeping it live; %s",
+			who, when, editor.CloseCode(), p.roomCloses(t, artifactID))
+	}
+}
+
+// lenientT hands a dial's refusal back to dialEditor instead of ending the test: a browser's
+// provider dials again after a refused reconnect (ygo refuses a dial between a closing room's
+// hang-up and its removal), and so do the rows that reconnect. docstest.Dial reports a refusal
+// through Fatalf, which here unwinds to dialEditor's recover.
+type lenientT struct{ *testing.T }
+
+type dialRefused struct{ err error }
+
+func (t lenientT) Fatalf(format string, args ...any) {
+	panic(dialRefused{fmt.Errorf(format, args...)})
+}
+
+// dialEditor connects login's tab to the document's socket at url, answering a refusal as an
+// error.
+func dialEditor(t *testing.T, url, login, artifactID string) (editor *docstest.Peer, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			refused, ok := recovered.(dialRefused)
+			if !ok {
+				panic(recovered)
+			}
+			err = refused.err
+		}
+	}()
+	return docstest.Dial(lenientT{t}, url, asUser(login), artifactID, crdt.New()), nil
+}
+
+// awaitDocument asks the room for its document until the editor's copy renders one.
+func awaitDocument(editor *docstest.Peer, within time.Duration) error {
+	deadline := time.NewTimer(within)
+	defer deadline.Stop()
+	for markdown(editor) == "" {
+		if err := editor.AskForDocument(); err != nil {
+			return fmt.Errorf("ask the room for the document: %w", err)
+		}
+		select {
+		case <-editor.Answers:
+		case <-editor.Ended:
+			return fmt.Errorf("the connection closed (code %d) before the room sent the document", editor.CloseCode())
+		case <-deadline.C:
+			return fmt.Errorf("the room sent no document within %v", within)
+		}
+	}
+	return nil
+}
+
+// reconnectEditor connects login's tab to the document on this process again, as the dashboard's
+// provider does once its socket closed: it dials again after a refusal, up to twenty times a
+// tenth of a second apart (a browser backs off too), and returns once the room has sent the tab
+// a document. It answers an error rather than failing the test, so a row counting disconnects
+// can report what it counted.
+func (p *dispatchProcess) reconnectEditor(t *testing.T, login, artifactID string) (*docstest.Peer, error) {
+	t.Helper()
+	var last error
+	for range 20 {
+		editor, err := dialEditor(t, p.documentURL(artifactID), login, artifactID)
+		if err == nil {
+			if err = awaitDocument(editor, 10*time.Second); err == nil {
+				return editor, nil
+			}
+			editor.Close()
+		}
+		last = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("reconnect %s's tab: %w", login, last)
+}
+
+// openStoredEditor is openEditorAs that also waits, up to ten seconds, for the update the tab's
+// sync appends (openSyncedEditor says why there is one) to be stored, so the next thing the row
+// does is the only thing that moves the document.
+func (p *dispatchPair) openStoredEditor(t *testing.T, process *dispatchProcess, login, artifactID, want string) *docstest.Peer {
+	t.Helper()
+	before := storedHead(t, p, artifactID)
+	editor := process.openEditorAs(t, login, artifactID, want)
+	p.waitStoredPast(t, artifactID, before, 10*time.Second, login+"'s tab's sync update on "+p.name(process))
+	return editor
+}
+
+// waitStoredPast waits up to within for the document's stored head to pass head, and fails the
+// test naming what was to be stored when it does not.
+func (p *dispatchPair) waitStoredPast(t *testing.T, artifactID string, head int64, within time.Duration, what string) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for storedHead(t, p, artifactID) <= head {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s was not stored within %v: the document still stands at update %d", what, within, head)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// typeAtEnd types text at the end of the editor's first paragraph in one keystroke's transaction,
+// on the paragraph's own Yjs text as ProseMirror's binding does, and sends the room the update.
+func typeAtEnd(editor *docstest.Peer, text string) error {
+	fragment := editor.Doc.GetXmlFragment("prosemirror")
+	missing := false
+	if _, err := editor.Send(func(txn *crdt.Transaction) {
+		paragraph := docstest.FirstText(fragment)
+		if paragraph == nil {
+			missing = true
+			return
+		}
+		paragraph.Insert(txn, paragraph.Len(), text, nil)
+	}); err != nil {
+		return err
+	}
+	if missing {
+		return errors.New("the editor's copy holds no paragraph text to type into")
+	}
+	return nil
+}
+
+// rewriteDocument changes the editor's document as one transaction - change edits the tree it
+// reads, and pmdoc writes the difference back - and sends the room the update.
+func rewriteDocument(editor *docstest.Peer, change func(*pmdoc.Node) error) error {
+	fragment := editor.Doc.GetXmlFragment("prosemirror")
+	var changeErr error
+	if _, err := editor.Send(func(txn *crdt.Transaction) {
+		tree, err := pmdoc.ReadInTransaction(txn, fragment)
+		if err != nil {
+			changeErr = err
+			return
+		}
+		if changeErr = change(tree); changeErr != nil {
+			return
+		}
+		changeErr = pmdoc.Update(txn, fragment, tree)
+	}); err != nil {
+		return err
+	}
+	return changeErr
+}
+
+// deleteParagraph deletes, in the editor, the top-level block whose text holds word, as a person
+// selecting the paragraph and pressing delete does.
+func deleteParagraph(t *testing.T, editor *docstest.Peer, word string) {
+	t.Helper()
+	if err := rewriteDocument(editor, func(tree *pmdoc.Node) error {
+		for index, block := range tree.Children {
+			if strings.Contains(pmdoc.TextContent(block), word) {
+				tree.Children = slices.Delete(tree.Children, index, index+1)
+				return nil
+			}
+		}
+		return fmt.Errorf("no paragraph holds %q", word)
+	}); err != nil {
+		t.Fatalf("delete the paragraph holding %q: %v", word, err)
+	}
+}
+
+// appendMarkdown appends the blocks markdown parses to at the end of the editor's document, as a
+// person typing them (an ask block's slash command included) does.
+func appendMarkdown(t *testing.T, editor *docstest.Peer, markdown string) {
+	t.Helper()
+	parsed, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse %q: %v", markdown, err)
+	}
+	if err := rewriteDocument(editor, func(tree *pmdoc.Node) error {
+		tree.Children = append(tree.Children, parsed.Children...)
+		return nil
+	}); err != nil {
+		t.Fatalf("append %q: %v", markdown, err)
+	}
+}
+
+// placeMark marks quote in the editor's document with a comment mark carrying id, as the
+// dashboard does before it posts the comment that mark anchors.
+func placeMark(t *testing.T, editor *docstest.Peer, login, quote, id string) {
+	t.Helper()
+	fragment := editor.Doc.GetXmlFragment("prosemirror")
+	var markErr error
+	if _, err := editor.Send(func(txn *crdt.Transaction) {
+		tree, err := pmdoc.ReadInTransaction(txn, fragment)
+		if err != nil {
+			markErr = err
+			return
+		}
+		quoted, err := pmdoc.FindQuote(tree, quote, nil, nil)
+		if err != nil {
+			markErr = err
+			return
+		}
+		markErr = pmdoc.MarkRange(txn, fragment, quoted, pmdoc.Mark{
+			Type:  string(docs.MarkComment),
+			Attrs: pmdoc.Attrs{"id": id, "by": "user:" + login},
+		})
+	}); err != nil || markErr != nil {
+		t.Fatalf("mark %q in the editor: %v %v", quote, err, markErr)
+	}
+}
+
+// roomRendering asks the room for its whole document over the editor's socket and renders the
+// answer on its own: what the room holds, not what the editor's copy holds. The room answers a
+// sync step 1 after every message the editor sent before it, so this is also a barrier.
+func roomRendering(editor *docstest.Peer, within time.Duration) (string, error) {
+	for drained := false; !drained; {
+		select {
+		case <-editor.Answers:
+		default:
+			drained = true
+		}
+	}
+	if err := editor.AskForDocument(); err != nil {
+		return "", fmt.Errorf("ask the room for its document: %w", err)
+	}
+	select {
+	case state := <-editor.Answers:
+		doc := crdt.New()
+		if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
+			return "", fmt.Errorf("apply the room's document: %w", err)
+		}
+		return renderDocument(doc), nil
+	case <-editor.Ended:
+		return "", fmt.Errorf("the connection closed (code %d) before the room sent its document", editor.CloseCode())
+	case <-time.After(within):
+		return "", fmt.Errorf("the room sent no document within %v", within)
+	}
+}
+
+// typist is one person typing into a document in a row that counts what the session cost them:
+// they reconnect whenever their socket closes, as the dashboard's provider does, and each
+// disconnect's close code is noted.
+type typist struct {
+	who         string
+	login       string
+	process     *dispatchProcess
+	editor      *docstest.Peer
+	text        string
+	disconnects []int
+}
+
+// disconnected reports, as an error message's clause, how often the typist was disconnected and
+// with which close codes, or "" when never.
+func (typing *typist) disconnected() string {
+	if len(typing.disconnects) == 0 {
+		return ""
+	}
+	codes := map[int]int{}
+	for _, code := range typing.disconnects {
+		codes[code]++
+	}
+	return fmt.Sprintf("%s was disconnected %d times (close code: times %v)", typing.who, len(typing.disconnects), codes)
+}
+
+// keystroke types the typist's text once and waits until the store has moved past where it stood
+// before the keystroke, or until the typist's socket closed, which is a browser's lot when the
+// room it typed into was closed. A closed socket is noted and reconnected before the next
+// keystroke. It answers an error when the typist cannot be reconnected or the keystroke goes
+// nowhere at all.
+func (p *dispatchPair) keystroke(t *testing.T, artifactID string, typing *typist) error {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		if peerEnded(typing.editor) {
+			typing.disconnects = append(typing.disconnects, typing.editor.CloseCode())
+			editor, err := typing.process.reconnectEditor(t, typing.login, artifactID)
+			if err != nil {
+				return fmt.Errorf("%s: %w", typing.who, err)
+			}
+			typing.editor = editor
+		}
+		before := storedHead(t, p, artifactID)
+		if err := typeAtEnd(typing.editor, typing.text); err != nil {
+			if peerEnded(typing.editor) && attempt < 5 {
+				continue
+			}
+			return fmt.Errorf("%s's keystroke: %w", typing.who, err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for storedHead(t, p, artifactID) <= before && !peerEnded(typing.editor) {
+			if time.Now().After(deadline) {
+				return fmt.Errorf("%s's keystroke was neither stored nor ended with its socket within 5 s", typing.who)
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		return nil
+	}
+}
+
+// latestSeq is the issue's latest event sequence.
+func latestSeq(t *testing.T, pair *dispatchPair, issueKey string) int {
+	t.Helper()
+	var seq int
+	if err := pair.database.Pool.QueryRow(context.Background(),
+		`select coalesce(max(seq), 0) from events where issue_key = $1`, issueKey).Scan(&seq); err != nil {
+		t.Fatalf("read the latest event of %s: %v", issueKey, err)
+	}
+	return seq
+}
+
+// versionActorsSince is the actor of each artifact.version event of the issue after seq, in order:
+// one per version a settlement or a write minted.
+func versionActorsSince(t *testing.T, pair *dispatchPair, issueKey string, seq int) []model.Actor {
+	t.Helper()
+	rows, err := pair.database.Pool.Query(context.Background(), `
+		select actor::text from events
+		where issue_key = $1 and type = 'artifact.version' and seq > $2
+		order by seq
+	`, issueKey, seq)
+	if err != nil {
+		t.Fatalf("read the versions of %s: %v", issueKey, err)
+	}
+	defer rows.Close()
+	var actors []model.Actor
+	for rows.Next() {
+		var encoded string
+		var actor model.Actor
+		if err := rows.Scan(&encoded); err != nil {
+			t.Fatalf("scan a version's actor: %v", err)
+		}
+		if err := json.Unmarshal([]byte(encoded), &actor); err != nil {
+			t.Fatalf("decode a version's actor %s: %v", encoded, err)
+		}
+		actors = append(actors, actor)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the versions of %s: %v", issueKey, err)
+	}
+	return actors
+}
+
+// typeAndSee types text in typist's editor and requires reader's editor, on the other process, to
+// show it within liveWithin of the keystroke.
+func (p *dispatchPair) typeAndSee(t *testing.T, artifactID, typistName string, typist *docstest.Peer, text, readerName string, reader *docstest.Peer, keystroke int) {
+	t.Helper()
+	p.requireConnected(t, artifactID, typistName, typist, fmt.Sprintf("before keystroke %d", keystroke))
+	if err := typeAtEnd(typist, text); err != nil {
+		t.Fatalf("%s's keystroke %d: %v", typistName, keystroke, err)
+	}
+	typed := time.Now()
+	want := markdown(typist)
+	if err := reader.WaitForText(markdown, want, liveWithin); err != nil {
+		t.Fatalf("%s's keystroke %d did not reach %s live within %v: %v; %s",
+			typistName, keystroke, readerName, liveWithin, err, p.roomCloses(t, artifactID))
+	}
+	t.Logf("%s's keystroke %d reached %s %v after it was typed", typistName, keystroke, readerName, time.Since(typed))
+}
+
+// cursorState is the awareness state a dashboard tab announces: who it is and where its cursor is.
+func cursorState(login string, at int) map[string]any {
+	return map[string]any{"user": map[string]any{"name": login}, "cursor": map[string]any{"anchor": at, "head": at}}
+}
+
+// holdsState is a WaitForAwareness condition: client's state is want, compared as JSON values.
+func holdsState(client uint64, want any) func(map[uint64]json.RawMessage) bool {
+	encoded, _ := json.Marshal(want)
+	var wanted any
+	_ = json.Unmarshal(encoded, &wanted)
+	return func(states map[uint64]json.RawMessage) bool {
+		raw, present := states[client]
+		if !present {
+			return false
+		}
+		var got any
+		return json.Unmarshal(raw, &got) == nil && reflect.DeepEqual(got, wanted)
+	}
+}
+
+// The awareness client ids the tabs below announce, as a Yjs provider announces its document's.
+const (
+	aliceAwarenessClient uint64 = 1001
+	bobAwarenessClient   uint64 = 2002
+)
+
+// Spec item 1: two people on one document, each connected to a different process, see each
+// other's typing and cursors within a second, and nobody is disconnected.
+//
+// At this row's first commit the processes share no live document: an append on one leaves the
+// other's room behind the stored head, the stale-room evictor closes that room (or the room's
+// next append is refused and fails it), and its browsers reconnect; awareness never leaves the
+// process it was sent to. Each subtest has a document of its own, so one behaviour failing does
+// not decide another's.
+func TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "LIVE")
+	pair.a.createProject(t, project, "Live across processes")
+
+	t.Run("each keystroke reaches the editor on the other process within a second", func(t *testing.T) {
+		_, artifactID := pair.a.createIssueIn(t, project, "Typed on both", "x")
+		alice := pair.a.openEditorAs(t, "alice", artifactID, "x\n")
+		bob := pair.b.openEditorAs(t, "bob", artifactID, "x\n")
+		for keystroke := 1; keystroke <= 3; keystroke++ {
+			pair.typeAndSee(t, artifactID, "alice on A", alice, "a", "bob on B", bob, keystroke)
+			pair.typeAndSee(t, artifactID, "bob on B", bob, "b", "alice on A", alice, keystroke)
+		}
+		pair.requireConnected(t, artifactID, "alice on A", alice, "after the keystrokes")
+		pair.requireConnected(t, artifactID, "bob on B", bob, "after the keystrokes")
+		pair.requireNoRoomCloses(t, artifactID)
+	})
+
+	t.Run("cursors and presence cross processes within a second", func(t *testing.T) {
+		_, artifactID := pair.a.createIssueIn(t, project, "Cursors on both", "x")
+		alice := pair.a.openEditorAs(t, "alice", artifactID, "x\n")
+		if err := alice.SetAwareness(aliceAwarenessClient, cursorState("alice", 0)); err != nil {
+			t.Fatalf("announce alice's cursor: %v", err)
+		}
+		// Bob opens the document second, on the other process: alice's cursor must be there for
+		// him at once, not after her tab's next heartbeat.
+		bob := pair.b.openEditorAs(t, "bob", artifactID, "x\n")
+		if err := bob.WaitForAwareness(liveWithin, holdsState(aliceAwarenessClient, cursorState("alice", 0))); err != nil {
+			t.Fatalf("bob, who opened the document second and on B, did not see the cursor alice set on A within %v: %v",
+				liveWithin, err)
+		}
+		if err := bob.SetAwareness(bobAwarenessClient, cursorState("bob", 1)); err != nil {
+			t.Fatalf("announce bob's cursor: %v", err)
+		}
+		if err := alice.WaitForAwareness(liveWithin, holdsState(bobAwarenessClient, cursorState("bob", 1))); err != nil {
+			t.Fatalf("the cursor bob set on B did not reach alice on A within %v: %v", liveWithin, err)
+		}
+		if err := alice.SetAwareness(aliceAwarenessClient, cursorState("alice", 1)); err != nil {
+			t.Fatalf("move alice's cursor: %v", err)
+		}
+		if err := bob.WaitForAwareness(liveWithin, holdsState(aliceAwarenessClient, cursorState("alice", 1))); err != nil {
+			t.Fatalf("alice's cursor moving on A did not reach bob on B within %v: %v", liveWithin, err)
+		}
+		pair.requireConnected(t, artifactID, "alice on A", alice, "while the cursors moved")
+		pair.requireConnected(t, artifactID, "bob on B", bob, "while the cursors moved")
+		alice.Close()
+		if err := bob.WaitForAwareness(liveWithin, func(states map[uint64]json.RawMessage) bool {
+			_, present := states[aliceAwarenessClient]
+			return !present
+		}); err != nil {
+			t.Fatalf("alice's tab closing on A did not remove her presence from bob's tab on B within %v: %v", liveWithin, err)
+		}
+		pair.requireConnected(t, artifactID, "bob on B", bob, "after alice left")
+		pair.requireNoRoomCloses(t, artifactID)
+	})
+
+	t.Run("an edit through B's API reaches an editor on A within a second", func(t *testing.T) {
+		_, artifactID := pair.a.createIssueIn(t, project, "Written through the other API", "x")
+		alice := pair.a.openEditorAs(t, "alice", artifactID, "x\n")
+		if answer := pair.b.mustRequest(t, http.MethodPost, editPath(artifactID), editBody(t, "x", "y", "", false), asUser("bob")); answer.status != http.StatusOK {
+			t.Fatalf("bob's edit through B: %v", answer)
+		}
+		if err := alice.WaitForText(markdown, "y\n", liveWithin); err != nil {
+			t.Fatalf("bob's edit through B's API did not reach alice's editor on A live within %v: %v; %s",
+				liveWithin, err, pair.roomCloses(t, artifactID))
+		}
+		pair.requireConnected(t, artifactID, "alice on A", alice, "after bob's edit")
+		pair.requireNoRoomCloses(t, artifactID)
+	})
+
+	// Finding 7 of the audit: a room whose append another process's write had left behind was
+	// failed, and a failed room compacts while it waits for the document lock - the one
+	// compaction that does. Two people taking turns, each keystroke stored before the next,
+	// must fail no room and run no such compaction on either process (the room-counters hook).
+	// A typist whose socket closes reconnects as the dashboard does, so a process that fails
+	// rooms shows it in the counters rather than stopping the session at its first casualty.
+	t.Run("two hundred alternating keystrokes fail no room and run no lock-waiting compaction", func(t *testing.T) {
+		_, artifactID := pair.a.createIssueIn(t, project, "Taking turns", "x")
+		typists := []*typist{
+			{who: "alice on A", login: "alice", process: pair.a, text: "a"},
+			{who: "bob on B", login: "bob", process: pair.b, text: "b"},
+		}
+		typists[0].editor = pair.a.openEditorAs(t, "alice", artifactID, "x\n")
+		typists[1].editor = pair.b.openEditorAs(t, "bob", artifactID, "x\n")
+		const keystrokes = 200
+		var stopped error
+		typed := 0
+		for ; typed < keystrokes && stopped == nil; typed++ {
+			stopped = pair.keystroke(t, artifactID, typists[typed%2])
+		}
+		countersA, countersB := pair.a.roomCounters(t, artifactID), pair.b.roomCounters(t, artifactID)
+		t.Logf("after %d keystrokes: A %+v, B %+v", typed, countersA, countersB)
+		if countersA != (docs.RoomCounters{}) || countersB != (docs.RoomCounters{}) {
+			t.Errorf("finding 7: %d alternating keystrokes failed rooms of the document and ran lock-waiting compactions: on A %d room failures and %d lock-waiting compactions, on B %d and %d; want none on either",
+				typed, countersA.RoomFailures, countersA.LockWaitingCompactions, countersB.RoomFailures, countersB.LockWaitingCompactions)
+		}
+		for _, typing := range typists {
+			if disconnected := typing.disconnected(); disconnected != "" {
+				t.Errorf("%s during the session and had to reconnect", disconnected)
+			}
+		}
+		if stopped != nil {
+			t.Errorf("the session stopped after %d keystrokes: %v", typed, stopped)
+		}
+		pair.requireNoRoomCloses(t, artifactID)
+		if t.Failed() {
+			return
+		}
+		alice, bob := typists[0].editor, typists[1].editor
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			seenByAlice, seenByBob := markdown(alice), markdown(bob)
+			if seenByAlice == seenByBob && strings.Count(seenByAlice, "a") == keystrokes/2 && strings.Count(seenByAlice, "b") == keystrokes/2 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("five seconds after the last keystroke the editors disagree or lost keystrokes: alice on A has %q, bob on B has %q; want both to hold %d of each", seenByAlice, seenByBob, keystrokes/2)
+			}
+			if err := alice.AskForDocument(); err != nil {
+				t.Fatalf("ask A's room for the document: %v", err)
+			}
+			if err := bob.AskForDocument(); err != nil {
+				t.Fatalf("ask B's room for the document: %v", err)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+
+	// One person types, then the other, each within the settle delay of the last: on one process
+	// that is one burst and one version, credited to whoever typed last. Across two processes it
+	// must be too (plan D3.7), whichever process wins the settlement.
+	t.Run("alternating typists within the debounce make one version credited to the last typist", func(t *testing.T) {
+		issueKey, artifactID := pair.a.createIssueIn(t, project, "One burst", "x")
+		waitForSettlementOwed(t, pair.database, artifactID, false)
+		baseline := latestSeq(t, pair, issueKey)
+		typists := []*typist{
+			{who: "alice on A", login: "alice", process: pair.a, text: "a"},
+			{who: "bob on B", login: "bob", process: pair.b, text: "b"},
+		}
+		typists[0].editor = pair.a.openEditorAs(t, "alice", artifactID, "x\n")
+		typists[1].editor = pair.b.openEditorAs(t, "bob", artifactID, "x\n")
+		for keystroke := range 6 {
+			if err := pair.keystroke(t, artifactID, typists[keystroke%2]); err != nil {
+				t.Fatalf("keystroke %d: %v", keystroke+1, err)
+			}
+		}
+		lastTypist := typists[1]
+		burst := time.Now()
+		// The default settle delay is two seconds on each process; fifteen is room for a
+		// settlement that retried, and the wait ends as soon as the burst has settled.
+		deadline := burst.Add(15 * time.Second)
+		for (settlementOwed(t, pair.database, artifactID) || len(versionActorsSince(t, pair, issueKey, baseline)) == 0) && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+		}
+		actors := versionActorsSince(t, pair, issueKey, baseline)
+		t.Logf("%v after the burst: versions credited to %+v; settlement owed: %t", time.Since(burst), actors, settlementOwed(t, pair.database, artifactID))
+		if len(actors) != 1 || actors[0].Kind != "user" || actors[0].ID != lastTypist.login {
+			t.Errorf("six alternating keystrokes within the settle delay made %d versions, credited to %+v; want one version, credited to %s, the last typist",
+				len(actors), actors, lastTypist.login)
+		}
+		for _, typing := range typists {
+			if disconnected := typing.disconnected(); disconnected != "" {
+				t.Errorf("%s during the burst", disconnected)
+			}
+		}
+	})
+}
+
+// patchIssueStatus sets the issue's status through the process's API: "done" closes it, any other
+// status reopens it.
+func (p *dispatchProcess) patchIssueStatus(t *testing.T, issueKey, status string) {
+	t.Helper()
+	p.call(t, http.MethodPatch, "/api/v1/issues/"+issueKey, fmt.Sprintf(`{"status":%q}`, status), http.StatusOK)
+}
+
+// requireEndsWithin waits up to within for the editor's socket to close, and fails the test with
+// what the process logged when it stays open.
+func requireEndsWithin(t *testing.T, editor *docstest.Peer, within time.Duration, what string, process *dispatchProcess) {
+	t.Helper()
+	select {
+	case <-editor.Ended:
+	case <-time.After(within):
+		t.Fatalf("%s: the socket stayed open %v later.\nThat process's output:\n%s", what, within, process.Output.String())
+	}
+}
+
+// reconnectWithScope reconnects login's tab to the document on process, authenticates it as the
+// dashboard does, and requires the scope the room grants it.
+func reconnectWithScope(t *testing.T, process *dispatchProcess, login, artifactID, scope, what string) *docstest.Peer {
+	t.Helper()
+	editor, err := process.reconnectEditor(t, login, artifactID)
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	if granted := authenticateEditor(t, editor); granted != scope {
+		t.Fatalf("%s: the room granted %q, want %q", what, granted, scope)
+	}
+	return editor
+}
+
+// Spec item 2: closing or reopening an issue changes every process's copy of its documents at
+// once. A tab on the process that did not take the request is closed with the others and comes
+// back with the scope the issue now allows; an update sent on the closed issue is not stored.
+//
+// At this row's first commit only the process that took the PATCH refreshes its rooms
+// (SetIssueClosed, called from patchIssue), so the room on the other process keeps taking edits on
+// a closed issue until it is reloaded for some other reason.
+//
+// Bob opens his tab on B before alice opens hers on A, so the room alice is in stands at the
+// stored head when the issue closes: what closes her socket, if anything does, is the close.
+func TestClosingAndReopeningAnIssueChangesEveryProcessesRooms(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "SHUT")
+	pair.a.createProject(t, project, "Closed across processes")
+	issueKey, artifactID := pair.b.createIssueIn(t, project, "Closed on the other process", "before")
+
+	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "before\n")
+	alice := pair.openStoredEditor(t, pair.a, "alice", artifactID, "before\n")
+	if scope := authenticateEditor(t, alice); scope != "read-write" {
+		t.Fatalf("alice's tab on A on an open issue was granted %q, want read-write", scope)
+	}
+	bobEndedBeforeClose := peerEnded(bob)
+
+	pair.b.patchIssueStatus(t, issueKey, "done")
+	requireEndsWithin(t, alice, liveWithin,
+		"closing the issue through B left alice's tab on A connected to a room that still takes edits on the closed issue", pair.a)
+	if bobEndedBeforeClose {
+		t.Fatalf("bob's tab on B was disconnected before the close (close code %d), so the close cannot be shown closing it; %s",
+			bob.CloseCode(), pair.roomCloses(t, artifactID))
+	}
+	requireEndsWithin(t, bob, liveWithin, "closing the issue through B left bob's tab on B connected", pair.b)
+
+	alice = reconnectWithScope(t, pair.a, "alice", artifactID, "readonly", "alice's tab on A, reconnected after the close")
+	bob = reconnectWithScope(t, pair.b, "bob", artifactID, "readonly", "bob's tab on B, reconnected after the close")
+	closedHead := storedHead(t, pair, artifactID)
+	if err := typeAtEnd(alice, "zzz"); err != nil {
+		t.Fatalf("alice's keystroke on the closed issue: %v", err)
+	}
+	held, err := roomRendering(alice, 5*time.Second)
+	if err != nil {
+		t.Fatalf("read A's room after alice's keystroke on the closed issue: %v", err)
+	}
+	if strings.Contains(held, "zzz") {
+		t.Errorf("A's room took alice's keystroke on the closed issue: it holds %q", held)
+	}
+	if head := storedHead(t, pair, artifactID); head != closedHead {
+		t.Errorf("the document moved from update %d to %d after the close: an update on a closed issue was stored", closedHead, head)
+	}
+
+	pair.a.patchIssueStatus(t, issueKey, "todo")
+	requireEndsWithin(t, alice, liveWithin, "reopening the issue through A left alice's read-only tab on A connected", pair.a)
+	requireEndsWithin(t, bob, liveWithin,
+		"reopening the issue through A left bob's read-only tab on B connected, so it cannot edit the reopened issue", pair.b)
+	alice = reconnectWithScope(t, pair.a, "alice", artifactID, "read-write", "alice's tab on A, reconnected after the reopen")
+	bob = reconnectWithScope(t, pair.b, "bob", artifactID, "read-write", "bob's tab on B, reconnected after the reopen")
+	for _, edit := range []struct {
+		who    string
+		editor *docstest.Peer
+		text   string
+	}{{"alice on A", alice, "a"}, {"bob on B", bob, "b"}} {
+		head := storedHead(t, pair, artifactID)
+		if err := typeAtEnd(edit.editor, edit.text); err != nil {
+			t.Fatalf("%s's keystroke on the reopened issue: %v", edit.who, err)
+		}
+		pair.waitStoredPast(t, artifactID, head, 5*time.Second, edit.who+"'s keystroke on the reopened issue")
+	}
+}
+
+// documentAsk is an ask a document's settlement indexed: its block and its author.
+type documentAsk struct {
+	BlockID *string     `json:"block_id"`
+	Author  model.Actor `json:"author"`
+}
+
+// askOfBlock is the ask a settlement made of blockID on the issue, read through the process's API
+// (GET /api/v1/issues/{key}/asks), or false while there is none.
+func (p *dispatchProcess) askOfBlock(t *testing.T, issueKey, blockID string) (documentAsk, bool) {
+	t.Helper()
+	answer := p.call(t, http.MethodGet, "/api/v1/issues/"+issueKey+"/asks", "", http.StatusOK)
+	var asks []documentAsk
+	if err := json.Unmarshal(answer, &asks); err != nil {
+		t.Fatalf("decode the document's asks: %v: %s", err, answer)
+	}
+	for _, ask := range asks {
+		if ask.BlockID != nil && *ask.BlockID == blockID {
+			return ask, true
+		}
+	}
+	return documentAsk{}, false
+}
+
+// Spec item 3: an ask block keeps the author who wrote it, whichever process settles it.
+//
+// Bob writes an ask block in his tab on B, and B is killed (SIGKILL) before it settles - B's
+// settle delay is ten minutes - so the settlement the document owes is left to the resumption on
+// A. The pending row is made older than the resumption age (one minute) by SQL rather than by
+// waiting it out, so A's next pass (one a minute) arms it.
+//
+// Alice edits the document through B after bob's block and before the kill. Without her, the
+// latest edit source the pending row names is bob's, and at this row's first commit a settlement
+// that does not know who introduced a block credits the block to that latest source (the
+// fallback in askBlockSources.author), so the row would pass by coincidence with the author
+// living only in B's memory. With her, that fallback names alice, and only an author recorded
+// where A can read it names bob.
+func TestAnAskBlockKeepsItsAuthorWhenAnotherProcessSettlesIt(t *testing.T) {
+	pair := newPair(t)
+	pair.startSettling(t, nil, 0, 10*time.Minute)
+	project := uniqueProjectKey(t, "ASKA")
+	pair.b.createProject(t, project, "Ask authors across processes")
+	// Created through B, whose own settlement is ten minutes away, so A never loads this
+	// document before its resumption does.
+	issueKey, artifactID := pair.b.createIssueIn(t, project, "Bob asks on B", "Intro.")
+
+	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "Intro.\n")
+	const blockID = "ask-bob-region"
+	head := storedHead(t, pair, artifactID)
+	appendMarkdown(t, bob, ":::ask{#"+blockID+` urgency="med" multiple="false"}`+"\nWhich region goes first?\n:::\n")
+	pair.waitStoredPast(t, artifactID, head, 10*time.Second, "bob's ask block")
+	if answer := pair.b.mustRequest(t, http.MethodPost, editPath(artifactID), editBody(t, "Intro.", "Intro, edited.", "", false), asUser("alice")); answer.status != http.StatusOK {
+		t.Fatalf("alice's edit through B after bob's ask block: %v", answer)
+	}
+	if _, found := pair.b.askOfBlock(t, issueKey, blockID); found {
+		t.Fatalf("B already settled bob's ask block, so no other process is left to settle it")
+	}
+	pair.b.kill(t)
+
+	backdated, err := pair.database.Pool.Exec(context.Background(), `
+		update doc_settlements_pending set marked_at = now() - interval '2 minutes' where artifact_id = $1
+	`, artifactID)
+	if err != nil {
+		t.Fatalf("age the document's pending settlement: %v", err)
+	}
+	if backdated.RowsAffected() != 1 {
+		t.Fatalf("B left no pending settlement for the document, so there is nothing for A to resume")
+	}
+	// A resumption pass runs once a minute; two and a half minutes is two passes and the settle
+	// delay after the second.
+	const within = 150 * time.Second
+	deadline := time.Now().Add(within)
+	for {
+		ask, found := pair.a.askOfBlock(t, issueKey, blockID)
+		if found {
+			if ask.Author.Kind != "user" || ask.Author.ID != "bob" {
+				t.Fatalf("A's resumed settlement made the ask of bob's block with author %+v, want bob (user), who wrote it on B; A's resumption lines: %q",
+					ask.Author, pair.a.logLines("resumed owed document settlements"))
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("A made no ask of bob's block within %v of the settlement becoming due for resumption:\n%s", within, pair.a.Output.String())
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// backgroundRequest is a request sent from a goroutine of its own, for a request a row parks
+// with a hook while it does something else.
+type backgroundRequest struct {
+	answered chan httpAnswer
+	failed   chan error
+}
+
+// requestInBackground sends the request from a goroutine of its own and returns at once.
+func (p *dispatchProcess) requestInBackground(method, path, body string, header http.Header) backgroundRequest {
+	pending := backgroundRequest{answered: make(chan httpAnswer, 1), failed: make(chan error, 1)}
+	go func() {
+		answer, err := p.request(method, path, body, header)
+		if err != nil {
+			pending.failed <- err
+			return
+		}
+		pending.answered <- answer
+	}()
+	return pending
+}
+
+// await waits up to within for the request's answer, and fails the test when it does not come.
+func (pending backgroundRequest) await(t *testing.T, within time.Duration, what string, process *dispatchProcess) httpAnswer {
+	t.Helper()
+	select {
+	case answer := <-pending.answered:
+		return answer
+	case err := <-pending.failed:
+		t.Fatalf("%s: %v", what, err)
+	case <-time.After(within):
+		t.Fatalf("%s: no answer within %v:\n%s", what, within, process.Output.String())
+	}
+	return httpAnswer{}
+}
+
+// The document item 4's cases write into: P, the middle paragraph, is the one bob deletes and the
+// agent writes into.
+const (
+	agentRowSpec     = "Intro.\n\nThe pear is ripe.\n\nOutro."
+	agentRowWithoutP = "Intro.\n\nOutro.\n"
+)
+
+// lostEditAnswer is the body of a lost-edit refusal or of an edit's 200: the code and
+// participants of the first, the lost_ops of either.
+type lostEditAnswer struct {
+	Code         string        `json:"code"`
+	Participants []model.Actor `json:"participants"`
+	LostOps      *[]int        `json:"lost_ops"`
+}
+
+func decodeLostEdit(t *testing.T, answer httpAnswer) lostEditAnswer {
+	t.Helper()
+	var decoded lostEditAnswer
+	if err := json.Unmarshal(answer.body, &decoded); err != nil {
+		t.Fatalf("decode the edit's answer: %v: %v", err, answer)
+	}
+	return decoded
+}
+
+// Spec item 4: an agent's write through one process sees what a person on the other process
+// typed before it, and its lost-edit check judges against every process. Bob's tab is on B, with a
+// second tab of his there that shows when B's room has applied his delete; A holds no room of
+// the document, so the agent's write forks it from the store. Each case has its own document.
+//
+// At this row's first commit nothing asks B: A's cold fork is the store alone, B's update that is
+// not stored yet is invisible to it, and the lost-edit check and its participants read A's room
+// alone - which, for a cold write, is the room its publish loads from the store.
+func TestAnAgentWriteSeesEditsInFlightOnTheOtherProcess(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "AGNT")
+	pair.b.createProject(t, project, "Agent writes across processes")
+
+	// open makes the case's document through B, opens bob's two tabs on it there, and requires
+	// that A holds no room of it.
+	open := func(t *testing.T, title string) (artifactID string, bob, bobsOtherTab *docstest.Peer) {
+		t.Helper()
+		_, artifactID = pair.b.createIssueIn(t, project, title, agentRowSpec)
+		waitForSettlementOwed(t, pair.database, artifactID, false)
+		want := pair.b.documentText(t, artifactID)
+		bob = pair.openStoredEditor(t, pair.b, "bob", artifactID, want)
+		bobsOtherTab = pair.openStoredEditor(t, pair.b, "bob", artifactID, want)
+		if pair.a.holdsRoom(t, artifactID) {
+			t.Fatalf("A holds a room of the document before the agent writes, so its write would not be the cold fork this case is about")
+		}
+		return artifactID, bob, bobsOtherTab
+	}
+	// deleteP deletes P in bob's tab and waits for B's room to show his other tab the delete,
+	// leaving want.
+	deleteP := func(t *testing.T, artifactID string, bob, bobsOtherTab *docstest.Peer, want string) {
+		t.Helper()
+		deleteParagraph(t, bob, "pear")
+		if err := bobsOtherTab.WaitForText(markdown, want, liveWithin); err != nil {
+			t.Fatalf("B's room never showed bob's delete of P to his other tab: %v; %s", err, pair.roomCloses(t, artifactID))
+		}
+	}
+
+	t.Run("before the fork: an edit into a paragraph deleted on the other process is refused", func(t *testing.T) {
+		artifactID, bob, bobsOtherTab := open(t, "Deleted before the agent forks")
+		// B applies and broadcasts bob's delete at once and stores it 300 ms later.
+		pair.b.holdPersistence(t, artifactID, 300*time.Millisecond)
+		deleted := time.Now()
+		deleteP(t, artifactID, bob, bobsOtherTab, agentRowWithoutP)
+		answer := pair.a.mustRequest(t, http.MethodPost, editPath(artifactID), editBody(t, "pear", "plum", "", true), asAgent())
+		t.Logf("the agent's edit through A answered %v after bob's delete", time.Since(deleted))
+		if answer.status == http.StatusOK {
+			t.Fatalf("the agent's edit through A of a paragraph bob had already deleted on B answered 200: A forked the document from a store that did not hold the delete B's room had applied (its append was held 300 ms), so the write landed in a deleted paragraph; want 404 TARGET_NOT_FOUND. Answer: %v", answer)
+		}
+		if answer.status != http.StatusNotFound || answer.code() != "TARGET_NOT_FOUND" {
+			t.Fatalf("the agent's edit of a paragraph bob had deleted on B answered %v, want 404 TARGET_NOT_FOUND", answer)
+		}
+	})
+
+	t.Run("while the write is open: a delete on the other process refuses it with its participants", func(t *testing.T) {
+		artifactID, bob, bobsOtherTab := open(t, "Deleted while the agent writes")
+		head := storedHead(t, pair, artifactID)
+		pair.a.armLiveWritePause(t, artifactID, docs.PauseAfterFirstAppend)
+		write := pair.a.requestInBackground(http.MethodPost, editPath(artifactID), editBody(t, "pear", "pear tart", "", true), asAgent())
+		// Parked after its first append, the write holds the document's advisory lock, so B's
+		// append of bob's delete waits on it: the delete is in B's room and not stored.
+		pair.a.awaitLiveWriteParked(t, artifactID, docs.PauseAfterFirstAppend)
+		deleteP(t, artifactID, bob, bobsOtherTab, agentRowWithoutP)
+		if moved := storedHead(t, pair, artifactID); moved != head {
+			t.Fatalf("the document moved from update %d to %d while the agent's write held its lock, so bob's delete is not the update in flight this case is about", head, moved)
+		}
+		if !pair.a.releaseLiveWritePause(t, artifactID, docs.PauseAfterFirstAppend) {
+			t.Fatalf("the release found no write parked")
+		}
+		answer := write.await(t, 30*time.Second, "the agent's edit through A, after its release", pair.a)
+		decoded := decodeLostEdit(t, answer)
+		if answer.status != http.StatusConflict || decoded.Code != "EDIT_LOST_TO_CONCURRENT_CHANGE" {
+			t.Fatalf("the agent's write into P through A, which bob deleted on B while the write was open, answered %v; want 409 EDIT_LOST_TO_CONCURRENT_CHANGE naming bob: the write's check judged a fork that never saw B's room, so the paragraph it wrote into reads as alive", answer)
+		}
+		if !slices.ContainsFunc(decoded.Participants, func(actor model.Actor) bool { return actor.Kind == "user" && actor.ID == "bob" }) {
+			t.Errorf("the lost-edit refusal names participants %+v; want bob, connected on B, among them", decoded.Participants)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for strings.Contains(pair.a.documentText(t, artifactID), "pear") {
+			if time.Now().After(deadline) {
+				t.Fatalf("bob's delete was not stored within 5 s of the refused write rolling back: the document reads %q", pair.a.documentText(t, artifactID))
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+
+	// The write that is judged here first commits and then publishes, so B learns of its commit
+	// before bob deletes. An earlier agent write through A, which this case does not judge, is
+	// what makes that hold at this row's first commit too: a commit on A closes B's room there
+	// unless an eviction of that room inside the last two seconds holds it off, so where the
+	// earlier write closes B's room, bob's tabs reconnect as a browser's do, and the judged write
+	// lands inside the window that close opened - B's room stays open, and behind.
+	t.Run("after the commit: a delete on the other process is reported in lost_ops", func(t *testing.T) {
+		artifactID, bob, bobsOtherTab := open(t, "Deleted before the agent publishes")
+		const earlier = "Intro, first.\n\nThe pear is ripe.\n\nOutro.\n"
+		if answer := pair.a.mustRequest(t, http.MethodPost, editPath(artifactID), editBody(t, "Intro.", "Intro, first.", "", true), asAgent()); answer.status != http.StatusOK {
+			t.Fatalf("the agent's earlier write through A: %v", answer)
+		}
+		var evicted time.Time
+		if err := bobsOtherTab.WaitForText(markdown, earlier, liveWithin); err != nil {
+			if !peerEnded(bobsOtherTab) {
+				t.Fatalf("the agent's earlier write through A reached neither bob's tab on B nor closed it within %v: %v", liveWithin, err)
+			}
+			evicted = time.Now()
+			t.Logf("the earlier write closed B's room (bob's tab: close code %d); bob's tabs reconnect", bobsOtherTab.CloseCode())
+			bob = pair.reconnectStored(t, pair.b, "bob", artifactID)
+			bobsOtherTab = pair.reconnectStored(t, pair.b, "bob", artifactID)
+			// Bob's reconnects are writes on B, which close the room the earlier write's
+			// publish left on A: the judged write is to fork the store, as a cold write does.
+			deadline := time.Now().Add(5 * time.Second)
+			for pair.a.holdsRoom(t, artifactID) {
+				if time.Now().After(deadline) {
+					t.Fatalf("A still holds the room the earlier write's publish loaded, so the judged write would not fork cold")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		pair.a.armLiveWritePause(t, artifactID, docs.PauseAfterCommit)
+		write := pair.a.requestInBackground(http.MethodPost, editPath(artifactID), editBody(t, "pear", "pear tart", "", true), asAgent())
+		pair.a.awaitLiveWriteParked(t, artifactID, docs.PauseAfterCommit)
+		// The write is committed; bob's delete reaches B's room now, and B stores it 300 ms on.
+		pair.b.holdPersistence(t, artifactID, 300*time.Millisecond)
+		deleteP(t, artifactID, bob, bobsOtherTab, "Intro, first.\n\nOutro.\n")
+		if !evicted.IsZero() {
+			if spent := time.Since(evicted); spent >= 1500*time.Millisecond {
+				t.Fatalf("the judged write and bob's delete took %v of B's two-second eviction window, so B's room may close before the write is judged; this case measured nothing", spent)
+			}
+		}
+		if !pair.a.releaseLiveWritePause(t, artifactID, docs.PauseAfterCommit) {
+			t.Fatalf("the release found no write parked")
+		}
+		answer := write.await(t, 30*time.Second, "the agent's edit through A, after its release", pair.a)
+		if answer.status != http.StatusOK {
+			t.Fatalf("the agent's committed write answered %v, want 200 with lost_ops", answer)
+		}
+		decoded := decodeLostEdit(t, answer)
+		if decoded.LostOps == nil || !slices.Equal(*decoded.LostOps, []int{0}) {
+			got := "null"
+			if decoded.LostOps != nil {
+				got = fmt.Sprint(*decoded.LostOps)
+			}
+			t.Fatalf("the agent's write into P, which bob deleted on B after it committed and before it published, answered 200 with lost_ops %s; want [0], its one operation: the loss was judged on A's room alone, which never receives B's delete. Answer: %v", got, answer)
+		}
+	})
+}
+
+// reconnectStored reconnects login's tab on process and waits for the update its sync appends to
+// be stored, as openStoredEditor does for a first connection.
+func (p *dispatchPair) reconnectStored(t *testing.T, process *dispatchProcess, login, artifactID string) *docstest.Peer {
+	t.Helper()
+	head := storedHead(t, p, artifactID)
+	editor, err := process.reconnectEditor(t, login, artifactID)
+	if err != nil {
+		t.Fatalf("%v:\n%s", err, process.Output.String())
+	}
+	p.waitStoredPast(t, artifactID, head, 10*time.Second, login+"'s reconnected tab's sync update on "+p.name(process))
+	return editor
+}
+
+// Spec item 5: a read never returns text older than the store holds, whichever process serves it.
+//
+// At this row's first commit a read is served from the process's resident room with no look at
+// the stored head. The evictor closes a room another process's write left behind, but at most
+// once every two seconds per room, so a write on A that lands in the window of an earlier
+// eviction on B - the second write of the loop below, once bob's tab has reconnected as a
+// browser does - leaves B's room, and every read B serves from it, behind the store
+// (burstLeavingTheRoomBehind is the same shape). That is what makes the stale read here
+// deterministic rather than a race.
+func TestAReadOnTheOtherProcessIsNeverOlderThanTheStore(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "READ")
+	pair.a.createProject(t, project, "Reads across processes")
+
+	t.Run("a read on B right after each write on A shows it and its token passes the next conditional write", func(t *testing.T) {
+		_, artifactID := pair.a.createIssueIn(t, project, "Written on A, read on B", "v0")
+		bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "v0\n")
+		_, token := pair.a.textAndToken(t, artifactID)
+		reconnects := 0
+		for write := 1; write <= 50; write++ {
+			before, after := fmt.Sprintf("v%d", write-1), fmt.Sprintf("v%d", write)
+			if peerEnded(bob) {
+				reconnects++
+				bob = pair.reconnectStored(t, pair.b, "bob", artifactID)
+			}
+			answer := pair.a.mustRequest(t, http.MethodPost, editPath(artifactID), editBody(t, before, after, token, false), asUser("alice"))
+			if answer.status != http.StatusOK {
+				t.Fatalf("write %d through A, conditional on the token of the read B served after write %d, answered %v: that read's token was not the stored document's",
+					write, write-1, answer)
+			}
+			read, readToken := pair.b.textAndToken(t, artifactID)
+			if read != after+"\n" {
+				t.Fatalf("read %d on B, sent the moment write %d through A answered 200, answered %q: older than the store, which holds %q. Bob's tab on B, which keeps B's room resident, reconnected %d times by then, as a browser whose room was closed does; %s",
+					write, write, read, after+"\n", reconnects, pair.roomCloses(t, artifactID))
+			}
+			token = readToken
+		}
+	})
+
+	// A comment anchored to a mark a browser placed is verified against the document (VerifyMark),
+	// which waits up to a second (MarkWait) for the mark to arrive. Alice places the mark on A;
+	// the comment goes through B, where bob's tab keeps a room of the document.
+	//
+	// While alice connects and marks, a write through B is parked after its commit, in its
+	// publish (the live-write pause hook), and released once the mark is stored. At this row's
+	// first commit an open live write is what holds the evictor off a room (hasOpenLiveWrite), and
+	// each notification it holds off defers that room's next look by at least two seconds, so B's
+	// room stays resident and behind the mark for longer than the comment's verification waits:
+	// a stale read by construction, not by the evictor's timing. A process that keeps its rooms
+	// current shows the mark whatever that write does.
+	t.Run("a mark placed by an editor on A is verified by a comment anchored through B", func(t *testing.T) {
+		issueKey, artifactID := pair.b.createIssueIn(t, project, "Marked on A, anchored through B", "The quick brown fox")
+		bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "The quick brown fox\n")
+		pair.b.armLiveWritePause(t, artifactID, docs.PauseAfterCommit)
+		write := pair.b.requestInBackground(http.MethodPost, editPath(artifactID), editBody(t, "brown", "red", "", false), asUser("carol"))
+		pair.b.awaitLiveWriteParked(t, artifactID, docs.PauseAfterCommit)
+		alice := pair.openStoredEditor(t, pair.a, "alice", artifactID, "The quick red fox\n")
+		markID := "mark-" + uniqueProjectKey(t, "M")
+		head := storedHead(t, pair, artifactID)
+		placeMark(t, alice, "alice", "quick", markID)
+		pair.waitStoredPast(t, artifactID, head, 5*time.Second, "alice's mark")
+		if !pair.b.releaseLiveWritePause(t, artifactID, docs.PauseAfterCommit) {
+			t.Fatalf("the release found no write parked")
+		}
+		if answer := write.await(t, 30*time.Second, "carol's write through B, after its release", pair.b); answer.status != http.StatusOK {
+			t.Fatalf("carol's write through B: %v", answer)
+		}
+		pair.requireConnected(t, artifactID, "bob on B", bob, "before the comment")
+		body := fmt.Sprintf(`{"body":"why","anchor":{"artifact":%q,"mark_id":%q}}`, artifactID, markID)
+		answer := pair.b.mustRequest(t, http.MethodPost, "/api/v1/issues/"+issueKey+"/comments", body, asUser("bob"))
+		if answer.status != http.StatusCreated {
+			t.Fatalf("bob's comment through B, anchored on the mark alice placed on A and the store holds, answered %v; want 201: B verified the mark against a room older than the store", answer)
+		}
+		var comment struct {
+			Anchor struct {
+				Quote string `json:"quote"`
+			} `json:"anchor"`
+		}
+		if err := json.Unmarshal(answer.body, &comment); err != nil || comment.Anchor.Quote != "quick" {
+			t.Fatalf("the comment's anchor quotes %q (%v), want %q: %v", comment.Anchor.Quote, err, "quick", answer)
+		}
+	})
+}
+
+// corruptHistory makes the document's stored history one update ygo cannot decode, at the head
+// it stood at, so a rebuild has something to rebuild and no room's cursor moves.
+func corruptHistory(t *testing.T, pair *dispatchPair, artifactID string) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pair.database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the corruption: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	for _, statement := range []string{
+		`delete from doc_checkpoints where artifact_id = $1`,
+		`delete from doc_updates where artifact_id = $1 and version < (select max(version) from doc_updates where artifact_id = $1)`,
+		`update doc_updates set update = decode('deadbeef', 'hex') where artifact_id = $1`,
+	} {
+		if _, err := tx.Exec(ctx, statement, artifactID); err != nil {
+			t.Fatalf("corrupt the document's history: %s: %v", statement, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the corruption: %v", err)
+	}
+}
+
+func rebuildPath(artifactID string) string {
+	return "/api/v1/artifacts/" + artifactID + "/rebuild"
+}
+
+// resumedLine is what a settlement-resumption pass logs when it armed owed settlements.
+const resumedLine = `msg="dispatch: resumed owed document settlements"`
+
+// loggedAt is the time a slog text line was written (its time= field).
+func loggedAt(line string) (time.Time, bool) {
+	field, _, _ := strings.Cut(line, " ")
+	stamp, found := strings.CutPrefix(field, "time=")
+	if !found {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(time.RFC3339Nano, stamp)
+	return at, err == nil
+}
+
+// resumedBetween is every resumption line either process logged at a time in [from, to).
+func (p *dispatchPair) resumedBetween(from, to time.Time) []string {
+	var lines []string
+	for _, process := range []*dispatchProcess{p.a, p.b} {
+		for _, line := range process.logLines(resumedLine) {
+			if at, ok := loggedAt(line); ok && !at.Before(from) && at.Before(to) {
+				lines = append(lines, p.name(process)+": "+line)
+			}
+		}
+	}
+	return lines
+}
+
+// Spec item 6: a rebuild, the settlement resumption, the conditional-edit queue and a write to a
+// document no room holds behave across processes as on one. Every process here has a ten-minute
+// settle delay, so no settlement runs inside the row: an owed settlement stays owed for the
+// resumption to find, and no settlement loads a room.
+func TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses(t *testing.T) {
+	pair := newPair(t)
+	pair.startSettling(t, nil, 10*time.Minute, 10*time.Minute)
+	project := uniqueProjectKey(t, "MAIN")
+	pair.a.createProject(t, project, "Maintenance across processes")
+
+	t.Run("a rebuild through A refuses a document live on B", func(t *testing.T) {
+		_, artifactID := pair.b.createIssueIn(t, project, "Live on B, rebuilt through A", "before")
+		pair.openStoredEditor(t, pair.b, "bob", artifactID, "before\n")
+		corruptHistory(t, pair, artifactID)
+		answer := pair.a.mustRequest(t, http.MethodPost, rebuildPath(artifactID), `{}`, asUser("alice"))
+		if answer.status != http.StatusConflict || answer.code() != "DOCUMENT_LIVE" {
+			t.Fatalf("a rebuild through A while bob's tab holds a room of the document on B answered %v; want 409 DOCUMENT_LIVE: A asked only its own rooms whether the document is live", answer)
+		}
+	})
+
+	t.Run("two rebuilds at once through A and B: one runs and the other is refused", func(t *testing.T) {
+		issueKey, artifactID := pair.a.createIssueIn(t, project, "Rebuilt twice", "before")
+		if pair.a.holdsRoom(t, artifactID) || pair.b.holdsRoom(t, artifactID) {
+			t.Fatalf("a process holds a room of the document, so a rebuild would be refused as live rather than meet the other rebuild")
+		}
+		corruptHistory(t, pair, artifactID)
+		// Both rebuilds validate the history they loaded and then wait here, on the issue's row
+		// (lockArtifactOwner), so each has loaded the corrupt history before either replaces it.
+		gate := lockIssue(t, pair.database, issueKey)
+		throughA := pair.a.requestInBackground(http.MethodPost, rebuildPath(artifactID), `{}`, asUser("alice"))
+		throughB := pair.b.requestInBackground(http.MethodPost, rebuildPath(artifactID), `{}`, asUser("alice"))
+		if waiting := storetest.WaitForLockWaiters(t, gate, 2, 30*time.Second); waiting < 2 {
+			t.Fatalf("%d of the two rebuilds reached the issue's row within 30 s:\nA:\n%s\nB:\n%s", waiting, pair.a.Output.String(), pair.b.Output.String())
+		}
+		if err := gate.Rollback(context.Background()); err != nil {
+			t.Fatalf("release the issue's row: %v", err)
+		}
+		answers := []httpAnswer{
+			throughA.await(t, 60*time.Second, "the rebuild through A", pair.a),
+			throughB.await(t, 60*time.Second, "the rebuild through B", pair.b),
+		}
+		succeeded := 0
+		for _, answer := range answers {
+			if answer.status == http.StatusOK {
+				succeeded++
+			}
+		}
+		if succeeded != 1 || (answers[0].status != http.StatusConflict && answers[1].status != http.StatusConflict) {
+			t.Fatalf("two rebuilds of one document at once answered %v through A and %v through B; want one 200 and one 409: the second replaced the history the first had just rebuilt, judged on a load from before it", answers[0], answers[1])
+		}
+	})
+
+	t.Run("an owed settlement is resumed by one process per period", func(t *testing.T) {
+		_, artifactID := pair.a.createIssueIn(t, project, "Owed and resumed", "before")
+		pair.a.call(t, http.MethodPost, editPath(artifactID), editBody(t, "before", "after", "", false), http.StatusOK)
+		waitForSettlementOwed(t, pair.database, artifactID, true)
+		if _, err := pair.database.Pool.Exec(context.Background(), `
+			update doc_settlements_pending set marked_at = now() - interval '2 minutes' where artifact_id = $1
+		`, artifactID); err != nil {
+			t.Fatalf("age the document's pending settlement: %v", err)
+		}
+		// A period is a bucket of the clock (duty.Exclusive, migration 0115), and the row is owed
+		// through the whole of the first bucket that starts after it aged: no settlement runs
+		// inside the row. Each process's resumption ticks once a minute from its own start, so
+		// each meets that bucket once; what this counts is how many of those meetings resumed it.
+		period := docs.SettlementResumeInterval
+		start := time.Now().Truncate(period).Add(period)
+		end := start.Add(period)
+		t.Logf("counting the resumptions logged in the period from %s to %s", start.Format(time.TimeOnly), end.Format(time.TimeOnly))
+		time.Sleep(time.Until(end) + 2*time.Second)
+		resumed := pair.resumedBetween(start, end)
+		if len(resumed) != 1 {
+			t.Fatalf("the owed settlement was resumed %d times in one %v period, want once across both processes:\n%s",
+				len(resumed), period, strings.Join(resumed, "\n"))
+		}
+	})
+
+	t.Run("33 conditional edits across A and B: 32 queue and one answers 429 EDIT_QUEUE_FULL", func(t *testing.T) {
+		_, artifactID := pair.a.createIssueIn(t, project, "Queued on both", "alpha")
+		_, token := pair.a.textAndToken(t, artifactID)
+		// The first edit parks after its first append, holding the document; every later
+		// conditional edit of it waits behind it, on A in A's queue and on B in B's.
+		pair.a.armLiveWritePause(t, artifactID, docs.PauseAfterFirstAppend)
+		first := pair.a.requestInBackground(http.MethodPost, editPath(artifactID), editBody(t, "alpha", "beta", token, false), asUser("alice"))
+		pair.a.awaitLiveWriteParked(t, artifactID, docs.PauseAfterFirstAppend)
+		const queued = 32
+		later := make([]backgroundRequest, queued)
+		for index := range later {
+			process := pair.a
+			if index%2 == 1 {
+				process = pair.b
+			}
+			later[index] = process.requestInBackground(http.MethodPost, editPath(artifactID), editBody(t, "alpha", "gamma", token, false), asUser("alice"))
+		}
+		answered := make([]*httpAnswer, queued)
+		refused := 0
+		deadline := time.Now().Add(15 * time.Second)
+		for refused == 0 && time.Now().Before(deadline) {
+			for index, request := range later {
+				if answered[index] != nil {
+					continue
+				}
+				select {
+				case answer := <-request.answered:
+					answered[index] = &answer
+					if answer.status == http.StatusTooManyRequests {
+						refused++
+					}
+				case err := <-request.failed:
+					t.Fatalf("conditional edit %d: %v", index+2, err)
+				default:
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if refused == 0 {
+			t.Errorf("33 conditional edits of one document were in flight at once - the first parked holding it, 16 queued behind it on A and 16 on B - and none answered 429 EDIT_QUEUE_FULL within 15 s: each process held its own queue to 32, so the two together queued 33")
+		}
+		if !pair.a.releaseLiveWritePause(t, artifactID, docs.PauseAfterFirstAppend) {
+			t.Fatalf("the release found no edit parked")
+		}
+		first.await(t, 60*time.Second, "the first conditional edit", pair.a)
+		refused = 0
+		for index, request := range later {
+			answer := answered[index]
+			if answer == nil {
+				awaited := request.await(t, 60*time.Second, fmt.Sprintf("conditional edit %d", index+2), pair.a)
+				answer = &awaited
+			}
+			if answer.status == http.StatusTooManyRequests {
+				if answer.code() != "EDIT_QUEUE_FULL" {
+					t.Errorf("conditional edit %d answered %v, want the 429 to be EDIT_QUEUE_FULL", index+2, answer)
+				}
+				refused++
+			}
+		}
+		if refused != 1 {
+			t.Errorf("%d of the 33 conditional edits answered 429 EDIT_QUEUE_FULL, want exactly one: 32 may queue across both processes", refused)
+		}
+	})
+
+	t.Run("an agent write through A, which holds no room, leaves none resident there", func(t *testing.T) {
+		_, artifactID := pair.b.createIssueIn(t, project, "Written cold", "before")
+		if pair.a.holdsRoom(t, artifactID) {
+			t.Fatalf("A holds a room of the document before the write, so the write would not be cold")
+		}
+		if answer := pair.a.mustRequest(t, http.MethodPost, editPath(artifactID), editBody(t, "before", "after", "", true), asAgent()); answer.status != http.StatusOK {
+			t.Fatalf("the agent's write through A: %v", answer)
+		}
+		if pair.a.holdsRoom(t, artifactID) {
+			t.Fatalf("an agent's write through A, which held no room of the document, left a room of it resident on A with no reader in it: the write's publish loaded the room from the store (audit finding 11); A's rooms: %q", pair.a.residentRooms(t))
+		}
+	})
+}
+
+// Plan D10: the answer to a document socket's upgrade names the process that serves it
+// (X-Dispatch-Process, the pod name in production), which is how a two-pod production check
+// records where each of its sockets landed. Both processes run on this host, and the binary
+// reads its name from the host (no setting names it otherwise), so each must answer this host's
+// name.
+func TestEachDocumentSocketNamesItsServingProcess(t *testing.T) {
+	pair := startPair(t, nil)
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		t.Fatalf("read this host's name: %q %v", hostname, err)
+	}
+	project := uniqueProjectKey(t, "HOST")
+	pair.a.createProject(t, project, "Serving processes")
+	_, artifactID := pair.a.createIssueIn(t, project, "Served by both", "x")
+	for _, process := range []*dispatchProcess{pair.a, pair.b} {
+		editor := process.openEditorAs(t, "alice", artifactID, "x\n")
+		switch served := servingProcess(editor); served {
+		case hostname:
+		case "":
+			t.Errorf("the document socket's upgrade on %s carries no X-Dispatch-Process header; want the serving process's host name, %q. Upgrade header: %v",
+				pair.name(process), hostname, editor.UpgradeHeader)
+		default:
+			t.Errorf("the document socket's upgrade on %s names %q as its serving process, want %q", pair.name(process), served, hostname)
+		}
+	}
 }

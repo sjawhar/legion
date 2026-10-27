@@ -522,6 +522,10 @@ func TestTheHealthWaitTakesNoAnswerOnThePortForAProcessThatLostIt(t *testing.T) 
 // dispatchTestLogin is the person the test calls the server as, through header identity.
 const dispatchTestLogin = "alice"
 
+// dispatchAgentToken is the DISPATCH_AGENT_TOKEN every process a test starts trusts: the bearer
+// an agent's request carries.
+const dispatchAgentToken = "shutdown-test-token"
+
 // dispatchProcess is a Dispatch binary a test started, serving on port.
 type dispatchProcess struct {
 	*cmdtest.Process
@@ -572,7 +576,7 @@ func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatch
 		"XDG_CONFIG_HOME":                  home,
 		"XDG_DATA_HOME":                    home,
 		"DATABASE_URL":                     databaseURL,
-		"DISPATCH_AGENT_TOKEN":             "shutdown-test-token",
+		"DISPATCH_AGENT_TOKEN":             dispatchAgentToken,
 		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 		"DISPATCH_LISTEN_HOST":             "127.0.0.1",
@@ -769,20 +773,31 @@ func (p *dispatchProcess) openEditor(t *testing.T, artifactID, want string) *doc
 // identity these processes trust).
 func (p *dispatchProcess) openEditorAs(t *testing.T, login, artifactID, want string) *docstest.Peer {
 	t.Helper()
-	url := "ws://127.0.0.1:" + strconv.Itoa(p.port) + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
-	editor := docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{login}}, artifactID, crdt.New())
+	editor := docstest.Dial(t, p.documentURL(artifactID), http.Header{"X-Dispatch-User": []string{login}}, artifactID, crdt.New())
 	if err := editor.WaitForText(markdown, want, 10*time.Second); err != nil {
 		t.Fatalf("%v:\n%s", err, p.Output.String())
 	}
 	return editor
 }
 
+// documentURL is the address of the document's socket on this process, at the schema version the
+// dashboard presents.
+func (p *dispatchProcess) documentURL(artifactID string) string {
+	return "ws://127.0.0.1:" + strconv.Itoa(p.port) + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+}
+
 // markdown renders the editor's copy of the document, read under its lock while the room's updates
 // apply, or "" while the copy holds no document it can render.
 func markdown(editor *docstest.Peer) string {
-	fragment := editor.Doc.GetXmlFragment("prosemirror")
+	return renderDocument(editor.Doc)
+}
+
+// renderDocument renders doc's Proof document, read under its lock, or "" while doc holds no
+// document it can render.
+func renderDocument(doc *crdt.Doc) string {
+	fragment := doc.GetXmlFragment("prosemirror")
 	var rendered string
-	editor.Doc.Transact(func(txn *crdt.Transaction) {
+	doc.Transact(func(txn *crdt.Transaction) {
 		tree, err := pmdoc.ReadInTransaction(txn, fragment)
 		if err != nil {
 			return
