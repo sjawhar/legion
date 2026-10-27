@@ -22,6 +22,7 @@ import (
 // heldPublisher answers no publish until the test answers it, as NATS answers a publish a round
 // trip after it was sent.
 type heldPublisher struct {
+	publishOnly
 	mu      sync.Mutex
 	topics  []string
 	answers []chan error

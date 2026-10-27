@@ -21,6 +21,7 @@ import (
 // countingPublisher records every topic it is asked to publish, answering each with its entry in
 // failTopics, or else with fail (nil publishes).
 type countingPublisher struct {
+	publishOnly
 	mu         sync.Mutex
 	fail       error
 	failTopics map[string]error

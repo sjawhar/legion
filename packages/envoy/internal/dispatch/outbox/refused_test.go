@@ -19,6 +19,7 @@ import (
 // refusingPublisher refuses one topic as NATS refuses an envelope it cannot take, and publishes
 // the rest, counting every attempt by topic.
 type refusingPublisher struct {
+	publishOnly
 	mu       sync.Mutex
 	refuse   string
 	attempts map[string]int

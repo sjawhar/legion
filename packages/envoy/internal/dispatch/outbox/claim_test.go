@@ -22,6 +22,7 @@ import (
 // other claims. The wait has a deadline so a process that never publishes fails the assertions
 // below rather than hanging the package.
 type rendezvousPublisher struct {
+	publishOnly
 	mu      sync.Mutex
 	ids     []string
 	once    sync.Once

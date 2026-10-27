@@ -966,3 +966,11 @@ func (acceptingPublisher) PublishAsync(contracts.Envelope) <-chan error {
 	accepted <- nil
 	return accepted
 }
+
+func (acceptingPublisher) Request(string, contracts.Envelope, bus.RequestOptions) <-chan error {
+	accepted := make(chan error, 1)
+	accepted <- nil
+	return accepted
+}
+
+func (acceptingPublisher) Probe(time.Duration) error { return nil }

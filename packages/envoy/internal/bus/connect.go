@@ -57,10 +57,11 @@ func (t *reconnectErrThrottle) reset() {
 // twice in a row, or a server -ERR it does not classify. Those two are why onClosed still starts a
 // recovery that dials a replacement. The reconnect buffer is off, so nothing is held and sent after its caller
 // saw an error: a publish while reconnecting waits for the reconnect instead
-// (ensureConnWithContext), and a publish that fails was not sent. AsyncErrorCB logs each error the
-// connection reports on its own and then hands it to asyncErrCB, where the client reads the
-// server's refusal of its core subscription (onAsyncError).
-func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func(), asyncErrCB func(*nats.Conn, error), now func() time.Time) nats.Options {
+// (ensureConnWithContext), and a publish that fails was not sent. DisconnectedErrCB logs the
+// disconnect and then calls disconnectedCB. AsyncErrorCB logs each error the connection reports
+// on its own and then hands it to asyncErrCB, where the client reads the server's refusal of its
+// core subscription (onAsyncError).
+func options(name string, urls []string, reconnectCB func(*nats.Conn), disconnectedCB func(), closedCB func(), asyncErrCB func(*nats.Conn, error), now func() time.Time) nats.Options {
 	if now == nil {
 		now = time.Now
 	}
@@ -82,9 +83,12 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	opts.DisconnectedErrCB = func(_ *nats.Conn, err error) {
 		if err != nil {
 			slog.Info("envoy nats disconnected", slog.String("name", name), slog.String("error", err.Error()))
-			return
+		} else {
+			slog.Info("envoy nats disconnected", slog.String("name", name))
 		}
-		slog.Info("envoy nats disconnected", slog.String("name", name))
+		if disconnectedCB != nil {
+			disconnectedCB()
+		}
 	}
 	// A reconnect attempt that fails is otherwise silent: nats.go retries in place forever, so a
 	// broker that is down leaves no line at all in the process's log. The servers come from urls,
@@ -159,8 +163,8 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 // deadline cuts either to what remains of it.
 const connectTimeout = 5 * time.Second
 
-func connect(name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func(), asyncErrCB func(*nats.Conn, error), now func() time.Time) (*nats.Conn, error) {
-	return connectWithContext(context.Background(), name, urls, credential, dialer, reconnectCB, closedCB, asyncErrCB, now)
+func connect(name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), disconnectedCB func(), closedCB func(), asyncErrCB func(*nats.Conn, error), now func() time.Time) (*nats.Conn, error) {
+	return connectWithContext(context.Background(), name, urls, credential, dialer, reconnectCB, disconnectedCB, closedCB, asyncErrCB, now)
 }
 
 // connectWithContext dials urls with envoy's options, when credential is not nil as the NATS user
@@ -174,7 +178,7 @@ func connect(name string, urls []string, credential nats.Option, dialer *socks5D
 // nats.go's ErrNoServers alone, which names neither, so the proxy's own dial error stands in for
 // it. The address carries no credentials: CheckSOCKS5Proxy admits only an IP address with no zone
 // or a DNS name.
-func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func(), asyncErrCB func(*nats.Conn, error), now func() time.Time) (_ *nats.Conn, err error) {
+func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), disconnectedCB func(), closedCB func(), asyncErrCB func(*nats.Conn, error), now func() time.Time) (_ *nats.Conn, err error) {
 	if dialer != nil {
 		defer func() {
 			if err != nil {
@@ -187,7 +191,7 @@ func connectWithContext(ctx context.Context, name string, urls []string, credent
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		next := options(name, urls, reconnectCB, closedCB, asyncErrCB, now)
+		next := options(name, urls, reconnectCB, disconnectedCB, closedCB, asyncErrCB, now)
 		if credential != nil {
 			if err := credential(&next); err != nil {
 				return nil, err

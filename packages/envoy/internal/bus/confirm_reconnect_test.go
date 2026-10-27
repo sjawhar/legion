@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -166,7 +168,9 @@ func TestSameErrorTreatsAValueThatCannotBeComparedAsChanged(t *testing.T) {
 
 // answeringServer serves one NATS client and stays up: it answers every flush that follows a
 // publish with the permissions violation for deny, when deny is not empty, and then the PONG, and,
-// when receipt is true, then sends an empty receipt to the publish's reply subject.
+// when receipt is true, then sends an empty receipt to the publish's reply subject. A publish with
+// headers (HPUB, as RequestCoreTo's forward with its Nats-Msg-Id is) is read whole by its length,
+// since its header block spans lines.
 func answeringServer(t *testing.T, deny string, receipt bool) *nats.Conn {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -199,6 +203,18 @@ func answeringServer(t *testing.T, deny string, receipt bool) *nats.Conn {
 				}
 				published, reply = true, ""
 				if len(fields) == 4 {
+					reply = fields[2]
+				}
+			case len(fields) >= 4 && fields[0] == "HPUB":
+				total, err := strconv.Atoi(fields[len(fields)-1])
+				if err != nil {
+					return
+				}
+				if _, err := io.ReadFull(lines, make([]byte, total+len("\r\n"))); err != nil {
+					return
+				}
+				published, reply = true, ""
+				if len(fields) == 5 {
 					reply = fields[2]
 				}
 			case len(fields) == 1 && fields[0] == "PING" && published:

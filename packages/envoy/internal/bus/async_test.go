@@ -147,3 +147,61 @@ func TestAWindowWhoseConnectionIsLostAnswersUnavailableBeforeSending(t *testing.
 		}
 	}
 }
+
+// A JetStream publish NATS answers with no responders while the window's connection stays
+// connected is not a lost connection, so it is not ErrUnavailable, which a caller resends on the
+// next connection with no attempt counted: it is ErrNotAcknowledged, which the caller backs off.
+// Deleting the stream makes the server answer the stream's subject with no responders.
+func TestAWindowAnswersNoRespondersOnACurrentConnectionAsNotAcknowledged(t *testing.T) {
+	_, url := testnats.Start(t)
+	client, err := bus.ConnectOwningStream([]string{url})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	if err := client.JS().DeleteStream(bus.Stream); err != nil {
+		t.Fatalf("delete the stream: %v", err)
+	}
+
+	select {
+	case err := <-client.Window().PublishAsync(numberedEnvelope(orderedStreamTopic, 0)):
+		if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, natsgo.ErrNoResponders) || errors.Is(err, bus.ErrUnavailable) {
+			t.Fatalf("a publish answered with no responders on a current connection answered %v, want ErrNotAcknowledged wrapping nats.ErrNoResponders, not ErrUnavailable", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the publish was never answered")
+	}
+	if !client.Connected() {
+		t.Fatal("the client lost its connection; the test proves nothing about a current one")
+	}
+}
+
+// A JetStream publish NATS never acknowledges while the window's connection stays connected, as a
+// server that has gone silent leaves it, is ErrNotAcknowledged once the acknowledgement's 5 s run
+// out, not ErrUnavailable: the connection never read as lost.
+func TestAWindowAnswersAnUnacknowledgedPublishOnACurrentConnectionAsNotAcknowledged(t *testing.T) {
+	server, url := testnats.Start(t)
+	client, err := bus.ConnectOwningStream([]string{url})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	window := client.Window()
+	if err := <-window.PublishAsync(numberedEnvelope(orderedStreamTopic, 0)); err != nil {
+		t.Fatalf("first publish answered %v", err)
+	}
+
+	thaw := server.Freeze(t)
+	defer thaw()
+	select {
+	case err := <-window.PublishAsync(numberedEnvelope(orderedStreamTopic, 1)):
+		if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, natsgo.ErrAsyncPublishTimeout) || errors.Is(err, bus.ErrUnavailable) {
+			t.Fatalf("a publish never acknowledged on a current connection answered %v, want ErrNotAcknowledged wrapping nats.ErrAsyncPublishTimeout, not ErrUnavailable", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the publish was never answered")
+	}
+	if !client.Connected() {
+		t.Fatal("the client lost its connection while frozen; the test proves nothing about a current one")
+	}
+}

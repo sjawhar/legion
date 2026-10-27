@@ -32,6 +32,16 @@ func answered(err error) <-chan error {
 	return answer
 }
 
+// publishOnly completes bus.Sender for a test publisher the outbox only publishes through: the
+// outbox sends nothing with Request or Probe, so a Request answers that it is not served.
+type publishOnly struct{}
+
+func (publishOnly) Request(subject string, _ contracts.Envelope, _ bus.RequestOptions) <-chan error {
+	return answered(fmt.Errorf("test publisher serves no Request (to %q)", subject))
+}
+
+func (publishOnly) Probe(time.Duration) error { return nil }
+
 // publish runs one attempt of event to its end, as scanBatch does for each event of a batch, and
 // returns why it failed.
 func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
@@ -41,6 +51,7 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 }
 
 type recordingPublisher struct {
+	publishOnly
 	mu          sync.Mutex
 	items       []contracts.Envelope
 	failures    int
@@ -85,6 +96,7 @@ func (p *recordingPublisher) setFailTopic(topic string) {
 }
 
 type blockingFailPublisher struct {
+	publishOnly
 	started chan struct{}
 	release chan struct{}
 	calls   atomic.Int64

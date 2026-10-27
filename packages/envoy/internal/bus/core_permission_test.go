@@ -141,6 +141,24 @@ func TestRequestCoreToReportsAForwardNATSDenies(t *testing.T) {
 	}
 }
 
+// A window's Request the server denies answers the denial at once, not as a Request nobody
+// answered.
+func TestAWindowRequestReportsAForwardNATSDenies(t *testing.T) {
+	client, _ := grantedClient(t)
+	started := time.Now()
+	select {
+	case err := <-client.Window().Request(deniedRole, roleEnvelope(deniedRole), bus.RequestOptions{Timeout: 2 * time.Second}):
+		if !errors.Is(err, bus.ErrPublishDenied) || errors.Is(err, bus.ErrNotAcknowledged) {
+			t.Fatalf("denied Request answered %v, want ErrPublishDenied", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the denied Request was never answered")
+	}
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Fatalf("denied Request waited %s, the whole timeout", elapsed)
+	}
+}
+
 // The server's refusal of the core subscription the client sent again on reconnecting reads as an
 // inactive subscription until a server that grants it accepts it again. nats.go keeps a refused
 // subscription valid and only records the refusal, so the listener's live topics lane, reconnected

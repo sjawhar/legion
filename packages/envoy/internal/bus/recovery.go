@@ -11,13 +11,18 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// onClosed is wired as the ClosedCB callback. It launches recovery in a
-// background goroutine so the NATS library callback returns immediately.
+// onClosed is wired as the ClosedCB callback. It reports the connection event (ConnectionChanged)
+// and launches recovery in a background goroutine so the NATS library callback returns
+// immediately.
 func (c *Client) onClosed() {
+	c.connectionChanged()
 	go c.recover()
 }
 
 func (c *Client) onReconnect(nc *nats.Conn) {
+	// The reconnect is reported first (ConnectionChanged), so a publish waiting for it goes on
+	// without waiting for the re-subscribe and the hooks below.
+	c.connectionChanged()
 	// A reconnect after the client stopped belongs to a process that is shutting down: closeStopped
 	// closes the connection, or leaves it to the drain when the reconnect came before Drain stopped
 	// the client.
