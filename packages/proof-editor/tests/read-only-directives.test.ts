@@ -181,6 +181,25 @@ test("read-only without a block schema draws every container directive as text",
   ]);
 });
 
+test("read-only keeps every line of a typed block whose content a drawn directive would break", async () => {
+  // The server's ask takes `paragraph+ bullet_list?`. Drawing the unknown :::note after the list
+  // puts paragraphs where the ask allows none; Milkdown then drops the whole ask and the reader
+  // sees none of its text, where the default mode's refusal at least showed the raw source.
+  const proof = await createHeadlessProof({
+    blockSchema: {
+      version: 1,
+      types: [{ name: "ask", content: "paragraph+ bullet_list?", render: "host", attributes: {} }],
+    },
+    readOnly: true,
+  });
+  const doc = proof.parseMarkdown(
+    "Lead\n\n::::ask\nWhich option?\n\n- first\n\n:::note\nA note line\n:::\n::::\n"
+  );
+  for (const line of ["Lead", "Which option?", "first", ":::note", "A note line"]) {
+    expect(doc.textContent).toContain(line);
+  }
+});
+
 test("a refused directive without source offsets throws", () => {
   const transform = remarkReadOnlyDirectives(blockSchema);
   const tree = { type: "root", children: [{ type: "containerDirective", name: "note" }] };
