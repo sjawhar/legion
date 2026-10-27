@@ -2,32 +2,33 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-595",
-  "completed": "2026-10-27T11:05:10Z",
-  "round": "rebase re-check after the conflict merge",
+  "completed": "2026-10-27T14:31:45Z",
+  "round": "rebase re-check after the second conflict merge",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2367",
-  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6440306917",
+  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6444693984",
+  "evidencePreviousRecheck": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6440306917",
   "evidenceRound2": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6436244777",
-  "testedHead": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
+  "testedHead": "c5ecb79f20a97a14f078183c3f9081354e1bc6ae",
   "rebaseRecheck": {
-    "oldHead": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
-    "newHead": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
+    "oldHead": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
+    "newHead": "c5ecb79f20a97a14f078183c3f9081354e1bc6ae",
     "fingerprintOld": "9cfde11a35ae2b9601d92dab83bcc08daf816ef0774db140ab7372beb45741e7",
     "fingerprintNew": "9cfde11a35ae2b9601d92dab83bcc08daf816ef0774db140ab7372beb45741e7",
     "verdict": "unchanged: bare gates only"
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "I computed the conflicts-and-rewrites fingerprint myself, with the fork point against \"main\"@origin and without .legion and docs/solutions. It is 9cfde11a…41e7 at b1ce6a9 (the head my E2E line named) and at f48e32d9, the same value the implementer reports. GitHub reports the PR MERGEABLE."
+    "how": "I computed the conflicts-and-rewrites fingerprint myself, with the fork point against \"main\"@origin and without .legion and docs/solutions. It is 9cfde11a…41e7 at f48e32d9 (the head my E2E line named) and at c5ecb79f, the same value the implementer reports. GitHub reports the PR MERGEABLE. After the conflict resolution, .dispatch/architecture/envoy-listener.md still has its one event-driven sentence."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
       "criterion": "Behaviour visible to callers unchanged (rebase re-check, bare gates only: CI read on GitHub and the smoke check).",
-      "surface": "the real envoy-listener binary built from the merged tree f48e32d9, on a testnats natsd with 30,000 CI records, ENVOY_CI_DEBOUNCE=5s; the PR's checks on GitHub",
-      "command": "the fingerprint command of skill://legion-worker/references/conflicts-and-rewrites.md for b1ce6a9 and f48e32d9; git archive f48e32d9249c packages/envoy && GOWORK=off go build ./cmd/listener; bash $TMPDIR/infra595-test/smoke.sh listener-head4 out-smoke-head4; bash $TMPDIR/infra595-test/reset-held.sh listener-head4 out-reset-head4; gh api repos/sjawhar/legion/commits/f48e32d9…/check-runs",
-      "observed": "fingerprints equal. Idle: 3 ticks in 60 s (0.0005 cores), the 300 waiting records settled. A signed check_run got HTTP 200 and pr.42.checks settled once, 5.6 s after the post. Held gauge across a recreated envoy_ci_state: 2 -> 0 -> 1. CI at f48e32d9: build, changes, lint, test, typecheck and pr-title queued when read; the PR is MERGEABLE",
-      "headSha": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
+      "surface": "the real envoy-listener binary built from the merged tree c5ecb79f, on a testnats natsd with 30,000 CI records, ENVOY_CI_DEBOUNCE=5s; the PR's checks on GitHub",
+      "command": "the fingerprint command of skill://legion-worker/references/conflicts-and-rewrites.md for f48e32d9 and c5ecb79f; git archive c5ecb79f20a9 packages/envoy && GOWORK=off go build ./cmd/listener; bash $TMPDIR/infra595-test/smoke.sh listener-head5 out-smoke-head5; bash $TMPDIR/infra595-test/reset-held.sh listener-head5 out-reset-head5; gh api repos/sjawhar/legion/commits/c5ecb79f…/check-runs",
+      "observed": "fingerprints equal. Idle: 4 ticks in 60 s (0.0007 cores), the 300 waiting records settled. A signed check_run got HTTP 200 and pr.42.checks settled once, 5.7 s after the post. Held gauge across a recreated envoy_ci_state: 2 -> 0 -> 1. CI at c5ecb79f: build, changes, lint, test, typecheck and pr-title queued when read; the PR is MERGEABLE",
+      "headSha": "c5ecb79f20a97a14f078183c3f9081354e1bc6ae",
       "negativeControl": "the same check_run signed with a wrong secret: HTTP 401 and no settlement"
     }
   ]
