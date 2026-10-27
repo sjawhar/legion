@@ -445,6 +445,42 @@ await test('typed-block commands refuse a block pointer to a block of their docu
   assert(malformed.state().doc.eq(doc), 'the refused non-canonical pointer changed the document');
 });
 
+await test('a retype into a type whose block pointer allows fewer targets refuses a pointer the old type held', async () => {
+  const documentRef = 'dispatch://CORE-1/spec';
+  const callout = `${documentRef}#b-k1`;
+  // A loose block points at any block; a claim, which may hold it, points only at requirements.
+  const retypeSchema = {
+    version: 1,
+    types: [
+      pointerSchema.types[0],
+      { name: 'loose', content: 'paragraph+', render: 'host', attributes: { serves: { kind: 'block[]' } } },
+      { name: 'claim', content: 'block+', render: 'host', attributes: { serves: { kind: 'block[]', targets: ['requirement'] } } },
+      blockSchema.types[0],
+    ],
+  } as const;
+  const proof = await createHeadlessProof({ blockSchema: retypeSchema });
+  const { schema } = proof;
+  const doc = schema.nodes.doc.create(null, [
+    schema.nodes.callout.create({ blockId: 'k1' }, schema.nodes.paragraph.create(null, schema.text('Note.'))),
+    schema.nodes.loose.create({ blockId: 'c1', serves: [callout] }, schema.nodes.paragraph.create(null, schema.text('Claim.'))),
+  ]);
+  let state = EditorState.create({ schema, doc });
+  const commands = createTypedBlockCommands({
+    blockSchema: retypeSchema,
+    documentRef,
+    getState: () => state,
+    dispatch: (tr) => {
+      state = state.apply(tr);
+    },
+  });
+  const error = thrownBy(() => commands.retypeBlock('c1', 'claim', { serves: [callout] }));
+  assert(error !== undefined, 'a retype into a claim kept its pointer at the callout');
+  for (const word of ['"serves"', '"callout"', 'requirement']) {
+    assert(error!.message.includes(word), `refusal = ${error!.message}, want it to name ${word}`);
+  }
+  assert(state.doc.eq(doc), 'the refused retype changed the document');
+});
+
 await test('a pasted typed block carrying a refused block pointer is not read as the typed block', async () => {
   const rule = typedSchema(pointerSchema.types[1]).nodes.claim.spec.parseDOM![0] as { getAttrs: (dom: HTMLElement) => Record<string, unknown> | false | null };
   const value = 'dispatch://CORE-1/spec#b-x dispatch://CORE/artifact/handbook-md#b-y';

@@ -338,8 +338,8 @@ func validateAttributeValue(attr BlockAttributeSchema, value any) error {
 // no pointers, else canonical block references (text.CanonicalBlockRef) joined by exactly one
 // space, with none leading or trailing and none repeated. Anything else is refused, never
 // normalised, so the server and the editor never disagree on a value. Its twin is
-// parseBlockPointerValue in @legion/contracts; both are tested against
-// `testdata/block-pointer-values.json`.
+// parseBlockPointerValue in @legion/contracts, whose blockPointerValueProblem gives its refusal's
+// reason in the same words; both are tested against `testdata/block-pointer-values.json`.
 func ParseBlockPointerValue(raw string) ([]string, error) {
 	if raw == "" {
 		return []string{}, nil
@@ -355,7 +355,8 @@ func ParseBlockPointerValue(raw string) ([]string, error) {
 }
 
 // validateBlockPointerValues refuses a list of block pointers holding one that is not a canonical
-// block reference (text.CanonicalBlockRef), or holding one twice.
+// block reference (text.CanonicalBlockRef), or holding one twice. Its twin is blockPointersProblem
+// in @legion/contracts, which words each refusal the same.
 func validateBlockPointerValues(values []string) error {
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {

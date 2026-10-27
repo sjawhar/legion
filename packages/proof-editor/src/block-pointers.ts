@@ -1,38 +1,40 @@
 /**
  * A typed block's `block[]` attribute: the blocks it points at, as canonical block references.
- * Which values it may hold is decided by `@legion/contracts` (`parseBlockPointerValue`,
- * `parseCanonicalBlockReference`), the parsers the document service's twins are tested against
- * with the same table, so the editor and the service never disagree on a value. A pointer to a
- * block of the editor's own document is also refused when the block's type is not one the
- * attribute's `targets` allow; a block of another document is the service's to check, since only
- * it knows that document's blocks. Each refusal reads as the service's does (pmdoc
+ * Which values it may hold, and why one is refused, is decided by `@legion/contracts`
+ * (`blockPointerValueProblem`, `blockPointersProblem`, `parseCanonicalBlockReference`), the
+ * parsers the document service's twins are tested against with the same table, in the service's
+ * words, so the editor and the service never disagree on a value. A pointer to a block of the
+ * editor's own document is also refused when the block's type is not one the attribute's
+ * `targets` allow; a block of another document is the service's to check, since only it knows
+ * that document's blocks. Each refusal reads as the service's does (pmdoc
  * `ParseBlockPointerValue` and `CheckBlockPointers`).
  */
 
-import { parseBlockPointerValue, parseCanonicalBlockReference } from "@legion/contracts";
+import { blockPointerValueProblem, parseCanonicalBlockReference } from "@legion/contracts";
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import type { BlockTypeSchema } from "./block-schema";
 import { blockIdOf } from "./editor/schema/block-ids";
 
-const NOT_CANONICAL =
-  "is not a block reference as Dispatch writes one: dispatch://<ISSUE>/spec#b-<id>, or dispatch://<ISSUE or PROJECT>/artifact/<slug>#b-<id>, the id percent-encoded in upper-case hex except ASCII letters, digits and -, optionally pinned @v<N>";
-
 /**
- * What is wrong with `values` as the pointers of a `block[]` attribute - one that is not a
- * canonical block reference, or one named twice - or undefined when nothing is.
+ * The first block of `doc` whose id is `id`, and its position, or null when no block has it. The
+ * first holder of a repeated id is the block, as the document service reads it.
  */
-export function blockPointerProblem(values: readonly string[]): string | undefined {
-  const seen = new Set<string>();
-  for (const value of values) {
-    if (parseCanonicalBlockReference(value) === undefined) {
-      return `${JSON.stringify(value)} ${NOT_CANONICAL}`;
+export function findBlock(
+  doc: ProseMirrorNode,
+  id: string
+): { node: ProseMirrorNode; pos: number } | null {
+  let found: { node: ProseMirrorNode; pos: number } | null = null;
+  doc.descendants((node, pos) => {
+    if (found !== null) {
+      return false;
     }
-    if (seen.has(value)) {
-      return `names ${JSON.stringify(value)} twice`;
+    if (blockIdOf(node) !== id) {
+      return true;
     }
-    seen.add(value);
-  }
-  return undefined;
+    found = { node, pos };
+    return false;
+  });
+  return found;
 }
 
 /**
@@ -41,27 +43,23 @@ export function blockPointerProblem(values: readonly string[]): string | undefin
  * joined by exactly one space. Any other value is refused, never normalised.
  */
 export function parseBlockPointers(typeName: string, name: string, value: string): string[] {
-  const pointers = parseBlockPointerValue(value);
-  if (pointers !== undefined) {
-    return pointers;
+  const problem = blockPointerValueProblem(value);
+  if (problem !== undefined) {
+    throw new Error(
+      `typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)}: ${problem}`
+    );
   }
-  const problem =
-    value.startsWith(" ") || value.endsWith(" ") || value.includes("  ")
-      ? `${JSON.stringify(value)} must be block references separated by exactly one space, with none leading or trailing`
-      : (blockPointerProblem(value.split(" ")) ?? `${JSON.stringify(value)} ${NOT_CANONICAL}`);
-  throw new Error(
-    `typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)}: ${problem}`
-  );
+  return value === "" ? [] : value.split(" ");
 }
 
 /**
  * Why a command may not leave `doc` with the typed block `type` (`block` its id, null for a block
  * not yet given one) holding the attribute values `attrs`, or undefined when it may: a `block[]`
- * value it introduces - one `held`, the block's attributes before the command, does not already
- * hold in that attribute - names a block of `doc` whose type the attribute's `targets` do not
- * allow. A pointer names a block of `doc` when its document is `documentRef`, the document's
- * unversioned reference; without one nothing is refused here. A pointer to a block `doc` lacks
- * is accepted, as the service accepts one to an absent block.
+ * value it introduces - one `held`, the block's attributes before the command as the same type,
+ * does not already hold in that attribute - names a block of `doc` whose type the attribute's
+ * `targets` do not allow. A pointer names a block of `doc` when its document is `documentRef`, the
+ * document's unversioned reference; without one nothing is refused here. A pointer to a block
+ * `doc` lacks is accepted, as the service accepts one to an absent block.
  */
 export function blockPointerRefusal(
   doc: ProseMirrorNode,
@@ -94,17 +92,7 @@ export function blockPointerRefusal(
       ) {
         continue;
       }
-      let target: string | undefined;
-      doc.descendants((node) => {
-        if (target !== undefined) {
-          return false;
-        }
-        if (blockIdOf(node) === reference.block) {
-          target = node.type.name;
-          return false;
-        }
-        return true;
-      });
+      const target = findBlock(doc, reference.block)?.node.type.name;
       if (target !== undefined && !targets.includes(target)) {
         const at = block === null ? "" : ` #${block}`;
         return `typed block ${JSON.stringify(type.name)}${at} attribute ${JSON.stringify(name)} points at ${value}, a ${JSON.stringify(target)} block; it points only at ${targets.join(", ")}`;

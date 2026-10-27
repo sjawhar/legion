@@ -6,9 +6,11 @@
 
 - A typed block's `block[]` attribute: `BlockAttributeKind` gains `"block[]"` and
   `BlockAttributeSchema` gains `targets`, the block types it points at. `parseBlockPointerValue`
-  reads a value (canonical block references joined by exactly one space), with
-  `parseCanonicalBlockReference` and `formatBlockReference` for one reference, tested with Go's
-  `pmdoc.ParseBlockPointerValue` against `DISPATCH_BLOCK_POINTER_VALUES`. `GraphEdgeKind` admits
+  reads a value (canonical block references joined by exactly one space), and
+  `blockPointerValueProblem` and `blockPointersProblem` say why a value or a list of pointers is
+  refused, in the server's words, with `parseCanonicalBlockReference` and `formatBlockReference`
+  for one reference, tested with Go's `pmdoc.ParseBlockPointerValue` against
+  `DISPATCH_BLOCK_POINTER_VALUES`. `GraphEdgeKind` admits
   a `block[]` attribute's name beside the structural kinds, the kind of the edges its pointers
   make.
 - The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,11 +17,12 @@ import (
 )
 
 // Pointer is one reference a typed block's `block[]` attribute holds (pmdoc.BlockPointer): the
-// typed block's id, the link's kind (the attribute's name), the canonical block reference, and
-// the block types the attribute points at (none: any block).
+// typed block's id, the link's kind (the attribute's name), the block reference it names, and the
+// block types the attribute points at (none: any block).
 type Pointer struct {
-	Block, Kind, Ref string
-	Targets          []string
+	Block, Kind string
+	Target      text.Ref
+	Targets     []string
 }
 
 // IndexBlocks records version `version` (written at versionAt) of document artifactID's blocks as
@@ -185,46 +187,12 @@ type heldTarget struct {
 }
 
 // blockPairs is each distinct link the pointers of nodes and the mentions in located write: a
-// pointer from its typed block, a mention from the innermost of nodes holding its start. A mention
-// no block holds, and an external URL, write none; nor does a block's mention of a target its own
-// pointers account for (IndexBlocks).
+// pointer from its typed block (pointerPairs), a mention from the innermost of nodes holding its
+// start. A mention no block holds, and an external URL, write none; nor does a block's mention of
+// a target its own pointers account for (IndexBlocks).
 func blockPairs(nodes []model.ArtifactBlock, located []text.Located, pointers []Pointer) []blockPair {
-	pairs := make([]blockPair, 0, len(located)+len(pointers))
-
-	// pointed counts each block's pointer values naming a target. A pinned and an unpinned value
-	// of one attribute name one target, and write one pair. No attribute is named mentions
-	// (pmdoc), so no pointer's pair is a mention's.
-	var pointed map[heldTarget]int
-	if len(pointers) > 0 {
-		type pointerKey struct {
-			held heldTarget
-			kind string
-		}
-		written := make(map[pointerKey]struct{}, len(pointers))
-		isNode := make(map[string]struct{}, len(nodes))
-		for _, node := range nodes {
-			isNode[node.ID] = struct{}{}
-		}
-		pointed = make(map[heldTarget]int, len(pointers))
-		for _, pointer := range pointers {
-			if _, ok := isNode[pointer.Block]; !ok {
-				continue
-			}
-			ref, ok := text.CanonicalBlockRef(pointer.Ref)
-			if !ok {
-				continue
-			}
-			target, _ := targetOf(ref)
-			held := heldTarget{blockID: pointer.Block, target: target}
-			pointed[held]++
-			key := pointerKey{held: held, kind: pointer.Kind}
-			if _, dup := written[key]; dup {
-				continue
-			}
-			written[key] = struct{}{}
-			pairs = append(pairs, blockPair{blockID: pointer.Block, kind: pointer.Kind, target: target, toTypes: pointer.Targets})
-		}
-	}
+	pairs, pointed := pointerPairs(nodes, pointers)
+	pairs = slices.Grow(pairs, len(located))
 
 	starts := make([]int, len(located))
 	for i, mention := range located {
@@ -253,6 +221,42 @@ func blockPairs(nodes []model.ArtifactBlock, located []text.Located, pointers []
 		}
 	}
 	return pairs
+}
+
+// pointerPairs is each distinct link the pointers of nodes write, from its typed block, and the
+// number of each block's pointer values naming each target. A pinned and an unpinned value of one
+// attribute name one target, and write one pair. No attribute is named mentions (pmdoc), so no
+// pointer's pair is a mention's.
+func pointerPairs(nodes []model.ArtifactBlock, pointers []Pointer) ([]blockPair, map[heldTarget]int) {
+	if len(pointers) == 0 {
+		return nil, nil
+	}
+	type pointerKey struct {
+		held heldTarget
+		kind string
+	}
+	written := make(map[pointerKey]struct{}, len(pointers))
+	isNode := make(map[string]struct{}, len(nodes))
+	for _, node := range nodes {
+		isNode[node.ID] = struct{}{}
+	}
+	pairs := make([]blockPair, 0, len(pointers))
+	pointed := make(map[heldTarget]int, len(pointers))
+	for _, pointer := range pointers {
+		if _, ok := isNode[pointer.Block]; !ok {
+			continue
+		}
+		target, _ := targetOf(pointer.Target)
+		held := heldTarget{blockID: pointer.Block, target: target}
+		pointed[held]++
+		key := pointerKey{held: held, kind: pointer.Kind}
+		if _, dup := written[key]; dup {
+			continue
+		}
+		written[key] = struct{}{}
+		pairs = append(pairs, blockPair{blockID: pointer.Block, kind: pointer.Kind, target: target, toTypes: pointer.Targets})
+	}
+	return pairs, pointed
 }
 
 // replaceBlockRefs reconciles the document's block_refs with pairs, matching on the five columns

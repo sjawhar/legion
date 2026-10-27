@@ -1927,11 +1927,12 @@ Three rules enforce `targets`. An agent's or API write is refused when a pointer
 names an existing block of a type the attribute does not allow (`pmdoc.CheckBlockPointers`, called
 by `docs.refuseBlockPointers` from `applyLive`, `SeedText`, and `RebuildDocument` given markdown):
 a pointer is introduced when the tree before the write holds no pointer with the same typed block
-id, attribute and reference (a new pointer, a changed value, or a block retyped into a type
-declaring the attribute), and every pointer is when there is no such tree (a new document, a repair
-of a tree outside the schema, a rebuild whose latest version does not read back). A target in the
-written document is read from the tree the write leaves, any other from its current
-`document_blocks` rows, and a target no block holds is accepted. The refusal is `400 INVALID_OP`
+id, typed block type, attribute and reference (a new pointer, a changed value, or a block retyped
+into a type declaring the attribute, whatever the type before declared under that name), and every
+pointer is when there is no such tree (a new document, a repair of a tree outside the schema, a
+rebuild whose latest version does not read back). A target in the written document is read from
+the tree the write leaves, any other from its current `document_blocks` rows (one query for all of
+a write's introduced pointers), and a target no block holds is accepted. The refusal is `400 INVALID_OP`
 on `attributes` on the edit route and `400 INVALID_MARKDOWN` on every other; a pointer the write
 leaves unchanged is never refused. A browser's write and the block-index reconciliation are never
 refused, and store the pointer as any other. Every block-aware read lists a pointer's edge only

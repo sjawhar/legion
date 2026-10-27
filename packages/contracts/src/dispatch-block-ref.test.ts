@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import {
+  blockPointerValueProblem,
   DISPATCH_BLOCK_ID_ENCODINGS,
   DISPATCH_BLOCK_POINTER_VALUES,
   decodeBlockId,
@@ -101,6 +102,8 @@ test("the Go encoder's table is the same table", async () => {
 
 test.each([...DISPATCH_BLOCK_POINTER_VALUES])("decides block[] value %p", (row) => {
   expect(parseBlockPointerValue(row.value) !== undefined).toBe(row.ok);
+  // A refused value has a reason, and an accepted one none.
+  expect(blockPointerValueProblem(row.value) === undefined).toBe(row.ok);
 });
 
 test("each reference of an accepted value is written back as it was", () => {

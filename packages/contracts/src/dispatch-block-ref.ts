@@ -180,21 +180,49 @@ export function parseCanonicalBlockReference(value: string): DispatchBlockRefere
  * The pointers a typed block's `block[]` attribute holds, as markdown writes it: the empty string
  * for none, else canonical block references (`parseCanonicalBlockReference`) joined by exactly one
  * space, with none leading or trailing and none repeated. Undefined for any other value, which is
- * refused, never normalised, so the editor and the server never disagree on one. Go's twin is
- * `pmdoc.ParseBlockPointerValue`; both are tested against DISPATCH_BLOCK_POINTER_VALUES, whose
- * JSON copy is `packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json`.
+ * refused, never normalised, so the editor and the server never disagree on one
+ * (`blockPointerValueProblem` says why). Go's twin is `pmdoc.ParseBlockPointerValue`; both are
+ * tested against DISPATCH_BLOCK_POINTER_VALUES, whose JSON copy is
+ * `packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json`.
  */
 export function parseBlockPointerValue(value: string): string[] | undefined {
-  if (value === "") {
-    return [];
-  }
-  const references = value.split(" ");
-  if (new Set(references).size !== references.length) {
+  if (blockPointerValueProblem(value) !== undefined) {
     return undefined;
   }
-  return references.every((reference) => parseCanonicalBlockReference(reference) !== undefined)
-    ? references
-    : undefined;
+  return value === "" ? [] : value.split(" ");
+}
+
+/**
+ * Why `value` is not a `block[]` attribute as markdown writes it (`parseBlockPointerValue`), in
+ * the words of Go's `pmdoc.ParseBlockPointerValue`, or undefined when it is one.
+ */
+export function blockPointerValueProblem(value: string): string | undefined {
+  if (value === "") {
+    return undefined;
+  }
+  if (value.startsWith(" ") || value.endsWith(" ") || value.includes("  ")) {
+    return `${JSON.stringify(value)} must be block references separated by exactly one space, with none leading or trailing`;
+  }
+  return blockPointersProblem(value.split(" "));
+}
+
+/**
+ * Why `values` are not the pointers of a `block[]` attribute - one is not a canonical block
+ * reference (`parseCanonicalBlockReference`), or one is named twice - in the words of Go's
+ * `pmdoc.validateBlockPointerValues`, or undefined when they are.
+ */
+export function blockPointersProblem(values: readonly string[]): string | undefined {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (parseCanonicalBlockReference(value) === undefined) {
+      return `${JSON.stringify(value)} is not a block reference as Dispatch writes one: dispatch://<ISSUE>/spec#b-<id>, or dispatch://<ISSUE or PROJECT>/artifact/<slug>#b-<id>, the id percent-encoded in upper-case hex except ASCII letters, digits and -, optionally pinned @v<N>`;
+    }
+    if (seen.has(value)) {
+      return `names ${JSON.stringify(value)} twice`;
+    }
+    seen.add(value);
+  }
+  return undefined;
 }
 
 const atIdBound = `dispatch://CORE-1/spec#b-${"x".repeat(MAX_BLOCK_ID_BYTES)}`;

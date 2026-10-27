@@ -1,7 +1,8 @@
+import { blockPointersProblem } from '@legion/contracts';
 import type { Node as ProseMirrorNode, NodeType } from '@milkdown/kit/prose/model';
 import type { EditorState, Transaction } from '@milkdown/kit/prose/state';
 
-import { blockPointerProblem, blockPointerRefusal } from './block-pointers.js';
+import { blockPointerRefusal, findBlock } from './block-pointers.js';
 import type { BlockAttributeSchema, BlockSchema, BlockTypeSchema } from './block-schema.js';
 import { BLOCK_ID_ATTR, blockIdOf } from './editor/schema/block-ids.js';
 
@@ -75,7 +76,7 @@ function validateValue(typeName: string, name: string, attribute: BlockAttribute
       if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
         throw new Error(`typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)} must be an array of block references`);
       }
-      const problem = blockPointerProblem(value as readonly string[]);
+      const problem = blockPointersProblem(value as readonly string[]);
       if (problem !== undefined) throw new Error(`typed block ${JSON.stringify(typeName)} attribute ${JSON.stringify(name)}: ${problem}`);
     }
   }
@@ -91,16 +92,6 @@ function clientAttributes(type: BlockTypeSchema, attrs: TypedBlockAttributes | u
     result[name] = value;
   }
   return result;
-}
-
-function findBlock(doc: ProseMirrorNode, id: string): LocatedBlock | null {
-  let found: LocatedBlock | null = null;
-  doc.descendants((node, pos) => {
-    if (blockIdOf(node) !== id) return;
-    found = { node, pos };
-    return false;
-  });
-  return found;
 }
 
 function selectedParagraph(state: EditorState): LocatedBlock | null {
@@ -151,7 +142,10 @@ function retype(context: TypedBlockCommandContext, schema: BlockSchema, blockId:
     ...clientAttributes(type, attrs),
     [BLOCK_ID_ATTR]: blockId,
   }, body);
-  dispatchUnlessRefused(context, state.tr.replaceWith(source.pos, source.pos + source.node.nodeSize, replacement), type, blockId, replacement.attrs, source.node.attrs);
+  // A pointer the old type held under the same name is introduced unless the type is unchanged:
+  // the new type's targets may be narrower.
+  const held = source.node.type.name === type.name ? source.node.attrs : {};
+  dispatchUnlessRefused(context, state.tr.replaceWith(source.pos, source.pos + source.node.nodeSize, replacement), type, blockId, replacement.attrs, held);
   return true;
 }
 
