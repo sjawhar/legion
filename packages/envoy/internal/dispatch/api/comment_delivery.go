@@ -489,7 +489,7 @@ func loadCommentDelivery(ctx context.Context, q queryer, commentID, target strin
 func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 	actor, human, err := s.optionalActor(r)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return
 	}
 	var input struct {
@@ -498,12 +498,12 @@ func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 		Delivery string       `json:"delivery"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if !human {
 		if actor, err = bearerSessionActor(r, actor, input.Actor); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -520,20 +520,20 @@ func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 		select target from comment_mentions where comment_id = $1 order by target
 	`, comment.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	targets := []string{}
 	for rows.Next() {
 		var target string
 		if err := rows.Scan(&target); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		targets = append(targets, target)
 	}
 	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	rows.Close()
@@ -564,13 +564,13 @@ func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := s.loadCommentCreatedEvent(r.Context(), s.deps.Store.Pool, comment.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	resolved := ResolvedMention{Target: target, Delivery: input.Delivery}
 	attempt, err := s.deliverResolvedCommentMention(r.Context(), comment, created, resolved, actor, false)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusCreated, attempt)
@@ -589,7 +589,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		Error   *string      `json:"error"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	actor, ok := s.requireActor(w, r, input.Actor)
@@ -607,7 +607,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -617,14 +617,14 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "COMMENT_NOT_FOUND", http.StatusNotFound, "comment not found")
 			return
 		}
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	rows, err := tx.Query(r.Context(), `
 		select target from comment_mentions where comment_id = $1 order by target for update
 	`, comment.ID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	targets := []string{}
@@ -632,14 +632,14 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		var target string
 		if err := rows.Scan(&target); err != nil {
 			rows.Close()
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		targets = append(targets, target)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	rows.Close()
@@ -683,11 +683,11 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	if attempt.ReplyID != nil {
 		reply, err := s.loadComment(r.Context(), tx, *attempt.ReplyID)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		if err := tx.Commit(r.Context()); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		WriteJSON(w, http.StatusOK, reply)
@@ -695,7 +695,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	}
 	if attempt.State == "failed" && input.Error != nil {
 		if err := tx.Commit(r.Context()); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		WriteJSON(w, http.StatusOK, attempt)
@@ -710,17 +710,17 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			comment.ID, attempt.Target, input.Attempt, *input.Error,
 		))
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		attempt = updated
 		event, err := s.appendEvent(r.Context(), tx, commentDeliveryReceipt(comment, actor, attempt))
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		if err := tx.Commit(r.Context()); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		s.publish(event)
@@ -729,7 +729,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	}
 	author, err := json.Marshal(actor)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// A callback reply joins its thread exactly as `POST .../comments` would: the shared climb
@@ -739,7 +739,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	// already loaded and locked, so the climb starts there rather than re-reading it.
 	thread, err := s.threadHeadOf(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID), comment)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// A callback reply requests no turn, so it hands the turn back the way any session reply
@@ -751,53 +751,53 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		returning `+commentColumns+`
 	`, comment.IssueKey, comment.ArtifactID, author, *input.Body, thread.ReplyTo, thread.AskID, turn))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	waitingOn := thread.waitingOnAfter(turn)
 	if thread.AskID != nil {
 		if err := asks.FollowAuthor(r.Context(), tx, *thread.AskID, actor); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
 	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", reply.ID, reply.Body)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if _, err := tx.Exec(r.Context(), `
 		update comment_deliveries set reply_id = $4, state = 'sent', error = null
 		where comment_id = $1 and target = $2 and attempt = $3
 	`, comment.ID, attempt.Target, input.Attempt, reply.ID); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	artifactName, err := s.commentArtifactName(r.Context(), tx, reply)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	payload, err := s.commentEventPayload(
 		r.Context(), tx, reply, artifactName, thread.eventThread(waitingOn), referenceChanges,
 	)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(reply.IssueKey, reply.ArtifactID).event(
 		"comment.answered", actor, payload,
 	))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := refs.Stamp(r.Context(), tx, "comment", reply.ID, event.ID); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(event)

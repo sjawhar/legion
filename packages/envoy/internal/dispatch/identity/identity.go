@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 )
 
@@ -73,8 +74,14 @@ func (i HeaderIdentity) Login(r *http.Request) (string, error) {
 	return email, nil
 }
 
-// WriteError renders an Identity error as Dispatch's JSON error response.
-func WriteError(w http.ResponseWriter, err error) {
+// WriteError renders an Identity error for request r as Dispatch's JSON error response. A lookup
+// that failed because r could not be served - its deadline passed, its client went away, or no
+// database connection came free in time - is answered as admission.WriteUnserved answers it, a
+// retryable 503 or nothing, rather than as a failure of the identity service.
+func WriteError(w http.ResponseWriter, r *http.Request, err error) {
+	if admission.WriteUnserved(w, r.Context(), err) {
+		return
+	}
 	status := http.StatusInternalServerError
 	body := map[string]string{"error": "identity resolution failed", "code": "IDENTITY_ERROR"}
 	if errors.Is(err, ErrNoIdentity) {

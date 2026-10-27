@@ -15,7 +15,7 @@ func (s *server) resolveIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	key, err := s.resolveIssueRef(r.Context(), r.URL.Query().Get("ref"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]string{"key": key})

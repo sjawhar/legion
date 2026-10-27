@@ -48,7 +48,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -56,7 +56,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 	defer ledger.Discard()
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if comment.ReplyTo != nil || comment.AskID != nil {
@@ -65,7 +65,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 	}
 	artifactName, err := s.commentArtifactName(r.Context(), tx, comment)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if _, err := tx.Exec(r.Context(), `
@@ -73,7 +73,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		set resolved = false, resolved_by = null, resolved_at = null
 		where id = $1
 	`, comment.ID); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	comment.Resolved = false
@@ -82,7 +82,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 	if comment.Anchor != nil {
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		// A resolved orphaned suggestion reopens like any thread: its mark is gone, so it has no
@@ -90,20 +90,20 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		projectionKind := ""
 		kind, kindErr := s.commentProjectionKind(documentCtx, comment)
 		if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
-			s.writeHandlerError(w, kindErr)
+			s.writeHandlerError(w, r, kindErr)
 			return
 		}
 		if kindErr == nil {
 			projectionKind = kind
 		}
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind), actor); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
 	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, model.ReferenceChanges{})
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
@@ -112,11 +112,11 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		payload,
 	))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := ledger.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(event)
@@ -132,7 +132,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		Body string `json:"body"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if strings.TrimSpace(input.Body) == "" {
@@ -145,7 +145,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -153,7 +153,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	defer ledger.Discard()
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if comment.Author != actor {
@@ -162,7 +162,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	}
 	artifactName, err := s.commentArtifactName(r.Context(), tx, comment)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	var editedAt time.Time
@@ -172,7 +172,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		where id = $1
 		returning edited_at
 	`, comment.ID, input.Body).Scan(&editedAt); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	comment.Body = input.Body
@@ -180,27 +180,27 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	if comment.Anchor != nil {
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		projectionKind, err := s.commentProjectionKind(documentCtx, comment)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind), actor); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
 	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", comment.ID, comment.Body)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, referenceChanges)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
@@ -209,15 +209,15 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		payload,
 	))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := refs.Stamp(r.Context(), tx, "comment", comment.ID, event.ID); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := ledger.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(event)
@@ -243,7 +243,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -251,19 +251,19 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	defer ledger.Discard()
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	artifactName, err := s.commentArtifactName(r.Context(), tx, comment)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	projectionKind := ""
 	eventType := "comment.resolved"
 	resolvedBy, err := encodeJSON(actor)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	switch action {
@@ -273,7 +273,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		// to close a suggestion that can no longer be accepted or rejected.
 		kind, kindErr := s.commentProjectionKind(documentCtx, comment)
 		if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
-			s.writeHandlerError(w, kindErr)
+			s.writeHandlerError(w, r, kindErr)
 			return
 		}
 		if kindErr == nil {
@@ -286,7 +286,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			where id = $1
 			returning resolved_at
 		`, comment.ID, resolvedBy).Scan(&resolvedAt); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		comment.Resolved = true
@@ -307,7 +307,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 		kind, kindErr := s.commentProjectionKind(documentCtx, comment)
 		if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
-			s.writeHandlerError(w, kindErr)
+			s.writeHandlerError(w, r, kindErr)
 			return
 		}
 		if kindErr == nil {
@@ -322,24 +322,24 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			}
 			if markErr != nil {
 				if !errors.Is(markErr, docs.ErrAnchorOrphaned) {
-					s.writeHandlerError(w, markErr)
+					s.writeHandlerError(w, r, markErr)
 					return
 				}
 				comment.Anchor.Orphaned = true
 				anchor, err := encodeJSON(comment.Anchor)
 				if err != nil {
-					s.writeHandlerError(w, err)
+					s.writeHandlerError(w, r, err)
 					return
 				}
 				if _, err := tx.Exec(r.Context(), `update comments set anchor = $2 where id = $1`, comment.ID, anchor); err != nil {
-					s.writeHandlerError(w, err)
+					s.writeHandlerError(w, r, err)
 					return
 				}
 				if err := ledger.Commit(r.Context()); err != nil {
-					s.writeHandlerError(w, err)
+					s.writeHandlerError(w, r, err)
 					return
 				}
-				s.writeHandlerError(w, markErr)
+				s.writeHandlerError(w, r, markErr)
 				return
 			}
 		}
@@ -353,7 +353,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		comment.Suggestion.Accepted = &accepted
 		suggestion, err := encodeJSON(comment.Suggestion)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		var resolvedAt time.Time
@@ -367,7 +367,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 				writeError(w, "ALREADY_ACTIONED", http.StatusConflict, "suggestion has already been actioned")
 				return
 			}
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		comment.ResolvedBy = &actor
@@ -376,11 +376,11 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	if comment.Anchor != nil {
 		replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", comment.ID)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind), actor); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -394,24 +394,24 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 		named, err := s.deps.Docs.NamedVersion(documentCtx, comment.Anchor.ArtifactID, summary, actor)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		diff, err := s.namedVersionDiff(r.Context(), tx, comment.Anchor.ArtifactID, named.Version)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		versionEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID), actor, comment.Anchor.ArtifactID, artifactName, named, diff)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		events = append(events, versionEvent)
 	}
 	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, model.ReferenceChanges{})
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
@@ -420,12 +420,12 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		payload,
 	))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	events = append(events, event)
 	if err := ledger.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(events...)

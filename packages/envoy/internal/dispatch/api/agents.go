@@ -94,7 +94,7 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, err.Error())
 			return
 		}
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if len(sessions) == 0 {
@@ -114,12 +114,12 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	openAsks, err := s.agentOpenAskCounts(r.Context(), sessionIDs)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	activity, err := s.agentLastActivity(r.Context(), sessionIDs)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 

@@ -122,23 +122,23 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, offset, err := parseMyAnswersPage(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	issue, artifact, err := parseMyRepliesOwner(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	login := model.CanonicalLogin(caller.ID)
 	response := model.MyRepliesResponse{Rows: []model.MyReplyRow{}, Limit: limit, Offset: offset}
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), myRepliesCountQuery, login, issue, artifact).Scan(&response.Total); err != nil {
-		s.writeHandlerError(w, fmt.Errorf("count my replies: %w", err))
+		s.writeHandlerError(w, r, fmt.Errorf("count my replies: %w", err))
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), myRepliesPageQuery, login, issue, artifact, limit, offset)
 	if err != nil {
-		s.writeHandlerError(w, fmt.Errorf("list my replies: %w", err))
+		s.writeHandlerError(w, r, fmt.Errorf("list my replies: %w", err))
 		return
 	}
 	defer rows.Close()
@@ -153,7 +153,7 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 			&issueKey, &issueTitle, &project, &slug, &name,
 			&subject, &replyID, &isAnswer, &author, &body, &row.Reply.CreatedAt,
 		); err != nil {
-			s.writeHandlerError(w, fmt.Errorf("scan my reply: %w", err))
+			s.writeHandlerError(w, r, fmt.Errorf("scan my reply: %w", err))
 			return
 		}
 		row.Reply.Kind = "reply"
@@ -171,7 +171,7 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 		}
 		if author != nil {
 			if err := json.Unmarshal(author, &row.Reply.Author); err != nil {
-				s.writeHandlerError(w, fmt.Errorf("decode my reply author: %w", err))
+				s.writeHandlerError(w, r, fmt.Errorf("decode my reply author: %w", err))
 				return
 			}
 		}
@@ -179,7 +179,7 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 		response.Rows = append(response.Rows, row)
 	}
 	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, fmt.Errorf("list my replies: %w", err))
+		s.writeHandlerError(w, r, fmt.Errorf("list my replies: %w", err))
 		return
 	}
 	WriteJSON(w, http.StatusOK, response)
@@ -208,7 +208,7 @@ func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 		ReadThrough *string `json:"read_through"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if input.ReadThrough == nil {
@@ -216,14 +216,14 @@ func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := parseAgentStateCutoff("read_through", input.ReadThrough); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	login := model.CanonicalLogin(actor.ID)
 	threadID := r.PathValue("id")
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -237,7 +237,7 @@ func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// A closed issue is not refused: reading a thread on a closed issue is reading it.
@@ -247,7 +247,7 @@ func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(r.Context(), `select 1 from artifacts where id = $1 for share`, *artifactID)
 	}
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// read_through is cast by Postgres from the caller's own text rather than bound as a parsed
@@ -259,7 +259,7 @@ func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 		where login = $1 and thread_id = $2 and read_through < least($3::text::timestamptz, now())
 	`, login, threadID, *input.ReadThrough)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// A revisit that moves nothing announces nothing: the thread on screen marks itself on every
@@ -272,11 +272,11 @@ func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 		"user_thread_state.updated", actor, model.UserThreadStateEventPayload{Login: login, ThreadID: threadID},
 	))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(event)

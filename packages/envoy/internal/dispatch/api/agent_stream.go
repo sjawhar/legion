@@ -102,14 +102,14 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 		}
 	})
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer stop()
 	// The session publishes only while a viewer is attached, so it has to hear from this one
 	// before the first turn, not after it.
 	if err := source.Watch(sessionID); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 

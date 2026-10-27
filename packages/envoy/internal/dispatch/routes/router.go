@@ -31,6 +31,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
@@ -311,6 +312,9 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	}
 	subject := r.ctx.SignInRule.Subject(session.Claims)
 	if err := r.ctx.SignInRule.WriteSignIn(req.Context(), r.ctx.People, email, subject, session.RefreshToken, time.Now()); err != nil {
+		if admission.WriteUnserved(w, req.Context(), err) {
+			return
+		}
 		slog.Error("dispatch: record sign-in failed", "email", email, "error", err)
 		writeError(w, http.StatusInternalServerError, "record sign-in")
 		return
@@ -339,6 +343,9 @@ func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email, s
 		var err error
 		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), email)
 		if err != nil {
+			if admission.WriteUnserved(w, req.Context(), err) {
+				return false
+			}
 			slog.Error("dispatch: ensure session generation failed", "email", email, "error", err)
 			writeError(w, http.StatusInternalServerError, "session generation")
 			return false
@@ -349,6 +356,9 @@ func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email, s
 			if errors.Is(err, identity.ErrSignInSuperseded) {
 				slog.Warn("dispatch: sign-in superseded: another Google account signed in to the address before its cookie", "email", email)
 				writeCodeError(w, http.StatusConflict, "another Google account signed in to this address meanwhile; start over at /auth/start", "SIGNIN_SUPERSEDED")
+				return false
+			}
+			if admission.WriteUnserved(w, req.Context(), err) {
 				return false
 			}
 			slog.Error("dispatch: read the account the sign-in recorded failed", "email", email, "error", err)
@@ -367,6 +377,9 @@ func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 	}
 	if r.ctx.Sessions != nil {
 		if err := r.ctx.Sessions.RevokeSessions(req.Context(), email); err != nil {
+			if admission.WriteUnserved(w, req.Context(), err) {
+				return
+			}
 			slog.Warn("dispatch: revoke sessions failed", "email", email, "error", err)
 			writeError(w, http.StatusInternalServerError, "revoke session")
 			return
@@ -400,7 +413,7 @@ func (r *router) apiGithubRest(w http.ResponseWriter, req *http.Request) {
 func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) {
 	login, err := r.ctx.Identity.Login(req)
 	if err != nil {
-		identity.WriteError(w, err)
+		identity.WriteError(w, req, err)
 		return "", false
 	}
 	accesslog.Note(req.Context(), accesslog.KindUser, login)

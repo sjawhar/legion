@@ -75,7 +75,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	assigneeMode, assigneeLogin, err := s.inboxAssigneeFilter(r.Context(), r.URL.Query().Get("assignee"), caller)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// waiting_on is askReadColumns' alias for the turn rule, 'human' or 'agent' on an open ask, so
@@ -99,7 +99,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		         coalesce(lr.created_at, a.created_at) desc, a.id desc
 	`, project, assigneeMode, assigneeLogin, model.CanonicalLogin(caller.ID))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer rows.Close()
@@ -110,7 +110,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		var snoozedUntil *time.Time
 		row, reply, err := scanAskRead(rows, &issueKey, &issueTitle, &issueAssignee, &ask.Priority, &documentProject, &documentSlug, &documentName, &snoozedUntil)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		ask.Ask = row
@@ -128,7 +128,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		asks = append(asks, ask)
 	}
 	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	askPointers := make([]*model.Ask, len(asks))
@@ -138,16 +138,16 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		askIDs[index] = asks[index].ID
 	}
 	if err := s.attachOpenedEventIDs(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := attachAskBacklinkCounts(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	threads, err := s.loadAskThreads(r.Context(), s.deps.Store.Pool, askIDs)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	for index := range asks {

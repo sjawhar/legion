@@ -14,7 +14,7 @@ func (s *server) listProjectArtifacts(w http.ResponseWriter, r *http.Request) {
 	}
 	project := r.PathValue("key")
 	if _, err := s.loadProject(r.Context(), s.deps.Store.Pool, project); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	unlinked := r.URL.Query().Get("unlinked") == "true"
@@ -28,14 +28,14 @@ func (s *server) listProjectArtifacts(w http.ResponseWriter, r *http.Request) {
 	query += ` order by created_at, id`
 	rows, err := s.deps.Store.Pool.Query(r.Context(), query, project)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	artifacts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.Artifact, error) {
 		return scanArtifact(row)
 	})
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if artifacts == nil {
@@ -45,14 +45,14 @@ func (s *server) listProjectArtifacts(w http.ResponseWriter, r *http.Request) {
 	for index := range artifacts {
 		versions, err := s.loadVersions(r.Context(), s.deps.Store.Pool, artifacts[index].ID)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		artifacts[index].Versions = versions
 		pointers[index] = &artifacts[index]
 	}
 	if err := s.attachApprovals(r.Context(), s.deps.Store.Pool, pointers); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, artifacts)

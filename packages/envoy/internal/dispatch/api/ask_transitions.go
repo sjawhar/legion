@@ -167,12 +167,12 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		Actor            *model.Actor    `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	expectedEditedAt, provided, err := parseAnswerPrecondition("expected_edited_at", input.ExpectedEditedAt)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if !provided {
@@ -181,7 +181,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	replacesAnswer, err := parseReplacesAnswer(input.ExpectedAnswerAt)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	transition := answerTransition(actor, input.Selected, input.Text, answerOptions{
@@ -238,7 +238,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, transition)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, ask)
@@ -257,7 +257,7 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 		Actor  *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	actor, ok := s.requireActor(w, r, input.Actor)
@@ -302,7 +302,7 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, ask)

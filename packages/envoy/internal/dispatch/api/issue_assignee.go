@@ -85,7 +85,7 @@ func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `select email from people order by email`)
 	if err != nil {
-		s.writeHandlerError(w, fmt.Errorf("list people: %w", err))
+		s.writeHandlerError(w, r, fmt.Errorf("list people: %w", err))
 		return
 	}
 	users, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (dispatchUser, error) {
@@ -94,7 +94,7 @@ func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
 		return user, err
 	})
 	if err != nil {
-		s.writeHandlerError(w, fmt.Errorf("list people: %w", err))
+		s.writeHandlerError(w, r, fmt.Errorf("list people: %w", err))
 		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"users": users})
@@ -106,7 +106,7 @@ func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
 func (s *server) whoami(w http.ResponseWriter, r *http.Request) {
 	actor, human, err := s.optionalActor(r)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return
 	}
 	if human {

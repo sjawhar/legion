@@ -381,7 +381,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 
 	response, err := s.runSearch(r.Context(), searchText, project, limit, offset)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, response)

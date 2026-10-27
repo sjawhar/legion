@@ -14,6 +14,8 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 )
 
 // DevSignInOrigin returns the host:port of serverURL, the dashboard origin, when it names this
@@ -89,6 +91,9 @@ func (r *router) authDevSignIn(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if err := r.ctx.People.Record(req.Context(), email); err != nil {
+		if admission.WriteUnserved(w, req.Context(), err) {
+			return
+		}
 		slog.Error("dispatch: dev sign-in could not record the person", "email", email, "error", err)
 		writeError(w, http.StatusInternalServerError, "record person")
 		return

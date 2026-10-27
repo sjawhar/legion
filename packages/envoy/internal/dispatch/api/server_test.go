@@ -22,8 +22,10 @@ import (
 
 	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -93,6 +95,18 @@ type testServerOptions struct {
 	lifetime context.Context
 	// streamHeartbeat replaces the event streams' and the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
+	// admission replaces the server's admission limiter; nil is the deployment's limits.
+	admission *admission.Limiter
+	// requestDeadline replaces the server's request deadline; zero is the deployment's.
+	requestDeadline time.Duration
+	// requestPoolSize and acquireBound replace the request pool's size and its acquire bound
+	// (store.BoundAcquires), each when non-zero, so a test can fill the pool and see a request
+	// refused within a fraction of a second.
+	requestPoolSize int32
+	acquireBound    time.Duration
+	// browserPeers lets the document service admit a browser peer by the X-Dispatch-User header,
+	// as connectBrowserPeer connects one; without it the document websocket refuses every peer.
+	browserPeers bool
 }
 
 // headerIdentity is the test header identity that records each named person in the database.
@@ -157,12 +171,32 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		lifetime = t.Context()
 	}
 	database := storetest.Open(t)
+	if options.requestPoolSize != 0 || options.acquireBound != 0 {
+		config := database.Pool.Config()
+		if options.requestPoolSize != 0 {
+			config.MaxConns = options.requestPoolSize
+			config.MinConns, config.MinIdleConns = 0, 0
+		}
+		if options.acquireBound != 0 {
+			store.BoundAcquires(config, options.acquireBound)
+		}
+		pool, err := pgxpool.NewWithConfig(context.Background(), config)
+		if err != nil {
+			t.Fatalf("open the request pool: %v", err)
+		}
+		t.Cleanup(pool.Close)
+		database.Pool = store.NewPool(pool)
+	}
 	broker := events.NewBroker()
 	var documentPersistence docs.VersionedStore
 	if options.persistence != nil {
 		documentPersistence = options.persistence(database)
 	}
-	documentService := docs.New(docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
+	documentDeps := docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: "https://dispatch.example", Settle: settle}
+	if options.browserPeers {
+		documentDeps.Identity = headerIdentity(database)
+	}
+	documentService := docs.New(documentDeps)
 	t.Cleanup(func() {
 		if err := documentService.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
@@ -182,6 +216,8 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		TestHooksEnabled: options.testHooks,
 		Lifetime:         lifetime,
 		StreamHeartbeat:  options.streamHeartbeat,
+		Admission:        options.admission,
+		RequestDeadline:  options.requestDeadline,
 		EnvoyURL:         options.envoyURL,
 		EnvoyTimeout:     options.envoyTimeout,
 		OIDC:             options.oidc,

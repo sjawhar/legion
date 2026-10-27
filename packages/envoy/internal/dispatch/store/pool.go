@@ -657,13 +657,14 @@ func (p *Pool) begin(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error)
 	}
 	release := hold(ctx)
 	if release == nil {
-		return tx, nil
+		release = func() {}
 	}
 	return &trackedTx{Tx: tx, release: release}, nil
 }
 
-// trackedTx clears the caller's mark however the transaction ends. Callers commit and then run
-// a deferred rollback; the release absorbs that second call.
+// trackedTx commits apart from its caller's cancellation (CommitContext) and clears the caller's
+// mark however the transaction ends. Callers commit and then run a deferred rollback; the release
+// absorbs that second call.
 type trackedTx struct {
 	pgx.Tx
 	release func()
@@ -671,12 +672,29 @@ type trackedTx struct {
 
 func (t *trackedTx) Commit(ctx context.Context) error {
 	defer t.release()
+	ctx, cancel := CommitContext(ctx)
+	defer cancel()
 	return t.Tx.Commit(ctx)
 }
 
 func (t *trackedTx) Rollback(ctx context.Context) error {
 	defer t.release()
 	return t.Tx.Rollback(ctx)
+}
+
+// commitTimeout bounds a commit CommitContext has detached from its caller.
+const commitTimeout = 10 * time.Second
+
+// CommitContext is the context a transaction commits on: ctx's values without its cancellation
+// or deadline, bounded at commitTimeout. A commit cut short by its caller - a client that went
+// away, a request deadline that passed - has an unknown outcome, since the server may have
+// committed it, and the document service fails every room such a transaction wrote, which then
+// reload the durable document (docs.Ledger.Commit); a request that ended mid-commit would take its
+// rooms down with it. So a commit in flight runs to its end, and only its own bound, ten seconds,
+// keeps one the database never answers from holding its connection for good. Every transaction
+// this pool opens commits on it.
+func CommitContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), commitTimeout)
 }
 
 type errRow struct {

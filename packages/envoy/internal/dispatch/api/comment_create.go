@@ -332,7 +332,7 @@ func (s *server) lockCommentOwner(ctx context.Context, tx pgx.Tx, owner owner, r
 func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner owner) {
 	var input commentInput
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if input.Suggestion != nil {
@@ -352,7 +352,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	delivery, mentionTargets, err := validateCommentMentions(input)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 
@@ -364,7 +364,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	// the write cannot accept pays for no lookup here.
 	if len(mentionTargets) > 0 {
 		if err := s.refuseClosedOwnerBeforeResolving(r.Context(), owner); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -390,7 +390,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			"the issue's delivery route changed while this comment was being written; post it again"),
 	)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	tx, status, route := start.tx, start.status, start.route
@@ -399,7 +399,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	defer ledger.Discard()
 	threadTarget, err := s.normalizeCommentThreadTarget(r.Context(), tx, owner, input)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if input.Turn != nil {
@@ -443,7 +443,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	turn := threadTarget.replyTurn(actor, input.Turn)
 	var rowID string
 	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	markKind := docs.MarkComment
@@ -452,7 +452,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	anchor, artifactName, snapshot, err := s.resolveAnchor(documentCtx, tx, owner, input.Anchor, markKind, rowID, actor)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 
@@ -462,19 +462,19 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	projectionKind, err := s.commentProjectionKind(documentCtx, projection)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	author, err := encodeJSON(actor)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	var anchorJSON any
 	if anchor != nil {
 		anchorJSON, err = encodeJSON(anchor)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -484,7 +484,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		suggestion = &model.Suggestion{ReplaceWith: input.Suggestion.ReplaceWith}
 		suggestionJSON, err = encodeJSON(suggestion)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -494,13 +494,13 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		returning created_at
 	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON).Scan(&comment.CreatedAt); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	waitingOn := threadTarget.waitingOnAfter(turn)
 	if input.AskID != nil {
 		if err := asks.FollowAuthor(r.Context(), tx, *input.AskID, actor); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -518,7 +518,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	comment.Deliveries = []model.CommentDelivery{}
 	if comment.Anchor != nil {
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind), actor); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -536,7 +536,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 				set resolved = false, resolved_by = null, resolved_at = null
 				where id = $1
 			`, root.ID); err != nil {
-				s.writeHandlerError(w, err)
+				s.writeHandlerError(w, r, err)
 				return
 			}
 			root.Resolved = false
@@ -545,14 +545,14 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			reopenedRoot = &root
 			reopenedArtifactName, err = s.commentArtifactName(r.Context(), tx, root)
 			if err != nil {
-				s.writeHandlerError(w, err)
+				s.writeHandlerError(w, r, err)
 				return
 			}
 		}
 		if root.Anchor != nil {
 			replies, err := s.loadReplyChain(r.Context(), tx, "reply_to", root.ID)
 			if err != nil {
-				s.writeHandlerError(w, err)
+				s.writeHandlerError(w, r, err)
 				return
 			}
 			// A decided or orphaned suggestion's mark is gone, so it has no projection kind to
@@ -561,14 +561,14 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			rootProjectionKind := ""
 			kind, kindErr := s.commentProjectionKind(documentCtx, root)
 			if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
-				s.writeHandlerError(w, kindErr)
+				s.writeHandlerError(w, r, kindErr)
 				return
 			}
 			if kindErr == nil {
 				rootProjectionKind = kind
 			}
 			if err := s.deps.Docs.ProjectMark(documentCtx, root.Anchor.ArtifactID, root.Anchor.MarkID, commentMarkRecord(root, replies, rootProjectionKind), actor); err != nil {
-				s.writeHandlerError(w, err)
+				s.writeHandlerError(w, r, err)
 				return
 			}
 		}
@@ -578,7 +578,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			insert into comment_mentions (comment_id, target, delivery, resolved_session_id)
 			values ($1, $2, $3, $4)
 		`, comment.ID, mention.Target, mention.Delivery, mention.SessionID); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		resolveError := (*string)(nil)
@@ -589,20 +589,20 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, resolve_error, state)
 			values ($1, $2, 1, $3, $4, $5, 'pending')
 		`, comment.ID, mention.Target, mention.Delivery, mention.SessionID, resolveError); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
 	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", comment.ID, comment.Body)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	events := []model.Event{}
 	if snapshot != nil {
 		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		events = append(events, snapshotEvent)
@@ -610,7 +610,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	if reopenedRoot != nil {
 		payload, err := s.commentEventPayload(r.Context(), tx, *reopenedRoot, reopenedArtifactName, commentEventThread{}, model.ReferenceChanges{})
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		event, err := s.appendEvent(r.Context(), tx, owner.event(
@@ -619,7 +619,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			payload,
 		))
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		events = append(events, event)
@@ -628,7 +628,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		r.Context(), tx, comment, artifactName, threadTarget.eventThread(waitingOn), referenceChanges,
 	)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	payload.SuppressRoute = suppressRoute
@@ -641,11 +641,11 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		payload,
 	))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if err := refs.Stamp(r.Context(), tx, "comment", comment.ID, event.ID); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	events = append(events, event)
@@ -656,14 +656,14 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		)
 	}
 	if err := ledger.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(events...)
 	for _, mention := range resolvedMentions {
 		attempt, err := s.deliverResolvedCommentMention(r.Context(), comment, event, mention, actor, true)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		comment.Deliveries = append(comment.Deliveries, attempt)

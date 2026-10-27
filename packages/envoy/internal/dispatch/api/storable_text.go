@@ -140,7 +140,7 @@ func (s *server) refuseUnstorableParameters(pattern string, handler http.Handler
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if refusal := unstorableParameter(r, wildcards); refusal != nil {
-			s.writeHandlerError(w, refusal)
+			s.writeHandlerError(w, r, refusal)
 			return
 		}
 		handler(w, r)
@@ -188,7 +188,7 @@ func unstorableQuery(raw string) *apiError {
 func (s *server) refuseUnstorableActor(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if refusal := unstorableJSON(docs.ActorHeader, []byte(r.Header.Get(docs.ActorHeader))); refusal != nil {
-			s.writeHandlerError(w, refusal)
+			s.writeHandlerError(w, r, refusal)
 			return
 		}
 		handler(w, r)

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 )
@@ -25,14 +26,87 @@ const (
 	authBearer routeAuth = "bearer"
 )
 
-// apiRoute is one mounted route. Register mounts the table and GET /api/v1 lists it, so the
-// two can never disagree about what the server serves.
-type apiRoute struct {
+// routeRow is one row of the route table: what a route is. Register mounts the table and GET
+// /api/v1 lists it, so the two can never disagree about what the server serves.
+type routeRow struct {
 	Method      string
 	Pattern     string
 	Auth        routeAuth
 	Description string
 	Handler     http.HandlerFunc
+}
+
+// apiRoute is one mounted route: its row, and how register serves it (serveRoute).
+type apiRoute struct {
+	routeRow
+	// Stream marks the two server-sent event streams, which run for as long as their client
+	// listens: they are neither admitted nor bounded by a deadline. INFRA-258 moves both onto a
+	// websocket, and the field goes with their rows.
+	Stream bool
+	// TestHook marks a route TestHooksEnabled mounts; a test's own route is neither admitted nor
+	// bounded either.
+	TestHook bool
+	// Deadline replaces the server's request deadline (defaultRequestDeadline) for a route whose
+	// work is bounded by the bytes or the repository it moves rather than by the database.
+	Deadline time.Duration
+	// Weight is how many of its class's admission units a request takes (admission.Limiter): the
+	// most request-pool connections it holds at once. Zero is one.
+	Weight int
+}
+
+// transferDeadline is the deadline of the routes that move a file's bytes - the three uploads and
+// the four file version downloads, a file up to files.MaxObjectSize over whatever link the client
+// has - and of the architecture syncs, which read a whole repository's model through GitHub. Five
+// minutes is what such a transfer or import is given before the server gives up on it.
+const transferDeadline = 5 * time.Minute
+
+// concurrentReadWeight is the weight of a route that runs its reads side by side, at most two at
+// once (readDeliveryRows, readPipelinePopulation): two request-pool connections.
+const concurrentReadWeight = 2
+
+// routeServings names the rows register serves other than as an ordinary request, by method and
+// pattern. routes() refuses an entry that names no row, so a renamed route cannot silently lose
+// its serving.
+var routeServings = map[string]apiRoute{
+	"GET /api/v1/events":                     {Stream: true},
+	"GET /api/v1/agents/{session_id}/stream": {Stream: true},
+
+	"POST /api/v1/projects/{key}/artifacts":                                {Deadline: transferDeadline},
+	"POST /api/v1/issues/{key}/artifacts":                                  {Deadline: transferDeadline},
+	"POST /api/v1/agents/{session_id}/artifacts":                           {Deadline: transferDeadline},
+	"GET /api/v1/artifacts/{id}/versions/{number}":                         {Deadline: transferDeadline},
+	"GET /api/v1/issues/{key}/artifacts/{slug}/versions/{number}":          {Deadline: transferDeadline},
+	"GET /api/v1/projects/{key}/artifacts/{slug}/versions/{number}":        {Deadline: transferDeadline},
+	"GET /api/v1/agents/{session_id}/artifacts/{slug}/versions/{number}":   {Deadline: transferDeadline},
+	"POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync": {Deadline: transferDeadline},
+	"POST /api/v1/projects/{key}/architecture-sources/sync":                {Deadline: transferDeadline},
+	"POST /api/v1/projects/{key}/architecture-source/sync":                 {Deadline: transferDeadline},
+
+	"GET /api/v1/delivery/timeline": {Weight: concurrentReadWeight},
+	"GET /api/v1/delivery/measures": {Weight: concurrentReadWeight},
+	"GET /api/v1/delivery/pipeline": {Weight: concurrentReadWeight},
+}
+
+// mountedRoutes is rows as register serves them: each with its routeServings entry, and each
+// test hook marked TestHook.
+func mountedRoutes(rows, testHooks []routeRow) []apiRoute {
+	routes := make([]apiRoute, 0, len(rows)+len(testHooks))
+	served := 0
+	for _, row := range rows {
+		route, found := routeServings[row.Method+" "+row.Pattern]
+		if found {
+			served++
+		}
+		route.routeRow = row
+		routes = append(routes, route)
+	}
+	if served != len(routeServings) {
+		panic(fmt.Sprintf("routeServings names %d routes, and the table mounts %d of them", len(routeServings), served))
+	}
+	for _, row := range testHooks {
+		routes = append(routes, apiRoute{routeRow: row, TestHook: true})
+	}
+	return routes
 }
 
 // routeIndexEntry is the public shape of a route in GET /api/v1.
@@ -48,7 +122,7 @@ const routeIndexDocs = "skills/dispatch/SKILL.md"
 
 // routes lists every native-workspace route. Add a row here, never a mux.HandleFunc line.
 func (s *server) routes() []apiRoute {
-	routes := []apiRoute{
+	rows := []routeRow{
 		{http.MethodGet, "/api/v1", authPublic, "This index: every route with its method, auth, and purpose.", s.getRouteIndex},
 		{http.MethodGet, "/api/v1/schema/blocks", authPublic, "The typed document block schema as JSON.", s.getBlockSchema},
 		{http.MethodGet, "/api/v1/projects", authAny, "List projects.", s.listProjects},
@@ -188,16 +262,17 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/machine-logins", authHuman, "List the machine logins the caller may revoke that can still reach a secret: the secrets broker's launcher credentials for every service's login, whoever approved it, and for the caller's own machines, unexpired or expired with a session still running, each naming who approved it.", s.listMachineLogins},
 		{http.MethodPost, "/api/v1/machine-logins/{id}/revoke", authHuman, "Revoke a machine login, expired or not, ending every session it enrolled, a service's pods included: anyone signed in revokes a service's login, and only the person who approved a person's machine login revokes that one.", s.revokeMachineLogin},
 	}
+	var testHooks []routeRow
 	if s.deps.TestHooksEnabled {
-		routes = append(routes,
-			apiRoute{http.MethodPost, "/api/v1/events/_test/disconnect", authAny, "Test hook: drop every open event stream.", s.disconnectAllStreams},
-			apiRoute{http.MethodPost, "/api/v1/delivery/_test/disconnect", authAny, "Test hook: close every open delivery socket with 1012, as a restart does.", s.disconnectDeliverySockets},
-			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
-			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
-			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
-		)
+		testHooks = []routeRow{
+			{http.MethodPost, "/api/v1/events/_test/disconnect", authAny, "Test hook: drop every open event stream.", s.disconnectAllStreams},
+			{http.MethodPost, "/api/v1/delivery/_test/disconnect", authAny, "Test hook: close every open delivery socket with 1012, as a restart does.", s.disconnectDeliverySockets},
+			{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
+			{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
+			{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
+		}
 	}
-	return routes
+	return mountedRoutes(rows, testHooks)
 }
 
 // routeIndexEntries renders the table for GET /api/v1, sorted by path then method.

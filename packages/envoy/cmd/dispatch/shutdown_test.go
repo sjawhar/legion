@@ -114,14 +114,14 @@ func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *tes
 	process.checkSettledAtShutdown(t, database, artifactID)
 }
 
-// A write in flight at SIGTERM can wait on a lock past the HTTP drain's share, the document
-// service's budget and the point a fixed shutdown bound would end it, here a title change behind
-// another writer that holds the issue for 27 seconds after the signal, 3 s inside the runtime's
-// kill. The database is answering, so Dispatch keeps the request's connection open until the write
-// commits and its answer is sent, and only then closes the pool, as the deferred close of the pool
-// before this shutdown order did.
+// A write in flight at SIGTERM can wait on a lock past the HTTP drain's share and the point the
+// document service starts settling, here a title change behind another writer that holds the issue
+// for 15 seconds after the signal: past httpDrainBeforeDocuments, and inside the request's own
+// 20-second deadline (api's defaultRequestDeadline), which is now what bounds the wait before the
+// runtime's kill does. The database is answering, so Dispatch keeps the request's connection open
+// until the write commits and its answer is sent, and only then closes the pool.
 func TestSIGTERMWhileAWriteWaitsOnALockCommitsItAndAnswersBeforeExit(t *testing.T) {
-	const lockHeldAfterSIGTERM = 27 * time.Second
+	const lockHeldAfterSIGTERM = 15 * time.Second
 	database := storetest.Open(t)
 	process := startDispatchProcess(t, database.Pool.Config().ConnString())
 	process.waitHealthy(t)

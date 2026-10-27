@@ -11,6 +11,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // Ledger is what the document operations joined to one database transaction produce until it
@@ -118,7 +119,8 @@ func collectEvent(ctx context.Context, event model.Event) {
 // operations recorded (see Ledger), and last publishes the events they appended, so a caller's
 // own events, published after Commit returns, follow them. When the commit returns an error its
 // outcome is unknown, so the rooms the transaction wrote are failed and reload the durable
-// document.
+// document. That is why ctx's cancellation and deadline do not reach the commit (commit): the
+// publish that follows it already runs on a context of its own (publishLiveUpdate).
 func (l *Ledger) Commit(ctx context.Context) error {
 	if err := l.commit(ctx); err != nil {
 		return err
@@ -141,7 +143,16 @@ func (l *Ledger) publishEvents() {
 
 // commit is Commit up to the publish. Another transaction can run between the two, and tests
 // call them apart to hold that window open.
+//
+// It runs on store.CommitContext - ctx's values, bounded at its own ten seconds, and neither
+// ctx's cancellation nor its deadline - from the settlement credit it records in the transaction
+// to the commit itself. A request whose client goes away or whose deadline passes mid-commit
+// would otherwise cut the commit short, leave its outcome unknown and fail every room the
+// transaction wrote, a room's peers losing their connection over a write that may well have
+// committed.
 func (l *Ledger) commit(ctx context.Context) error {
+	ctx, cancel := store.CommitContext(ctx)
+	defer cancel()
 	if err := l.recordSettlementCredit(ctx); err != nil {
 		_ = l.tx.Rollback(context.Background())
 		l.endRebuilds()

@@ -145,19 +145,19 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey string   `json:"idempotency_key"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	requested, err := validateBroadcastInput(input.Body, input.Delivery, input.IdempotencyKey, input.SessionIDs)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	key := newBroadcastKey(actor, input.IdempotencyKey, input.Body, input.Delivery, requested)
 	// A key this human has already used answers its broadcast before anything else is read: a
 	// retry of a send that landed owes nothing to the registry and must not fail because the
 	// listener is down.
-	if s.answerHeldBroadcastKey(r.Context(), w, key, requested) {
+	if s.answerHeldBroadcastKey(w, r, key, requested) {
 		return
 	}
 	if s.deps.Envoy == nil {
@@ -185,7 +185,7 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, err.Error())
 			return
 		}
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	targets := resolveBroadcastTargets(requested, input.Delivery, sessions)
@@ -210,13 +210,13 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, errBroadcastKeyHeld) {
 		// Two requests with one key reached the write together; the other committed first, and
 		// this one's transaction rolled back - broadcast, messages, attempts and events with it.
-		if !s.answerHeldBroadcastKey(r.Context(), w, key, requested) {
-			s.writeHandlerError(w, fmt.Errorf("broadcast key %q was held and then not found", key.key))
+		if !s.answerHeldBroadcastKey(w, r, key, requested) {
+			s.writeHandlerError(w, r, fmt.Errorf("broadcast key %q was held and then not found", key.key))
 		}
 		return
 	}
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	for _, event := range events {
@@ -315,7 +315,8 @@ func newBroadcastKey(actor model.Actor, key, body, delivery string, requested []
 // death before delivery comes back pending, for the broadcast view's same-mode retry to resume
 // (deliverBroadcast's comment), so a 200 says the broadcast exists, not that delivery is under
 // way.
-func (s *server) answerHeldBroadcastKey(ctx context.Context, w http.ResponseWriter, key broadcastKey, requested []string) bool {
+func (s *server) answerHeldBroadcastKey(w http.ResponseWriter, r *http.Request, key broadcastKey, requested []string) bool {
+	ctx := r.Context()
 	var broadcastID, digest string
 	err := s.deps.Store.Pool.QueryRow(ctx, `
 		select broadcast_id::text, request_digest from broadcast_idempotency_keys
@@ -325,7 +326,7 @@ func (s *server) answerHeldBroadcastKey(ctx context.Context, w http.ResponseWrit
 		return false
 	}
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return true
 	}
 	if digest != key.digest {
@@ -339,7 +340,7 @@ func (s *server) answerHeldBroadcastKey(ctx context.Context, w http.ResponseWrit
 	}
 	read, err := s.readBroadcast(ctx, broadcastID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return true
 	}
 	WriteJSON(w, http.StatusOK, broadcastCreated{
@@ -629,7 +630,7 @@ func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 		limit 50
 	`)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer rows.Close()
@@ -641,17 +642,17 @@ func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 			&summary.ID, &author, &summary.Body, &summary.Delivery, &summary.CreatedAt,
 			&summary.Recipients, &summary.Replies,
 		); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		if err := json.Unmarshal(author, &summary.Author); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		summaries = append(summaries, summary)
 	}
 	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, summaries)
@@ -673,7 +674,7 @@ func (s *server) getBroadcast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, read)

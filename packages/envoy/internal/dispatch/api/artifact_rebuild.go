@@ -23,12 +23,12 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 		Markdown *string `json:"markdown"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if artifact.Kind != "doc" {
@@ -37,7 +37,7 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
@@ -53,20 +53,20 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	var published []model.Event
 	if written.Wrote {
 		event, err := s.commitArtifactVersionEvent(r.Context(), tx, ownerForArtifact(artifact), actor, artifact.ID, artifact.Name, written, nil)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		published = append(published, event)
 	}
 	if err := ledger.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.publish(published...)
@@ -79,7 +79,7 @@ func (s *server) injectArtifactSchemaFailure(w http.ResponseWriter, r *http.Requ
 	}
 	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if artifact.Kind != "doc" {
@@ -87,7 +87,7 @@ func (s *server) injectArtifactSchemaFailure(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := s.deps.Docs.InjectSchemaInvalidForTest(r.Context(), artifact.ID); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

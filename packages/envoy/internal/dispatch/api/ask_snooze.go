@@ -36,14 +36,14 @@ func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
 	}
 	askID, err := parseAskID(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	var input struct {
 		SnoozedUntil *string `json:"snoozed_until"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if input.SnoozedUntil == nil {
@@ -71,7 +71,7 @@ func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
 		on conflict (login, ask_id) do update set snoozed_until = excluded.snoozed_until
 		returning snoozed_until
 	`, model.CanonicalLogin(actor.ID), askID, snoozedUntil).Scan(&stored); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, userAskSnooze{SnoozedUntil: timestampValue(stored)})
@@ -85,7 +85,7 @@ func (s *server) deleteAskSnooze(w http.ResponseWriter, r *http.Request) {
 	}
 	askID, err := parseAskID(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// Un-snoozing a row that is not snoozed is the state the caller asked for, so it answers
@@ -93,7 +93,7 @@ func (s *server) deleteAskSnooze(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.deps.Store.Pool.Exec(r.Context(), `
 		delete from user_ask_snooze where login = $1 and ask_id = $2
 	`, model.CanonicalLogin(actor.ID), askID); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

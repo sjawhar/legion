@@ -299,3 +299,15 @@ func configurePool(config *pgxpool.Config, name string, bound time.Duration) *ac
 	config.ConnConfig.Tracer = &composedTracer{Tracer: composed, acquire: tracer}
 	return tracer
 }
+
+// BoundAcquires re-configures config, a copy of an open pool's configuration (Pool.Config), so a
+// pool opened from it bounds its acquires at bound, under the same pool name. Tests outside this
+// package shorten a full pool's wait with it, so the pool answers ErrPoolBusy in milliseconds
+// rather than in production's seconds.
+func BoundAcquires(config *pgxpool.Config, bound time.Duration) {
+	name := RequestsPool
+	if configured := acquireTracerOf(config.ConnConfig.Tracer); configured != nil {
+		name = configured.name
+	}
+	configurePool(config, name, bound)
+}

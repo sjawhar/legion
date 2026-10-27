@@ -25,12 +25,12 @@ func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	options, err := parseEventListOptions(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	events, err := s.readEvents(r.Context(), issueOwner(r.PathValue("key")), options)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, events)
@@ -90,7 +90,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		var err error
 		since, err = parseNonNegativeInt(sinceRaw, "since")
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
@@ -114,7 +114,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// (id <= since) and missed by a subscription registered only afterwards.
 	subscription, cancel, err := s.eventRelay.subscribe(r.Context())
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer cancel()
@@ -128,7 +128,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// with nothing logged and nothing failed.
 	var head int64
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), `select coalesce(max(id), 0) from events`).Scan(&head); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// A cold client asked for no backlog, and a since above the head can only be an id of a log

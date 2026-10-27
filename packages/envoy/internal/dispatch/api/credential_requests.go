@@ -82,7 +82,7 @@ func (s *server) readRelayBody(w http.ResponseWriter, r *http.Request) (json.Raw
 		return nil, false
 	}
 	if refusal := unstorableJSON("", body); refusal != nil {
-		s.writeHandlerError(w, refusal)
+		s.writeHandlerError(w, r, refusal)
 		return nil, false
 	}
 	return json.RawMessage(body), true

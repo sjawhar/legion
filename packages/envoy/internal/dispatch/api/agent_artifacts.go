@@ -92,7 +92,7 @@ func (s *server) uploadAgentArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := requestSessionID(r)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	s.uploadArtifactFor(w, r, artifactTarget{Session: session})

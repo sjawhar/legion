@@ -23,6 +23,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/agentsecrets"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
@@ -110,6 +111,12 @@ type Deps struct {
 	// (whileCallerResolves), each closing once the caller no longer resolves, and a delivery
 	// socket pings its page and sends it a heartbeat frame.
 	StreamHeartbeat time.Duration
+	// Admission admits every table route's request but the event streams' and the test hooks'
+	// (register); nil is a Limiter at admission.DefaultLimits. A test sets a small one to fill it.
+	Admission *admission.Limiter
+	// RequestDeadline bounds every table route's request that the route itself does not bound
+	// otherwise (apiRoute.Deadline); zero is defaultRequestDeadline. A test sets a short one.
+	RequestDeadline time.Duration
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -154,6 +161,9 @@ type DepsInput struct {
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
 	StreamHeartbeat time.Duration
+	// Admission and RequestDeadline are Deps.Admission and Deps.RequestDeadline.
+	Admission       *admission.Limiter
+	RequestDeadline time.Duration
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -213,6 +223,8 @@ func NewDeps(input DepsInput) (Deps, error) {
 		Lifetime:         input.Lifetime,
 		TestHooksEnabled: input.TestHooksEnabled,
 		StreamHeartbeat:  heartbeat,
+		Admission:        input.Admission,
+		RequestDeadline:  input.RequestDeadline,
 	}, nil
 }
 
@@ -302,6 +314,11 @@ type queryer interface {
 // its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
 // document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 //
+// Every table route but the event streams and the test hooks is admitted by Deps.Admission and
+// bounded by a deadline before its handler runs (serveRoute), so past capacity a request is
+// refused at once with a retryable 503 instead of queueing without end. The websockets are mounted
+// outside the table and are neither.
+//
 // With a Lifetime, the server holds the delivery hub (LEGION-690), which starts its goroutines on
 // the first subscription and runs them until Lifetime ends, and mounts GET /ws/delivery beside the
 // document websocket, under the same wrappers; a server without one (a test's) has neither, so
@@ -343,8 +360,16 @@ func register(mux *http.ServeMux, deps Deps) *server {
 	}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
+	limiter := deps.Admission
+	if limiter == nil {
+		limiter = admission.New(admission.DefaultLimits())
+	}
+	deadline := deps.RequestDeadline
+	if deadline == 0 {
+		deadline = defaultRequestDeadline
+	}
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler))))
+		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, s.serveRoute(route, limiter, deadline)))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
@@ -357,6 +382,57 @@ func register(mux *http.ServeMux, deps Deps) *server {
 		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.serveDeliverySocket)))))
 	}
 	return s
+}
+
+// defaultRequestDeadline bounds an ordinary route's request. Twenty seconds is below the thirty
+// the load generator and the web app's pages wait before they give up and the sixty the dispatch
+// command waits, so the server stops a request's work before its client abandons it, rather than
+// finishing work nobody is waiting for while the requests behind it queue.
+const defaultRequestDeadline = 20 * time.Second
+
+// serveRoute is route's handler as register mounts it, inside the access log: admission, then the
+// request's deadline, then the transaction tracking and the parameter refusal every route has.
+// Admission comes before the deadline so a request's wait for room is bounded by admission's own
+// wait, and the deadline counts only the work the request was admitted to do. An event stream
+// (Stream) and a test hook are neither admitted nor bounded: a stream runs for as long as its
+// client listens, holding no connection between events, and a test hook is a test's own.
+func (s *server) serveRoute(route apiRoute, limiter *admission.Limiter, deadline time.Duration) http.HandlerFunc {
+	handler := trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler))
+	if route.Stream || route.TestHook {
+		return handler
+	}
+	if route.Deadline != 0 {
+		deadline = route.Deadline
+	}
+	return admitted(limiter, route.Weight, boundedBy(deadline, handler))
+}
+
+// admitted runs handler once limiter admits the request at weight, with the ticket on the
+// request's context so a wait elsewhere can park it (admission.Ticket.Park), and answers a
+// refusal 503 OVERLOADED. A request whose client went away while it waited is answered nothing.
+func admitted(limiter *admission.Limiter, weight int, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ticket, err := limiter.Admit(r.Context(), admission.ClassOf(r.Method), weight)
+		if err != nil {
+			var refusal *admission.Refusal
+			if errors.As(err, &refusal) {
+				admission.WriteRefused(w, refusal)
+			}
+			return
+		}
+		defer ticket.Release()
+		handler(w, r.WithContext(admission.WithTicket(r.Context(), ticket)))
+	}
+}
+
+// boundedBy runs handler under deadline (admission.WithDeadline), whose passing writeHandlerError
+// answers 503 REQUEST_TIMEOUT.
+func boundedBy(deadline time.Duration, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := admission.WithDeadline(r.Context(), deadline)
+		defer cancel()
+		handler(w, r.WithContext(ctx))
+	}
 }
 
 func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
@@ -471,7 +547,15 @@ func documentErrorCode(err error) string {
 	return ""
 }
 
-func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
+// writeHandlerError answers r, whose handler failed with err. A request the server could not serve
+// - its deadline passed, its client went away, or no database connection came free in time - is
+// answered first, as admission.WriteUnserved answers it: a retryable 503, or nothing for a client
+// that is gone, and never an ERROR line, since under load every request may meet one. Only then is
+// err mapped to the failure it names.
+func (s *server) writeHandlerError(w http.ResponseWriter, r *http.Request, err error) {
+	if admission.WriteUnserved(w, r.Context(), err) {
+		return
+	}
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)
@@ -546,6 +630,8 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		return
 	}
 	if errors.Is(err, docs.ErrPreconditionBusy) {
+		// Refused before its transaction opened, so nothing ran and the writer may retry.
+		w.Header().Set("Retry-After", admission.RetryAfter)
 		writeError(w, "EDIT_QUEUE_FULL", http.StatusTooManyRequests, docs.ErrPreconditionBusy.Error())
 		return
 	}
@@ -715,17 +801,17 @@ func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *mo
 	}, nil
 }
 
-func (s *server) writeAuthenticationError(w http.ResponseWriter, err error) {
+func (s *server) writeAuthenticationError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, identity.ErrNoIdentity) {
-		identity.WriteError(w, err)
+		identity.WriteError(w, r, err)
 		return
 	}
-	s.writeHandlerError(w, err)
+	s.writeHandlerError(w, r, err)
 }
 
 func (s *server) requireAuthenticated(w http.ResponseWriter, r *http.Request) bool {
 	if _, _, err := s.optionalActor(r); err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return false
 	}
 	return true
@@ -734,7 +820,7 @@ func (s *server) requireAuthenticated(w http.ResponseWriter, r *http.Request) bo
 func (s *server) requireActor(w http.ResponseWriter, r *http.Request, supplied *model.Actor) (model.Actor, bool) {
 	actor, err := s.actorFrom(r, supplied)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return model.Actor{}, false
 	}
 	return actor, true
@@ -748,7 +834,7 @@ func (s *server) decodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst 
 		return true
 	}
 	if err := decodeJSON(r, dst); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return false
 	}
 	return true
@@ -757,7 +843,7 @@ func (s *server) decodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst 
 func (s *server) requireHuman(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {
 	actor, present, err := s.optionalActor(r)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return model.Actor{}, false
 	}
 	if !present {

@@ -40,29 +40,29 @@ type messageRead struct {
 func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 	actor, human, err := s.optionalActor(r)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return
 	}
 	var input createMessageInput
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if !human {
 		if actor, err = bearerSessionActor(r, actor, input.Actor); err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 	}
 	delivery, err := validateCreateMessage(&input)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	issueKey := r.PathValue("key")
 	message, advice, err := s.createStoredMessage(r.Context(), &issueKey, input, delivery, actor)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusCreated, withAdvice(message, advice))
@@ -79,7 +79,7 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 		InReplyTo *string `json:"in_reply_to"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	target := "session:" + r.PathValue("session_id")
@@ -88,12 +88,12 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	delivery, err := validateCreateMessage(&messageInput)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	message, _, err := s.createStoredMessage(r.Context(), nil, messageInput, delivery, actor)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusCreated, message)
@@ -452,7 +452,7 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	read, err := s.readMessage(r.Context(), r.PathValue("key"), r.PathValue("id"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, read)
@@ -471,7 +471,7 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 	_, human, err := s.optionalActor(r)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeAuthenticationError(w, r, err)
 		return
 	}
 	if !requireUUIDPath(w, r, "message") {
@@ -481,12 +481,12 @@ func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), messageThreadCTE+`
 		select id::text from thread where in_reply_to is null
 	`, r.PathValue("id")).Scan(&rootID); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	read, err := s.readMessage(r.Context(), "", rootID)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	if !human && read.Message.IssueKey == nil {
@@ -573,7 +573,7 @@ func (s *server) listIssueMessages(w http.ResponseWriter, r *http.Request) {
 		order by created_at, id
 	`, r.PathValue("key"))
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer rows.Close()
@@ -581,19 +581,19 @@ func (s *server) listIssueMessages(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		root, err := scanMessage(rows)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		roots = append(roots, root)
 	}
 	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	rows.Close()
 	result, err := s.hydrateMessageThreads(r.Context(), roots)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, result)
@@ -666,7 +666,7 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 		order by moved desc, id desc
 	`, unreadDirectRepliesArgs(actor.ID, &sessionID)...)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	defer rows.Close()
@@ -676,20 +676,20 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 		var holdsUnread bool
 		message, err := scanMessage(rows, &holdsUnread)
 		if err != nil {
-			s.writeHandlerError(w, err)
+			s.writeHandlerError(w, r, err)
 			return
 		}
 		roots = append(roots, message)
 		unread[message.ID] = holdsUnread
 	}
 	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	rows.Close()
 	result, err := s.hydrateMessageThreads(r.Context(), roots)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	// Only this list has an unread verdict to carry; a root the query left out of the map is

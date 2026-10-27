@@ -70,7 +70,7 @@ func (s *server) getDeliveryPipeline(w http.ResponseWriter, r *http.Request) {
 	}
 	population, err := s.readPipelinePopulation(r.Context(), settings, at)
 	if err != nil {
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, r, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, deliveryPipelineCompute(settings, population, at, time.Now().UTC()))
