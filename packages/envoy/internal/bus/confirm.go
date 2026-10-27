@@ -23,8 +23,8 @@ var errPublishUnconfirmed = errors.New("publish not known to have been accepted"
 // the server accepted it (confirmPublished). A nil error means the server accepted the publish;
 // otherwise the error is a window already spent (errWindowElapsed), nats.go's refusal before
 // sending (refused), a flush that failed or ran out of the window, ErrPublishDenied, or one
-// wrapping errPublishUnconfirmed. publish is conn.PublishMsg, bound to the same conn: both callers
-// read their connection once and pass it and its PublishMsg, so publish publishes on the
+// wrapping errPublishUnconfirmed. publish is conn.PublishMsg, bound to the same conn: every caller
+// reads its connection once and passes it and its PublishMsg, so publish publishes on the
 // connection observe and confirmPublished judge. It is a parameter so a test can make the server's
 // answer arrive before publish returns, which is the case the state read before it exists for.
 //
@@ -33,7 +33,7 @@ var errPublishUnconfirmed = errors.New("publish not known to have been accepted"
 // answering failure behind it tells the caller a message failed that its subscribers receive - and
 // a core subject has no duplicate window, so the caller's retry delivers it twice. The deadline is
 // also read off the clock, since it can pass before ctx's timer marks ctx done; a ctx with no
-// deadline has the zero one, already spent, though both callers bound theirs. The check after
+// deadline has the zero one, already spent, though every caller bounds its own. The check after
 // publish stays for a window that runs out during publish itself; that publish is not known to
 // have left this process, the same ambiguity a flush that runs out of the window has, and is
 // answered the same way. A cancel that lands after the check goes unseen: the publish is made.

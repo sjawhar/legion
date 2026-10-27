@@ -13,8 +13,9 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-// publishAcknowledgementTimeout bounds one publish: the wait for a connection and the server's
-// answer to it, a JetStream acknowledgement or a core publish's flush.
+// publishAcknowledgementTimeout bounds each send of a publish window (Client.Window): its wait for
+// a connection, a core send's flush and confirmation, and a JetStream send's acknowledgement (the
+// stream context's PublishAsyncTimeout). Publish and PublishCoreTo take publishBound instead.
 const publishAcknowledgementTimeout = 5 * time.Second
 
 // ErrUnavailable is wrapped by the outcome of a window's send that NATS did not take because of

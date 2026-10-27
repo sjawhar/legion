@@ -874,11 +874,12 @@ func (c *Client) refused(err error, size int) error {
 	return err
 }
 
-// publishBound is the window an exported publish method gives a publish, its wait for a reconnect
-// and its JetStream acknowledgement together. Every publisher in the repository that has no
-// deadline of its own relies on it, so the exported methods keep it; it is also the HTTP client's
-// per-attempt deadline (packages/envoy-client/src/transport.ts), which a publish that spends the
-// whole bound can never be answered inside, and that is what the Within forms below exist for.
+// publishBound bounds Publish, PublishCoreTo and PublishReportingDuplicate, and the publishJetStream
+// and publishCoreTo of a caller that passed no deadline of its own: their wait for a reconnect and
+// their flush or JetStream acknowledgement together. A publish window's sends take
+// publishAcknowledgementTimeout instead. It is also the HTTP client's per-attempt deadline
+// (packages/envoy-client/src/transport.ts), which a publish that spends the whole bound can never
+// be answered inside, and that is what the Within forms below exist for.
 const publishBound = 5 * time.Second
 
 // Publish routes role lanes, their delivery-exception lanes and every topic the stream does not
