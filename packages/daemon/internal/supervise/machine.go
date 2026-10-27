@@ -1217,20 +1217,41 @@ func (m *Machine) armRegistration() {
 	m.arm(TimerRegistration, runtime.RegistrationDeadline(m.deps.Timeouts.Boot, m.deps.Timeouts.RegistrationIntervals, grace), "")
 }
 
-// idleWait holds the idle suspend's wait to what the claim is: armed exactly while the claim is
-// idle with nothing waiting for it, and disarmed the moment anything is — a task queued, a turn of
-// the agent's own, a suspension held, a process gone. Every decision ends here (Handle) and every
-// claim the daemon reads back begins here (NewMachine), so no path leaves an idle worker with
-// nothing armed: a turn's end, a task the issue's phase left behind and dropped, a prompt the
-// agent refused, a daemon restart.
+// idleSuspendable is whether the idle suspend is for a claim's role at all: a phase worker's,
+// which runs its phase's turns and is handed its next task by the workflow, which resumes it by
+// rule wherever it left off. An architect's and the project controller's are not, and the reason
+// is the resume rather than the wait: nothing resumes an architect by rule — the boot's resume
+// skips the role (workflow/resume.go) and the two senders of RequestRuleResume are the phase-start
+// outbox, for a phase role, and the controller keeper, for the controller — so an architect
+// suspended for idling would never come back, and every notice its tree then published (a child
+// closed, a review, a merge) would wait for a role holder that has none. An architect idling is
+// its tree waiting for its own events, not a worker holding a process for nothing; so is the
+// controller, which the keeper, not a wait, decides the life of. A role added later is outside
+// the list until it is put in it on purpose.
+func idleSuspendable(role claim.Role) bool {
+	switch role {
+	case claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger:
+		return true
+	default:
+		return false
+	}
+}
+
+// idleWait holds the idle suspend's wait to what the claim is: armed exactly while a phase
+// worker's claim is idle with nothing waiting for it, and disarmed the moment anything is — a task
+// queued, a turn of the agent's own, a suspension held, a process gone. Every decision ends here
+// (Handle) and every claim the daemon reads back begins here (NewMachine), so no path leaves an
+// idle worker with nothing armed: a turn's end, a task the issue's phase left behind and dropped,
+// a prompt the agent refused, a daemon restart.
 //
 // A wait already running is kept rather than started over, since what else reaches an idle claim —
 // a shim's hello, a probe, a write of its issue's status — is not the worker's own work and must
 // not postpone its suspension. A wait that is not running starts whole, so a worker always keeps
 // its process a full worker_idle_suspend_seconds after the last thing it had to do. A deployment
-// whose worker_idle_suspend_seconds is 0 arms nothing at all.
+// whose worker_idle_suspend_seconds is 0, and every claim whose role the suspend is not for
+// (idleSuspendable), arm nothing at all.
 func (m *Machine) idleWait() {
-	if m.deps.Timeouts.IdleSuspend <= 0 {
+	if m.deps.Timeouts.IdleSuspend <= 0 || !idleSuspendable(m.claim.Role) {
 		return
 	}
 	busy, _ := m.notIdle()

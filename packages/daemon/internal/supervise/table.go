@@ -983,18 +983,16 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	return m.sendPending(ctx)
 }
 
-// idleSuspend is the idle suspend's timer: the worker's turn ended a whole
+// idleSuspend is the idle suspend's timer: a phase worker's turn ended a whole
 // worker_idle_suspend_seconds ago and nothing has reached it since. Its process is taken back and
 // its session kept, so the next task resumes the same agent, and the suspension is the daemon's
-// own by rule (SuspendedByIdle), which the boot's resume by rule and every wake act on. The wait
-// is disarmed the moment anything reaches the claim (idleWait), so work the timer finds here
-// arrived as it fired: the claim is left alone, and its wait begins again when that work is over
-// — the turn it becomes ends, or it is dropped without ever becoming one.
+// own by rule (SuspendedByIdle), which the boot's resume by rule and every wake act on.
+//
+// The row has nothing of its own to decide. Anything that reaches the claim disarms the wait by
+// the end of that decision (idleWait), and a timer whose arming was disarmed or replaced is
+// fenced out before it reaches a row (fence, Timer), so a claim this row runs for is idle with
+// nothing waiting for it. The table's own ignores hold the states.
 func idleSuspend(m *Machine, ctx context.Context, _ Event) error {
-	if busy, why := m.notIdle(); busy {
-		m.log.Info("supervise: the idle suspend found work waiting; the claim keeps its process", "waiting", why)
-		return nil
-	}
 	m.log.Info("supervise: the worker was idle for its whole idle suspend; suspending it and keeping its session",
 		"idleSuspend", m.deps.Timeouts.IdleSuspend)
 	return m.suspendNow(ctx, RequestSuspend{Claim: m.claim.Token, Reason: "idle for worker_idle_suspend_seconds", By: SuspendedByIdle})

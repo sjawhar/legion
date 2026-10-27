@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
@@ -12,26 +13,30 @@ import (
 // (worker_idle_suspend_seconds).
 const testIdleSuspend = 30 * time.Minute
 
-// idleHarness is a harness whose claim is suspended once it has been idle testIdleSuspend. The
-// shipped testTimeouts leaves the idle suspend off, so every other test of this package is
-// untouched by the wait.
+// idleHarness is a harness whose implementer claim is suspended once it has been idle
+// testIdleSuspend. The shipped testTimeouts leaves the idle suspend off, so every other test of
+// this package is untouched by the wait.
 func idleHarness(t *testing.T) *harness {
 	t.Helper()
-	return idleHarnessInPhase(t, nil)
+	return idleHarnessOf(t, queuedClaim(), nil)
 }
 
 // idleHarnessInPhase is idleHarness whose issue is in a delivered task's phase while holds says so
-// and has left it when it does not: a task the phase has left is dropped without ever becoming a
-// turn (sendPending), which is one of the two ways a claim goes back to idle with no turn to arm
-// its wait.
+// and has left it when it does not: such a task is dropped where it is (sendPending), so the claim
+// is idle again with no turn of that task ever ending to start its wait.
 func idleHarnessInPhase(t *testing.T, holds *bool) *harness {
+	t.Helper()
+	return idleHarnessOf(t, queuedClaim(), holds)
+}
+
+// idleHarnessOf is the idle suspend's harness over the queued claim c, whichever role it is on.
+func idleHarnessOf(t *testing.T, c Claim, holds *bool) *harness {
 	t.Helper()
 	h := newBareHarness(t)
 	h.deps.Timeouts.IdleSuspend = testIdleSuspend
 	if holds != nil {
 		h.deps.PhaseHolds = func(context.Context, string, phase.Phase, uint64) (bool, error) { return *holds, nil }
 	}
-	c := queuedClaim()
 	h.token = c.Token
 	if err := h.store.PutClaim(h.ctx, c); err != nil {
 		t.Fatal(err)
@@ -154,6 +159,32 @@ func TestAWorkingClaimIsNeverIdleSuspended(t *testing.T) {
 	h.advance(2 * testIdleSuspend)
 	h.wantState(StateWorking)
 	h.wantCalls("Suspend", 0)
+}
+
+// The idle suspend is for a phase worker only. An architect idling is its tree waiting for its own
+// events, and the project controller's life is the keeper's, not a wait's; nothing resumes either
+// by rule, so a wait that suspended one would strand it and every notice its tree published. A
+// claim on either role arms nothing however long it idles, whatever worker_idle_suspend_seconds
+// is.
+func TestAnArchitectAndTheControllerAreNeverIdleSuspended(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim Claim
+	}{
+		{"architect", rootClaim()},
+		{"controller", Claim{Token: claim.ControllerToken("legion"), Project: "legion", Role: claim.RoleController, State: StateQueued}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := idleHarnessOf(t, tc.claim, nil)
+			h.reach(StateIdle)
+			if _, armed := h.m.timers[TimerIdle]; armed {
+				t.Fatalf("the idle suspend is armed for %s, want it armed for phase workers only", tc.name)
+			}
+			h.advance(100 * testIdleSuspend)
+			h.wantState(StateIdle)
+			h.wantCalls("Suspend", 0)
+		})
+	}
 }
 
 // A worker that survives a daemon restart is idle-suspended like any other: the restart's machine
