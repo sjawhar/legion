@@ -2,74 +2,22 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-148",
-  "completed": "2026-10-27T14:16:00Z",
-  "headTested": "21da602e6e33e3d79ee7422993e143636669ed91",
+  "completed": "2026-10-27T17:05:00Z",
+  "headTested": "e1dd5c5287a854c3edf9cec4e1aed8b0295cde3f",
+  "rebaseCheck": "Fingerprint at my last verified head 21da602e: 0fe22d58…; at e1dd5c52: c6e5df90… (changed). The diff of the two fingerprinted diffs is only the migration renumbering 0130-0132 -> 0135-0137 (files, README, comments). Changed, so this was a full test round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran each proof at 21da602e (code = 8dbed4e8) against my own build of the head's Dispatch, on a fresh database and a fresh nats-server 2.10.29. A1: the smoke driver passed: answer verbatim, no cache_control on the list, 0 of 4 requests before the answer carried a list, no self-check side turn carried a list. Real-omp file: `LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/session-answers-omp.test.ts`: 14 pass, including the review-2 cases (m) a remote compaction cut right after a delivered message and (n) a remote compaction that keeps no tail. A5: tests/answers-hook.test.ts 12 pass, and my round-1 red test is byte-identical to cd624cd8. tests/answers-claude.test.ts passed 4 of 4 in each of 3 runs. A9: cache rig TESTER4: turn 3 cacheRead 20358 = 20336 + 22, uncached input 114 -> 199."
+    "how": "Re-ran at e1dd5c52 (merge 3d789a90) against my own build of the head's Dispatch on a fresh database. /healthz schema_version 137, with indexes events_person_words, comment_deliveries_session and message_deliveries_session_created present. A1 smoke driver passed (answer verbatim, no cache_control on the list, no list on self-checks, 0 of 4 requests before the answer carried a list). `dispatch answers` gave 11 items as before. The route's 400/401 refusals hold. The real-omp file passed 14 of 14. answers-claude passed 4 of 4 in each of 3 runs. The round-1 red test is byte-identical and passes. The omp probes (cap 7,999/8,000, two copies, empty list then hang, subagent during a hang, restart with Dispatch failing, persist) match round 4. The implementer's merge proof holds. The failure below is a gap the review-2 fix left, not a regression of the merge."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "A1 and main-conversation only: a session whose ask a person answered carries that answer word for word in its next model request, and no side turn carries the list",
-      "surface": "real omp 18.12.2 with the checkout's pi-envoy against my build of the head's Dispatch (Postgres 17 + pgvector on 127.0.0.1:5444, nats-server 2.10.29, outbox publishing) and a stand-in model gateway",
-      "command": "cd /legion/scratch/tmp/infra148-test && bun driver.ts (logs/driver4.log, out/gateway-summary.json)",
-      "observed": "The next turn's last message was the list, carrying the answer byte for byte, with no cache_control (anchors on 5 and 7). Every main turn after the answer carried the list last, and every run-end self-check carried none. A later mention was listed as `mentioned you`.",
-      "headSha": "21da602e6e33e3d79ee7422993e143636669ed91",
-      "negativeControl": "The 4 requests before the answer carried no list. `dispatch answers` for another session printed `No person wrote to this session in the last 72 hours.`"
-    },
-    {
-      "criterion": "Review 2: a list from another Dispatch URL never stands in, including when a slow `!` token command leaves Dispatch off for the hook; no doubled full stop in the cached header",
-      "surface": "the committed Claude hook bundle dist/session-hook.js run as Claude Code runs it (stdin input, CLAUDE_CONFIG_DIR envoy.json with token `!sleep 2; cat <file>`, no DISPATCH_* variables), against the local Dispatch",
-      "command": "cd /legion/scratch/tmp/infra148-test: serverUrl 18866 then hooks at startup, +3 s resume; serverUrl switched to 18867 (nothing listens) then compact and clear; serverUrl back to 18866 then fork; tmpdir and state checked 11 s later",
-      "observed": "startup: the failure line naming the unfinished `!` command. resume: the 18866 list, headed `As read at 14:10:12.885Z; this read failed: a \"!\" command in envoy.json had not finished 800 ms after the hook started.` (one full stop). compact and clear with serverUrl 18867: the failure line, never the 18866 list. fork, back on 18866: the 18866 list again. Each hook took 825-834 ms. TMPDIR was empty, and the state files hold no token (grep -F: no match). In real omp, a 503 reason ending `… so a retry may succeed.` appears with one full stop (2 of 2 occurrences).",
-      "headSha": "21da602e6e33e3d79ee7422993e143636669ed91",
-      "negativeControl": "serverUrl switched to 18867, where nothing listens: the failure line, not the list read from 18866"
-    },
-    {
-      "criterion": "A4/A6: reply to its comment, comment on a document it wrote and replies in that document's threads, message to it; 72-hour window; one item per thing",
-      "surface": "the dispatch CLI (bun packages/envoy-client/bin/dispatch.ts) as session 01a17c99-0000-7000-8000-01a17db211ac against the local Dispatch; the person is alice through the dev sign-in",
-      "command": "cd /legion/scratch/tmp/infra148-test && bun probe-dispatch.ts && bun probe-dispatch2.ts 01a17c99-0000-7000-8000-01a17db211ac TPQQC-1",
-      "observed": "11 items, newest first: a replaced answer (latest only), a direct message, an answer, the person's anchored comment and replies at depths 1 and 2 on a spec the agent wrote, a mention in a doc-thread reply (once), the person's edited reply in a thread on the agent's document, the edited doc comment, a thread reply and a 71 h answer.",
-      "headSha": "21da602e6e33e3d79ee7422993e143636669ed91",
-      "negativeControl": "Not listed: a 73 h answer, another agent session's reply, and an ask resolved as moot. The route refuses a bad session id, since 8 days ago, since in the future and max_chars=0 with 400, and no bearer with 401."
-    },
-    {
-      "criterion": "A5: Claude Code carries the list at start, resume, compaction and subagent start, including after a slow start-up",
-      "surface": "real Claude Code 2.1.311 with --plugin-dir packages/claude-envoy against a stand-in Messages endpoint and Dispatch",
-      "command": "cd packages/claude-envoy && LEGION_TEST_CLAUDE=/legion/scratch/tmp/claude-code-2.1.311/node_modules/.bin/claude bun test tests/answers-claude.test.ts (3 runs); bun test tests/answers-hook.test.ts",
-      "observed": "answers-claude: 4 pass in each of 3 runs. answers-hook: 12 pass, including the round-1 red test, byte-identical to cd624cd8.",
-      "headSha": "21da602e6e33e3d79ee7422993e143636669ed91",
-      "negativeControl": "Round 1 at 7b53f622: the same answers-claude command failed in 3 of 3 runs, and the red test received `could not be read (Dispatch did not answer within 0 ms)`."
-    },
-    {
-      "criterion": "Oh My Pi edges and review-2 compaction: cap at 7,999/8,000, two copies, two copies with an empty list then a hang, subagent during a hang, restart with Dispatch failing, list never persisted, remote compaction cuts",
-      "surface": "real omp 18.12.2 with the checkout's pi-envoy (and an independent bun build of it rebuilt at this head) against a stand-in model gateway and Dispatch answers route",
-      "command": "cd /legion/scratch/tmp/infra148-test && bun probe-omp.ts cap twocopies twoemptyhang subhang restart persist; cd packages/pi-envoy && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/session-answers-omp.test.ts",
-      "observed": "Cap: 7,999 characters carried whole, and at 8,000 the older item left out with the line. Two copies: 1 list per turn. Two copies, empty list then hang: one read per turn, waits of 66, 39 and 857 ms (the failure line). Subagent during a hang: a first wait of 839 ms, then each turn carried the saved list with `this read failed: …`. Restart, same URL answering 503: the saved list came from disk. Persist: 0 occurrences of the answer in the session .jsonl. Real-omp file: 14 of 14, including (k), (m) and (n): a remote compaction's request ends at its cut with no list, keeps no message past the cut after a delivered message, and keeps no tail. The turn after each carries the list.",
-      "headSha": "21da602e6e33e3d79ee7422993e143636669ed91",
-      "negativeControl": "A Dispatch answering 503 on the restarted process: the saved list headed with that reason, and no fresh list was claimed. The 8,000-character list was cut."
-    },
-    {
-      "criterion": "A9: a change in the list does not invalidate the cached conversation",
-      "surface": "real omp 18.12.2 with the checkout's pi-envoy on the pod's real Anthropic route (claude-sonnet-4-5)",
-      "command": "cd /legion/scratch/tmp/infra148/cache && bun rig.ts TESTER4 original 3",
-      "observed": "turn1 cacheRead 0 / write 20336; turn2 read 20336 / write 22; turn3 (list L1 -> L2) read 20358 / write 22; uncached input 114 -> 199",
-      "headSha": "21da602e6e33e3d79ee7422993e143636669ed91",
-      "negativeControl": "Round 1 at 7b53f622: rig.ts TESTERB altered 1 (first message changed) read only 8815 and wrote 11521"
-    },
-    {
-      "criterion": "A10/A11/A12: dispatch doc-read prints each open anchored comment's author, time and full text under its passage, and its help says so; dispatch answers reads every item",
-      "surface": "the dispatch CLI against the local Dispatch",
-      "command": "dispatch doc-read --project TPQQC --artifact probe-doc.md; dispatch doc-read --issue SMK-2; dispatch doc-read --help; DISPATCH_SESSION_ID=<session> dispatch answers",
-      "observed": "doc-read printed, under its quote, each open comment with author, time (and edited time) and full text, with its replies. The help has the D8 sentence (driver: `help has sentence true`). `dispatch answers` printed all 11 items in full.",
-      "headSha": "21da602e6e33e3d79ee7422993e143636669ed91",
-      "negativeControl": "The resolved anchored comment on SMK-2 is absent: grep -c SMOKE-COMMENT-RESOLVED -> 0"
+      "criterion": "Review 2 / D5: a list read from another Dispatch URL never stands in (the Claude hook with a `!` token command)",
+      "evidence": "The answers refresher is shared by every hook of the session (answers-refresh.lock), whichever Dispatch each hook resolves. Its outcome (answers-refresh.json) is taken by a later hook without checking the Dispatch URL that hook resolves now (packages/claude-envoy/hooks/session-hook.ts answersMessage: `if (\"text\" in refreshed) return refreshed.text`). Reproduced with the committed bundle against my local Dispatch:\n- envoy.json had serverUrl 18866 and token `!sleep 2; cat <file>`. A startup hook started the refresher.\n- envoy.json was then switched to serverUrl 18867, where nothing listens, and a resume hook started 1.0, 1.1, 1.2, 1.3 or 1.5 s later.\n- In all 5 runs, that hook carried 18866's list as a fresh list, with no `As read at` line (out: `[Dispatch: what people wrote …]` / `dispatch://TPNNE-1/ask/48909898-…`).\n- The same path in the other direction: with envoy.json just switched back to 18866, a hook carried the 18867 refresher's `could not be read (Unable to connect …)` and hid the 18866 list saved in answers.json.\nRed test, its own commit 1502ee12: packages/claude-envoy/tests/answers-hook.test.ts, \"a refresher started for the Dispatch envoy.json named before never hands its list to a hook for the Dispatch it names now\". A gated token command holds the first hook's refresher; the gate opens as the second hook (envoy.json now on another Dispatch) starts. Fails 3 of 3: `cd packages/claude-envoy && bun test tests/answers-hook.test.ts -t 'never hands its list'` received the list carrying `Read from the Dispatch before.`, after asserting that the refresher read `before` with `before-token`."
     }
   ],
+  "failed": 1,
   "observations": [
-    "I did not drive Anthropic's remote compaction against the real provider. Its cut is proven by the real-omp cases (k), (m) and (n) against the stand-in, as the implementer drove it.",
-    "CI at 21da602e when read: build x2, changes, lint, test, typecheck and pr-title x2 queued; pr-title cancelled x3. Not read as green."
+    "One full run of tests/answers-hook.test.ts also failed the implementer's `a \\`!\\` token command runs outside the hook…` (3889 ms). It passed alone and in 2 more full runs. It is a timing-sensitive wall-clock test, as the implementer's discoveredComplexity says.",
+    "CI at e1dd5c52 is not read as green: the first two reads showed only queued runs, and it was not read again before this handoff."
   ]
 }
