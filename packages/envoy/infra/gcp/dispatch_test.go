@@ -1007,7 +1007,8 @@ func TestDispatchFrontDoorRunsTwoRollingPodsBehindItsSOCKS5Service(t *testing.T)
 // SOCKS5 proxy on every pod; a grace period for the preStop drain and containerboot's shutdown;
 // readiness from the advertiser's ready file alone. Its containers are cert-seed (init), tailscale,
 // cert-publish on frontDoorToolsImage and the advertiser, every one as the envoy image's uid with
-// no privilege, together requesting 700m and 768Mi.
+// no privilege, together requesting 700m and 768Mi. The ServiceAccount's token is not automounted:
+// cert-publish alone mounts it, projected with the certificate authority and the namespace.
 func TestDispatchFrontDoorPodHostsTheTailscaleService(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1015,6 +1016,7 @@ func TestDispatchFrontDoorPodHostsTheTailscaleService(t *testing.T) {
 	template := deploymentPodTemplate(t, m, "example-dispatch-tailnet")
 	pod := template["spec"].(map[string]any)
 	require.Equal(t, "example-dispatch-tailnet", pod["serviceAccountName"])
+	require.Equal(t, false, pod["automountServiceAccountToken"], "no container gets the token unless it mounts it")
 	require.EqualValues(t, 60, pod["terminationGracePeriodSeconds"])
 	require.Equal(t, map[string]any{
 		"runAsUser": float64(999), "runAsGroup": float64(999), "runAsNonRoot": true,
@@ -1024,6 +1026,13 @@ func TestDispatchFrontDoorPodHostsTheTailscaleService(t *testing.T) {
 		map[string]any{"name": "state", "emptyDir": map[string]any{}},
 		map[string]any{"name": "serve", "configMap": map[string]any{"name": "example-dispatch-serve"}},
 		map[string]any{"name": "tls", "secret": map[string]any{"secretName": "example-dispatch-tailnet-tls", "optional": false}},
+		map[string]any{"name": "token", "projected": map[string]any{"sources": []any{
+			map[string]any{"serviceAccountToken": map[string]any{"path": "token", "expirationSeconds": float64(3607)}},
+			map[string]any{"configMap": map[string]any{"name": "kube-root-ca.crt", "items": []any{map[string]any{"key": "ca.crt", "path": "ca.crt"}}}},
+			map[string]any{"downwardAPI": map[string]any{"items": []any{map[string]any{
+				"path": "namespace", "fieldRef": map[string]any{"apiVersion": "v1", "fieldPath": "metadata.namespace"},
+			}}}},
+		}}},
 	}, pod["volumes"])
 
 	containers := podProbes(t, m, "example-dispatch-tailnet")
@@ -1056,6 +1065,19 @@ func TestDispatchFrontDoorPodHostsTheTailscaleService(t *testing.T) {
 	for _, name := range []string{"cert-seed", "cert-publish"} {
 		require.Contains(t, containers[name]["volumeMounts"], map[string]any{"name": "tls", "mountPath": "/etc/frontdoor-tls", "readOnly": true}, name)
 	}
+	for name, container := range containers {
+		for _, item := range container["volumeMounts"].([]any) {
+			mount := item.(map[string]any)
+			if name == "cert-publish" && mount["name"] == "token" {
+				require.Equal(t, map[string]any{"name": "token", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount", "readOnly": true}, mount)
+				continue
+			}
+			require.NotEqual(t, "token", mount["name"], "%s mounts the ServiceAccount token", name)
+			require.NotEqual(t, "/var/run/secrets/kubernetes.io/serviceaccount", mount["mountPath"], "%s mounts the ServiceAccount token path", name)
+		}
+	}
+	require.Contains(t, containers["cert-publish"]["volumeMounts"],
+		map[string]any{"name": "token", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount", "readOnly": true}, "cert-publish calls the API server")
 
 	tailscale := containers["tailscale"]
 	env := frontDoorEnv(t, tailscale)
@@ -1098,8 +1120,9 @@ func TestDispatchFrontDoorPodHostsTheTailscaleService(t *testing.T) {
 	require.Contains(t, containers["cert-seed"]["args"].([]any)[0], "seeded the cached certificate")
 }
 
-// The front door writes one object, its TLS Secret, through a Role that names that Secret alone
-// and binds the front door's own ServiceAccount alone; no Role lets any pod write a tailnet state
+// The front door writes one object, its TLS Secret, through a Role that names that Secret alone,
+// grants get and patch alone (the claim gate's read and the scripts' merge patches; no update), and
+// binds the front door's own ServiceAccount alone; no Role lets any pod write a tailnet state
 // Secret, and no container names one. The app and the listener keep ServiceAccount <hostname>,
 // which the serviceAccountSubject output names (TestConstructOutputsTheServiceAccountIssuerAndSubject).
 func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
@@ -1112,7 +1135,7 @@ func TestDispatchFrontDoorAloneWritesItsTLSSecret(t *testing.T) {
 	role := m.Named(t, roleType, "example-dispatch-tailnet-tls").Inputs.Mappable()
 	require.Equal(t, []any{map[string]any{
 		"apiGroups": []any{""}, "resources": []any{"secrets"}, "resourceNames": []any{"example-dispatch-tailnet-tls"},
-		"verbs": []any{"get", "update", "patch"},
+		"verbs": []any{"get", "patch"},
 	}}, role["rules"])
 	binding := m.Named(t, bindingType, "example-dispatch-tailnet-tls").Inputs.Mappable()
 	require.Equal(t, map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "example-dispatch-tailnet-tls"}, binding["roleRef"])

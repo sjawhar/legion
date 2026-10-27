@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -231,18 +232,17 @@ type publishPod struct {
 	script string
 }
 
-// newPublishPod renders dispatchCertPublishScript for a pod writing into store, with its endless
-// loop replaced by one publish so a test drives one pass. The substitution must bite, or the test
-// would hang on the loop, so the tail is asserted first.
+// newPublishPod renders dispatchCertPublishScript for a pod writing into store, with the claim gate
+// and the endless loop (dispatchCertPublishLoop) replaced by one publish so a test drives one pass.
+// The substitution must bite, or the test would hang on the loop, so the tail is asserted first.
 func newPublishPod(t *testing.T, store *frontDoorSecretStore) *publishPod {
 	t.Helper()
 	requireFrontDoorTools(t)
 	paths := newFrontDoorCertPaths(t, store.url)
 	paths.secret = store.dir
 	script := dispatchCertPublishScript(paths, frontDoorTestFQDN)
-	const loop = "while true; do\n  publish\n  sleep 60\ndone\n"
-	require.True(t, strings.HasSuffix(script, loop), "the publisher ends with the loop this test replaces:\n%s", script)
-	return &publishPod{paths: paths, script: strings.TrimSuffix(script, loop) + "publish\n"}
+	require.True(t, strings.HasSuffix(script, dispatchCertPublishLoop), "the publisher ends with the loop this test replaces:\n%s", script)
+	return &publishPod{paths: paths, script: strings.TrimSuffix(script, dispatchCertPublishLoop) + "publish\n"}
 }
 
 // holds puts a certificate for name, expiring at notAfter, in this pod's cache under the Service
@@ -412,6 +412,111 @@ func TestDispatchCertPublishSaysOnceThatItIsWaitingForACertificate(t *testing.T)
 	require.Zero(t, store.count())
 }
 
+// certPublishRun is cert-publish's whole program running in the background: its exit, once
+// exited is closed, and the files its output goes to.
+type certPublishRun struct {
+	exited         chan struct{}
+	err            error
+	stdout, stderr string
+}
+
+// output is what the program has written so far.
+func (r *certPublishRun) output(t *testing.T) (stdout, stderr string) {
+	t.Helper()
+	out, err := os.ReadFile(r.stdout)
+	require.NoError(t, err)
+	errOut, err := os.ReadFile(r.stderr)
+	require.NoError(t, err)
+	return string(out), string(errOut)
+}
+
+// startCertPublish starts cert-publish's whole program for paths, the claim gate and the
+// publishing loop as the container runs them, with a sleep first on PATH that cuts the loop's 60 s
+// pause to a fifth of a second and, when killGate is set, kills the gate at its 30 s pause, as an
+// out-of-memory kill would end it. The output goes to files, so the test reads it while the
+// program runs, and the shell leads a process group of its own, which the test's cleanup kills
+// with every process the program started.
+func startCertPublish(t *testing.T, paths dispatchCertPaths, killGate bool) *certPublishRun {
+	t.Helper()
+	requireFrontDoorTools(t)
+	realSleep, err := exec.LookPath("sleep")
+	require.NoError(t, err)
+	gatePause := fmt.Sprintf("exec %q 30", realSleep)
+	if killGate {
+		gatePause = `kill -KILL "$PPID"`
+	}
+	shim := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(shim, "sleep"), []byte(fmt.Sprintf(`#!/bin/sh
+case "$1" in
+60) exec %[1]q 0.2 ;;
+30) %[2]s ;;
+*) exec %[1]q "$@" ;;
+esac
+`, realSleep, gatePause)), 0o755))
+
+	dir := t.TempDir()
+	run := &certPublishRun{exited: make(chan struct{}), stdout: filepath.Join(dir, "stdout"), stderr: filepath.Join(dir, "stderr")}
+	stdout, err := os.Create(run.stdout)
+	require.NoError(t, err)
+	defer stdout.Close()
+	stderr, err := os.Create(run.stderr)
+	require.NoError(t, err)
+	defer stderr.Close()
+	cmd := tailnetTestShell(context.Background(), "-c", dispatchCertPublishScript(paths, frontDoorTestFQDN))
+	cmd.Env = append(os.Environ(), "PATH="+shim+string(os.PathListSeparator)+os.Getenv("PATH"), "HOSTNAME="+frontDoorTestPod+"a")
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, cmd.Start())
+	go func() {
+		run.err = cmd.Wait()
+		close(run.exited)
+	}()
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-run.exited
+	})
+	return run
+}
+
+// Only the claim gate lets the pod advertise, and nothing in the container restarts it by itself:
+// when it dies, the publishing loop's next pass says so in one line naming it and exits 1, so the
+// container restarts and the pod's restart count shows it. The negative control: with the gate
+// alive, the loop keeps running and says nothing of it.
+func TestDispatchCertPublishExitsWhenTheClaimGateDies(t *testing.T) {
+	const gateLine = "the claim gate (pid "
+	store := newFrontDoorSecretStore(t)
+
+	t.Run("the gate dies", func(t *testing.T) {
+		run := startCertPublish(t, newFrontDoorCertPaths(t, store.url), true)
+		select {
+		case <-run.exited:
+		case <-time.After(30 * time.Second):
+			stdout, stderr := run.output(t)
+			t.Fatalf("cert-publish still runs 30s after its gate was killed:\n%s%s", stdout, stderr)
+		}
+		stdout, stderr := run.output(t)
+		var exit *exec.ExitError
+		require.ErrorAs(t, run.err, &exit, "cert-publish exits non-zero once its gate is gone (stderr: %q)", stderr)
+		require.Equal(t, 1, exit.ExitCode(), stderr)
+		require.Equal(t, 1, strings.Count(stderr, gateLine), "one line names the gate:\n%s", stderr)
+		require.Contains(t, stdout, "node id is not read yet", "the gate ran its pass before it was killed")
+	})
+
+	t.Run("the gate lives", func(t *testing.T) {
+		run := startCertPublish(t, newFrontDoorCertPaths(t, store.url), false)
+		select {
+		case <-run.exited:
+			stdout, stderr := run.output(t)
+			t.Fatalf("cert-publish exited (%v) with its gate alive:\n%s%s", run.err, stdout, stderr)
+		case <-time.After(3 * time.Second):
+		}
+		stdout, stderr := run.output(t)
+		require.NotContains(t, stderr, gateLine)
+		require.Contains(t, stdout, "node id is not read yet", "the gate runs")
+		require.Contains(t, stdout, "waiting for tailscaled to cache a certificate", "the publishing loop runs")
+	})
+}
+
 // frontDoorLedger is Secret <hostname>-tailnet-tls's claim annotation, its node registry and its
 // resourceVersion, behind a server that applies a merge patch only when its resourceVersion is the
 // current one, as the API server does, and changes only the annotations the patch names. It
@@ -554,17 +659,17 @@ func newGatePod(t *testing.T, name string) *gatePod {
 // gateNodeID is the node id a test pod's own tailscaled reports.
 func gateNodeID(pod string) string { return "n" + strings.TrimPrefix(pod, frontDoorTestPod) + "CNTRL" }
 
-// gate renders dispatchCertClaimScript for p against l with its retry loop replaced by one pass,
-// runs it, and returns whether the pass let the pod advertise, and what it printed. The
-// substitution must bite, or the test would hang on the loop, so the tail is asserted first.
+// gate renders dispatchCertPublishScript for p against l with the claim gate's loop and the
+// publishing loop (dispatchCertPublishLoop) replaced by one pass of the gate, runs it, and returns
+// whether the pass let the pod advertise, and what it printed. The substitution must bite, or the
+// test would hang on the loop, so the tail is asserted first.
 func (p *gatePod) gate(t *testing.T, l *frontDoorLedger) (bool, string) {
 	t.Helper()
 	paths := p.paths
 	paths.secretURL = l.url
-	script := dispatchCertClaimScript(paths, frontDoorTestFQDN)
-	const tail = "  while :; do gate; sleep 30; done\n) &\n"
-	require.True(t, strings.HasSuffix(script, tail), "the claim gate ends with the loop this test replaces:\n%s", script)
-	stdout, stderr, err := runFrontDoorScript(t, strings.TrimSuffix(script, tail)+"  gate\n)\n", "HOSTNAME="+p.name)
+	script := dispatchCertPublishScript(paths, frontDoorTestFQDN)
+	require.True(t, strings.HasSuffix(script, dispatchCertPublishLoop), "cert-publish ends with the loops this test replaces:\n%s", script)
+	stdout, stderr, err := runFrontDoorScript(t, strings.TrimSuffix(script, dispatchCertPublishLoop)+"gate\n", "HOSTNAME="+p.name)
 	_, flagErr := os.Stat(p.flag)
 	require.Equal(t, err == nil, flagErr == nil, "the gate exited %v but the flag's presence is %v:\n%s%s", err, flagErr == nil, stdout, stderr)
 	return err == nil, stdout + stderr
@@ -805,9 +910,9 @@ func TestDispatchCertificateBudgetWritesOnlyItsTwoAnnotations(t *testing.T) {
 // integers hold, is skipped as malformed, like a non-numeric one, in both annotations: the pass
 // still decides, here taking the third claim beside the two live ones. Shell arithmetic reads a
 // leading zero as octal and fails on 8 or 9, and dash fails on an overflow; either error ends the
-// gate's background subshell, which nothing restarts, so no pod reading that ledger would ever
-// advertise again. The negative control is TestDispatchCertificateBudgetClaims, whose epochs are
-// well formed.
+// gate's background subshell, and with it the container, whose every restart would read the same
+// ledger and end again, so no pod reading that ledger would ever advertise again. The negative
+// control is TestDispatchCertificateBudgetClaims, whose epochs are well formed.
 func TestDispatchCertificateBudgetSkipsAMalformedEpoch(t *testing.T) {
 	malformed := fmt.Sprintf("08/%sother8 0177/%sother9 99999999999999999999999/%sother10", frontDoorTestPod, frontDoorTestPod, frontDoorTestPod)
 	l := newFrontDoorLedger(t, malformed+" "+gateClaimsAt(time.Hour, 2*time.Hour))

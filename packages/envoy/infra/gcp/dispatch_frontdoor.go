@@ -31,10 +31,10 @@ import (
 //     <hostname>-tailnet-tls into the cache before tailscaled starts (dispatchCertSeedScript);
 //   - the claim gate, in cert-publish, lets the pod advertise the Service only with a certificate
 //     that is not due, cached or published, or with one of dispatchCertificateClaimsPerWeek claims
-//     on that Secret (dispatchCertClaimScript); the advertiser advertises only the node the gate's
+//     on that Secret (dispatchCertClaimBody); the advertiser advertises only the node the gate's
 //     flag names (tailnetServiceHost.certificate);
 //   - cert-publish's loop writes the pod's own cached certificate into that Secret when it is the
-//     later of the two (dispatchCertPublishScript), so the next pod finds it.
+//     later of the two (dispatchCertPublishBody), so the next pod finds it.
 //
 // cert-publish runs on frontDoorToolsImage, for its shell, curl, openssl, base64 and GNU date: the
 // Tailscale image is busybox and has neither curl nor openssl. The certificate never touches the
@@ -48,9 +48,15 @@ const (
 	// dispatchFrontDoorTLSMount is Secret <hostname>-tailnet-tls, mounted read-only into cert-seed
 	// and cert-publish.
 	dispatchFrontDoorTLSMount = "/etc/frontdoor-tls"
-	// dispatchServiceAccountTokenDir is where the kubelet projects a pod's own ServiceAccount token
-	// and the cluster's certificate authority: how cert-publish authenticates to the API server.
+	// dispatchServiceAccountTokenDir is where cert-publish, and no other container, mounts the
+	// pod's own ServiceAccount token, the cluster's certificate authority and the namespace, the
+	// three files the kubelet's automount would give every container: how cert-publish
+	// authenticates to the API server.
 	dispatchServiceAccountTokenDir = "/var/run/secrets/kubernetes.io/serviceaccount"
+	// dispatchServiceAccountTokenSeconds is the projected token's expirationSeconds, the lifetime
+	// the automounted volume asks for (the ServiceAccount admission plugin writes 3607); the
+	// kubelet renews the file before it expires.
+	dispatchServiceAccountTokenSeconds = 3607
 	// dispatchServeMount is where the tailscale container mounts ConfigMap <hostname>-serve, and
 	// dispatchServeConfig the serve config in it, TS_SERVE_CONFIG.
 	dispatchServeMount  = "/etc/tailscale"
@@ -67,7 +73,7 @@ const (
 	// tailnetShutdownSeconds, with 5 s left for tailscaled to exit on its SIGTERM.
 	dispatchFrontDoorGraceSeconds = 60
 
-	// The certificate budget the claim gate keeps (dispatchCertClaimScript): at most
+	// The certificate budget the claim gate keeps (dispatchCertClaimBody): at most
 	// dispatchCertificateClaimsPerWeek claims in any dispatchCertificateClaimWindow, under the 5
 	// Let's Encrypt allows, so an operator's own order or a retried apply still fits; a cached or
 	// published certificate with more than dispatchCertNotDueSeconds left buys a pod its
@@ -134,19 +140,16 @@ func dispatchScriptVars(vars [][2]string) string {
 // must be 0700, searchable only by the pod's uid. An absent or empty Secret is no error: the pod
 // starts with no cached certificate, and the claim gate decides whether it may order one. Its
 // mkdir also creates the state directory itself, a subdirectory of the state volume
-// (tailnetServicePaths.stateDir says why), so the pod's uid owns it.
+// (tailnetServicePaths.stateDir says why), so the pod's uid owns it. It copies with
+// dispatchCertCopyFuncs, as the claim gate does.
 func dispatchCertSeedScript(p dispatchCertPaths, fqdn string) string {
-	return dispatchScriptVars([][2]string{{"cache", p.cache()}, {"secret", p.secret}, {"fqdn", fqdn}}) + dispatchCertSeedBody
+	return dispatchScriptVars([][2]string{{"cache", p.cache()}, {"secret", p.secret}, {"fqdn", fqdn}}) + "set -eu\n" + dispatchCertCopyFuncs + dispatchCertSeedBody
 }
 
-const dispatchCertSeedBody = `set -eu
-mkdir -p "$cache"
+const dispatchCertSeedBody = `mkdir -p "$cache"
 chmod 0700 "$cache"
 if [ -s "$secret/tls.crt" ] && [ -s "$secret/tls.key" ] && [ -s "$secret/acme-account.key.pem" ]; then
-  cp "$secret/tls.crt" "$cache/$fqdn.crt"
-  chmod 0644 "$cache/$fqdn.crt"
-  cp "$secret/tls.key" "$cache/$fqdn.key"
-  chmod 0600 "$cache/$fqdn.key"
+  copycert
   cp "$secret/acme-account.key.pem" "$cache/acme-account.key.pem"
   chmod 0600 "$cache/acme-account.key.pem"
   echo "seeded the cached certificate for $fqdn from $secret"
@@ -155,7 +158,69 @@ else
 fi
 `
 
-// dispatchCertPublishScript is cert-publish's publishing loop: every 60 s it compares tailscaled's
+// dispatchCertCopyFuncs defines copycert, which copies the certificate and key in the mounted
+// Secret into tailscaled's cache, the key owner-only: both into temporary files first, then each
+// renamed into place, the key before the certificate, so tailscaled, which reads the cache on every
+// lookup, never reads half a file. cert-seed and the claim gate both copy with it; they run in two
+// containers, so each program composes it in.
+const dispatchCertCopyFuncs = `copycert() {
+  cp "$secret/tls.crt" "$cache/$fqdn.crt.tmp" && cp "$secret/tls.key" "$cache/$fqdn.key.tmp" &&
+    chmod 0644 "$cache/$fqdn.crt.tmp" && chmod 0600 "$cache/$fqdn.key.tmp" &&
+    mv "$cache/$fqdn.key.tmp" "$cache/$fqdn.key" && mv "$cache/$fqdn.crt.tmp" "$cache/$fqdn.crt"
+}
+`
+
+// dispatchCertPublishScript is cert-publish's program, as the pod's uid: the claim gate
+// (dispatchCertClaimBody) in the background, then the publishing loop (dispatchCertPublishBody).
+// One block of variables serves both, and both call the helpers dispatchCertFuncs defines.
+//
+// Every pass of the loop first checks that the gate still runs (dispatchCertPublishLoop): only the
+// gate writes the advertise flag and keeps this pod's registry entry, so a pod whose gate died
+// would stay unready for ever with nothing saying why. The loop logs one line naming the gate and
+// exits 1 instead, so the container restarts both and the pod's restart count shows it. set -u
+// holds for both halves: a variable read unset ends the gate, and with it the container, rather
+// than reading as empty.
+func dispatchCertPublishScript(p dispatchCertPaths, fqdn string) string {
+	return dispatchScriptVars([][2]string{
+		{"state", p.service.stateDir()}, {"cache", p.cache()}, {"secret", p.secret}, {"fqdn", fqdn}, {"tokens", p.tokens}, {"url", p.secretURL},
+		{"flag_file", p.service.advertiseFlag()}, {"node_file", p.service.nodeID()},
+		{"claims_max", strconv.Itoa(dispatchCertificateClaimsPerWeek)}, {"window", strconv.Itoa(dispatchCertificateClaimWindow)},
+		{"not_due", strconv.Itoa(dispatchCertNotDueSeconds)}, {"keep", strconv.Itoa(dispatchFrontDoorNodesKeepSeconds)},
+		{"claims_key", dispatchCertificateClaimsAnnotation}, {"nodes_key", dispatchFrontDoorNodesAnnotation},
+	}) + "set -u\n" + dispatchCertCopyFuncs + dispatchCertFuncs + dispatchCertClaimBody + dispatchCertPublishBody + dispatchCertPublishLoop
+}
+
+// dispatchCertFuncs defines the helpers both halves of cert-publish call: kube, which calls the API
+// server as the pod's ServiceAccount, each caller adding its own flags and redirects, and notafter,
+// which reads a certificate's notAfter for the Service's name alone (dispatchCertPublishBody says
+// why the name is read out of the certificate).
+const dispatchCertFuncs = `kube() { curl -sS -f --cacert "$tokens/ca.crt" -H "Authorization: Bearer $(cat "$tokens/token")" "$@"; }
+# notafter prints a PEM certificate's notAfter as seconds since the epoch, and fails, printing
+# nothing, unless its subjectAltName names $fqdn exactly.
+notafter() {
+  openssl x509 -noout -ext subjectAltName -in "$1" 2>/dev/null |
+    tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -Fqx "DNS:$fqdn" || return 1
+  enddate=$(openssl x509 -noout -enddate -in "$1" 2>/dev/null) || return 1
+  date -u -d "${enddate#notAfter=}" +%s 2>/dev/null
+}
+`
+
+// dispatchCertPublishLoop starts the claim gate's loop in the background, keeping its pid, then
+// runs the publishing loop, each pass of which first checks with kill -0 that the gate still runs
+// and ends the container when it does not (dispatchCertPublishScript says why).
+const dispatchCertPublishLoop = `( while :; do gate; sleep 30; done ) &
+gate_pid=$!
+while true; do
+  if ! kill -0 "$gate_pid" 2>/dev/null; then
+    echo "the claim gate (pid $gate_pid) has exited, and only it lets this pod advertise the Service: exiting so the container restarts it" >&2
+    exit 1
+  fi
+  publish
+  sleep 60
+done
+`
+
+// dispatchCertPublishBody is cert-publish's publishing loop: every 60 s it compares tailscaled's
 // own cached certificate with the one in Secret <hostname>-tailnet-tls and sends one merge patch
 // when its own is the later of the two. It asks Tailscale for nothing: tailscaled renews the files
 // in its cache by itself.
@@ -180,33 +245,15 @@ fi
 // A failed patch is logged and the loop goes on: the next pass retries, and the cached
 // certificate is still good. So set -u without -e, and neither a cached certificate openssl
 // cannot parse (the pass is skipped) nor a published one it cannot parse (taken for none) wedges
-// it. A cache this process cannot read is the one exit: an identity that cannot read tailscaled's
-// owner-only cache now never will, and skipping every pass in silence would leave the Secret empty
-// with nothing saying why, so the container exits 1 naming the path and its uid, and the pod's
-// restarts show it. An empty cache is normal until tailscaled's first order and is said once.
-func dispatchCertPublishScript(p dispatchCertPaths, fqdn string) string {
-	return dispatchScriptVars([][2]string{
-		{"state", p.service.stateDir()}, {"cache", p.cache()}, {"secret", p.secret}, {"fqdn", fqdn}, {"tokens", p.tokens}, {"url", p.secretURL},
-	}) + dispatchCertPublishBody
-}
-
-const dispatchCertPublishBody = `set -u
-crt=$cache/$fqdn.crt
+// it. A cache this process cannot read ends the container, as a dead gate does: an identity that
+// cannot read tailscaled's owner-only cache now never will, and skipping every pass in silence
+// would leave the Secret empty with nothing saying why, so the container exits 1 naming the path
+// and its uid, and the pod's restarts show it. An empty cache is normal until tailscaled's first
+// order and is said once.
+const dispatchCertPublishBody = `crt=$cache/$fqdn.crt
 key=$cache/$fqdn.key
 account=$cache/acme-account.key.pem
 waiting=
-# ournames succeeds only when the PEM certificate $1's subjectAltName names $fqdn exactly.
-ournames() {
-  openssl x509 -noout -ext subjectAltName -in "$1" 2>/dev/null |
-    tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -Fqx "DNS:$fqdn"
-}
-# notafter prints a PEM certificate's notAfter as seconds since the epoch, and nothing at all
-# unless it is a certificate for $fqdn.
-notafter() {
-  ournames "$1" || return 0
-  enddate=$(openssl x509 -noout -enddate -in "$1" 2>/dev/null) || return 0
-  date -u -d "${enddate#notAfter=}" +%s 2>/dev/null
-}
 # unreadable ends the container, naming what it cannot read.
 unreadable() {
   echo "$1 is not readable by uid $(id -u): this container's identity cannot read tailscaled's certificate cache, so the Secret will never be written" >&2
@@ -233,24 +280,16 @@ publish() {
   if [ -n "$theirs" ] && [ "$mine" -le "$theirs" ]; then return 0; fi
   body=$(printf '{"data":{"tls.crt":"%s","tls.key":"%s","acme-account.key.pem":"%s"}}' \
     "$(base64 <"$crt" | tr -d '\n')" "$(base64 <"$key" | tr -d '\n')" "$(base64 <"$account" | tr -d '\n')")
-  if curl -sS -f -X PATCH "$url" \
-    --cacert "$tokens/ca.crt" \
-    -H "Authorization: Bearer $(cat "$tokens/token")" \
-    -H 'Content-Type: application/merge-patch+json' \
-    --data-binary "$body" >/dev/null; then
+  if kube -X PATCH "$url" -H 'Content-Type: application/merge-patch+json' --data-binary "$body" >/dev/null; then
     echo "published a later certificate for $fqdn"
   else
     echo "publishing the certificate for $fqdn failed; retrying in 60s" >&2
   fi
 }
-while true; do
-  publish
-  sleep 60
-done
 `
 
-// dispatchCertClaimScript is the claim gate: it runs in the background ahead of
-// dispatchCertPublishScript in cert-publish, as the pod's uid, and writes the advertise flag
+// dispatchCertClaimBody is the claim gate: it runs in the background beside the publishing loop in
+// cert-publish (dispatchCertPublishScript), as the pod's uid, and writes the advertise flag
 // (tailnetServicePaths.advertiseFlag) once the pod may host the Service, logging each reading. No
 // pod advertises the Service by itself (TS_EXPERIMENTAL_SERVICE_AUTO_ADVERTISEMENT is false), and a
 // node the Service has not approved cannot get its name among its certificate domains, so
@@ -288,159 +327,140 @@ done
 // The pod writes the two annotations with merge patches under its own field manager; the
 // component declares the Secret with no annotations and applies it server-side, and a server-side
 // apply removes only the fields its own manager set, so no apply strips them.
-func dispatchCertClaimScript(p dispatchCertPaths, fqdn string) string {
-	return dispatchScriptVars([][2]string{
-		{"cache", p.cache()}, {"secret", p.secret}, {"fqdn", fqdn}, {"tokens", p.tokens}, {"url", p.secretURL},
-		{"flag_file", p.service.advertiseFlag()}, {"node_file", p.service.nodeID()},
-		{"claims_max", strconv.Itoa(dispatchCertificateClaimsPerWeek)}, {"window", strconv.Itoa(dispatchCertificateClaimWindow)},
-		{"not_due", strconv.Itoa(dispatchCertNotDueSeconds)}, {"keep", strconv.Itoa(dispatchFrontDoorNodesKeepSeconds)},
-		{"claims_key", dispatchCertificateClaimsAnnotation}, {"nodes_key", dispatchFrontDoorNodesAnnotation},
-	}) + dispatchCertClaimBody
+const dispatchCertClaimBody = `at() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+log() { echo "$(at) $1 $2 | $3 | $4"; }
+# left prints the seconds until a PEM certificate's notAfter, and fails unless its
+# subjectAltName names $fqdn exactly.
+left() {
+  end=$(notafter "$1") || return 1
+  echo $((end - $(date -u +%s)))
 }
-
-const dispatchCertClaimBody = `(
-  at() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-  log() { echo "$(at) $1 $2 | $3 | $4"; }
+# annotation prints the value of the Secret's annotation $1 as the pass read it, or nothing. The
+# key's dots are escaped, so only the key itself, quoted, matches.
+annotation() {
+  k=$(printf '%s' "$1" | sed 's/\./\\./g')
+  printf '%s' "$body" | sed -n "s|.*\"$k\": *\"\([^\"]*\)\".*|\1|p"
+}
+# entry succeeds when $1 is a ledger entry this gate writes: an epoch of 1 to 12 digits with no
+# leading zero (the shell reads a leading zero as octal and fails on 8 or 9, and a longer number
+# overflows its arithmetic, either of which would end this loop), then "/" and characters a pod
+# name or node id holds. Anything else, a hand edit or a value an escaped quote cut short, is
+# skipped and so dropped at the next write, rather than carried into the merge patch's JSON.
+entry() {
+  t=${1%%/*}
+  case "$t" in ''|0*|*[!0-9]*|?????????????*) return 1 ;; esac
+  case "${1#*/}" in ''|*[!A-Za-z0-9./-]*) return 1 ;; esac
+  case "$1" in */*) return 0 ;; esac
+  return 1
+}
+# patch writes the annotations $1 (JSON members) on the Secret, with the resourceVersion the pass
+# read as the precondition, so a write after another pod's fails with 409 and writes nothing.
+patch() {
+  kube -X PATCH "$url" -H 'Content-Type: application/merge-patch+json' \
+    --data-binary "{\"metadata\":{\"resourceVersion\":\"$rv\",\"annotations\":{$1}}}" >/dev/null 2>&1
+}
+gate() {
   me=${HOSTNAME:-$(hostname)}
-  # left prints the seconds until a PEM certificate's notAfter, and fails unless its
-  # subjectAltName names $fqdn exactly.
-  left() {
-    openssl x509 -noout -ext subjectAltName -in "$1" 2>/dev/null |
-      tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -Fqx "DNS:$fqdn" || return 1
-    end=$(openssl x509 -noout -enddate -in "$1" 2>/dev/null) || return 1
-    end=$(date -u -d "${end#notAfter=}" +%s 2>/dev/null) || return 1
-    echo $((end - $(date -u +%s)))
-  }
-  # annotation prints the value of the Secret's annotation $1 as the pass read it, or nothing. The
-  # key's dots are escaped, so only the key itself, quoted, matches.
-  annotation() {
-    k=$(printf '%s' "$1" | sed 's/\./\\./g')
-    printf '%s' "$body" | sed -n "s|.*\"$k\": *\"\([^\"]*\)\".*|\1|p"
-  }
-  # entry succeeds when $1 is a ledger entry this gate writes: an epoch of 1 to 12 digits with no
-  # leading zero (the shell reads a leading zero as octal and fails on 8 or 9, and a longer number
-  # overflows its arithmetic, either of which would end this loop), then "/" and characters a pod
-  # name or node id holds. Anything else, a hand edit or a value an escaped quote cut short, is
-  # skipped and so dropped at the next write, rather than carried into the merge patch's JSON.
-  entry() {
-    t=${1%%/*}
-    case "$t" in ''|0*|*[!0-9]*|?????????????*) return 1 ;; esac
-    case "${1#*/}" in ''|*[!A-Za-z0-9./-]*) return 1 ;; esac
-    case "$1" in */*) return 0 ;; esac
+  if [ ! -s "$node_file" ]; then
+    log happened "certificate budget" "cat $node_file" "this pod's node id is not read yet: not advertising; again in 30s"
     return 1
-  }
-  # patch writes the annotations $1 (JSON members) on the Secret, with the resourceVersion the pass
-  # read as the precondition, so a write after another pod's fails with 409 and writes nothing.
-  patch() {
-    curl -sS -f -X PATCH "$url" --cacert "$tokens/ca.crt" -H "Authorization: Bearer $(cat "$tokens/token")" \
-      -H 'Content-Type: application/merge-patch+json' \
-      --data-binary "{\"metadata\":{\"resourceVersion\":\"$rv\",\"annotations\":{$1}}}" >/dev/null 2>&1
-  }
-  gate() {
-    if [ ! -s "$node_file" ]; then
-      log happened "certificate budget" "cat $node_file" "this pod's node id is not read yet: not advertising; again in 30s"
-      return 1
+  fi
+  id=$(cat "$node_file")
+  # A StableNodeID is alphanumeric; anything else would be written into the merge patch below
+  # unescaped, so it is not recorded at all.
+  case "$id" in ''|*[!A-Za-z0-9]*)
+    log happened "certificate budget" "cat $node_file" "the node id is not alphanumeric: not recording it, not advertising; again in 30s"
+    return 1 ;;
+  esac
+  cached=$cache/$fqdn.crt
+  why=
+  # A flag holds the node id it was set for, then why. A pod advertising already takes no claim
+  # and copies nothing: the registry is read, and this pod's entry under its current node id
+  # written again when it is missing.
+  flagged=
+  if [ -e "$flag_file" ]; then
+    read -r flagged prev <"$flag_file" || :
+    why=${prev:-flag set}
+  elif l=$(left "$cached") && [ "$l" -gt "$not_due" ]; then
+    why="cached certificate, ${l}s left"
+    log happened "certificate budget" "openssl x509 -enddate -in $cached" "the cache holds the certificate with ${l}s left: advertise, no claim"
+  elif l=$(left "$secret/tls.crt") && [ "$l" -gt "$not_due" ] && [ -s "$secret/tls.key" ]; then
+    copycert || return 1
+    if [ ! -s "$cache/acme-account.key.pem" ] && [ -s "$secret/acme-account.key.pem" ]; then
+      cp "$secret/acme-account.key.pem" "$cache/acme-account.key.pem" && chmod 0600 "$cache/acme-account.key.pem"
     fi
-    id=$(cat "$node_file")
-    # A StableNodeID is alphanumeric; anything else would be written into the merge patch below
-    # unescaped, so it is not recorded at all.
-    case "$id" in ''|*[!A-Za-z0-9]*)
-      log happened "certificate budget" "cat $node_file" "the node id is not alphanumeric: not recording it, not advertising; again in 30s"
-      return 1 ;;
+    why="published certificate, ${l}s left"
+    log happened "certificate budget" "openssl x509 -enddate -in $secret/tls.crt" "the Secret holds the certificate with ${l}s left: copied into the cache, advertise, no claim"
+  fi
+  if ! body=$(kube -H 'Accept: application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1' "$url" 2>/dev/null); then
+    log happened "certificate budget" "GET $url" "the claim ledger could not be read: not advertising; again in 30s"
+    return 1
+  fi
+  body=$(printf '%s' "$body" | tr -d '\n')
+  rv=$(printf '%s' "$body" | sed -n 's/.*"resourceVersion": *"\([0-9]*\)".*/\1/p')
+  claims=$(annotation "$claims_key")
+  nodes=$(annotation "$nodes_key")
+  now=$(date -u +%s)
+  if [ -z "$rv" ]; then
+    log happened "certificate budget" "GET $url" "no resourceVersion read: not advertising; again in 30s"
+    return 1
+  fi
+  # The registry carried forward: every entry younger than the keep window but this pod's entry
+  # for its current node id, then that one, fresh. This pod's entries for older node ids stay, so
+  # a node it was before a re-registration is still named as the front door's.
+  reg=
+  for e in $nodes; do
+    entry "$e" || continue
+    t=${e%%/*}
+    rest=${e#*/}
+    [ $((now - t)) -lt "$keep" ] || continue
+    [ "$rest" = "$me/$id" ] && continue
+    reg="$reg $e"
+  done
+  reg="${reg# } $now/$me/$id"
+  reg=${reg# }
+  live=
+  count=0
+  mine=
+  for c in $claims; do
+    entry "$c" || continue
+    t=${c%%/*}
+    [ $((now - t)) -lt "$window" ] || continue
+    live="$live $c"
+    count=$((count + 1))
+    [ "${c#*/}" = "$me" ] && mine=$c
+  done
+  live=${live# }
+  newclaims=$live
+  if [ -e "$flag_file" ]; then
+    case " $nodes " in *"/$me/$id "*) return 0 ;; esac
+    log happened "certificate budget" "GET $url" "this pod advertises (its flag names node ${flagged:-none}), and the registry lacks $me/$id: recording it again"
+  fi
+  if [ -z "$why" ]; then
+    log happened "certificate budget" "GET $url" "claims in the last ${window}s: $count of $claims_max:${live:- none}"
+    if [ -n "$mine" ]; then
+      why="claim $mine"
+      log happened "certificate budget" "GET $url" "this pod holds claim $mine: advertise"
+    elif [ "$count" -ge "$claims_max" ]; then
+      log happened "certificate budget" "GET $url" "no claim left: not advertising, so this pod orders no certificate for $fqdn; again in 30s"
+      return 1
+    else
+      newclaims="${live:+$live }$now/$me"
+      why="claim $now/$me"
+    fi
+  fi
+  log asked "certificate budget" "PATCH $url (resourceVersion $rv)" "$why; node $me=$id"
+  if patch "\"$claims_key\":\"$newclaims\",\"$nodes_key\":\"$reg\""; then
+    echo "$id $why" >"$flag_file"
+    case "$why" in
+      "claim $now/$me") log happened "certificate budget" "PATCH $url" "claim $now/$me taken, node $id recorded: advertise" ;;
+      *) log happened "certificate budget" "PATCH $url" "node $id recorded: advertise ($why)" ;;
     esac
-    cached=$cache/$fqdn.crt
-    why=
-    # A flag holds the node id it was set for, then why. A pod advertising already takes no claim
-    # and copies nothing: the registry is read, and this pod's entry under its current node id
-    # written again when it is missing.
-    flagged=
-    if [ -e "$flag_file" ]; then
-      read -r flagged prev <"$flag_file" || :
-      why=${prev:-flag set}
-    elif l=$(left "$cached") && [ "$l" -gt "$not_due" ]; then
-      why="cached certificate, ${l}s left"
-      log happened "certificate budget" "openssl x509 -enddate -in $cached" "the cache holds the certificate with ${l}s left: advertise, no claim"
-    elif l=$(left "$secret/tls.crt") && [ "$l" -gt "$not_due" ] && [ -s "$secret/tls.key" ]; then
-      cp "$secret/tls.crt" "$cached.tmp" && cp "$secret/tls.key" "$cache/$fqdn.key.tmp" && chmod 0644 "$cached.tmp" &&
-        chmod 0600 "$cache/$fqdn.key.tmp" && mv "$cache/$fqdn.key.tmp" "$cache/$fqdn.key" && mv "$cached.tmp" "$cached" || return 1
-      if [ ! -s "$cache/acme-account.key.pem" ] && [ -s "$secret/acme-account.key.pem" ]; then
-        cp "$secret/acme-account.key.pem" "$cache/acme-account.key.pem" && chmod 0600 "$cache/acme-account.key.pem"
-      fi
-      why="published certificate, ${l}s left"
-      log happened "certificate budget" "openssl x509 -enddate -in $secret/tls.crt" "the Secret holds the certificate with ${l}s left: copied into the cache, advertise, no claim"
-    fi
-    if ! body=$(curl -sS -f --cacert "$tokens/ca.crt" -H "Authorization: Bearer $(cat "$tokens/token")" \
-      -H 'Accept: application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1' "$url" 2>/dev/null); then
-      log happened "certificate budget" "GET $url" "the claim ledger could not be read: not advertising; again in 30s"
-      return 1
-    fi
-    body=$(printf '%s' "$body" | tr -d '\n')
-    rv=$(printf '%s' "$body" | sed -n 's/.*"resourceVersion": *"\([0-9]*\)".*/\1/p')
-    claims=$(annotation "$claims_key")
-    nodes=$(annotation "$nodes_key")
-    now=$(date -u +%s)
-    if [ -z "$rv" ]; then
-      log happened "certificate budget" "GET $url" "no resourceVersion read: not advertising; again in 30s"
-      return 1
-    fi
-    # The registry carried forward: every entry younger than the keep window but this pod's entry
-    # for its current node id, then that one, fresh. This pod's entries for older node ids stay, so
-    # a node it was before a re-registration is still named as the front door's.
-    reg=
-    for e in $nodes; do
-      entry "$e" || continue
-      t=${e%%/*}
-      rest=${e#*/}
-      [ $((now - t)) -lt "$keep" ] || continue
-      [ "$rest" = "$me/$id" ] && continue
-      reg="$reg $e"
-    done
-    reg="${reg# } $now/$me/$id"
-    reg=${reg# }
-    live=
-    count=0
-    mine=
-    for c in $claims; do
-      entry "$c" || continue
-      t=${c%%/*}
-      [ $((now - t)) -lt "$window" ] || continue
-      live="$live $c"
-      count=$((count + 1))
-      [ "${c#*/}" = "$me" ] && mine=$c
-    done
-    live=${live# }
-    newclaims=$live
-    if [ -e "$flag_file" ]; then
-      case " $nodes " in *"/$me/$id "*) return 0 ;; esac
-      log happened "certificate budget" "GET $url" "this pod advertises (its flag names node ${flagged:-none}), and the registry lacks $me/$id: recording it again"
-    fi
-    if [ -z "$why" ]; then
-      log happened "certificate budget" "GET $url" "claims in the last ${window}s: $count of $claims_max:${live:- none}"
-      if [ -n "$mine" ]; then
-        why="claim $mine"
-        log happened "certificate budget" "GET $url" "this pod holds claim $mine: advertise"
-      elif [ "$count" -ge "$claims_max" ]; then
-        log happened "certificate budget" "GET $url" "no claim left: not advertising, so this pod orders no certificate for $fqdn; again in 30s"
-        return 1
-      else
-        newclaims="${live:+$live }$now/$me"
-        why="claim $now/$me"
-      fi
-    fi
-    log asked "certificate budget" "PATCH $url (resourceVersion $rv)" "$why; node $me=$id"
-    if patch "\"$claims_key\":\"$newclaims\",\"$nodes_key\":\"$reg\""; then
-      echo "$id $why" >"$flag_file"
-      case "$why" in
-        "claim $now/$me") log happened "certificate budget" "PATCH $url" "claim $now/$me taken, node $id recorded: advertise" ;;
-        *) log happened "certificate budget" "PATCH $url" "node $id recorded: advertise ($why)" ;;
-      esac
-      return 0
-    fi
-    log happened "certificate budget" "PATCH $url" "the write was refused (another pod's write, or the API): again in 30s"
-    return 1
-  }
-  while :; do gate; sleep 30; done
-) &
+    return 0
+  fi
+  log happened "certificate budget" "PATCH $url" "the write was refused (another pod's write, or the API): again in 30s"
+  return 1
+}
 `
 
 // newDispatchFrontDoor registers the front door's own objects and renders its pod, for the
@@ -471,14 +491,15 @@ func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettin
 	if err != nil {
 		return corev1.PodSpecArgs{}, nil, err
 	}
-	// cert-publish writes that one Secret and nothing else: no create verb, since the component
-	// creates it, and its name is the only one the rule names.
+	// cert-publish writes that one Secret and nothing else: get, for the claim gate's read, and
+	// patch, for the gate's and the loop's merge patches; no update, which no script sends, and no
+	// create, since the component creates it. Its name is the only one the rule names.
 	if _, err := rbacv1.NewRole(ctx, tlsName, &rbacv1.RoleArgs{
 		Metadata: metadata(tlsName),
 		Rules: rbacv1.PolicyRuleArray{rbacv1.PolicyRuleArgs{
 			ApiGroups: pulumi.StringArray{pulumi.String("")}, Resources: pulumi.StringArray{pulumi.String("secrets")},
 			ResourceNames: pulumi.StringArray{pulumi.String(tlsName)},
-			Verbs:         pulumi.StringArray{pulumi.String("get"), pulumi.String("update"), pulumi.String("patch")},
+			Verbs:         pulumi.StringArray{pulumi.String("get"), pulumi.String("patch")},
 		}},
 	}, child...); err != nil {
 		return corev1.PodSpecArgs{}, nil, err
@@ -524,10 +545,14 @@ func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettin
 	stateMount := corev1.VolumeMountArgs{Name: pulumi.String("state"), MountPath: pulumi.String(dispatchFrontDoorStateMount)}
 	tlsMount := corev1.VolumeMountArgs{Name: pulumi.String("tls"), MountPath: pulumi.String(dispatchFrontDoorTLSMount), ReadOnly: pulumi.Bool(true)}
 	seedCommand, seedArgs := shell(dispatchCertSeedScript(paths, fqdn))
-	publishCommand, publishArgs := shell(dispatchCertClaimScript(paths, fqdn) + dispatchCertPublishScript(paths, fqdn))
+	publishCommand, publishArgs := shell(dispatchCertPublishScript(paths, fqdn))
 	advertiserCommand, advertiserArgs := shell(tailnetAdvertiserScript(host))
+	// The ServiceAccount's token is mounted into cert-publish alone, the one container that calls
+	// the API server: no automount, and a projected volume holding the three files the automount
+	// gives (the token, at the automount's lifetime, the cluster's certificate authority and
+	// the namespace), so tailscaled, the advertiser and cert-seed hold no credential to the cluster.
 	pod := corev1.PodSpecArgs{
-		ServiceAccountName: pulumi.String(name), EnableServiceLinks: pulumi.Bool(false),
+		ServiceAccountName: pulumi.String(name), AutomountServiceAccountToken: pulumi.Bool(false), EnableServiceLinks: pulumi.Bool(false),
 		SecurityContext:               tailnetPodSecurity(dispatchFrontDoorUID),
 		TerminationGracePeriodSeconds: pulumi.Int(dispatchFrontDoorGraceSeconds),
 		InitContainers: corev1.ContainerArray{
@@ -562,8 +587,10 @@ func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettin
 				Env: corev1.EnvVarArray{corev1.EnvVarArgs{Name: pulumi.String("HOSTNAME"), ValueFrom: &corev1.EnvVarSourceArgs{
 					FieldRef: &corev1.ObjectFieldSelectorArgs{FieldPath: pulumi.String("metadata.name")},
 				}}},
-				VolumeMounts: corev1.VolumeMountArray{stateMount, tlsMount},
-				Resources:    resources("100m", "128Mi"), SecurityContext: tailnetContainerSecurity(),
+				VolumeMounts: corev1.VolumeMountArray{stateMount, tlsMount,
+					corev1.VolumeMountArgs{Name: pulumi.String("token"), MountPath: pulumi.String(dispatchServiceAccountTokenDir), ReadOnly: pulumi.Bool(true)},
+				},
+				Resources: resources("100m", "128Mi"), SecurityContext: tailnetContainerSecurity(),
 			},
 			// The advertiser (tailnetAdvertiserScript, with the Service's name as its certificate):
 			// it advertises the Service once the gate's flag names this pod's node, orders the name's
@@ -580,6 +607,17 @@ func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettin
 			corev1.VolumeArgs{Name: pulumi.String("state"), EmptyDir: &corev1.EmptyDirVolumeSourceArgs{}},
 			corev1.VolumeArgs{Name: pulumi.String("serve"), ConfigMap: &corev1.ConfigMapVolumeSourceArgs{Name: pulumi.String(serveName)}},
 			corev1.VolumeArgs{Name: pulumi.String("tls"), Secret: &corev1.SecretVolumeSourceArgs{SecretName: pulumi.String(tlsName), Optional: pulumi.Bool(false)}},
+			corev1.VolumeArgs{Name: pulumi.String("token"), Projected: &corev1.ProjectedVolumeSourceArgs{Sources: corev1.VolumeProjectionArray{
+				corev1.VolumeProjectionArgs{ServiceAccountToken: &corev1.ServiceAccountTokenProjectionArgs{
+					Path: pulumi.String("token"), ExpirationSeconds: pulumi.Int(dispatchServiceAccountTokenSeconds),
+				}},
+				corev1.VolumeProjectionArgs{ConfigMap: &corev1.ConfigMapProjectionArgs{
+					Name: pulumi.String("kube-root-ca.crt"), Items: corev1.KeyToPathArray{corev1.KeyToPathArgs{Key: pulumi.String("ca.crt"), Path: pulumi.String("ca.crt")}},
+				}},
+				corev1.VolumeProjectionArgs{DownwardAPI: &corev1.DownwardAPIProjectionArgs{Items: corev1.DownwardAPIVolumeFileArray{corev1.DownwardAPIVolumeFileArgs{
+					Path: pulumi.String("namespace"), FieldRef: &corev1.ObjectFieldSelectorArgs{ApiVersion: pulumi.String("v1"), FieldPath: pulumi.String("metadata.namespace")},
+				}}}},
+			}}},
 		},
 	}
 	// The pod names the ConfigMap and the TLS Secret by their constant names, and the Deployment

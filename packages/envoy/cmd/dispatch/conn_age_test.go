@@ -156,20 +156,23 @@ func TestMaxConnAgeHandlerPassesARequestWithNoAcceptTime(t *testing.T) {
 	}
 }
 
-// TestShutdownAlreadyClosesKeepAliveConnections records the net/http behaviour the connection age
-// limit leaves shutdown to: once Server.Shutdown has begun, a handler still running writes its
-// response with Connection: close (keep-alives are off while the server is shutting down), so a
-// draining process sheds every connection as its last response goes out.
-func TestShutdownAlreadyClosesKeepAliveConnections(t *testing.T) {
-	server := httptest.NewUnstartedServer(nil)
+// TestServerClosesConnectionsAfterShutdownBegins proves that the server main runs
+// (newHTTPServer), with the connection age handler in front, leaves shutdown to net/http: once
+// Server.Shutdown has begun, a handler still running writes its response with Connection: close
+// (keep-alives are off while the server is shutting down), so a draining process sheds every
+// connection as its last response goes out, however young the connection.
+func TestServerClosesConnectionsAfterShutdownBegins(t *testing.T) {
 	shutdownBegun := make(chan struct{})
-	server.Config.RegisterOnShutdown(func() { close(shutdownBegun) })
 	entered := make(chan struct{})
-	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		close(entered)
 		<-shutdownBegun
 		_, _ = io.WriteString(w, "ok")
 	})
+	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	server := httptest.NewUnstartedServer(nil)
+	server.Config = newHTTPServer(handler, clock.Now)
+	server.Config.RegisterOnShutdown(func() { close(shutdownBegun) })
 	server.Start()
 	t.Cleanup(server.Close)
 
