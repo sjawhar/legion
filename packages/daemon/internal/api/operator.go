@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -285,6 +286,68 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 // failed claim that is not an architect's, naming who retries it (supervise's operatorRetry).
 func retryEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
 	return supervise.RequestOperatorRetry{Claim: c.Token}, true
+}
+
+// retryClaim is the operator's retry of a failed claim. A failed phase worker whose issue the
+// workflow holds for that worker's own role (a held phase whose working role is the claim's role,
+// Options.RoleFor) is retried as its architect's retry_or_escalate retries it: the operator
+// applies the held phase's retry (intake.RetryOrEscalate), whose start relaunches the failed role on
+// its kept session with fresh budgets, and the route answers 202 with the claim as it is until that
+// start runs. A retry that leaves the issue held relaunched nothing (a lingering tree's members stay
+// where they stood), so the route answers 409 naming the issue rather than report a retry. Every
+// other claim is the machine's to answer (retryEvent): an architect is relaunched, and a phase
+// worker whose issue holds no phase, or holds another role's, is refused, since the next start of
+// its role relaunches it. It is how an operator relaunches the claims a runtime failed to launch —
+// every failed claim in turn, with `legion claims retry --failed` — once the cause is gone.
+func (s *server) retryClaim(w http.ResponseWriter, r *http.Request) {
+	token := claim.Token(r.PathValue("token"))
+	m, ok := s.supervisor.Machine(token)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, errorBody("no claim "+string(token)))
+		return
+	}
+	c := m.Claim()
+	if c.State != supervise.StateFailed || !isPhaseWorker(c.Role) || s.pool == nil || s.records == nil || s.roleFor == nil {
+		s.claimRequest("retry", retryEvent)(w, r)
+		return
+	}
+	if s.stopped(w, "retry") {
+		return
+	}
+	recorded, err := s.recordedIssue(r.Context(), c.Issue)
+	if err != nil {
+		s.logFailure("api: read the issue of a failed phase worker to retry", "claim", token, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not read %s's record: %v", c.Issue, err)))
+		return
+	}
+	if recorded == nil || recorded.Phase != phase.Held || recorded.Hold == nil || s.roleFor(recorded.Hold.From) != c.Role {
+		s.claimRequest("retry", retryEvent)(w, r)
+		return
+	}
+	result, err := intake.ApplyFact(r.Context(), s.pool, "api", requestFactID("operator/retry"),
+		intake.RetryOrEscalate{Issue: c.Issue, Decision: intake.RetryDecision}, s.handlers...)
+	if err != nil {
+		s.logFailure("api: apply the operator's retry of a held phase", "claim", token, "issue", c.Issue, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not retry %s's held phase %s: %v", c.Issue, recorded.Hold.From, err)))
+		return
+	}
+	if result.Refusal != nil {
+		writeJSON(w, result.Refusal.Status, errorBody(result.Refusal.Message))
+		return
+	}
+	after, err := s.recordedIssue(r.Context(), c.Issue)
+	if err != nil {
+		s.logFailure("api: read the issue after the operator's retry of its held phase", "claim", token, "issue", c.Issue, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("could not read %s's record after the retry: %v", c.Issue, err)))
+		return
+	}
+	if after != nil && after.Phase == phase.Held {
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("%s is still held after the retry of its phase %s, so nothing relaunched %s: its tree lingers, and a lingering tree's members stay where they stood", c.Issue, recorded.Hold.From, token)))
+		return
+	}
+	s.log.Info("api: the operator retried a held phase", "claim", token, "issue", c.Issue, "phase", recorded.Hold.From)
+	s.operatorDone(r, token)
+	writeJSON(w, http.StatusAccepted, operatorView(m.Claim()))
 }
 
 // closeTree is the operator closing a tree no workflow issue backs, through its root claim: the

@@ -189,6 +189,22 @@
           "rounds": 1
         }
       }
+    },
+    "LEGION-212": {
+      "key": "LEGION-212",
+      "generation": 1,
+      "phase": "awaiting_person",
+      "status": "in_progress",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {},
+      "waitingOn": {
+        "kind": "ask",
+        "ask": "9a8fd348-55d5-4d72-a793-3cd037f75f13",
+        "since": "2026-09-22T08:05:00Z",
+        "answeredAt": "2026-09-22T09:21:00Z",
+        "answeredBy": "ask"
+      }
     }
   },
   "pendingStatusWrites": [],
