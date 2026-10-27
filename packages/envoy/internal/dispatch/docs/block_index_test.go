@@ -383,12 +383,12 @@ func TestBlockIndexIndexesAClosedDocumentWhoseAskStatesAreAheadOfItsVersion(t *t
 	}
 	for _, block := range liveBlocks {
 		blockText, indexed := texts[block.ID]
-		if !indexed || blockText != live[block.From:block.To] {
-			t.Fatalf("block %s is indexed %v with text %q, want it indexed with its live text %q", block.ID, indexed, blockText, live[block.From:block.To])
+		if !indexed || !strings.Contains(stored, blockText) {
+			t.Fatalf("block %s is indexed %v with text %q, want it indexed with its text in version 1 %q", block.ID, indexed, blockText, stored)
 		}
 	}
-	if !strings.Contains(texts["region"], `state="resolved"`) {
-		t.Fatalf("the ask block is indexed at version 1 without the sweep's state: %q", texts["region"])
+	if strings.Contains(texts["region"], `state="resolved"`) {
+		t.Fatalf("the ask block is indexed at version 1 with the sweep's state: %q", texts["region"])
 	}
 	document, found, err := refs.Node(ctx, database.Pool, "artifact", spec, false)
 	if err != nil || !found {
@@ -530,6 +530,183 @@ func TestTheReopensSettlementDatesAClosedDocumentsUnsettledEditToItsVersion(t *t
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("read the texts recorded at version 1: %v", err)
+	}
+}
+
+// A block of a closed issue's document that an unsettled edit changed keeps the history version 1
+// gives it. Version 1 holds two untyped paragraphs, indexed while the issue was open and its live
+// text was version 1's. The live text then edits the plain paragraph, the same block with new
+// text, the issue closes with the edit unsettled, and a rebuild-refs marks the document owed. The
+// closed tick indexes version 1's own text: the unedited paragraph keeps its row under its live
+// id, and the edited one, whose live text version 1 does not hold, keeps its row under the id of
+// the stored row that holds version 1's text of it, so it stays dated version 1 with version 1's
+// text and is recorded deleted at no version that holds it, and no text at version 1 holds the
+// edit. The reopen's settlement writes the edit into version 2, which dates the edited block and
+// records its text, and its text at version 1 stays version 1's.
+func TestAClosedDocumentsUnsettledEditOfAnUntypedBlockIsDatedToTheVersionThatHoldsIt(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	spec := createOwedDocument(t, database, service, "", "spec", "Ship it after dispatch://CORE-2.\n\nPlain paragraph.\n", "")
+	var stored string
+	if err := database.Pool.QueryRow(ctx, `select markdown from artifact_versions where artifact_id = $1 and number = 1`, spec).Scan(&stored); err != nil {
+		t.Fatalf("read version 1: %v", err)
+	}
+	if tick := reconcileBlockIndex(t, service, ""); tick.Documents != 1 || tick.OwedDocuments != 0 {
+		t.Fatalf("indexing version 1 while CORE-1 is open: tick = %#v", tick)
+	}
+	cited := holderOf(t, service, spec, "dispatch://CORE-2")
+	edited := holderOf(t, service, spec, "Plain paragraph.")
+	var firstChanged int
+	var firstText string
+	if err := database.Pool.QueryRow(ctx, `
+		select d.changed_version, t.text from document_blocks d
+		join document_block_texts t on t.artifact_id = d.artifact_id and t.block_id = d.block_id and t.version = 1
+		where d.artifact_id = $1 and d.block_id = $2
+	`, spec, edited).Scan(&firstChanged, &firstText); err != nil || firstChanged != 1 || !strings.Contains(firstText, "Plain paragraph.") {
+		t.Fatalf("the plain paragraph %s is indexed at %d with text %q (%v), want version 1's text", edited, firstChanged, firstText, err)
+	}
+
+	replaced := false
+	var replace func(node *pmdoc.Node)
+	replace = func(node *pmdoc.Node) {
+		if node.Type == "text" && strings.Contains(node.Text, "Plain paragraph.") {
+			node.Text, replaced = strings.Replace(node.Text, "Plain paragraph.", "Edited paragraph.", 1), true
+		}
+		for _, child := range node.Children {
+			replace(child)
+		}
+	}
+	editLiveTree(t, service, spec, func(tree *pmdoc.Node) *pmdoc.Node {
+		replace(tree)
+		return tree
+	})
+	if !replaced {
+		t.Fatalf("no text of %s holds the plain paragraph", spec)
+	}
+	waitForLandedAppends(t, service, spec)
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'CORE-1'`); err != nil {
+		t.Fatalf("close CORE-1: %v", err)
+	}
+	closeDocumentRoom(t, service, spec)
+	// A rebuild-refs marks the document owed.
+	if _, err := database.Pool.Exec(ctx, `update document_block_versions set version = null where artifact_id = $1`, spec); err != nil {
+		t.Fatalf("mark the document owed: %v", err)
+	}
+	live, liveBlocks, err := service.TextWithBlocks(ctx, spec)
+	if err != nil {
+		t.Fatalf("read the live document: %v", err)
+	}
+	var editedText string
+	for _, block := range liveBlocks {
+		if block.ID == edited {
+			editedText = live[block.From:block.To]
+		}
+	}
+	var pending bool
+	if err := database.Pool.QueryRow(ctx, `select exists (select 1 from doc_settlements_pending where artifact_id = $1)`, spec).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(editedText, "Edited paragraph.") || strings.Contains(stored, "Edited paragraph.") || !pending {
+		t.Fatalf("live text %q gives block %s the text %q (settlement pending %v), want the same block edited ahead of version 1 %q", live, edited, editedText, pending, stored)
+	}
+
+	tick := reconcileBlockIndex(t, service, "")
+	if tick.Documents != 1 || tick.LiveAhead != 0 || tick.OwedDocuments != 0 {
+		t.Fatalf("tick = %#v, want the closed document indexed and nothing owed", tick)
+	}
+	if version := blockIndexAt(t, database, spec); version == nil || *version != 1 {
+		t.Fatalf("blocks indexed at %v, want version 1", version)
+	}
+	document, found, err := refs.Node(ctx, database.Pool, "artifact", spec, false)
+	if err != nil || !found {
+		t.Fatalf("resolve the spec: found %v (%v)", found, err)
+	}
+	resolve := func(id string) {
+		t.Helper()
+		reference := refs.BlockRef(document.Ref, id)
+		ref, ok := text.ParseRef(reference, "https://dispatch.example")
+		if !ok {
+			t.Fatalf("%s is no reference", reference)
+		}
+		node, found, err := refs.Node(ctx, database.Pool, "block", text.TargetID(ref), true)
+		if err != nil || !found || node.BlockID != id {
+			t.Fatalf("%s resolves to %#v, found %v (%v), want block %s", reference, node, found, err, id)
+		}
+	}
+	resolve(cited)
+	var keptChanged int
+	var keptText string
+	var keptDeleted bool
+	if err := database.Pool.QueryRow(ctx, `
+		select coalesce((select d.changed_version from document_blocks d where d.artifact_id = t.artifact_id and d.block_id = t.block_id), 0),
+		       coalesce(t.text, ''), t.text is null
+		from document_block_texts t
+		where t.artifact_id = $1 and t.block_id = $2 and t.version = 1
+	`, spec, edited).Scan(&keptChanged, &keptText, &keptDeleted); err != nil {
+		t.Fatalf("read the edited block %s at version 1 after the closed tick: %v", edited, err)
+	}
+	if keptChanged != 1 || keptDeleted || keptText != firstText {
+		t.Fatalf("the edited block %s is dated version %d with text %q (deleted %v) at version 1, want version 1 with version 1's text %q", edited, keptChanged, keptText, keptDeleted, firstText)
+	}
+	resolve(edited)
+	rows, err := database.Pool.Query(ctx, `
+		select block_id, text from document_block_texts where artifact_id = $1 and version = 1 and text is not null
+	`, spec)
+	if err != nil {
+		t.Fatalf("read the texts recorded at version 1: %v", err)
+	}
+	versionTexts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) ([2]string, error) {
+		var recorded [2]string
+		err := row.Scan(&recorded[0], &recorded[1])
+		return recorded, err
+	})
+	if err != nil {
+		t.Fatalf("scan the texts recorded at version 1: %v", err)
+	}
+	for _, recorded := range versionTexts {
+		if !strings.Contains(stored, recorded[1]) {
+			t.Fatalf("block %s is recorded at version 1 with text %q, which version 1 %q does not hold", recorded[0], recorded[1], stored)
+		}
+	}
+
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = null where key = 'CORE-1'`); err != nil {
+		t.Fatalf("reopen CORE-1: %v", err)
+	}
+	if err := service.SettleIssueDocuments(ctx, "CORE-1"); err != nil {
+		t.Fatalf("settle the reopened issue's documents: %v", err)
+	}
+	var latest int
+	var second string
+	if err := database.Pool.QueryRow(ctx, `
+		select number, markdown from artifact_versions where artifact_id = $1 order by number desc limit 1
+	`, spec).Scan(&latest, &second); err != nil {
+		t.Fatalf("read the latest version: %v", err)
+	}
+	if latest != 2 || !strings.Contains(second, "Edited paragraph.") {
+		t.Fatalf("latest version %d %q, want version 2 holding the edit", latest, second)
+	}
+	if version := blockIndexAt(t, database, spec); version == nil || *version != 2 {
+		t.Fatalf("blocks indexed at %v, want version 2", version)
+	}
+	resolve(edited)
+	var changed int
+	var secondText string
+	if err := database.Pool.QueryRow(ctx, `
+		select d.changed_version, t.text from document_blocks d
+		join document_block_texts t on t.artifact_id = d.artifact_id and t.block_id = d.block_id and t.version = 2
+		where d.artifact_id = $1 and d.block_id = $2
+	`, spec, edited).Scan(&changed, &secondText); err != nil {
+		t.Fatalf("read the edited block at version 2: %v", err)
+	}
+	if changed != 2 || secondText != editedText {
+		t.Fatalf("the edited block %s is dated version %d with text %q, want version 2 with the edited text %q", edited, changed, secondText, editedText)
+	}
+	var reopenedText string
+	var reopenedDeleted bool
+	if err := database.Pool.QueryRow(ctx, `
+		select coalesce(text, ''), text is null from document_block_texts where artifact_id = $1 and block_id = $2 and version = 1
+	`, spec, edited).Scan(&reopenedText, &reopenedDeleted); err != nil || reopenedDeleted || reopenedText != firstText {
+		t.Fatalf("the edited block %s has text %q (deleted %v) at version 1 after the reopen (%v), want version 1's text %q", edited, reopenedText, reopenedDeleted, err, firstText)
 	}
 }
 

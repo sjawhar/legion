@@ -1,16 +1,24 @@
 package docs
 
 import (
+	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/pmezard/go-difflib/difflib"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -274,16 +282,20 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 // that version would date a later edit's blocks to it. Its settlement indexes it when it writes
 // the next version.
 //
-// A closed issue's document is the exception: it is indexed from its live text at its latest
-// version, whatever sets that text apart from the version. No settlement runs while its issue is
-// closed (RunSettlementResumption resumes open issues only), and the document is read-only until
-// a reopen, so its live text is what every reader sees until then: the ask states the issue's
-// close, its final sweep and the repair write and no version (WriteIssueAskStates), and any edit
-// the close could not settle. No version is written for it, since a closed issue gets no
-// settlement; the reopen's settlement writes the next version, whose own index replaces this one.
-// The live text was read before the owner row was locked, so it is indexed only while the pending
-// settlement's marked_at, which every appended update moves, is still the one listed; otherwise
-// the document is left owed for the next tick to read again.
+// A closed issue's document is the exception: no settlement runs while its issue is closed
+// (RunSettlementResumption resumes open issues only), so it is indexed at its latest version from
+// that version's own text, with each block the version holds under the id the live document gives
+// that block, or, for a block an edit after the version changed, the id of the index's row that
+// holds the version's text of it (closedVersionBlocks), read under the owner row. The issue's
+// close, its final sweep and the repair write ask states into the live document and no version
+// (WriteIssueAskStates), and the close may leave an edit it could not settle. A block that only
+// such an edit made is not indexed, since no version holds its text, and a block it changed keeps
+// the version and text its row holds: the reopen's settlement indexes the edit at the version it
+// writes, the first that holds it, as block history names only versions that hold a block's text.
+// The live blocks were read before the owner row was locked, so they are used only while the
+// pending settlement's marked_at, which every appended update moves, is still the one listed;
+// otherwise the document is left owed for the next tick to read again. A version this build
+// cannot read back is indexed with no blocks.
 //
 // A document the server cannot read (ErrDocumentUnloadable, ErrDocOutsideSchema) or that has no
 // stored state has no block to show, so its latest version's markdown is indexed with no blocks.
@@ -352,6 +364,18 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 		return false, true, nil
 	case markedAt != nil && markdown != stored && !markedAt.Equal(document.markedAt):
 		return false, false, nil
+	case markedAt != nil && markdown != stored:
+		indexRows, err := indexedBlocks(ctx, tx, document.id)
+		if err != nil {
+			return false, false, err
+		}
+		held, heldBlocks, err := closedVersionBlocks(stored, markdown, blocks, indexRows)
+		if err != nil {
+			slog.Warn("dispatch: block index cannot read back a closed issue's document version; it is indexed with no blocks",
+				"artifact", document.id, "version", version, "error", err)
+			held, heldBlocks = stored, nil
+		}
+		markdown, blocks = held, heldBlocks
 	}
 	if _, err := s.indexRenderedVersion(ctx, tx, document.id, version, versionAt, markdown, blocks); err != nil {
 		return false, false, err
@@ -363,6 +387,169 @@ func (s *Service) indexOwedDocument(ctx context.Context, document owedDocument) 
 		return false, false, err
 	}
 	return true, false, nil
+}
+
+// indexedBlock is a block row of a document's index: its id, type and text's sha256 (hex).
+type indexedBlock struct {
+	id, typ, sum string
+}
+
+// indexedBlocks is each block row the index holds for document artifactID, by id, read in the
+// caller's transaction, which holds the document's owner row.
+func indexedBlocks(ctx context.Context, tx pgx.Tx, artifactID string) ([]indexedBlock, error) {
+	rows, err := tx.Query(ctx, `
+		select block_id, type, text_sha256 from document_blocks where artifact_id = $1 order by block_id
+	`, artifactID)
+	if err != nil {
+		return nil, fmt.Errorf("read the indexed blocks of %s: %w", artifactID, err)
+	}
+	indexed, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (indexedBlock, error) {
+		var block indexedBlock
+		err := row.Scan(&block.id, &block.typ, &block.sum)
+		return block, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read the indexed blocks of %s: %w", artifactID, err)
+	}
+	return indexed, nil
+}
+
+// closedVersionBlocks is the rendering of the version whose stored markdown is stored, with each
+// block of it that the live document - live, with liveBlocks (TextWithBlocks) - also holds, under
+// the live block's id, and each other block of it whose type and text a row of the document's
+// index (indexed, by id) holds, under that row's id. A block of the version that neither holds,
+// and a live block that only an edit after the version made, are left out, so each block indexed
+// at the version is text that version holds.
+//
+// The version's markdown names the id of a typed block alone; its parse mints the others, which no
+// reader knows, so those ids are never indexed. A typed block of the version is the live block of
+// its id and type, whose text may differ from the version's in what the close wrote into it. An
+// untyped block is a live untyped block of its type and text, each typed block inside the live
+// one read as the version's block of that id, so a block holding an ask whose state the close
+// wrote still matches. The untyped blocks are aligned in document order by difflib's matching
+// blocks with no junk heuristic: unlike a greedy first match, a block repeated further on, or a
+// block an edit moved, cannot pull the alignment past the unchanged run that follows it, and the
+// longest runs of unchanged blocks, which an edit leaves around itself, are kept whole. A version
+// is compared and indexed as it renders today, as the live text is.
+//
+// A block of the version that an unsettled edit changed or deleted matches no live block. It is
+// the row of the index that holds its type and text (the sha256 of markdown[From:To], as
+// refs.IndexBlocks hashes it) under an id no other block of the version took: that row was
+// indexed from a version holding the same text under that id, so the id is the block's, and
+// refs.IndexBlocks keeps the block's changed version and text rather than recording it deleted at
+// a version that holds it. A typed block takes only the row of its own id. An untyped block takes
+// the first such row whose id is a live block's, in live document order, else the first of the
+// others by id. A row whose text the version does not hold - indexed at an older version whose
+// text of that block this version changed - matches no block, and is still recorded deleted at
+// this version, although this version holds the block.
+func closedVersionBlocks(stored, live string, liveBlocks []model.ArtifactBlock, indexed []indexedBlock) (string, []model.ArtifactBlock, error) {
+	tree, err := pmdoc.ParseRendering(stored)
+	if err != nil {
+		return "", nil, err
+	}
+	markdown, offsets, err := documentMarkdownWithOffsets(tree)
+	if err != nil {
+		return "", nil, err
+	}
+	firstHolder := make(map[string]int, len(liveBlocks))
+	for index, block := range liveBlocks {
+		if _, held := firstHolder[block.ID]; !held {
+			firstHolder[block.ID] = index
+		}
+	}
+	ids := make([]string, len(offsets))
+	typedTexts := map[string]string{}
+	var versionKeys []string
+	var versionUntyped []int
+	for index, offset := range offsets {
+		if pmdoc.IsTypedBlock(offset.Type) {
+			if at, held := firstHolder[offset.ID]; held && liveBlocks[at].Type == offset.Type {
+				ids[index] = offset.ID
+				typedTexts[offset.ID] = markdown[offset.From:offset.To]
+			}
+			continue
+		}
+		versionKeys = append(versionKeys, offset.Type+"\x00"+markdown[offset.From:offset.To])
+		versionUntyped = append(versionUntyped, index)
+	}
+	var liveKeys []string
+	var liveUntyped []int
+	for index, block := range liveBlocks {
+		if pmdoc.IsTypedBlock(block.Type) {
+			continue
+		}
+		liveKeys = append(liveKeys, block.Type+"\x00"+versionText(live, liveBlocks, index, typedTexts))
+		liveUntyped = append(liveUntyped, index)
+	}
+	for _, match := range difflib.NewMatcherWithJunk(versionKeys, liveKeys, false, nil).GetMatchingBlocks() {
+		for step := range match.Size {
+			ids[versionUntyped[match.A+step]] = liveBlocks[liveUntyped[match.B+step]].ID
+		}
+	}
+	used := make(map[string]bool, len(offsets))
+	for _, id := range ids {
+		if id != "" {
+			used[id] = true
+		}
+	}
+	rank := func(id string) int {
+		if at, held := firstHolder[id]; held {
+			return at
+		}
+		return len(liveBlocks)
+	}
+	slices.SortStableFunc(indexed, func(a, b indexedBlock) int { return cmp.Compare(rank(a.id), rank(b.id)) })
+	holders := make(map[string][]string, len(indexed))
+	for _, row := range indexed {
+		key := row.typ + "\x00" + row.sum
+		holders[key] = append(holders[key], row.id)
+	}
+	for index, offset := range offsets {
+		if ids[index] != "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(markdown[offset.From:offset.To]))
+		for _, id := range holders[offset.Type+"\x00"+hex.EncodeToString(sum[:])] {
+			if !used[id] && (!pmdoc.IsTypedBlock(offset.Type) || id == offset.ID) {
+				ids[index], used[id] = id, true
+				break
+			}
+		}
+	}
+	blocks := make([]model.ArtifactBlock, 0, len(offsets))
+	for index, offset := range offsets {
+		if ids[index] != "" {
+			blocks = append(blocks, model.ArtifactBlock{ID: ids[index], Type: offset.Type, From: offset.From, To: offset.To})
+		}
+	}
+	return markdown, blocks, nil
+}
+
+// versionText is the text of blocks[index] in live, with each typed block inside it that the
+// version holds (typedTexts, by id) read as the version's text of that block. blocks are in
+// document order, each parent before its children, so the blocks inside one follow it up to the
+// first that starts at or past its end.
+func versionText(live string, blocks []model.ArtifactBlock, index int, typedTexts map[string]string) string {
+	outer := blocks[index]
+	var text strings.Builder
+	at := outer.From
+	for _, inner := range blocks[index+1:] {
+		if inner.From >= outer.To {
+			break
+		}
+		held, typed := typedTexts[inner.ID]
+		if inner.From < at || !typed || !pmdoc.IsTypedBlock(inner.Type) {
+			continue
+		}
+		text.WriteString(live[at:inner.From])
+		text.WriteString(held)
+		at = inner.To
+	}
+	if at == outer.From {
+		return live[outer.From:outer.To]
+	}
+	text.WriteString(live[at:outer.To])
+	return text.String()
 }
 
 // stampVersionEvent gives the edges a re-index of version inserted the source_seq of the event

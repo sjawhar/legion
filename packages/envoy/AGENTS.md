@@ -1518,12 +1518,19 @@ transaction held, then, under the document's owner lock, indexes it only while i
 and its owed mark are the ones it listed, taking the version's time and the `source_seq` of the
 event that recorded the version (`stampVersionEvent`). A document that owes a settlement and whose
 live markdown differs from its latest version's is skipped, counted `live_ahead` and left owed,
-except on a closed issue, which no settlement runs on and whose document is read-only until a
-reopen: its live text (the ask states the close, its sweep and the repair write with no version,
-and any edit the close could not settle) is indexed under its live block ids at its latest
-version, with no version written, while its pending settlement's `marked_at` is still the one the
-tick listed; the reopen's settlement writes the next version, whose own index replaces it. The loop
-remembers a skipped document and counts it
+except on a closed issue, which no settlement runs on: its latest version's own rendering is
+indexed, with only the blocks the live document or the index's stored rows also hold, each under
+its live id or its stored row's id (`closedVersionBlocks`), while its pending settlement's
+`marked_at` is still the one the tick listed. A typed block matches the live block of its id (the
+version's markdown names only typed blocks' ids; the close, its sweep and the repair write ask
+states with no version), an untyped one a live block of its type and text, aligned in document
+order. A version block an unsettled edit changed or deleted matches the stored `document_blocks`
+row of its type and text (`text_sha256`) whose id no other block took, a live id first, so it
+keeps its changed version and text; a stored row whose text the version does not hold (indexed at
+an older version this one changed) is still recorded deleted at it. A live block only an unsettled
+edit made is not indexed until the reopen's settlement writes the version that holds it, so block
+history names only versions that hold a block's text. The loop remembers a skipped document and
+counts it
 again without reading it while its latest version and its pending settlement's `marked_at` (which
 every update append moves) stay as they were and this server holds no room for it. An item is
 re-read `for no key update` and re-indexed with this build's grammar (`refs.ReindexOwedItem`), a
