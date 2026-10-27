@@ -72,4 +72,17 @@ func TestABacklogIsDeliveredOnceWhileEachFactTakesItsAcknowledgementWindow(t *te
 			t.Errorf("%s prepared %d times, want once: the consumer held it past its acknowledgement window", key, count)
 		}
 	}
+	// Every delivery counts here, a redelivered copy the consumer has not reached yet included, so
+	// this is the whole backlog's cost rather than what the preparations show at this moment.
+	item, err := stream.Consumer(context.Background(), dispatchConsumerName(spec.Project))
+	if err != nil {
+		t.Fatalf("read the Dispatch consumer: %v", err)
+	}
+	info, err := item.Info(context.Background())
+	if err != nil {
+		t.Fatalf("read the Dispatch consumer's info: %v", err)
+	}
+	if info.Delivered.Consumer != backlog {
+		t.Errorf("JetStream delivered %d messages for a backlog of %d, want one delivery each", info.Delivered.Consumer, backlog)
+	}
 }
