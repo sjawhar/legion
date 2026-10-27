@@ -9,7 +9,7 @@
       "surface": "Dispatch Conversation, chromium, real Go Dispatch server and Postgres 17 + pgvector (throwaway e2e, deleted after the run): one comment `Lead\\r> ```mermaid\\r> graph TD\\r>   Opened --> Still` and one closed with `\\r> ```\\r`",
       "command": "( source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/zz-mermaid-cr.e2e.ts --project chromium )",
       "observed": "At head 59dacf3a: OPEN_IMAGES 0 OPEN_STATUS 0 (source visible as code), CLOSED_IMAGES 1 CLOSED_STATUS 0 (diagram holding 'Drawn'), 1 passed. Four-project e2e/mermaid.e2e.ts at 59dacf3a: 32 passed (4.1m).",
-      "headSha": "59dacf3affba6bf5c7e4ad6d0ce830ed0f2c5ddd",
+      "headSha": "59dacf3affbab5b0b955708b2932163fcec64dd5",
       "negativeControl": "At 6b9f6b50 (probe fixed, sources not normalized) the closed lone-CR comment showed `Unable to render Mermaid diagram: Invalid mermaid header` with its source open, because the code block keeps lone CRs and beautiful-mermaid splits lines at LF alone (renderMermaidMarkup: LF and CRLF draw, lone CR refused)."
     },
     {
@@ -17,7 +17,7 @@
       "surface": "Dispatch unit suite, CI's command",
       "command": "cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx && bun test --parallel web/src e2e/__tests__",
       "observed": "MarkdownBody 43 pass / 0 fail; full parallel suite 2522 pass / 0 fail at 59dacf3a.",
-      "headSha": "59dacf3affba6bf5c7e4ad6d0ce830ed0f2c5ddd",
+      "headSha": "59dacf3affbab5b0b955708b2932163fcec64dd5",
       "negativeControl": "Reverting the probe's line to `source.lastIndexOf(\"\\n\") + 1` fails the lone-CR quote/list case (41 pass / 1 fail); reverting the normalization to `pre.textContent ?? \"\"` fails the lone-CR draw case (42 pass / 1 fail)."
     }
   ],
