@@ -3182,6 +3182,126 @@ describe("envoy OMP extension", () => {
     expect(roleClaims).toEqual([{ session_id: "ses_omp", role: "legion-controller" }]);
   });
 
+  test("envoy_subscribe records a topic durably and envoy_unsubscribe tombstones it", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+    const { default: envoyExtension } = await import("./envoy.ts?subscription-durable-record");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    if (subscribeTool === undefined || unsubscribeTool === undefined) {
+      throw new Error("subscription tools were not registered");
+    }
+    const team = "notifications.team.acme-owners.>";
+    const base = "notifications.team.acme-owners";
+    const subscriptionEntries = () =>
+      fixture.entries.filter((entry) => entry.customType === "envoy-subscription");
+
+    await subscribeTool.execute("", { topics: [team] });
+    // The topic is recorded active once per expanded subject, the durable record a resume reads.
+    expect(subscriptionEntries()).toEqual([
+      { type: "custom", customType: "envoy-subscription", data: { topic: base, active: true } },
+      { type: "custom", customType: "envoy-subscription", data: { topic: team, active: true } },
+    ]);
+
+    await unsubscribeTool.execute("", { topics: [team] });
+    expect(subscriptionEntries().slice(-2)).toEqual([
+      { type: "custom", customType: "envoy-subscription", data: { topic: base, active: false } },
+      { type: "custom", customType: "envoy-subscription", data: { topic: team, active: false } },
+    ]);
+  });
+
+  test("a resumed session re-subscribes a transcript-recorded topic after an Envoy reset wiped the registry", async () => {
+    const registryReads: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      // Envoy was rebuilt: its interest registry knows nothing of this session's old topics, only
+      // the agent subject this process's own establish pass just registered.
+      if (url.pathname === "/v1/interests/ses_omp") {
+        registryReads.push(url.pathname);
+        return response({
+          session_id: "ses_omp",
+          machine_id: "test",
+          dir: "/tmp",
+          topics: ["notifications.agent.ses_omp"],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?subscription-reset-recovery");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+
+    const team = "notifications.team.acme-owners.>";
+    const dropped = "notifications.dispatch.issue.ACME-1.>";
+    const resumed = {
+      ...sessionContext(),
+      sessionManager: {
+        ...sessionContext().sessionManager,
+        getBranch: () => [
+          { type: "custom", customType: "envoy-subscription", data: { topic: team, active: true } },
+          // Subscribed then dropped: last-wins tombstones it, so a resume does not resurrect it.
+          {
+            type: "custom",
+            customType: "envoy-subscription",
+            data: { topic: dropped, active: true },
+          },
+          {
+            type: "custom",
+            customType: "envoy-subscription",
+            data: { topic: dropped, active: false },
+          },
+        ],
+      },
+    };
+    await fixture.handlers.get("session_start")?.({}, resumed);
+
+    // The registry carried only the agent subject, yet the team topic is live again — from the
+    // transcript, the one source that survives an Envoy rebuild.
+    expect(natsState.controls.has("notifications.team.acme-owners.>")).toBe(true);
+    expect(natsState.controls.has("notifications.team.acme-owners")).toBe(true);
+    expect(natsState.controls.has(dropped)).toBe(false);
+    // The registry was consulted and answered with no team topic, so the recovery came from the
+    // transcript alone. (The role-recovery path reads it too, so the count is not asserted.)
+    expect(registryReads).toContain("/v1/interests/ses_omp");
+  });
+
+  test("a role-shaped topic subscribed through the tool is not recorded as a durable subscription", async () => {
+    const role = "librarian";
+    const roleTopic = `notifications.role.${role}`;
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/roles/set") {
+        return response({
+          session_id: "ses_omp",
+          machine_id: "test",
+          dir: "/tmp",
+          topics: [roleTopic],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?subscription-role-not-recorded");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (roleTool === undefined || subscribeTool === undefined) {
+      throw new Error("role tools were not registered");
+    }
+    await roleTool.execute("", { role });
+    await subscribeTool.execute("", { topics: [roleTopic] });
+    // A role is reclaimed by its own durable record (`envoy-role-claim`); it is never a durable
+    // subscription the resume would restore as a plain topic.
+    expect(fixture.entries.filter((entry) => entry.customType === "envoy-subscription")).toEqual(
+      []
+    );
+  });
+
   test("a session rebind moves a held role from the dead id to the new one", async () => {
     const roleClaims: { readonly session_id: string; readonly role: string }[] = [];
     globalThis.fetch = async (input, init) => {
