@@ -224,15 +224,23 @@ export interface WriteAdvice {
    */
   readonly decision_blocks_added?: number;
   /**
+   * INFRA-568: the related-item check each of a document edit's new decision blocks got, in
+   * document order; a block past the fifth in one edit answers `not_made`. Omitted when the edit
+   * added none, and absent from a Dispatch server predating the check, which only counts them in
+   * `decision_blocks_added`.
+   */
+  readonly decision_block_checks?: DecisionBlockCheck[];
+  /**
    * The typed block openings (`:::ask{…}`) the written document holds as text rather than as
    * blocks, outside code: written inside a line, or escaped. `examples` quotes the first few with a
    * little of the text before each. Omitted when there are none.
    */
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
   /**
-   * LEGION-550's write-time feedback, set only on an issue or ask creation: the items most like
-   * what was just filed, and any past decision that matches. Never refuses or delays the write;
-   * `suggestions.missing` explains why search did not answer in time instead.
+   * The related-item check (LEGION-550, INFRA-568), set on an issue or ask creation: the items
+   * most like what was just filed, any past decision that matches, and what the check did
+   * (`outcome`). Never refuses the write; it waits at most five seconds, and a check that did not
+   * search to the end says why in `missing`.
    */
   readonly suggestions?: Suggestions;
   /**
@@ -1434,7 +1442,22 @@ export interface SearchResult {
   /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
   readonly rank: number;
   readonly href: string;
+  /**
+   * Where an ask hit stands, read when the search ran: set on every ask hit from a Dispatch of
+   * this release, absent on other kinds, from an older Dispatch, and on an ask deleted between
+   * the search and that read.
+   */
+  readonly ask?: SearchAsk;
 }
+
+/** Where an ask hit stands, read when the search ran. `answer` on an answered ask is its latest
+ *  answer (a re-answer replaces it); on a resolved ask it is the last answer a person gave before
+ *  it was closed (rows settlement retracted while answered), when it had one. `answer.selected`
+ *  is `[]` when no option was chosen. Mirrors `model.SearchAsk`. */
+export type SearchAsk =
+  | { readonly state: "open" }
+  | { readonly state: "answered"; readonly answer: AskAnswer }
+  | { readonly state: "resolved"; readonly resolution: AskResolution; readonly answer?: AskAnswer };
 
 /** The four paging fields a Dispatch that supports search paging always answers together. */
 export interface SearchResultsPage {
@@ -1526,10 +1549,11 @@ export interface DuplicateCandidate {
 }
 
 /**
- * One item LEGION-550's write-time feedback judges similar to what was just filed: a fused-search
- * hit (`SearchResult`) over the same project. `answered_by`/`answered_at` are set only when this
- * is `Suggestions.decision` — the "past decision" case, where the agent needs who answered and
- * when, not just a link.
+ * One item the related-item check (LEGION-550, INFRA-568) judges like what was just filed: a
+ * search hit over the same project. `ask` is where an ask item stands (absent from an older
+ * Dispatch). `answered_by`/`answered_at` are set only when this is `Suggestions.decision` — the
+ * "past decision" case, where the agent needs who answered and when, not just a link — and repeat
+ * `ask.answer`'s user and time for clients built before `ask`.
  */
 export interface WriteSuggestion {
   readonly kind: SearchResultKind;
@@ -1538,20 +1562,101 @@ export interface WriteSuggestion {
   readonly id: string;
   readonly snippet: string;
   readonly href: string;
+  readonly ask?: SearchAsk;
   readonly answered_by?: string;
   readonly answered_at?: string;
 }
 
+/** `Suggestions.outcome`: the check listed items, searched and found none, or did not search to
+ *  the end (`missing` says why). */
+export type RelatedCheckOutcome = "found" | "none" | "not_made";
+
+/** `Suggestions.search`: how the check searched; keywords only when meaning search could not run
+ *  (`search_note` says why) or the caller asked for it. */
+export type RelatedCheckSearch = "meaning_and_keywords" | "keywords_only";
+
 /**
- * LEGION-550's write-time feedback on a newly created issue or ask: the three items most like
- * it (`related`) and, when an answered ask already settles the same question, that decision
- * (`decision`). `missing` explains why search did not answer within the write's bounded budget,
- * instead of refusing or delaying the write itself.
+ * The related-item check's result (LEGION-550, INFRA-568) on a newly created issue or ask, on
+ * each new decision block of a document edit, and as the whole answer of the no-write related
+ * route: the three items most like it (`related`, one per owner, always an array) and, when an
+ * answered ask already settles the same question, that decision (`decision`). The check never
+ * refuses the write; it waits at most five seconds.
+ *
+ * A Dispatch predating INFRA-568 sends only `related`, `decision` and `missing`; every other
+ * field is absent there. From INFRA-568 on, `outcome` is always set, `search` is set unless the
+ * check was not made, and `missing` is set, to the reason, exactly when `outcome` is `not_made`.
+ * `search_query` is two or three of the words the keyword search used, spelled as the text spells
+ * them, for a reader to run `dispatch search` with. `title_matches` is the issues whose titles
+ * near-duplicate a new issue's when the create was forced past that refusal. Mirrors
+ * `model.Suggestions`.
  */
 export interface Suggestions {
+  readonly outcome?: RelatedCheckOutcome;
+  readonly search?: RelatedCheckSearch;
+  readonly search_note?: string;
+  readonly search_query?: string;
   readonly related: WriteSuggestion[];
   readonly decision?: WriteSuggestion;
   readonly missing?: string;
+  readonly title_matches?: DuplicateCandidate[];
+}
+
+/** One new decision block's related-item check in a document edit's advice
+ *  (`WriteAdvice.decision_block_checks`): the block's id, its question, and the check's result. */
+export interface DecisionBlockCheck {
+  readonly block_id: string;
+  readonly question: string;
+  readonly suggestions: Suggestions;
+}
+
+/**
+ * The body of `POST /api/v1/projects/{key}/related` (and the query of its `GET` form, which caps
+ * title and text together at `SEARCH_QUERY_MAX`): the related-item check over a title and a text
+ * without writing anything. `exclude_issue` leaves that issue's own items out of the results, as a
+ * check on that issue's own write does; `keywords_only` skips meaning search. A blank title and
+ * text answer `not_made`. The answer is `Suggestions`.
+ */
+export interface RelatedCheckInput {
+  readonly title?: string;
+  readonly text?: string;
+  readonly exclude_issue?: string;
+  readonly keywords_only?: boolean;
+}
+
+/** One millisecond column of `RelatedChecksReport` over the checks that hold a value in it
+ *  (`count`): discrete 50th and 95th percentiles, the largest, and how many took more than 300 ms.
+ *  `p50`, `p95` and `max` are null when `count` is 0. Mirrors `model.RelatedCheckTiming`. */
+export interface RelatedCheckTiming {
+  readonly count: number;
+  readonly p50: number | null;
+  readonly p95: number | null;
+  readonly max: number | null;
+  readonly over_300ms: number;
+}
+
+/**
+ * `GET /api/v1/related-checks?project=&from=&to=&source_kind=`: how the related-item checks of
+ * writes recorded within one window went. `project`, `source_kind`, `from` and `to` echo the
+ * filters, each null when not given (`from` inclusive, `to` exclusive). Each `by_*` map holds only
+ * the values seen; `by_search` counts a check not made under `not_made`, and `by_reason` leaves
+ * out checks with no reason. `completed` is the checks that searched to the end (found or none),
+ * `skipped_for_time` those not made because the search ran out of time. Mirrors
+ * `model.RelatedChecksReport`.
+ */
+export interface RelatedChecksReport {
+  readonly project: string | null;
+  readonly source_kind: string | null;
+  readonly from: string | null;
+  readonly to: string | null;
+  readonly total: number;
+  readonly by_source_kind: Readonly<Record<string, number>>;
+  readonly by_outcome: Readonly<Record<string, number>>;
+  readonly by_search: Readonly<Record<string, number>>;
+  readonly by_reason: Readonly<Record<string, number>>;
+  readonly completed: number;
+  readonly skipped_for_time: number;
+  readonly keyword_ms: RelatedCheckTiming;
+  readonly total_ms: RelatedCheckTiming;
 }
 
 export interface Agent {

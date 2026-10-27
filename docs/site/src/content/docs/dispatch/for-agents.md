@@ -68,7 +68,7 @@ tells the agent who Dispatch takes it for.
 | Comments | `dispatch comment` comments on a document or replies in a thread. `dispatch suggest` proposes replacement text. `dispatch resolve-comment` resolves a thread. |
 | Messages | `dispatch message` posts a message or replies to one. |
 | Documents | `dispatch doc-read` reads a document, or the text of an uploaded file; with `--blocks` it lists the document's block ids, tokens and table rows that `dispatch doc-edit` addresses. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
-| Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch whoami` reports who Dispatch takes the agent for. |
+| Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch related --project <KEY>` runs the related-item check a new issue or ask gets on a `--title` and `--text`, and writes nothing. `dispatch whoami` reports who Dispatch takes the agent for. |
 | Architecture | `dispatch architecture-sync` imports a project's architecture model now, from every source repository with a line for each, or from one with `--repo <owner/name>`. |
 
 A command with several problems is refused once, with every problem listed, so the next run can

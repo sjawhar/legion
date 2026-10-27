@@ -45,10 +45,10 @@ the Dispatch specs behind the `dispatch` command:
 ## Critical conventions
 
 - `src/tool-schema.ts` — `zodSchemaApi(z).string({ max })` emits `is N characters over the M-character limit (L/M)` (the field name is prepended by `formatZodIssues` in `@legion/envoy-client/tool-input-errors`), followed by `; <maxHint>` when the field names what to send instead; the OMP `pi.zod` facade ignores the message, which is why pi-envoy registers its Envoy tools with `lenientArgValidation` and refuses a bad call once with every problem listed, as `executeDispatchTool` does for a `dispatch` command.
-- `src/dispatch-tools.ts` is the source of the twenty-three Dispatch specs behind the `dispatch` command (`packages/envoy-client/src/dispatch-command.ts` derives one command per spec and one flag per field):
+- `src/dispatch-tools.ts` is the source of the twenty-four Dispatch specs behind the `dispatch` command (`packages/envoy-client/src/dispatch-command.ts` derives one command per spec and one flag per field):
   `dispatch issue`, `dispatch issue-update`, `dispatch claim`, `dispatch ask`, `dispatch edit-ask`, `dispatch resolve-ask`, `dispatch resolve-comment`, `dispatch follow`,
   `dispatch comment`, `dispatch suggest`, `dispatch message`, `dispatch doc-edit`, `dispatch doc-read`, `dispatch request-approval`,
-  `dispatch artifact`, `dispatch read`, `dispatch search`, `dispatch issues`, `dispatch project`, `dispatch projects`, `dispatch architecture-sync`, `dispatch open-asks`, and `dispatch whoami`. It defines their names,
+  `dispatch artifact`, `dispatch read`, `dispatch search`, `dispatch related`, `dispatch issues`, `dispatch project`, `dispatch projects`, `dispatch architecture-sync`, `dispatch open-asks`, and `dispatch whoami`. It defines their names,
   descriptions, and field shapes; `dispatch open-asks` and `dispatch whoami` have no model-supplied session selector (`dispatch whoami` takes no arguments at all: a strict empty object; `dispatch open-asks` takes only an optional `project`, which switches it from this session's own asks to every open ask in that project) and
   `dispatch message --in-reply-to` is the same-issue message-reply correlation used for a targeted agent's
   answer; with a bare message id and no `issue` it answers a human's direct message through

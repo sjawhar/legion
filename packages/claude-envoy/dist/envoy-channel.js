@@ -36728,11 +36728,12 @@ var DOC_EDIT_OPS = [
   "delete_row",
   "delete_column"
 ];
+var RELATED_CHECK_RESULT = "Dispatch then runs the related-item check (waiting at most five seconds; dispatch related runs " + "it without writing), and the result says, right after the line naming what was created, " + "which items it found and how it searched, that it searched and found nothing, or that no " + "check was made, why, and the dispatch search to run instead.";
 var dispatchToolSpecs = [
   {
     name: "dispatch_issue",
     example: { project: "DSP", title: "Native workspace" },
-    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " + "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
+    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " + "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it. " + `${RELATED_CHECK_RESULT} With --force, the result also names each issue whose title you forced past. ` + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       project: z2.string().describe("Project key for the new issue."),
       title: z2.string({ max: ISSUE_TITLE_MAX }).describe("Concise issue title, at most 1,000 characters."),
@@ -36805,7 +36806,7 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${RELATED_CHECK_RESULT} ` + `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36955,7 +36956,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "Each decision block the edit adds gets the related-item check dispatch ask gets, waiting at most five seconds for all of them together: the result prints, after its first line, `Decision block <id>:` and what that check found, that it found nothing, or that it was not made and why. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -37065,6 +37066,25 @@ var dispatchToolSpecs = [
       check: (value) => {
         const { project } = value;
         return typeof project !== "string" || project === "" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: `project is not a project key: ${PROJECT_KEY_RULE}`
+    }
+  },
+  {
+    name: "dispatch_related",
+    example: { project: "CORE", title: "Retry failed webhook deliveries" },
+    description: "Run the related-item check that dispatch issue, dispatch ask and a new decision block in " + "dispatch doc-edit run on their own write, and write nothing: it lists the three items of " + "one project most like a title and a text (at most one per issue or document, open ones " + "first), each ask with whether it is answered, and a past decision that already answers " + "the same question. Use it to check a draft before filing it. It searches by meaning and by " + "the text's rarest words, and says how it searched; when meaning search cannot run it " + "searches by keywords only and says why. When it could not search at all it says why and " + "names the dispatch search to run instead. exclude_issue leaves that issue's own items out, " + "as a check on that issue's own write does; keywords_only skips meaning search.",
+    arguments: (z2) => ({
+      project: z2.string().describe("Project key to search within, such as CORE."),
+      title: z2.string({ max: ISSUE_TITLE_MAX }).describe("Optional title to check, as an issue title; at most 1,000 characters.").optional(),
+      text: z2.string().describe("Optional text to check, such as a draft spec or a question.").optional(),
+      exclude_issue: z2.string().describe("Optional issue key in the project whose own items are left out.").optional(),
+      keywords_only: z2.boolean().describe("Search by keywords only, skipping meaning search.").optional()
+    }),
+    validation: {
+      check: (value) => {
+        const { project } = value;
+        return typeof project !== "string" || PROJECT_KEY_PATTERN.test(project);
       },
       message: `project is not a project key: ${PROJECT_KEY_RULE}`
     }
@@ -39375,6 +39395,9 @@ class DispatchClient {
   async search(query, options = {}) {
     return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
   }
+  async related(project, input) {
+    return this.#json("POST", ["api", "v1", "projects", project, "related"], input);
+  }
   async getIssue(issue2) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2)]);
   }
@@ -40193,6 +40216,145 @@ function subscriptionRemovedTopics(raw, sessionID) {
   return parsedPayload.data.topics ?? [];
 }
 
+// ../envoy-client/src/related-check.ts
+function relatedCheckLines(suggestions, context) {
+  if (suggestions === null || suggestions === undefined) {
+    return [notMadeLine("the server sent no check result", context)];
+  }
+  let lines;
+  try {
+    lines = relatedCheckForm(suggestions, context);
+  } catch (error48) {
+    lines = [
+      notMadeLine(`this client could not read the check result (${messageFor(error48)})`, context)
+    ];
+  }
+  try {
+    const { decision } = suggestions;
+    if (decision !== undefined && decision !== null) {
+      const when = decision.answered_at === undefined ? "" : ` on ${decision.answered_at}`;
+      lines.push(`A past decision may already answer this: ${suggestionLabel(decision)}, answered by ${decision.answered_by}${when} \u2192 ${absoluteHref(decision.href, context.configUrl)}`);
+    }
+    for (const match of suggestions.title_matches ?? []) {
+      lines.push(`Title overlaps you forced past: ${match.key} [${match.status}] ${match.title} \u2192 ${absoluteHref(match.href, context.configUrl)}`);
+    }
+  } catch (error48) {
+    lines.push(`The check's past decision or title overlaps could not be shown: ${messageFor(error48)}`);
+  }
+  return lines;
+}
+function decisionBlockLines(advice, context) {
+  try {
+    const checks3 = advice?.decision_block_checks;
+    if (checks3 === undefined || checks3 === null) {
+      const added = advice?.decision_blocks_added ?? 0;
+      if (added === 0)
+        return [];
+      return [
+        `${added} new decision ${added === 1 ? "block" : "blocks"}:`,
+        notMadeLine("the server sent no check result", context)
+      ];
+    }
+    return checks3.flatMap((check2) => [
+      `Decision block ${check2.block_id}:`,
+      ...relatedCheckLines(check2.suggestions, { ...context, text: check2.question ?? "" })
+    ]);
+  } catch (error48) {
+    return [
+      notMadeLine(`this client could not read the decision blocks' checks (${messageFor(error48)})`, context)
+    ];
+  }
+}
+function relatedCheckForm(suggestions, context) {
+  const { outcome, missing } = suggestions;
+  if (outcome === "not_made" || outcome === undefined && missing !== undefined) {
+    return [notMadeLine(missing ?? "the server gave no reason", context, suggestions.search_query)];
+  }
+  const related = suggestions.related ?? [];
+  const mode = searchModeWords(suggestions);
+  if (related.length > 0) {
+    const header = mode === undefined ? "Related items:" : `Related items (searched by ${mode}):`;
+    return [header, ...related.flatMap((item) => relatedItemLines(item, context.configUrl))];
+  }
+  if (outcome === undefined) {
+    return [
+      notMadeLine("the server did not say whether it searched", context, suggestions.search_query)
+    ];
+  }
+  if (outcome === "found" || outcome === "none") {
+    return [
+      mode === undefined ? "Related-item check searched and found nothing." : `Related-item check searched (${mode}) and found nothing.`
+    ];
+  }
+  return [
+    notMadeLine(`the server answered an outcome this client does not know (${String(outcome)})`, context, suggestions.search_query)
+  ];
+}
+function searchModeWords(suggestions) {
+  const { search, search_note: note } = suggestions;
+  if (search === undefined)
+    return;
+  if (search === "meaning_and_keywords")
+    return "meaning and keywords";
+  const words = search === "keywords_only" ? "keywords only" : String(search);
+  return note === undefined || note === "" ? words : `${words}: ${note}`;
+}
+function relatedItemLines(item, configUrl) {
+  try {
+    const lines = [`- ${suggestionLabel(item)} \u2192 ${absoluteHref(item.href, configUrl)}`];
+    if (item.kind === "ask" && item.ask !== undefined && item.ask !== null) {
+      const { ask } = item;
+      if (ask.state === "open") {
+        lines.push("  Ask: open");
+      } else if (ask.state === "answered") {
+        lines.push(`  Ask: answered by ${answerSummary(ask.answer)}`, ...answerTextLines(ask.answer));
+      } else if (ask.answer === undefined || ask.answer === null) {
+        lines.push(`  Ask: closed with no answer: ${ask.resolution.kind}`);
+      } else {
+        lines.push(`  Ask: closed after an answer: ${ask.resolution.kind}; last answered by ${answerSummary(ask.answer)}`, ...answerTextLines(ask.answer));
+      }
+    }
+    return lines;
+  } catch (error48) {
+    const href = item?.href;
+    return [`- ${String(href)} (this client could not show it: ${messageFor(error48)})`];
+  }
+}
+function answerSummary(answer) {
+  const selected = answer.selected ?? [];
+  const chose = selected.length === 0 ? "chose no option" : `chose ${selected.map((label) => JSON.stringify(label)).join(", ")}`;
+  return `${answer.user} at ${answer.at}, ${chose}`;
+}
+function answerTextLines(answer) {
+  const text = answer.text?.trim() ?? "";
+  if (text === "")
+    return ["  Answer text: none"];
+  return [`  Answer text: ${text.split(`
+`).join(`
+    `)}`];
+}
+function suggestionLabel(item) {
+  if (item.owner.kind === "issue") {
+    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
+  }
+  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
+}
+function absoluteHref(href, configUrl) {
+  try {
+    return new URL(href, configUrl).toString();
+  } catch {
+    return String(href);
+  }
+}
+function notMadeLine(reason, context, searchQuery) {
+  const words = searchQuery?.trim() || searchWords(context.text);
+  const query = words === "" ? " with two or three of its words as --query" : ` --query '${words.replaceAll("'", "'\\''")}'`;
+  return `No related-item check was made: ${reason}. Search before you rely on this being new: dispatch search --project ${context.project}${query}`;
+}
+function searchWords(text) {
+  return (text.match(/[\p{L}\p{N}_]+/gu) ?? []).filter((word) => (word.match(/\p{L}/gu) ?? []).length >= 4).slice(0, 3).join(" ");
+}
+
 // ../envoy-client/src/search-answer.ts
 function pageSummaryText(offset, count, total) {
   return `showing ${offset + 1}-${offset + count} of ${total}`;
@@ -40327,31 +40489,12 @@ function renderAdvice(tool, key, advice, opts) {
   }
   return lines;
 }
-function renderSuggestions(suggestions, configUrl) {
-  if (suggestions === undefined)
-    return [];
-  if (suggestions.missing !== undefined) {
-    return [`Related-item search was skipped: ${suggestions.missing}.`];
+async function otherAdviceLines(render) {
+  try {
+    return await render();
+  } catch (error48) {
+    return [`Other advice could not be shown: ${messageFor(error48)}`];
   }
-  const lines = [];
-  if (suggestions.related.length > 0) {
-    lines.push("Possibly related, found by search:");
-    for (const item of suggestions.related) {
-      lines.push(`- ${suggestionLabel(item)} \u2192 ${new URL(item.href, configUrl).toString()}`);
-    }
-  }
-  if (suggestions.decision !== undefined) {
-    const item = suggestions.decision;
-    const when = item.answered_at === undefined ? "" : ` on ${item.answered_at}`;
-    lines.push(`A past decision may already answer this: ${suggestionLabel(item)}, answered by ${item.answered_by}${when} \u2192 ${new URL(item.href, configUrl).toString()}`);
-  }
-  return lines;
-}
-function suggestionLabel(item) {
-  if (item.owner.kind === "issue") {
-    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
-  }
-  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
 }
 function documentResultDetails(artifact) {
   return {
@@ -40404,6 +40547,7 @@ var issueFreeTools = {
   dispatch_resolve_comment: true,
   dispatch_follow: true,
   dispatch_search: true,
+  dispatch_related: true,
   dispatch_issues: true,
   dispatch_project: true,
   dispatch_projects: true,
@@ -41874,19 +42018,25 @@ async function executeDispatchTool(input) {
           actor
         });
         refuseUnsavedRepository("created", created, repo2);
-        const componentGuidance = await architectureGuidance(client, created.project, created.components);
-        const adviceLines = [
-          ...renderAdvice(input.tool, created.key, created.advice, {
-            isPrimarySpec: spec !== undefined
-          }),
-          ...componentGuidance === undefined ? [] : [componentGuidance],
-          ...renderSuggestions(created.advice?.suggestions, linkBase)
-        ];
+        const adviceLines = await otherAdviceLines(async () => {
+          const componentGuidance = await architectureGuidance(client, created.project, created.components);
+          return [
+            ...renderAdvice(input.tool, created.key, created.advice, {
+              isPrimarySpec: spec !== undefined
+            }),
+            ...componentGuidance === undefined ? [] : [componentGuidance]
+          ];
+        });
         const href = new URL(`/issues/${encodeURIComponent(created.key)}`, linkBase).toString();
         const assigned = created.assignee === undefined ? "" : created.assignee === null ? "; unassigned" : `; assigned to ${created.assignee}`;
         return {
           text: [
             `Created ${created.key}: ${created.title} \u2192 ${href}${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`,
+            ...relatedCheckLines(created.advice?.suggestions, {
+              project: created.project,
+              text: title,
+              configUrl: linkBase
+            }),
             ...adviceLines
           ].join(`
 `),
@@ -42068,6 +42218,29 @@ async function executeDispatchTool(input) {
       });
       return searchAnswer(search, query, offset, linkBase);
     }
+    case "dispatch_related": {
+      const project = stringArg(args, "project");
+      const title = optionalString(args, "title");
+      const text = optionalString(args, "text");
+      const excludeIssue = optionalString(args, "exclude_issue");
+      const keywordsOnly = optionalBoolean(args, "keywords_only");
+      const suggestions = await client.related(project, {
+        ...title === undefined ? {} : { title },
+        ...text === undefined ? {} : { text },
+        ...excludeIssue === undefined ? {} : { exclude_issue: excludeIssue },
+        ...keywordsOnly === undefined ? {} : { keywords_only: keywordsOnly }
+      });
+      return {
+        text: relatedCheckLines(suggestions, {
+          project,
+          text: [title, text].filter((part) => part !== undefined).join(`
+`),
+          configUrl: linkBase
+        }).join(`
+`),
+        details: { project, suggestions }
+      };
+    }
     case "dispatch_issues": {
       const project = stringArg(args, "project");
       const status = optionalString(args, "status");
@@ -42230,14 +42403,17 @@ async function executeDispatchTool(input) {
       };
       const ask = resolved?.owner.kind === "project" ? await client.artifactAsk(resolved.artifact.id, askInput) : await client.ask(issue2(), askInput);
       const askOwner = ask.issue_key !== null ? issueTopic(ask.issue_key) : resolved === undefined ? issueTopic(issue2()) : documentTopic(resolved.artifact);
-      const adviceLines = [
-        ...renderSuggestions(ask.advice?.suggestions, linkBase),
-        ...renderAdvice(input.tool, askOwner.label, ask.advice, {})
-      ];
+      const checkLines = relatedCheckLines(ask.advice?.suggestions, {
+        project: resolved?.artifact.project ?? (ask.issue_key ?? "").replace(/-[0-9]+$/, ""),
+        text: stringArg(args, "question"),
+        configUrl: linkBase
+      });
+      const adviceLines = await otherAdviceLines(() => renderAdvice(input.tool, askOwner.label, ask.advice, {}));
       return {
         text: [
-          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}
-${await followsAsk(askOwner, input.subscriptions)}`,
+          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}`,
+          ...checkLines,
+          await followsAsk(askOwner, input.subscriptions),
           ...adviceLines
         ].join(`
 `),
@@ -42434,11 +42610,18 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const lostOps = edited.lost_ops;
       const lostText = lostOps === undefined || lostOps !== null && lostOps.length === 0 ? "" : lostOps === null ? "; could not confirm this edit survived, because the live document is being reloaded or holds a tree too deep to read \u2014 re-read it" : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote \u2014 re-read the document`;
       const applied = `${head}${unchangedText}${lostText}`;
-      const adviceLines = renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {});
+      const editAskText = ops.map((operation) => /^:{3,}ask\{.*\n([\s\S]*)/mu.exec(operation.markdown ?? operation.with ?? "")?.[1]).find((text) => text !== undefined) ?? resolved.issue?.title ?? "";
+      const checkLines = decisionBlockLines(edited.advice, {
+        project: resolved.artifact.project,
+        text: editAskText,
+        configUrl: linkBase
+      });
+      const adviceLines = await otherAdviceLines(() => renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {}));
       const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];
       return {
         text: [
           `${applied}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
+          ...checkLines,
           ...tokenTrailer,
           ...adviceLines
         ].join(`

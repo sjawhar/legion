@@ -45,8 +45,10 @@ import type {
   MessageReplyResult,
   OpenAsksResponse,
   Project,
+  RelatedCheckInput,
   ResolveAskInput,
   SearchResponse,
+  Suggestions,
   UpdateIssueInput,
   Version,
   WhoamiResponse,
@@ -466,6 +468,12 @@ export class DispatchClient {
 
   async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
     return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
+  }
+
+  /** `POST /api/v1/projects/{key}/related`: the related-item check over a title and a text,
+   *  writing nothing. A blank title and text answer `outcome: "not_made"` with the reason. */
+  async related(project: string, input: RelatedCheckInput): Promise<Suggestions> {
+    return this.#json("POST", ["api", "v1", "projects", project, "related"], input);
   }
 
   async getIssue(issue: string): Promise<IssueDetails> {

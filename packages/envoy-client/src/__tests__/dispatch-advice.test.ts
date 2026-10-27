@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
-import type { WriteAdvice } from "@legion/contracts";
+import type { SearchAsk, Suggestions, WriteAdvice, WriteSuggestion } from "@legion/contracts";
 import type { ExecFn } from "../dispatch-cwd";
 import { executeDispatchTool, resetAdviceMemory } from "../dispatch-execute";
 
@@ -534,10 +534,13 @@ describe("Dispatch write advice", () => {
   });
 
   test.each([
+    // An issue or an ask from a server that sends no advice gets the not-made form: that server
+    // ran no related-item check the reader can rely on.
     [
       "dispatch_issue",
       { project: "DSP", title: "Created issue" },
-      `Created DSP-42: Created issue → http://dispatch.test/issues/DSP-42 ${issueSuffix}`,
+      `Created DSP-42: Created issue → http://dispatch.test/issues/DSP-42 ${issueSuffix}\n` +
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project DSP --query 'Created issue'",
       { issue: "DSP-42" },
     ],
     [
@@ -563,6 +566,7 @@ describe("Dispatch write advice", () => {
       "dispatch_ask",
       { issue: "DSP-42", question: "What should we do?" },
       "Asked ask-new on DSP-42 (urgency med): What should we do?\n" +
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project DSP --query 'What should'\n" +
         "You follow this ask: its answer and replies reach you directly. " +
         "For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>",
       { issue: "DSP-42", ask: "ask-new", follows: { ask: "ask-new" } },
@@ -583,97 +587,481 @@ describe("Dispatch write advice", () => {
       `DSP-42: title "Renamed" ${issueSuffix}`,
       { issue: "DSP-42", status: "in_progress", external_links: [] },
     ],
-  ])("%s preserves the existing result when advice is absent", async (tool, args, text, details) => {
+  ])("%s renders its result when advice is absent", async (tool, args, text, details) => {
     const result = await executeWrite(tool, args);
 
     expect(result.text).toBe(text);
     expect(result.details).toEqual(details);
     expect(result.details).not.toHaveProperty("advice");
   });
+});
 
-  test("dispatch_issue renders related suggestions with status and a link", async () => {
-    const rawAdvice = advice({
-      suggestions: {
-        related: [
+const createdLine = `Created DSP-42: Created issue → http://dispatch.test/issues/DSP-42 ${issueSuffix}`;
+const askedLine = "Asked ask-new on DSP-42 (urgency med): Should the billing service retry?";
+const followsLine =
+  "You follow this ask: its answer and replies reach you directly. " +
+  "For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>";
+
+function issueItem(key: string, title: string, status = "backlog"): WriteSuggestion {
+  return {
+    kind: "issue",
+    owner: { kind: "issue", key, title, status },
+    id: key,
+    snippet: title,
+    href: `/issues/${key}`,
+  };
+}
+
+function askItem(key: string, id: string, ask?: SearchAsk): WriteSuggestion {
+  return {
+    kind: "ask",
+    owner: { kind: "issue", key, title: "Billing retries", status: "in_progress" },
+    id,
+    snippet: "Should billing retry?",
+    href: `/issues/${key}#ask-${id}`,
+    ...(ask === undefined ? {} : { ask }),
+  };
+}
+
+async function createIssue(suggestions: Suggestions | undefined, extra: Partial<WriteAdvice> = {}) {
+  return executeWrite(
+    "dispatch_issue",
+    { project: "DSP", title: "Created issue" },
+    advice({ ...(suggestions === undefined ? {} : { suggestions }), ...extra })
+  );
+}
+
+describe("the related-item check", () => {
+  test("dispatch_issue lists what it found, and how it searched, right under the created line", async () => {
+    const suggestions: Suggestions = {
+      outcome: "found",
+      search: "meaning_and_keywords",
+      related: [issueItem("DSP-7", "Existing issue", "triage")],
+    };
+    const result = await createIssue(suggestions);
+
+    expect(result.text).toBe(
+      [
+        createdLine,
+        "Related items (searched by meaning and keywords):",
+        "- DSP-7 [triage] Existing issue → http://dispatch.test/issues/DSP-7",
+      ].join("\n")
+    );
+    expect(result.details.advice).toEqual(advice({ suggestions }));
+  });
+
+  test("a keywords-only search names why in its header", async () => {
+    const result = await createIssue({
+      outcome: "found",
+      search: "keywords_only",
+      search_note: "meaning search is off on this server",
+      related: [issueItem("DSP-7", "Existing issue")],
+    });
+
+    expect(result.text.split("\n")[1]).toBe(
+      "Related items (searched by keywords only: meaning search is off on this server):"
+    );
+  });
+
+  test.each([
+    [
+      { search: "meaning_and_keywords" } as const,
+      "Related-item check searched (meaning and keywords) and found nothing.",
+    ],
+    [
+      { search: "keywords_only", search_note: "meaning search is off on this server" } as const,
+      "Related-item check searched (keywords only: meaning search is off on this server) and found nothing.",
+    ],
+  ])("a search that found nothing says so: %p", async (mode, line) => {
+    const result = await createIssue({ outcome: "none", related: [], ...mode });
+
+    expect(result.text).toBe([createdLine, line].join("\n"));
+  });
+
+  test("a check not made says why and names the search to run, quoting the server's words for a shell", async () => {
+    const result = await createIssue({
+      outcome: "not_made",
+      related: [],
+      missing: "the search behind it did not answer within 5s",
+      search_query: "carrier's webhook retries",
+    });
+
+    expect(result.text).toBe(
+      [
+        createdLine,
+        "No related-item check was made: the search behind it did not answer within 5s. Search before you rely on this being new: dispatch search --project DSP --query 'carrier'\\''s webhook retries'",
+      ].join("\n")
+    );
+  });
+
+  test.each([
+    [
+      "no check result",
+      undefined,
+      "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project DSP --query 'Created issue'",
+    ],
+    [
+      "a missing reason",
+      { related: [], missing: "the search behind it did not answer within 300ms" },
+      "No related-item check was made: the search behind it did not answer within 300ms. Search before you rely on this being new: dispatch search --project DSP --query 'Created issue'",
+    ],
+    [
+      "items and no outcome",
+      { related: [issueItem("DSP-7", "Existing issue")] },
+      "Related items:\n- DSP-7 [backlog] Existing issue → http://dispatch.test/issues/DSP-7",
+    ],
+    [
+      "no items and no outcome",
+      { related: [] },
+      "No related-item check was made: the server did not say whether it searched. Search before you rely on this being new: dispatch search --project DSP --query 'Created issue'",
+    ],
+  ] as const)("an older server's %s reads as one of the forms", async (_shape, suggestions, form) => {
+    const result = await createIssue(suggestions as Suggestions | undefined);
+
+    expect(result.text).toBe([createdLine, form].join("\n"));
+  });
+
+  test("an ask item says where the ask stands", async () => {
+    const answer = (selected: string[], text: string | null) => ({
+      user: "alice",
+      selected,
+      text,
+      at: "2026-09-12T13:20:00Z",
+    });
+    const resolution = {
+      kind: "retracted" as const,
+      reason: "Superseded.",
+      actor: { kind: "user" as const, id: "bob" },
+      at: "2026-09-13T08:00:00Z",
+    };
+    const result = await createIssue({
+      outcome: "found",
+      search: "meaning_and_keywords",
+      related: [
+        askItem("DSP-1", "a1", { state: "open" }),
+        askItem("DSP-2", "a2", {
+          state: "answered",
+          answer: answer(["Exponential", "Capped"], "Back off.\nCap at an hour."),
+        }),
+        askItem("DSP-3", "a3", { state: "answered", answer: answer([], "Never retry.") }),
+        askItem("DSP-4", "a4", { state: "resolved", resolution }),
+        askItem("DSP-5", "a5", {
+          state: "resolved",
+          resolution: { ...resolution, kind: "resolved" },
+          answer: answer(["Linear"], null),
+        }),
+        askItem("DSP-6", "a6"),
+      ],
+    });
+
+    expect(result.text).toBe(
+      [
+        createdLine,
+        "Related items (searched by meaning and keywords):",
+        "- DSP-1 [in_progress] Billing retries → http://dispatch.test/issues/DSP-1#ask-a1",
+        "  Ask: open",
+        "- DSP-2 [in_progress] Billing retries → http://dispatch.test/issues/DSP-2#ask-a2",
+        '  Ask: answered by alice at 2026-09-12T13:20:00Z, chose "Exponential", "Capped"',
+        "  Answer text: Back off.",
+        "    Cap at an hour.",
+        "- DSP-3 [in_progress] Billing retries → http://dispatch.test/issues/DSP-3#ask-a3",
+        "  Ask: answered by alice at 2026-09-12T13:20:00Z, chose no option",
+        "  Answer text: Never retry.",
+        "- DSP-4 [in_progress] Billing retries → http://dispatch.test/issues/DSP-4#ask-a4",
+        "  Ask: closed with no answer: retracted",
+        "- DSP-5 [in_progress] Billing retries → http://dispatch.test/issues/DSP-5#ask-a5",
+        '  Ask: closed after an answer: resolved; last answered by alice at 2026-09-12T13:20:00Z, chose "Linear"',
+        "  Answer text: none",
+        // An older server sends no state; the item reads as it did.
+        "- DSP-6 [in_progress] Billing retries → http://dispatch.test/issues/DSP-6#ask-a6",
+      ].join("\n")
+    );
+  });
+
+  test("a forced create names the titles it went past after the form", async () => {
+    const result = await createIssue({
+      outcome: "not_made",
+      related: [],
+      missing: "the search behind it failed",
+      title_matches: [
+        {
+          key: "DSP-3",
+          title: "Created issue",
+          status: "todo",
+          snippet: "Created issue",
+          shared_terms: 2,
+          href: "/issues/DSP-3",
+        },
+      ],
+    });
+
+    expect(result.text).toBe(
+      [
+        createdLine,
+        "No related-item check was made: the search behind it failed. Search before you rely on this being new: dispatch search --project DSP --query 'Created issue'",
+        "Title overlaps you forced past: DSP-3 [todo] Created issue → http://dispatch.test/issues/DSP-3",
+      ].join("\n")
+    );
+  });
+
+  test("a link that does not parse prints as the server sent it", async () => {
+    const result = await createIssue({
+      outcome: "found",
+      search: "meaning_and_keywords",
+      related: [{ ...issueItem("DSP-7", "Existing issue"), href: "http://[" }],
+    });
+
+    expect(result.text.split("\n")[2]).toBe("- DSP-7 [backlog] Existing issue → http://[");
+  });
+
+  test("advice that cannot be shown leaves the created line and the form, and says so", async () => {
+    const result = await createIssue(
+      { outcome: "none", search: "meaning_and_keywords", related: [] },
+      // A malformed field makes the advice renderer throw.
+      { unparsed_openers: { count: 2, examples: null as unknown as string[] } }
+    );
+    const lines = result.text.split("\n");
+
+    expect(lines.slice(0, 2)).toEqual([
+      createdLine,
+      "Related-item check searched (meaning and keywords) and found nothing.",
+    ]);
+    expect(lines[2]).toStartWith("Other advice could not be shown: ");
+    expect(lines).toHaveLength(3);
+  });
+
+  test("dispatch_ask prints the form between the asked line and the follow line, then a past decision", async () => {
+    const decision: WriteSuggestion = {
+      ...askItem("DSP-9", "ask-old", {
+        state: "answered",
+        answer: { user: "alice", selected: ["REST"], text: null, at: "2026-09-12T13:20:00Z" },
+      }),
+      answered_by: "alice",
+      answered_at: "2026-09-12T13:20:00Z",
+    };
+    const result = await executeWrite(
+      "dispatch_ask",
+      { issue: "DSP-42", question: "Should the billing service retry?" },
+      advice({
+        suggestions: {
+          outcome: "found",
+          search: "meaning_and_keywords",
+          related: [decision],
+          decision,
+        },
+      })
+    );
+
+    expect(result.text).toBe(
+      [
+        askedLine,
+        "Related items (searched by meaning and keywords):",
+        "- DSP-9 [in_progress] Billing retries → http://dispatch.test/issues/DSP-9#ask-ask-old",
+        '  Ask: answered by alice at 2026-09-12T13:20:00Z, chose "REST"',
+        "  Answer text: none",
+        "A past decision may already answer this: DSP-9 [in_progress] Billing retries, answered by alice on 2026-09-12T13:20:00Z → http://dispatch.test/issues/DSP-9#ask-ask-old",
+        followsLine,
+      ].join("\n")
+    );
+  });
+
+  test("dispatch_ask still ends with the cadence line", async () => {
+    const result = await executeWrite(
+      "dispatch_ask",
+      { issue: "DSP-42", question: "Should the billing service retry?" },
+      advice({
+        session_writes_since_human: 3,
+        suggestions: { related: [], missing: "the search behind it did not answer within 300ms" },
+      })
+    );
+    const lines = result.text.split("\n");
+
+    expect(lines.slice(0, 3)).toEqual([
+      askedLine,
+      "No related-item check was made: the search behind it did not answer within 300ms. Search before you rely on this being new: dispatch search --project DSP --query 'Should billing service'",
+      followsLine,
+    ]);
+    expect(lines.at(-1)).toStartWith("Posted. You've sent 3 messages on DSP-42");
+  });
+});
+
+describe("dispatch_doc_edit's decision block checks", () => {
+  const askBlock =
+    ':::ask{urgency="med"}\nShould webhook deliveries back off exponentially?\n:::\n';
+  const editArgs = {
+    issue: "DSP-42",
+    artifact: "spec",
+    ops: [{ op: "insert", after: "end", markdown: askBlock }],
+  };
+  const appliedLine = `Applied 1 ops (no new version) ${issueSuffix}`;
+
+  test("prints each new block's check under its id, after the applied line", async () => {
+    const result = await executeWrite(
+      "dispatch_doc_edit",
+      editArgs,
+      advice({
+        decision_blocks_added: 2,
+        decision_block_checks: [
           {
-            kind: "issue",
-            owner: { kind: "issue", key: "DSP-7", title: "Existing issue", status: "triage" },
-            id: "DSP-7",
-            snippet: "an existing issue",
-            href: "/issues/DSP-7",
+            block_id: "ask-block-1",
+            question: "Should webhook deliveries back off exponentially?",
+            suggestions: {
+              outcome: "found",
+              search: "keywords_only",
+              search_note: "meaning search is off on this server",
+              related: [issueItem("DSP-7", "Webhook retries")],
+            },
+          },
+          {
+            block_id: "ask-block-2",
+            question: "Which queue holds them?",
+            suggestions: {
+              outcome: "not_made",
+              related: [],
+              missing: "more than five new decision blocks in one edit",
+            },
           },
         ],
-      },
-    });
-    const result = await executeWrite(
-      "dispatch_issue",
-      { project: "DSP", title: "Created issue" },
-      rawAdvice
+      })
     );
 
-    expect(result.text).toContain("Possibly related, found by search:");
-    expect(result.text).toContain(
-      "- DSP-7 [triage] Existing issue → http://dispatch.test/issues/DSP-7"
+    expect(result.text).toBe(
+      [
+        appliedLine,
+        "Decision block ask-block-1:",
+        "Related items (searched by keywords only: meaning search is off on this server):",
+        "- DSP-7 [backlog] Webhook retries → http://dispatch.test/issues/DSP-7",
+        "Decision block ask-block-2:",
+        "No related-item check was made: more than five new decision blocks in one edit. Search before you rely on this being new: dispatch search --project DSP --query 'Which queue holds'",
+        "Document token: sha256:edited",
+      ].join("\n")
     );
-    expect(result.details.advice).toEqual(rawAdvice);
   });
 
-  test("dispatch_ask renders a past decision with who answered and when", async () => {
-    const rawAdvice = advice({
-      suggestions: {
-        related: [],
-        decision: {
-          kind: "ask",
-          owner: { kind: "issue", key: "DSP-9", title: "Transport choice", status: "done" },
-          id: "ask-old",
-          snippet: "Should we use REST or GraphQL?",
-          href: "/issues/DSP-9#ask-ask-old",
-          answered_by: "alice",
-          answered_at: "2026-09-12T13:20:00Z",
+  test("an older server that only counts the new blocks gets one not-made line, searched by the block's question", async () => {
+    const result = await executeWrite(
+      "dispatch_doc_edit",
+      editArgs,
+      advice({ decision_blocks_added: 1 })
+    );
+
+    expect(result.text).toBe(
+      [
+        appliedLine,
+        "1 new decision block:",
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project DSP --query 'Should webhook deliveries'",
+        "Document token: sha256:edited",
+      ].join("\n")
+    );
+  });
+
+  test("an older server's count with no block text in the edit searches by the issue's title", async () => {
+    const result = await executeWrite(
+      "dispatch_doc_edit",
+      { issue: "DSP-42", artifact: "spec", ops: [{ op: "replace", find: "draft", with: "final" }] },
+      advice({ decision_blocks_added: 1 })
+    );
+
+    expect(result.text.split("\n")[2]).toEndWith("--query 'Original title'");
+  });
+
+  test("an edit that added no block prints no check", async () => {
+    const result = await executeWrite(
+      "dispatch_doc_edit",
+      editArgs,
+      advice({ decision_blocks_added: 0 })
+    );
+
+    expect(result.text).toBe([appliedLine, "Document token: sha256:edited"].join("\n"));
+  });
+});
+
+describe("dispatch_related", () => {
+  async function related(args: Record<string, unknown>, answer: Suggestions) {
+    const requests: Array<{ method: string; path: string; body: unknown }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push({
+        method: init?.method ?? "GET",
+        path: target.pathname,
+        body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+      });
+      return response(answer);
+    };
+    const result = await executeDispatchTool({
+      tool: "dispatch_related",
+      args,
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec(),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+    return { result, requests };
+  }
+
+  test("posts the title, text and switches to the project's related route and prints the form", async () => {
+    const answer: Suggestions = {
+      outcome: "found",
+      search: "keywords_only",
+      search_note: "the caller asked for keywords only",
+      related: [issueItem("DSP-7", "Webhook retries")],
+    };
+    const { result, requests } = await related(
+      {
+        project: "DSP",
+        title: "Retry failed webhook deliveries",
+        text: "Back off exponentially.",
+        exclude_issue: "DSP-9",
+        keywords_only: true,
+      },
+      answer
+    );
+
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        path: "/api/v1/projects/DSP/related",
+        body: {
+          title: "Retry failed webhook deliveries",
+          text: "Back off exponentially.",
+          exclude_issue: "DSP-9",
+          keywords_only: true,
         },
       },
-    });
-    const result = await executeWrite(
-      "dispatch_ask",
-      { issue: "DSP-42", question: "Should the billing service use REST or GraphQL?" },
-      rawAdvice
+    ]);
+    expect(result.text).toBe(
+      [
+        "Related items (searched by keywords only: the caller asked for keywords only):",
+        "- DSP-7 [backlog] Webhook retries → http://dispatch.test/issues/DSP-7",
+      ].join("\n")
     );
-
-    expect(result.text).toContain(
-      "A past decision may already answer this: DSP-9 [done] Transport choice, answered by alice on 2026-09-12T13:20:00Z → http://dispatch.test/issues/DSP-9#ask-ask-old"
-    );
-    expect(result.details.advice).toEqual(rawAdvice);
+    expect(result.details).toEqual({ project: "DSP", suggestions: answer });
   });
 
-  test("dispatch_ask ends with the cadence line after its suggestions", async () => {
-    const rawAdvice = advice({
-      session_writes_since_human: 3,
-      suggestions: { related: [], missing: "the search behind it did not answer within 300ms" },
-    });
-    const result = await executeWrite(
-      "dispatch_ask",
-      { issue: "DSP-42", question: "What should we do?" },
-      rawAdvice
+  test("a check not made names the project and the text's words to search by", async () => {
+    const { result, requests } = await related(
+      { project: "DSP", text: "the a of" },
+      { outcome: "not_made", related: [], missing: "the text holds no word to search for" }
     );
 
-    expect(result.text).toContain("Related-item search was skipped");
-    expect(result.text.split("\n").at(-1)).toStartWith("Posted. You've sent 3 messages on DSP-42");
+    expect(requests.map(({ body }) => body)).toEqual([{ text: "the a of" }]);
+    expect(result.text).toBe(
+      "No related-item check was made: the text holds no word to search for. Search before you rely on this being new: dispatch search --project DSP with two or three of its words as --query"
+    );
   });
 
-  test("dispatch_issue reports why suggestions are missing instead of blocking the write", async () => {
-    const rawAdvice = advice({
-      suggestions: { related: [], missing: "the search behind it did not answer within 300ms" },
-    });
-    const result = await executeWrite(
-      "dispatch_issue",
-      { project: "DSP", title: "Created issue" },
-      rawAdvice
+  test("prints that it found nothing", async () => {
+    const { result } = await related(
+      { project: "DSP", title: "Quantum teleportation" },
+      { outcome: "none", search: "meaning_and_keywords", related: [] }
     );
 
-    expect(result.text).toContain(
-      "Related-item search was skipped: the search behind it did not answer within 300ms."
+    expect(result.text).toBe(
+      "Related-item check searched (meaning and keywords) and found nothing."
     );
-    expect(result.details.advice).toEqual(rawAdvice);
   });
 });
 
