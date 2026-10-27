@@ -36,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 	natsgo "github.com/nats-io/nats.go"
 
@@ -203,14 +204,21 @@ type sseFrame struct {
 // arriving on the connection the reader already had, never on a reconnect's catch-up.
 func (p *dispatchProcess) openEventStream(t *testing.T) <-chan sseFrame {
 	t.Helper()
-	response, err := p.send(http.MethodGet, "/api/v1/events", "")
+	return p.openServerSentEvents(t, "/api/v1/events")
+}
+
+// openServerSentEvents holds the server-sent stream at path open as a signed-in tab does and
+// reports every frame it reads on the returned channel, which closes once the connection ends.
+func (p *dispatchProcess) openServerSentEvents(t *testing.T, path string) <-chan sseFrame {
+	t.Helper()
+	response, err := p.send(http.MethodGet, path, "")
 	if err != nil {
-		t.Fatalf("open the event stream: %v", err)
+		t.Fatalf("open %s: %v", path, err)
 	}
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)
 		_ = response.Body.Close()
-		t.Fatalf("open the event stream: status %d: %s", response.StatusCode, body)
+		t.Fatalf("open %s: status %d: %s", path, response.StatusCode, body)
 	}
 	t.Cleanup(func() { _ = response.Body.Close() })
 	frames := make(chan sseFrame, 256)
@@ -2687,4 +2695,132 @@ func TestBothProcessesJudgeARouteAgainstOneRoster(t *testing.T) {
 				first, second, routedToSRE)
 		}
 	})
+}
+
+// ───── the test hooks ───────────────────────────────────────────────────────
+
+// hookViewerSession is the session whose conversation the test-hook row's viewer watches: any
+// UUID, since the in-process relay the publish hook feeds knows no sessions of its own.
+const hookViewerSession = "01a0e090-4848-7473-acc5-fc96e6a646d3"
+
+// startHookPair starts both processes as the browser harness starts its server: with the test
+// hooks, as every process here runs, and without NATS, so the agent conversation relay each
+// serves is the in-process source the publish hook feeds (main.go), one per process.
+func startHookPair(t *testing.T) *dispatchPair {
+	t.Helper()
+	pair := &dispatchPair{database: storetest.Open(t)}
+	options := dispatchOptions{SigningKey: multiprocessSigningKey}
+	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), options)
+	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), options)
+	pair.a.waitHealthy(t)
+	pair.b.waitHealthy(t)
+	return pair
+}
+
+// openDeliverySocket opens GET /ws/delivery as a signed-in Delivery page does and reports the
+// read error that ended it on the returned channel.
+func (p *dispatchProcess) openDeliverySocket(t *testing.T) <-chan error {
+	t.Helper()
+	conn, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(p.url("/ws/delivery"), "http"),
+		http.Header{"X-Dispatch-User": {dispatchTestLogin}})
+	if err != nil {
+		t.Fatalf("open the delivery socket: %v (%v)", err, response)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	ended := make(chan error, 1)
+	go func() {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				ended <- err
+				return
+			}
+		}
+	}()
+	return ended
+}
+
+// requireStreamEnded drains frames until the stream closes, failing the row when it is still
+// open within.
+func requireStreamEnded(t *testing.T, frames <-chan sseFrame, within time.Duration, what string) {
+	t.Helper()
+	deadline := time.After(within)
+	for {
+		select {
+		case _, open := <-frames:
+			if !open {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("%s was still open %v later", what, within)
+		}
+	}
+}
+
+// Every test hook acts on every process serving the database, whichever process the call landed
+// on: a browser suite against two processes disconnects, quiesces and feeds frames to the process
+// its page happens to be connected to, which is not the one its own API call reaches. A stream, a
+// delivery socket, a live document room and a conversation viewer are each held open on B, and
+// each hook is called on A. quiesce answers only once B's room has closed too, which is what a
+// harness truncating its database right after relies on. Once B is killed its lock is gone with
+// its connection, and a hook called on A answers on A's acknowledgement alone rather than waiting
+// out the timeout for a process that no longer exists.
+func TestEveryTestHookActsOnBothProcesses(t *testing.T) {
+	pair := startHookPair(t)
+	project := uniqueProjectKey(t, "HKS")
+	pair.a.createProject(t, project, "Test hooks")
+	_, artifactID := pair.a.createIssueIn(t, project, "Open on B", "before")
+
+	stream := pair.b.openEventStream(t)
+	pair.a.call(t, http.MethodPost, "/api/v1/events/_test/disconnect", "", http.StatusOK)
+	requireStreamEnded(t, stream, 10*time.Second, "the event stream B held after the disconnect hook was called on A")
+
+	socket := pair.b.openDeliverySocket(t)
+	pair.a.call(t, http.MethodPost, "/api/v1/delivery/_test/disconnect", "", http.StatusOK)
+	select {
+	case err := <-socket:
+		if !gws.IsCloseError(err, gws.CloseServiceRestart) {
+			t.Fatalf("the delivery socket B held ended with %v, want the hook's 1012", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the delivery socket B held was still open 10s after the delivery disconnect hook was called on A")
+	}
+
+	editor := pair.b.openEditor(t, artifactID, "before\n")
+	pair.a.call(t, http.MethodPost, "/api/v1/artifacts/_test/quiesce", "", http.StatusOK)
+	// B closed the room before it acknowledged, and A answered only after that acknowledgement,
+	// so the close is already on its way over loopback when the answer arrives: the bound is that
+	// trip, not a wait for B to get round to it.
+	select {
+	case <-editor.Ended:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("the document room B held was still open 2s after quiesce answered on A:\nB:\n%s", pair.b.Output.String())
+	}
+
+	viewer := pair.b.openServerSentEvents(t, "/api/v1/agents/"+hookViewerSession+"/stream")
+	const published = `{"v":1,"kind":"message","seq":7}`
+	pair.a.call(t, http.MethodPost, "/api/v1/agents/"+hookViewerSession+"/stream/_test/publish", published, http.StatusOK)
+	deadline := time.After(10 * time.Second)
+	for received := false; !received; {
+		select {
+		case frame, open := <-viewer:
+			if !open {
+				t.Fatal("the conversation viewer B held closed before the frame published on A arrived")
+			}
+			received = frame.event == "frame" && frame.data == published
+		case <-deadline:
+			t.Fatal("the conversation viewer B held never received the frame published on A")
+		}
+	}
+
+	survivor := pair.a.openEventStream(t)
+	pair.b.kill(t)
+	called := time.Now()
+	pair.a.call(t, http.MethodPost, "/api/v1/events/_test/disconnect", "", http.StatusOK)
+	waited := time.Since(called)
+	t.Logf("the disconnect hook on A answered %v after B was killed", waited)
+	// The hook's timeout is ten seconds; an answer inside it is one that did not wait for B.
+	if waited >= 10*time.Second {
+		t.Fatalf("the disconnect hook on A answered %v after B was killed, want well inside the 10s timeout", waited)
+	}
+	requireStreamEnded(t, survivor, 10*time.Second, "the event stream A held after the disconnect hook answered with B killed")
 }
