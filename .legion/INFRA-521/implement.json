@@ -2,16 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-521",
-  "completed": "2026-10-27T06:01:51Z",
+  "completed": "2026-10-27T06:03:13Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2313",
-  "headSha": "6d04381cecd504fd575653a6eb415985f02f00fe",
+  "headSha": "2cd0e10371bf1669d84617e671347a581a156221",
   "proof": [
     {
       "criterion": "Review round 1 (PR #2313 review 5662777061): the documented rule gives the selection; iphone runs the 223 kept tests",
       "surface": "Playwright CLI in packages/dispatch and a real browser in the issue pod (harness /legion/scratch/harness, lane implementer)",
       "command": "bunx playwright test --config e2e/playwright.config.ts --list (per project) and --list --project iphone --reporter=json | bun $TMPDIR/infra521/check-iphone.ts; bunx playwright test --config e2e/playwright.config.ts --project iphone --project chromium issue.e2e.ts:697 margin-thread-reply.e2e.ts:216 agents-search.e2e.ts inbox.e2e.ts:355",
       "observed": "iphone lists 223 = the keep rows of dispatch://INFRA-521/artifact/iphone-selection-md v2 (0 extra, 0 missing); chromium 786, webkit 53, webkit-iphone 11, firefox 53, firefox-download-navigation 1, chromium-plain-http 4 unchanged; the changed tests: 7 passed (issue.e2e.ts:697 under iphone and chromium; margin-thread-reply.e2e.ts:216, the three agents-search tests and inbox.e2e.ts:355 under chromium). Under the new precondition, each of the reviewer`s nine named tests is untagged by it (agents.e2e.ts:759/847/953/1001 and delivery-live.e2e.ts:454 skip all but chromium or webkit-iphone; keyboard-palette.e2e.ts:1030 and margin-thread-reply.e2e.ts:216 set a desktop viewport; mention-composer.e2e.ts:443 starts on a wider screen and narrows) except issue.e2e.ts:697, which sets a phone width from no desktop start: it is now tagged and passes under iphone.",
-      "headSha": "6d04381cecd504fd575653a6eb415985f02f00fe",
+      "headSha": "2cd0e10371bf1669d84617e671347a581a156221",
       "negativeControl": "In a scratch copy of 357138e7, margin-thread-reply.e2e.ts:216 tagged @phone with its old openThread(page, testInfo.project.name, …) failed under iphone (30.0 s timeout, as the reviewer predicted); the same copy with openThread(page, \"chromium\", …) passed under iphone (6.7 s)."
     },
     {
@@ -113,7 +113,7 @@
     "packages/dispatch/AGENTS.md (Phone acceptance: what iphone runs, R1-R6, tag syntax, silent-drop caveat and --list check; the grep-exception sentence)",
     "packages/dispatch/README.md (the seven projects as the config defines them)",
     "docs/solutions/testing/a-layout-change-is-proven-by-the-whole-project-...-INFRA-92.md (dated INFRA-521 note)",
-    "Round 2: packages/dispatch/AGENTS.md (precondition before R1-R6; skip sentence narrowed to === \"iphone\" skips, !== \"chromium\" skips stay), e2e/issue.e2e.ts (:697 tagged), e2e/margin-thread-reply.e2e.ts (:226 passes \"chromium\"), e2e/agents-search.e2e.ts and e2e/inbox.e2e.ts (dead iphone width ternaries inlined to 1280), e2e/playwright.config.ts (anchor comment)"
+    "Round 2: packages/dispatch/AGENTS.md (precondition before R1-R6; skip sentence narrowed to === \"iphone\" skips, !== \"chromium\" skips stay), e2e/issue.e2e.ts (:697 tagged), e2e/margin-thread-reply.e2e.ts (:226 passes \"chromium\"), e2e/agents-search.e2e.ts and e2e/inbox.e2e.ts (dead iphone width ternaries inlined to 1280), e2e/playwright.config.ts (anchor comment); AGENTS.md precondition also names a test that starts at the project width expecting a desktop one and narrows the window itself (mention-composer.e2e.ts:443)"
   ],
   "trickyParts": [
     "Playwright's project grep text also holds the project name 'iphone' and file paths like phone.e2e.ts, so the grep is anchored on whitespace: /(^|\\s)@phone(\\s|$)/.",
