@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -150,9 +151,11 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 	// --ignore-working-copy (on 0.44 and 0.45, after registering the workspace and creating its
 	// directory), so the add snapshots the clone's own working copy. Every other command
 	// provisioning and removal run on the clone is onClone's, and so is every command a refusal
-	// prints (wayOut).
+	// prints (wayOut). The add registers the workspace with no files (--sparse-patterns empty), so
+	// it is quick under the store lock; Provision writes the working copy after letting the lock go
+	// (checkout).
 	add := []string{
-		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "-R", cloneDir,
+		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "--sparse-patterns", "empty", "-R", cloneDir,
 	}
 	result, err := runCommand(ctx, run, add, nil, "")
 	if err != nil {
@@ -444,13 +447,31 @@ func removingPath(dir string) string { return dir + removingSuffix }
 // colocated worktree of a directory already gone, so Remove deletes that entry itself, also when
 // the workspace is neither registered nor present (a crash after the forget). workspace is
 // Location's, which names the clone; any other is refused before anything is removed.
-func Remove(ctx context.Context, run Runner, workspace Workspace) error {
+//
+// store is the repository's store lock, the one a provision is handed as Request.StoreLock (nil
+// holds nothing). Remove holds it for every command on the shared clone, the rename aside and the
+// git worktree entry's removal, and lets it go before it deletes the aside directory: that delete's
+// time follows the workspace's size, and it touches nothing of the clone's, so the provisions of the
+// repository's other issues do not wait for it. An aside directory a crash left before its delete
+// is cleared by the issue's next Remove, before it takes the lock.
+func Remove(ctx context.Context, run Runner, workspace Workspace, store sync.Locker) error {
 	if !located(workspace) {
 		return fmt.Errorf("workspace to remove (%#v) is not a workspace Location names", workspace)
 	}
 	if _, err := guardWorkspace(workspace.Dir, workspace.Clone, false); err != nil {
 		return err
 	}
+	// A stale aside from an interrupted removal of this same directory name, never cleared (named
+	// again later, or a previous pass's delete itself never ran): cleared before the rename so it
+	// never refuses with "already exists", and before the store lock, since it holds nothing of the
+	// clone's.
+	aside := removingPath(workspace.Dir)
+	if err := os.RemoveAll(aside); err != nil {
+		return fmt.Errorf("clear a stale removal-in-progress directory: %w", err)
+	}
+	held := &storeLock{locker: store}
+	held.lock()
+	defer held.unlock()
 	cloneDir, workspaceName := workspace.Clone, filepath.Base(workspace.Dir)
 	cloneExists, err := pathExists(filepath.Join(cloneDir, ".jj"))
 	if err != nil {
@@ -477,22 +498,12 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 		}
 		commits = nonEmptyLines(own.Stdout)
 	}
-	aside := removingPath(workspace.Dir)
 	if present, err := pathExists(workspace.Dir); err != nil {
 		return err
 	} else if present {
-		// A stale aside from an interrupted removal of this same directory name, never cleared
-		// (named again later, or a previous pass's finish step itself never ran): cleared before
-		// the rename so it never refuses with "already exists".
-		if err := os.RemoveAll(aside); err != nil {
-			return fmt.Errorf("clear a stale removal-in-progress directory: %w", err)
-		}
 		if err := os.Rename(workspace.Dir, aside); err != nil {
 			return fmt.Errorf("rename workspace directory aside before removing it: %w", err)
 		}
-	}
-	if err := os.RemoveAll(aside); err != nil {
-		return fmt.Errorf("remove workspace directory: %w", err)
 	}
 	if registered {
 		if len(commits) > 0 {
@@ -508,6 +519,10 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 		if err := removeGitWorktree(cloneDir, workspace.Dir); err != nil {
 			return err
 		}
+	}
+	held.unlock()
+	if err := os.RemoveAll(aside); err != nil {
+		return fmt.Errorf("remove workspace directory: %w", err)
 	}
 	return nil
 }

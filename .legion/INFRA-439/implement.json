@@ -2,42 +2,21 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-27T00:42:07Z",
+  "completed": "2026-10-27T05:54:21Z",
   "pr": 2228,
-  "round": "review round 5 (changes requested at b08c70f3): retention gap told twice when its sweep is cut short; fork requeue order; nats-hub.md replay read; conditional no-auth NATS user sentence",
+  "round": "review round 7 (changes requested for CI alone at 465a078b): forward merge of main so the pull_request merge ref carries main's #2317 fix for the daemon admission test",
   "proof": [
     {
-      "criterion": "A retention gap is told once when its sweep is cut short between the notice and the page's last frame",
-      "surface": "envoy-client bun test (replay.test.ts) and pi-envoy bun test (extensions/envoy.test.ts), cutting the sweep while a gapped page's frame is shown",
-      "command": "cd packages/envoy-client && bun test (911 pass; the 1 fail is envoy-config.test.ts 'still running after 10 s', untouched by this PR, failing alone in this pod); cd packages/pi-envoy && bun test (1015 pass, 0 fail)",
-      "observed": "one retention_gap across the cut engine and the engine restored from its last write; a later-page gap gives one notice in total; the pi-envoy session cut at the surviving frame's card shows one gap notice after the restart and the frame once",
-      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
-      "negativeControl": "against 6eba519f's replay.ts the engine test gives ['retention_gap','retention_gap'] and the new tests fail"
-    },
-    {
-      "criterion": "Held replay notices still survive a kill and are told once live; the fork fix and gap fix leave the replay smoke green",
-      "surface": "the tester's notice4.sh and notice2.sh (unchanged) and packages/pi-envoy/scripts/smoke-replay.sh in local mode, on real omp 18.12.2",
-      "command": "bash /legion/scratch/tmp/adv/notice4.sh; bash /legion/scratch/tmp/adv/notice2.sh; bash packages/pi-envoy/scripts/smoke-replay.sh (https://github.com/sjawhar/legion/pull/2228#issuecomment-6430820579)",
-      "observed": "NOTICE4 RESULT: gap-a:PASS gap-b:PASS; NOTICE RESULT: N2-shown-after-resume:PASS N2-once:PASS; smoke exit 0, SMOKE REPLAY PASS",
-      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
-      "negativeControl": "notice4 at 489fd64d gave gap-b:FAIL(0->2->2); the fork unit test fails against the id-only dedupe (notice never handed in the fork)"
+      "criterion": "The forward merge changes nothing of this branch's diff and brings main's fix for the only red required check",
+      "surface": "the unchanged-diff fingerprint (jj diff from the fork point, .legion and docs/solutions excluded) and the merge's parents",
+      "command": "fingerprint at 465a078b (and at code head fcc7d008) vs at merge 34b3e846cb6e (https://github.com/sjawhar/legion/pull/2228#issuecomment-6434885121); jj log -r 'baadccdc & ::main@origin'",
+      "observed": "fingerprint fcfbc288f05b54a8f89461975c53a87e0da717f16b03149df2a0cf507b638fcf before and after, unchanged; no conflicts; #2317 (baadccdc) is an ancestor of the merged main 448a41003a17; locally tsc, go build (envoy, daemon), check-dist and biome are green, and pi-envoy bun test gives 1016 pass with the skills guard green",
+      "headSha": "34b3e846cb6e35bb661f02261d2fab236a2ca3f0",
+      "negativeControl": "at fcc7d008 the required test job failed 'Test the Go daemon' (read a slotted issue ... got 20 and 31) in runs 40445205215 job 121994721541 and its rerun 122015255071, from main's #2289 in the old merge ref"
     }
   ],
-  "filesChanged": [
-    "packages/envoy-client/src/replay.ts",
-    "packages/envoy-client/src/__tests__/replay.test.ts",
-    "packages/envoy-client/CHANGELOG.md",
-    "packages/claude-envoy/dist/envoy-channel.js",
-    "packages/pi-envoy/extensions/envoy.test.ts (test added only)",
-    "packages/pi-envoy/src/unwritten-frames.ts",
-    "packages/pi-envoy/src/unwritten-frames.test.ts",
-    "packages/envoy/infra/docs/nats-hub.md"
-  ],
-  "trickyParts": [
-    "Every subject gapped on a page is lifted to first_seq - 1 in both the sweep's reading and its cursor, written with flush(alive, true), and only then is the one notice per sweep raised; the page's frames (all at first_seq or later) are still handled.",
-    "Held and handed notices are keyed by (session, id): a fork's transcript copies its parent's held entry with the same id."
-  ],
+  "filesChanged": [],
   "deviations": [
-    "The cut between a gap notice and the page-end write lasts milliseconds; it is proven by engine and pi-envoy tests, not by a live kill."
+    "Two tests fail in this pod, in files this PR does not change: envoy-client envoy-config.test.ts 'still running after 10 s' and claude-envoy session-title.test.ts 'queryTmux is bounded'."
   ]
 }
