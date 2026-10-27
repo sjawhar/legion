@@ -255,7 +255,7 @@ func newestEventPayload[T any](t *testing.T, database *store.Store, eventType, i
 	return decoded
 }
 
-func createChildIssue(t *testing.T, handler http.Handler, title, parent string) model.Issue {
+func createTitledChild(t *testing.T, handler http.Handler, title, parent string) model.Issue {
 	t.Helper()
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
 		"project": "TEST", "title": title, "parent": parent, "force": true,
@@ -273,8 +273,8 @@ func createChildIssue(t *testing.T, handler http.Handler, title, parent string) 
 func TestIssueEventsSayWhatTheWriteChanged(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	root := createInteractionIssue(t, handler, "TEST", "Root of the tree", "A spec")
-	child := createChildIssue(t, handler, "Middle of the tree", root.Key)
-	grandchild := createChildIssue(t, handler, "Leaf of the tree", child.Key)
+	child := createTitledChild(t, handler, "Middle of the tree", root.Key)
+	grandchild := createTitledChild(t, handler, "Leaf of the tree", child.Key)
 
 	rootCreated := newestEventPayload[issueEventFields](t, database, "issue.created", root.Key)
 	if rootCreated.Ancestors == nil || len(rootCreated.Ancestors) != 0 {

@@ -14,6 +14,9 @@
   changed or was removed since, and what cites it; `dist/` was regenerated. The block forms, the
   pin and the 256-byte bound past which a block is no graph node are in the commands' `--help`
   (`dispatch read --help`, `dispatch ask --help`, `dispatch doc-edit --help`).
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line; `dist/` was
+  regenerated.
 - The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
   filtered issue listing in one request rather than a page, for a caller that must not miss or
   repeat a row while the list changes under it. `--all` with `--limit` or `--offset` is a usage

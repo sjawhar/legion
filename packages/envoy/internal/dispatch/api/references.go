@@ -105,9 +105,10 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 // text. A block no current version of its document holds answers 404, unless ref is pinned to a
 // version N that held it: the node then carries what N recorded (model.BlockPin), "unchanged"
 // or "changed" by comparing the current text with N's, or "removed" with the version that deleted
-// it, as a node with no text or changed version. A pin to a version the document lacks, to one
-// whose blocks are not on record (an older build wrote it and none indexed it) or to one that
-// did not hold the block answers 404, each saying which.
+// it, as a node with no text or changed version whose facts are a removed block's
+// (refs.RemovedBlockNode); a pin to a current block carries the current block's facts. A pin to
+// a version the document lacks, to one whose blocks are not on record (an older build wrote it and
+// none indexed it) or to one that did not hold the block answers 404, each saying which.
 func (s *server) blockReferenceNode(ctx context.Context, query refs.Query, ref text.Ref) (model.GraphNode, error) {
 	pool := s.deps.Store.Pool
 	documentKey, _, _ := strings.Cut(query.ID, "#")
@@ -147,16 +148,12 @@ func (s *server) blockReferenceNode(ctx context.Context, query refs.Query, ref t
 	pin := &model.BlockPin{Version: ref.Pin, Ref: blockRef + "@v" + strconv.Itoa(ref.Pin), Text: *at.Text}
 	if !current {
 		pin.State, pin.RemovedVersion = "removed", at.RemovedVersion
-		return model.GraphNode{
-			Kind:     "block",
-			ID:       query.ID,
-			BlockID:  ref.Block,
-			IssueKey: document.IssueKey,
-			Project:  document.Project,
-			Ref:      blockRef,
-			Document: document.Ref,
-			Pin:      pin,
-		}, nil
+		removed, err := refs.RemovedBlockNode(ctx, pool, document, query.ID, ref.Block, at.RemovedVersion)
+		if err != nil {
+			return model.GraphNode{}, err
+		}
+		removed.Pin = pin
+		return removed, nil
 	}
 	if node.Text, err = refs.CurrentBlockText(ctx, pool, document.ID, ref.Block); err != nil {
 		return model.GraphNode{}, err
