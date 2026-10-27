@@ -211,8 +211,9 @@ describe("dispatchToolSpecs", () => {
         options: z.ZodType;
       };
       expect(argumentsSchema.question.description, name).toContain(
-        "never enumerate choices in the question"
+        "The question names the concrete case first"
       );
+      expect(argumentsSchema.question.description, name).not.toContain("never enumerate choices");
       expect(argumentsSchema.options.description, name).toContain(
         "description says what that approach costs"
       );

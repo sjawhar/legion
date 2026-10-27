@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { dispatchToolSchema, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
+import {
+  ASK_QUESTION_MAX,
+  dispatchToolSchema,
+  dispatchToolSpecs,
+  overCapMessage,
+  zodSchemaApi,
+} from "@legion/contracts";
 import { z } from "zod";
 import { commandFlags, commandLine } from "../dispatch-command";
 import { formatZodIssues, ToolInputError } from "../tool-input-errors";
@@ -123,11 +129,11 @@ describe("formatZodIssues", () => {
     expect(
       problemsFor("dispatch_ask", {
         issue: "DSP-42",
-        question: "x".repeat(850),
+        question: "x".repeat(ASK_QUESTION_MAX + 50),
         options: Array.from({ length: 9 }, (_, index) => ({ label: `o${index}` })),
       })
     ).toEqual([
-      "--question is 50 characters over the 800-character limit (850/800)",
+      `--question ${overCapMessage(ASK_QUESTION_MAX + 50, ASK_QUESTION_MAX)}`,
       "--option has 9 items; the limit is 8",
     ]);
   });

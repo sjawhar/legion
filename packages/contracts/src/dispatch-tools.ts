@@ -55,9 +55,12 @@ const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 
 const ASK_QUESTION_CONTRACT =
-  "The question carries the problem the reader recognises and why it matters now, what constrains " +
-  "the answer, and the recommendation with its reason. It asks how to solve the problem or which " +
-  "outcome is wanted; never enumerate choices in the question.";
+  "The question names the concrete case first: which machines, files, sessions or people, and the " +
+  "numbers. It asks the choice in those terms, saying what happens to whom under each option " +
+  '("Ship Friday and risk signing out 1,240 users, or hold to Monday?"), never "How should we ' +
+  'proceed?" or "Which option?". It carries every fact the reader needs to decide and nothing ' +
+  "that does not change the decision. Generalize only after the specifics, if at all. Then give " +
+  "your recommendation and its reason.";
 
 const ASK_OPTIONS_CONTRACT =
   "Options carry the genuinely different approaches. Each option has a label, and its description " +
@@ -263,8 +266,13 @@ function imagesArgument<E extends SchemaNode<E>>(z: SchemaApi<E>, owner: string,
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 
-/** Longest ask question the Dispatch server accepts, in characters. */
-export const ASK_QUESTION_MAX = 800;
+/**
+ * Longest ask question the Dispatch server accepts, in UTF-16 code units. Generated into Go as
+ * `contracts.AskQuestionMax`, which the server enforces on an ask's question and from which it
+ * derives the room an approval request's summary has. A question names its concrete case, and
+ * 800 was too short for that: capped asks crowded the limit while uncapped ask blocks ran past it.
+ */
+export const ASK_QUESTION_MAX = 2000;
 
 /**
  * Longest comment, comment edit, message and broadcast body the Dispatch server accepts, in
@@ -541,16 +549,19 @@ export const dispatchToolSpecs = [
     example: {
       issue: "DSP-1",
       question:
-        "The release cannot pass its review gate because the revised plan is unreviewed. " +
-        "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+        "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the " +
+        "sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a " +
+        "wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships " +
+        "Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user " +
+        "waits on 4.2, and 1,240 forced sign-ins cost more than three days.",
       options: [
         {
-          label: "Review the revised plan",
-          description: "Delays release for review but keeps the release gate.",
+          label: "Hold to Monday",
+          description: "4.2 ships three days late, with the column drop reviewed.",
         },
         {
-          label: "Release without review",
-          description: "Ships sooner but bypasses the review gate.",
+          label: "Ship Friday",
+          description: "On time; a wrong drop signs out 1,240 users.",
         },
       ],
     },
@@ -625,16 +636,19 @@ export const dispatchToolSpecs = [
     example: {
       ask: "01234567-0000-4000-8000-000000000001",
       question:
-        "The release cannot pass its review gate because the revised plan is unreviewed. " +
-        "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+        "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the " +
+        "sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a " +
+        "wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships " +
+        "Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user " +
+        "waits on 4.2, and 1,240 forced sign-ins cost more than three days.",
       options: [
         {
-          label: "Review the revised plan",
-          description: "Delays release for review but keeps the release gate.",
+          label: "Hold to Monday",
+          description: "4.2 ships three days late, with the column drop reviewed.",
         },
         {
-          label: "Release without review",
-          description: "Ships sooner but bypasses the review gate.",
+          label: "Ship Friday",
+          description: "On time; a wrong drop signs out 1,240 users.",
         },
       ],
     },

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   type Artifact,
+  ASK_QUESTION_MAX,
   type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
@@ -457,18 +458,18 @@ describe("executeDispatchTool", () => {
       throw new Error("network must not be called");
     }) as unknown as typeof fetch;
 
-    // 790 + "\n\nRef: " (7) + 24 = 821 UTF-16 units.
+    // The question at the cap less 10, plus "\n\nRef: " (7) and the 24-unit ref, is 21 over.
     await expect(
       executeAsk(
         {
           issue: "DSP-41",
-          question: "x".repeat(790),
+          question: "x".repeat(ASK_QUESTION_MAX - 10),
           ref: "dispatch://DSP-41/ask/ab",
         },
         fetchImpl
       )
     ).rejects.toThrow(
-      "question plus ref is 21 characters over the 800-character limit (821/800); shorten the question or drop the ref"
+      `question plus ref ${overCapMessage(ASK_QUESTION_MAX + 21, ASK_QUESTION_MAX)}; shorten the question or drop the ref`
     );
   });
 

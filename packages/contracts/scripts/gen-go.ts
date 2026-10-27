@@ -16,6 +16,7 @@ import {
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
 import {
+  ASK_QUESTION_MAX,
   DISPATCH_BODY_MAX,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
@@ -164,6 +165,12 @@ const IssueTitleMax = ${ISSUE_TITLE_MAX}
 // accepts, in UTF-16 units. Generated from DISPATCH_BODY_MAX in packages/contracts so the server's
 // refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
 const DispatchBodyMax = ${DISPATCH_BODY_MAX}
+
+// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
+// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
+// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
+// ask composer cannot drift apart.
+const AskQuestionMax = ${ASK_QUESTION_MAX}
 
 // ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
 // accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the

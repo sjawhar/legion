@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { overCapMessage } from "@legion/contracts";
+import { ASK_QUESTION_MAX, overCapMessage } from "@legion/contracts";
 import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { type DispatchToolResult, executeDispatchTool } from "../dispatch-execute";
 import { DispatchClient } from "../dispatch-http";
@@ -187,19 +187,19 @@ describe("sending pictures", () => {
     expect(server.posted).toEqual([]);
   });
 
-  test("an ask's question counts its ref and its pictures toward the 800-character cap", async () => {
+  test("an ask's question counts its ref and its pictures toward the question cap", async () => {
     const server = dispatch();
     const shot = file("shot.png", PNG);
     const ref = "dispatch://DSP-41/message/0b6e0f4e-4e2c-4d55-9a7e-0e9b3a4c1d22";
     const line = "![shot.png](dispatch://DSP-41/artifact/shot-png@v1)";
-    const question = "q".repeat(800 - `\n\nRef: ${ref}`.length - 2 - line.length + 1);
+    const question = "q".repeat(ASK_QUESTION_MAX - `\n\nRef: ${ref}`.length - 2 - line.length + 1);
 
     const failure = await refusal(
       run("dispatch_ask", { issue: "DSP-41", question, ref, images: [shot] }, server.fetchImpl)
     );
 
     expect((failure as ToolInputError).problems).toEqual([
-      "question plus ref plus 1 picture is 1 characters over the 800-character limit (801/800); shorten the question, drop the ref or send fewer pictures",
+      `question plus ref plus 1 picture ${overCapMessage(ASK_QUESTION_MAX + 1, ASK_QUESTION_MAX)}; shorten the question, drop the ref or send fewer pictures`,
     ]);
     expect(server.uploads).toEqual([]);
   });
