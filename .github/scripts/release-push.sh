@@ -194,8 +194,13 @@
 #            The date is the tag's commit's committer date. Without a prefix (a
 #            package with no release of its own), every fragment is folded under
 #            main@<HEAD's first 12 hex digits>, dated by HEAD's committer date.
-#            It reads only git, so the build job and the publish job compute
-#            the same plan from the same checkout and tags.
+#            A fragment's path is one file to git, never a pattern: a name
+#            holding a glob character gets the commit that added that file. It
+#            reads only git, so it computes the same plan from the same
+#            checkout and tags. The build job and the publish job check out the
+#            same commit, but each fetches every tag, so a release tag pushed
+#            between the jobs can give the publish job's plan a version group
+#            the build job's lacks (push-fold defers it).
 # fold-notes: the build job's half of a fold: render the plan's fragments with
 #            changie, which is dependency code, into <notes-dir>, which must be
 #            absent or empty and is created. Each (package, label) of the plan
@@ -212,27 +217,40 @@
 #            with a clean working tree and index; $DEPLOY_KEY and
 #            $GITHUB_REPOSITORY must be set before anything is written. The
 #            plan is computed again from git, never taken from the build job;
-#            an empty one prints "Nothing to fold" and exits 0. <notes-dir>
-#            must hold exactly the files <package basename>_<label>.md of the
-#            plan, by `handed`'s rule (regular files, nothing else at any
-#            depth), so the build job chooses the notes' bytes but not which
-#            packages and labels they go to. Each must hold something besides
-#            blank lines, no NUL byte and no line starting "## " (the heading
-#            is push-fold's to write), and no package's CHANGELOG.md may
-#            already hold the heading "## [<label>]" of its group. Every
-#            refusal is an ::error:: naming the file, package or label, before
-#            anything is written. Each group then becomes a block, applied in
-#            ascending label order: "## [<label>] - <date>", a blank line, the
-#            notes with leading and trailing blank lines trimmed, a blank line.
-#            A version's block goes above the first "## " line that is not the
-#            release heading "## [X.Y.Z]" of a higher version, so the newest
-#            release is on top and an older one goes below a newer one present;
-#            a main@ block goes above the first "## " line; with no such line
-#            the block is appended after a blank line. Every existing line is
-#            kept, byte for byte and in order. The planned fragments are
-#            removed, and the one commit, by github-actions[bot] as `tag`'s
-#            are, has the fixed subject "chore: fold changelog fragments [skip
-#            ci]" and no body: "[skip ci]" starts no workflow run from it, and
+#            an empty one prints "Nothing to fold" and exits 0. A group
+#            labelled X.Y.Z whose notes file does not exist at all is deferred:
+#            its release tag was pushed after the build job computed its plan,
+#            so the build rendered no notes for it. Its fragments stay on main,
+#            a ::notice titled "Fold deferred" names its package and label, and
+#            a later run folds it (the release's own completion starts one, and
+#            the daily run is the backstop); the other groups fold as below.
+#            When every group is deferred, it says so, pushes nothing, starts
+#            no run and exits 0. A main@ group is never deferred: its label
+#            depends only on HEAD, which is the base the build job planned
+#            from, so its notes are missing only when the build is faulty, and
+#            that is a refusal. <notes-dir> must hold exactly the files
+#            <package basename>_<label>.md of the groups not deferred, by
+#            `handed`'s rule (regular files, nothing else at any depth; a
+#            version group's notes path that exists as anything but a regular
+#            file is refused, not deferred), so the build job chooses the
+#            notes' bytes but not which packages and labels they go to. Each
+#            must hold something besides blank lines, no NUL byte and no line
+#            starting "## " (the heading is push-fold's to write), and no
+#            package's CHANGELOG.md may already hold the heading
+#            "## [<label>]" of its group. Every refusal is an ::error:: naming
+#            the file, package or label, before anything is written. Each group
+#            then becomes a block, applied in ascending label order:
+#            "## [<label>] - <date>", a blank line, the notes with leading and
+#            trailing blank lines trimmed, a blank line. A version's block goes
+#            above the first "## " line that is not the release heading
+#            "## [X.Y.Z]" of a higher version, so the newest release is on top
+#            and an older one goes below a newer one present; a main@ block
+#            goes above the first "## " line; with no such line the block is
+#            appended after a blank line. Every existing line is kept, byte for
+#            byte and in order. The fragments of the groups folded are removed,
+#            and the one commit, by github-actions[bot] as `tag`'s are, has the
+#            fixed subject "chore: fold changelog fragments [skip ci]" and no
+#            body: "[skip ci]" starts no workflow run from it, and
 #            release-bump.sh reads commit subjects and bodies, where a fixed
 #            chore subject bumps no release. The commit lands by land_on_main
 #            (below), which never rebases: a fold is of main's tip, so when main
@@ -429,6 +447,9 @@ fold_plan() {
     [[ $spec != *=* ]] || prefix=${spec#*=}
     # The package dir goes into paths and pathspecs, the prefix into a tag
     # pattern, and the dir's basename names the notes file of each group.
+    # package_dir_re keeps the dir free of pathspec magic (a leading ':') and
+    # of glob characters, so it needs no --literal-pathspecs; a fragment's name
+    # is anything git holds, so each git call given one reads it literally.
     if ! [[ $dir =~ $package_dir_re ]] || { [[ $spec == *=* ]] && ! [[ $prefix =~ ^[A-Za-z0-9._-]+$ ]]; }; then
       fail_error "package spec $(quote_all "$spec") is not <package-dir>[=<tag-prefix>], a relative path of letters, digits, '.', '_' and '-' and a prefix of the same without '/'"
     fi
@@ -446,7 +467,7 @@ fold_plan() {
       if [ -z "$prefix" ]; then
         label=$head_label date=$head_date
       else
-        commit=$(git log -1 --diff-filter=A --format=%H HEAD -- "$path")
+        commit=$(git --literal-pathspecs log -1 --diff-filter=A --format=%H HEAD -- "$path")
         label='' tag=''
         for candidate in $(git tag --list "$prefix*" --contains "$commit"); do
           version=${candidate#"$prefix"}
@@ -461,7 +482,14 @@ fold_plan() {
       lines+="$index"$'\t'"$dir"$'\t'"$label"$'\t'"$date"$'\t'"$path"$'\n'
     done < <(git ls-tree -z HEAD -- "$dir/.changes/unreleased/")
   done
-  plan=$(printf '%s' "$lines" | LC_ALL=C sort -t $'\t' -k1,1n -k3,3V -k5,5 | cut -f2-)
+  set_plan "$(printf '%s' "$lines" | LC_ALL=C sort -t $'\t' -k1,1n -k3,3V -k5,5 | cut -f2-)"
+}
+
+# set_plan <lines>: set plan to <lines>, plan lines without the last newline,
+# each then ending in a newline (empty when <lines> is), and groups to its
+# distinct <package-dir><TAB><label> pairs, in the plan's order.
+set_plan() {
+  plan=$1
   [ -z "$plan" ] || plan+=$'\n'
   groups=$(printf '%s' "$plan" | cut -f1,2 | uniq)
 }
@@ -1007,11 +1035,31 @@ case "$command" in
       echo "Nothing to fold"
       exit 0
     fi
-    names=()
+    # A version group whose notes file does not exist at all is deferred (the
+    # header's push-fold paragraph). The deferred groups are named here, before
+    # the hand-over check, so that check expects the notes of every other group:
+    # a version group's notes that exist but are not a regular file, and every
+    # main@ group's notes, stay its to refuse.
+    names=() deferred=''
     while IFS=$'\t' read -r dir label; do
-      names+=("$(notes_name "$dir" "$label")")
+      name=$(notes_name "$dir" "$label")
+      if [[ $label != main@* ]] && [ ! -e "$notes_dir/$name" ] && [ ! -L "$notes_dir/$name" ]; then
+        deferred+="$dir"$'\t'"$label"$'\n'
+      else
+        names+=("$name")
+      fi
     done <<<"$groups"
     check_hand_over "$notes_dir" "the fold's plan names no notes for" "${names[@]}"
+    if [ -n "$deferred" ]; then
+      while IFS=$'\t' read -r dir label; do
+        echo "::notice title=Fold deferred::$dir $label is not folded in this run and its fragments stay on main: the build rendered no notes for it, so its release tag is newer than the build; a later run folds it (the release's own completion starts one, and the daily run is the backstop)" >&2
+      done < <(printf '%s' "$deferred")
+      set_plan "$(printf '%s' "$plan" | awk -F '\t' 'NR == FNR { deferred[$1 FS $2]; next } !(($1 FS $2) in deferred)' <(printf '%s' "$deferred") -)"
+      if [ -z "$plan" ]; then
+        echo "Nothing to fold in this run: every group of the plan is deferred to a later run"
+        exit 0
+      fi
+    fi
     while IFS=$'\t' read -r dir label; do
       notes_file="$notes_dir/$(notes_name "$dir" "$label")"
       shown=$(quote_all "$notes_file")

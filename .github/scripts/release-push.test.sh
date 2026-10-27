@@ -1743,5 +1743,46 @@ third_kept=$(git -C "$fc/origin.git" cat-file -e "main:packages/rel/$u/INFRA-3-t
 check "push-fold, a release tag pushed between the jobs: exits 0 and keeps the fragment the notes do not hold" \
   "$(is "$rc|$third_kept" "0|true")"
 
+# The same run folds every group the notes hold, as a run without the new tag does (fold-accepted
+# above), and names the group it defers.
+o="$fc/origin.git"
+accepted="$work/fold-accepted/origin.git"
+check "push-fold, a release tag pushed between the jobs: says it pushed, writing pushed=true" \
+  "$(is "$(contains "$out" '^Pushed [0-9a-f]\{40\} to main over')|$output" "true|pushed=true")"
+check "push-fold, a release tag pushed between the jobs: the groups the notes hold land, their fragments gone and nothing else changed" \
+  "$(is "$(git -C "$o" diff --name-status "$base" main)" "$(git -C "$accepted" diff --name-status "$base" main)")"
+check "push-fold, a release tag pushed between the jobs: their blocks are in the changelogs, and the deferred version's is not" \
+  "$(is "$(git -C "$o" show main:packages/rel/CHANGELOG.md)|$(git -C "$o" show main:packages/side/CHANGELOG.md)|$(git -C "$o" show main:packages/plain/CHANGELOG.md)" \
+    "$(git -C "$accepted" show main:packages/rel/CHANGELOG.md)|$(git -C "$accepted" show main:packages/side/CHANGELOG.md)|$(git -C "$accepted" show main:packages/plain/CHANGELOG.md)")"
+check "push-fold, a release tag pushed between the jobs: a notice names the deferred package and label" \
+  "$(contains "$out" '^::notice title=Fold deferred::packages/rel 1\.11\.0 is not folded in this run and its fragments stay on main: .*its release tag is newer than the build; a later run folds it')"
+check "push-fold, a release tag pushed between the jobs: one notice, for that group alone" \
+  "$(is "$(grep -c 'title=Fold deferred' <<<"$out")" 1)"
+
+# Every group of the plan is a version group the notes lack: nothing is left to fold.
+fold_case fold-all-deferred
+fold_specs=(packages/rel=rel-v)
+git -C "$fc/a" tag rel-v1.11.0 "$base"
+rm "$fc/notes/rel_1.9.0.md" "$fc/notes/rel_1.10.0.md" "$fc/notes/side_$main_label.md" "$fc/notes/plain_$main_label.md"
+push_fold
+check "push-fold, every group deferred: exits 0, saying nothing is folded in this run" \
+  "$(is "$rc|$(contains "$out" '^Nothing to fold in this run: every group of the plan is deferred')" "0|true")"
+check "push-fold, every group deferred: a notice for each group, in the plan's order" \
+  "$(is "$(sed -n 's/^::notice title=Fold deferred::\(packages\/rel [0-9.]*\) is not folded in this run.*/\1/p' <<<"$out")" "packages/rel 1.9.0
+packages/rel 1.10.0
+packages/rel 1.11.0")"
+check "push-fold, every group deferred: nothing written, origin untouched, gh not called, no pushed=" "$(is "$(untouched)|$output" "true|")"
+fold_specs=(packages/rel=rel-v packages/side packages/plain packages/empty)
+
+# Only a notes name that does not exist at all defers its group: one that is there as a symlink,
+# even a dangling one, is refused as the build's fault.
+fold_case fold-deferred-symlink
+git -C "$fc/a" tag rel-v1.11.0 "$base"
+ln -s "$fc/nowhere" "$fc/notes/rel_1.11.0.md"
+push_fold
+fold_refused "a version group's notes that are a dangling symlink" "rel_1\.11\.0\.md in .* is not a regular file"
+check "push-fold refuses a version group's notes that are a dangling symlink: defers nothing" \
+  "$(is "$(contains "$out" 'Fold deferred')" false)"
+
 summary "release-push.sh version, push-main, tagged, tag, release, push-tag, handed, no-credential, fold-plan and push-fold"
 
