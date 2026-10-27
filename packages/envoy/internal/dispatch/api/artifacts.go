@@ -16,6 +16,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -859,12 +860,17 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
+	// release ends the conditional edit gate once: right after the commit, which is all a later
+	// conditional edit of this document waits on, so the checks of this edit's new decision blocks
+	// never hold it; on every earlier return, here.
+	release := func() {}
 	if input.Precondition != nil {
-		release, err := s.deps.Docs.AcquireConditionalEdit(r.Context(), artifact.ID)
+		acquired, err := s.deps.Docs.AcquireConditionalEdit(r.Context(), artifact.ID)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+		release = sync.OnceFunc(acquired)
 		defer release()
 	}
 	tx, err := s.begin(r.Context())
@@ -936,6 +942,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	release()
 	var version *model.Version
 	if written != nil {
 		version = &written.Version
@@ -964,7 +971,10 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	// The ask blocks the edit added, read from the documents the batch was applied to: whether an
 	// operation's markdown makes a block depends on where it lands and on the parser's reading of
 	// code and containers, which a caller's own reading of that markdown would only approximate.
-	blocks := &editBlocks{DecisionBlocksAdded: edit.AskBlocksAdded}
+	blocks := &editBlocks{
+		DecisionBlocksAdded: edit.AskBlocksAdded,
+		DecisionBlockChecks: s.decisionBlockChecks(r.Context(), artifact, edit.AddedAskBlocks, actor),
+	}
 	if artifact.IssueKey == nil || advice == nil {
 		WriteJSON(w, http.StatusOK, withRawAdvice(responsePayload, blocks))
 		return

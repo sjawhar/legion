@@ -6,11 +6,13 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -42,6 +44,9 @@ const (
 	// for a reader's own dispatch search to find what the check found, few enough that search's
 	// AND of them still matches something.
 	relatedSearchQueryTerms = 3
+	// decisionBlockCheckLimit is how many of one edit's new decision blocks are checked; each past
+	// it answers that its check was not made (decisionBlockChecks).
+	decisionBlockCheckLimit = 5
 )
 
 // relatedEFSearch sets hnsw.ef_search for the meaning query's transaction: how many nearest
@@ -82,6 +87,7 @@ const (
 	relatedReasonEmbedFailed       = "embed_failed"
 	relatedReasonMeaningFailed     = "meaning_failed"
 	relatedReasonKeywordsRequested = "keywords_only_requested"
+	relatedReasonTooManyBlocks     = "too_many_blocks"
 )
 
 // What a reader is told for the reasons more than one step of the check can reach.
@@ -118,6 +124,45 @@ func withSuggestions(payload any, advice *writeAdvice, suggestions *model.Sugges
 		return withAdvice(payload, advice)
 	}
 	return withRawAdvice(payload, suggestionsOnlyAdvice{Suggestions: suggestions})
+}
+
+// decisionBlockChecks runs the related-item check for each decision block a document edit added,
+// once the edit has committed, so a block whose question restates a decision already made or work
+// already filed is answered with it while the writer is still at the document. The first
+// decisionBlockCheckLimit blocks are checked at once, all under one relatedAllowance, so an edit
+// waits on its checks no longer than an issue create waits on its one; each block past them
+// answers, and is recorded, as not made. A block's source is the document's issue, or the project
+// document itself when it has no issue, left out of its results as an ask's owner is. Nil when the
+// edit added no block.
+func (s *server) decisionBlockChecks(
+	ctx context.Context, artifact model.Artifact, blocks []docs.AddedAskBlock, actor model.Actor,
+) []decisionBlockCheck {
+	if len(blocks) == 0 {
+		return nil
+	}
+	bounded, cancel := context.WithTimeout(ctx, s.relatedAllowance())
+	defer cancel()
+	checks := make([]decisionBlockCheck, len(blocks))
+	var running sync.WaitGroup
+	for index, block := range blocks {
+		source := suggestionSource{kind: "decision_block", blockID: block.ID, actor: actor}
+		if artifact.IssueKey != nil {
+			source.issueKey = *artifact.IssueKey
+		} else {
+			source.artifactID = artifact.ID
+		}
+		input := relatedInput{project: artifact.Project, text: block.Question, source: source, record: true}
+		checks[index] = decisionBlockCheck{BlockID: block.ID, Question: block.Question}
+		if index >= decisionBlockCheckLimit {
+			checks[index].Suggestions = s.relatedCheckNotRun(
+				ctx, input, relatedReasonTooManyBlocks, "more than five new decision blocks in one edit",
+			)
+			continue
+		}
+		running.Go(func() { checks[index].Suggestions = s.relatedCheck(bounded, input) })
+	}
+	running.Wait()
+	return checks
 }
 
 // suggestionSource identifies what a check was run for: a newly created issue, a newly created

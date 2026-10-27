@@ -440,12 +440,14 @@ func (b editBatch) outcome(applied int) (EditOutcome, error) {
 	if err != nil {
 		return EditOutcome{}, err
 	}
+	added := addedAskBlocks(b.beforeTree, b.tree)
 	return EditOutcome{
 		Applied:        applied,
 		Changed:        after != b.before,
 		Unchanged:      b.unchanged,
 		Token:          after,
-		AskBlocksAdded: addedAskBlocks(b.beforeTree, b.tree),
+		AskBlocksAdded: len(added),
+		AddedAskBlocks: added,
 	}, nil
 }
 

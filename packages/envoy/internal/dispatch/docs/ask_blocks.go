@@ -520,13 +520,30 @@ func addedAskBlockIDs(before, after *pmdoc.Node) map[string]struct{} {
 	return added
 }
 
-// addedAskBlocks counts the readable ask blocks in after whose block id no readable ask block in
-// before carries: one an edit inserted, retyped another block into, or repaired after a browser left
-// it unreadable, wherever it lands - a blockquote, a list item - as the parser reads it, so an opener
-// quoted in code adds none. One the edit moved, reworded or left alone keeps its id and counts
-// nothing.
-func addedAskBlocks(before, after *pmdoc.Node) int {
-	return len(addedAskBlockIDs(before, after))
+// addedAskBlocks is each readable ask block in after whose block id no readable ask block in
+// before carries (addedAskBlockIDs), in after's document order, with its question: one an edit
+// inserted, copied from another document, retyped another block into, or repaired after a browser
+// left it unreadable, wherever it lands - a blockquote, a list item - as the parser reads it, so an
+// opener quoted in code adds none. One the edit moved, reworded or left alone keeps its id and is
+// not among them. An id two blocks repeat is named once, for the first.
+func addedAskBlocks(before, after *pmdoc.Node) []AddedAskBlock {
+	ids := addedAskBlockIDs(before, after)
+	added := make([]AddedAskBlock, 0, len(ids))
+	pmdoc.Walk(after, func(node *pmdoc.Node) bool {
+		if node.Type != "ask" {
+			return true
+		}
+		block, err := parseAskBlock(node)
+		if err != nil {
+			return true
+		}
+		if _, unnamed := ids[block.id]; unnamed {
+			added = append(added, AddedAskBlock{ID: block.id, Question: block.question})
+			delete(ids, block.id)
+		}
+		return true
+	})
+	return added
 }
 
 // newAskMarkdown is what an uploaded version can say of an ask, for one refuseChangedAsks call: its
