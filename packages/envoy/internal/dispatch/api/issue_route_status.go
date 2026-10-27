@@ -96,7 +96,8 @@ type rosterCache struct {
 	mu sync.Mutex
 	// built is the roster this process last built from a stored answer, and builtSent that
 	// answer's sent_at, zero before any: a read of a row still carrying that sent_at takes built
-	// rather than reading and decoding the row's sessions again.
+	// rather than reading and decoding the row's sessions again, and a read that found an older
+	// row stale takes built rather than fetching once more (readRouteRoster).
 	built     routeRoster
 	builtSent time.Time
 	// fetch is the listener read in flight, nil when none is.
@@ -124,11 +125,19 @@ type rosterSession struct {
 // every route unknown, and so does a read whose own request ends while it waits; the fetch runs on
 // for the other reads, and stores its answer for every process. A read whose own read of the row
 // fails reads unknown too, since the stored answer is the one every process judges by.
+//
+// A read that found the row stale may reach the lock only after the fetch that was in flight
+// while it read has stored its answer and gone. It then takes the answer this process built
+// since its own read of the row (builtSent later than the sent_at that read saw) rather than
+// starting a second fetch. The row's sent_at only grows, so that answer was stored after the read
+// found the row stale - by this process's fetch, or by another process's later one, which counts
+// as storeRouteRoster counts it - and it is the answer the read would have waited for had it
+// reached the lock a moment sooner.
 func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 	if s.deps.Envoy == nil {
 		return routeRoster{}
 	}
-	roster, fresh, now, err := s.storedRouteRoster(ctx)
+	roster, fresh, now, seen, err := s.storedRouteRoster(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
 			slog.Warn("dispatch: read the stored listener answer; routes read unknown", "error", err)
@@ -142,6 +151,11 @@ func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 	cache.mu.Lock()
 	fetch := cache.fetch
 	if fetch == nil {
+		if cache.builtSent.After(seen) {
+			roster = cache.built
+			cache.mu.Unlock()
+			return roster
+		}
 		fetch = &rosterFetch{done: make(chan struct{})}
 		cache.fetch = fetch
 		// The fetch is every waiting read's, so it runs on the server's lifetime rather than on
@@ -170,9 +184,9 @@ const routeRosterQuery = `
 	left join route_roster r on true`
 
 // storedRouteRoster reads the route_roster row on the pool, outside any transaction, and answers
-// the roster it holds, whether that is still fresh by the database's clock, and that clock's
-// now(). No row reads as not fresh.
-func (s *server) storedRouteRoster(ctx context.Context) (roster routeRoster, fresh bool, now time.Time, err error) {
+// the roster it holds, whether that is still fresh by the database's clock, that clock's now(),
+// and the row's sent_at, zero for no row. No row reads as not fresh.
+func (s *server) storedRouteRoster(ctx context.Context) (roster routeRoster, fresh bool, now, sent time.Time, err error) {
 	cache := &s.rosters
 	cache.mu.Lock()
 	built, builtSent := cache.built, cache.builtSent
@@ -185,18 +199,18 @@ func (s *server) storedRouteRoster(ctx context.Context) (roster routeRoster, fre
 	var sentAt, expiresAt *time.Time
 	var sessions []byte
 	if err := s.deps.Store.Pool.QueryRow(ctx, routeRosterQuery, known).Scan(&now, &answered, &sentAt, &expiresAt, &sessions); err != nil {
-		return routeRoster{}, false, time.Time{}, err
+		return routeRoster{}, false, time.Time{}, time.Time{}, err
 	}
 	if sentAt == nil {
-		return routeRoster{}, false, now, nil
+		return routeRoster{}, false, now, time.Time{}, nil
 	}
 	roster = built
 	if sessions != nil {
 		if roster, err = cache.remember(*sentAt, answered, sessions); err != nil {
-			return routeRoster{}, false, time.Time{}, err
+			return routeRoster{}, false, time.Time{}, time.Time{}, err
 		}
 	}
-	return roster, expiresAt.After(now), now, nil
+	return roster, expiresAt.After(now), now, *sentAt, nil
 }
 
 // remember builds the roster a stored answer holds and keeps it as this process's built roster.
@@ -275,7 +289,7 @@ func (s *server) storeRouteRoster(ctx context.Context, sent time.Time, listed []
 		return own
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		if newer, _, _, err := s.storedRouteRoster(ctx); err == nil {
+		if newer, _, _, _, err := s.storedRouteRoster(ctx); err == nil {
 			return newer
 		}
 		return own

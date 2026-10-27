@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type commentInput struct {
@@ -269,6 +270,9 @@ type commentWrite struct {
 // A comment with no such route commits at once, and its mentions' senders wait out the take-over
 // under the attempts the commit made durable. Every lookup runs at once, so a comment waits about
 // one take-over window however many mentions it carries (validateCommentMentions allows ten).
+// The lookups share the request's tracking mark because they call only the listener and never
+// take a pooled connection; one that read the database would need a mark of its own
+// (store.ForConcurrentRead), as the senders after the commit take.
 func (s *server) resolveCommentDeliveries(
 	ctx context.Context, owner owner, input commentInput, targets []string, delivery string,
 ) (commentResolution, error) {
@@ -708,14 +712,27 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	// the dispatch command's own request deadline, after the comment has committed, so its retry
 	// would post the comment again. Together they wait one window (validateCommentMentions allows
 	// ten mentions, so ten senders at most).
+	//
+	// Each sender takes a tracking mark of its own: the pool's one-connection guard is per mark
+	// (store.WithTransactionTracking), so senders sharing the request's would trip it whenever two
+	// of them were inside a claim or settle transaction at once, and race on its flag. The marks are
+	// taken before any sender starts, so a refusal leaves nothing in flight; the committed attempts
+	// stay pending for the resume loop.
 	sendCtx := context.WithoutCancel(r.Context())
+	senders := make([]context.Context, len(resolvedMentions))
+	for index := range senders {
+		if senders[index], err = store.ForConcurrentRead(sendCtx); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	attempts := make([]model.CommentDelivery, len(resolvedMentions))
 	failures := make([]error, len(resolvedMentions))
 	var sends sync.WaitGroup
 	for index, mention := range resolvedMentions {
 		sends.Go(func() {
 			attempts[index], failures[index] = s.deliverResolvedCommentMention(
-				sendCtx, comment, event, mention, actor, commentClaim{mode: claimCreating},
+				senders[index], comment, event, mention, actor, commentClaim{mode: claimCreating},
 			)
 		})
 	}
