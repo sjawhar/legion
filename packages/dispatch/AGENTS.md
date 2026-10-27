@@ -1412,6 +1412,18 @@ runs a second proxy in front of a stand-in upstream to show that a closed page's
 upstream. `chromium` and `iphone` ignore both specs by file name. Both skip when
 `PLAYWRIGHT_BASE_URL` is `https:`, where there is no plain-HTTP origin to proxy.
 
+The `chromium-plain-http-sign-out` project runs the rows of `e2e/keyed-writes.e2e.ts` whose
+titles name a sign-out (`grep: /a sign-out/`) on the same plain-HTTP origin, signed in through
+`asPlainHttpUser`. A page that is not a secure context has no `navigator.locks`, so there a tab
+holds the person's writes for another tab's sign-out on the lease that tab renews
+(`SIGN_OUT_RENEW_MS`, `SIGN_OUT_LEASE_MS`), which no secure-context project reaches: the
+confirmed sign-out sends nothing queued behind a held write, and a signing-out tab that closes
+before its answer leaves the other tab to ask Dispatch who is signed in. Those rows send the
+page's `POST /auth/logout` to a server that never answers (`route.continue` to a local socket)
+rather than leaving the route unanswered, because Chromium sends a paused request on to the
+server once its page closes. They skip on an `https:` `PLAYWRIGHT_BASE_URL` as the two specs
+above do.
+
 ## Phone acceptance
 
 The `iphone` Playwright project uses Chromium with the iPhone 13 viewport,

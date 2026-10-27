@@ -174,7 +174,7 @@ docker rmi "ghcr.io/sjawhar/legion/envoy:${acceptance_image_tag}"
 
 `e2e/seed.ts` truncates its database before each scenario. Always set
 `PLAYWRIGHT_DATABASE_URL` to an isolated test database when using a deployed URL.
-The suite has seven projects. `chromium` and `iphone` run every spec except the two plain-HTTP
+The suite has eight projects. `chromium` and `iphone` run every spec except the two plain-HTTP
 specs; the iPhone project uses Chromium with iPhone 13 viewport, touch, and user-agent emulation.
 `webkit` runs `e2e/collab-cursor.e2e.ts`, since where a caret lands beside a collaborator's cursor
 differs by engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since Firefox's own editing
@@ -197,7 +197,10 @@ local proxy), a plain-HTTP origin that is not loopback and so not a secure conte
 forwards to the dev sign-in server at its loopback origin. The project proves a document takes a
 new paragraph and a comment renders formatted there, where `crypto.randomUUID` does not exist, and
 that the proxy refuses any other `Host` as the server's own fence does and keeps no request open
-upstream once a page has closed.
+upstream once a page has closed. `chromium-plain-http-sign-out` runs the sign-out rows of
+`e2e/keyed-writes.e2e.ts` on that same origin, where the browser has no `navigator.locks`, so a
+tab holds the person's writes for another tab's sign-out on a renewed lease rather than on that
+tab's lock.
 `bun run e2e:install` installs all three browsers.
 
 ## Phone check
