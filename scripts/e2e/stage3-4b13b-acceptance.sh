@@ -442,11 +442,18 @@ gate_send() {
   gate_artifacts[$issue]=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   architect_registers_gate "$issue" "$issue"
 }
+# gate_finish ISSUE: the root waits on a person at its closed gate without a slot, its architect
+# suspended (await_gate_wait); the proof human approves, the root takes a slot back
+# (await_answered_slot), and only then reaches planning. admission_cap 3 is the run's three roots
+# (the child takes none), so the slots every waiting root gave back stand free and the answered root
+# takes one at once.
 gate_finish() {
   local issue=$1 artifact=${gate_artifacts[$1]}
   until_true 600 "$issue architect to register primary artifact $artifact" sh -c \
     "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$issue' --arg artifact '$artifact' '.issues[\$issue].designGate.artifactId == \$artifact and .issues[\$issue].designGate.currentVersion > 0'"
+  await_gate_wait "$issue" "$issue"
   dispatch_human POST "artifacts/$artifact/reviews" '{"state":"approved"}' >/dev/null
+  await_answered_slot "$issue" "$issue"
   wait_for_phase "$issue" planning
   wait_for_worker "$issue" planner
 }
@@ -491,7 +498,7 @@ instruction_for() {
   esac
 }
 instructor() {
-  local issue spec role phase f key tick=0 n st cl cur live
+  local issue spec role phase f key tick=0 n st cl cur live watched
   trap - EXIT ERR
   set +e
   mkdir -p "$evidence/instructed"
@@ -499,7 +506,8 @@ instructor() {
     # One state read and one claims read per pass, so the watcher adds two daemon calls every two
     # seconds, not one per issue and role.
     if ! st=$(daemon_state 2>/dev/null) || ! cl=$(claims list --json 2>/dev/null); then sleep 2; continue; fi
-    for issue in $(cat "$work/instructor-issues"); do
+    mapfile -t watched <"$work/instructor-issues"
+    for issue in "${watched[@]}"; do
       cur=$(jq -r --arg i "$issue" '.issues[$i].phase // ""' <<<"$st")
       for spec in implementer:implementing tester:testing reviewer:reviewing implementer:retro merger:merging; do
         role=${spec%%:*} phase=${spec#*:}
@@ -727,7 +735,8 @@ holder_tree="${project}-900"
 # the directory, and a delivery first adopts the working copy for the role's App (jj metaedit), so it
 # is a jj repository of its own; the holder never touches the smoke repository.
 holder_dir="$state/workspaces/$repo/${holder_tree,,}"
-mkdir -p "$holder_dir" && jj git init "$holder_dir" >/dev/null 2>&1 || fail "could not create the holder's jj workspace"
+mkdir -p "$holder_dir" || fail "could not create the holder's jj workspace"
+jj git init "$holder_dir" >/dev/null 2>&1 || fail "could not create the holder's jj workspace"
 holder=$(claims spawn --json --tree "$holder_tree" --issue "$holder_tree" --role architect \
   --task "Acceptance operation: call your envoy_role_set tool with role merge-queue now, so this session holds the merge-queue role. Then reply with the single line 'holding merge-queue' and wait. Do nothing else." | jq -er .token)
 claim_registered() { claim_is "$1" '(.session // "") != ""'; }
@@ -761,7 +770,7 @@ set_status "$child" todo
 until_true 180 "$child recorded under $root1" sh -c \
   "'$work/legion' state --json --port '$port_daemon' | jq -e --arg c '$child' '.issues[\$c].phase == \"admitted\"'"
 note "roots $root1 $root2 $root3; child $child admitted under $root1"
-for issue in "$root1" "$root2" "$root3"; do wait_for_worker "$issue" architect; done
+for issue in "$root1" "$root2" "$root3"; do wait_for_architect "$issue"; done
 printf '%s\n' "$root1" "$root2" "$root3" "$child" >"$work/instructor-issues"
 instructor &
 instructor_pid=$!
