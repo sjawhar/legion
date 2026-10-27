@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -287,48 +288,72 @@ func TestMentionLookupsOfOneCommentRunAtOnce(t *testing.T) {
 	}
 }
 
-// A listener whose mention lookup never answers delays the comment by at most
-// mentionLookupTimeout. The comment is created with that mention unresolved, so its event
-// suppresses nothing for it, neither the route the mention names nor the session as an author,
-// and the mention sender resolves and delivers it after the response once the listener answers.
-func TestAMentionLookupThatNeverAnswersDelaysTheCommentOnlyByItsTimeout(t *testing.T) {
+// unansweredLookupComment is what one comment whose mention lookup the listener did not answer
+// in time came to: its comment.created payload, every send the listener took, and the topics the
+// outbox published comment.created to.
+type unansweredLookupComment struct {
+	payload      model.CommentEventPayload
+	sends        []mentionListenerSend
+	destinations []string
+}
+
+// commentWithAnUnansweredLookup posts a comment mentioning mention on an issue whose route is
+// route, while the listener holds every lookup of hungPath unanswered. It checks that the comment
+// answers within mentionLookupTimeout's bound with that mention unresolved and its attempt
+// pending, then lets the listener answer, waits for the mention sender to send the attempt to
+// s1, and runs the outbox until it has published comment.created. The listener resolves every
+// session of senderTestSessions, and role:reviewer to s1.
+func commentWithAnUnansweredLookup(t *testing.T, route, mention, hungPath string) unansweredLookupComment {
+	t.Helper()
 	answer := make(chan struct{})
 	var answerOnce sync.Once
 	letAnswer := func() { answerOnce.Do(func() { close(answer) }) }
-	defer letAnswer()
 	var mu sync.Mutex
-	sends := 0
+	var sends []mentionListenerSend
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+		if r.Method == http.MethodGet && r.URL.Path == hungPath {
 			select {
 			case <-answer:
-				writeSessionRecord(t, w, senderTestSessions, "s1")
 			case <-r.Context().Done():
+				return
 			}
+		}
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/"):
+			writeSessionRecord(t, w, senderTestSessions, strings.TrimPrefix(r.URL.Path, "/v1/registry/"))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/reviewer":
+			_, _ = w.Write([]byte(`{"role":"reviewer","holder":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(senderTestSessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			var request struct {
+				TargetSession string `json:"target_session"`
+				Message       string `json:"message"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode mention send: %v", err)
+			}
 			mu.Lock()
-			sends++
+			sends = append(sends, mentionListenerSend{request.TargetSession, request.Message})
 			mu.Unlock()
-			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
+			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"` + request.TargetSession + `"}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	defer listener.Close()
-	handler, database := newTargetedMessageHandler(t, listener.URL)
+	defer letAnswer()
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	issue := createInteractionIssue(t, handler, "TEST", "An unanswered lookup", "before")
 	if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
-		"route": "session:s1",
+		"route": route,
 	}, "alice"); patched.Code != http.StatusOK {
 		t.Fatalf("set the route: status=%d body=%s", patched.Code, patched.Body.String())
 	}
 
 	started := time.Now()
 	response := postMentionedComment(t, handler, issue.Key, map[string]any{
-		"body": "Are you there?", "mentions": []map[string]any{{"target": "session:s1"}},
+		"body": "Are you there?", "mentions": []map[string]any{{"target": mention}},
 	})
 	answered := time.Since(started)
 	created := decodeMentionedComment(t, response)
@@ -359,10 +384,9 @@ func TestAMentionLookupThatNeverAnswersDelaysTheCommentOnlyByItsTimeout(t *testi
 	if payload == nil {
 		t.Fatalf("no comment.created event for %s: %s", created.ID, events.Body.String())
 	}
-	if payload.SuppressRoute || payload.SuppressedRoute != "" || len(payload.SuppressedAuthors) != 0 ||
-		len(payload.Mentions) != 1 || payload.Mentions[0].SessionID != nil {
-		t.Fatalf("comment.created suppresses route %v (%q) and authors %v with mentions %#v, want nothing suppressed for the unresolved mention",
-			payload.SuppressRoute, payload.SuppressedRoute, payload.SuppressedAuthors, payload.Mentions)
+	if len(payload.SuppressedAuthors) != 0 || len(payload.Mentions) != 1 || payload.Mentions[0].SessionID != nil {
+		t.Fatalf("comment.created suppresses authors %v with mentions %#v, want no author suppressed for the unresolved mention",
+			payload.SuppressedAuthors, payload.Mentions)
 	}
 
 	letAnswer()
@@ -370,10 +394,52 @@ func TestAMentionLookupThatNeverAnswersDelaysTheCommentOnlyByItsTimeout(t *testi
 	if len(settled) != 1 || settled[0].State != "sent" || settled[0].SessionID == nil || *settled[0].SessionID != "s1" {
 		t.Fatalf("the mention once the listener answered = %#v, want it sent to s1", settled)
 	}
+	published := eventDeliveries(t, database, deps.Docs, "comment.created", created.ID)
+	if len(published) != 1 {
+		t.Fatalf("comment.created deliveries = %#v, want the one event's", published)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if sends != 1 {
-		t.Fatalf("the listener took %d sends, want the one mention's", sends)
+	return unansweredLookupComment{payload: *payload, sends: slices.Clone(sends), destinations: published[0].Destinations}
+}
+
+// A listener whose mention lookup never answers delays the comment by at most
+// mentionLookupTimeout, and the mention sender delivers the mention after the response once the
+// listener answers. When the issue's route is the very string the comment mentions, both name
+// one session, so the event suppresses the route by that string and the session hears the
+// comment once, from the mention.
+func TestAnUnansweredMentionOfTheRouteItselfSuppressesTheRouteCopy(t *testing.T) {
+	got := commentWithAnUnansweredLookup(t, "session:s1", "session:s1", "/v1/registry/s1")
+	if !got.payload.SuppressRoute || got.payload.SuppressedRoute != "session:s1" ||
+		got.payload.SuppressedRouteSessionID != nil {
+		t.Fatalf("comment.created suppresses route %v (%q, session %v), want session:s1 suppressed by its string",
+			got.payload.SuppressRoute, got.payload.SuppressedRoute, got.payload.SuppressedRouteSessionID)
+	}
+	if len(got.sends) != 1 || got.sends[0].session != "s1" {
+		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
+	}
+	if slices.Contains(got.destinations, contracts.AgentSubject("s1")) {
+		t.Fatalf("the outbox published comment.created to %v, want s1's topic left out: the mention delivered it",
+			got.destinations)
+	}
+}
+
+// A route that names the mentioned session by a different string - here session:s1, while the
+// comment mentions role:reviewer, which s1 holds - is not suppressed when the mention's lookup
+// goes unanswered: no session is known to compare. s1 receives the comment twice, once from the
+// mention sender and once as the route copy on its own topic, under different dedupe keys.
+func TestAnUnansweredMentionOfAnotherStringForTheRouteLeavesTwoCopies(t *testing.T) {
+	got := commentWithAnUnansweredLookup(t, "session:s1", "role:reviewer", "/v1/roles/reviewer")
+	if got.payload.SuppressRoute || got.payload.SuppressedRoute != "" || got.payload.SuppressedRouteSessionID != nil {
+		t.Fatalf("comment.created suppresses route %v (%q, session %v), want no route suppressed",
+			got.payload.SuppressRoute, got.payload.SuppressedRoute, got.payload.SuppressedRouteSessionID)
+	}
+	if len(got.sends) != 1 || got.sends[0].session != "s1" {
+		t.Fatalf("the listener took sends %#v, want the one mention's, to s1", got.sends)
+	}
+	if !slices.Contains(got.destinations, contracts.AgentSubject("s1")) {
+		t.Fatalf("the outbox published comment.created to %v, want s1's topic among them as well: s1 gets two copies",
+			got.destinations)
 	}
 }
 

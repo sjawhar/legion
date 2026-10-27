@@ -231,11 +231,13 @@ func (s *server) describeAsk(
 // comment's transaction opened: the route string the pre-transaction read saw, and the live
 // session it names. checked is false where the write consults no route at all - a project
 // document, a comment with no mentions, an owner that does not exist - and the locked row is
-// then not compared against it.
+// then not compared against it. unanswered says the route string is one the comment mentions
+// and the listener did not answer that mention's lookup in time, so no session is known.
 type commentRoute struct {
-	checked   bool
-	route     string
-	sessionID *string
+	checked    bool
+	route      string
+	sessionID  *string
+	unanswered bool
 }
 
 // commentWrite is the open comment transaction and what its locked owner said: the owner's
@@ -278,6 +280,9 @@ func (s *server) resolveCommentRoute(
 	for index := range mentions {
 		if mentions[index].Target == route.route {
 			route.sessionID = mentions[index].SessionID
+			// No pinned session and no resolve error is the shape of a lookup cut short by its
+			// timeout (resolveMentionTarget).
+			route.unanswered = route.sessionID == nil && mentions[index].ResolveError == ""
 			return route, nil
 		}
 	}
@@ -418,12 +423,20 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	suppressRoute := false
 	suppressedRoute := ""
 	var suppressedRouteSessionID *string
-	if route.sessionID != nil {
+	switch {
+	case route.sessionID != nil:
 		if _, mentioned := mentionedSessions[*route.sessionID]; mentioned {
 			suppressRoute = true
 			suppressedRoute = route.route
 			suppressedRouteSessionID = route.sessionID
 		}
+	case route.unanswered:
+		// The route string is a mention's target, and one string names one session, so the
+		// mention delivers to whichever session the route copy would reach. The route is
+		// suppressed by its string alone; with no session known, a route later moved to that
+		// session's direct form is not.
+		suppressRoute = true
+		suppressedRoute = route.route
 	}
 	// A session a mention delivers this comment to hears it from the mention alone: the author
 	// routes skip it (suppressed_authors). A reply's author route reaches its thread's root

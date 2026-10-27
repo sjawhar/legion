@@ -70,9 +70,10 @@ func (s *server) resolveMentionTargets(
 
 // resolveMentionTarget resolves one mention target. A lookup that timeout cut short, while ctx
 // itself is still live, yields the target with no pinned session and no resolve error: the
-// listener has not answered, so nothing is known to refuse and no session is known to suppress.
-// Its attempt row records neither, which is the shape of an attempt stranded before anything was
-// resolved, so the sender resolves it when it sends (mentionResolutionFor).
+// listener has not answered, so nothing is known to refuse and no session is known to suppress
+// (createCommentFor still suppresses an issue route whose string is this target). Its attempt row
+// records neither, which is the shape of an attempt stranded before anything was resolved, so
+// the sender resolves it when it sends (mentionResolutionFor).
 func (s *server) resolveMentionTarget(
 	ctx context.Context, target, delivery string, timeout time.Duration,
 ) ResolvedMention {
@@ -475,11 +476,16 @@ func (s *server) deliverResolvedCommentMention(
 	}
 	// The key is scoped to the mention's target and mode, stable across every attempt of that
 	// triple, so a retry of a send that already landed repeats its dedupe key and is recognised as
-	// the repeat it is (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts says by what). It is
-	// not the key of the issue route's copy of comment.created, which the outbox publishes under
-	// dispatch-<event id> (outbox.envelope): a session that copy reaches and this send reaches
-	// receives the comment twice unless the event suppressed the route for it, which it does only
-	// for a session a mention lookup pinned before the commit (createCommentFor).
+	// the repeat it is (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts says by what).
+	//
+	// The issue route's copy of comment.created is suppressed for this send (createCommentFor)
+	// when the route resolved to the session a mention lookup pinned before the commit, and when
+	// the route string equals this target and its lookup went unanswered: equal strings name one
+	// session. A route string that differs from this target yet names the same session - role:X
+	// and session:<holder of X>, with a lookup that went unanswered - is not suppressed, and that
+	// session receives the comment twice: the route copy goes out under dispatch-<event id>
+	// (outbox.envelope) and this send under the key below, and a host drops a repeat only on an
+	// equal dedupe key or envelope id.
 	envelopeID, duplicate, deliveryError := s.sendResolvedDelivery(
 		ctx, target, stored.Body, stored.ID+":"+target.Target+":"+target.Delivery, nil, frame,
 	)
