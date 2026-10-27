@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-366",
+  "completed": "2026-10-27T01:17:41Z",
+  "headSha": "7f8941b81a4e5425063b8a6376d7c1e291d0ffdd",
+  "round": 14,
+  "provider": "436 assistant turns of this test run, all provider anthropic, model claude-opus-5-5, read from the run's own session transcript (omp_session_files, session 01a175a2-1036-71da-aaba-a9b28d0f2e1b) at 2026-10-27T01:17Z; no subagent was used.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Computed the unchanged-diff fingerprint at 2db18dfb (round 13's verified head) and at 7f8941b8; checked the merge's parents and the migration numbering; ran the smoke on a server built from the head."
+  },
+  "rebaseRecheck": {
+    "from": "2db18dfbb217d10dfa8b5c66f0c89012bb344a72",
+    "to": "7f8941b81a4e5425063b8a6376d7c1e291d0ffdd",
+    "fingerprint": "e806d335e9d02137512985ca622d28ebdd71cc07c110b7330593cf01548830b2 at both heads",
+    "verdict": "rebase re-check 2db18dfb → 7f8941b8: fingerprint unchanged, bare gates only",
+    "bareGates": "CI at 7f8941b8 read on GitHub: Tests 40431471531, Legion Envoy and Contracts 40431470667, Docs 40431470751 queued; Worker Image 40431470657 pending; PR Title 40431552907 queued. Smoke: a server built from 7f8941b8 migrates a fresh database (infra366_t14) to 128; block-graph.sh exit 0, 37 PASS; unauthenticated GET /api/v1/block-links 401. Merge 737a099b's parents are 5923a0d4 and main bc98d3e7; main's highest migration is 0120, this branch's 0121-0128."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Rebase re-check: the merged head still serves the block graph",
+      "surface": "Real Go server built from 7f8941b8 on a fresh database (port 8801) and the real dispatch CLI",
+      "command": "DISPATCH_URL=http://127.0.0.1:8801 DISPATCH_TOKEN=e2e-token PROJECT=CORE bash packages/dispatch/e2e/acceptance/block-graph.sh",
+      "observed": "exit 0, 37 PASS; schema_migrations max 128",
+      "headSha": "7f8941b81a4e5425063b8a6376d7c1e291d0ffdd",
+      "negativeControl": "Unauthenticated GET /api/v1/block-links → 401 NO_IDENTITY"
+    }
+  ],
+  "ci": "At 7f8941b8: Tests 40431471531, Legion Envoy and Contracts 40431470667, Docs 40431470751 queued; Worker Image 40431470657 pending; PR Title 40431552907 queued."
+}
