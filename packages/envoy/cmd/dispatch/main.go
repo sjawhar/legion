@@ -34,6 +34,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
+	"github.com/sjawhar/envoy/internal/dispatch/logging"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
@@ -49,6 +50,11 @@ const (
 	defaultEnvoyURL   = "http://127.0.0.1:9020"
 	readHeaderTimeout = 10 * time.Second
 	idleTimeout       = 2 * time.Minute
+	// logFlushTimeout bounds each exit's wait for the log lines still buffered (logging.Handler's
+	// Flush). A destination that takes writes takes a few thousand lines in milliseconds; the bound
+	// matters only once stderr has stopped taking them, and then the process exits without those
+	// lines rather than spending its stop grace (stopGrace) on them.
+	logFlushTimeout = 2 * time.Second
 )
 
 // buildCommit is the legion commit this binary was built from. Only the image build stamps it
@@ -120,22 +126,41 @@ type bootConfig struct {
 	Embedder embedderConfig
 }
 
+// logs is the process's log handler: main installs it as slog's default, so no caller ever waits
+// on stderr, and exit writes the lines it still holds.
+var logs = logging.New(os.Stderr, nil)
+
+// exit ends the process with code once the log lines still buffered are written, within
+// logFlushTimeout: os.Exit runs no deferred call and does not wait for logs' writer, so a reason
+// logged just before it would otherwise be lost. Every exit of the process goes through it.
+func exit(code int) {
+	logs.Flush(logFlushTimeout)
+	os.Exit(code)
+}
+
+// fatal logs why Dispatch cannot go on, at ERROR, and exits with 1 once that reason is written.
+func fatal(msg string, args ...any) {
+	slog.Error(msg, args...)
+	exit(1)
+}
+
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	slog.SetDefault(slog.New(logs))
+	// Deferred first, so a shutdown writes the lines its other deferred calls logged before the
+	// process ends.
+	defer logs.Flush(logFlushTimeout)
 	env := processSettings()
 	if len(os.Args) > 1 {
-		os.Exit(runSubcommand(context.Background(), os.Args[1:], env, os.Stdout, os.Stderr))
+		exit(runSubcommand(context.Background(), os.Args[1:], env, os.Stdout, os.Stderr))
 	}
 	boot, err := resolveBootConfig(env)
 	if err != nil {
-		slog.Error("dispatch: resolve boot config", "error", err)
-		os.Exit(1)
+		fatal("dispatch: resolve boot config", "error", err)
 	}
 
 	envoyConfig, err := loadEnvoyConfig(env, config.LoadOptions{})
 	if err != nil {
-		slog.Error("dispatch: load envoy config", "error", err)
-		os.Exit(1)
+		fatal("dispatch: load envoy config", "error", err)
 	}
 	serverURL := ""
 	if envoyConfig.Dispatch != nil {
@@ -145,17 +170,14 @@ func main() {
 	// key it will not sign with before NATS or Postgres is dialled.
 	dataDir, err := defaultDataDir()
 	if err != nil {
-		slog.Error("dispatch: resolve data dir", "error", err)
-		os.Exit(1)
+		fatal("dispatch: resolve data dir", "error", err)
 	}
 	appCfg, appSource, err := loadAppCredentials(env, dataDir)
 	if err != nil {
-		slog.Error("dispatch: load app credentials", "error", err)
-		os.Exit(1)
+		fatal("dispatch: load app credentials", "error", err)
 	}
 	if err := devSignInLoadedFence(boot, serverURL, appCfg, appSource); err != nil {
-		slog.Error("dispatch: dev sign-in", "error", err)
-		os.Exit(1)
+		fatal("dispatch: dev sign-in", "error", err)
 	}
 	if appCfg == nil {
 		slog.Info("dispatch: no app credentials yet — dashboard will respond 503 until configured")
@@ -171,8 +193,7 @@ func main() {
 	// The profiler binds first, before NATS, migrations and the rest of boot, so a slow or hung
 	// boot can be profiled and a port clash refuses the boot before anything connects.
 	if _, err := startPprof(ctx, boot.PprofAddr); err != nil {
-		slog.Error("dispatch: pprof", "error", err)
-		os.Exit(1)
+		fatal("dispatch: pprof", "error", err)
 	}
 
 	var natsClient *bus.Client
@@ -181,8 +202,7 @@ func main() {
 	} else {
 		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))
 		if err != nil {
-			slog.Error("dispatch: connect NATS", "error", err)
-			os.Exit(1)
+			fatal("dispatch: connect NATS", "error", err)
 		}
 		defer natsClient.Close()
 	}
@@ -202,8 +222,7 @@ func main() {
 	} else {
 		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.Envoy.NatsURLs, env.lookup)
 		if err != nil {
-			slog.Error("dispatch: connect the agent conversation relay", "error", err)
-			os.Exit(1)
+			fatal("dispatch: connect the agent conversation relay", "error", err)
 		}
 		defer streamConn.Close()
 		agentStream = agentstream.NewNATS(streamConn)
@@ -211,30 +230,25 @@ func main() {
 
 	database, err := store.Open(ctx, boot.DatabaseURL)
 	if err != nil {
-		slog.Error("dispatch: open database", "error", err)
-		os.Exit(1)
+		fatal("dispatch: open database", "error", err)
 	}
 	if err := database.Migrate(ctx); err != nil {
-		slog.Error("dispatch: migrate database", "error", explainMigrateError(err))
-		os.Exit(1)
+		fatal("dispatch: migrate database", "error", explainMigrateError(err))
 	}
 
 	if err := validateDefaultProject(ctx, database, boot.DefaultProject); err != nil {
-		slog.Error("dispatch: validate default project", "error", err)
-		os.Exit(1)
+		fatal("dispatch: validate default project", "error", err)
 	}
 
 	webDistDir, err := defaultWebDistDir(boot.WebDist)
 	if err != nil {
-		slog.Error("dispatch: resolve web dist dir", "error", err)
-		os.Exit(1)
+		fatal("dispatch: resolve web dist dir", "error", err)
 	}
 
 	// The store's construction reads no network: credentials come with the first request.
 	fileStore, err := openFileStore(ctx, boot)
 	if err != nil {
-		slog.Error("dispatch: configure the file store", "error", err)
-		os.Exit(1)
+		fatal("dispatch: configure the file store", "error", err)
 	}
 	if fileStore != nil {
 		slog.Info("dispatch: storing uploaded files in a bucket", "bucket", boot.FileStoreBucket)
@@ -243,15 +257,13 @@ func main() {
 	if boot.AssetStoreBucket != "" {
 		assetStore, err = routes.NewS3AssetStore(ctx, boot.AssetStoreBucket)
 		if err != nil {
-			slog.Error("dispatch: configure retained asset store", "error", err)
-			os.Exit(1)
+			fatal("dispatch: configure retained asset store", "error", err)
 		}
 	}
 
 	signIn, err := discoverSignIn(ctx, boot)
 	if err != nil {
-		slog.Error("dispatch: discover the sign-in issuer", "error", err)
-		os.Exit(1)
+		fatal("dispatch: discover the sign-in issuer", "error", err)
 	}
 	if signIn != nil {
 		signInRule(boot).BootLog(boot.SignInIssuer, boot.SignInClientID)
@@ -259,8 +271,7 @@ func main() {
 
 	people, signingKey, err := openPeople(boot, dataDir, database.Pool, signIn)
 	if err != nil {
-		slog.Error("dispatch: load signing key", "error", err)
-		os.Exit(1)
+		fatal("dispatch: load signing key", "error", err)
 	}
 	retirePlainRefreshTokens(ctx, people, plainRefreshTokenRetireTimeout)
 	sessions := store.NewPgSessionStore(database.Pool)
@@ -282,14 +293,12 @@ func main() {
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
 	// TestCopyLockComesBeforeEveryPendingRowAndEvent reads main as one transaction.
 	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
-		slog.Error("dispatch: seed repository projects", "error", err)
-		os.Exit(1)
+		fatal("dispatch: seed repository projects", "error", err)
 	}
 
 	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
 	if err != nil {
-		slog.Error("dispatch: discover OIDC issuer", "error", err)
-		os.Exit(1)
+		fatal("dispatch: discover OIDC issuer", "error", err)
 	}
 	if serviceTokens != nil {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
@@ -300,8 +309,7 @@ func main() {
 	// AWS_REGION set - which newEmbedder logs as a warning rather than a reason to refuse to boot.
 	embedder, err := newEmbedder(ctx, boot.Embedder)
 	if err != nil {
-		slog.Error("dispatch: build the embedder", "error", err)
-		os.Exit(1)
+		fatal("dispatch: build the embedder", "error", err)
 	}
 
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
@@ -325,8 +333,7 @@ func main() {
 	}))
 
 	if err != nil {
-		slog.Error("dispatch: build app context", "error", err)
-		os.Exit(1)
+		fatal("dispatch: build app context", "error", err)
 	}
 
 	// Two envoy-dispatch processes serve one Postgres and one NATS (INFRA-66), so each periodic
@@ -357,8 +364,7 @@ func main() {
 	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above.
 	leases, err := database.Pool.Leases()
 	if err != nil {
-		slog.Error("dispatch: open the lease pool for the maintenance loops", "error", err)
-		os.Exit(1)
+		fatal("dispatch: open the lease pool for the maintenance loops", "error", err)
 	}
 	// The background loops below - the embedding queue and its coverage pass, the suggestion
 	// sweep, the architecture importer's ticker, the delivery reconcile and intakes - read and
@@ -368,16 +374,14 @@ func main() {
 	// from the store themselves. Each leased loop still takes its lease on the lease pool above.
 	background, err := database.Pool.Background()
 	if err != nil {
-		slog.Error("dispatch: open the background pool for the background loops", "error", err)
-		os.Exit(1)
+		fatal("dispatch: open the background pool for the background loops", "error", err)
 	}
 	backgroundStore := &store.Store{Pool: background}
 
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()
 		if err != nil {
-			slog.Error("dispatch: open the events outbox's pool", "error", err)
-			os.Exit(1)
+			fatal("dispatch: open the events outbox's pool", "error", err)
 		}
 		go outbox.Run(ctx, outbox.Deps{
 			Store:     &store.Store{Pool: outboxPool},
@@ -424,8 +428,7 @@ func main() {
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
-		slog.Error("dispatch: open webhook redelivery", "error", err)
-		os.Exit(1)
+		fatal("dispatch: open webhook redelivery", "error", err)
 	}
 	if sweeper != nil {
 		slog.Info("dispatch: redelivering the GitHub App webhook's failed deliveries", "client_id", appCfg.ClientID, "interval", redeliver.Interval)
@@ -453,8 +456,7 @@ func main() {
 		}
 		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, background, leases, appCtx.GitHub(), broker)
 		if err != nil {
-			slog.Error("dispatch delivery: connect NATS", "error", err)
-			os.Exit(1)
+			fatal("dispatch delivery: connect NATS", "error", err)
 		}
 		defer func() {
 			cancel()
@@ -480,12 +482,10 @@ func main() {
 	// supervisor must not read a port clash as a clean stop.
 	listener, err := net.Listen("tcp", boot.ListenAddr)
 	if err != nil {
-		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
-		os.Exit(1)
+		fatal("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 	}
 	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery); err != nil {
-		slog.Error("dispatch: serve", "error", err)
-		os.Exit(1)
+		fatal("dispatch: serve", "error", err)
 	}
 }
 

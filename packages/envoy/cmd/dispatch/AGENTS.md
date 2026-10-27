@@ -232,6 +232,16 @@ text (surviving edges keep their provenance, orphan sources are deleted), and pr
 reads `DATABASE_URL` and the envoy config's `dispatch.server_url`, refusing an empty URL because
 dashboard-URL mentions are recognised only against it.
 
+Every line logged through slog's default goes through `logging.Handler`
+(`internal/dispatch/logging`), which `main` installs: a caller formats its line, in exactly
+`slog.TextHandler`'s format, and hands it to one writer goroutine through a channel of 4,096
+lines, so no caller ever waits on stderr. A line that finds the channel full is dropped and
+counted under its level (`Handler.Dropped`), and once the channel has room the writer writes one
+WARN `dropped N log records` with the count per level (`dropped.debug` … `dropped.error`). Since
+`os.Exit` waits for no goroutine, every exit goes through `exit` (a refused boot through `fatal`,
+which logs the reason at ERROR first), which writes the lines still buffered within
+`logFlushTimeout`; a shutdown writes them last, once every other deferred call has run.
+
 ## Identity
 
 `internal/dispatch/identity` is the human identity boundary. Handlers resolve
