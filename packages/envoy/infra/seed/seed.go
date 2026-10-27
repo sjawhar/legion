@@ -582,3 +582,5 @@ func exitCode(stderr io.Writer, err error) int {
 	fmt.Fprintf(stderr, "error after writing: %v\n", err)
 	return 1
 }
+
+// scratch INFRA-520 go-notices
