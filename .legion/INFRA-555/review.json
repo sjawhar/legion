@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-555",
-  "completed": "2026-10-27T16:14:13Z",
+  "completed": "2026-10-27T16:15:52Z",
   "round": 2,
   "reviewedCodeHead": "76483b143ad894e973ec8e537d9d4deab604fe0a",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 3,
   "minor": 4,
   "ci": "At code head 76483b14 (CI head of the newest pull_request runs; compare to PR head 6bbf48f8 shows only .legion/ changed): required lint, typecheck, test and pr-title all queued at 15:50Z. Not read as a pass; this round requests changes on other grounds.",
   "roundOneThreads": "All ten round-1 threads verified fixed at 76483b14 and answered with a reply each (the implementer had already resolved them).",
@@ -20,6 +20,11 @@
       "severity": "important",
       "file": "PR body (## Contract change census)",
       "description": "C2 and C5 name migration 0130, which at the head is 0130_comments_written_version; this PR's is 0135_server_processes, and the C5 rollout note tells an operator to check for the wrong one. The header says every other search has 0 hits in agent-infra; a re-run gives 4 for the NATS-down search, 381 for the replicas search and 102 (not 94) for refuses/exits."
+    },
+    {
+      "severity": "important",
+      "file": "skills/legion-worker/references/merge-gate.md",
+      "description": "Skill edit (and its packages/claude-envoy/legion copy, with the CHANGELOG lines that describe it) must leave #2390 for a skill-only pull request that merges after it, once the human approves it on a dispatch ask: the human's 15:49Z rule, which the INFRA-63 architect passed to this review."
     },
     {
       "severity": "important",
