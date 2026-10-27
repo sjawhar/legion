@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // The boot's retirement of the refresh tokens stored in plain text is bounded: a sign-in pool that
@@ -36,7 +37,7 @@ func TestRetirePlainRefreshTokensAtBootStopsAtItsBound(t *testing.T) {
 		t.Fatalf("openPeople: %v", err)
 	}
 	var logs bytes.Buffer
-	setDefaultLogger(t, slog.NewTextHandler(&logs, nil))
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 
 	start := time.Now()
 	retirePlainRefreshTokens(ctx, people, 500*time.Millisecond)

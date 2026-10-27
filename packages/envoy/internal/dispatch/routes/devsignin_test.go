@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // devSignInOrigin is the loopback dashboard origin the e2e harness serves on.
@@ -89,7 +90,7 @@ func whoamiAs(t *testing.T, handler http.Handler, cookie *http.Cookie) *httptest
 
 func TestDevSignInIssuesTheSessionCookieAndRecordsThePerson(t *testing.T) {
 	var logs bytes.Buffer
-	setDefaultLogger(t, slog.NewTextHandler(&logs, nil))
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 
 	// A generation other than the first proves the cookie carries the store's, not a constant.
 	sessions := &memorySessionStore{generations: map[string]int64{"alice@d.example": 3}}

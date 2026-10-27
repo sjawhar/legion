@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // A recovery that is dialling when Drain stops the client neither installs the connection its dial
@@ -27,7 +28,7 @@ func TestARecoveryStoppedMidDialInstallsNothingAndLogsNoError(t *testing.T) {
 
 	var logs bytes.Buffer
 	var logsMu sync.Mutex
-	setDefaultLogger(t, slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
+	logtest.SetDefault(t, slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
 		logsMu.Lock()
 		defer logsMu.Unlock()
 		return logs.Write(p)
@@ -75,11 +76,12 @@ func TestARecoveryDiallingALostServerEndsAtTheStop(t *testing.T) {
 
 	var logs bytes.Buffer
 	var logsMu sync.Mutex
-	setDefaultLogger(t, slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
+	logtest.SetDefault(t, slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
 		logsMu.Lock()
 		defer logsMu.Unlock()
 		return logs.Write(p)
 	}), nil))
+
 	logged := func(fragment string) bool {
 		logsMu.Lock()
 		defer logsMu.Unlock()

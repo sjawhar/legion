@@ -499,12 +499,14 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec, takenOver 
 	// launch would wait out; only the writes into the claim's directories wait for the refusal.
 	ghRoot, ghDefault, ghWriter := "", "", strings.ToLower(spec.Repository.Owner())
 	var bundle ghconfig.Bundle
-	var mintErr error
+	var noOwner bool
 	if r.gitHubCredential != nil {
 		ghRoot = runtime.GHConfigDir(r.stateDir, spec.Claim)
-		bundle, mintErr = r.gitHubCredential(ctx, spec.Role, ghWriter)
-		if mintErr != nil && (spec.Role != claim.RoleController || !errors.Is(mintErr, runtime.ErrNoGitHubOwner)) {
-			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, mintErr)
+		var err error
+		bundle, err = r.gitHubCredential(ctx, spec.Role, ghWriter)
+		noOwner = spec.Role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner)
+		if err != nil && !noOwner {
+			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
 		}
 	}
 	r.launchMu.Lock()
@@ -518,7 +520,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec, takenOver 
 	}
 	switch {
 	case r.gitHubCredential == nil:
-	case mintErr != nil:
+	case noOwner:
 		// A project with no GitHub owner to mint for still runs its controller, with gh acting
 		// as nobody, as `legion controller start` and the sandbox runtime do there: its gh
 		// directory empty, so no token an earlier launch wrote outlives this one.

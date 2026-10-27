@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log"
 	"log/slog"
 	"runtime"
 	"slices"
@@ -14,6 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // The pool refuses a second connection to a caller that already holds one of its transactions:
@@ -316,10 +317,7 @@ func TestEachBeginRefusalIsKeyedToItsCaller(t *testing.T) {
 	ctx, release := HoldsConnection(context.Background())
 	defer release()
 	var logs bytes.Buffer
-	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
-	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 
 	if _, err := beginFromOneSite(ctx, database.Pool); !errors.Is(err, ErrNestedAcquire) {
 		t.Fatalf("transaction from the first call site: %v, want ErrNestedAcquire", err)

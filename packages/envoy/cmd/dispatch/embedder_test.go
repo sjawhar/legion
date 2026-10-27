@@ -3,13 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
-	"log"
 	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // testAzureKey is the API key azureEmbedEnvironment sets, which no log line or refusal may carry.
@@ -51,26 +51,11 @@ func withOverrides(base, overrides map[string]string) map[string]string {
 	return values
 }
 
-// setDefaultLogger makes handler the default logger's for the test's lifetime. slog.SetDefault also
-// points the log package's output at handler and clears its flags, and setting the previous logger
-// back undoes neither, so the cleanup puts the log package's output and flags back as well: without
-// that, every log.Print after the test writes into its finished buffer instead of stderr.
-func setDefaultLogger(t *testing.T, handler slog.Handler) {
-	t.Helper()
-	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
-	slog.SetDefault(slog.New(handler))
-	t.Cleanup(func() {
-		slog.SetDefault(previous)
-		log.SetOutput(output)
-		log.SetFlags(flags)
-	})
-}
-
 // capturedLog sends the default logger to the returned buffer for the rest of the test.
 func capturedLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var logged bytes.Buffer
-	setDefaultLogger(t, slog.NewTextHandler(&logged, nil))
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
 	return &logged
 }
 

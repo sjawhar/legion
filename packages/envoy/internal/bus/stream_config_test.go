@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"log/slog"
 	"net"
 	"reflect"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -544,11 +544,7 @@ func (l *capturedLogs) recordsWithMsg(t *testing.T, message string) []map[string
 func captureLogs(t *testing.T) *capturedLogs {
 	t.Helper()
 	logs := &capturedLogs{}
-	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
-	// Setting the previous logger back leaves the log package writing into logs, so its output
-	// and flags are put back as well.
-	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
+	logtest.SetDefault(t, slog.NewJSONHandler(logs, nil))
 	return logs
 }
 

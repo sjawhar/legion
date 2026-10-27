@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // sweepLeaseTick is the interval both runners tick on: short, so each reaches its first pass at
@@ -50,7 +51,7 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 	second := storetest.SecondProcess(t, database)
 	firstLeases, secondLeases := sweepLeases(t, database), sweepLeases(t, second)
 	logs := &storetest.LockedLog{}
-	setDefaultLogger(t, slog.NewTextHandler(logs, nil))
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
 	gate, err := database.Pool.Begin(ctx)
 	if err != nil {
@@ -127,7 +128,7 @@ func TestALoneRunnerMakesAPassOnEveryTick(t *testing.T) {
 	database := storetest.Open(t)
 	leases := sweepLeases(t, database)
 	logs := &storetest.LockedLog{}
-	setDefaultLogger(t, slog.NewTextHandler(logs, nil))
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
 	const tick = time.Second
 	const ticks = 10

@@ -3,7 +3,6 @@ package redeliver_test
 import (
 	"context"
 	"io"
-	"log"
 	"log/slog"
 	"os"
 	"sync/atomic"
@@ -16,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // webhookRedeliveryLease is the name the running sweep takes its lease under, written here as the
@@ -64,10 +64,7 @@ func redeliverTestLeases(t *testing.T) duty.Leases {
 func captureDefaultLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
 	buffer := &lockedBuffer{}
-	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
-	slog.SetDefault(slog.New(slog.NewTextHandler(buffer, nil)))
-	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
-	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
+	logtest.SetDefault(t, slog.NewTextHandler(buffer, nil))
 	return buffer
 }
 

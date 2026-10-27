@@ -20,6 +20,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -335,7 +336,7 @@ func TestSignInNamesThePersonByTheirUsernameNotTheEmailClaim(t *testing.T) {
 // the log; they get neither a session nor a recorded sign-in.
 func TestSignInRefusesSomeoneOutsideTheGroupWithPageAndLog(t *testing.T) {
 	var logs bytes.Buffer
-	setDefaultLogger(t, slog.NewTextHandler(&logs, nil))
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 
 	rig := newSignInRig(t, "")
 	response := rig.signIn(t, personClaims("other-group"))
@@ -426,7 +427,7 @@ func googleClaims(subject string) map[string]any {
 func captureRouterLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var logs bytes.Buffer
-	setDefaultLogger(t, slog.NewTextHandler(&logs, nil))
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 	return &logs
 }
 

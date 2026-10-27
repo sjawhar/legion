@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // The WARN lines the singular routes log, one per call, so an operator can find the callers that
@@ -31,7 +32,7 @@ const (
 func captureSourceWarnings(t *testing.T) func() []string {
 	t.Helper()
 	logs := &storetest.LockedLog{}
-	setDefaultLogger(t, slog.NewJSONHandler(logs, nil))
+	logtest.SetDefault(t, slog.NewJSONHandler(logs, nil))
 	read := 0
 	return func() []string {
 		t.Helper()

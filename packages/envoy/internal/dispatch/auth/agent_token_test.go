@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 func TestBearerToken(t *testing.T) {
@@ -128,10 +129,7 @@ func TestParseSharedAgentTokensRefusesAnEmptyOrRepeatedEntry(t *testing.T) {
 func warnings(t *testing.T) func() []map[string]any {
 	t.Helper()
 	var buffer bytes.Buffer
-	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buffer, nil)))
-	// slog.SetDefault also redirected the log package, which setting previous back does not undo.
-	t.Cleanup(func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) })
+	logtest.SetDefault(t, slog.NewJSONHandler(&buffer, nil))
 	return func() []map[string]any {
 		var lines []map[string]any
 		for _, line := range strings.Split(strings.TrimSpace(buffer.String()), "\n") {

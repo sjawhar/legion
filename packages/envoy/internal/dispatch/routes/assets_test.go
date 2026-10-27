@@ -24,6 +24,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // fakeAssetStore answers from assets, or with err, and records every key it is asked for.
@@ -400,7 +402,7 @@ func TestStaticHandlerAnswers503ForARetainedAssetThatStallsPastTheFetchBound(t *
 // would a 404. Each failure leaves one ERROR record naming the key and the store's error.
 func TestStaticHandlerLogsARetainedAssetStoreFailure(t *testing.T) {
 	var logs bytes.Buffer
-	setDefaultLogger(t, slog.NewJSONHandler(&logs, nil))
+	logtest.SetDefault(t, slog.NewJSONHandler(&logs, nil))
 
 	handler, context := newTestRouter(t)
 	context.WebDistDir = t.TempDir()
@@ -494,7 +496,7 @@ func stallRetainedReaders(t *testing.T, handler http.Handler, n int) []*stalledC
 // fetch bound runs out is refused without asking the store: 503, not kept, retried after a second.
 func TestStaticHandlerCapsRetainedBytesHeldAtOnce(t *testing.T) {
 	var logs bytes.Buffer
-	setDefaultLogger(t, slog.NewJSONHandler(&logs, nil))
+	logtest.SetDefault(t, slog.NewJSONHandler(&logs, nil))
 
 	handler, context := newTestRouter(t)
 	context.WebDistDir = t.TempDir()
@@ -656,7 +658,7 @@ func TestStaticHandlerAnswers503WhenTheFetchRunsOutOfTheSharedBound(t *testing.T
 	defer cancel()
 
 	var logs bytes.Buffer
-	setDefaultLogger(t, slog.NewJSONHandler(&logs, nil))
+	logtest.SetDefault(t, slog.NewJSONHandler(&logs, nil))
 
 	handler, appContext := newTestRouter(t)
 	appContext.WebDistDir = t.TempDir()
@@ -726,7 +728,7 @@ func TestStaticHandlerWritesNoResponseWhenTheClientCancelsWhileQueuedForTheMemor
 	cancel()
 
 	var logs bytes.Buffer
-	setDefaultLogger(t, slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logtest.SetDefault(t, slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	handler, appContext := newTestRouter(t)
 	appContext.WebDistDir = t.TempDir()

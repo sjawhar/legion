@@ -992,7 +992,6 @@ type sessionDialer struct {
 	check func() error
 
 	mu     sync.Mutex
-	dials  []string
 	bounds []dialBound
 	silent string
 }
@@ -1004,11 +1003,10 @@ type dialBound struct {
 	hasDeadline bool
 }
 
-func (d *sessionDialer) Dial(ctx context.Context, instance string) (net.Conn, error) {
+func (d *sessionDialer) Dial(ctx context.Context, _ string) (net.Conn, error) {
 	bound := dialBound{entered: time.Now()}
 	bound.deadline, bound.hasDeadline = ctx.Deadline()
 	d.mu.Lock()
-	d.dials = append(d.dials, instance)
 	d.bounds = append(d.bounds, bound)
 	silent := d.silent
 	d.mu.Unlock()
@@ -1314,7 +1312,7 @@ func TestOnTheContainersShutdownASessionDatabaseEndsOnceItsWedgedChildIsKilled(t
 	upstreamDials := func() int {
 		dialer.mu.Lock()
 		defer dialer.mu.Unlock()
-		return len(dialer.dials)
+		return len(dialer.bounds)
 	}
 	before := upstreamDials()
 

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log"
 	"log/slog"
 	"slices"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // notServingAfter is the threshold every clock in this file records unless a test says otherwise:
@@ -187,13 +187,7 @@ func (b *logBuffer) String() string {
 func captureSlog(t *testing.T) *logBuffer {
 	t.Helper()
 	logged := &logBuffer{}
-	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logged, nil)))
-	t.Cleanup(func() {
-		slog.SetDefault(previous)
-		log.SetOutput(output)
-		log.SetFlags(flags)
-	})
+	logtest.SetDefault(t, slog.NewTextHandler(logged, nil))
 	return logged
 }
 

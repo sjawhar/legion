@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // boundSpec is a spec of two callouts and a paragraph. A browser edit gives the first callout and
@@ -157,7 +158,7 @@ func TestADocumentAlreadyHoldingABlockIDPastTheBoundIsIndexedAndLeavesOwed(t *te
 // and opens none. No settlement fails on an index key past its limit (SQLSTATE 54000).
 func TestAnAskBlockWhoseIDIsPastTheBoundSettles(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	setDefaultLogger(t, slog.NewTextHandler(logs, nil))
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	service, original := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, original, "Context\n\n"+shipBlock)

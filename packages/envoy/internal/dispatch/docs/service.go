@@ -1056,12 +1056,18 @@ func (s *Service) scheduleSettleAfterAppend(room string) {
 }
 
 func (s *Service) retrySettleSoon(room string) {
-	if s.stopping.Load() || s.shuttingDown(room) {
+	s.settleAfter(room, 10*time.Millisecond)
+}
+
+// settleAfter arms the document's settlement to run after delay, replacing the timer armed for it,
+// unless the service or the room is shutting down.
+func (s *Service) settleAfter(artifactID string, delay time.Duration) {
+	if s.stopping.Load() || s.shuttingDown(artifactID) {
 		return
 	}
-	state := s.lockState(room)
-	defer s.unlockState(room, state)
-	s.scheduleSettleAfterLocked(room, state, 10*time.Millisecond)
+	state := s.lockState(artifactID)
+	defer s.unlockState(artifactID, state)
+	s.scheduleSettleAfterLocked(artifactID, state, delay)
 }
 
 // nextRoomGeneration is the generation a state moves to when something invalidates what a
@@ -2082,12 +2088,7 @@ func (s *Service) ScheduleSettlement(artifactID string) {
 // tests that hold a write unsettled across a window wide enough to land another write in it: once
 // that write has landed, the test settles the document now instead of waiting the window out.
 func (s *Service) SettleNow(artifactID string) {
-	if s.stopping.Load() || s.shuttingDown(artifactID) {
-		return
-	}
-	state := s.lockState(artifactID)
-	defer s.unlockState(artifactID, state)
-	s.scheduleSettleAfterLocked(artifactID, state, 0)
+	s.settleAfter(artifactID, 0)
 }
 
 type BlockIDBackfill struct {

@@ -9,7 +9,6 @@ import (
 	"crypto/ecdsa"
 	"encoding/json"
 	"io"
-	"log"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -23,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // capturingHandler records every slog record it is asked to handle, so a test can assert what the
@@ -353,11 +353,7 @@ func TestAPodRenewsCarryingItsCurrentToken(t *testing.T) {
 	t.Run("a new pod renews without a token, logged, until it renews with its own token", func(t *testing.T) {
 		id, podUID, key := enrollPod(t)
 		var records []slog.Record
-		// slog.SetDefault also redirects the log package, which setting previous back does not undo.
-		previous, output, flags := slog.Default(), log.Writer(), log.Flags()
-		restore := func() { slog.SetDefault(previous); log.SetOutput(output); log.SetFlags(flags) }
-		slog.SetDefault(slog.New(capturingHandler{records: &records}))
-		t.Cleanup(restore)
+		restore := logtest.Swap(t, capturingHandler{records: &records})
 		for range 2 {
 			if status, code := renew(t, key, id, nil); status != http.StatusOK {
 				t.Fatalf("renew with no body, a new pod enrollment = %d %s, want 200", status, code)

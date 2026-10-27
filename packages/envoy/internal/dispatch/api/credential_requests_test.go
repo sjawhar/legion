@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // credentialTestAccountToken stands in for Dispatch's own projected ServiceAccount token: what
@@ -291,7 +292,7 @@ func TestCredentialRouteWithAnUnreadableAccountTokenNamesDispatchsOwnCredential(
 	missing := filepath.Join(t.TempDir(), "missing")
 	handler := newCredentialTestHandlerReading(t, rig.server.URL, missing)
 	logs := &storetest.LockedLog{}
-	setDefaultLogger(t, slog.NewTextHandler(logs, nil))
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests/rec1", nil, "alice")
 	if response.Code != http.StatusInternalServerError {

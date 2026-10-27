@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // editNoticeRow is a document's pending edit notice as document_edit_notices holds it, with the
@@ -626,7 +627,7 @@ func TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce(t *testing.T) {
 // versions, so each person's version is in exactly one sent notice's range.
 func TestEditNoticeSweepDuringSettlement(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	setDefaultLogger(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	service.editNoticeQuiet = 500 * time.Millisecond
@@ -726,7 +727,7 @@ func TestEditNoticeSweepDuringSettlement(t *testing.T) {
 // the sweep does not fail, and the next due notice of the same sweep still goes.
 func TestEditNoticeSweepSkipsDeletedArtifact(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	setDefaultLogger(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	service, _ := newTestService(t)
 	gone := createIssueDocument(t, service.store, 5, "Gone.")
 	kept := createIssueDocument(t, service.store, 6, "Kept.")
@@ -978,7 +979,7 @@ func TestOutsideReviewJoinedHumanEditLastHuman(t *testing.T) {
 // then name nobody, rather than pick a person out of the credited names: no window names anyone.
 func TestEditNoticeTwoConnectedOneEditsNamesNobody(t *testing.T) {
 	logs := &storetest.LockedLog{}
-	setDefaultLogger(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")

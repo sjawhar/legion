@@ -27,6 +27,18 @@ func CountLockWaits(ctx context.Context, database *store.Store, like string) (in
 	return waiting, nil
 }
 
+// waitingBehindHolder is the recursive CTE naming, as waiting(pid), every backend queued behind a
+// lock the current transaction owns, directly or behind an earlier waiter.
+const waitingBehindHolder = `
+	with recursive waiting(pid) as (
+		select pid from pg_locks
+		where not granted and pg_backend_pid() = any(pg_blocking_pids(pid))
+		union
+		select blocked.pid from pg_locks blocked, waiting
+		where not blocked.granted and waiting.pid = any(pg_blocking_pids(blocked.pid))
+	)
+`
+
 // WaitForLockWaiters waits up to within for want backends to queue behind a lock holder's
 // transaction owns, directly or behind an earlier waiter (a second row-lock waiter is blocked by
 // the first, which holds the tuple lock), and returns how many it last saw. It polls through
@@ -41,16 +53,7 @@ func WaitForLockWaiters(t testing.TB, holder pgx.Tx, want int, within time.Durat
 	deadline := time.Now().Add(within)
 	for {
 		var count int
-		if err := holder.QueryRow(context.Background(), `
-			with recursive waiting(pid) as (
-				select pid from pg_locks
-				where not granted and pg_backend_pid() = any(pg_blocking_pids(pid))
-				union
-				select blocked.pid from pg_locks blocked, waiting
-				where not blocked.granted and waiting.pid = any(pg_blocking_pids(blocked.pid))
-			)
-			select count(*) from waiting
-		`).Scan(&count); err != nil {
+		if err := holder.QueryRow(context.Background(), waitingBehindHolder+`select count(*) from waiting`).Scan(&count); err != nil {
 			t.Fatalf("inspect database locks: %v", err)
 		}
 		if count >= want || time.Now().After(deadline) {
@@ -68,16 +71,7 @@ func WaitForLockWaiters(t testing.TB, holder pgx.Tx, want int, within time.Durat
 // the-pid-of-the-call-under-test-and-its-mutant-fires-only-on-that-call-INFRA-260.md).
 func QueuedBehind(ctx context.Context, holder pgx.Tx, pid uint32) (bool, error) {
 	var queued bool
-	if err := holder.QueryRow(ctx, `
-		with recursive waiting(pid) as (
-			select pid from pg_locks
-			where not granted and pg_backend_pid() = any(pg_blocking_pids(pid))
-			union
-			select blocked.pid from pg_locks blocked, waiting
-			where not blocked.granted and waiting.pid = any(pg_blocking_pids(blocked.pid))
-		)
-		select exists (select 1 from waiting where pid = $1)
-	`, pid).Scan(&queued); err != nil {
+	if err := holder.QueryRow(ctx, waitingBehindHolder+`select exists (select 1 from waiting where pid = $1)`, pid).Scan(&queued); err != nil {
 		return false, fmt.Errorf("inspect database locks: %w", err)
 	}
 	return queued, nil

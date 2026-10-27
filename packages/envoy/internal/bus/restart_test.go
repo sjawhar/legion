@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"log/slog"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -262,25 +262,10 @@ func (l *busLogs) count(name, msg string) int {
 	return found
 }
 
-// setDefaultLogger makes handler the default logger's for the test's lifetime. slog.SetDefault also
-// points the log package's output at handler and clears its flags, and setting the previous logger
-// back undoes neither, so the cleanup puts the log package's output and flags back as well: without
-// that, every log.Print after the test writes into its finished buffer instead of stderr.
-func setDefaultLogger(t *testing.T, handler slog.Handler) {
-	t.Helper()
-	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
-	slog.SetDefault(slog.New(handler))
-	t.Cleanup(func() {
-		slog.SetDefault(previous)
-		log.SetOutput(output)
-		log.SetFlags(flags)
-	})
-}
-
 func captureBusLogs(t *testing.T) *busLogs {
 	t.Helper()
 	logs := &busLogs{}
-	setDefaultLogger(t, slog.NewJSONHandler(logs, nil))
+	logtest.SetDefault(t, slog.NewJSONHandler(logs, nil))
 	return logs
 }
 

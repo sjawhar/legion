@@ -43,6 +43,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/githubappjwt"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/testsocks5"
 )
@@ -1481,7 +1482,7 @@ func answersSharedToken(response *httptest.ResponseRecorder) bool {
 func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
 	// The server's request goroutines write the log while the test reads it.
 	var logged cmdtest.LockedBuffer
-	setDefaultLogger(t, slog.NewJSONHandler(&logged, nil))
+	logtest.SetDefault(t, slog.NewJSONHandler(&logged, nil))
 	previousTokenLines := func() []map[string]any {
 		t.Helper()
 		var lines []map[string]any
