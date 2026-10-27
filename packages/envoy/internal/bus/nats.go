@@ -968,6 +968,15 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 // the connection dropped, since either may have hidden its denial.
 var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 
+// ForwardMsgID is the Nats-Msg-Id of a forward of an envelope whose dedupe key is dedupeKey to
+// subject: the stream, which captures every agent subject, keeps one copy of a message per
+// recipient however many times a sender forwards it, and a forward of the same message to another
+// recipient is a copy of its own. It is the shape the stream's own publishes use (dedupe key, a
+// colon, the subject), and every forward to a session's subject sets its header through it.
+func ForwardMsgID(dedupeKey, subject string) string {
+	return dedupeKey + ":" + subject
+}
+
 // RequestCoreTo delivers item directly to subject and waits for an empty
 // receiver receipt: a reply with no data and no header field. Agent subjects
 // are captured by the notification stream, whose non-empty JetStream publish
@@ -1007,7 +1016,7 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 	}
 	defer receipt.Unsubscribe()
 	forward := &nats.Msg{Subject: subject, Reply: inbox, Data: data, Header: nats.Header{}}
-	forward.Header.Set(nats.MsgIdHdr, item.DedupeKey+":"+subject)
+	forward.Header.Set(nats.MsgIdHdr, ForwardMsgID(item.DedupeKey, subject))
 	err = c.publishConfirmed(conn, forward, deadline, conn.PublishMsg)
 	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
 		return err
