@@ -117,7 +117,8 @@ function drawDirective(node: MdastNode, children: MdastNode[], source: string): 
     lastLineStart--;
   }
   const opening = source.slice(start, openingEnd);
-  const openingRun = /^:*/.exec(opening)?.[0].length ?? 0;
+  let openingRun = 0;
+  while (opening[openingRun] === ":") openingRun++;
   const kept = node.children?.filter((child) => !isLabel(child)).at(-1);
   const floor = (kept === undefined ? undefined : sourceEnd(kept)) ?? openingEnd;
   const lastLine = source.slice(lastLineStart, end);
@@ -146,19 +147,20 @@ function readOnlyDirective(node: MdastNode, context: Context): MdastNode[] {
   const refused = blockSchema === undefined || typedBlockRefusal(blockSchema, node) !== undefined;
   const children = readOnlyChildren(node.children ?? [], context);
   if (!refused && fitsContentRule(schema, node.name ?? "", children)) {
-    node.children = children;
-    return [node];
+    return [{ ...node, children }];
   }
   return drawDirective(node, children, context.source);
 }
 
+/**
+ * `nodes` with each container directive decided. The parse's nodes are left as they are, so a
+ * directive drawn later reads its own children rather than the paragraphs drawn in their place.
+ */
 function readOnlyChildren(nodes: MdastNode[], context: Context): MdastNode[] {
   return nodes.flatMap((node) => {
     if (node.type === "containerDirective") return readOnlyDirective(node, context);
-    if (node.children !== undefined) {
-      node.children = readOnlyChildren(node.children, context);
-    }
-    return [node];
+    if (node.children === undefined) return [node];
+    return [{ ...node, children: readOnlyChildren(node.children, context) }];
   });
 }
 
@@ -173,16 +175,18 @@ function readOnlyChildren(nodes: MdastNode[], context: Context): MdastNode[] {
  * text, so checked against the ProseMirror `schema` the parse builds with, a typed block whose
  * content would not fit (a heading in a `paragraph+` block, or a drawn directive's paragraphs
  * after its list) is drawn as text too. Blocks are decided innermost first, so a drawn block's
- * lines are checked against its parent's rule in turn.
+ * lines are checked against its parent's rule in turn. The lines are cut from the file without
+ * one leading U+FEFF, which micromark drops before it counts the offsets the tree carries.
  */
 export function remarkReadOnlyDirectives(blockSchema: BlockSchema | undefined, schema: Schema) {
   if (blockSchema !== undefined) validateBlockSchema(blockSchema);
   return (tree: MdastNode, file: { toString(): string }): void => {
     if (tree.children !== undefined) {
+      const text = file.toString();
       tree.children = readOnlyChildren(tree.children, {
         blockSchema,
         schema,
-        source: file.toString(),
+        source: text.startsWith("\ufeff") ? text.slice(1) : text,
       });
     }
   };

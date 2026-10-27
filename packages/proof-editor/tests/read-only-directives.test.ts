@@ -385,3 +385,53 @@ test("read-only draws no closing fence from a line inside a mark span's last blo
     ["blockquote", ":::"],
   ]);
 });
+
+test("read-only draws a directive after a leading byte-order mark from its own lines", async () => {
+  // micromark drops one leading U+FEFF before it counts offsets, so the transform cuts the lines
+  // from the source without it.
+  expect(blocks(await readOnlyServerParse("\ufeff:::note\nbody\n:::\n"))).toEqual([
+    ["paragraph", ":::note"],
+    ["paragraph", "body"],
+    ["paragraph", ":::"],
+  ]);
+});
+
+test("read-only keeps every line of a body that starts with a byte-order mark", async () => {
+  const errors: unknown[][] = [];
+  const consoleError = console.error;
+  console.error = (...args: unknown[]) => {
+    errors.push(args);
+  };
+  try {
+    const doc = await readOnlyServerParse("\ufeffHello **b**\n\n:::note\nbody\n:::\n");
+    expect(blocks(doc)).toEqual([
+      ["paragraph", "Hello b"],
+      ["paragraph", ":::note"],
+      ["paragraph", "body"],
+      ["paragraph", ":::"],
+    ]);
+    // remark drops the mark from the first paragraph's text itself, as the default mode does.
+    const expected = [
+      { text: "Hello ", marks: [] },
+      { text: "b", marks: ["strong"] },
+    ];
+    expect(runs(doc.child(0))).toEqual(expected);
+    const defaultMode = await createHeadlessProof({ blockSchema: serverBlockSchema });
+    expect(runs(defaultMode.parseMarkdown("\ufeffHello **b**\n").child(0))).toEqual(expected);
+  } finally {
+    console.error = consoleError;
+  }
+  expect(errors).toEqual([]);
+});
+
+test("read-only draws a directive inside a mark span inside a refused directive once", async () => {
+  const doc = await readOnlyServerParse(
+    '::::note\n<span data-dispatch="ask" data-id="x">\n\n:::zzz\nbody\n:::'
+  );
+  expect(blocks(doc)).toEqual([
+    ["paragraph", "::::note"],
+    ["paragraph", ":::zzz"],
+    ["paragraph", "body"],
+    ["paragraph", ":::"],
+  ]);
+});
