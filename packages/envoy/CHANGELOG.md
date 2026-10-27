@@ -893,14 +893,24 @@
   the Service), and `frontDoorToolsImage`, the digest-pinned image `cert-publish` runs on, which
   must carry `/bin/sh`, `curl`, `openssl` 3, `base64`, GNU `date`, `sed`, `grep` and `tr` (the
   envoy image does). The front door's shape changed: its pods run as a ServiceAccount of their own,
-  `<hostname>-tailnet`, whose Role `<hostname>-tailnet-tls` writes only the certificate Secret; the
-  Role `<hostname>-tailscale-state` is gone; and a Tailscale Service holds the name `<hostname>`
-  rather than a node. Moving takes steps before the update ("Moving from a single front-door node"
-  in `packages/envoy/infra/README.md`): delete the tailnet machine that holds `<hostname>`, declare
-  `svc:<hostname>` with an auto-approval for the front door's tags, optionally seed
-  `<hostname>-tailnet-tls`, delete a hand-made budget named `<hostname>`, and back up, then delete,
-  the runtime Secret `<hostname>-tailscale-state`. The move is an outage while the old node is gone
-  and the new pods come up. The defaults changed size too: `databaseTier` is `db-custom-4-15360`
+  `<hostname>-tailnet`, whose Role `<hostname>-tailnet-tls` may only get and patch the certificate
+  Secret, with the token mounted into `cert-publish` alone; the Role `<hostname>-tailscale-state`
+  is gone; and a Tailscale Service holds the name `<hostname>` rather than a node. Moving takes
+  steps before the update ("Moving from a single front-door node" in
+  `packages/envoy/infra/README.md`): give every client of Dispatch access to `svc:<hostname>` on
+  443 in the tailnet policy (a grant with that destination, or a tag on the Service their grants
+  already name), since grants on the front door's tags do not cover the Service's address, with
+  an auto-approval of the Service for the front door's tags; delete the tailnet machine that holds
+  `<hostname>`; declare `svc:<hostname>` with its port `tcp:443`; optionally seed
+  `<hostname>-tailnet-tls`; delete a hand-made budget named `<hostname>`; and back up, then
+  delete, the runtime Secret `<hostname>-tailscale-state`. The move is an outage while the old
+  node is gone and the new pods come up. New refusals, each naming its input before anything
+  registers: a resolved `tailnetService` other than `svc:<hostname>` (never echoing it), an
+  unpinned `frontDoorToolsImage`, a `databaseAvailabilityType` other than `ZONAL` or `REGIONAL`,
+  an `appCpu`, `appMemory`, `proxyCpu` or `proxyMemory` not above 0 or outside Autopilot's bounds
+  for the pod's sum, a `frontDoorReplicas` or `listenerReplicas` below 1, and a
+  `frontDoorPdbMinAvailable` or `listenerPdbMinAvailable` outside 1 to its Deployment's replica
+  count. The defaults changed size too: `databaseTier` is `db-custom-4-15360`
   (was `db-custom-1-3840`) and the `cloud-sql-proxy` sidecar 1 CPU and `2Gi` (was `200m` and
   `256Mi`), so a deployment that relied on either default changes size on its next update; set
   `databaseTier` to the tier the instance runs to keep it. `appPriorityClassName` is renamed

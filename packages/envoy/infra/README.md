@@ -139,7 +139,7 @@ the listener may dial the proxy, and the app alone may dial the listener.
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
 | Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the resolved `tailnetService`), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). |
-| ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get`, `update` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. |
+| ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. |
 | Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. |
 | Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). |
 | Three Deployments | The app at `replicas` pods, the front door at `frontDoorReplicas` (2 by default) and the listener at `listenerReplicas` (1 by default), each `Recreate` at one pod and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, by its own count. Every pod carries required pod anti-affinity on `kubernetes.io/hostname` and a `topology.kubernetes.io/zone` spread with `minDomains: 2`, both over its own Deployment's pods, and every serving container a startup and a liveness probe ([The pods](#the-pods)). The app and the listener have a 35-second termination grace period, a five-second pre-stop wait and the stop each is built for; the front door 60 seconds, for its drain ([The front door](#the-front-door)). Every container has equal requests and limits. A pod template whose Deployment has no PodDisruptionBudget carries `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`; one whose Deployment has a budget does not. |
@@ -169,12 +169,18 @@ names the in-cluster namespaces the NetworkPolicy admits on port 8766.
 `tailnetService`, required, is the Tailscale Service the front door's pods host, as Tailscale's
 API names it. It must resolve to `svc:<hostname>`, the name the certificate and the URL carry, and
 any other value fails the update once it resolves, naming the input and never echoing the value.
-The component never creates the Service: the consumer declares it in the tailnet, with an
-auto-approval for `tags` in the tailnet policy, and passes the `Name` output of its
-`tailscale.Service` here. The Serve ConfigMap `<hostname>-serve` is rendered from the resolved
-value, and the front door's Deployment waits for that ConfigMap and for whatever the value came
-from, so on a fresh stack no pod advertises the Service before it exists: a node that advertises a
-Service before it exists is not approved when the Service appears.
+The component never creates the Service: the consumer declares it in the tailnet with its one
+port, `tcp:443`, gives it an auto-approval for `tags` in the tailnet policy, and passes the `Name`
+output of its `tailscale.Service` here. The auto-approval only lets the front door's nodes host
+the Service; it gives no client access. A Tailscale Service is a grant destination of its own
+([Tailscale Services](https://tailscale.com/kb/1552/tailscale-services), "Configure Service
+access"), so the tailnet policy also needs a grant with `dst: ["svc:<hostname>"]` and `ip:
+["443"]` for every client of Dispatch, or a tag on the Service that their grants already name:
+a grant on the front door's `tags` does not cover the Service's address, which is the address
+`<hostname>.<tailnetDnsName>` resolves to. The Serve ConfigMap `<hostname>-serve` is rendered
+from the resolved value, and the front door's Deployment waits for that ConfigMap and for whatever
+the value came from, so on a fresh stack no pod advertises the Service before it exists: a node
+that advertises a Service before it exists is not approved when the Service appears.
 
 `frontDoorToolsImage`, required and pinned by digest like the other three images, is the image the
 front door's `cert-publish` container runs on. Its scripts call `/bin/sh`, `curl`, `openssl` 3,
@@ -542,8 +548,12 @@ while it hosts the Service ([The front door](#the-front-door)). The app and the 
 NATS only through the front door's SOCKS5 proxy, so with no front-door pod ready both fail
 readiness within their probes' windows (30 seconds for the app, 10 for the listener) and leave
 their Services, and the in-cluster `allowedNamespaces` consumers lose the app for that time as
-well. It heals itself, since `internal/bus` reconnects without limit (`MaxReconnect = -1`) and no
-liveness probe reads NATS.
+well. It heals itself once a front-door pod is ready again, since `internal/bus` reconnects
+without limit (`MaxReconnect = -1`) and no liveness probe reads NATS. One case does not: a
+front-door pod whose advertiser spent all 6 certificate orders waits unready for ever while its
+liveness probe passes, so if every front-door pod reaches that state the SOCKS5 Service has no
+endpoint until someone deletes those pods (`kubectl -n <namespace> delete pod -l
+app=<hostname>-tailnet`), whose replacements start over.
 
 A stopping app or listener pod keeps serving for five seconds after it is told to stop, which is
 the window its removal from routing has to propagate, and is what its pre-stop wait (`sleep 5`)
@@ -666,7 +676,17 @@ its state directory and renews it at two thirds of its life, but a new pod start
   `legion.dev/front-door-nodes` annotation. Its read every 30 seconds asks for the Secret's
   metadata alone (`PartialObjectMetadata`), never its certificate key;
 - `cert-publish`'s loop, every 60 seconds, writes the pod's own cached certificate into the Secret
-  when it ends later than the published one for the same name, so the next pod finds it.
+  when it ends later than the published one for the same name, so the next pod finds it. The
+  claim gate runs beside that loop in the same container, and a pass that finds the gate gone
+  ends the container with status 1, so the kubelet restarts both and the pod's restart count
+  shows it, rather than leaving the pod unready with nothing deciding.
+
+A renewal is outside the claim budget: each pod's tailscaled renews its own cached certificate at
+two thirds of its life, and pods seeded from one certificate reach that point together, so
+`frontDoorReplicas` pods order that many certificates at about the same time. Above 5 pods, or
+fewer in a week whose orders were already spent, Let's Encrypt refuses some of them; a refused pod
+keeps serving its old certificate, which still has a third of its life, and tailscaled tries again
+later. Raise `frontDoorReplicas` above 5 only with that in mind.
 
 Every front-door pod runs tailscaled's SOCKS5 proxy on `0.0.0.0:1055`, and the Service
 `<hostname>-tailnet` sends the app's and the listener's NATS connections to whichever pods are
@@ -702,13 +722,19 @@ new pod hosts the Service. The update itself deletes the Role and RoleBinding
 `<hostname>-tailscale-state` and changes Deployment `<hostname>-tailnet` in place, since its name
 and selector are unchanged. Before it:
 
-1. Delete the tailnet machine that holds the name `<hostname>`: Tailscale refuses a Service whose
+1. Prepare the tailnet policy: an auto-approval for `svc:<hostname>` to the front door's `tags`,
+   and access for every client of Dispatch. A Tailscale Service is a grant destination of its own,
+   and grants on the front door's `tags` do not cover its address, so either add a grant with
+   `dst: ["svc:<hostname>"]` and `ip: ["443"]` for those clients, or tag the Service in step 3
+   with a tag their grants already name as a destination. Without one of the two, every client
+   that reached Dispatch through a grant on the front door's tags loses it after the move.
+2. Delete the tailnet machine that holds the name `<hostname>`: Tailscale refuses a Service whose
    name a machine holds. Dispatch is off the tailnet from here on.
-2. Declare `svc:<hostname>` in the tailnet, with an auto-approval in the tailnet policy for the
-   front door's `tags`, and pass the Service's `Name` output as `tailnetService`.
-3. Set `frontDoorToolsImage`, and give `tailnetAuthKey` a key minted as the front door needs it
+3. Declare `svc:<hostname>` in the tailnet with its port `tcp:443` (and the tag step 1 chose, if
+   any), and pass the Service's `Name` output as `tailnetService`.
+4. Set `frontDoorToolsImage`, and give `tailnetAuthKey` a key minted as the front door needs it
    ([The front door](#the-front-door)).
-4. Optionally seed `<hostname>-tailnet-tls`, so the first pods order no certificate; unseeded,
+5. Optionally seed `<hostname>-tailnet-tls`, so the first pods order no certificate; unseeded,
    they spend one or two of the three weekly claims. The component creates that Secret empty, and
    its provider does not adopt one made by hand, so create it first with an update that targets it
    alone (`pulumi up --target '<the Secret's URN>'`), then write into it, from
@@ -716,12 +742,12 @@ and selector are unchanged. Before it:
    `<hostname>.<tailnetDnsName>.key` as `tls.key` and `acme-account.key.pem` as
    `acme-account.key.pem` (the keys tailscaled writes them under in a Kubernetes state Secret).
    The component ignores the Secret's contents, so the full update keeps them.
-5. Before the update that sets `appPdbMinAvailable`, delete any budget made by hand named
+6. Before the update that sets `appPdbMinAvailable`, delete any budget made by hand named
    `<hostname>` (`kubectl -n <namespace> delete pdb <hostname>`): the component's app budget takes
    that name, and its provider does not adopt an object that already exists.
-6. Back up, then delete, the runtime Secret `<hostname>-tailscale-state`, which Pulumi never owned
+7. Back up, then delete, the runtime Secret `<hostname>-tailscale-state`, which Pulumi never owned
    and no pod reads any more.
-7. Before switching `databaseAvailabilityType` in the same update, set `databaseTier` to the tier
+8. Before switching `databaseAvailabilityType` in the same update, set `databaseTier` to the tier
    the instance actually runs, so the instance update does not also resize it.
 
 ### YAML
