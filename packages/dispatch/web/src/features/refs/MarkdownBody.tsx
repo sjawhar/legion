@@ -2,6 +2,7 @@ import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, useRef } from "react";
 
 import { markdownClassName, type SoftBreaks } from "./markdown-engine";
+import { drawTaskCheckboxes } from "./task-checkboxes";
 import { type PaintMarkdown, useRenderedMarkdown } from "./useRenderedMarkdown";
 
 /** The first textblock's own inline content (marks intact), plus the flattened plain text of
@@ -70,6 +71,7 @@ const paintInline: PaintMarkdown = (element, parsed, serializer) => {
 
 const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
   element.replaceChildren(serializer.serializeFragment(parsed.content));
+  drawTaskCheckboxes(element);
   for (const item of element.querySelectorAll("li[data-spread='false']")) {
     const paragraph = item.firstElementChild;
     if (item.childElementCount === 1 && paragraph?.tagName === "P") {
@@ -81,7 +83,8 @@ const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
 /**
  * Renders Markdown text through Proof's own parser and schema, so every question, answer,
  * comment, reply, and message formats identically to the document editor. `block` (the
- * default) renders the full parsed document, including lists and headings, inside a `<div>`.
+ * default) renders the full parsed document, including lists and headings, inside a `<div>`;
+ * there a task item (`- [x] done`) draws a disabled checkbox, ticked as its source is.
  * `inline` renders only inline marks (bold, code, links) inside a `<span>` with no wrapping
  * `<p>` or block spacing, for single-line contexts like an option label or a resolution reason
  * inside a metadata line:

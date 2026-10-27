@@ -107,6 +107,26 @@ type Issue struct {
 	// event subjects carry, which NATS matches case-sensitively, so GitHub intake hears the issue's
 	// repository by it, read from the record at boot.
 	GitHubRepo string
+	// Ancestry is the keys of a root's Dispatch parent chain, from its parent upward to the top,
+	// stopping only at a repeated key or back at the root, as the newest Dispatch observation
+	// applied to the record was prepared with (intake's DispatchIssue.Ancestry), or as the
+	// preparation of an event of an issue on that chain read it again (intake's
+	// DispatchIssue.Reread): kept for a labelled todo root under a parent unrecorded or recorded as
+	// a root, such as a child of a live tree that tree's architect has not released. Such a root
+	// is held under that unreleased child (the ancestry hold) and waits for no slot while any live
+	// root is on its chain (Waiting), exactly while that root's release would reach it; it is not
+	// the hold on Dispatch blocked-by links (blockers.WaitsOn). Empty for every other record, for a
+	// root that ran as a tree of its own (workflow's RanAsRoot), which no release adopts, and
+	// cleared when adoption takes the record into a tree.
+	Ancestry []string
+	// HandedOverFrom is the key of the tree the issue left when it became a root of its own:
+	// re-admission (admit.Admission.readmit) writes it whenever it moves a member of another tree
+	// into a tree of its own, a child its finished tree handed over (carrying its run or not) or an
+	// orphan a person admitted, and never clears it, a root's re-admission of itself included. Such
+	// a root stays its own tree (workflow's RanAsRoot): no admission sweep or release of children
+	// adopts it, into the tree it left or any other, and no ancestry hold holds it. Empty for every
+	// other record.
+	HandedOverFrom string
 	// Awaiting is what a root in phase awaiting_person waits on, nil in every other phase: the two
 	// change together, as Hold and held do.
 	Awaiting *Awaiting
@@ -403,10 +423,24 @@ type PullRequest struct {
 	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
 	// HeadCountedBefore is the mark HeadCounted held before the count that set it. A count made
-	// before its head's push arrived is taken back when that push proves handoff-only or the review
-	// App's (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
-	// which of the push and the head's arrival GitHub delivers first.
+	// before its head's pushes arrived is taken back when they prove the move spares it
+	// (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
+	// which of the pushes and the head's arrival GitHub delivers first, while the counted head is
+	// still the recorded head (classify.AdvancePullRequestHead names the order it does not cover).
 	HeadCountedBefore string
+	// HeadCountedFrom is the recorded head (HeadSHA) that HeadCounted replaced when it was counted:
+	// the head the counted move started from. The count is taken back once the recorded pushes chain
+	// from this head to HeadCounted, each the review App's or an unforced handoff-only push
+	// (classify.ApplyPush); a push that reached the counted head from another head - the
+	// required-checks pass's compare from an approved head, say - is on no such chain. Empty when no
+	// count stands, and for a mark a take-back restored, which nothing takes back.
+	HeadCountedFrom string
+	// HeadArrivedFrom is the head HeadSHA replaced when it arrived (classify.AdvancePullRequestHead),
+	// set on every head move, empty before the first and after a new generation. The planned mark
+	// (PlannedRed) is the last push that may change code on the chain of recorded pushes from this
+	// head to HeadSHA, whichever of the pushes and the head arrives first (classify.ApplyPush), also
+	// when the daemon reached the head past heads it never recorded.
+	HeadArrivedFrom string
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
@@ -732,6 +766,10 @@ type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
+	// QueuedRootsUnder is every labelled todo root whose Ancestry holds key, by key: the roots the
+	// waiting line may hold under a live root on a chain key is on (Waiting), whose Ancestry an
+	// event of key reads again.
+	QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]Issue, error)
 	// SlottedIssues is the record of each issue of project that holds an admission slot, in slot
 	// order, in one read: another project's slot in the shared table, and every issue holding no
 	// slot, are left out of the read rather than of the caller's loop.

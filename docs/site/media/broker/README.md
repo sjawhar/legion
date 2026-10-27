@@ -38,15 +38,18 @@ agent machine, `agent-secrets-helper` for `alice@example.com` under the hostname
 machine. It prints the addresses, then waits; Ctrl-C stops everything it started and drops the
 broker's database.
 
-It needs `go`, `bun`, `psql`, `curl`, `openssl`, `setsid`, and passwordless `sudo` with `unshare`
-and `setpriv`. Its one input, `DATABASE_URL`, names a Postgres database on this machine that it may
-empty, as the e2e harness requires: a `postgres://` URL whose host is a loopback name or address or
-a unix socket directory. The rig refuses any other before it runs a single `psql`, and it ignores
-the variables that could send its SQL or seed elsewhere (`PGHOST`, `PGHOSTADDR`, `PGSERVICE`, and a
-deployed e2e run's `PLAYWRIGHT_BASE_URL`, `PLAYWRIGHT_DATABASE_URL` and `E2E_AGENT_TOKEN`). The
-broker's database is created beside it under a name of the run's own and dropped on exit. The rig
-picks its ports itself (`scripts/e2e/lib/rig.sh`'s `pick_port`), so two rigs on one machine never
-meet.
+It needs `go`, `bun`, `python3`, `psql`, `curl`, `openssl`, `setsid`, and passwordless `sudo` with
+`unshare` and `setpriv`. Its one input, `DATABASE_URL`, names a Postgres database on this machine
+that it may empty, as the e2e harness requires: a `postgres://` URL whose host is a loopback name
+or address or a unix socket directory. The rig refuses any other before it runs a single `psql`,
+and it ignores the variables that could send its SQL or seed elsewhere (`PGHOST`, `PGHOSTADDR`,
+`PGSERVICE`, and a deployed e2e run's `PLAYWRIGHT_BASE_URL`, `PLAYWRIGHT_DATABASE_URL` and
+`E2E_AGENT_TOKEN`). The broker's database is created beside it under a name of the run's own and
+dropped on exit. Every port the rig serves on is one the kernel chose, so two rigs on one machine
+never meet: a keeper holds Dispatch's from before the broker starts, which names Dispatch's
+machine-login page (`scripts/e2e/lib/rig.sh`'s `keep_port`), and Dispatch serves on that socket;
+the broker and the harness's fakes bind ports the kernel assigns and report them. The rig ignores
+a caller's `DISPATCH_E2E_PORT` and `FAKE_*_PORT`.
 
 Postgres from the distribution's package serves, unpacked rather than installed (Ubuntu 24.04
 shown). It listens on no TCP port, only on a socket in a directory no other account can enter, and
