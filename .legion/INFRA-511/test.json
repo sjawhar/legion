@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-511",
+  "completed": "2026-10-27T05:03:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's command at PR head d1ccba65 (code head 73dd84ff): `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts` -> 6 pass, 0 fail (58.6 s), against a local nats-server 2.10.29. Drove the built CLI independently: my own `go build ./cmd/legion` from the workspace, both plugins packed and installed by scripts/e2e/lib/install-plugin-profile.sh into a fresh profile (i511-tester), and my own stand-in and PTY driver (not the implementer's smoke3 rig); results in proof below."
+  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "The start message starts the first turn, once per process, and the operator's controller stays claimed (spec Outcome; plan.md design item 2, decision-table row 'the claim is still running -> awaits that claim, then decides again'; plan gap-analysis finding 3). The claim now runs from /legion-controller-start in the interactive window, where the operator can run the command again while its claim is in flight, and nothing serialises the two claims.",
+      "evidence": "Red test (commit 5dffc26f): packages/pi-legion/extensions/legion.test.ts, test \"/legion-controller-start run again while the start command's claim is in flight registers once and says nothing to do\". Command: `cd packages/pi-legion && bun test ./extensions/legion.test.ts -t \"run again while the start command\"` -> 1 fail: the second run returns [] (it ran a whole second claim) where NOTHING_TO_DO is expected. Real-binary probe (throwaway, /legion/scratch/tmp/i511-zz-tester-probe.test.ts, a copy of controller-start-omp.test.ts's rig at 73dd84ff, Oh My Pi 18.12.2 under a PTY, real NATS): with the registration held, typing `/legion-controller-start` + Enter makes a second POST /legion/v1/claims/register (registrations while held: 2). With the stand-in giving each registration its own secret, as the daemon does (packages/daemon/internal/api/controller.go registerController: `secret := rand.Text()` and store.RegisterController replaces secret_hash each time), and the first claim's role claim answered 2 s late, the session keeps the first registration's secret: the start turn's `legion` set_status call got `POST /legion/v1/grants failed with 403: invalid controller secret` (grantSecrets=[\"secret-1\"], current=secret-2, statusWrites=0). So a second run of the command during a slow claim can leave the controller unable to write any status until a re-claim. The same unserialised claim() is reached by /legion-claim-controller typed during the start command's claim (two registrations; in my one run it happened to finish in order and the grant was accepted). One start message was sent in every run; the defect is the second registration and the secret it can leave stale."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "A2-A5: the start turn runs after startup, the TUI shows it, the operator can type into it and interrupt it, and the start message is the first turn, once, with /legion-controller-start in no request or transcript line; a card and a notice arriving as soon as the role is claimed come after the start message; a claim refusal is shown as a warning",
+      "surface": "real interactive Oh My Pi 18.12.2 (/opt/omp/bin/omp, .omp-pin tag) under a pseudo-terminal, both plugins of this branch, stand-in daemon/listener/gateway, real NATS",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts",
+      "observed": "6 pass, 0 fail, 18 expect() calls, 58.6 s",
+      "headSha": "d1ccba654aa5c641be4ba60470261f1f07a801c3",
+      "negativeControl": "The refused-claim case (claims/register answers 403 'invalid controller capability'): warning naming the refusal and /legion-claim-controller on screen, 0 Messages requests in a 3 s window."
+    },
+    {
+      "criterion": "A12: the built `legion controller start` launches interactive Oh My Pi whose argv ends with the word, and the first turn is the start message after startup, shown with the busy row; a second /legion-controller-start after the claim does nothing; an ordinary prompt then works",
+      "surface": "legion built from the workspace (`go build -o /legion/scratch/tmp/i511t/legion ./cmd/legion`), plugins installed with scripts/e2e/lib/install-plugin-profile.sh into a fresh profile, my own stand-in, Bun.Terminal 200x50 read through @xterm/headless, real NATS",
+      "command": "env -i PATH=... HOME=/home/legion bun /legion/scratch/tmp/i511t/drive.ts pos (runs `legion controller start --config <scratch controller.yaml>` with LEGION_OMP_PATH=/opt/omp/bin/omp)",
+      "observed": "SMOKE PASS: omp argv [/opt/omp/bin/omp, …, --append-system-prompt, <2507 chars>, /legion-controller-start], no --resume/--mode; stand-in order register#7 < roles/set#9 < first turn#11; registration pluginContract 41; screen shows the start message and Working… while the turn is held; after the reply, /legion-controller-start + Enter shows 'legion: nothing to do: …', registrations stay 1, turns stay 1; 'hello after start' becomes turn 2; the start message appears once in the conversation; no request carries /legion-controller-start",
+      "headSha": "d1ccba654aa5c641be4ba60470261f1f07a801c3",
+      "negativeControl": "drive.ts pipe (stdin a pipe) and devnull (stdin /dev/null): exit 1, 'stdin is not a terminal: Oh My Pi would run headless print mode…', 0 stand-in requests, no controller-state directory; drive.ts perm (token file 0644, stdin /dev/null): the token-file refusal comes first ('readable by its group or others (mode 0644)'), 0 requests."
+    },
+    {
+      "criterion": "A8: a CLI and a pi-legion of different contracts are refused before the mint, both directions",
+      "surface": "the built `legion controller start` probe against the installed pi-legion",
+      "command": "the installed pi-legion's package.json legion.daemonApiVersion set to 40, then 42 (restored to 41 after), then drive.ts pos",
+      "observed": "both exit 1: 'pi-legion at …/package.json (package 11.1.0) speaks daemon API contract 40; this daemon requires 41' (and 42); the stand-in saw only GET /legion/v1/state, no POST /legion/v1/controller/secret",
+      "headSha": "d1ccba654aa5c641be4ba60470261f1f07a801c3",
+      "negativeControl": "the skewed plugin is itself the broken input; the matching contract (41) passes the probe in the A12 run above"
+    }
+  ],
+  "observations": [
+    "Esc pressed while the start command's claim is in flight (registration held, nothing busy on screen) interrupts the start before it runs: in 1 of 3 trials the start message is recorded with an assistant entry stopReason aborted / 'Interrupted by user' and no Messages request; in 2 of 3 it is put back in the composer, and Enter then runs it as the first turn. No Messages request follows without Enter in any trial. Judged as Oh My Pi's ordinary interrupt (A4's behaviour, one step earlier), not a failure.",
+    "Text typed and entered while the claim is held becomes the first turn and the start message follows as a follow-up, once (plan decision 1).",
+    "CI at code head 73dd84ff and PR head d1ccba65: every lane queued (build, changes, lint, typecheck, test, pr-title) when read at 2026-10-27T05:00Z; not waited on.",
+    "A6, A10 and A13 left this pull request with spec version 3 (they move to #2278 via branch legion/INFRA-511-startup-wait); A7, A9, A11 are unit tests read from CI, not re-run here."
+  ]
+}
