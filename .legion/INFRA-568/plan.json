@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-568",
+  "completed": "2026-10-27T03:00:44Z",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, the proof object, the pull request body and simplify pass (references/pr-body.md), the push and skip-checks rules",
+      "dispatch: the production check files and closes the INFRA-131 refile on production Dispatch and reads production issues for the recall corpus",
+      "ce-simplify-code: the simplify pass over the settled change that references/pr-body.md requires"
+    ],
+    "test": [
+      "legion-worker: proof format, re-running the implementer's commands on the named surfaces, negative controls",
+      "dispatch: reading production Dispatch issues and messages when re-running the recall script"
+    ],
+    "review": [
+      "legion-worker: review threads, approval by head SHA and the merge gate (references/review-threads.md, references/merge-gate.md)"
+    ]
+  },
+  "planDocument": "dispatch://INFRA-568/artifact/plan-md",
+  "summary": "Rebuild the related-item check: per-project term statistics pick at most 25 rare lexemes (tf*idf, df cutoffs, match budget) for a keyword search run alongside a 3 s meaning search (embed + shared RRF query), 5 s backstop, three output forms, outcomes recorded in related_checks and readable at GET /api/v1/related-checks, --force names title matches, ask items carry INFRA-569's SearchAsk, doc-edit checks new decision blocks, a no-write GET/POST /api/v1/projects/{key}/related route and `dispatch related`, issues embedded with title and spec.",
+  "tasks": [
+    "1. Harness. Stand up Postgres with pgvector on the issue volume per the INFRA-42 solution doc (`$TMPDIR`, never `/tmp`), export `DISPATCH_TEST_DATABASE_URL` around the Go test runs, and use `DATABASE_URL` for `bun run dispatch:local`. Record the exports in the handoff's tricky parts for the tester.",
+    "2. Migration A (`0121_related_checks`). `related_checks`, `search_term_stats`, `search_term_totals`; indexes `(project_key, created_at)` and `(project_key, lexeme)`; foreign keys to `projects`, `issues`, `artifacts`, `asks` with `on delete cascade`; check constraints on `source_kind`, `outcome`, `searc\u2026",
+    "3. Migration B (`0122_issue_embedding_spec`). `issue_embedding_text(title, spec)` = title alone when the spec is null or blank, else title, a blank line, spec markdown; the issue trigger uses it with the primary artifact's latest version (still firing on insert or title update), and a new `after insert\u2026",
+    "4. Term statistics. New `dispatch/api/related_terms.go`: the refresh (lease, boot, 10 min, single-flight per project, log line with duration and item count) started from `cmd/dispatch/main.go` beside `RunSuggestionOutcomeSweep`; the picker (decision 1) as one SQL statement plus the bounded probe, retur\u2026",
+    "5. search.go split. Move the two `with q as (\u2026)` openers into one constant; no other change to `search.go`. Tell `notifications.role.legion-infra-infra-569-implementer` before pushing it.",
+    "6. The check. Rewrite `suggestions.go`: `relatedCheck(ctx, input) relatedResult` with stages 1 and 2 (decision 4), the 3 s and 5 s bounds (`relatedMeaningAllowance`, `relatedCheckAllowance`; `suggestionTimeout` stays the one test knob, now overriding the 5 s), dedupe, open-before-done, decision, ask st\u2026",
+    "7. Issue and ask routes. `issue_create.go`: run the check whatever `writeAdvice` returned (a suggestions-only advice shape when it is nil), run `duplicateCandidates` under `force` (decision 10). External links: an existing external issue answers `not_made` (\"Dispatch already holds this issue; nothing w\u2026",
+    "8. No-write route and records route (decisions 7, 8) in `routes_table.go` and a new `dispatch/api/related_routes.go`; `projects_test.go`'s bad-key test covers the new `{key}` route; update the pinned route count (`routes_table_test.go`).",
+    "9. Decision blocks (decision 11): `docs/api.go`, `docs/edits.go`, `docs/ask_blocks.go`, `api/artifacts.go`, `api/write_advice.go`.",
+    "10. Client and contracts. `dispatch-api.ts` types; `dispatch-execute.ts` rendering for `dispatch issue`, `dispatch ask`, `dispatch doc-edit` (decision 9); the `dispatch_related` spec in `dispatch-tools.ts`, its execution case and `DispatchClient.related()` in `dispatch-http.ts`, `issueFreeTools`, the ex\u2026",
+    "11. Tests (Go, `dispatch/api`, real Postgres through `storetest`). Update the pins: `suggestions_test.go:183,351,371,457,495-498` and the recall-shaped tests (`:64,114,207,522,550,576`), `dispatch-advice.test.ts:594-677`. New tests, each failing before the change:",
+    "12. Duplicate recall (acceptance 3). `packages/envoy/scripts/related-recall.sh` (project as an argument, no project or key in the file): with the caller's Dispatch credentials, list the project's `done` issues, read each one's messages for `Duplicate of dispatch://<KEY>` (the close reason is posted as a\u2026",
+    "13. Latency on a production-sized corpus. Run the stage-1 keyword search for INFRA-131's spec and for a 10,000-word spec against the recall corpus and, where the operator's nightly dump is reachable (`packages/envoy/scripts/corpus-copy.sh` needs `DISPATCH_BACKUP_BUCKET`; try `agent-secrets` before calli\u2026",
+    "14. Docs. `.dispatch/architecture/` `dispatch-api.md`, `dispatch-store.md`, `dispatch-docs.md`, `dispatch-model.md`, `dispatch-server.md`, `contracts.md`, `envoy-client.md`, `envoy.md` (`embedqueue` belongs to no `dispatch-*` component), `claude-envoy-bridge.md`; `packages/envoy/cmd/dispatch/README.md` \u2026",
+    "15. End to end (`bun run dispatch:local`, `DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token`, keyword-only since the local server has no embedder) \u2014 the commands in the acceptance table, then a push, the pull request with `Dispatch: INFRA-568`, and CI."
+  ],
+  "trickyParts": [
+    "No docker in the pod: Postgres with pgvector per docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md; export DISPATCH_TEST_DATABASE_URL for go test and DATABASE_URL for bun run dispatch:local; record both in the implement handoff.",
+    "Triggers and embedqueue coverageSources must produce byte-identical issue text (TestCoverChangesNothingTheTriggersAlreadyEnqueued).",
+    "The conditional edit gate in editArtifact is held by defer release(): release it after the commit before running block checks.",
+    "Migration numbers 0121/0122 may collide with INFRA-148's own PR or another tree: renumber at rebase.",
+    "INFRA-569 shares SearchAsk/attachAskStates and edits search.go; tell notifications.role.legion-infra-infra-569-implementer before pushing the q-opener split.",
+    "The repository is public: the recall corpus stays under $TMPDIR; quote counts only.",
+    "Rebuild packages/claude-envoy/dist in the same commit as the client change."
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Rarest-word picking undefined: MLT is tf*idf with min/max df; rarity alone picks typos/hashes; short texts keep common words; the source counts itself.",
+        "answer": "Decision 1: tf*idf with BM25 idf, max 25, min tf 1, drop df=0, drop df>max(10,N/10), drop digit and 12+ hex lexemes, summed-df budget 3,000, source/exclude_issue items subtracted from df, ties by df then lexeme; picker unit tests in task 11."
+      },
+      {
+        "finding": "Keyword ranking ignores rarity; lexemes must not be re-stemmed through websearch_to_tsquery; $1 also drives own_key, firstTerm and href echo; shared SQL collides with INFRA-569.",
+        "answer": "Decision 3: quoted-lexeme tsquery built with quote_literal; only the `with q as` opener is split into a constant so the check supplies its own q; ts_rank_cd kept, idf-coordination rank is the measured fallback if recall does not improve; INFRA-569 told on Envoy and the implementer tells 569's implementer before pushing."
+      },
+      {
+        "finding": "A per-project df table needs rules: latest doc version only, refresh cadence, empty table, injection, e2e reset, multiple pods, cost.",
+        "answer": "Decision 2: search_term_stats/totals with FK cascade to projects, ts_stat counting each item once (latest doc version), lease-guarded refresh at boot and every 10 min, format(%L), bounded live probe for unknown lexemes, async single-flight refresh when a project has no totals; refresh time measured in task 13."
+      },
+      {
+        "finding": "3 s / 5 s interplay; keyword arms run twice; InputQuery and floor calibrated for short queries; hnsw ef_search may starve the project-filtered arm.",
+        "answer": "Decision 4: meaning (embed + stage 2) bounded at 3 s from start, keyword result returned as keywords_only otherwise, 5 s only binds stage 1; double keyword work accepted with reason; InputQuery and 0.25 floor kept, measurable only after INFRA-394 (risk listed); set local hnsw.ef_search=400 with a test for a project-filtered item beyond 40 nearer vectors."
+      },
+      {
+        "finding": "Recorded outcomes cannot answer the production lines: need project, source ids, created_at, reasons, keyword_ms definition, a read surface, no recording of no-write runs, and always an outcome.",
+        "answer": "Decision 7: related_checks with project, source ids, reason codes, keyword_ms including term selection, written under its own context; GET /api/v1/related-checks with filters and percentiles; no-write route records nothing; decision 5: every source gets an outcome; P1 command names the curl and issue.deployed as the window start."
+      },
+      {
+        "finding": "Old/new client/server mixing needs rules; --force against an old server cannot name matches; the suggested search command; totality of post-write rendering.",
+        "answer": "Decision 9: missing kept on not_made and related always an array for old clients; new client maps old shapes (absent, missing, items without outcome, empty without outcome); search_query from the server else first three 4+-letter words, shell-quoted; check renderer cannot throw and other advice is wrapped. Decision 10: old-server --force prints only the not-made form."
+      },
+      {
+        "finding": "Every write now waits up to 5 s including the web app; issue route skips suggestions when advice fails; texts saying it never slows the write become false.",
+        "answer": "Decision 12 and task 7: the check runs whatever writeAdvice returned (suggestions-only advice shape); all callers keep the check and its record; route descriptions, README, CHANGELOG, contracts comments and the INFRA-56 solution doc are rewritten (task 14)."
+      },
+      {
+        "finding": "'Search made to fail' has no real surface; a failing duplicateCandidates under force must not block the create.",
+        "answer": "Acceptance 1a: lock asks with psql during dispatch issue --force on dispatch:local (fails the search and the write advice, leaves duplicateCandidates working); decision 10: duplicateCandidates failures under force are logged and the issue is created."
+      },
+      {
+        "finding": "doc-edit: edit gate held through the check, several blocks multiply the wait, cap of 5 unsourced, no ask id, write_suggestions source_kind, which writes count, copied blocks.",
+        "answer": "Decision 11: gate released after commit, checks concurrent under one 5 s bound, blocks past five answer not_made, results keyed by block id, recorded in related_checks only, doc-edit only as the spec names; copied blocks are checked (Smaller decisions)."
+      },
+      {
+        "finding": "Re-embedding with title+spec: trigger order, byte-identical texts with coverage, empty specs, re-embed noise, duplicate owner entries, nothing until INFRA-394, census and README per migration.",
+        "answer": "Task 3: issue_embedding_text shared by both triggers and coverageSources, artifact_versions trigger for primary docs, empty spec keeps title alone, census select 0 and README paragraph; decision 5: per-owner dedupe; risk notes production re-embeds only after INFRA-394; raw markdown as documents do (Smaller decisions)."
+      },
+      {
+        "finding": "Migration numbers can collide with sibling trees.",
+        "answer": "Tasks preamble: take the next free numbers on main (0121, 0122 now), two migrations only, renumber at rebase across file names, census comments, README and CHANGELOG, keeping the first merged."
+      },
+      {
+        "finding": "Recall measurement fairness: corpus, identical post-processing, ties, text versions, which pairs count, what if no improvement, public repo.",
+        "answer": "Task 12 and the departure: all project issues as competitors, production timestamps, every issue loaded open, duplicate as source for both queries with depth 10 and per-owner dedupe, duplicate's version 1 and survivor's spec as of the filing, cross-project and later survivors left out and counted, chains reported, counts only on the PR, decision 3 fallback if not higher."
+      },
+      {
+        "finding": "INFRA-569 needs the same answer shape.",
+        "answer": "Decision 6: INFRA-569's SearchAsk{state, answer, resolution}, SearchResult.Ask and attachAskStates adopted with its names, agreed with 569's planner on Envoy; WriteSuggestion.ask; whichever merges second rebases."
+      },
+      {
+        "finding": "INFRA-570's route: title alone, same shape, authAny, kind param purpose, GET vs POST for the production check, keywords_only.",
+        "answer": "Decision 8: GET and POST /api/v1/projects/{key}/related, authAny, title alone accepted, same Suggestions shape, no kind parameter, bare GET answers 200 not_made so the production check (GET, 200 or 403 only) passes, keywords_only offered."
+      },
+      {
+        "finding": "Unlisted updates: claude-envoy dist, new command registrations, route pins and tables, more architecture docs, pinned tests, CHANGELOGs.",
+        "answer": "Tasks 8, 10, 11, 14 list each: dist rebuild, dispatch_related spec and name list and AGENTS count and issueFreeTools and DispatchClient method, route count and bad-key test, nine architecture docs, the pinned tests, three CHANGELOGs."
+      },
+      {
+        "finding": "Production acceptance lines need concrete commands; INFRA-131 vs INFRA-130 ordering; the after-INFRA-394 run needs exclude_issue and keywords_only.",
+        "answer": "Acceptance table P1-P3 with exact commands; open-before-done and per-owner dedupe keep INFRA-131 ahead of the closed INFRA-130; exclude_issue and keywords_only on the no-write route."
+      },
+      {
+        "finding": "Where the result sits in the output.",
+        "answer": "Decision 9: right after Created, and for asks after the Asked line and before You follow this ask; issue suggestions move above the other advice lines."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [
+    {
+      "spec": "Duplicate recall: copy the titles and specs of INFRA's issues closed as duplicates and of the issues they name, and report top-three hits for the 40-word OR query and the new keyword search.",
+      "plan": "Also load every other INFRA issue's title and spec as competitors with production timestamps, use the duplicate's version-1 spec and the survivor's spec as of the duplicate's filing, load every issue open, and leave out (and count) pairs whose survivor is in another project or was filed later.",
+      "evidence": "With only the pairs loaded both queries find nearly every survivor, and a tie fails 'lists the survivor for more of them'; the dispatch-first skill tells closers to copy the duplicate's unique content into the survivor, so a later survivor spec can hold the duplicate's text; a project-scoped check can never find a survivor in another project (gap analysis finding 12).",
+      "outcome": {
+        "kind": "changed",
+        "scope": "acceptance: the duplicate-recall line's method is broadened; its comparison and the quoted counts are unchanged."
+      }
+    }
+  ],
+  "acceptance": "See plan.md 'Acceptance: surface, command, and who runs it' (rows 1a-6 before the merge, P1-P3 on production)."
+}
