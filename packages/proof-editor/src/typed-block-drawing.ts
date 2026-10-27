@@ -24,7 +24,7 @@ export type MdastNode = {
 };
 
 /** Which container directives may stay typed blocks, and what their content is checked against. */
-export type TypedBlockDecision = {
+type TypedBlockDecision = {
   /** The ProseMirror schema the parse builds with. */
   schema: Schema;
   /** The parsed text, as `markdownSource` returns it, which the tree's offsets count into. */
@@ -179,12 +179,29 @@ function decideDirective(node: MdastNode, decision: TypedBlockDecision): MdastNo
  * so a directive drawn later reads its own children rather than the paragraphs drawn in their
  * place.
  */
-export function decideTypedBlocks(nodes: MdastNode[], decision: TypedBlockDecision): MdastNode[] {
+function decideTypedBlocks(nodes: MdastNode[], decision: TypedBlockDecision): MdastNode[] {
   return nodes.flatMap((node) => {
     if (node.type === "containerDirective") return decideDirective(node, decision);
     if (node.children === undefined) return [node];
     return [{ ...node, children: decideTypedBlocks(node.children, decision) }];
   });
+}
+
+/**
+ * The remark transformer that runs `decideTypedBlocks` over the whole tree, checked against the
+ * ProseMirror `schema` the parse builds with, keeping a container directive typed only when
+ * `accepts` takes it.
+ */
+export function remarkDecideTypedBlocks(schema: Schema, accepts: (node: MdastNode) => boolean) {
+  return (tree: MdastNode, file: { toString(): string }): void => {
+    if (tree.children !== undefined) {
+      tree.children = decideTypedBlocks(tree.children, {
+        schema,
+        source: markdownSource(file),
+        accepts,
+      });
+    }
+  };
 }
 
 /**
@@ -196,15 +213,7 @@ export function decideTypedBlocks(nodes: MdastNode[], decision: TypedBlockDecisi
  * lines around its formatted content, so every word of it stays in the document.
  */
 export function remarkUnfitTypedBlocks(schema: Schema) {
-  return (tree: MdastNode, file: { toString(): string }): void => {
-    if (tree.children !== undefined) {
-      tree.children = decideTypedBlocks(tree.children, {
-        schema,
-        source: markdownSource(file),
-        accepts: () => true,
-      });
-    }
-  };
+  return remarkDecideTypedBlocks(schema, () => true);
 }
 
 /**

@@ -1,6 +1,6 @@
 import type { Schema } from "@milkdown/prose/model";
 import { type BlockSchema, typedBlockRefusal, validateBlockSchema } from "./block-schema.js";
-import { decideTypedBlocks, type MdastNode, markdownSource } from "./typed-block-drawing.js";
+import { remarkDecideTypedBlocks } from "./typed-block-drawing.js";
 
 /**
  * The read-only counterpart of `remarkTypedBlocks`, for bodies that are only displayed. A body
@@ -18,14 +18,8 @@ import { decideTypedBlocks, type MdastNode, markdownSource } from "./typed-block
  */
 export function remarkReadOnlyDirectives(blockSchema: BlockSchema | undefined, schema: Schema) {
   if (blockSchema !== undefined) validateBlockSchema(blockSchema);
-  return (tree: MdastNode, file: { toString(): string }): void => {
-    if (tree.children !== undefined) {
-      tree.children = decideTypedBlocks(tree.children, {
-        schema,
-        source: markdownSource(file),
-        accepts: (node) =>
-          blockSchema !== undefined && typedBlockRefusal(blockSchema, node) === undefined,
-      });
-    }
-  };
+  return remarkDecideTypedBlocks(
+    schema,
+    (node) => blockSchema !== undefined && typedBlockRefusal(blockSchema, node) === undefined
+  );
 }
