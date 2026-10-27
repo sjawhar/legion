@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/sjawhar/envoy/listenfd"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
@@ -210,6 +212,25 @@ func holdPortOn(t *testing.T, host string) int {
 	return port
 }
 
+// heldSocket holds a loopback port the kernel chooses and returns a descriptor of its own for the
+// listening socket, with that port: the socket stays listening once the listener is closed, so no
+// other process can take the port before whatever is handed the descriptor serves it. The
+// descriptor is closed when t ends, if its caller has not closed it first.
+func heldSocket(t *testing.T) (*os.File, int) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a loopback port: %v", err)
+	}
+	file, err := listener.(*net.TCPListener).File()
+	_ = listener.Close()
+	if err != nil {
+		t.Fatalf("take the held socket's descriptor: %v", err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return file, listener.Addr().(*net.TCPAddr).Port
+}
+
 // rebindHeldPorts hands cfg a freshly held API port. A daemon that has stopped closed the
 // listener it was handed, and from then on the port it used is any process's, so a test that
 // starts a second daemon on the same config holds one again first. The worker stream needs no
@@ -238,18 +259,6 @@ func heldListen(network, address string) (net.Listener, error) {
 // pollClient bounds each poll of a daemon's port: holdPortOn's listener queues a connection until a
 // daemon takes the listener and serves it, and a daemon that exits before then never answers it.
 var pollClient = &http.Client{Timeout: time.Second}
-
-// boundPort is a free loopback port for a process that binds it itself, such as a scratch server
-// launched as a command: until it does, the port is any process's.
-func boundPort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("find a free port: %v", err)
-	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
-}
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -397,6 +406,47 @@ func TestRunRecordsNoBootWhenItCannotTakeItsPort(t *testing.T) {
 	}
 	if count, _ := boots(t, cfg); count != 0 {
 		t.Fatalf("boots after a start that never served = %d, want 0", count)
+	}
+}
+
+// `legion start` hands Run the socket it inherited (LEGION_LISTEN_FD), which a harness opened on a
+// port the kernel chose and held from then on: the daemon serves its API on that socket without
+// binding an address of its own, and its boot line names the address it serves on.
+func TestRunServesTheSocketItIsHandedAndLogsItsAddress(t *testing.T) {
+	cfg := testConfig(t)
+	file, _ := heldSocket(t)
+	// The descriptor `legion start` inherits is a bare number no *os.File owns, which Adopt closes.
+	descriptor, err := syscall.Dup(int(file.Fd()))
+	_ = file.Close()
+	if err != nil {
+		t.Fatalf("copy the held socket's descriptor: %v", err)
+	}
+	socket, err := listenfd.Inspect("LEGION_LISTEN_FD", strconv.Itoa(descriptor))
+	if err != nil {
+		_ = syscall.Close(descriptor)
+		t.Fatalf("inspect the held socket: %v", err)
+	}
+	inherited, err := listenfd.Adopt(socket)
+	if err != nil {
+		t.Fatalf("adopt the held socket: %v", err)
+	}
+	address := socket.Addr().String()
+	if thief, err := net.Listen("tcp", address); err == nil {
+		_ = thief.Close()
+		t.Fatalf("another listener took %s before the daemon served it", address)
+	}
+	cfg.Port = socket.Addr().Port
+	cfg.DaemonURL = "http://" + address
+	// Run's listen: the handed socket in place of any bind. The socket still holds cfg's address, so
+	// a daemon that bound it rather than serve the socket would be refused, and never answer.
+	o := fakeRuntime(fake.NewRuntime(), &built{})
+	o.listen = handed(inherited)
+	logs := &syncBuffer{}
+
+	startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(logs, nil)))
+
+	if logged := bootField(t, logs.String(), "address"); logged != address {
+		t.Errorf("the boot line names address %q, want %q, the socket the daemon serves on", logged, address)
 	}
 }
 
