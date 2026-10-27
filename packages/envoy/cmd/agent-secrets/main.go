@@ -1072,6 +1072,7 @@ var sessionIdentityVars = map[string]bool{
 // inherited entry too, before that name's granted value is appended. Without that second strip,
 // a duplicate key from the inherited environment could shadow the broker-released value under an
 // execve implementation that keeps the first occurrence of a repeated key rather than the last.
+// Each value passes through trimSingleLineNewline first.
 func buildChildEnv(environ []string, values map[string]string) []string {
 	envp := make([]string, 0, len(environ)+len(values))
 	for _, e := range environ {
@@ -1088,7 +1089,24 @@ func buildChildEnv(environ []string, values map[string]string) []string {
 		envp = append(envp, e)
 	}
 	for name, value := range values {
-		envp = append(envp, name+"="+value)
+		envp = append(envp, name+"="+trimSingleLineNewline(value))
 	}
 	return envp
+}
+
+// trimSingleLineNewline drops the one trailing "\n" or "\r\n" from a value that is a single
+// non-empty line followed by it, as a secret written with `echo` is stored. Such a value is meant
+// to be the line: an HTTP client rejects a header value that ends in a newline, and may quote the
+// whole value in its error. Any other value — one with a newline inside (a PEM key), more than
+// one trailing newline, nothing but a newline, or no trailing newline — is returned unchanged.
+func trimSingleLineNewline(value string) string {
+	line, ok := strings.CutSuffix(value, "\n")
+	if !ok {
+		return value
+	}
+	line = strings.TrimSuffix(line, "\r")
+	if line == "" || strings.ContainsAny(line, "\r\n") {
+		return value
+	}
+	return line
 }

@@ -8,7 +8,8 @@ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
 
 It asks the broker for the named secrets, waits while a person approves them in Dispatch if the
 secret's owner and tier require it, and runs the command with each granted value in its
-environment, writing one line to standard error first: the names it injected and the broker and
+environment (a single-line value without its one trailing `\n` or `\r\n`; any other value as
+stored), writing one line to standard error first: the names it injected and the broker and
 store they came from, never a value. Every form names that source the same way - `request`,
 `status` and `self` as a `source:` line, `secret show` as a `store:` line, and every refusal as
 `; asked the broker at <host> (<store>)` - so an answer of this CLI's is never taken for another

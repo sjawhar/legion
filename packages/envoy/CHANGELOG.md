@@ -1429,6 +1429,13 @@
 
 ### Fixed
 
+- `agent-secrets NAME -- command` puts a value stored as one non-empty line followed by one `\n`
+  or `\r\n` into the command's environment without that newline. A program that sent such a value
+  as an HTTP header was refused, and its error could quote the whole value. Every other value, a
+  multi-line PEM key included, goes in unchanged. `agent-secrets secret set` and `create` now drop
+  a trailing `\r\n` from a piped value, as they already dropped a trailing `\n`, so a file saved
+  with Windows line endings no longer stores a value ending in `\r`.
+
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a
   map value), naming the component and the input's path and never quoting a secret value, before

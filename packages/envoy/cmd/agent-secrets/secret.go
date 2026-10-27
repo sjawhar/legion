@@ -271,8 +271,8 @@ func pipeCommand(prefix, profile string, words ...string) string {
 // stderr, once it holds the terminal with echo off, and reads one line (readHidden), as
 // `gh secret set` does, so the value never shows on the screen; a value of more than one line is
 // refused there, naming pipeTo, the form's own command line (pipeCommand) with the value piped in.
-// Otherwise it reads all of secretStdin, less one trailing newline, so `echo` and a file ending
-// in a newline give the value without one. An empty value is a usage error either way.
+// Otherwise it reads all of secretStdin, less one trailing "\n" or "\r\n", so `echo` and a file
+// ending in a line ending give the value without one. An empty value is a usage error either way.
 func readSecretValue(name, pipeTo string, stderr io.Writer) (string, error) {
 	if err := disableCoreDumps(); err != nil {
 		return "", err
@@ -320,7 +320,10 @@ func readSecretValue(name, pipeTo string, stderr io.Writer) (string, error) {
 	if !utf8.Valid(data) {
 		return "", usageErr{errors.New("the value must be valid UTF-8")}
 	}
-	value := strings.TrimSuffix(string(data), "\n")
+	value, lf := strings.CutSuffix(string(data), "\n")
+	if lf {
+		value = strings.TrimSuffix(value, "\r")
+	}
 	if value == "" {
 		return "", usageErr{errors.New("the value is read from standard input, which was empty")}
 	}

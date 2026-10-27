@@ -114,8 +114,8 @@ machine's Application Default Credentials are its own identity, and so does ever
   Ctrl-S, Ctrl-Q, and Ctrl-C, Ctrl-\\ or Ctrl-Z inside a bracketed paste, refuses the value. The
   prompt keeps discarding through Enter or Ctrl-D and the paste's end before reporting the error
   and naming the pipe command. Anywhere
-  else the CLI reads standard input to its end, less one trailing newline. Empty values and
-  invalid UTF-8 are refused (exit 2) and write nothing.
+  else the CLI reads standard input to its end, less one trailing newline (`\n` or `\r\n`). Empty
+  values and invalid UTF-8 are refused (exit 2) and write nothing.
 
 The CLI checks your sign-in before it asks for the value, so a refused sign-in never has you type a
 secret for nothing. The secret is created on the broker's key with its tags, and the broker serves
