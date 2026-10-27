@@ -1678,7 +1678,9 @@
   the answer's text and the options it chose - where it was cut from the question, the options'
   raw JSON and the answer's text, so the excerpt could show JSON keys and braces (INFRA-569).
 - An ask answer that chose no option reads `"selected": []` from `GET /api/v1/asks/{id}`, the ask
-  lists and `GET /api/v1/me/answers`, where it read `null`, including the rows and `ask.answered`
+  lists and `GET /api/v1/me/answers`, and an `ask.answered` event's `answer` and `previous_answer`
+  read it from `GET /api/v1/issues/{key}/events`, `GET /api/v1/artifacts/{id}/events` and the
+  `GET /api/v1/events` stream, where each read `null`, including the rows and `ask.answered`
   events already stored with `null`; a new answer stores `[]` (INFRA-569).
 
 - A broker outage no longer ends the sessions whose leases ran out during it (INFRA-487). A session

@@ -223,8 +223,9 @@ func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
 
 // TestAnsweredEventStoredWithNullSelectedServesEmptyLists: an ask.answered event written before
 // answers stored an empty list holds null in answer.selected and previous_answer.selected. The
-// issue event log, the stream's catch-up and its live frame all send [] there instead, the reading
-// model.AskAnswer gives an answer, so a client can read the list's length.
+// issue event log and the stream's catch-up send [] there instead, the reading model.AskAnswer
+// gives an answer, so a client can read the list's length. A live frame is read through the same
+// attachAskEventFields (TestLiveAskEventFrameCarriesTheReadTimeFields).
 func TestAnsweredEventStoredWithNullSelectedServesEmptyLists(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Null selected events", "A spec")
@@ -233,9 +234,8 @@ func TestAnsweredEventStoredWithNullSelectedServesEmptyLists(t *testing.T) {
 	firstAt := timestampValue(first.Answer.At)
 	answerAskForChange(t, handler, ask.ID, "alice", "Hold", &firstAt)
 
-	ctx := context.Background()
 	var changedID int64
-	if err := database.Pool.QueryRow(ctx, `
+	if err := database.Pool.QueryRow(context.Background(), `
 		update events
 		set payload = jsonb_set(jsonb_set(payload, '{answer,selected}', 'null'), '{previous_answer,selected}', 'null')
 		where type = 'ask.answered' and payload->>'id' = $1 and payload->'previous_answer' is not null
@@ -289,22 +289,4 @@ func TestAnsweredEventStoredWithNullSelectedServesEmptyLists(t *testing.T) {
 		t.Fatalf("SSE catch-up sent ask.answered %d first, want %d", replayed.ID, changedID)
 	}
 	requireBothSelectedEmpty("SSE catch-up", replayed.Payload)
-
-	// The live frame comes from the relay, which reads a row as it commits: a copy of the stored
-	// row, committed after the stream opened, is a null-selected event it reads live.
-	live := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, eventHead(t, database)))
-	var copiedID int64
-	if err := database.Pool.QueryRow(ctx, `
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		select issue_key, (select max(seq) + 1 from events where issue_key = $2), type, actor, payload, false
-		from events where id = $1
-		returning id
-	`, changedID, issue.Key).Scan(&copiedID); err != nil {
-		t.Fatalf("copy the null-selected ask.answered event: %v", err)
-	}
-	streamed := frameEvent(readSSEFrameOfType(t, live, "ask.answered"))
-	if streamed.ID != copiedID {
-		t.Fatalf("live stream sent ask.answered %d, want %d", streamed.ID, copiedID)
-	}
-	requireBothSelectedEmpty("SSE live frame", streamed.Payload)
 }
