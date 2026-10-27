@@ -8,6 +8,7 @@ import (
 	"maps"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -567,6 +568,138 @@ func TestSettlementMarksUnsupportedAskBodyInvalid(t *testing.T) {
 	if asks != 0 {
 		t.Fatalf("unsupported ask rows = %d, want none", asks)
 	}
+}
+
+// Concurrent browser edits can leave an ask holding a second bullet list, which the browser keeps
+// and draws its options from the last list alone. Settlement marks it invalid and leaves its row
+// open and as it was, until an edit joins the lists.
+func TestSettlementMarksAnAskWithASecondBulletListInvalid(t *testing.T) {
+	const reason = `ask block "ask-lists", asking "Should we ship?", holds a second bullet list where its content rule, paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last`
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n")))
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskMarkedInvalidAndKept(t, service, artifactID, "ask-lists", reason)
+
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := firstAsk(tree)
+		ask.Children[1].Children = append(ask.Children[1].Children, ask.Children[2].Children...)
+		ask.Children = ask.Children[:2]
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "Wait for review"},
+		{Label: "Defer", Description: "Wait a week"},
+	})
+}
+
+// Concurrent browser edits can leave an ask holding a paragraph after its options, which the
+// browser keeps and takes no part of its question from. Settlement marks it invalid and leaves its
+// row open and as it was, until an edit moves the paragraph into the question.
+func TestSettlementMarksAnAskWithAParagraphAfterItsOptionsInvalid(t *testing.T) {
+	const reason = `ask block "ask-paragraph", asking "Should we ship?", holds a paragraph after its options where its content rule, paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last`
+	service, artifactID := seedIndexedShipAsk(t, "ask-paragraph")
+	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "Decide by Friday.\n")))
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskMarkedInvalidAndKept(t, service, artifactID, "ask-paragraph", reason)
+
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := firstAsk(tree)
+		ask.Children = []*pmdoc.Node{ask.Children[0], ask.Children[2], ask.Children[1]}
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-paragraph", "Should we ship?\n\nDecide by Friday.", []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "Wait for review"},
+	})
+}
+
+// seedIndexedShipAsk is a document holding one ask, "Should we ship?" with the options Ship and
+// Hold, which settlement has indexed as an open ask row. Its settlements run only when the test
+// runs them.
+func seedIndexedShipAsk(t *testing.T, blockID string) (*Service, string) {
+	t.Helper()
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#"+blockID+" urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n")
+	settleCurrentGeneration(t, service, artifactID)
+	assertShipAskRow(t, service, artifactID, blockID)
+	return service, artifactID
+}
+
+// parsedBlock is the first block markdown parses to, stamped with block ids as the browser editor
+// would.
+func parsedBlock(t *testing.T, markdown string) *pmdoc.Node {
+	t.Helper()
+	parsed, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse block: %v", err)
+	}
+	pmdoc.EnsureBlockIDs(parsed)
+	return parsed.Children[0]
+}
+
+// assertAskMarkedInvalidAndKept checks settlement flagged the document's first ask invalid for
+// reason, said so in a block.invalid event, and left its row open as seedIndexedShipAsk indexed it.
+func assertAskMarkedInvalidAndKept(t *testing.T, service *Service, artifactID, blockID, reason string) {
+	t.Helper()
+	if got := firstAsk(liveTree(t, service, artifactID)).Attrs["invalid"]; got != reason {
+		t.Fatalf("ask invalid = %#v, want %q", got, reason)
+	}
+	var eventBlockID, eventReason string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select payload->>'block_id', payload->>'reason'
+		from events where type = 'block.invalid' order by id desc limit 1
+	`).Scan(&eventBlockID, &eventReason); err != nil {
+		t.Fatalf("load block.invalid event: %v", err)
+	}
+	if eventBlockID != blockID || eventReason != reason {
+		t.Fatalf("block.invalid event = block=%q reason=%q, want block=%q reason=%q", eventBlockID, eventReason, blockID, reason)
+	}
+	assertShipAskRow(t, service, artifactID, blockID)
+}
+
+// assertShipAskRow checks the ask row of blockID is open with seedIndexedShipAsk's question and
+// options.
+func assertShipAskRow(t *testing.T, service *Service, artifactID, blockID string) {
+	t.Helper()
+	state, question, options := blockAskRow(t, service, artifactID, blockID)
+	want := []model.AskOption{{Label: "Ship", Description: "Release it"}, {Label: "Hold", Description: "Wait for review"}}
+	if state != "open" || question != "Should we ship?" || !slices.Equal(options, want) {
+		t.Fatalf("ask row = state=%q question=%q options=%#v, want it open as indexed", state, question, options)
+	}
+}
+
+// assertAskRepaired checks settlement cleared the document's first ask's invalid attribute and
+// wrote question and options to its open row.
+func assertAskRepaired(t *testing.T, service *Service, artifactID, blockID, question string, options []model.AskOption) {
+	t.Helper()
+	if got, exists := firstAsk(liveTree(t, service, artifactID)).Attrs["invalid"]; exists {
+		t.Fatalf("repaired ask invalid = %#v, want it cleared", got)
+	}
+	state, gotQuestion, gotOptions := blockAskRow(t, service, artifactID, blockID)
+	if state != "open" || gotQuestion != question || !slices.Equal(gotOptions, options) {
+		t.Fatalf("repaired ask row = state=%q question=%q options=%#v, want open with question=%q options=%#v", state, gotQuestion, gotOptions, question, options)
+	}
+}
+
+// blockAskRow is the state, question and options of the ask row anchored to blockID.
+func blockAskRow(t *testing.T, service *Service, artifactID, blockID string) (string, string, []model.AskOption) {
+	t.Helper()
+	var state, question string
+	var optionsJSON []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select state, question, options from asks where block_artifact_id = $1 and block_id = $2
+	`, artifactID, blockID).Scan(&state, &question, &optionsJSON); err != nil {
+		t.Fatalf("load ask row of block %q: %v", blockID, err)
+	}
+	var options []model.AskOption
+	if err := json.Unmarshal(optionsJSON, &options); err != nil {
+		t.Fatalf("decode ask row options: %v", err)
+	}
+	return state, question, options
 }
 
 // firstAsk is the document's first top-level ask.
