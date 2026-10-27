@@ -2,47 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-596",
-  "completed": "2026-10-27T10:18:11Z",
+  "completed": "2026-10-27T12:04:32Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedHead": "ed6e58b80eac8148b789ffe1339a78d690c9e74a",
-  "codeHead": "86599d457b94b92107eabc08b1700865f2613d23",
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection: none. CI head 86599d457b94 (newest pull_request run); compare to ed6e58b8 handoffsOnly true, 2 files. All required checks queued at 10:18Z; a REQUEST_CHANGES does not wait on them.",
-  "thermonuclear": "Pair ran once at ed6e58b8: deep-review CHANGES (2 Medium, 2 Minor), code-quality CHANGES (1 correctness, 11 cleanup). Both independently found finding 1. Deep review ran outbox, deliveryaudit, api (Comment|Mention|Suppress|Document|Claim) Go tests and the two bun suites: all pass; claude-envoy dist matches a fresh build.",
+  "reviewedHead": "a8377334b667e6e463bbcc4b92659c6d73d62cc3",
+  "codeHead": "9ac93a9703a08a11a746a98c747099e5087fb7e8",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; no branch protection. CI head 9ac93a97 (newest pull_request run); compare to a8377334 handoffsOnly true, 2 files. Every required check queued at 12:04Z; a REQUEST_CHANGES does not wait on them.",
+  "thermonuclear": "Pair ran once at a8377334 (a new round: forward merge 9ac93a97 changed the fingerprint). deep-review: APPROVE, no Medium or High finding; the new failure-path tests fail on the round-1 code at 94647c77 and pass at the head; outbox, deliveryaudit, api (Comment|Mention|Suppress|Document|Claim|HumanEdit|Edit), cmd/dispatch EditNotice and the bun suites pass; dist matches a fresh build. code-quality: CHANGES, no behaviour defect; cleanup and doc findings. The report output on the fixtures is unchanged by the split.",
+  "roundOneFindings": "All six fixed: 1 fbbd171228c3, 2/4/5 0937a91c1ac0, 3 383b9dcdc456, 6 in the PR body. Each thread replied to (4388436026, 4388436314, 4388436603, 4388437029, 4388437648) and accepted.",
+  "conflictMerges": "42b95bdb (fingerprint unchanged) and 9ac93a97 (fingerprint changed; #2137's artifact.human_edited author read moved into publishAuthorRoutes' case arm), both after GitHub reported CONFLICTING, each recorded in a PR comment. #2137's behaviour and tests are kept.",
   "critical": 0,
-  "important": 3,
-  "minor": 3,
+  "important": 1,
+  "minor": 1,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:234,298 / recipients.go:226-236,276-283",
-      "description": "resolveCommentRecipients runs before any send and a failed query sets item.failure, which settle backs off before the event's owner topic is published. On main a failed author lookup ran after the owner topic was sent, so the issue subject still got the event in id order (scanBatch's own comment: an event backed off reaches its issue subject after later events, which the Legion daemon drops as stale). And settle checks item.failure before ctx.Err(), so a stopping process backs these events off (attempts+1, ERROR) where every other event is released (TestAnOutboxStoppedMidBatchMarksTheAnsweredAndReleasesTheRest's contract). The claimed 'backs off only the events that needed it' has no test."
-    },
-    {
-      "severity": "important",
       "file": "skills/dispatch/SKILL.md:48",
-      "description": "The rewrite dropped '(--route '' on release)' while still recommending --route session:<your id>. Releasing a claim does not clear issues.route, and publishClaimant/primaryAuthorsIssueOf skip whenever a route is set, so a stale self-route sends every later person's comment to the released session and never to the next claimant or the spec's writers."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/outbox/THROUGHPUT.md:45-46",
-      "description": "The before/after load was measured at 4c3eb5caf, before ccc0e3b5 added loadPrimaryDocumentAuthors, and the comment-replies load uses claimed issues only, so the second batch query never runs. The PR body's 'no measurable cost' does not cover the head; re-measure at the corrective head with unclaimed, unrouted issues in the load."
+      "description": "Main's 'Never route such an issue' referred to line 46's 'An issue with the legion label, or under one'. The new 'never route a `legion` issue' drops 'or under one', and a Legion child carries no label. With this PR, a route also turns off the claimant and primary-document delivery (takesClaimRecipients), so an agent that routes a Legion child to itself now takes people's comments away from the tree's claimant. The skill is agent behaviour; fix: 'never route a `legion` issue or one under it'."
     },
     {
       "severity": "minor",
-      "file": "docs/site/src/content/docs/dispatch/for-agents.md:182 and packages/envoy/CHANGELOG.md:1445-1447",
-      "description": "'A comment that mentions you arrives once, as the mention' and 'in an ask's thread too, so a mentioned session hears the comment once' are false for an ask follower: publishFollowerRoutes never reads suppressed_authors (packages/envoy/AGENTS.md says so), and validateCommentMentions allows mentions on ask replies."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/CHANGELOG.md:1447-1448",
-      "description": "'the reopen that a reply makes in the same transaction tells no session twice' contradicts publisher_comment_recipients_test.go:210-214, where the root author gets both the reopen and the reply; AGENTS.md's 'no new session twice' is accurate."
-    },
-    {
-      "severity": "minor",
-      "file": "PR #2366 body, Change bullet 1",
-      "description": "'A routed issue still reaches only its route' is false: on a routed issue a person's reply also reaches the thread's sessions and the thread document's sessions (publishAuthorRoutes ignores the route; test case 'a routed issue reaches the route's holder and the thread's sessions')."
+      "file": "packages/pi-envoy/CHANGELOG.md:53-55",
+      "description": "The entry says the skill says 'a thread the session wrote in brings people's replies'; 0937a91c removed that clause from SKILL.md:48. Remove it from the entry, or put it back in the skill."
     }
   ],
-  "fastFollow": "Deduplicate the outbox recipient routing: one resolver-computed claim-recipient list sharing publishAuthorRoutes' actor/suppression filter, one keyed-sessions loader, drop publishClaimant's unreachable actor skip and its forced-notify test cases; split report.ts by its banner sections with a first-match class chain.",
-  "contractCensus": "Not required: getComments(issue, artifact?) -> getComments(issue) is a method of the unpublished workspace package @legion/envoy-client, bundled into the plugins; its three callers (dispatch-execute.ts:2216, 3381, 4043) are updated. suppressed_authors keeps its name and type and widens in meaning; its only readers are publishClaimant and publishAuthorRoutes."
+  "fastFollow": "Dead code in the outbox and the report: one considerDocument closure for the two identical loadDocumentSessionAuthors blocks in publishAuthorRoutes (and drop editedDocument's now-redundant type guard), drop loadCommentRecipients' second uuid parse and its 'not-a-uuid' test input, move deliveryaudit's test-only Bind/Statements into the test file, and replace classes.ts's ClassRule/CLASS_RULES/ReportOptions seam with one first-match chain, deleting the four refusals production cannot reach, their tests and README:254.",
+  "contractCensus": "Not required: unchanged from round 1 (getComments in the unpublished workspace package @legion/envoy-client, all callers updated; suppressed_authors keeps its name and type)."
 }
