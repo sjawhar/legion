@@ -14,6 +14,7 @@ import {
   type AskRead,
   type AskThread,
   type BlockTypeSchema,
+  type ChangedReference,
   type Comment,
   CommentEventPayloadSchema,
   type CreateCommentInput,
@@ -35,6 +36,7 @@ import {
   type MyAnswersResponse,
   type MyRepliesResponse,
   serviceSubjectLabel,
+  type UserStateUpdatedEventPayload,
   type UserThreadStateUpdatedEventPayload,
 } from "./dispatch-api";
 
@@ -364,6 +366,40 @@ test("models the Replies page and the read mark's event", () => {
     page.rows.map((row) => `${row.kind}:${row.reply.kind}`),
     event.payload.thread_id,
   ]).toEqual([["comment:reply", "ask:answer", "comment:reply"], "comment-1"]);
+});
+
+test("models a snooze's state event and a document named in references_changed", () => {
+  const snoozed = {
+    login: "alice",
+    state: { pinned: false, last_read_seq: 0, dismissed: [], seq: 0 },
+    changed: ["snoozed"],
+    ask_id: "ask-1",
+  } satisfies UserStateUpdatedEventPayload;
+  const event = {
+    id: 2,
+    issue_key: null,
+    project: "CORE",
+    seq: 4,
+    actor: { kind: "user", id: "alice" },
+    notify: false,
+    created_at: "2026-10-12T00:03:00Z",
+    type: "user_state.updated",
+    payload: snoozed,
+  } satisfies DispatchEvent;
+  const references_changed = [
+    { kind: "issue", id: "CORE-1" },
+    { kind: "artifact", id: "a4cf7999-cab2-4326-939d-cb1e76733cc3", ref: "dispatch://CORE/artifact/runbook" },
+  ] satisfies ChangedReference[];
+
+  expect(DispatchEventSchema.safeParse(event)).toMatchObject({ success: true });
+  // A reader that declares no references_changed still reads the comment around a document entry.
+  expect(
+    CommentEventPayloadSchema.parse({ id: "comment-1", references_changed })
+  ).toMatchObject({ id: "comment-1" });
+  expect([event.payload.changed, references_changed[1]?.ref]).toEqual([
+    ["snoozed"],
+    "dispatch://CORE/artifact/runbook",
+  ]);
 });
 
 test("preserves block-pinned and legacy anchors in ask event payloads", () => {

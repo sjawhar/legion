@@ -392,3 +392,70 @@ func TestGraphReadsSkipANodeKindThisBuildCannotAddress(t *testing.T) {
 		t.Errorf("issue backlink counts excluding mentions = %v; want none", excluded)
 	}
 }
+
+// A cited document or file is named as its Referenced by panel is opened - its uuid and its
+// dispatch:// address, an issue's primary document as its spec - beside the issues and asks; a
+// citation that resolves to nothing is not named. Documents count toward the same cap: past
+// CountedChangeLimit named targets of any kind the event names none and says it was truncated.
+func TestCountedChangesNamesCitedDocumentsWithinTheCap(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "CORE")
+	createReferenceIssue(t, tx, "CORE-1", "CORE")
+	runbookID, runbookKey := createReferenceArtifact(t, tx, "", "CORE", "runbook")
+	specID, specKey := createReferenceArtifact(t, tx, "CORE-1", "CORE", "spec")
+	var shotID, shotKey string
+	if err := tx.QueryRow(ctx, `
+		insert into artifacts (session_id, slug, name, kind, created_by)
+		values ('session-1', 'shot-png', 'shot.png', 'image', '{"kind":"session","id":"session-1"}')
+		returning id::text, ref_key
+	`).Scan(&shotID, &shotKey); err != nil {
+		t.Fatalf("create agent artifact: %v", err)
+	}
+
+	changes, err := CountedChanges(ctx, tx, []Target{
+		{Kind: "artifact", ID: runbookKey},
+		{Kind: "issue", ID: "CORE-1"},
+		{Kind: "artifact", ID: specKey},
+		{Kind: "artifact", ID: "CORE/missing"},
+		{Kind: "artifact", ID: shotKey},
+		{Kind: "artifact", ID: runbookKey},
+	})
+	if err != nil {
+		t.Fatalf("resolve changed targets: %v", err)
+	}
+	want := model.ReferenceChanges{Targets: []model.ChangedReference{
+		{Kind: "artifact", ID: runbookID, Ref: "dispatch://CORE/artifact/runbook"},
+		{Kind: "issue", ID: "CORE-1"},
+		{Kind: "artifact", ID: specID, Ref: "dispatch://CORE-1/spec"},
+		{Kind: "artifact", ID: shotID, Ref: "dispatch://agent/session-1/artifact/shot-png"},
+	}}
+	if !reflect.DeepEqual(changes, want) {
+		t.Fatalf("changed targets = %#v, want %#v", changes, want)
+	}
+
+	documents := make([]Target, 0, CountedChangeLimit+1)
+	for index := range CountedChangeLimit + 1 {
+		_, key := createReferenceArtifact(t, tx, "", "CORE", "doc-"+strconv.Itoa(index))
+		documents = append(documents, Target{Kind: "artifact", ID: key})
+	}
+	atCap, err := CountedChanges(ctx, tx, documents[:CountedChangeLimit])
+	if err != nil {
+		t.Fatalf("resolve documents at the cap: %v", err)
+	}
+	if atCap.Truncated || len(atCap.Targets) != CountedChangeLimit {
+		t.Fatalf("%d documents named %d (truncated=%t), want every one", CountedChangeLimit, len(atCap.Targets), atCap.Truncated)
+	}
+	pastCap, err := CountedChanges(ctx, tx, append(documents[:CountedChangeLimit:CountedChangeLimit], Target{Kind: "issue", ID: "CORE-1"}))
+	if err != nil {
+		t.Fatalf("resolve targets past the cap: %v", err)
+	}
+	if !pastCap.Truncated || pastCap.Targets != nil {
+		t.Fatalf("%d documents and an issue = %#v, want truncated and nothing named", CountedChangeLimit, pastCap)
+	}
+}

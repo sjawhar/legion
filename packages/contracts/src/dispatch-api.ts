@@ -1407,16 +1407,22 @@ export interface Message {
 }
 
 /**
- * A node whose inbound reference edges one write moved, addressed the way the lists carrying
- * its backlink count are keyed: an issue by key, an ask by id together with the issue or
- * document whose ask list holds its row. Only the kinds a reader counts are named; a citation
- * of a comment, message or document changes no counted row and the graph query covers it.
+ * A node whose inbound reference edges one write moved, addressed the way the reads that show
+ * it are keyed: an issue by key, an ask by id together with the issue or document whose ask list
+ * holds its row, and a document or file (`artifact`) by its uuid (`id`, the node id its
+ * `GET /api/v1/references` read reports) and its `ref`, the dispatch:// address its Referenced by
+ * panel is opened on (`dispatch://CORE/artifact/runbook`, `dispatch://CORE-1/spec`,
+ * `dispatch://CORE-1/artifact/notes-md`). An `artifact` entry carries neither `issue_key` nor
+ * `artifact_id`; `ref` is absent for one whose owner names no address. A citation of a comment
+ * or message changes no row read by name and the graph query covers it. An event written before
+ * `artifact` entries existed names none.
  */
 export interface ChangedReference {
-  readonly kind: "issue" | "ask";
+  readonly kind: "issue" | "ask" | "artifact";
   readonly id: string;
   readonly issue_key?: string | null;
   readonly artifact_id?: string | null;
+  readonly ref?: string;
 }
 
 /** `thread_logins` (the message's thread root, up `in_reply_to`) is carried by an issue message's
@@ -1870,12 +1876,19 @@ export interface ArchitectureSyncFailedEventPayload {
 
 export interface UserStateUpdatedEventPayload {
   readonly login: string;
+  /** The viewer's row for one issue as the write left it. A snooze names no issue row it moves:
+   *  there it is the viewer's row for the ask's issue, or the default row for an ask on a
+   *  project document. */
   readonly state: UserIssueState;
-  /** Which of `pinned`, `last_read_seq` and `dismissed` the write moved from the row it read
-   *  (`[]` when it moved none), so another tab refreshes its pinned list for a pin and not for a
-   *  read mark. Absent from an event written before the field existed, which a reader takes as
-   *  "any of them may have moved". */
+  /** Which of `pinned`, `last_read_seq`, `dismissed` and `snoozed` the write moved (`[]` when it
+   *  moved none), so another tab refreshes its pinned list for a pin, its Inbox for a snooze or an
+   *  un-snooze (`PUT`/`DELETE /api/v1/me/asks/{id}/snooze`, which carry `["snoozed"]` and
+   *  `ask_id`), and neither for a read mark. Absent from an event written before the field
+   *  existed, which a reader takes as "any of pinned, last_read_seq and dismissed may have
+   *  moved". */
   readonly changed?: string[];
+  /** The ask a snooze or an un-snooze moved; absent from every other write. */
+  readonly ask_id?: string;
 }
 
 /** `user_agent_state.updated`: one viewer's Clear or read mark on one session's conversation

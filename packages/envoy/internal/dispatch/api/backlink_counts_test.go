@@ -669,3 +669,102 @@ func TestIssueCreateNamesWhatItsSpecCited(t *testing.T) {
 	}
 	requireAskBacklinkCount(t, countsByAskID(decodeBody[[]askBacklinkCount](t, asks)), askID, 1)
 }
+
+// A document's Referenced by panel lists what cites it, so every write that moves one of its
+// edges - a comment, a message, an ask, a document version - names the document, and so does an
+// edit that keeps the edge but moves the excerpt the panel shows. A project document and an
+// issue's documents (its spec among them) are each named by their uuid, the node id the panel's
+// own read reports, and by the reference the panel is opened on.
+func TestReferenceWritesNameTheDocumentsTheyCite(t *testing.T) {
+	handler := newTestHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	source := createReferenceAPIIssue(t, handler, "OPS")
+	runbook := createProjectDocument(t, handler, "CORE", "Runbook", "# Runbook\n")
+	uploaded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+target.Key+"/artifacts", map[string]string{
+		"name": "notes.md", "content": "# Notes\n",
+	}, "alice")
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload issue document: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	notes := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact
+	runbookRef := "dispatch://CORE/artifact/" + runbook.Slug
+	notesRef := "dispatch://" + target.Key + "/artifact/" + notes.Slug
+	specRef := "dispatch://" + target.Key + "/spec"
+	runbookNamed := model.ChangedReference{Kind: "artifact", ID: runbook.ID, Ref: runbookRef}
+	notesNamed := model.ChangedReference{Kind: "artifact", ID: notes.ID, Ref: notesRef}
+	specNamed := model.ChangedReference{Kind: "artifact", ID: target.PrimaryArtifactID, Ref: specRef}
+
+	// Each entry matches the panel it moves: the reference names that panel's read, and the read's
+	// node is the entry's id.
+	for _, named := range []model.ChangedReference{runbookNamed, notesNamed, specNamed} {
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/references?to="+url.QueryEscape(named.Ref), nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("read the panel of %s: status=%d body=%s", named.Ref, response.Code, response.Body.String())
+		}
+		if node := decodeBody[model.GraphReferences](t, response).Node; node.Kind != "artifact" || node.ID != named.ID {
+			t.Fatalf("the panel of %s reads node %#v, want the artifact %s", named.Ref, node, named.ID)
+		}
+	}
+
+	comment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+source.Key+"/comments", map[string]any{
+		"body": "Follow " + runbookRef + " and " + notesRef + ", then " + specRef + ".",
+	}, "alice")
+	if comment.Code != http.StatusCreated {
+		t.Fatalf("create citing comment: status=%d body=%s", comment.Code, comment.Body.String())
+	}
+	commentID := decodeBody[writtenRecord](t, comment).ID
+	requireReferencesChanged(t, handler, source.Key, "comment.created", commentID, []model.ChangedReference{runbookNamed, notesNamed, specNamed})
+
+	message := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+source.Key+"/messages", map[string]any{
+		"actor": sessionActor(),
+		"body":  "The runbook is " + runbookRef + ".",
+	})
+	if message.Code != http.StatusCreated {
+		t.Fatalf("create citing message: status=%d body=%s", message.Code, message.Body.String())
+	}
+	requireReferencesChanged(t, handler, source.Key, "message.created", decodeBody[writtenRecord](t, message).ID, []model.ChangedReference{runbookNamed})
+
+	ask := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+source.Key+"/asks", map[string]any{
+		"question": "Is " + notesRef + " current?",
+	}, "alice")
+	if ask.Code != http.StatusCreated {
+		t.Fatalf("open a citing ask: status=%d body=%s", ask.Code, ask.Body.String())
+	}
+	requireReferencesChanged(t, handler, source.Key, "ask.opened", decodeBody[writtenRecord](t, ask).ID, []model.ChangedReference{notesNamed})
+
+	// The edit keeps all three edges but moves the head of the comment, which is each panel's
+	// excerpt; an edit past the excerpt moves nothing a panel shows.
+	editComment := func(body string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/comments/"+commentID, map[string]any{"body": body}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("edit comment: status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	head := "First follow " + runbookRef + " and " + notesRef + ", then " + specRef + ". " + strings.Repeat("x", 260)
+	editComment(head)
+	requireReferencesChanged(t, handler, source.Key, "comment.edited", commentID, []model.ChangedReference{runbookNamed, notesNamed, specNamed})
+	editComment(head + " More.")
+	requireReferencesChanged(t, handler, source.Key, "comment.edited", commentID, nil)
+
+	// A document version names a document it starts citing, and one whose cited block it moves.
+	document := createProjectDocument(t, handler, "OPS", "Rollout notes", "# Rollout notes\n\nPending.\n\nAn unrelated paragraph.\n")
+	events := "/api/v1/artifacts/" + document.ID + "/events"
+	edit := func(find, with string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+document.ID+"/edits", map[string]any{
+			"ops": []map[string]string{{"op": "replace", "find": find, "with": with}},
+		}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("edit the document: status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	edit("Pending.", "Waiting on "+runbookRef+".")
+	requireArtifactEventNames(t, handler, events, document.ID, []model.ChangedReference{runbookNamed})
+	edit("An unrelated paragraph.", "Another unrelated paragraph.")
+	requireArtifactEventNames(t, handler, events, document.ID, nil)
+	edit("Waiting on", "Still waiting on")
+	requireArtifactEventNames(t, handler, events, document.ID, []model.ChangedReference{runbookNamed})
+}

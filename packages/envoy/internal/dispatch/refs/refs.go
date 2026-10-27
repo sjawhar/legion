@@ -128,8 +128,8 @@ func ReplaceDocumentCounted(
 // replace reconciles the Dispatch references written by one source with body: targets no
 // longer mentioned are deleted, new ones inserted, and an edge that persists keeps its
 // created_at and source_seq. It returns the targets whose inbound edges moved — deleted or
-// inserted, oldest state first — so ReplaceCounted can resolve the ones whose readers carry a
-// batched backlink count.
+// inserted, oldest state first — so ReplaceCounted can resolve the ones a reader refreshes by
+// name (CountedChanges).
 func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string) ([]Target, error) {
 	kinds, ids := targets(body, serverURL)
 	changed, err := scanTargets(tx.Query(ctx, `
@@ -212,12 +212,13 @@ func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int6
 // event says it was truncated and the reader refreshes its lists wholesale instead.
 const CountedChangeLimit = 20
 
-// CountedChanges names the changed targets whose readers carry a batched backlink count — an
-// issue (its detail) and an ask (every list that carries the ask row, plus the human Inbox) —
-// in the shape those readers are keyed by. Other kinds are dropped: nothing counts a comment,
-// a message or a document, and the panels that list their edges refresh on the graph itself.
-// Past CountedChangeLimit it returns truncated, and the reader falls back to refreshing every
-// such list rather than carrying an unbounded array on an event.
+// CountedChanges names the changed targets a reader refreshes by name — an issue (its detail and
+// its count), an ask (every list that carries the ask row, plus the human Inbox) and a document
+// or file (its Referenced by panel) — in the shape those readers are keyed by. Comments, messages
+// and components are dropped: nothing counts them, and their panels refresh on the graph itself.
+// Past CountedChangeLimit named targets, whatever their kinds, it returns truncated, and the
+// reader falls back to refreshing every such list rather than carrying an unbounded array on an
+// event.
 //
 // A reference the grammar accepts need not address anything: `dispatch://CORE-1/ask/hello`
 // parses and is stored, so every lookup here compares text and a target that resolves to no
@@ -225,6 +226,7 @@ const CountedChangeLimit = 20
 func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.ReferenceChanges, error) {
 	issueKeys := []string{}
 	askIDs := []string{}
+	artifactKeys := []string{}
 	ordered := make([]Target, 0, len(changed))
 	seen := make(map[[2]string]struct{}, len(changed))
 	for _, target := range changed {
@@ -239,6 +241,9 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 		case "ask":
 			askIDs = append(askIDs, target.ID)
 			ordered = append(ordered, target)
+		case "artifact":
+			artifactKeys = append(artifactKeys, target.ID)
+			ordered = append(ordered, target)
 		}
 	}
 	issues, err := resolveIssueTargets(ctx, q, issueKeys)
@@ -249,16 +254,25 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
+	artifacts, err := resolveArtifactTargets(ctx, q, artifactKeys)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
 	references := make([]model.ChangedReference, 0, len(ordered))
 	for _, target := range ordered {
-		if target.Kind == "issue" {
+		switch target.Kind {
+		case "issue":
 			if _, found := issues[target.ID]; found {
 				references = append(references, model.ChangedReference{Kind: "issue", ID: target.ID})
 			}
-			continue
-		}
-		if reference, found := asks[target.ID]; found {
-			references = append(references, reference)
+		case "ask":
+			if reference, found := asks[target.ID]; found {
+				references = append(references, reference)
+			}
+		case "artifact":
+			if reference, found := artifacts[target.ID]; found {
+				references = append(references, reference)
+			}
 		}
 	}
 	if len(references) > CountedChangeLimit {
@@ -322,6 +336,40 @@ func resolveAskTargets(ctx context.Context, q Queryer, ids []string) (map[string
 			return nil, fmt.Errorf("scan changed ask reference: %w", err)
 		}
 		found[reference.ID] = reference
+	}
+	return found, rows.Err()
+}
+
+// resolveArtifactTargets resolves cited artifacts by the ref_key `refs` stores for them, the
+// address GET /api/v1/references?to= resolves too, into the entry a Referenced by panel is
+// matched by: the artifact's uuid (its node id in that read) and its dispatch:// address (the
+// reference the dashboard opens the panel on, refs.ArtifactRef). Keyed by ref_key.
+func resolveArtifactTargets(ctx context.Context, q Queryer, refKeys []string) (map[string]model.ChangedReference, error) {
+	found := map[string]model.ChangedReference{}
+	if len(refKeys) == 0 {
+		return found, nil
+	}
+	rows, err := q.Query(ctx, `
+		select id::text, ref_key, issue_key, coalesce(project_key, ''), session_id, slug, kind, is_primary
+		from artifacts
+		where ref_key = any($1)
+	`, refKeys)
+	if err != nil {
+		return nil, fmt.Errorf("resolve changed artifact references: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, refKey, project, slug, kind string
+		var issueKey, session *string
+		var primary bool
+		if err := rows.Scan(&id, &refKey, &issueKey, &project, &session, &slug, &kind, &primary); err != nil {
+			return nil, fmt.Errorf("scan changed artifact reference: %w", err)
+		}
+		found[refKey] = model.ChangedReference{
+			Kind: "artifact",
+			ID:   id,
+			Ref:  ArtifactRef(issueKey, project, session, slug, kind, primary),
+		}
 	}
 	return found, rows.Err()
 }

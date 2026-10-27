@@ -1183,12 +1183,17 @@ func NameReferenceChanges(payload map[string]any, changes ReferenceChanges) {
 
 // ChangedReference is a node whose inbound reference edges one write moved, addressed the way
 // the lists that carry its backlink count are keyed: an issue by key, an ask by id together
-// with the issue or document whose ask list holds its row.
+// with the issue or document whose ask list holds its row. A document or file (kind "artifact")
+// is named by its uuid, the id its Referenced by panel's read reports for the node, and by Ref,
+// its dispatch:// address as refs.ArtifactRef spells it (the reference that panel is opened on);
+// Ref is empty for an artifact whose owner names no address. An artifact entry carries neither
+// IssueKey nor ArtifactID, which address an ask's row list.
 type ChangedReference struct {
 	Kind       string  `json:"kind"`
 	ID         string  `json:"id"`
 	IssueKey   *string `json:"issue_key,omitempty"`
 	ArtifactID *string `json:"artifact_id,omitempty"`
+	Ref        string  `json:"ref,omitempty"`
 }
 
 // CommentEventPayload is the wire payload of comment.* and suggestion.* events:
