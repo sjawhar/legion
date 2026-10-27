@@ -248,17 +248,19 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 			t.Fatalf("summary %q: status=%d body=%s", blank, refused.Code, refused.Body.String())
 		}
 	}
-	// "Approve spec.md (version 9999999999)? ", the prefix at the longest version a request can
-	// reach, leaves 762 of the 800 UTF-16 units for the summary; each "é" is one unit and two bytes,
-	// and the padding around a summary is not part of it.
-	over := strings.Repeat("é", 763)
-	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(refused.Body.String(), "summary is 1 characters over the 762-character limit (763/762)") {
+	// "Approve spec.md (version 9999999999)?", the question at the longest version a request can
+	// reach, and the space after it leave the rest of the ask cap for the summary; each "é" is one
+	// UTF-16 unit and two bytes, and the padding around a summary is not part of it.
+	room := maxAskQuestion16 - len16(docs.ApprovalQuestion("spec.md", maxApprovalVersion, "")) - 1
+	over := strings.Repeat("é", room+1)
+	overCap := "summary is 1 characters over the " + strconv.Itoa(room) + "-character limit (" + strconv.Itoa(room+1) + "/" + strconv.Itoa(room) + ")"
+	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(refused.Body.String(), overCap) {
 		t.Fatalf("summary over the cap: status=%d body=%s", refused.Code, refused.Body.String())
 	}
 	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "draft" {
 		t.Fatalf("approval after refused requests = %#v, want draft with nothing opened", got.Approval)
 	}
-	atCap := strings.Repeat("é", 762)
+	atCap := strings.Repeat("é", room)
 	padded := "  " + atCap + "\n"
 	first := request(issue.PrimaryArtifactID, &padded)
 	if first.Code != http.StatusCreated {
