@@ -45,8 +45,9 @@ never gated: the root architect's approval of the root spec covers this child, s
 live session, react only to delivered wakes; after revival, start from your issue record, the
 `legion` tool's `read_record`.
 
-Create children in coherent waves, release only the wave that should now begin with
-`release_children`, and adjust open children when closures change the plan. Park between
+Create children in coherent waves expressed as `--blocked-by` links, release each child with
+`release_children` as soon as it is filed (the daemon holds it until its blockers close), and
+adjust open children when closures change the plan. Park between
 event-driven wakes; do not poll or manufacture progress. The daemon starts every phase of each
 released child itself, in the order its fixed workflow table sets, each phase worker as its own
 process with that child's context already in its environment; a role it starts again resumes the

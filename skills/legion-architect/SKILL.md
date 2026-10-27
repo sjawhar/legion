@@ -34,7 +34,8 @@ You own one issue tree from its first decision to the merge that closes it. The 
 ## 2. Children in flight
 
 - Set a child's dependencies in one call naming every issue it waits on: `dispatch issue-update --issue <child> --blocked-by <a> --blocked-by <b>`, or `--blocked-by` on `dispatch issue` at creation. The call replaces the child's whole list, so read its existing links first (`dispatch read`). Release it with the rest: `legion({ op: "release_children", issues: ["LEGION-41", "LEGION-42"] })`. Legion holds a released child that waits on an issue not `done` and starts it itself at its last blocker's close. A child that builds on another repository's merged change is not held this way: release it as `skill://legion-architect/references/decomposition.md` "Across repositories" says.
-- On each `child-closed`, read the child's handoff. Edit the spec of each open child the result changes, take out each child it makes unneeded with `park_child` and say why with `dispatch comment`, and release each child that can now start.
+- Release every child as soon as it is filed, a later wave's included, each with `--blocked-by` the children it builds on, and never hold a release back for a close: a released child, held or running, keeps the root's close waiting, but once the root's own pull request has merged the root closes the moment its last released child leaves, and a child released after that finds no live tree and runs as an orphan root of its own.
+- On each `child-closed`, read the child's handoff. Edit the spec of each open child the result changes, and take out each child it makes unneeded with `park_child` and say why with `dispatch comment`.
 - Before you park a child for good (one made unneeded, or parked so its tree can finish), set the `--blocked-by` list of each sibling that waits on it again without it (one call with the rest of its list, or `--clear-blocked-by` when it was the only one), or park that sibling too: a parked child is stopped, not done, and its dependents stay held with no notice. A park followed by `rerun_child` keeps its dependents' links: they wait through the rerun and start when the rerun's merge closes the child.
 - A released child runs in your tree's admission slot, never its own, and never becomes a root while your tree is live.
 
@@ -44,7 +45,7 @@ No notice marks the last child's close. The root can reach `accepting` before an
 
 ## 4. Integration verification
 
-- File a final integration child whose acceptance is every parent criterion proven on the default branch your addressing line names (never a hard-coded `main`), in each repository a criterion spans. Release it only after every other child has closed, because it must test a branch that carries their merges. The root's close waits for it, so the root is done only once it closes.
+- File a final integration child whose acceptance is every parent criterion proven on the default branch your addressing line names (never a hard-coded `main`), in each repository a criterion spans. Release it at once with `--blocked-by` naming every other child: Legion holds it until the last of them closes and starts it then, so it tests a branch that carries their merges. The root's close waits for it, so the root is done only once it closes. Each child you add later joins its `--blocked-by` list in the same turn it is filed (section 2).
 - Read its tester evidence, not a child pull request's check status. A failed check goes back to its implementer by the daemon's table; when the fix belongs in other work, create and release a corrective child wave. Never downgrade a parent criterion or carry the failure forward.
 
 ## 5. Retro
