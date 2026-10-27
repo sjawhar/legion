@@ -167,9 +167,10 @@ jobs:
           # cache main's builds write and writes none: a newer head can cancel it in the middle of an
           # export, and on 2026-10-27 the Actions cache held 10.80 GB of pull-request-scope buildkit
           # entries. Only a build on main writes it (a workflow_dispatch on another branch writes
-          # none).
+          # none), and with ignore-error=true: the cache only saves time, so a failed export never
+          # fails the build that pushed the image a release pins.
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
-          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE) || '' }}
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref={0}:buildcache,mode=max,ignore-error=true', env.IMAGE) || '' }}
           tags: ${{ steps.meta.outputs.tags }}
           # org.opencontainers.image.source is the Dockerfile's LABEL (the in-repo convention).
           labels: |
