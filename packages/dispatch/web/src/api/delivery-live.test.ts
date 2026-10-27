@@ -368,6 +368,54 @@ test("an error frame rejects the query with an ApiError carrying the code", asyn
   }
 });
 
+// While a release rolls out, the socket can reach a process of an older build that refuses a frame
+// this page sends. The page closes that socket and reconnects with the lost socket's backoff, as
+// each reconnect may reach another process, and the new socket subscribes again.
+test("an INVALID_FRAME for a subscription the page holds opens a new socket", async () => {
+  jest.useFakeTimers();
+  const { observer, unsubscribe } = observe();
+  try {
+    const { socket, sub } = await opened();
+    socket.receive(snapshot(sub));
+    await settle();
+
+    socket.receive({
+      type: "error",
+      sub,
+      code: "INVALID_FRAME",
+      message: "type must be subscribe",
+    });
+    expect(socket.closedWith).toBe(4000);
+    expect(live.state().state).toBe("reconnecting");
+    // The page keeps the data it holds while it reconnects.
+    expect(queryClient.getQueryData<DeliveryTimelineResponse>(key)).toEqual(body);
+    expect(sockets.sockets).toHaveLength(1);
+    jest.advanceTimersByTime(1_251);
+    expect(sockets.sockets).toHaveLength(2);
+
+    const again = sockets.latest();
+    again.open();
+    expect(again.subscribed("timeline")).toMatchObject({ sub, resume: { seq: "40" } });
+    // A second refusal waits twice as long: the refusal did not reset the backoff.
+    again.receive({ type: "error", sub, code: "INVALID_FRAME", message: "type must be subscribe" });
+    expect(again.closedWith).toBe(4000);
+    jest.advanceTimersByTime(1_499);
+    expect(sockets.sockets).toHaveLength(2);
+    jest.advanceTimersByTime(1_002);
+    expect(sockets.sockets).toHaveLength(3);
+
+    // The process the third socket reaches serves the subscription.
+    const served = sockets.latest();
+    served.open();
+    served.receive(snapshot(served.subscribed("timeline").sub, "42"));
+    await settle();
+    expect(live.state().state).toBe("open");
+    expect(observer.getCurrentResult().data).toEqual(body);
+  } finally {
+    unsubscribe();
+  }
+});
+
 test("the last observer leaving unsubscribes", async () => {
   const first = observe();
   const second = observe();

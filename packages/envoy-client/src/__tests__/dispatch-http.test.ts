@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { ArchitectureSource, IssueSummary } from "@legion/contracts";
-import { DispatchClient, DispatchGatewayError } from "../dispatch-http";
+import {
+  DispatchClient,
+  DispatchGatewayError,
+  DispatchNoRouteError,
+  NO_ROUTE_ROLLING_RELEASE_MESSAGE,
+} from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
 interface RecordedRequest {
@@ -28,6 +33,14 @@ function fakeFetch(responses: readonly Response[]) {
 
 function requestBody(request: RecordedRequest): unknown {
   return JSON.parse(request.init.body as string);
+}
+
+/** A sleep that returns at once, for a test that does not time the waits. */
+const noWait = async (_ms: number): Promise<void> => {};
+
+/** Four no-route answers, one for each attempt of a request, so its fallback runs next. */
+function noRoutes(answer: Response): Response[] {
+  return Array.from({ length: 4 }, () => answer.clone());
 }
 
 const actor = {
@@ -1038,8 +1051,9 @@ test("syncArchitectureSource refuses a repository with an empty owner or name wi
   expect(requests).toEqual([]);
 });
 
-// A server older than the list route answers it with no route; the client reads the singular
-// route that server does serve, so a rollout that mixes versions still reads the project's model.
+// A server older than the list route answers it with no route at each of the four attempts; the
+// client then reads the singular route that server does serve, so a rollout that mixes versions
+// still reads the project's model.
 describe("listArchitectureSources against a server older than the list route", () => {
   const noRoute = jsonResponse(
     {
@@ -1071,22 +1085,34 @@ describe("listArchitectureSources against a server older than the list route", (
     ],
     ["a row as that one source", jsonResponse(source), [source]],
   ])("reads the singular route's %s", async (_answer, singular, want) => {
-    const { fetchImpl, requests } = fakeFetch([noRoute.clone(), singular]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const { fetchImpl, requests } = fakeFetch([...noRoutes(noRoute), singular]);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      noWait
+    );
 
     expect(await client.listArchitectureSources("CORE")).toEqual(want);
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
-      "/api/v1/projects/CORE/architecture-sources",
+      ...Array.from({ length: 4 }, () => "/api/v1/projects/CORE/architecture-sources"),
       "/api/v1/projects/CORE/architecture-source",
     ]);
   });
 
   test("throws any other answer to the singular read", async () => {
     const { fetchImpl } = fakeFetch([
-      noRoute.clone(),
+      ...noRoutes(noRoute),
       jsonResponse({ code: "NOT_FOUND", error: "not found" }, 404),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      noWait
+    );
 
     await expect(client.listArchitectureSources("CORE")).rejects.toMatchObject({
       code: "NOT_FOUND",
@@ -1110,8 +1136,9 @@ describe("listArchitectureSources against a server older than the list route", (
   });
 });
 
-// A server older than the every-source sync route answers it with no route; the client asks that
-// server's singular sync, so a rollout that mixes versions still syncs the project's one source.
+// A server older than the every-source sync route answers it with no route at each of the four
+// attempts; the client then asks that server's singular sync, so a rollout that mixes versions
+// still syncs the project's one source.
 describe("syncArchitectureSources against a server older than the every-source sync route", () => {
   const noRoute = jsonResponse(
     {
@@ -1135,24 +1162,36 @@ describe("syncArchitectureSources against a server older than the every-source s
   };
 
   test("returns the singular sync's row as that one source", async () => {
-    const { fetchImpl, requests } = fakeFetch([noRoute.clone(), jsonResponse(source)]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const { fetchImpl, requests } = fakeFetch([...noRoutes(noRoute), jsonResponse(source)]);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      noWait
+    );
 
     expect(await client.syncArchitectureSources("CORE")).toEqual([source]);
     expect(
       requests.map((request) => `${request.init.method} ${new URL(request.url).pathname}`)
     ).toEqual([
-      "POST /api/v1/projects/CORE/architecture-sources/sync",
+      ...Array.from({ length: 4 }, () => "POST /api/v1/projects/CORE/architecture-sources/sync"),
       "POST /api/v1/projects/CORE/architecture-source/sync",
     ]);
   });
 
   test("throws the singular sync's 404 SOURCE_NOT_FOUND for a project with no source", async () => {
     const { fetchImpl } = fakeFetch([
-      noRoute.clone(),
+      ...noRoutes(noRoute),
       jsonResponse({ code: "SOURCE_NOT_FOUND", error: "no architecture source configured" }, 404),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      noWait
+    );
 
     await expect(client.syncArchitectureSources("CORE")).rejects.toMatchObject({
       code: "SOURCE_NOT_FOUND",
@@ -1173,5 +1212,104 @@ describe("syncArchitectureSources against a server older than the every-source s
       message: "not found",
     });
     expect(requests).toHaveLength(1);
+  });
+});
+
+// While a release rolls out, an older Dispatch process answers a route only the newer build serves
+// with no route. No handler ran, so the client sends the request again, and the next attempt may
+// reach the newer process.
+describe("a request a Dispatch process answers with no route", () => {
+  const noRoute = (method: string, path: string) =>
+    jsonResponse(
+      {
+        code: "NOT_FOUND",
+        error: `no route for ${method} ${path}`,
+        hint: "GET /api/v1 lists every route",
+      },
+      404
+    );
+  const recordedSleep = () => {
+    const waits: number[] = [];
+    return {
+      sleep: async (ms: number) => {
+        waits.push(ms);
+      },
+      waits,
+    };
+  };
+
+  test("is sent again, and the next answer resolves it", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      noRoute("GET", "/api/v1/projects"),
+      jsonResponse([{ key: "CORE", name: "Core" }]),
+    ]);
+    const wait = recordedSleep();
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      wait.sleep
+    );
+
+    expect(await client.listProjects()).toEqual([{ key: "CORE", name: "Core" }] as never);
+    expect(requests).toHaveLength(2);
+    // One wait of a second, jittered by a quarter either way.
+    expect(wait.waits).toHaveLength(1);
+    expect(wait.waits[0]).toBeGreaterThanOrEqual(750);
+    expect(wait.waits[0]).toBeLessThanOrEqual(1_250);
+  });
+
+  test("throws the message that a release is in progress after four attempts", async () => {
+    const { fetchImpl, requests } = fakeFetch(
+      Array.from({ length: 4 }, () => noRoute("GET", "/api/v1/projects"))
+    );
+    const wait = recordedSleep();
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      wait.sleep
+    );
+
+    const error = await client.listProjects().catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(DispatchNoRouteError);
+    expect(error).toMatchObject({
+      code: "NOT_FOUND",
+      status: 404,
+      message: NO_ROUTE_ROLLING_RELEASE_MESSAGE,
+    });
+    expect(NO_ROUTE_ROLLING_RELEASE_MESSAGE).toBe(
+      "The Dispatch process that answered does not offer this action yet, because a new release " +
+        "of Dispatch is in progress. Try again in one minute."
+    );
+    expect(requests).toHaveLength(4);
+    // Waits of 1 s, 2 s and 4 s, each jittered by a quarter either way.
+    expect(wait.waits).toHaveLength(3);
+    for (const [index, base] of [1_000, 2_000, 4_000].entries()) {
+      expect(wait.waits[index]).toBeGreaterThanOrEqual(base * 0.75);
+      expect(wait.waits[index]).toBeLessThanOrEqual(base * 1.25);
+    }
+  });
+
+  test("sends a POST again with the same body", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      noRoute("POST", "/api/v1/projects"),
+      jsonResponse({ key: "CORE", name: "Core" }, 201),
+    ]);
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      noWait
+    );
+
+    await client.createProject({ key: "CORE", name: "Core" });
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.init.method)).toEqual(["POST", "POST"]);
+    expect(requestBody(requests[1] as RecordedRequest)).toEqual({ key: "CORE", name: "Core" });
+    expect(requests[1]?.init.body).toBe(requests[0]?.init.body);
   });
 });

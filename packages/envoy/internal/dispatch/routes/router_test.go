@@ -1187,6 +1187,37 @@ func TestUnknownReservedPathIsJSONNotFoundWithHint(t *testing.T) {
 	}
 }
 
+// A method a known /api path does not serve gets the same JSON 404 as an unknown path. While a
+// release rolls out, an older process answers a route a newer one added this way, whether the path
+// is new or only the method is, and the page and the CLI detect this answer to retry on another
+// process.
+func TestAMethodAKnownPathDoesNotServeIsJSONNoRoute(t *testing.T) {
+	handler, _ := newTestRouter(t)
+	for _, method := range []string{http.MethodPost, http.MethodPatch, http.MethodDelete} {
+		path := "/api/v1/delivery/runs/7"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(method, path, strings.NewReader(`{}`)))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("%s %s status %d: %s", method, path, response.Code, response.Body.String())
+		}
+		if got := response.Header().Get("Content-Type"); got != "application/json" {
+			t.Fatalf("%s %s content type %q", method, path, got)
+		}
+		var body map[string]string
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s %s body %q: %v", method, path, response.Body.String(), err)
+		}
+		want := map[string]string{
+			"code":  "NOT_FOUND",
+			"error": "no route for " + method + " " + path,
+			"hint":  "GET /api/v1 lists every route",
+		}
+		if !reflect.DeepEqual(body, want) {
+			t.Fatalf("%s %s body = %v, want %v", method, path, body, want)
+		}
+	}
+}
+
 func TestStaticHandlerServesFaviconIcoAsSvg(t *testing.T) {
 	webDist := t.TempDir()
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {

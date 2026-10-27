@@ -325,23 +325,17 @@ func TestClaimRecordsTheRequestsOwnActor(t *testing.T) {
 		t.Fatalf("a human claim must record the human: %+v", held.Claim)
 	}
 
-	// The request has no parameter for claiming on another session's behalf: an invented one
-	// is refused rather than quietly ignored. A bearer still declares its own session in
-	// `actor`, as on every write — `dispatch claim` fills that from the host runtime.
-	onBehalf := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
-		"actor":      claimActorBody("session-one", "Implementer"),
-		"session_id": "session-two",
-	})
-	if onBehalf.Code != http.StatusBadRequest {
-		t.Fatalf("claiming for another session: status=%d body=%s", onBehalf.Code, onBehalf.Body.String())
-	}
-
 	release := dispatchRequest(t, handler, http.MethodDelete, "/api/v1/issues/"+key+"/claim", nil, "alice")
 	if release.Code != http.StatusOK {
 		t.Fatalf("human release: status=%d body=%s", release.Code, release.Body.String())
 	}
+	// The request has no parameter for claiming on another session's behalf: an invented one is
+	// ignored, as every member a route does not declare is, and claims nothing on that session's
+	// behalf. A bearer still declares its own session in `actor`, as on every write — `dispatch
+	// claim` fills that from the host runtime.
 	session := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
-		"actor": claimActorBody("session-one", "Implementer"),
+		"actor":      claimActorBody("session-one", "Implementer"),
+		"session_id": "session-two",
 	})
 	if session.Code != http.StatusOK {
 		t.Fatalf("session claim: status=%d body=%s", session.Code, session.Body.String())

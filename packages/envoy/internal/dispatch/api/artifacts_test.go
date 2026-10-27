@@ -104,6 +104,31 @@ func TestUploadArtifactRejectsPrimaryFlag(t *testing.T) {
 	assertRejected(t, "multipart", multipartResponse.Code, multipartResponse.Body.String(), "multipart-primary.md")
 }
 
+// A JSON upload ignores a member the route does not declare, as a newer build's client may send
+// one while a release rolls out. `primary` above is still declared, so it is still refused.
+func TestUploadArtifactJSONIgnoresAMemberItDoesNotDeclare(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"name": "architect-spec.md", "content": "# Spec\n", "summary": "Initial spec", "template": "rfc",
+	}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("JSON upload with a member the route does not declare: status=%d body=%s", response.Code, response.Body.String())
+	}
+	upload := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+		Version  model.Version  `json:"version"`
+	}](t, response)
+	if upload.Artifact.Kind != "doc" || upload.Version.Number != 1 || upload.Version.Summary == nil || *upload.Version.Summary != "Initial spec" {
+		t.Fatalf("JSON artifact = %#v version=%#v, want document version 1 summarised %q", upload.Artifact, upload.Version, "Initial spec")
+	}
+	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+upload.Artifact.ID+"/text", nil, "alice")
+	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"# Spec\n"`) {
+		t.Fatalf("read JSON artifact text: status=%d body=%s", text.Code, text.Body.String())
+	}
+}
+
 func TestPrimaryRoutesAreGone(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
