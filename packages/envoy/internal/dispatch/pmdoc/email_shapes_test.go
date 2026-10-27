@@ -39,6 +39,8 @@ func TestEmailShapesReadAsTheEngineReadsThemAndSurviveARender(t *testing.T) {
 		"x _a@b.test end\n",
 		"*a@b.test*\n",
 		"x *a@b.test* y\n",
+		"a~b~x@y.co\n",
+		"~~a c~~x@y.co\n",
 		"a\\_b@c.dd\\.@y.zz\n",
 		"- a\\_b@c.dd\\.@y.zz\n",
 		"> a\\_b@c.dd\\.@y.zz\n",
