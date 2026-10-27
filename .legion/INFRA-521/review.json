@@ -2,36 +2,44 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-521",
-  "completed": "2026-10-27T05:46:59Z",
+  "completed": "2026-10-27T06:50:22Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedHead": "357138e78c6017644331c97328e101b2a291c14a (code); handoff head above it carries only .legion/",
+  "reviewedHead": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1 (code); branch head above it carries only .legion/",
   "critical": 0,
-  "important": 1,
+  "important": 2,
   "minor": 2,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/AGENTS.md:1314-1347, packages/dispatch/e2e/margin-thread-reply.e2e.ts:226",
-      "description": "The documented tagging rule (R1-R6, 'When unsure, tag it') does not give the selection the PR made: the table drops every test that cannot run at the iphone project's own viewport (it skips every project but chromium, sets a desktop viewport itself, or is webkit-iphone-only), but R1/R5/R6 say to tag agents.e2e.ts:759/847/953/1001, issue.e2e.ts:697, keyboard-palette.e2e.ts:1030, mention-composer.e2e.ts:443, delivery-live.e2e.ts:454, and margin-thread-reply.e2e.ts:216. The last one lost its iphone skip (whose reason was 'below xl the margin is a sheet, with no rail') and still passes testInfo.project.name to openThread -> setSheet at a 1440 px viewport, so a future author following R1 tags it and it fails under iphone. The closing sentence 'a test that skips iphone has no reason to: drop the skip' also contradicts the 50 surviving `!== \"chromium\"` skips. Acceptance 2 asks for a followable selection: state the precondition before R1-R6 and make the skip sentence give one answer; pass \"chromium\" at margin-thread-reply.e2e.ts:226."
+      "file": "packages/dispatch/AGENTS.md:1361-1362",
+      "description": "The sentence telling authors to keep `!== \"chromium\"` skips gives a false reason. It says such a skip 'says the test is desktop-only by design', but the skips' own reasons are mostly 'the viewport is set here, not by the project' (agents.e2e.ts:762/850/956/1004, which check the phone layout at 390 px in chromium), 'one browser proves …' and 'the recovery does not depend on the layout'. It also says the skip 'keeps it off any other project whose testMatch names its file', but none of the 11 files' skipped tests is selected by another project (webkit-iphone's grep matches no skipped agent-view title; firefox-download-navigation's grep picks only the shell.e2e.ts row that the skip at :117 lets through). What the skip actually does is mark the test for the first exception."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/README.md:177-182, packages/dispatch/e2e/playwright.config.ts:15-18",
+      "description": "Both copies of the selection rule list the tag conditions ('… or say they cover the phone layout') without the exceptions this round added to AGENTS.md, so both now describe agents.e2e.ts:759/847/953/1001 and mention-composer.e2e.ts:443 (titled for the phone, untagged by design) wrongly. The Docs acceptance names README and the config comment. Cut both copies to a pointer to AGENTS.md, so the rule lives in one place."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/e2e/playwright.config.ts:19-21",
-      "description": "The comment says the regex is anchored because the grep text holds 'iphone' and 'phone.e2e.ts'; neither contains '@', so an unanchored /@phone/ would not match them. The anchors stop '@phone' matching inside a longer token ('@phones', 'x@phone'), which is what the negative controls exercised."
+      "file": "packages/dispatch/AGENTS.md:1320-1324,1352",
+      "description": "'desktop width' and 'phone width' are not defined. keyboard-palette.e2e.ts:1039 sets 1024 px, which the app treats as compact (COMPACT_VIEWPORT_QUERY max-width 1279px) and not phone (PHONE_VIEWPORT_QUERY max-width 767px, web/src/features/shell/useDialog.ts:7,9). Name the threshold. 'When unsure, tag it … an extra phone test costs CI minutes' is false for a test under the third exception, which fails when tagged: say the sentence applies once the exceptions are ruled out."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/e2e/agents-search.e2e.ts:70, packages/dispatch/e2e/inbox.e2e.ts:380",
-      "description": "Untagged tests keep `project.name === \"iphone\" ? \"390\" : \"1280\"`; iphone no longer runs them, so the 390 arm is dead, the same kind of dead iphone code the PR removed elsewhere."
+      "file": "packages/dispatch/e2e/margin-thread-reply.e2e.ts:226",
+      "description": "The comment says the margin is 'the desktop rail on any project'. At 1440 px it is the desktop margin; it becomes the rail only after the test clicks Hide margin (:231)."
     }
   ],
   "verified": [
-    "Playwright 1.63.0 project grep runs on _grepTitleWithTags (project, file, describe titles, test title joined by spaces), so the anchored /(^|\\s)@phone(\\s|$)/ matches test- and describe-level tags (thermonuclear-deep-review).",
-    "--list at head: iphone 222 in 53 files, every other project's count unchanged (786, 53, 53, 11, 1, 4) (both thermonuclear reviewers, matching the tester).",
-    "All 75 removed test.skip calls have the single condition testInfo.project.name === \"iphone\" (reviewer's diff extraction).",
-    "Direct-body AST scan of untagged tests plus the deep reviewer's transitive scan (helpers, hooks): no test that iphone ran at base and that takes a phone-only path is untagged; sampled drop rows (agents-search.e2e.ts:61, inbox.e2e.ts:355, inbox.e2e.ts:742, ask-blocks.e2e.ts:110) match their table reasons.",
-    "Both E2E lines present in the PR body; 0 review threads; no contract change at a process or package boundary, so no census is needed."
+    "Round-1 threads PRRT_kwDORFy7ds6wkFAJ, PRRT_kwDORFy7ds6wkFAM and PRRT_kwDORFy7ds6wkFAR are fixed (6d04381c, 2cd0e103, 0fc4e40a) and accepted.",
+    "thermonuclear-deep-review applied the new rule mechanically to all 663 test calls: every tag agrees with the rule, and no tagged test falls under an exception.",
+    "--list at the head: iphone 223 in 53 files, which is exactly the 223 keep rows of iphone-selection-md v2; every other project lists the same tests as at base 1357b95c.",
+    "issue.e2e.ts:697 under iphone: the app picks its layout by width only (no pointer/hover media queries in web/src), so the desktop steps lay out as they do under chromium and the 390 step adds isMobile; the tester ran it green at 2cd0e103, which has the same specs as the head.",
+    "margin-thread-reply.e2e.ts:227 passing \"chromium\" changes nothing under chromium; no stale testInfo remains; the dead width ternaries are gone.",
+    "Specs at 2cd0e103 and 0fc4e40a are identical (only AGENTS.md and .legion/ differ), so the implementer's and the tester's runs at 2cd0e103 stand for this code."
   ],
-  "ci": "Code head 357138e7: required lint/typecheck/test/pr-title re-run from the 05:00Z reopen still queued at 05:46Z; the first run's test failed in daemon Go tests outside this diff and lint read the first description. Not read as green; the request for changes does not wait on it.",
-  "thermo": "thermonuclear-deep-review: approve, two minors (folded into the findings above); thermonuclear-code-quality: changes (finding 1 important, two minors)."
+  "notDemanded": "Quality reviewer's suggestion to replace the third exception by giving mention-composer.e2e.ts:443 its own start width and tagging it: the rule as written gives the correct selection, so this is a coverage choice for the implementer, not a finding.",
+  "ci": "CI head 08660e74 (the code 0fc4e40a plus .legion/ only): the required lint, typecheck, test and pr-title checks were still queued at 06:50Z. A request for changes does not wait on them.",
+  "thermo": "thermonuclear-deep-review: approve, two minors (the PR body count, which the reviewer fixed in the brief, and the comment at margin-thread-reply.e2e.ts:226). thermonuclear-code-quality: changes; its findings 2-4 are the first three above, and its finding 1 is in notDemanded."
 }
