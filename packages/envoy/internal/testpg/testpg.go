@@ -12,6 +12,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -104,7 +105,17 @@ func containerURL(t testing.TB) string {
 			Image:        Image,
 			ExposedPorts: []string{"5432/tcp"},
 			Env:          map[string]string{"POSTGRES_PASSWORD": "test"},
-			WaitingFor:   wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
+			// The data directory's parent on tmpfs leaves no anonymous volume behind (the image
+			// declares one at /var/lib/postgresql, and its PostgreSQL 18 entrypoint refuses a mount at
+			// the old /var/lib/postgresql/data), and with it the server fits in two CPUs and 2 GiB, as
+			// every container the repository's tests start is capped on a shared host; tmpfs counts
+			// against that memory.
+			Tmpfs: map[string]string{"/var/lib/postgresql": "rw"},
+			HostConfigModifier: func(hostConfig *container.HostConfig) {
+				hostConfig.NanoCPUs = 2_000_000_000
+				hostConfig.Memory = 2 << 30
+			},
+			WaitingFor: wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
 		},
 		Started: true,
 	})

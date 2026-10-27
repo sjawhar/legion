@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -81,16 +83,41 @@ type statusRecorder struct {
 	// approved.
 	approvals map[string]dispatch.Approval
 	issues    map[string]dispatch.Issue
+	// readFails names the issues whose detail read fails with the error given, as Dispatch's did
+	// for some children in a deployment; the listing still carries them unless listFails is set.
+	readFails map[string]error
+	listFails error
 	// reads is every issue and document read, in order: `issue:<key>` and `approval:<id>`.
 	reads []string
 }
 
+// ListIssues answers Dispatch's project listing: every issue the fake knows, in key order, as the
+// listing summarizes it.
 func (r *statusRecorder) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
-	return nil, nil
+	r.reads = append(r.reads, "listing")
+	if r.listFails != nil {
+		return nil, r.listFails
+	}
+	keys := make([]string, 0, len(r.issues))
+	for key := range r.issues {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	summaries := make([]dispatch.IssueSummary, 0, len(keys))
+	for _, key := range keys {
+		issue := r.issues[key]
+		summaries = append(summaries, dispatch.IssueSummary{Key: issue.Key, Title: issue.Title, Status: issue.Status, Parent: issue.Parent, Rank: issue.Rank,
+			HandedOver: issue.HandedOver, LastSeq: issue.LastSeq, ResolvedRepo: issue.ResolvedRepo, BlockedBy: issue.BlockedBy,
+			ClaimedBy: issue.Claim.Holder(), ClaimUnread: issue.ClaimUnread})
+	}
+	return summaries, nil
 }
 
 func (r *statusRecorder) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
 	r.reads = append(r.reads, "issue:"+key)
+	if err, fails := r.readFails[key]; fails {
+		return dispatch.Issue{}, err
+	}
 	issue, ok := r.issues[key]
 	if !ok {
 		return dispatch.Issue{}, &dispatch.Error{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "issue not found"}
@@ -98,12 +125,25 @@ func (r *statusRecorder) GetIssue(_ context.Context, key string) (dispatch.Issue
 	return issue, nil
 }
 
-func (r *statusRecorder) SetStatus(_ context.Context, issue, status string) error {
+// SetStatus answers as Dispatch's PATCH does: the issue as the write left it, its sequence moved on
+// by the one event every status write makes, the issue's own status included. The fake keeps the
+// written issue, so a later read sees the write.
+func (r *statusRecorder) SetStatus(_ context.Context, issue, status string) (dispatch.Issue, error) {
 	if r.err != nil {
-		return r.err
+		return dispatch.Issue{}, r.err
 	}
 	r.writes = append(r.writes, statusWrite{issue: issue, status: status})
-	return nil
+	written, ok := r.issues[issue]
+	if !ok {
+		written = dispatch.Issue{Key: issue}
+	}
+	written.Status = status
+	written.LastSeq++
+	if r.issues == nil {
+		r.issues = map[string]dispatch.Issue{}
+	}
+	r.issues[issue] = written
+	return written, nil
 }
 
 func (r *statusRecorder) HandOver(context.Context, dispatch.Issue, string) error {
@@ -112,6 +152,9 @@ func (r *statusRecorder) HandOver(context.Context, dispatch.Issue, string) error
 
 func (r *statusRecorder) PostMessage(context.Context, string, string) error { return nil }
 func (r *statusRecorder) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (r *statusRecorder) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 

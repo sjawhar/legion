@@ -16,7 +16,9 @@ set -euo pipefail
 
 container="dispatch-pg"
 image="mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11"
-run_flags=(-d --name "$container" -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432)
+# Two CPUs and 2 GiB, as every container on a shared devbox carries limits; a dev database's
+# working set fits, and its data stays on the volume, outside that memory.
+run_flags=(-d --name "$container" --cpus 2 --memory 2g -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432)
 database_url="postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable"
 
 refuse() {

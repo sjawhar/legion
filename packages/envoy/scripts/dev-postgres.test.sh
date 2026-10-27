@@ -85,7 +85,7 @@ read_only() {
 }
 
 run_case FAKE_CONTAINER=absent
-if [ "$status" -ne 0 ] || [ "$(cat "$out")" != "$url" ] || ! grep -qxF "run -d --name dispatch-pg -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 $pinned" "$calls"; then
+if [ "$status" -ne 0 ] || [ "$(cat "$out")" != "$url" ] || ! grep -qxF "run -d --name dispatch-pg --cpus 2 --memory 2g -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 $pinned" "$calls"; then
   fail "no dispatch-pg: created from the pinned image"
 else
   printf 'PASS: no dispatch-pg: created from the pinned image, URL printed\n'
@@ -116,7 +116,7 @@ readonly sequence=(
   "docker exec dispatch-pg pg_dumpall -U postgres --clean --if-exists > '$dump'"
   "docker stop dispatch-pg"
   "docker rename dispatch-pg $backup"
-  "docker run -d --name dispatch-pg -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 $pinned"
+  "docker run -d --name dispatch-pg --cpus 2 --memory 2g -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 $pinned"
   "docker exec dispatch-pg pg_isready -h 127.0.0.1 -U postgres"
   "docker exec -i dispatch-pg psql -h 127.0.0.1 -U postgres -q -f - < '$dump'"
   "docker exec dispatch-pg psql -U postgres -Atc 'select 1 from pg_available_extensions where name = '\''vector'\'''"
@@ -183,7 +183,7 @@ replayed_dump="$(replay "$printed_dump" </dev/null)"
 replayed_run="$(replay "$printed_run" </dev/null)"
 replayed_restore="$(replay "$printed_restore" </dev/null)"
 want_dump="$(printf '%s\n' exec dispatch-pg pg_dumpall -U postgres --clean --if-exists)"
-want_run="$(printf '%s\n' run -d --name dispatch-pg -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 "$pinned")"
+want_run="$(printf '%s\n' run -d --name dispatch-pg --cpus 2 --memory 2g -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 "$pinned")"
 want_restore="$(printf '%s\n' exec -i dispatch-pg psql -h 127.0.0.1 -U postgres -q -f - "$want_dump")"
 if [ -z "$printed_dump" ] || [ -z "$printed_run" ] || [ -z "$printed_restore" ] || [ -n "$replayed_dump" ] \
   || [ "$(cat "$dump" 2>/dev/null)" != "$want_dump" ] || [ "$replayed_run" != "$want_run" ] \

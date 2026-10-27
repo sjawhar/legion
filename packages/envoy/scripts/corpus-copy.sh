@@ -2,7 +2,7 @@
 # Restores the newest nightly Dispatch dump into a local Postgres container and prints its
 # DATABASE_URL, so a search change can be measured on the real corpus (cmd/dispatch/README.md,
 # "Search"). The dump is production data: it stays on this machine, the downloaded file is deleted
-# once it is restored, and the container is the copy (`docker rm -f <container>` deletes it).
+# once it is restored, and the container is the copy (`docker rm -f -v <container>` deletes it with its data volume).
 # Re-running while the container holds the database skips the download and the restore.
 set -euo pipefail
 
@@ -29,7 +29,7 @@ readonly database_url="postgres://postgres:dispatch@127.0.0.1:${port}/${database
 
 if [[ "$(docker container inspect --format '{{.State.Running}}' "$container" 2>/dev/null)" == true ]] &&
   [[ "$(psql --quiet --tuples-only --no-align "$admin_url" -c "select 1 from pg_database where datname = '${database}'" 2>/dev/null)" == 1 ]]; then
-  printf '%s already holds %s; remove it with docker rm -f %s to restore a newer dump\n' "$container" "$database" "$container" >&2
+  printf '%s already holds %s; remove it with docker rm -f -v %s to restore a newer dump\n' "$container" "$database" "$container" >&2
   printf 'DATABASE_URL=%s\n' "$database_url"
   exit 0
 fi
@@ -48,7 +48,9 @@ printf 'fetching %s\n' "$newest" >&2
 aws s3 cp --only-show-errors "s3://${bucket}/dispatch/${newest}" "$dump"
 
 if ! docker container inspect "$container" >/dev/null 2>&1; then
-  docker run -d --name "$container" -e POSTGRES_PASSWORD=dispatch -p "127.0.0.1:${port}:5432" mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 >/dev/null
+  # Two CPUs and 2 GiB, as every container on a shared devbox carries limits; the corpus lives on
+  # the container's volume, outside that memory.
+  docker run -d --name "$container" --cpus 2 --memory 2g -e POSTGRES_PASSWORD=dispatch -p "127.0.0.1:${port}:5432" mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 >/dev/null
 else
   docker start "$container" >/dev/null
 fi
