@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-629",
+  "completed": "2026-10-27T16:34:00Z",
+  "pr": "https://github.com/sjawhar/legion/pull/2419",
+  "proof": [
+    {
+      "criterion": "2. The release scripts' own shell tests prove the fold: given fragments, the released package's CHANGELOG.md gains them under the version heading, every old line stays in order, the fragments are gone, and push-fold's checks accept exactly that commit and refuse anything else",
+      "surface": "release-push.sh fold-plan, fold-notes (changie v1.26.0) and push-fold on a real clone of sjawhar/legion with its real tags, landing on a local bare origin through the deploy-key insteadOf path, with a stub gh",
+      "command": "PATH=$TMPDIR/infra629/bin:$PATH bash $TMPDIR/infra629/proof.sh f0673226e1889a4c0d4aa5e88e959ad7e02e9a62 (log: https://github.com/sjawhar/legion/pull/2419#issuecomment-6447603300); bash .github/scripts/release-push.test.sh; PATH=<changie v1.26.0>:$PATH bash .github/scripts/changelog-fold.test.sh",
+      "observed": "Origin's main got one commit by github-actions[bot], 'chore: fold changelog fragments [skip ci]': pi-legion/CHANGELOG.md gained '## [99.0.0] - 2026-10-27' (### Added then ### Fixed, a multi-line body's continuation lines and second paragraph indented two spaces) directly above '## Before changelog fragments'; contracts/CHANGELOG.md gained '## [main@<12 hex>] - 2026-10-27'; the three fragments were deleted and nothing else changed; no gh call. A second fold built on the same base after the first landed pushed nothing, printed '::notice title=Nothing pushed::main moved ...' and called 'gh workflow run changelog-fold.yaml --ref main --repo sjawhar/legion'. release-push.test.sh 393 passed, 0 failed; changelog-fold.test.sh 12 passed, 0 failed.",
+      "headSha": "f0673226e1889a4c0d4aa5e88e959ad7e02e9a62",
+      "negativeControl": "Notes with '## [1.0.0] - 2000-01-01' appended to pi-legion_99.0.0.md: push-fold exit 1, '::error::release-push.sh push-fold: ... holds a line starting '## '; the heading is push-fold's to write', origin's main unchanged, working tree clean. A throwaway copy of release-push.sh whose insert_block appends at the end: changelog-fold.test.sh 11 passed, 1 failed (the placement check)."
+    },
+    {
+      "criterion": "3. bash .github/scripts/check-release-credentials.sh and the lint, typecheck and test jobs pass",
+      "surface": "the repository's release credential check and its tests, plugin-name, action-pin, image-trigger and private-name checks, biome",
+      "command": "uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-release-credentials.sh; ... check-release-credentials.test.sh; bash .github/scripts/check-plugin-names.sh; bash .github/scripts/check-plugin-names.test.sh; uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-action-pins.sh; ... check-image-trigger-paths.sh; bash .github/scripts/check-private-names.sh; bunx biome check .",
+      "observed": "check-release-credentials: '9 credentialed job(s) and 9 build job(s) across 4 release and changelog-fold workflows keep credentials out of jobs that run dependency code'; its tests 237 passed, 0 failed; check-plugin-names pass, its tests 54 passed; action pins pass (17 files); image triggers pass; private names pass; biome exit 0 (only pre-existing infos in untouched files). The PR's GitHub jobs are read by the tester and reviewer, not waited on here.",
+      "headSha": "966fc545a6cc288ab6d541ae88a9d782272c9a5a",
+      "negativeControl": "A scratch copy of .github where fold_publish runs 'changie --version': check-release-credentials.sh exit 1, '::error::.github/workflows/changelog-fold.yaml:149: job 'fold_publish' holds a credential, but step 'Check changie' runs 'changie'; dependency code runs only in a job that holds none'."
+    }
+  ],
+  "filesChanged": [
+    ".github/actions/install-changie/action.yml (new)",
+    "packages/{claude-envoy,contracts,envoy,envoy-client,envoy-plugin,pi-envoy,pi-legion}/.changie.yaml (new, identical)",
+    ".github/scripts/release-push.sh (fold-plan, fold-notes, push-fold, land_on_main, check_hand_over shared with handed)",
+    ".github/scripts/release-push.test.sh (55 new cases)",
+    ".github/scripts/changelog-fold.test.sh (new)",
+    ".github/workflows/changelog-fold.yaml (new)",
+    ".github/workflows/pr-and-main.yaml (test job: install-changie, changelog-fold.test.sh)",
+    ".github/scripts/check-release-credentials.sh and .test.sh",
+    ".github/scripts/check-plugin-names.sh and .test.sh",
+    "the seven packages' CHANGELOG.md (one heading line each)",
+    ".changelog/516.md (deleted)",
+    "AGENTS.md (new Conventions bullet; release-credentials bullet names changelog-fold.yaml and push-fold)",
+    "packages/{envoy,contracts,envoy-client,claude-envoy,pi-envoy}/README.md",
+    "packages/envoy/infra/docs/nats-hub.md (the guard shipped in legion-envoy-v13.11.1, commit 87c0da166de5)",
+    "three docs/solutions/legion notes",
+    ".dispatch/architecture/release-engineering.md"
+  ],
+  "trickyParts": [
+    "changie strips a YAML block body's indentation, so changeFormat indents continuation lines itself: '- {{ regexReplaceAll \"\\n(.)\" .Body \"\\n  ${1}\" }}' (blank lines stay empty); authors write body: as plain markdown, a |- block for several lines.",
+    "changie's error for an unknown kind does not name the file, so fold-notes renders each fragment of a failed group alone and names the ones changie refuses.",
+    "The pod's environment sets GIT_AUTHOR_*/GIT_COMMITTER_*, which outrank git -c user.*: push-fold sets the four variables to github-actions[bot] for its commit; tag reads the same bot_name/bot_email constants, behaviour unchanged.",
+    "push-fold's clean-tree check ignores untracked files (the workflow downloads the notes outside the checkout anyway)."
+  ],
+  "deviations": [
+    "Shared push shape with INFRA-630 (agreed with its implementer over Envoy, 2026-10-27 15:40Z): land_on_main <base-sha> <workflow-file> pushes HEAD (one commit whose parent is the base) only while main's fetched tip is the base; when main moved it pushes nothing, runs 'gh workflow run <workflow-file> --ref main', and exits 0. No rebase. So push-fold builds the fold commit itself from a clean checkout of the base and lands it; there is no separate 'fold' subcommand, and the plan's refusals of a doctored commit (second commit, merge commit, paths outside the plan, a fragment edited on main since the base, a rebase conflict) have no input to act on. push-fold refuses HEAD != base, a dirty tree, and notes that are missing, extra, a symlink, empty, NUL-holding, carrying a '## ' line, or for a heading the CHANGELOG.md already has. fold_publish therefore has actions: write and GH_TOKEN in its push step.",
+    "check-release-credentials rule 7 (pin the workflow-level concurrency group) was dropped: with land_on_main two runs cannot both land a fold, so the group only saves wasted runs. The group is changelog-fold-${{ github.ref }}.",
+    "changelog-fold.yaml gained a pull_request trigger (paths: the workflow, release-push.sh, install-changie, packages/*/.changie.yaml; not .changes/**) so fold_build runs on GitHub before the merge on the PR's merge commit; fold_publish runs on main only.",
+    "Each package's fragments for one release share one notes file per (package, label); fold-plan prints tab-separated lines <package-dir> <label> <date> <path>; specs are <package-dir>[=<tag-prefix>] arguments.",
+    "Simplify pass: 5 applied, 1 skipped (git --sort=v:refname for the lowest release tag would order a tag prefix ending in digits differently from sort -V)."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "The fold_publish half (the deploy-key push to GitHub and gh workflow run) first executes on main after the merge; its script path is covered by release-push.test.sh and the real-clone proof with a local bare origin and a stub gh. The same deploy_key_env mechanism already pushes push-main's bump commits on main.",
+    "Open pull requests that touch the same scripts: #2358 (INFRA-576) and #2316 (INFRA-520) edit release-push.test.sh and check-release-credentials.sh/.test.sh; INFRA-630 adds land_on_main's twin (whichever merges second takes the other's from main).",
+    "Remaining 'Unreleased' hits outside CHANGELOG.md and docs/plans: AGENTS.md's new bullet (names the old heading on purpose), docs/solutions unchanged-diff-fingerprint:105, LEGION-247 forward-merge note :43 and a-name-a-package-stops-shipping :58 (dated records), packages/dispatch/e2e/agent-view.e2e.ts:78 (a chat fixture), daemon Go test names about unreleased child issues."
+  ]
+}
