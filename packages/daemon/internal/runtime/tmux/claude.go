@@ -117,13 +117,22 @@ func claudeInnerCommand(legion string, launch ClaudeLaunch, mcpConfig, session s
 // claudeEnvironment are the -e pairs a Claude Code pane carries beside every pane's: its claim's own
 // configuration directory, and Claude Code's background tasks and scheduled prompts off, since the
 // bridge reports a turn's end when its last user message's result arrives and nothing may run after
-// it unseen.
+// it unseen. The names are runtime.ClaudeConfigDirVariable and runtime.ClaudeDisabledFeatures, which
+// an operator's pane variable may not name (runtime.PaneVariableRefusal): these pairs come after
+// the operator's and would override them without a word.
 func claudeEnvironment(configDir string) []string {
-	return []string{
-		"-e", "CLAUDE_CONFIG_DIR=" + configDir,
-		"-e", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1",
-		"-e", "CLAUDE_CODE_DISABLE_CRON=1",
+	pairs := []string{"-e", runtime.ClaudeConfigDirVariable + "=" + configDir}
+	for _, feature := range runtime.ClaudeDisabledFeatures {
+		pairs = append(pairs, "-e", feature+"=1")
 	}
+	return pairs
+}
+
+// SessionsDir is the claim's own Claude Code projects directory, under which Claude Code keeps each
+// transcript as `<folder named for the working directory>/<session id>.jsonl`: the directory a
+// resumed transcript must be under (claudeResumeSession).
+func (claudeLauncher) SessionsDir(spec runtime.SpawnSpec, host Host, _ map[string]string, _ string) (string, error) {
+	return filepath.Join(ClaudeConfigDir(host.StateDir, spec.Claim), "projects"), nil
 }
 
 // Launch is the inner command and the extra -e pairs of a Claude Code launch: the claim's

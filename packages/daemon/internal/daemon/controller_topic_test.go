@@ -85,6 +85,7 @@ func TestAHeldNoticeReachesTheControllerTopicAndItsRetriesNeverResendTheArchitec
 	}); err != nil {
 		t.Fatalf("record the running tree: %v", err)
 	}
+	hostWorkspace(t, cfg.StateDir, "acme/widgets", issue)
 	st, err := store.Open(context.Background(), cfg.PostgresDSN)
 	if err != nil {
 		t.Fatalf("open the daemon's store: %v", err)

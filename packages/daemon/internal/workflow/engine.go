@@ -109,6 +109,10 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.dispatchArtifact(ctx, tx, fact)
 	case intake.GateAboveDispatch:
 		return e.gateAboveDispatch(ctx, tx, fact)
+	case intake.GateRequestFound:
+		return e.gateRequestFound(ctx, tx, fact)
+	case intake.CatchUpApplied:
+		return e.catchUpApplied(ctx, tx, fact)
 	case intake.DispatchAskOpened:
 		return e.dispatchAskOpened(ctx, tx, fact)
 	case intake.DispatchAskClosed:
@@ -207,7 +211,10 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	// An event carries the whole issue, so it writes a status only when its status differs from the
 	// one Dispatch showed at the event before it. One that does not is an edit — a rank, title or
 	// label change — made while a status the daemon queued has not reached Dispatch, whoever made it.
-	if fact.Status == issue.DispatchStatus {
+	// A route's own write (intake.DispatchIssue.StatusMove) is a status Dispatch confirmed the daemon
+	// wrote, applied ahead of events the consumer has not delivered, so it is a move whatever the
+	// record last saw Dispatch show.
+	if fact.Status == issue.DispatchStatus && !fact.StatusMove {
 		return intake.Result{}, e.keepStatus(ctx, tx, *issue, fact)
 	}
 	if reasserted, err := e.sessionStatusWrite(ctx, tx, *issue, fact); err != nil || reasserted {
@@ -759,6 +766,11 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 // signOff is the architect's acceptance of a reviewed head: it moves the issue from accepting to
 // retro and starts the implementer there, told the review's handoff and the pull request as the
 // approval told it before acceptance existed. Outside accepting it changes nothing and says so.
+// Nothing beneath the issue holds it: the acceptance is of the issue's own reviewed head, and the
+// tree's order is kept at the close instead, where a root whose pull request merged while any
+// other issue of its tree is still in the workflow waits in awaiting_merge until the last of them
+// is done or parked (closeMerged). Holding the acceptance as well kept an approved pull request out
+// of retro, READY and the merge queue for as long as any issue beneath it ran.
 func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
@@ -766,13 +778,6 @@ func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (i
 	}
 	if issue.Phase != phase.Accepting {
 		return refused("SIGNOFF_OUTSIDE_ACCEPTING", fmt.Sprintf("%s is in phase %s, not accepting; this sign-off changed nothing", issue.Key, issue.Phase)), nil
-	}
-	running, err := e.openBeneath(ctx, tx, *issue)
-	if err != nil {
-		return intake.Result{}, err
-	}
-	if len(running) > 0 {
-		return refused("SIGNOFF_CHILD_IN_WORKFLOW", fmt.Sprintf("%s still has %s beneath it in the workflow; this sign-off changed nothing. Accept %s once the last of them closes, or take one out of the workflow with park_child", issue.Key, strings.Join(running, ", "), issue.Key)), nil
 	}
 	review, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
@@ -1148,57 +1153,6 @@ func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) 
 		}
 	}
 	return members, nil
-}
-
-// openBeneath is the sorted keys of the issues under issue — its children, their children, and so
-// on — that are still in the workflow (InWorkflow). It reads the tree's members once and walks
-// down the recorded parent column from issue, which is the right candidate set because every issue
-// of a tree keeps the root's key in its tree field and its own parent's key in parent. The walk
-// must be downward and never over the flat tree: every member names the root in its tree field, so
-// an issue held for any member of its tree would wait for the root, which is waiting for it. Its
-// three termination rules are the ones the daemon's upward walk already carries (api/architect.go,
-// owns): a visited set, since parent is plain nullable text with no foreign key, rewritten from
-// every Dispatch observation, so a cycle is possible and would otherwise spin inside the fact's
-// transaction; only issues the tree lists are followed, so a parent recorded in another tree is
-// never reached; and an issue whose parent is empty, or names a key the tree does not hold, is
-// beneath nothing.
-func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue) ([]string, error) {
-	members, err := e.treeMembers(ctx, tx, issue)
-	if err != nil {
-		return nil, err
-	}
-	return openBeneathIn(members, issue.Key), nil
-}
-
-// openBeneathIn is openBeneath's walk over members, the issues of key's tree as already read.
-func openBeneathIn(members []record.Issue, key string) []string {
-	// The index holds each child's place in members rather than its record: an Issue is a wide
-	// struct, and the walk reads only its key and whether it is in the workflow.
-	children := map[string][]int{}
-	for index, member := range members {
-		if member.Parent != nil && *member.Parent != "" {
-			children[*member.Parent] = append(children[*member.Parent], index)
-		}
-	}
-	running := []string{}
-	seen := map[string]bool{key: true}
-	for frontier := []string{key}; len(frontier) > 0; {
-		current := frontier[len(frontier)-1]
-		frontier = frontier[:len(frontier)-1]
-		for _, index := range children[current] {
-			child := members[index]
-			if seen[child.Key] {
-				continue
-			}
-			seen[child.Key] = true
-			frontier = append(frontier, child.Key)
-			if InWorkflow(child) {
-				running = append(running, child.Key)
-			}
-		}
-	}
-	slices.Sort(running)
-	return running
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {
