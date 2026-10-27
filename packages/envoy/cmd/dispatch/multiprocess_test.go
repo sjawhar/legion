@@ -1153,9 +1153,9 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Three of the six leases are observable inside a window a test can wait out:
-// reference-excerpts and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other three
+// Two of the six leases are observable here inside a window a test can wait out:
+// reference-excerpts and webhook-redelivery, whose first pass is immediate (suggestion-outcomes,
+// a woken loop whose first pass is immediate too, has a row of its own below). The other three
 // are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
 // architecture-import's and delivery-reconcile's first pass is jittered uniformly over
 // SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether their passes
@@ -1164,8 +1164,8 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
 	// refs is where the reference-excerpt reconciliation's first statement writes
-	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does.
-	gate := lockTables(t, pair.database, "refs", "write_suggestions")
+	// (refs.MarkStaleExcerpts).
+	gate := lockTables(t, pair.database, "refs")
 	pair.start(t, githubAppEnv(t, fake.URL()))
 
 	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 60*time.Second); waiting < 1 {
@@ -1184,16 +1184,11 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	waitForLease(t, pair, leaseRan, "webhook-redelivery", 60*time.Second)
 	requireLeasedOnce(t, pair, "webhook-redelivery")
 
-	// The suggestion-outcome sweep's first tick is a minute after each process started, so this
-	// waits that out; its pass then waits on write_suggestions as the first one waits on refs.
-	waitForLease(t, pair, leaseSkipped, "suggestion-outcomes", 3*time.Minute)
 	if err := gate.Rollback(context.Background()); err != nil {
-		t.Fatalf("release the tables the passes are waiting on: %v", err)
+		t.Fatalf("release the table the passes are waiting on: %v", err)
 	}
 	waitForLease(t, pair, leaseRan, "reference-excerpts", 60*time.Second)
-	waitForLease(t, pair, leaseRan, "suggestion-outcomes", 60*time.Second)
 	requireLeasedOnce(t, pair, "reference-excerpts")
-	requireLeasedOnce(t, pair, "suggestion-outcomes")
 	for _, unobserved := range []struct{ lease, why string }{
 		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
@@ -1205,6 +1200,40 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 			continue
 		}
 		t.Logf("%s was not observed: %s", unobserved.lease, unobserved.why)
+	}
+}
+
+// The suggestion-outcome sweep is a woken loop (api.RunSuggestionOutcomeSweep): each process runs
+// a pass at start under the suggestion-outcomes lease, and the two start together, so their boot
+// passes meet. The one holding the lease waits inside its first statement - the read of the cursor
+// row it holds for update, behind a lock this test takes - and the other finds the lease held and
+// runs nothing beside it. Once the lock lets go, the other keeps retrying (every minute, its
+// HeldRetry) until it runs a pass of its own: the first process's pass may have read before
+// whatever woke the second, so a woken loop never gives its pass up to another process's.
+func TestTheSuggestionOutcomeSweepNeverPassesAtOnceAcrossBothProcessesAndBothPass(t *testing.T) {
+	pair := newPair(t)
+	gate := lockTables(t, pair.database, "suggestion_outcome_cursor")
+	pair.start(t, nil)
+
+	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 60*time.Second); waiting < 1 {
+		t.Fatalf("no suggestion-outcome pass reached the cursor lock, so neither process took the lease:\nA:\n%s\nB:\n%s",
+			pair.a.Output.String(), pair.b.Output.String())
+	}
+	waitForLease(t, pair, leaseSkipped, "suggestion-outcomes", 60*time.Second)
+	if ran := countLease(pair.a, leaseRan, "suggestion-outcomes") + countLease(pair.b, leaseRan, "suggestion-outcomes"); ran != 0 {
+		t.Errorf("a suggestion-outcome pass reported running %d times while the one holding the lease is still inside the cursor lock", ran)
+	}
+	if err := gate.Rollback(context.Background()); err != nil {
+		t.Fatalf("release the cursor the pass is waiting on: %v", err)
+	}
+	// The second process's next retry is up to a minute and a tenth after its last skip.
+	deadline := time.Now().Add(3 * time.Minute)
+	for countLease(pair.a, leaseRan, "suggestion-outcomes") == 0 || countLease(pair.b, leaseRan, "suggestion-outcomes") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("both processes did not each run a suggestion-outcome pass of their own within 3m:\nA:\n%s\nB:\n%s",
+				pair.a.Output.String(), pair.b.Output.String())
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

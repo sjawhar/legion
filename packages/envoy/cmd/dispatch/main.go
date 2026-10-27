@@ -398,8 +398,9 @@ func main() {
 	// Postgres, and the room this process holds for it closes within that round trip, so its
 	// browsers reconnect and re-sync instead of reading text the store no longer holds.
 	go documentService.RunStaleRoomEviction(ctx)
-	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
-	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
+	// LEGION-550: resolves write_suggestions outcomes off the write path, from the events written
+	// since its last pass.
+	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, leases, nil)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again, at start and on an interval, so their progress shows without anyone

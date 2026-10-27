@@ -13,9 +13,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// sweepLeaseTick is the interval both runners tick on: short, so each reaches its first pass at
-// once, and the test is about which of the two runs it rather than about waiting.
-const sweepLeaseTick = 20 * time.Millisecond
+// sweepLeaseSchedule is the pace both runners keep: a short gap, so a held lease is retried at
+// once and the test is about which runner passes when rather than about waiting.
+var sweepLeaseSchedule = suggestionSchedule{minGap: 50 * time.Millisecond, page: suggestionOutcomePage}
 
 // sweepLeases is the pool a sweep takes its lease on, the one cmd/dispatch gives it.
 func sweepLeases(t *testing.T, database *store.Store) *pgxpool.Pool {
@@ -38,114 +38,131 @@ func countLeaseLines(logs *storetest.LockedLog, message, lease string) int {
 	return count
 }
 
-// Two envoy-dispatch processes sweep one database, each through RunSuggestionOutcomeSweep itself
-// and each on a pool of its own (storetest.SecondProcess, as a second process has): one takes the
-// suggestion-outcomes lease and runs the pass, the other finds it held and skips. The first pass
-// is held inside its own first statement by a lock this test takes on write_suggestions, which is
-// the moment the lease is about - both processes' tickers firing while one is still sweeping -
-// and both runners are stopped before that lock is released, so the pass runs exactly once.
-func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
+// captureSweepLogs sends the default logger's lines to the returned log until the test ends.
+func captureSweepLogs(t *testing.T) *storetest.LockedLog {
+	t.Helper()
+	logs := &storetest.LockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs
+}
+
+// runSweep runs run on a goroutine until the test ends, and fails the test if it does not return
+// promptly once its context ends.
+func runSweep(t *testing.T, run func(ctx context.Context)) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("the suggestion outcome sweep did not return within 10s of its context ending")
+		}
+	})
+}
+
+// waitUntil polls condition until it holds, failing the test after within.
+func waitUntil(t *testing.T, within time.Duration, what string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %v waiting for %s", within, what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Two envoy-dispatch processes sweep one database, each through the sweep's woken loop and each on
+// a pool of its own (storetest.SecondProcess, as a second process has): one takes the
+// suggestion-outcomes lease and runs its pass, and the other finds it held and does not run the
+// same pass beside it. The first pass is held inside its own first statement by a lock this test
+// takes on the cursor it reads for update, which is the moment the lease is about - both
+// processes' loops woken at once. The second keeps trying, and once the first pass is done it runs
+// a pass of its own: the first may have read before whatever woke the second, so a woken loop
+// never gives its pass up to another process's.
+func TestTwoSuggestionSweepRunnersNeverPassAtOnceAndBothPass(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
 	second := storetest.SecondProcess(t, database)
 	firstLeases, secondLeases := sweepLeases(t, database), sweepLeases(t, second)
-	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logs := captureSweepLogs(t)
 
 	gate, err := database.Pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("open the transaction holding write_suggestions: %v", err)
+		t.Fatalf("open the transaction holding the cursor: %v", err)
 	}
 	defer func() { _ = gate.Rollback(context.Background()) }()
-	if _, err := gate.Exec(ctx, `lock table write_suggestions in exclusive mode`); err != nil {
-		t.Fatalf("hold write_suggestions: %v", err)
+	if _, err := gate.Exec(ctx, `lock table suggestion_outcome_cursor in exclusive mode`); err != nil {
+		t.Fatalf("hold the cursor: %v", err)
 	}
 
-	firstCtx, stopFirst := context.WithCancel(ctx)
-	defer stopFirst()
-	firstDone := make(chan struct{})
-	go func() {
-		defer close(firstDone)
-		RunSuggestionOutcomeSweep(firstCtx, database.Pool, sweepLeaseTick, firstLeases)
-	}()
+	runSweep(t, func(ctx context.Context) {
+		runSuggestionOutcomeSweep(ctx, database.Pool, firstLeases, nil, sweepLeaseSchedule)
+	})
 	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 30*time.Second); waiting < 1 {
-		t.Fatal("the first runner's pass never reached the write_suggestions lock: it never took the lease")
+		t.Fatal("the first runner's pass never reached the cursor lock: it never took the lease")
+	}
+	runSweep(t, func(ctx context.Context) {
+		runSuggestionOutcomeSweep(ctx, second.Pool, secondLeases, nil, sweepLeaseSchedule)
+	})
+	// The second runner's boot attempt and at least one retry find the lease held.
+	waitUntil(t, 30*time.Second, "the second runner to find the lease held twice", func() bool {
+		return countLeaseLines(logs, "dispatch duty: leased pass skipped", suggestionOutcomeLease) >= 2
+	})
+	if ran := countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease); ran != 0 {
+		t.Fatalf("%d passes ran while the first one was held inside its pass; want none:\n%s", ran, logs.Lines("lease="))
 	}
 
-	secondCtx, stopSecond := context.WithCancel(ctx)
-	defer stopSecond()
-	secondDone := make(chan struct{})
-	go func() {
-		defer close(secondDone)
-		RunSuggestionOutcomeSweep(secondCtx, second.Pool, sweepLeaseTick, secondLeases)
-	}()
-	for deadline := time.Now().Add(30 * time.Second); countLeaseLines(logs, "dispatch duty: leased pass skipped", suggestionOutcomeLease) == 0; {
-		if time.Now().After(deadline) {
-			t.Fatalf("the second runner never skipped the %s lease:\n%s", suggestionOutcomeLease, logs.Lines("lease="))
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Both runners stop while the lock still holds the first one's pass: whatever each did, it
-	// did before the gate let go, so the counts below are the two tickers' one round. The first
-	// runner's pass is therefore one its own shutdown cut short, which since INFRA-66's third
-	// round reports itself as that rather than as a pass that ran - it serves no period, since
-	// it did not finish its work. What this row is about is unchanged and is counted below: one
-	// of the two tickers got into the pass and the other found the lease held.
-	stopSecond()
-	<-secondDone
-	stopFirst()
-	<-firstDone
 	if err := gate.Rollback(context.Background()); err != nil {
-		t.Fatalf("release write_suggestions: %v", err)
+		t.Fatalf("release the cursor: %v", err)
 	}
-
-	entered := countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease) +
-		countLeaseLines(logs, "dispatch duty: leased pass cut short by shutdown; its period is left unserved", suggestionOutcomeLease)
-	if entered != 1 {
-		t.Fatalf("the two runners got into the pass %d times; want once:\n%s", entered, logs.Lines("lease="))
+	waitUntil(t, 30*time.Second, "both runners to run a pass of their own", func() bool {
+		return countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease) == 2
+	})
+	var cursor *int64
+	if err := database.Pool.QueryRow(ctx, `select event_id from suggestion_outcome_cursor`).Scan(&cursor); err != nil {
+		t.Fatalf("read the cursor: %v", err)
 	}
-	if skipped := countLeaseLines(logs, "dispatch duty: leased pass skipped", suggestionOutcomeLease); skipped == 0 {
-		t.Fatalf("neither runner skipped:\n%s", logs.Lines("lease="))
+	if cursor == nil {
+		t.Fatal("the cursor is still unset after both passes")
 	}
 }
 
-// One runner, nothing else on the database: every tick must make a pass. The lease is free at
-// each of them and no other process has served the period, so a skip here is an interval of this
-// loop's work that no pass of any process did - the loop running slower than it is configured to,
-// with one process, which is what this deployment runs today.
-//
-// It is the loop's own shape that is at stake. Every leased loop ticks on the interval it passes
-// as its period (RunSuggestionOutcomeSweep, redeliver.Sweeper.Run, duty.RunJittered's callers),
-// so the period and the gap between two ticks are the same span, and the record of a pass is
-// stamped a moment after the tick that made it - the time it takes to take the lease. A tick
-// whose own moment is shorter than the previous one's then falls inside the period that pass
-// recorded and is dropped. Ten ticks are driven because one skip is what this is about and a
-// shorter window could miss it.
-func TestALoneRunnerMakesAPassOnEveryTick(t *testing.T) {
-	ctx, stop := context.WithCancel(context.Background())
+// One runner, nothing else on the database: every wake must earn a pass, each one gap after the
+// one before at the soonest. The lease is free at each of them, so a skip here would be a change
+// no pass of any process read - the loop doing less than it is woken for, with one process,
+// which is what this deployment runs today.
+func TestALoneSuggestionSweepRunnerPassesOnEveryWake(t *testing.T) {
 	database := storetest.Open(t)
 	leases := sweepLeases(t, database)
-	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logs := captureSweepLogs(t)
+	wake := make(chan struct{}, 1)
+	runSweep(t, func(ctx context.Context) {
+		runSuggestionOutcomeSweep(ctx, database.Pool, leases, wake, sweepLeaseSchedule)
+	})
 
-	const tick = time.Second
-	const ticks = 10
-	done := make(chan struct{})
-	go func() { defer close(done); RunSuggestionOutcomeSweep(ctx, database.Pool, tick, leases) }()
-	time.Sleep(tick*ticks + tick/2)
-	stop()
-	<-done
-
-	ran := countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease)
-	skipped := countLeaseLines(logs, "dispatch duty: leased pass skipped", suggestionOutcomeLease)
-	t.Logf("one runner, %d ticks of %v: ran %d, skipped %d", ticks, tick, ran, skipped)
-	if skipped != 0 {
-		t.Errorf("a lone runner skipped %d of its %d ticks; no other process swept, so each of those intervals went unswept:\n%s",
-			skipped, ran+skipped, logs.Lines("lease="))
+	const wakes = 5
+	for woken := 0; woken <= wakes; woken++ {
+		waitUntil(t, 10*time.Second, "the pass the last wake earned", func() bool {
+			return countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease) == woken+1
+		})
+		if woken < wakes {
+			wake <- struct{}{}
+		}
+	}
+	if skipped := countLeaseLines(logs, "dispatch duty: leased pass skipped", suggestionOutcomeLease); skipped != 0 {
+		t.Fatalf("a lone runner skipped %d passes:\n%s", skipped, logs.Lines("lease="))
+	}
+	time.Sleep(4 * sweepLeaseSchedule.minGap)
+	if ran := countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease); ran != wakes+1 {
+		t.Fatalf("a lone runner ran %d passes for its start and %d wakes; want %d:\n%s", ran, wakes, wakes+1, logs.Lines("lease="))
 	}
 }
