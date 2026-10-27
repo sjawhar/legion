@@ -124,10 +124,10 @@ and on `PATH`.
 `envoy-infra:gcp:Dispatch` deploys one private Autopilot cluster, its VPC and Cloud NAT, a
 private-IP Cloud SQL for PostgreSQL instance, and three Deployments: the app `<hostname>`, which
 runs `envoy-dispatch` beside the Cloud SQL Auth Proxy native sidecar; the front door
-`<hostname>-tailnet`, the userspace Tailscale node that holds the hostname; and
-`<hostname>-listener`, which runs `envoy-listener` alone. Tailscale Serve on the front door is the
-tailnet ingress on port 443, and proxies to the app's ClusterIP Service on port 8766, which also
-serves Dispatch's API in-cluster to the namespaces `allowedNamespaces` names; a NetworkPolicy
+`<hostname>-tailnet`, whose userspace Tailscale nodes host the Tailscale Service `svc:<hostname>`;
+and `<hostname>-listener`, which runs `envoy-listener` alone. Tailscale Serve on the front door is
+the tailnet ingress on port 443, and proxies to the app's ClusterIP Service on port 8766, which
+also serves Dispatch's API in-cluster to the namespaces `allowedNamespaces` names; a NetworkPolicy
 refuses every other namespace. The front door's SOCKS5 Service on port 1055 and the listener's
 Service on port 9020 are reachable only from the workloads their own policies name: the app and
 the listener may dial the proxy, and the app alone may dial the listener.
@@ -138,18 +138,20 @@ the listener may dial the proxy, and the app alone may dial the listener.
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
-| Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pods' configuration, tailnet state permission, generated application secrets, the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the Serve configuration, and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). |
+| Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the resolved `tailnetService`), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). |
+| ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get`, `update` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. |
+| Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. |
 | Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). |
-| Three Deployments | The app at `replicas` pods, `Recreate` at one and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, with a 35-second termination grace period — a five-second pre-stop wait and the thirty seconds `envoy-dispatch`'s shutdown is built for; the front door and the listener at one pod each, always `Recreate`. Every container has equal requests and limits. All three pod templates carry `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: without it the cluster autoscaler evicts these pods whenever it consolidates a node, and the one-replica front door takes Dispatch off the tailnet until its replacement is ready. Autopilot honours the annotation as [extended-duration](https://cloud.google.com/kubernetes-engine/docs/how-to/extended-duration-pods) protection: for up to seven days, from scale-down and node auto-upgrade only (node repair, Compute Engine maintenance and drains still evict), with each such pod on a node of its own whenever possible and raised to at least 500m CPU and 512Mi memory, so the front door and the listener each request 500m and 512Mi. |
-| PodDisruptionBudget (only with `appPdbMinAvailable`) | `<hostname>`, over the app's pods (`app=<hostname>`) alone, with `minAvailable` set to `appPdbMinAvailable` and Kubernetes' default `unhealthyPodEvictionPolicy`, so a drain cannot take the app below that many ready pods. |
+| Three Deployments | The app at `replicas` pods, the front door at `frontDoorReplicas` (2 by default) and the listener at `listenerReplicas` (1 by default), each `Recreate` at one pod and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, by its own count. Every pod carries required pod anti-affinity on `kubernetes.io/hostname` and a `topology.kubernetes.io/zone` spread with `minDomains: 2`, both over its own Deployment's pods, and every serving container a startup and a liveness probe ([The pods](#the-pods)). The app and the listener have a 35-second termination grace period, a five-second pre-stop wait and the stop each is built for; the front door 60 seconds, for its drain ([The front door](#the-front-door)). Every container has equal requests and limits. A pod template whose Deployment has no PodDisruptionBudget carries `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`; one whose Deployment has a budget does not. |
+| Up to three PodDisruptionBudgets | `<hostname>` with `appPdbMinAvailable`, `<hostname>-tailnet` with `frontDoorPdbMinAvailable` and `<hostname>-listener` with `listenerPdbMinAvailable`, each over its own Deployment's pods (`app=<name>`) alone, with that `minAvailable` and Kubernetes' default `unhealthyPodEvictionPolicy`, so a drain cannot take that workload below that many ready pods. |
 
 ### Inputs
 
-The required plain inputs are `region`, `hostname`, `tailnetDnsName`, `tags`, the three
-digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`,
+The required plain inputs are `region`, `hostname`, `tailnetDnsName`, `tags`, the four
+digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`, `tailnetService`,
 `natsUrl`, `natsSeedSecret`, and `signInClientSecret` are Pulumi inputs and may come from another
 resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
-defaults to `POSTGRES_16`, `databaseTier` to `db-custom-1-3840`, `namespace` to `dispatch`, and
+defaults to `POSTGRES_16`, `databaseTier` to `db-custom-4-15360`, `namespace` to `dispatch`, and
 `deletionProtection` to `true`; it sets both Pulumi's own guard and the Cloud SQL instance's
 `deletionProtectionEnabled`, which refuses a delete from the API or the console too, and the
 `dispatch` database's `deletionPolicy` `PREVENT` (otherwise `DELETE`), which keeps an instance
@@ -158,40 +160,89 @@ replacement from deleting the database first.
 the namespace as it exists in the cluster rather than create it, for a deployment where another
 program owns the namespace. On a stack that has already applied, turning it on removes the
 Namespace from the program, and the next update deletes the namespace and everything in it, the
-Tailscale state Secret included: first remove the Namespace from the stack's state
+front door's certificate Secret included: first remove the Namespace from the stack's state
 (`pulumi state delete <the Namespace's URN>`), so the update leaves it in the cluster. The flag is
 for a cluster that already exists: on a first apply the component creates the cluster, so no other
 program can have made the namespace yet. `allowedNamespaces`, empty by default, each a DNS label,
 names the in-cluster namespaces the NetworkPolicy admits on port 8766.
 
-`replicas` is the app Deployment's pod count, 1 by default; a value below 1 is refused by name
-before the component registers a resource. At 1 the app Deployment is recreated, stopping its pod
-before the next starts; above 1 it rolls, with `maxUnavailable: 0` and `maxSurge: 1`, so a new pod
-is ready before any old one goes down. The front door and the listener stay at one replica and are
-recreated whatever the count: one tailnet node holds the hostname and the state its single-use
-auth key left behind, and two listeners sharing one machine id never both bind its exclusive
-durable. There is no strategy, surge or front-door-replica input for that reason: the app's safe
-strategy follows from its replica count, and every value but one is wrong for the other two
-workloads.
+`tailnetService`, required, is the Tailscale Service the front door's pods host, as Tailscale's
+API names it. It must resolve to `svc:<hostname>`, the name the certificate and the URL carry, and
+any other value fails the update once it resolves, naming the input and never echoing the value.
+The component never creates the Service: the consumer declares it in the tailnet, with an
+auto-approval for `tags` in the tailnet policy, and passes the `Name` output of its
+`tailscale.Service` here. The Serve ConfigMap `<hostname>-serve` is rendered from the resolved
+value, and the front door's Deployment waits for that ConfigMap and for whatever the value came
+from, so on a fresh stack no pod advertises the Service before it exists: a node that advertises a
+Service before it exists is not approved when the Service appears.
 
-`appCpu` and `appMemory` size the app Deployment's `envoy-dispatch` container: plain Kubernetes
-quantities (`2`, `1500m`; `8Gi`, `6144Mi`), each rendered as both its request and its limit, 1 CPU
-and `4Gi` by default, so a deployment that sets neither renders the pod it always had. The pod's
-`cloud-sql-proxy` sidecar keeps its own `200m` and `256Mi`, and the front door and the listener
-keep theirs. Autopilot sizes the pod by the two containers' sum, so before it registers a resource
-the component refuses, by name, a value that is not a quantity or is empty, a decimal exponent
-outside `e-9` to `e18` (the range the suffixes `n` to `E` cover; write a suffix instead), and a
-size at which Autopilot would not run the pod as rendered: a pod below `500m` or `512Mi` (the
-floor of a `safe-to-evict: "false"` pod, so `appCpu` at least `300m` and `appMemory` at least
-`256Mi`) or outside 1 to 6.5 GiB of memory per CPU, which Autopilot raises, and a pod above 30 CPU
-or `110Gi` (`appCpu` at most `29800m`, `appMemory` at most `112384Mi`), which Autopilot rejects;
-these are the bounds of Autopilot's default general-purpose compute class
+`frontDoorToolsImage`, required and pinned by digest like the other three images, is the image the
+front door's `cert-publish` container runs on. Its scripts call `/bin/sh`, `curl`, `openssl` 3,
+`base64`, GNU `date`, `sed`, `grep` and `tr`, so the image must carry them all; the envoy image
+does, and the Tailscale image, which is busybox with neither `curl` nor `openssl`, does not. It is
+an input of its own rather than `envoyImage` so a release of the app's image never rolls the front
+door: pin the envoy image here at a digest that moves only on purpose. The container runs as uid
+999, the envoy image's `envoy` user, which every container of a front-door pod shares, since
+tailscaled writes its certificate cache readable by its own uid alone.
+
+`databaseTier`, `db-custom-4-15360` (4 vCPU and 15 GB) by default, is sized by connections. Cloud
+SQL's default `max_connections` follows the instance's memory, and from 15 to under 30 GB it is
+500 ([Configure database flags](https://cloud.google.com/sql/docs/postgres/flags),
+`max_connections`). Every app pod opens up to the sum of its pools
+(`packages/envoy/internal/dispatch/store/pool.go`): 16 shared, on which migrations run too, 4 for
+document rooms, 1 for health, 8 for leases, and the 3 `LISTEN` connections the listener pool dials
+and hands off, 32 in all; the listener's and the front door's pods open none. Fifteen pods open
+480, inside 500 with 20 to spare, and a rolling update runs `replicas` plus one pod, so up to 14
+replicas roll inside it. The previous default, `db-custom-1-3840` (3.75 GB, 100 connections), held
+three pods, so two replicas rolling, and its one vCPU served every pod's queries. A deployment
+that left `databaseTier` unset moves to the new default on its next update; one whose instance
+runs another tier, set by hand, sets `databaseTier` to that tier so the update does not resize it.
+
+`databaseAvailabilityType` is the Cloud SQL instance's availability type: `ZONAL`, the default and
+the instance's value before the input existed, keeps it in one zone, and `REGIONAL` keeps a
+standby in a second zone that Cloud SQL fails over to. Any other value is refused by name before
+the component registers a resource. Switching changes the instance in place, since the bridged
+Terraform provider declares `settings.availability_type` without ForceNew
+(`terraform-provider-google-beta` v8.6.0, which pulumi-gcp v10.1.0 bridges,
+`google-beta/services/sql/resource_sql_database_instance.go:449-462`): Cloud SQL restarts the
+instance once, which is a brief database outage, and the change cannot be stopped once started.
+`REGIONAL` roughly doubles the instance's cost, since Cloud SQL bills the standby's CPU, memory
+and storage as well ([Cloud SQL pricing](https://cloud.google.com/sql/pricing)).
+
+`replicas`, `frontDoorReplicas` and `listenerReplicas` are the pod counts of the app, the front
+door and the listener: 1, 2 and 1 by default, each refused by name below 1 before the component
+registers a resource. Each Deployment takes its update strategy from its own count ([The
+pods](#the-pods)). The front door runs two by default, since with one pod every node drain,
+upgrade or scale-down that moves it takes Dispatch off the tailnet until its replacement is ready.
+Raise `replicas` above 1 only on an envoy image that meets "Running more than one process" in
+`packages/envoy/cmd/dispatch/README.md` (below). Raise `listenerReplicas` above 1 only on an envoy
+image whose listener holds a delivery lease: there a standby pod is ready and serves `/v1` and the
+webhooks while only the lease holder delivers, a stopping holder hands the lease over in about a
+second, and a killed holder's lease is taken over in about six.
+
+`appCpu` and `appMemory` size the app Deployment's `envoy-dispatch` container, and `proxyCpu` and
+`proxyMemory` its `cloud-sql-proxy` sidecar: plain Kubernetes quantities (`2`, `1500m`; `8Gi`,
+`6144Mi`), each rendered as both its request and its limit. `appCpu` and `appMemory` are 1 CPU and
+`4Gi` by default, the size the container always had. `proxyCpu` and `proxyMemory` are 1 CPU and
+`2Gi` by default: every database call of the pod passes through the proxy's TLS, up to the 32
+connections of one pod's pools (above), and the proxy's own Kubernetes sidecar example requests 1
+CPU, since its CPU use scales with the traffic between the database and the application, and
+`2Gi`, since its memory scales with the active connections
+([Run the Cloud SQL Auth Proxy as a sidecar](https://github.com/GoogleCloudPlatform/cloud-sql-proxy/blob/v2.26.3/examples/k8s-sidecar/README.md)).
+One server pod's pools are that example's load. With the defaults the app pod requests 2 CPU and
+`6Gi`. The front door and the listener keep their own sizes. Autopilot sizes the pod by the two
+containers' sum, so before it registers a resource the component refuses, by name, a value that
+is not a quantity, is empty or is not above 0, a decimal exponent outside `e-9` to `e18` (the
+range the suffixes `n` to `E` cover; write a suffix instead), and sizes at which Autopilot would
+not run the pod as rendered: a pod below `500m` or `512Mi` (the floor of a pod with pod
+anti-affinity, which every Dispatch pod carries, and of a `safe-to-evict: "false"` pod) or outside
+1 to 6.5 GiB of memory per CPU, which Autopilot raises, and a pod above 30 CPU or `110Gi`, which
+Autopilot rejects; these are the bounds of Autopilot's default general-purpose compute class
 ([Resource requests in Autopilot](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests)).
 The pod runs at exactly the rendered size only on a cluster that supports Pod bursting; on one
-that does not, Autopilot also rounds the pod's CPU up to a multiple of 250m (the default pod's
-1200m becomes 1250m).
-A change to either replaces the app's pods as any change to its pod template does: recreated at
-one replica, rolled above one.
+that does not, Autopilot also rounds the pod's CPU up to a multiple of 250m.
+A change to any of the four replaces the app's pods as any change to its pod template does:
+recreated at one replica, rolled above one.
 
 `pprofPort`, unset by default, turns on `envoy-dispatch`'s Go profiler: the component sets
 `DISPATCH_PPROF_PORT` to it on the `envoy-dispatch` container alone, and Dispatch serves
@@ -204,48 +255,55 @@ component refuses, by name, a value outside 1-65535 and the two ports the app po
 its loopback, `envoy-dispatch`'s `8766` and the `cloud-sql-proxy` sidecar's `5432`. Setting or
 unsetting it replaces the app's pods as any change to its pod template does.
 
-`appPriorityClassName` and `appPdbMinAvailable` protect the app's pods from being displaced; the
-front door and the listener are unchanged by either, and with neither set the component renders
-what it always did.
+`priorityClassName`, `appPdbMinAvailable`, `frontDoorPdbMinAvailable` and
+`listenerPdbMinAvailable` protect the pods from being displaced; with none set the component
+renders no priority class and no budget.
 
-`appPriorityClassName` is the app pod's `priorityClassName`: the name, a DNS subdomain, of a
-PriorityClass that already exists in the cluster. The component never creates the class, but it
-reads it, and the app Deployment waits on that read: Kubernetes refuses every pod that names a
-class the cluster does not have, and at one replica `Recreate` would already have stopped the old
-pod, so a missing class fails the update, and the preview too once the cluster exists (on a first
-deploy the cluster's provider is unknown at preview, so the read waits for the update), instead of
-leaving Dispatch down. Create the class before, or outside, the program that sets the name. The
-`system-` prefix is refused: Kubernetes reserves it for `system-cluster-critical` and
-`system-node-critical`, which outrank every workload so the cluster's own components are placed
-first. A pod's priority decides which pods the scheduler may preempt to place it, when its class
-allows preemption, and, among pods that alike exceed (or alike stay within) their requests,
-decides which a node under memory or disk pressure evicts first. Like `appCpu`, a change to it
-replaces the app's pods.
+`priorityClassName` is the `priorityClassName` of every pod of the three Deployments: the name, a
+DNS subdomain, of a PriorityClass that already exists in the cluster. The component never creates
+the class, but it reads it once, and all three Deployments wait on that read: Kubernetes refuses
+every pod that names a class the cluster does not have, and at one replica `Recreate` would
+already have stopped the old pod, so a missing class fails the update, and the preview too once
+the cluster exists (on a first deploy the cluster's provider is unknown at preview, so the read
+waits for the update), instead of leaving a workload down. Create the class before, or outside,
+the program that sets the name. The `system-` prefix is refused: Kubernetes reserves it for
+`system-cluster-critical` and `system-node-critical`, which outrank every workload so the
+cluster's own components are placed first. A pod's priority decides which pods the scheduler may
+preempt to place it, when its class allows preemption, and, among pods that alike exceed (or
+alike stay within) their requests, decides which a node under memory or disk pressure evicts
+first. Like `appCpu`, a change to it replaces the pods, here of all three Deployments.
 
-`appPdbMinAvailable`, from 1 to `replicas`, registers the PodDisruptionBudget `<hostname>` with
-that `minAvailable`. The `safe-to-evict` annotation above already holds off the autoscaler's
-scale-down and node auto-upgrade for up to seven days; the budget also makes a drain wait, a
-manual upgrade, a node repair or an auto-upgrade past that window among them, and at `replicas`
-it refuses every voluntary eviction. So at one replica with `appPdbMinAvailable` 1, every drain
-of the app's node waits: `kubectl drain` waits with no limit (until its own `--timeout`, if one is
-given), and a GKE upgrade waits up to an hour (below). It keeps Kubernetes' default
-`unhealthyPodEvictionPolicy`, `IfHealthyBudget`, so it holds a pod that is not ready too while
-the budget is not met:
-`envoy-dispatch` reports not ready whenever NATS or Postgres is briefly out of reach (the front
-door's own eviction in the same drain is one way), and evicting it then would turn that into a
-cold restart. A drain of a pod that stays broken waits the longer for it: GKE respects a budget for
-up to an hour while it drains a node for an upgrade and then evicts anyway
+`appPdbMinAvailable`, from 1 to `replicas`, registers the PodDisruptionBudget `<hostname>` over
+the app's pods; `frontDoorPdbMinAvailable`, from 1 to `frontDoorReplicas`, registers
+`<hostname>-tailnet` over the front door's; and `listenerPdbMinAvailable`, from 1 to
+`listenerReplicas`, registers `<hostname>-listener` over the listener's. Each selects its own
+Deployment's `app` label alone and sets that `minAvailable`. A Deployment with a budget loses the
+`safe-to-evict` annotation ([The pods](#the-pods)): the budget bounds every voluntary eviction,
+the cluster autoscaler's scale-down among them, and lets the autoscaler move those pods as far as
+the budget allows. It also makes a drain wait, a manual upgrade, a node repair or an auto-upgrade
+among them, and at its Deployment's replica count it refuses every voluntary eviction. So at one
+replica with a budget of 1, every drain of that pod's node waits: `kubectl drain` waits with no
+limit (until its own `--timeout`, if one is given), and a GKE upgrade waits up to an hour (below).
+Each keeps Kubernetes' default `unhealthyPodEvictionPolicy`, `IfHealthyBudget`, so it holds a pod
+that is not ready too while the budget is not met: `envoy-dispatch` and `envoy-listener` report
+not ready whenever NATS or Postgres is briefly out of reach (a front-door pod's own eviction in
+the same drain is one way), and evicting one then would turn that into a cold restart. A
+front-door pod is ready only while it hosts the Service ([The front door](#the-front-door)), so
+the front door's budget counts only pods that serve. A drain of a pod that stays broken waits the
+longer for it: GKE respects a budget for up to an hour while it drains a node for an upgrade and
+then evicts anyway
 ([Autopilot cluster upgrades](https://cloud.google.com/kubernetes-engine/docs/concepts/cluster-upgrades-autopilot)).
-The budget never slows the app's own rollouts, which Kubernetes does not run through the eviction
-API. Delete every budget made by hand over the app's pods (`kubectl -n <namespace> delete pdb
-<name>`) just before the first update that sets it, one named `<hostname>` included: the
-component's Kubernetes provider does not adopt an object that already exists, so the update fails
-with the budget's `AlreadyExists`, and a hand-made budget under another name would select the
-same pod, which makes the eviction API refuse every eviction of it.
+A budget never slows its Deployment's own rollouts, which Kubernetes does not run through the
+eviction API. Delete every budget made by hand over the component's pods (`kubectl -n <namespace>
+delete pdb <name>`) just before the first update that sets the matching input, one already named
+`<hostname>`, `<hostname>-tailnet` or `<hostname>-listener` included: the component's Kubernetes
+provider does not adopt an object that already exists, so the update fails with the budget's
+`AlreadyExists`, and a hand-made budget under another name would select the same pods, which makes
+the eviction API refuse every eviction of them.
 
-The component refuses, each by name, before it registers a resource, an empty or malformed
-`appPriorityClassName`, one with the `system-` prefix, and an `appPdbMinAvailable` below 1 or
-above `replicas`.
+The component refuses, each by name, before it registers a resource, a `priorityClassName` that
+is empty, not a DNS subdomain or has the `system-` prefix, and a budget below 1 or above its
+Deployment's replica count.
 
 Two optional groups each come as all their inputs or none. Neither takes a secret value: the
 broker relay's credential is a token the kubelet mints and the App key is read at run time, so no
@@ -334,29 +392,32 @@ Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
 `ghcr.io/sjawhar/legion/envoy` before pinning it, with the `gh attestation verify` command
 [Running Dispatch](https://sjawhar.github.io/legion/dispatch/running-dispatch/) gives. The
 component refuses invalid hostnames, tailnet DNS names, tags, image references, sign-in domains,
-namespaces, allowed namespaces, an `appCpu` or `appMemory` outside Autopilot's bounds for the app
-pod (above), a `pprofPort` outside 1-65535 or on a port the app pod already binds (above), an
-`appPriorityClassName` that is empty, not a DNS subdomain or a `system-` class, an
-`appPdbMinAvailable` outside 1 to `replicas`, missing inputs, and nkey seeds in its own name and in
-plain inputs
-before it registers a resource; it refuses an
-`agentSecretsUrl` or an `agentSecretsAudience` whose partner input is missing, an `appClientId`,
-`appId`, `appPrivateKeySecretName` or `appPrivateKeySecretKey` set without the others (each missing
-input named), an `appId` that is not digits or is 0, an `appPrivateKeySecretName` that is not a DNS
-subdomain, an `appPrivateKeySecretKey` outside `[-._a-zA-Z0-9]+`, and an `agentSecretsUrl` that is
-not an absolute http(s) URL with no path; and, of the Azure group, any of its inputs without
-`azureEmbedEndpoint`, an endpoint without `azureEmbedTokensPerMinute` or with one below 1, both
-credential forms or neither, `azureTenantId` or `azureClientId` without the other, and an
-`azureFederationAudience` without them or empty. Once each Pulumi input resolves, before any child
-takes it, it refuses a seed in `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`,
-`azureEmbedEndpoint`, `azureEmbedDeployment`, `azureEmbedKeySecret`, `azureTenantId` and
-`azureClientId`; a blank or whitespace-only `tailnetAuthKey` or `signInClientSecret`,
-neither of which can work blank (the front door cannot join the tailnet, Dispatch refuses a blank
-sign-in secret at boot) — each a refusal naming the input and never echoing it; and a `natsUrl`
-that holds a seed, is local (the pods reach NATS only through the front door's SOCKS5 proxy), is
-empty, or holds a comma or a control character, each a refusal naming `natsUrl`. It requires both `gcp` and `random` providers. It
-creates its Kubernetes provider from the cluster's stable exec-plugin kubeconfig, so the machine
-running Pulumi needs `gke-gcloud-auth-plugin`.
+namespaces, allowed namespaces, an `appCpu`, `appMemory`, `proxyCpu` or `proxyMemory` outside
+Autopilot's bounds for the app pod (above), a `pprofPort` outside 1-65535 or on a port the app pod
+already binds (above), a `replicas`, `frontDoorReplicas` or `listenerReplicas` below 1, a
+`priorityClassName` that is empty, not a DNS subdomain or a `system-` class, an
+`appPdbMinAvailable`, `frontDoorPdbMinAvailable` or `listenerPdbMinAvailable` outside 1 to its
+Deployment's replica count, a `databaseAvailabilityType` other than `ZONAL` or `REGIONAL`, missing
+inputs, and nkey seeds in its own name and in plain inputs before it registers a resource; it
+refuses an `agentSecretsUrl` or an `agentSecretsAudience` whose partner input is missing, an
+`appClientId`, `appId`, `appPrivateKeySecretName` or `appPrivateKeySecretKey` set without the
+others (each missing input named), an `appId` that is not digits or is 0, an
+`appPrivateKeySecretName` that is not a DNS subdomain, an `appPrivateKeySecretKey` outside
+`[-._a-zA-Z0-9]+`, and an `agentSecretsUrl` that is not an absolute http(s) URL with no path; and,
+of the Azure group, any of its inputs without `azureEmbedEndpoint`, an endpoint without
+`azureEmbedTokensPerMinute` or with one below 1, both credential forms or neither, `azureTenantId`
+or `azureClientId` without the other, and an `azureFederationAudience` without them or empty.
+Once each Pulumi input resolves, before any child takes it, it refuses a seed in
+`tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`, `azureEmbedEndpoint`,
+`azureEmbedDeployment`, `azureEmbedKeySecret`, `azureTenantId` and `azureClientId`; a blank or
+whitespace-only `tailnetAuthKey` or `signInClientSecret`, neither of which can work blank (the
+front door cannot join the tailnet, Dispatch refuses a blank sign-in secret at boot); a
+`tailnetService` other than `svc:<hostname>` — each a refusal naming the input and never echoing
+it; and a `natsUrl` that holds a seed, is local (the pods reach NATS only through the front door's
+SOCKS5 proxy), is empty, or holds a comma or a control character, each a refusal naming
+`natsUrl`. It requires both `gcp` and `random` providers. It creates its Kubernetes provider from
+the cluster's stable exec-plugin kubeconfig, so the machine running Pulumi needs
+`gke-gcloud-auth-plugin`.
 
 The generated `principal` output is the Kubernetes service account's Workload Identity principal,
 `principal://iam.googleapis.com/projects/<project number>/locations/global/workloadIdentityPools/<project id>.svc.id.goog/subject/ns/<namespace>/sa/<hostname>`,
@@ -375,12 +436,14 @@ principal `roles/secretmanager.secretAccessor` only on the NATS seed secret (and
 secret when `azureEmbedKeySecret` is set), and the app and the listener, which mount the seed,
 wait for that grant to be written, as the app waits for the Azure key's. IAM can take minutes to apply
 a new binding (Google cites typically two, sometimes seven or more), and a pod restarts until it
-can mount. The three Deployments share that one Kubernetes service account, whose Role lets it
-read and update the Tailscale state Secret and create Secrets in its namespace, since Tailscale
-creates its state Secret on first start.
+can mount. The app and the listener share that one Kubernetes service account, which holds no
+Role: no pod creates a Secret, since each front-door node keeps its tailnet state on its own pod's
+`emptyDir`, and the front door's pods run as `<hostname>-tailnet`, whose Role lets it write only
+the Secret `<hostname>-tailnet-tls`.
 
 The `serviceAccountIssuer` and `serviceAccountSubject` outputs are the issuer and subject of the
-Dispatch pods' Kubernetes service-account tokens: the cluster's own issuer,
+app's and the listener's Kubernetes service-account tokens (the front door's pods run as an
+account the subject never names): the cluster's own issuer,
 `https://container.googleapis.com/v1/projects/<project id>/locations/<location>/clusters/<cluster name>`,
 and `system:serviceaccount:<namespace>:<hostname>`. The keyless Azure form rests on them: the
 managed identity `azureClientId` names holds a federated identity credential whose issuer is
@@ -392,12 +455,13 @@ declares the credential and the role from these two outputs.
 
 ### The pods
 
-The front door is the pod with the tailnet node. Its one Tailscale container joins with the
-supplied tags, serves `https://<hostname>.<tailnetDnsName>` and proxies it to the app's Service,
-and offers tailnet egress as that node through its userspace SOCKS5 proxy, which binds
-`0.0.0.0:1055` now that its callers are pods of their own rather than containers beside it. The
-app and the listener reach the NATS hub at its tailnet name through that proxy's Service, and the
-policy admits those two alone, since whatever reaches the proxy leaves the cluster as this node.
+The front door's pods are the tailnet nodes ([The front door](#the-front-door)). Each serves
+`https://<hostname>.<tailnetDnsName>` for the Tailscale Service and proxies it to the app's
+Service, and offers tailnet egress as its own node through its userspace SOCKS5 proxy, which binds
+`0.0.0.0:1055` since its callers are pods of their own rather than containers beside it. The app
+and the listener reach the NATS hub at its tailnet name through that proxy's Service, and the
+policy admits those two alone, since whatever reaches the proxy leaves the cluster as a front-door
+node.
 
 The app pod runs `envoy-dispatch` with the Cloud SQL Auth Proxy native sidecar, which listens only
 on `127.0.0.1:5432` with `--private-ip`. The listener pod runs `envoy-listener` alone, bound to
@@ -411,61 +475,131 @@ ServiceAccount token, read-only, at `/var/run/secrets/dispatch/agent-secrets-acc
 `azureEmbedKeySecret`, the Azure key at `/var/run/secrets/azure-embed/key`; and with the keyless
 Azure form, the projected token at `/var/run/secrets/azure-federation/token`.
 
-Dispatch reads every value of the `<hostname>-dispatch` Secret, the Azure key file and the NATS
-seed once, at boot, as the listener reads the seed and the listener's bearer, and rotating a
-secret's value changes only the Secret, never the pod template, so no rotation restarts a pod on
-its own — this holds for every secret the component renders, the original four keys as much as
-the App key, the Azure key and the listener's bearer. The projected tokens are the exception: the
-kubelet rewrites them in place, and Dispatch reads the broker token on every call and the keyless
-Azure form's token on every exchange with Entra, so neither rewrite needs a restart. After rotating
-one of the others, restart the Deployments that read it so their pods boot on the new value:
+Each Deployment takes its update strategy from its own replica count. At one pod it is recreated,
+stopping the old pod before the new one starts: a roll would run the outgoing and the incoming
+builds together, which is safe only once the outgoing build follows the rules for two builds
+running side by side and keeps its assets in the shared store, and a one-pod release cannot know
+that of the build it replaces. Above one pod it rolls, with `maxUnavailable: 0` and `maxSurge: 1`,
+so a new pod is ready before any old one goes down: an operator who runs a workload above one pod
+runs such builds and wants no gap in service. There is no strategy or surge input, since the safe
+strategy follows from the count. So at one replica an input or image update recreates that
+workload's one pod, which is a brief outage, and the front door, at its default of two, rolls.
 
-- the `<hostname>-dispatch` Secret's keys, the App key and the Azure key: the app alone reads
-  them (`kubectl -n <namespace> rollout restart deployment/<hostname>`). `DISPATCH_AGENT_TOKEN`
-  is also the `agentToken` output, so a consumer that hands it to its agents passes them the new
-  value too;
-- the NATS seed: the app's `envoy-dispatch` and the listener's `envoy-listener` each read it once,
-  at start;
-- the listener's bearer, the `<hostname>-listener` Secret's `ENVOY_API_TOKEN`: the listener
-  serves with it and the app's `envoy-dispatch` sends it as `ENVOY_TOKEN`, so restarting only one
-  leaves the two on different tokens and every call from the app to the listener refused.
+Every pod carries two rules over its own Deployment's pods, at any replica count. Required pod
+anti-affinity on `kubernetes.io/hostname` puts at most one of them on a node, so a node's loss
+takes one pod. A spread over `topology.kubernetes.io/zone` with `maxSkew: 1`, `whenUnsatisfiable:
+DoNotSchedule` and `minDomains: 2` leaves a pod Pending rather than stacking a zone; `minDomains`
+is what makes the spread hold on Autopilot, which creates nodes on demand while the scheduler
+counts only zones that already have nodes, so without it two pods could satisfy the spread in one
+zone. Old and new revisions count together, so a surge pod lands in another zone and on another
+node than the pods it replaces. Autopilot raises a pod with pod anti-affinity to at least 500m CPU
+and 512Mi memory, which is why the component refuses an app pod below that (above) and the
+listener requests 500m and 512Mi.
 
-For the last two, restart both Envoy Deployments
-(`kubectl -n <namespace> rollout restart deployment/<hostname> deployment/<hostname>-listener`).
-The front door reads none of these.
+A pod template whose Deployment has no PodDisruptionBudget carries
+`cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: without it the cluster autoscaler
+evicts the pod whenever it consolidates the pod's node. Autopilot honours the annotation as
+[extended-duration](https://cloud.google.com/kubernetes-engine/docs/how-to/extended-duration-pods)
+protection: for up to seven days, from scale-down and node auto-upgrade only (node repair, Compute
+Engine maintenance and drains still evict), with each such pod on a node of its own whenever
+possible and raised to at least 500m CPU and 512Mi memory. A template whose Deployment has a budget
+(`appPdbMinAvailable`, `frontDoorPdbMinAvailable`, `listenerPdbMinAvailable`) carries no
+annotation: the budget bounds every voluntary eviction, the autoscaler's among them, and lets the
+autoscaler move those pods as far as the budget allows.
 
-The Deployments intentionally have no liveness probe for Dispatch because its health endpoint
-reads Cloud SQL. At one replica an input or image update recreates the app's one pod, which is a
-brief outage; so is every update of the front door or of the listener, at any replica count, since
-both are recreated, and a front-door recreate takes the app down with it: the app's readiness reads
-NATS, which reaches the hub only through that proxy, so thirty seconds later (`failureThreshold` 3
-at `periodSeconds` 10) every app replica fails readiness and leaves Service `<hostname>` too, and
-the in-cluster `allowedNamespaces` consumers lose the app for that window as well. It heals itself,
-since `internal/bus` reconnects without limit (`MaxReconnect = -1`) and no liveness probe restarts
-anything, and it is no regression, since the base ran one pod. Above one replica the app rolls
-instead: a new pod is ready before an old one stops, and a stopping pod keeps serving for five
-seconds after it is told to stop, which is the window its removal from routing has to propagate,
-and is what the pre-stop wait is for. The kubelet runs that wait inside the pod's one
-`terminationGracePeriodSeconds` and signals the container only once it returns, so the pod asks
-for 35 seconds: the five of the wait added to the thirty
-`envoy-dispatch`'s own shutdown is built for (`stopGrace` in
-`packages/envoy/cmd/dispatch/shutdown.go`) rather than taken out of them. Whoever tunes either
+Every serving container has a startup and a liveness probe, and a liveness probe fails only when
+the process does not answer at all. `envoy-dispatch`'s and `envoy-listener`'s run
+`curl -sS -o /dev/null --max-time 8` against their own `/healthz` on loopback (ports 8766 and
+9020), with a 9-second timeout: without `-f`, curl exits 0 whatever the status, so a `/healthz`
+answering 503 while Postgres or NATS is down passes, and a dependency outage never restarts every
+pod. Liveness asks every 10 seconds, and three missed answers in a row restart the container.
+Startup asks the same question for longer before liveness takes over: 30 minutes for
+`envoy-dispatch` (180 tries 10 seconds apart), since it migrates the database before it listens
+and nothing bounds a migration's run time, and 5 minutes for `envoy-listener` (60 tries 5 seconds
+apart). The `cloud-sql-proxy` sidecar runs with `--health-check` and serves its health endpoints
+on port 9801: its startup probe (`/startup`, once a second for up to a minute) gates
+`envoy-dispatch`'s start, and its liveness probe (`/liveness`, every 10 seconds, three failures)
+restarts a hung proxy rather than leaving the pod unready for ever. The kubelet probes from the
+pod's own node, which the app's NetworkPolicy does not fence, and no other pod reaches port 9801.
+The front door's `tailscale` container's liveness probe runs
+`tailscale --socket=<socket> version --daemon`, which asks tailscaled's LocalAPI for its status,
+answered in every backend state: a node logged out, waiting for login or unapproved is alive, and
+a restart would not help it, so only a minute with no answer (every 10 seconds, six failures)
+restarts the container. Its startup probe is containerboot's `/healthz`, which answers once the
+node has its tailnet addresses, given 3 minutes for a first login. `cert-seed` runs to completion
+before tailscaled starts, and `cert-publish` and the advertiser have no liveness probe: they serve
+no traffic, their loops log a failure and try again, and `cert-publish` exits on the one state it
+cannot recover from, a certificate cache it cannot read.
+
+Readiness is the other question. `envoy-dispatch` is ready while `curl -fsS` of its `/healthz`
+succeeds (every 10 seconds, three failures), which reads Postgres and NATS. `envoy-listener` is
+ready while `curl -fsS` of its `/healthz` succeeds every 5 seconds, two failures in a row taking
+it out; that endpoint answers within 5 seconds, so the probe allows 6. A front-door pod is ready
+while it hosts the Service ([The front door](#the-front-door)). The app and the listener reach
+NATS only through the front door's SOCKS5 proxy, so with no front-door pod ready both fail
+readiness within their probes' windows (30 seconds for the app, 10 for the listener) and leave
+their Services, and the in-cluster `allowedNamespaces` consumers lose the app for that time as
+well. It heals itself, since `internal/bus` reconnects without limit (`MaxReconnect = -1`) and no
+liveness probe reads NATS.
+
+A stopping app or listener pod keeps serving for five seconds after it is told to stop, which is
+the window its removal from routing has to propagate, and is what its pre-stop wait (`sleep 5`)
+is for. The kubelet runs that wait inside the pod's one `terminationGracePeriodSeconds` and
+signals the container only once it returns, so each pod asks for 35 seconds. For the app, that is
+the five of the wait added to the thirty `envoy-dispatch`'s own shutdown is built for (`stopGrace`
+in `packages/envoy/cmd/dispatch/shutdown.go`) rather than taken out of them; whoever tunes either
 number moves both, since a wait the grace period does not cover is paid for out of the server's
-drain, which spends its document service's reserve and kills a slow write mid-commit. Whether five
-seconds is enough to lose no request across a real release is unmeasured; the consuming stack's
-release measures it, with a poll every 250 milliseconds. A rolling update also runs the new image's
-migrations while the previous build is still serving, which bounds what a migration may change:
-"Database migrations" in `packages/envoy/cmd/dispatch/README.md` holds the rule. A region change
-replaces the component's networked resources. Keep `deletionProtection` enabled outside deliberate
-teardown-and-rebuild work: deleting the Cloud SQL instance deletes its backups. A teardown
-therefore takes an `up` with `deletionProtection: false` before `destroy`.
+drain, which spends its document service's reserve and kills a slow write mid-commit. For the
+listener, it is the five of the wait added to its own stop of about 26 seconds, with a margin.
+Whether five seconds is enough to lose no request across a real release is unmeasured; the
+consuming stack's release measures it, with a poll every 250 milliseconds. The front door drains
+its node instead ([The front door](#the-front-door)).
 
-`envoy-dispatch` itself is not yet safe at more than one concurrent process: its two delivery
-consumers are exclusive push durables, so a second process logs a bind error for as long as it
-runs, its SSE broker and its live document rooms are per-process, its outbox publisher claims no
-row before it publishes, and several of its loops are written for the one process that runs them,
-so a second copy runs them again. The component carries the capability and leaves the default at
-1; raising a production deployment above it waits on that separate work.
+Above one replica the app runs that many `envoy-dispatch` processes against one Postgres and one
+NATS, and a rolling update runs the previous build beside the new one: "Running more than one
+process" in `packages/envoy/cmd/dispatch/README.md` holds the preconditions. The component meets
+the first, since every pod reads the one `DISPATCH_SIGNING_KEY` in the Secret
+`<hostname>-dispatch`. The second bounds what a migration may change, since the rolling update
+runs the new image's migrations while the previous build is still serving: "Database migrations"
+in the same README holds the rule. Each process closes a client connection after its next response
+once the connection is 60 seconds old, so after a roll the front door's and the in-cluster
+callers' keep-alive connections spread onto the pods that have just come up.
+
+Every container reads its environment once, at start, and Dispatch reads the Azure key file and
+the NATS seed once, at boot, as the listener reads the seed, so a pod boots on a secret's new value
+only when it restarts. The component's own Secrets restart their readers by themselves: each pod
+template carries a `checksum/<secret>` annotation holding the resourceVersion of every component
+Secret its environment reads, `<hostname>-dispatch` and `<hostname>-listener` on the app,
+`<hostname>-listener` on the listener and `<hostname>-tailnet-auth-key` on the front door. The
+Kubernetes provider replaces a Secret whose data changes, so a new value (a new
+`signInClientSecret` or `tailnetAuthKey`, a replaced generated secret) gives the Secret a new
+resourceVersion and rolls the pods that read it once the new Secret exists, and an unchanged
+Secret never rolls a pod. The listener's bearer, `ENVOY_API_TOKEN` in `<hostname>-listener`, is on
+both templates, since the listener serves with it and `envoy-dispatch` sends it as `ENVOY_TOKEN`:
+the two Deployments roll in the same update, and until both have, a call from the app to a
+listener pod on the other token is refused. `DISPATCH_AGENT_TOKEN` is also the `agentToken`
+output, so a consumer that hands it to its agents passes them the new value too.
+`<hostname>-tailnet-tls` carries no checksum: a renewed certificate rolls no pod.
+
+The projected tokens need no restart either: the kubelet rewrites them in place, and Dispatch
+reads the broker token on every call and the keyless Azure form's token on every exchange with
+Entra. The secrets the component does not own carry no checksum, so after rotating one, restart
+the Deployments that read it, once the synced Kubernetes Secret or the mounted file holds the new
+value:
+
+- the NATS seed: the app's `envoy-dispatch` and the listener's `envoy-listener` each read it once,
+  at start
+  (`kubectl -n <namespace> rollout restart deployment/<hostname> deployment/<hostname>-listener`);
+- the GitHub App key and the Azure key: the app alone reads them
+  (`kubectl -n <namespace> rollout restart deployment/<hostname>`). Rotate the App key by adding a
+  new key to the App and writing it to the Secret Manager secret SecretSync copies, restarting the
+  app, and only then deleting the old key from the App: GitHub accepts every key the App holds,
+  and a pod keeps signing with the key it booted with until it restarts.
+
+The front door reads none of these. A region change replaces the component's networked
+resources. Keep `deletionProtection` enabled outside deliberate teardown-and-rebuild work:
+deleting the Cloud SQL instance deletes its backups. A teardown therefore takes an `up` with
+`deletionProtection: false` before `destroy`.
 
 To inspect pending migrations before an image update, run the image with the deployment's service
 account and `DATABASE_URL` from its Secret:
@@ -476,6 +610,76 @@ kubectl -n dispatch run census --rm -it --restart=Never --image=<envoyImage> \
   --command -- /usr/local/bin/envoy-dispatch census
 ```
 
+### The front door
+
+The front door's `frontDoorReplicas` pods each run a tailnet node of their own, registered under
+the pod's name (`TS_HOSTNAME` from `metadata.name`), and all of them host one Tailscale Service,
+`svc:<hostname>`, so `https://<hostname>.<tailnetDnsName>` and the SOCKS5 proxy answer while any
+one pod serves. No node holds the name `<hostname>`: it belongs to the Service. Each pod keeps its
+node's state (machine key, node key, certificate cache) on its own `emptyDir`, with
+`TS_KUBE_SECRET` set empty so containerboot keeps no Kubernetes state Secret, which every pod would
+share: a restarted `tailscale` container comes back as the same node, and a new pod is a new node.
+Every container of the pod runs as uid 999, since tailscaled writes its state and certificate
+cache readable by its own uid alone and grants LocalAPI write access to its own uid, and drops
+every Linux capability, since tailscaled runs in userspace.
+
+`tailnetAuthKey` is the key each new node logs in with, once (`TS_AUTH_ONCE`). Mint it reusable,
+since every new pod logs in with it; preauthorized, since a node waiting for an admin's approval
+never serves; ephemeral, so the control server removes the node of a pod that died without its
+logout; and with `tags`, which the Service's auto-approval names. Note its expiry and re-mint it
+before then, since a pod started after it cannot join: a new `tailnetAuthKey` replaces the Secret
+`<hostname>-tailnet-auth-key` and rolls the front door through its checksum. The Service must
+exist in the tailnet, with an auto-approval in the tailnet policy for `tags`, before an apply
+creates the pods (`tailnetService`, above).
+
+No pod advertises the Service by itself (`TS_EXPERIMENTAL_SERVICE_AUTO_ADVERTISEMENT` is `false`).
+Each pod's advertiser, a script on the Tailscale image in a container of its own, advertises it
+once the pod's certificate gate lets it (below), watches every 5 seconds for the control server's
+approval, then orders the Service name's certificate (up to 6 failed orders, with a jittered
+backoff; a pod whose orders are spent drains the Service and stays unready), and writes the ready
+file once the node is approved and tailscaled holds the certificate. The `tailscale` container's
+readiness probe passes only while that file exists, so a pod counts toward a rolling update and
+the budget, and receives SOCKS5 traffic, only while it hosts the Service. A node still unapproved
+after 120 seconds is drained, and advertised again 15 seconds later, its bound doubling up to 16
+minutes: that recovers a node that advertised before the Service existed. The advertiser removes
+the ready file and starts over when the node changes, logs out or stops advertising the Service.
+
+Every pod serves the Service name's certificate, and Let's Encrypt issues at most 5 certificates
+for one exact set of names in 7 days, from every account together
+([Rate limits](https://letsencrypt.org/docs/rate-limits/)). tailscaled caches the certificate in
+its state directory and renews it at two thirds of its life, but a new pod starts with an empty
+`emptyDir`, so without more every roll would order one per pod. The Secret
+`<hostname>-tailnet-tls` keeps one for the pods instead:
+
+- `cert-seed`, an init container on the Tailscale image, copies the published certificate, its key
+  and the ACME account key into tailscaled's cache before tailscaled starts;
+- the claim gate, in `cert-publish`, lets the pod advertise only with a certificate for the
+  Service's name more than 31 days from its end (one no pod renews yet), cached or published, or
+  with one of 3 claims per 7 days recorded in the Secret's `legion.dev/certificate-claims`
+  annotation, each write conditional on the resourceVersion it read so two pods never take one
+  claim. Three leaves room under Let's Encrypt's five for an operator's own order or a retried
+  apply. A pod that finds no claim left does not advertise, so orders nothing, and stays unready,
+  asking again every 30 seconds. The gate also records each pod's node in the
+  `legion.dev/front-door-nodes` annotation;
+- `cert-publish`'s loop, every 60 seconds, writes the pod's own cached certificate into the Secret
+  when it ends later than the published one for the same name, so the next pod finds it.
+
+Every front-door pod runs tailscaled's SOCKS5 proxy on `0.0.0.0:1055`, and the Service
+`<hostname>-tailnet` sends the app's and the listener's NATS connections to whichever pods are
+ready. Readiness, which hosting the Service decides, gates the proxy too, so a pod that cannot
+host the Service (its claims spent, the Tailscale Service missing or unapproved) also carries no
+NATS traffic. That coupling is accepted: in steady state at least one pod is ready, and the SOCKS5
+path is to give way to an in-cluster NATS Service.
+
+The front door's grace period is 60 seconds. Its `tailscale` container's preStop hook takes the
+node out of the Service and off the tailnet before the pod goes, so a replaced pod leaves no
+offline node approved behind: it marks the node as draining and removes the ready file, runs
+`tailscale serve drain svc:<hostname>` (at most 5 seconds), waits 20 seconds for clients to stop
+choosing this host (containerboot's own figure: about 15 for the control server to choose a new
+primary and 5 to spare), and runs `tailscale logout` (at most 5 seconds). Those 30 seconds and
+containerboot's own shutdown, at most 25, leave 5 seconds of the 60 for tailscaled to exit before
+the kubelet's SIGKILL.
+
 ### First deployment
 
 The first Google Cloud deployment proves the Autopilot admission of both native sidecars, the
@@ -484,6 +688,37 @@ tailnet Serve for HTTPS, SSE and websockets, the SOCKS5 connection to the hub, t
 user, and the exec-plugin credentials on the machine that runs Pulumi. It also verifies that the
 pod is ready, Dispatch reports a schema version, the site signs in through the configured client,
 and the database retains backups and point-in-time recovery.
+
+### Moving from a single front-door node
+
+A deployment applied before the front door hosted a Tailscale Service runs one front-door pod
+whose node holds the name `<hostname>` and keeps its state in the runtime Secret
+`<hostname>-tailscale-state`. The move is an outage, from the moment the old node is gone until a
+new pod hosts the Service. The update itself deletes the Role and RoleBinding
+`<hostname>-tailscale-state` and changes Deployment `<hostname>-tailnet` in place, since its name
+and selector are unchanged. Before it:
+
+1. Delete the tailnet machine that holds the name `<hostname>`: Tailscale refuses a Service whose
+   name a machine holds. Dispatch is off the tailnet from here on.
+2. Declare `svc:<hostname>` in the tailnet, with an auto-approval in the tailnet policy for the
+   front door's `tags`, and pass the Service's `Name` output as `tailnetService`.
+3. Set `frontDoorToolsImage`, and give `tailnetAuthKey` a key minted as the front door needs it
+   ([The front door](#the-front-door)).
+4. Optionally seed `<hostname>-tailnet-tls`, so the first pods order no certificate; unseeded,
+   they spend one or two of the three weekly claims. The component creates that Secret empty, and
+   its provider does not adopt one made by hand, so create it first with an update that targets it
+   alone (`pulumi up --target '<the Secret's URN>'`), then write into it, from
+   `<hostname>-tailscale-state`, the value of `<hostname>.<tailnetDnsName>.crt` as `tls.crt`,
+   `<hostname>.<tailnetDnsName>.key` as `tls.key` and `acme-account.key.pem` as
+   `acme-account.key.pem` (the keys tailscaled writes them under in a Kubernetes state Secret).
+   The component ignores the Secret's contents, so the full update keeps them.
+5. Before the update that sets `appPdbMinAvailable`, delete any budget made by hand named
+   `<hostname>` (`kubectl -n <namespace> delete pdb <hostname>`): the component's app budget takes
+   that name, and its provider does not adopt an object that already exists.
+6. Back up, then delete, the runtime Secret `<hostname>-tailscale-state`, which Pulumi never owned
+   and no pod reads any more.
+7. Before switching `databaseAvailabilityType` in the same update, set `databaseTier` to the tier
+   the instance actually runs, so the instance update does not also resize it.
 
 ### YAML
 
@@ -501,9 +736,11 @@ resources:
       tailnetDnsName: example-tailnet.ts.net
       tags: [tag:example-dispatch]
       tailnetAuthKey: ${tailnetAuthKey}
+      tailnetService: ${tailnetService.name}
       envoyImage: example/envoy@sha256:<digest>
       tailscaleImage: example/tailscale@sha256:<digest>
       cloudSqlProxyImage: example/cloud-sql-proxy@sha256:<digest>
+      frontDoorToolsImage: example/envoy@sha256:<digest>
       natsUrl: ${hub.natsUrl}
       natsSeedSecret: projects/example-project/secrets/example-nats-seed
       signInClientId: <client-id>

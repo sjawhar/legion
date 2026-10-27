@@ -12,24 +12,59 @@
   loopback, `8766` and the `cloud-sql-proxy` sidecar's `5432`.
 - `envoy-infra:gcp:Dispatch` takes `appCpu` and `appMemory`, the Kubernetes quantities that size
   the app Deployment's `envoy-dispatch` container as both its request and its limit: 1 CPU and
-  `4Gi` by default, the size it always had, so a deployment that sets neither renders the same pod.
-  The `cloud-sql-proxy` sidecar, the front door and the listener keep their sizes. The component
-  refuses, naming the input, a value that is not a quantity or is empty, a decimal exponent
-  outside `e-9` to `e18`, and a size at which GKE Autopilot would not run the app pod (the two
-  containers' sum) as rendered: below `500m` or `512Mi` or outside 1 to 6.5 GiB of memory per
-  CPU, which Autopilot raises, or above 30 CPU or `110Gi`, which it rejects. On a cluster without
-  Pod bursting Autopilot also rounds the pod's CPU up to a multiple of 250m.
-- `envoy-infra:gcp:Dispatch` takes `appPriorityClassName` and `appPdbMinAvailable`, which protect
-  the app Deployment's pods from being displaced, so a deployment sets both in its program rather
-  than by hand. `appPriorityClassName` is the app pod's `priorityClassName`, naming a PriorityClass
-  that already exists in the cluster; the component reads the class and the app Deployment waits
-  on the read, so a missing class fails the preview or update rather than leaving the one app pod
-  stopped and its replacement refused. `appPdbMinAvailable` registers a PodDisruptionBudget named
-  for the app, over its pods alone, with that `minAvailable` and Kubernetes' default
-  `unhealthyPodEvictionPolicy`, so a drain waits for the app. The front door and the listener are
-  unchanged, and with neither set the component renders what it always did. The component
-  refuses, naming the input, an `appPriorityClassName` that is empty, not a DNS subdomain or in
-  the reserved `system-` prefix, and an `appPdbMinAvailable` below 1 or above `replicas`.
+  `4Gi` by default, the size it always had, so a deployment that sets neither renders the same
+  container. The `cloud-sql-proxy` sidecar is sized by `proxyCpu` and `proxyMemory` (below), and
+  the front door and the listener keep their sizes. The component refuses, naming the input, a
+  value that is not a quantity, is empty or is not above 0, a decimal exponent outside `e-9` to
+  `e18`, and a size at which GKE Autopilot would not run the app pod (the two containers' sum) as
+  rendered: below `500m` or `512Mi` or outside 1 to 6.5 GiB of memory per CPU, which Autopilot
+  raises, or above 30 CPU or `110Gi`, which it rejects. On a cluster without Pod bursting
+  Autopilot also rounds the pod's CPU up to a multiple of 250m.
+- `envoy-infra:gcp:Dispatch` takes `proxyCpu` and `proxyMemory`, the Kubernetes quantities that
+  size the app pod's `cloud-sql-proxy` sidecar as both its request and its limit, so a deployment
+  sizes the proxy every database call of the pod passes through. They default to 1 CPU and `2Gi`
+  (see Changed), and the component judges them with `appCpu` and `appMemory` against Autopilot's
+  bounds for the pod's sum, refusing them as it refuses those, each refusal naming the inputs.
+- `envoy-infra:gcp:Dispatch` takes `priorityClassName`, `appPdbMinAvailable`,
+  `frontDoorPdbMinAvailable` and `listenerPdbMinAvailable`, which protect the pods from being
+  displaced, so a deployment sets them in its program rather than by hand. `priorityClassName` is
+  the `priorityClassName` of every pod of the three Deployments (the app, the front door and the
+  listener), naming a PriorityClass that already exists in the cluster; the component reads the
+  class once and all three Deployments wait on the read, so a missing class fails the preview or
+  update rather than leaving a one-pod workload stopped and its replacement refused. Each
+  `*PdbMinAvailable` registers a PodDisruptionBudget named for its Deployment (`<hostname>`,
+  `<hostname>-tailnet`, `<hostname>-listener`), over that Deployment's pods alone, with that
+  `minAvailable` and Kubernetes' default `unhealthyPodEvictionPolicy`, so a drain waits for that
+  workload. A pod template whose Deployment has a budget no longer carries the cluster
+  autoscaler's `safe-to-evict: "false"` annotation, since the budget bounds the autoscaler's
+  evictions too; a template with no budget keeps it. With none set the component renders no class
+  and no budget. The component refuses, naming the input, a `priorityClassName` that is empty, not
+  a DNS subdomain or in the reserved `system-` prefix, and a budget below 1 or above its
+  Deployment's replica count. A budget made by hand under one of those names must be deleted
+  before the update that sets its input, since the component's provider does not adopt it.
+- `envoy-infra:gcp:Dispatch` takes `frontDoorReplicas`, the front door's pod count, 2 by default,
+  and `listenerReplicas`, the listener's, 1 by default, each refused below 1. The front door runs
+  two by default, since with one pod every node drain, upgrade or scale-down that moves it takes
+  Dispatch off the tailnet until its replacement is ready. Raise `listenerReplicas` above 1 only on
+  an envoy image whose listener holds a delivery lease, where a standby pod is ready and serves
+  `/v1` while only the lease holder delivers.
+- `envoy-infra:gcp:Dispatch` takes `databaseAvailabilityType`, the Cloud SQL instance's
+  availability type: `ZONAL`, the default and the instance's value until now, or `REGIONAL`, a
+  standby in a second zone that Cloud SQL fails over to; anything else is refused by name.
+  Switching changes the instance in place, since the bridged Terraform provider declares
+  `settings.availability_type` without ForceNew: Cloud SQL restarts the instance once, and the
+  change cannot be stopped once started. `REGIONAL` roughly doubles the instance's cost.
+- `envoy-infra:gcp:Dispatch`'s front door runs `frontDoorReplicas` pods that host one Tailscale
+  Service, `svc:<hostname>`, each pod its own tailnet node, registered under the pod's name with its
+  state on an `emptyDir`, so `https://<hostname>.<tailnetDnsName>` and the SOCKS5 proxy the app and
+  the listener reach NATS through answer while any one pod serves. A pod advertises the Service
+  only through its advertiser, is ready only while it hosts the Service, and on stopping drains the
+  Service, waits 20 s and logs its node out inside a 60 s grace period. The Service's certificate
+  is kept in the Secret `<hostname>-tailnet-tls`, which a new pod seeds its cache from and the pods
+  publish a later certificate to, and a pod with no certificate more than 31 days from its end takes
+  one of 3 claims per 7 days recorded on that Secret before it may order one, under Let's Encrypt's
+  5 per name per week. `cert-publish` runs on `frontDoorToolsImage`; see the Breaking entry under
+  Changed for the move.
 - Dispatch writes one access-log line per served request, so the callers behind a load spike can
   be named: `dispatch: request` at INFO when the request ends, with the method, the route's own
   pattern, the escaped request path, the caller (a person's email, a bearer's session, a personal
@@ -796,6 +831,56 @@
 
 ### Changed
 
+- **Breaking:** `envoy-infra:gcp:Dispatch` takes two new required inputs: `tailnetService`, the
+  Tailscale Service the front door hosts, which must resolve to `svc:<hostname>` (pass the `Name`
+  output of the consumer's `tailscale.Service`, so the Serve ConfigMap and the front door wait for
+  the Service), and `frontDoorToolsImage`, the digest-pinned image `cert-publish` runs on, which
+  must carry `/bin/sh`, `curl`, `openssl` 3, `base64`, GNU `date`, `sed`, `grep` and `tr` (the
+  envoy image does). The front door's shape changed: its pods run as a ServiceAccount of their own,
+  `<hostname>-tailnet`, whose Role `<hostname>-tailnet-tls` writes only the certificate Secret; the
+  Role `<hostname>-tailscale-state` is gone; and a Tailscale Service holds the name `<hostname>`
+  rather than a node. Moving takes steps before the update ("Moving from a single front-door node"
+  in `packages/envoy/infra/README.md`): delete the tailnet machine that holds `<hostname>`, declare
+  `svc:<hostname>` with an auto-approval for the front door's tags, optionally seed
+  `<hostname>-tailnet-tls`, delete a hand-made budget named `<hostname>`, and back up, then delete,
+  the runtime Secret `<hostname>-tailscale-state`. The move is an outage while the old node is gone
+  and the new pods come up. The defaults changed size too: `databaseTier` is `db-custom-4-15360`
+  (was `db-custom-1-3840`) and the `cloud-sql-proxy` sidecar 1 CPU and `2Gi` (was `200m` and
+  `256Mi`), so a deployment that relied on either default changes size on its next update; set
+  `databaseTier` to the tier the instance runs to keep it.
+- `envoy-infra:gcp:Dispatch` defaults `databaseTier` to `db-custom-4-15360` (4 vCPU, 15 GB), whose
+  default `max_connections` of 500 holds 15 app pods at the 32 connections each pod's pools open,
+  so up to 14 replicas roll inside it; the previous `db-custom-1-3840` (100 connections) held
+  three. It defaults the `cloud-sql-proxy` sidecar to 1 CPU and `2Gi`, the proxy's own sidecar
+  example's size for one pod's pools, through whose TLS every database call passes; with the app's
+  defaults the pod requests 2 CPU and `6Gi`.
+- `envoy-infra:gcp:Dispatch` takes each Deployment's update strategy from its own replica count:
+  `Recreate` at one pod, since a roll would run two builds side by side, and `RollingUpdate` with
+  `maxUnavailable: 0` and `maxSurge: 1` above one, so a new pod is ready before an old one goes
+  down. The front door and the listener were always recreated; the front door, at its default of
+  two pods, now rolls.
+- `envoy-infra:gcp:Dispatch` spreads each Deployment's pods: required pod anti-affinity on
+  `kubernetes.io/hostname`, so a node holds at most one, and a `topology.kubernetes.io/zone` spread
+  with `maxSkew: 1`, `DoNotSchedule` and `minDomains: 2`, without which Autopilot, which creates
+  nodes on demand, could place two pods in one zone.
+- `envoy-infra:gcp:Dispatch` gives every serving container a startup and a liveness probe that
+  fails only when the process does not answer: `envoy-dispatch` and `envoy-listener` run curl
+  without `-f` against their `/healthz`, so a 503 while Postgres or NATS is down restarts no pod,
+  and `envoy-dispatch`'s startup allows 30 minutes for its migrations; `cloud-sql-proxy` runs with
+  `--health-check` and is probed on `/startup` and `/liveness` on port 9801; and the front door's
+  `tailscale` container's liveness asks its LocalAPI. The listener's readiness probe allows 6 s,
+  and the listener waits 5 s before it stops, inside a 35 s grace period.
+- `envoy-infra:gcp:Dispatch` rolls the pods that read one of its own Secrets when that Secret
+  changes: each pod template carries `checksum/<secret>`, the resourceVersion of
+  `<hostname>-dispatch` and `<hostname>-listener` on the app, `<hostname>-listener` on the
+  listener and `<hostname>-tailnet-auth-key` on the front door, so a rotated value no longer needs
+  a `kubectl rollout restart`. The NATS seed, the GitHub App key and the Azure key, which the
+  component does not own, still do.
+- Dispatch closes a client connection after its next response once the connection is 60 s old
+  (`Connection: close`), except a request carrying `Upgrade`, a websocket handshake. kube-proxy
+  and the front door spread load per connection, so while callers reuse keep-alive connections a
+  process that has just rolled in gets little traffic; the client's new connection is spread across
+  every ready process.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
