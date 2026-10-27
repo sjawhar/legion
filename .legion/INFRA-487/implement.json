@@ -2,33 +2,38 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-487",
-  "completed": "2026-10-26T22:37:06Z",
-  "round": 6,
+  "completed": "2026-10-27T03:20:28Z",
+  "round": 7,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2269",
-  "scope": "Review round 2 (f9927a54), narrowed by the INFRA-115 architect (envoy 950e6073) to its one finding: index the latest broker_serving row and show enrollment_lease_live's lookup uses it. Main not merged: GitHub reports MERGEABLE.",
-  "answersReview": [
-    "Thread PRRT_kwDORFy7ds6weu7O (enrollment_lease_live's read of the latest row is not an indexed lookup): migration 0019 (unreleased) creates broker_serving_latest on broker_serving (last_serving_at desc), with one header sentence. Fixed in e847db82."
-  ],
+  "scope": "Conflict return (architect, envoy b06a012e): forward merge of main only, no change to the change; the PR body's Fast-follow line now points at INFRA-585.",
+  "merge": {
+    "oldHead": "e96d10c0307162478acf42443919f7384570bd33",
+    "newHead": "015a2e699f652d224db3e9c47774c51e2fb21946",
+    "base": "main@origin d64c4073",
+    "fingerprintBefore": "f265f321824ec11f926320d38b0f5a04bb4778b1a534e085d36af5e2c9ba0efd",
+    "fingerprintAfter": "f265f321824ec11f926320d38b0f5a04bb4778b1a534e085d36af5e2c9ba0efd",
+    "verdict": "unchanged",
+    "conflicts": ["packages/envoy/CHANGELOG.md [Unreleased] Fixed: both entries kept (INFRA-487's and main's envoy-infra integer-input entry)"],
+    "comment": "https://github.com/sjawhar/legion/pull/2269#issuecomment-6432909601"
+  },
   "proof": [
     {
-      "criterion": "enrollment_lease_live's read of the latest broker_serving row is an index lookup",
-      "surface": "Postgres 16.4, a throwaway database with migration 0019 applied by psql and 5050 broker_serving rows spread over the last hour, then dropped",
-      "command": "psql -d zzidx -f packages/envoy/internal/broker/store/migrations/0019_broker_serving.up.sql; insert 5050 rows; analyze; explain (analyze, costs off) select last_serving_at, not_serving_after from broker_serving order by last_serving_at desc limit 1; \\timing; select count(*) from generate_series(1,20000) g where not enrollment_lease_live(now() - interval '1 minute' - g * interval '1 microsecond')",
-      "observed": "Limit -> Index Scan using broker_serving_latest on broker_serving (actual rows=1), Execution Time 0.032 ms; 20000 per-row calls of enrollment_lease_live: 300.905 ms",
-      "headSha": "e847db828666799901873c4153869309b7f170b9",
-      "negativeControl": "the same after drop index broker_serving_latest: Limit -> Sort (top-N heapsort) -> Seq Scan on broker_serving (rows=5050), Execution Time 1.860 ms; the 20000 calls took 35109.684 ms"
+      "criterion": "The forward merge leaves the change itself unchanged and the branch mergeable",
+      "surface": "the merged tree in the issue workspace and GitHub's mergeability",
+      "command": "jj diff --from \"fork_point(\\\"main\\\"@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at e96d10c0 and at 015a2e69; gh pr view 2269 --json mergeable",
+      "observed": "fingerprint f265f321... at both heads (unchanged); GitHub reports MERGEABLE",
+      "headSha": "015a2e699f652d224db3e9c47774c51e2fb21946",
+      "negativeControl": "before the merge GitHub reported CONFLICTING / DIRTY at e96d10c0"
     },
     {
-      "criterion": "The migration set and the serving clock still pass",
-      "surface": "in-process broker store and enroll packages on real Postgres",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=... go test -count=1 -v -skip TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken ./internal/broker/store ./internal/broker/enroll",
-      "observed": "ok store (15.4s), ok enroll (70.4s); 0 FAIL, 0 SKIP",
-      "headSha": "e847db828666799901873c4153869309b7f170b9",
+      "criterion": "Bare gates at the merged head",
+      "surface": "Go build and the broker store, enroll and config suites on real Postgres; the daemon's agentsecrets package",
+      "command": "cd packages/envoy && go build ./... && go vet ./internal/broker/... ./cmd/broker && BROKER_TEST_DATABASE_URL=... go test -count=1 -v -skip TestOpenSignsEveryNewConnectionInWithAFreshlyMintedToken ./internal/broker/store ./internal/broker/enroll ./internal/broker/config; cd packages/daemon && go build ./... && go test -count=1 ./internal/agentsecrets",
+      "observed": "build and vet clean; store, enroll, config ok, 0 FAIL, 0 SKIP; agentsecrets ok; migrations still end at 0019 (main added none)",
+      "headSha": "015a2e699f652d224db3e9c47774c51e2fb21946",
       "negativeControl": "the outage acceptance test is unchanged since 301addfd, where it failed on eee16056 with PROOF_INVALID not live and passed with 0 skips"
     }
   ],
-  "filesChanged": [
-    "packages/envoy/internal/broker/store/migrations/0019_broker_serving.up.sql (broker_serving_latest index, one header sentence)"
-  ],
+  "filesChanged": ["merge commit 015a2e69 (packages/envoy/CHANGELOG.md resolution only)"],
   "openQuestions": []
 }
