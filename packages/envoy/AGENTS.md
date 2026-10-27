@@ -1548,10 +1548,12 @@ taken. A stored row whose text the version does not hold (indexed at an older ve
 changed) and whose live text it does not hold either is still recorded deleted at it. A live block
 only an unsettled edit made is not indexed until the reopen's settlement writes the version that
 holds it, so block history names only versions that hold a block's text. The loop remembers a
-skipped document and counts it again without reading it while its latest version, its pending
-settlement's `marked_at` (which every update append moves) and whether its issue is open stay as
-they were and this server holds no room for it: a close can leave the version, the mark and the
-room as they were, and a closed issue's document is indexed, not skipped. An item is
+skipped document only when its listing read the issue open, and counts it again without reading
+it while its latest version and its pending settlement's `marked_at` (which every update append
+moves) stay as they were, the listing still reads the issue open, and this server holds no room
+for it: the listing reads the issue with no lock while the skip is decided under the owner lock,
+a close can leave the version, the mark and the room as they were, and a closed issue's document
+is indexed, not skipped. An item is
 re-read `for no key update` and re-indexed with this build's grammar (`refs.ReindexOwedItem`), a
 new edge taking the time its text was written and no `source_seq`; its owed row is deleted only
 while it holds the `enqueued_at` the tick listed, so an edit that lands meanwhile leaves the item

@@ -106,10 +106,14 @@ type Service struct {
 	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
 	// window.
 	afterEditNoticeIDs func(ids []string)
-	rooms              sync.Map
-	shutdownRooms      sync.Map
-	nextConnection     atomic.Uint64
-	stopping           atomic.Bool
+	// afterBlockIndexListed runs once a block-index tick has listed its owed documents, with no
+	// lock held, and before it reads or locks the first. Nil outside tests; tests use it to reopen
+	// an issue in that window.
+	afterBlockIndexListed func()
+	rooms                 sync.Map
+	shutdownRooms         sync.Map
+	nextConnection        atomic.Uint64
+	stopping              atomic.Bool
 	// quiescing holds off every settlement while Quiesce empties the rooms, so a timer that
 	// fires mid-quiesce cannot re-arm the room Quiesce just closed.
 	quiescing atomic.Bool

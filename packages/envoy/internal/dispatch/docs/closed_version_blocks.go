@@ -268,19 +268,8 @@ func (m *versionMatch) claimRows(indexed []indexedBlock) {
 // copy an edit typed would take an original's id and history, so its copies are left to
 // pairLeftovers.
 func (m *versionMatch) alignGaps(anchors [][2]int) {
-	versionCopies := map[string]int{}
-	for at, index := range m.versionUntyped {
-		if m.ids[index] == "" {
-			versionCopies[m.versionKeys[at]]++
-		}
-	}
-	liveCopies := map[string]int{}
-	for at, index := range m.liveUntyped {
-		if !m.used[m.liveBlocks[index].ID] {
-			liveCopies[m.liveKeys[at]]++
-		}
-	}
-	repeated := func(key string) bool { return versionCopies[key] > 1 || liveCopies[key] > 1 }
+	versionLeft, liveLeft := m.leftovers()
+	repeated := func(key string) bool { return len(versionLeft[key]) > 1 || len(liveLeft[key]) > 1 }
 	var gapVersion, gapLive []string
 	var gapVersionAt, gapLiveAt []int
 	fromVersion, fromLive := 0, 0
@@ -308,6 +297,24 @@ func (m *versionMatch) alignGaps(anchors [][2]int) {
 	}
 }
 
+// leftovers groups, by type and text, the version's untyped blocks that have no id and the live
+// untyped blocks whose id no block has taken, each in document order, as indexes into offsets and
+// into liveBlocks.
+func (m *versionMatch) leftovers() (versionLeft, liveLeft map[string][]int) {
+	versionLeft, liveLeft = map[string][]int{}, map[string][]int{}
+	for at, index := range m.versionUntyped {
+		if m.ids[index] == "" {
+			versionLeft[m.versionKeys[at]] = append(versionLeft[m.versionKeys[at]], index)
+		}
+	}
+	for at, index := range m.liveUntyped {
+		if !m.used[m.liveBlocks[index].ID] {
+			liveLeft[m.liveKeys[at]] = append(liveLeft[m.liveKeys[at]], index)
+		}
+	}
+	return versionLeft, liveLeft
+}
+
 // pairLeftovers pairs, for each type and text, the version's untyped blocks and the live untyped
 // blocks still unmatched that hold it, in order - the first with the first, and so on - where both
 // sides hold equally many, and never gives an id a block has taken. A text held more than once
@@ -317,18 +324,7 @@ func (m *versionMatch) alignGaps(anchors [][2]int) {
 // block: one an edit moved across others, in a document with no row to name it, matches no block
 // within its gap.
 func (m *versionMatch) pairLeftovers() {
-	versionLeft := map[string][]int{}
-	for at, index := range m.versionUntyped {
-		if m.ids[index] == "" {
-			versionLeft[m.versionKeys[at]] = append(versionLeft[m.versionKeys[at]], index)
-		}
-	}
-	liveLeft := map[string][]int{}
-	for at, index := range m.liveUntyped {
-		if !m.used[m.liveBlocks[index].ID] {
-			liveLeft[m.liveKeys[at]] = append(liveLeft[m.liveKeys[at]], index)
-		}
-	}
+	versionLeft, liveLeft := m.leftovers()
 	for key, left := range versionLeft {
 		holding := liveLeft[key]
 		if len(holding) != len(left) {

@@ -1443,6 +1443,51 @@ func TestBlockIndexRereadsALiveAheadDocumentWhoseIssueCloses(t *testing.T) {
 	}
 }
 
+// The listing reads whether a document's issue is open with no lock, and live ahead is decided
+// under the owner row's lock, so the two can disagree. A tick lists a closed issue's live-ahead
+// document; the issue reopens before the tick locks it, so the lock finds it live ahead and the
+// tick skips it, remembering nothing it listed closed. The issue then closes again with no new
+// mark, and the next tick of the same loop reads it again and indexes it as a closed issue's
+// document.
+func TestBlockIndexRemembersNoLiveAheadDocumentItListedClosed(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	spec := createOwedDocument(t, database, service, "", "spec", "Live text.\n", "Earlier text.\n")
+	closeDocumentRoom(t, service, spec)
+	setClosed := func(closed bool) {
+		t.Helper()
+		statement := `update issues set closed_at = null where key = 'CORE-1'`
+		if closed {
+			statement = `update issues set closed_at = now() where key = 'CORE-1'`
+		}
+		if _, err := database.Pool.Exec(ctx, statement); err != nil {
+			t.Fatalf("set CORE-1 closed %v: %v", closed, err)
+		}
+	}
+	setClosed(true)
+	service.afterBlockIndexListed = func() { setClosed(false) }
+	liveAhead := liveAheadDocuments{}
+	first, err := service.ReconcileBlockIndex(ctx, "", liveAhead)
+	service.afterBlockIndexListed = nil
+	if err != nil {
+		t.Fatalf("block index tick: %v", err)
+	}
+	if first.LiveAhead != 1 || first.Documents != 0 {
+		t.Fatalf("first tick = %#v, want the document listed closed, locked open and skipped as live ahead", first)
+	}
+	if found, remembered := liveAhead[spec]; remembered {
+		t.Errorf("the loop remembers %#v, which it listed with its issue closed, want nothing", found)
+	}
+	setClosed(true)
+	second, err := service.ReconcileBlockIndex(ctx, "", liveAhead)
+	if err != nil {
+		t.Fatalf("block index tick: %v", err)
+	}
+	if second.Documents != 1 || second.LiveAhead != 0 || second.OwedDocuments != 0 {
+		t.Fatalf("second tick = %#v, want the closed issue's document read again and indexed", second)
+	}
+}
+
 // writeAsAnOlderBuild writes the document's next version as a build without the block index does:
 // the edit (from replaced by to in a text of the live document) reaches the store through the room,
 // and its settlement writes the version, the document's reference to CORE-2 with the old grammar,

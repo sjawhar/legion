@@ -121,9 +121,12 @@ type owedDocument struct {
 // it was listed then. Every update appended to a document's store moves its pending settlement's
 // marked_at (markSettlementPending), and every version write moves its version, so a document
 // listed again with both unchanged, and its issue still open, still holds the stored live text a
-// tick found ahead: it is counted live ahead without being read or locked. A close can leave the
-// version, the mark and the room as they were, and a closed issue's document is indexed rather
-// than skipped, so one listed with its issue closed is read again. Only the store's text is
+// tick found ahead: it is counted live ahead without being read or locked. Only a listing that
+// reads the issue open uses it: the listing reads the issue with no lock, while live ahead is
+// decided under the owner row's lock, so an entry can carry a listed close that the lock saw
+// undone, and a close can leave the version, the mark and the room as they were. A closed issue's
+// document is indexed rather than skipped, so one listed with its issue closed is read again.
+// Only the store's text is
 // remembered: a room this server holds can be ahead of the store (an edit not yet appended) or
 // behind it (another process's append it has not yet been evicted for), so a document is neither
 // remembered nor taken from here while one is resident.
@@ -142,6 +145,9 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 	owed, err := s.owedDocuments(ctx, after)
 	if err != nil {
 		return tick, err
+	}
+	if s.afterBlockIndexListed != nil {
+		s.afterBlockIndexListed()
 	}
 	documentsFull := len(owed) == blockIndexDocumentBatch
 	liveAhead.forgetUnlisted(after, owed, documentsFull)
@@ -162,7 +168,9 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 				"artifact", document.id, "error", err)
 		case ahead:
 			tick.LiveAhead++
-			if cold && !document.markedAt.IsZero() && s.srv.GetDoc(document.id) == nil {
+			// Only a document the listing read open is remembered: the lock can have seen a reopen
+			// the listing missed, and stillLiveAhead reuses no entry listed closed.
+			if cold && document.open && !document.markedAt.IsZero() && s.srv.GetDoc(document.id) == nil {
 				liveAhead[document.id] = document
 			}
 		case indexed:
@@ -200,12 +208,13 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 	return tick, nil
 }
 
-// stillLiveAhead reports whether document, as listed now, is one liveAhead holds at the same
-// version, settlement mark and open issue, with no room of this server resident for it.
+// stillLiveAhead reports whether document, as listed now with its issue open, is one liveAhead
+// holds at the same version and settlement mark, listed open then too, with no room of this
+// server resident for it. A listing that reads the issue closed always reads the document again.
 func (s *Service) stillLiveAhead(liveAhead liveAheadDocuments, document owedDocument) bool {
 	found, ok := liveAhead[document.id]
-	return ok && found.version == document.version && found.markedAt.Equal(document.markedAt) &&
-		found.open == document.open && s.srv.GetDoc(document.id) == nil
+	return ok && document.open && found.open && found.version == document.version &&
+		found.markedAt.Equal(document.markedAt) && s.srv.GetDoc(document.id) == nil
 }
 
 // forgetUnlisted drops each document past after, up to the last of owed while the batch is full,
