@@ -1,0 +1,166 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-253",
+  "completed": "2026-10-27T04:13:49Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2229",
+  "codeHead": "9c51021b0b9dda25f493d0d68b29acd2897c63ee",
+  "proof": [
+    {
+      "criterion": "After the forward merge of main ef3a531d (#2270, CPU and memory limits on docker runs): the Stage 1 live proof still serves the daemon on a keeper's socket through LEGION_LISTEN_FD, restarts on the same port, and passes its holder check",
+      "surface": "pod, the real legion daemon under tmux 3.5a with the pod's Postgres",
+      "command": "LEGION_E2E_PG_DSN=<pod pg> bash scripts/e2e/stage1-skeleton.sh",
+      "observed": "stage 1 e2e: PASS; bash -n passes and shellcheck finds 0 findings, as at both parents; bun test scripts/e2e/lib 648 pass, 2 Docker-only nats-stream fails",
+      "headSha": "9c51021b0b9dda25f493d0d68b29acd2897c63ee",
+      "negativeControl": "a tmux first on PATH that is a script is refused before the daemon starts ('real_bin_path: mise which tmux failed'), as Stage 1 intends; the holder check's own control (keeper left out of the allowed set → exit 1) is recorded in the earlier entry"
+    },
+    {
+      "criterion": "Round 4 (review round 2): a misparsed --list (Playwright reads it as --grep's value, a real run) cannot get past the DISPATCH_E2E_REUSE_SERVERS refusal; a genuine listing still needs no harness",
+      "surface": "pod, real Playwright CLI evaluating e2e/playwright.config.ts; the harness through bun e2e/run.ts with Chromium and a scratch pgvector database",
+      "command": "cd packages/dispatch && bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list; FAKE_ENVOY_PORT=45999 bunx playwright test --config e2e/playwright.config.ts --grep-invert --list; bunx playwright test --config e2e/playwright.config.ts --grep --list; DATABASE_URL=<scratch> bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=chromium-plain-http e2e/fake-envoy.e2e.ts e2e/plain-http-proxy.e2e.ts e2e/plain-http-origin.e2e.ts e2e/smoke.e2e.ts",
+      "observed": "bare listing: 'Total: 11 tests in 4 files'; --grep --list with no port fails at preflight (ECONNREFUSED), targeting nothing; --list with every port and DISPATCH_E2E_REUSE_SERVERS=1 lists; the harness run: 7 passed",
+      "headSha": "b5139e26d69c6ad4528be7da037867b8cfea8348",
+      "negativeControl": "FAKE_ENVOY_PORT=45999 … --grep-invert --list → 'Error: This config starts no server, so it would run against whatever listens on 45999 (FAKE_ENVOY_PORT), …' (at c432d8ef the same argv skipped this refusal and reached preflight)"
+    },
+    {
+      "criterion": "Round 3 (review): a Playwright listing needs no harness; a non-listing bare run still refuses",
+      "surface": "pod, real Playwright CLI evaluating e2e/playwright.config.ts with no harness ports set",
+      "command": "cd packages/dispatch && bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list; bunx playwright test --config e2e/playwright.config.ts e2e/smoke.e2e.ts",
+      "observed": "the listing prints its rows and 'Total: 10 tests in 3 files' with no server started",
+      "headSha": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
+      "negativeControl": "the same bare invocation without --list → 'Error: The Dispatch e2e harness is not running: FAKE_ENVOY_PORT, … are unset … run it through e2e/run.ts'"
+    },
+    {
+      "criterion": "Round 3 (review): held-port.py exec --from works where the platform has no MSG_CMSG_CLOEXEC (darwin) and reads SO_ACCEPTCONN as non-zero",
+      "surface": "pod, real keeper and exec processes, with socket.MSG_CMSG_CLOEXEC removed before the script runs",
+      "command": "python3 held-port.py keep …; python3 nocloexec.py held-port.py exec --from <keeper sock> --fd-env TEST_FD -- python3 -c '<list /proc/self/fd; inspect fd 3>'; bun test scripts/e2e/lib/held-port.test.ts",
+      "observed": "TEST_FD=3 is a listening socket on the keeper's port, and no other descriptor of the helper reached the command; held-port.test.ts 5 pass",
+      "headSha": "c432d8ef102884a3e7751707556ec8f03fe38a4e",
+      "negativeControl": "before the fix, the same run raises AttributeError on socket.MSG_CMSG_CLOEXEC (reviewer's finding; the test's deletion reproduces darwin's missing constant)"
+    },
+    {
+      "criterion": "Round 2 (tester's fail): every changed test passes in the CI job that runs it — the pr-and-main test job's `bun test scripts/e2e/lib`",
+      "surface": "pod, the two scripts' real cleanup functions run by bun under set -u, as CI runs them",
+      "command": "bun test scripts/e2e/lib/smoke-cleanup.test.ts scripts/e2e/lib/stage3-4b13b-notes.test.ts; bun test scripts/e2e/lib",
+      "observed": "13 pass, 0 fail; the whole lib lane 516 pass, 2 fail, both nats-stream.test.ts rows that need Docker the pod lacks",
+      "headSha": "bd64de9846128dea7244472e02a6a91a36299424",
+      "negativeControl": "the two fixtures restored from main (no keeper pids declared): the tester's 5 rows fail with 'environment: line 43: daemon_keeper_pid: unbound variable'"
+    },
+    {
+      "criterion": "Round 2 (architect): record-casts.sh resolves the real gh as legion controller start does and refuses, naming it, when there is none",
+      "surface": "pod, the script's own real_gh function under env -i with real files on PATH",
+      "command": "env -i PATH=<dir with a gh script>:<dir with a gh binary> bash -c 'source <real_gh>; real_gh' and the other cases",
+      "observed": "a binary gh first is resolved; LEGION_GH_PATH naming an executable is used as given; the result goes into the operator shell's env -i as LEGION_GH_PATH",
+      "headSha": "bd64de9846128dea7244472e02a6a91a36299424",
+      "negativeControl": "a gh script first on PATH → 'FAIL setup: the first gh on PATH, …/a/gh, is a script, not the real gh, which legion controller start refuses'; no gh → 'gh is not on PATH'; a relative or non-executable LEGION_GH_PATH → refused"
+    },
+    {
+      "criterion": "A1b: a held port is never free between the harness choosing it and the server serving it (cmdtest.HoldPort replaces FreeTCPPort)",
+      "surface": "pod, real child process re-exec'd from the test binary on an inherited socket",
+      "command": "cd packages/envoy && go test -count=1 -v -run TestHeldPortStaysHeldUntilItsProcessServes ./internal/cmdtest ./listenfd",
+      "observed": "PASS: a competing net.Listen on the held address fails EADDRINUSE after Start and before the child serves; the child serves on the inherited fd; the address binds again after the child exits. listenfd refusal matrix (15 cases) and CheckAgainst matrix (31 cases) pass.",
+      "headSha": "3fb9e2a0d7e187a2493779e9bf15c2043779f5f1",
+      "negativeControl": "go test -overlay with HoldPort closing its socket before returning: FAIL cmdtest_test.go:87 'another listener bound 127.0.0.1:48742 after Start, before the child served; want address already in use'"
+    },
+    {
+      "criterion": "A1c: envoy-dispatch, envoy-listener and legion start serve on an inherited socket, refuse a bad one with no fallback bind, and log the bound address",
+      "surface": "pod, real binaries built from the tree; local Postgres 17 + pgvector and nats-server",
+      "command": "cd packages/envoy && go test -count=1 ./cmd/listener ./internal/config && DISPATCH_TEST_DATABASE_URL=<pod pg> go test -count=1 ./cmd/dispatch; cd packages/daemon && LEGION_TEST_PG_DSN=<pod pg> go test -count=1 ./cmd/legion/ && go test -run 'ScratchDispatch|TestRunServesTheSocketItIsHandedAndLogsItsAddress' ./internal/daemon/",
+      "observed": "ok for every package; TestDispatchServesOnTheListenSocketItInheritsWithNoAddressSet logs addr=127.0.0.1:<held port> and /healthz 200; TestListenerRefusesAnInheritedSocketOnEveryInterfaceWithoutCredentials refuses a 0.0.0.0 socket naming ENVOY_LISTEN_FD; TestStartRefusesAnInheritedSocketLegionYAMLDoesNotName refuses port/bind mismatch and a non-socket before any registry claim; the scratch-Dispatch outbox tests pass on a held socket with the retry loop deleted.",
+      "headSha": "3fb9e2a0d7e187a2493779e9bf15c2043779f5f1",
+      "negativeControl": "scratch Dispatch started with DISPATCH_PORT one above the held port: exits 1 with 'DISPATCH_PORT=19844 does not match DISPATCH_LISTEN_FD=3, a socket listening on 127.0.0.1:19843'; listener config mutated to skip the socket's address in the auth fence: the wildcard-socket test FAILs (listener served on 0.0.0.0 unauthenticated)"
+    },
+    {
+      "criterion": "A1e/S4a: held-port.py hands the server the held socket and nothing else keeps it; the Stage 1 live proof runs the real daemon on a kept port",
+      "surface": "pod, real envoy-listener and real legion daemon under tmux with a local Postgres",
+      "command": "bun test scripts/e2e/lib/held-port.test.ts; LEGION_E2E_PG_DSN=<pod pg> bash scripts/e2e/stage1-skeleton.sh",
+      "observed": "held-port.test.ts 5 pass (listener serves the port in the port file in the helper's own PID; competing bind before exec EADDRINUSE; exactly one close-on-exec holder; a missing command exits 127 and releases the port; keep + two exec --from listeners share one port, silent between them). stage 1 e2e: PASS, including the keeper restart and the check that only the daemon and keeper PIDs hold the listening socket's inode.",
+      "headSha": "3fb9e2a0d7e187a2493779e9bf15c2043779f5f1",
+      "negativeControl": "Stage 1 copy with the keeper PID left out of the allowed holder set: exit 1 'the socket listening on port 45892 is held by: 49307 python3 …held-port.py keep … 49423 …legion start … and should be held by 49423 alone'"
+    },
+    {
+      "criterion": "A1d/A3: explicit overrides are used as given; e2e-local, the deploy-probe test and the search scripts run on OS-chosen ports",
+      "surface": "pod, real natsd/envoy-listener/Bun fake session; envoy-dispatch against a scratch pgvector database",
+      "command": "cd packages/envoy && bash scripts/e2e-local.test.sh && bash scripts/e2e-local.sh && bash scripts/listener-deploy-probe.test.sh && DATABASE_URL=<scratch> bash scripts/search-smoke.sh --queries scripts/search-smoke-queries.txt && bash scripts/searchbench.sh --queries scripts/searchbench-pairs.txt && bash scripts/searchbench.sh --queries scripts/searchbench-paraphrases.txt",
+      "observed": "e2e-local.test.sh: occupied E2E_NATS_PORT, E2E_PORT and E2E_SESSION_PORT each fail with 'address already in use'; e2e-local.sh PASS on OS-chosen NATS/listener/session ports; the probe test's 15 verdicts PASS; search-smoke and both searchbench sets exit 0 with 'dispatch: listening addr=127.0.0.1:<port in the port file>'.",
+      "headSha": "3fb9e2a0d7e187a2493779e9bf15c2043779f5f1",
+      "negativeControl": "search-smoke/searchbench with --binary /bin/false: exit 1 within 0.3 s, no held-port.py or server process left, and a bind of the port from the port file succeeds"
+    },
+    {
+      "criterion": "S2/S3: the claude-envoy smoke and the Dispatch Playwright harness serve on OS-chosen ports",
+      "surface": "pod: real nats-server and listener for the smoke; Chromium through bun e2e/run.ts with a scratch pgvector database",
+      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh; cd packages/dispatch && DATABASE_URL=<scratch> bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone --project=chromium-plain-http; bun run dispatch:local; bun run docs:media",
+      "observed": "smoke: PASS (nats-server -p -1 on 21743, listener on 127.0.0.1:22192). Playwright: harness up on five OS-chosen ports, 1361 passed, 1 iphone editor row failed while a concurrent dispatch:local rebuilt web/dist and passed on rerun; at 8269c644d931 the chromium/chromium-plain-http fake-envoy and plain-http subset 5 passed. dispatch:local and docs:media exit 0 on OS-chosen ports.",
+      "headSha": "3fb9e2a0d7e187a2493779e9bf15c2043779f5f1",
+      "negativeControl": "DISPATCH_E2E_PORT set to a port another process holds: 'the Dispatch server cannot listen on DISPATCH_E2E_PORT=26714: address already in use'; bare bunx playwright test with no ports: refuses at config evaluation naming e2e/run.ts"
+    },
+    {
+      "criterion": "A2: four parallel copies of go test -count=1 -tags natslive ./core/ ./seed/ pass three rounds in a row",
+      "surface": "GitHub runner, push-triggered workflow on scratch branch infra-253/parallel-proof (pinned to a412c2c4a921, whose packages/envoy tree equals the code head's)",
+      "command": "gh run 40292180529 (workflow infra-253-parallel-proof.yaml), job parallel (head)",
+      "observed": "job parallel (head) success: ref=a412c2c4a921…, round 1-3 copies 1-4 each pass; 12 logs uploaded as artifact infra253-parallel-head",
+      "headSha": "a412c2c4a921c9ddb03494f810e534cdda06d956",
+      "negativeControl": "same workflow, job parallel (base) at a13a0366bfa9 (FreeTCPPort): job parallel (base) also passed 12/12 in this run, recorded as information (information only; the failure is intermittent, A1b is the deterministic control)"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/listenfd (new): Inspect/CheckAgainst/Adopt for an inherited listening socket",
+    "packages/envoy/internal/cmdtest: HoldPort/Pass replace FreeTCPPort; Start closes ExtraFiles",
+    "packages/envoy/cmd/dispatch: DISPATCH_LISTEN_FD settings row, resolveListen, dev sign-in fence, bound-address log; launcher and memory harness hold their ports",
+    "packages/envoy/cmd/listener, internal/config: ENVOY_LISTEN_FD before the auth fence, bound-address log; launcher holds its port",
+    "packages/daemon/cmd/legion, internal/daemon: LEGION_LISTEN_FD, adopted listener into Run, boot log; scratch-Dispatch test on a held socket",
+    "packages/envoy/infra: core natslive launchers hold ports; host/heldportwrapper (wrapper, Dockerfile, test); pulumitest.HoldPort/HeldPortImage; live tests and a docker-restart check",
+    "packages/envoy/docker/Dockerfile and packages/daemon/docker/worker.Dockerfile: listenfd in the builds",
+    ".github/workflows: envoy-smoke builds legion-envoy-smoke-heldport; dispatch job runs through e2e/run.ts; pr-and-main runs scripts/e2e/lib tests after setup-go; path filters",
+    "scripts/e2e/lib/held-port.py (+test), rig.sh (start_held, keep_port, start_kept, report_port, held_only_by), bridge-tunnel.sh; free-port.sh deleted; every stage script and rig user",
+    "packages/envoy/scripts: e2e-local.sh/test, listener-deploy-probe.test.sh, search-smoke.sh, searchbench.sh",
+    "packages/dispatch/e2e: harness-start.ts, run.ts, OS-chosen fake/server/proxy ports, run-server.sh (held socket, DISPATCH_E2E_LISTEN_FROM), playwright.config.ts; docs/site/media harness and rigs; packages/pi-legion skill-scenarios rig; packages/claude-envoy smoke",
+    "docs: AGENTS.md, docs/deployment.md, docs/kubernetes.md, READMEs, CHANGELOGs, skills/legion-worker/references/tools.md (+ generated mirror), dated notes in docs/solutions",
+    "round 2: scripts/e2e/lib/smoke-cleanup.test.ts and stage3-4b13b-notes.test.ts declare the keeper pids; scripts/e2e/stage2-tmux-supervision.sh expects the gate's current loader lists; docs/site/media/walkthroughs/legion-operator/record-casts.sh resolves LEGION_GH_PATH",
+    "round 3: .github/workflows/envoy-and-contracts.yaml (held-port.py in both trigger lists; dispatch filter adds listenfd, githubappjwt, id); packages/dispatch/e2e/playwright.config.ts and AGENTS.md (listing needs no harness); scripts/e2e/lib/held-port.py (darwin --from); cleanup commit 9a26a4a6 (daemon listen path, Dispatch empty listen settings, cmdtest.CloseExtraFiles, startListenerConfig, scripts/e2e/lib/port-file.sh)",
+    "round 4: packages/dispatch/e2e/playwright.config.ts and AGENTS.md (listing exempt only from the unset-ports refusal); scripts/e2e/stage2-tmux-supervision.sh and verifiers-staging-token.sh wait through lib/port-file.sh (port_of); packages/daemon/cmd/legion/main_test.go heldSocket comment"
+  ],
+  "trickyParts": [
+    "A held socket accepts and queues connections before the server serves, so every readiness poll against one carries a timeout and waits for the server's own listening line (dispatch and listener launchers, memory harness, search scripts, Stage 1).",
+    "The listener inspects ENVOY_LISTEN_FD in config.Load, before the API-auth fence, and takes the socket's IP as ListenHost, so a 0.0.0.0 socket without credentials is refused.",
+    "legion start adopts the socket before config.Load runs key commands and unsets LEGION_LISTEN_FD, so neither children nor panes inherit fd 3 or the variable.",
+    "The host wrapper receives the socket over an abstract unix socket (host network shares the namespace) and execs the listener in place; first container run of this is in CI's envoy-smoke.",
+    "The Playwright config can no longer start servers: e2e/run.ts starts the harness and exports the ports before Playwright evaluates, so every import-time port read sees real ports."
+  ],
+  "deviations": [
+    "envoy-smoke builds the held-port image with docker/build-push-action and the Dockerfile compiles the wrapper in a Go stage, because .github/scripts/check-image-trigger-paths.sh refuses a plain docker build step and a COPY of a CI-built binary.",
+    "listenfd.CheckAgainst takes two Setting{Name, Value, Set} values instead of four positional arguments, so refusals name each setting.",
+    "Every scripts/e2e daemon start uses a keeper (keep_port + start_kept), not only restarts: legion.yaml must name the port before legion start runs.",
+    "run-server.sh gained DISPATCH_E2E_LISTEN_FROM (a keeper's socket) for the broker docs rig, which needs Dispatch's port before the broker starts.",
+    "smoke-session-title.sh's negative-control BASE_REV default is now the parent of 0306bcbe16df (#2154): main@origin carries the feature, so the old default could not fail.",
+    "Two merges of main for GitHub-reported conflicts: #2209 added two FreeTCPPort calls (migrated to HoldPort) and SubscribeAllTopics beside ListenSocket; #2231 replaced the App key unsets with app_key_unsets in three rewritten stage scripts.",
+    "Round 2 edits the fixtures of the tester's red tests (smoke-cleanup.test.ts:171, stage3-4b13b-notes.test.ts:30): each copies the script's globals, and the scripts now declare daemon_keeper_pid/dispatch_keeper_pid; nothing they assert changed.",
+    "stage2's gate-refuses-a-skill-only-a-role-prompt-loads now asserts the refusal names roles/controller-root.md among two loaders: on main legion-worker/references/findings.md loads legion-controller too, so it is no longer loaded by a role prompt alone.",
+    "Round 3: the dispatch path filter also gained packages/envoy/internal/githubappjwt/** and internal/id/**, which go list -deps ./cmd/dispatch names and the filter lacked.",
+    "Round 3: overrides.inherited folded into overrides.listen (a handed() listen) rather than a bare listener field, because ~100 test call sites hand a listener through fakeRuntime/heldListen without cfg.",
+    "Round 3: the reviewer's six fast-follow items were done in this PR (9a26a4a6), not deferred; the search scripts' port-file wait is now 30 s (shared bound) instead of 10 s.",
+    "Round 3: a third forward merge of main for a GitHub-reported conflict (packages/envoy/CHANGELOG.md); fingerprint unchanged.",
+    "Round 4: the three Minor items were done in this PR (stage2 and verifiers share lib/port-file.sh's wait, which stops on a dead keeper or binary; the heldSocket comment); the Fast-follow line stays none.",
+    "Round 4: a fourth forward merge of main for a GitHub-reported conflict: #2188 gave the scratch-Dispatch start a NATS form, now carried on the held-socket start; the four scratch-Dispatch tests pass.",
+    "Round 5: a fifth forward merge of main (0587774a) for a GitHub-reported conflict in packages/envoy/CHANGELOG.md and scripts/e2e/README.md, both sides kept; fingerprint unchanged (4faa5738); no other change. It brings main's #2246 claude-envoy typecheck fix.",
+    "Round 6: a sixth forward merge of main (6f14a3671237) for a GitHub-reported conflict in packages/envoy/CHANGELOG.md alone, both sides kept; fingerprint unchanged (4faa5738); no other change. A merge commit the interrupted turn left unpushed (2919acba, no committer recorded) was superseded by this one.",
+    "Generation 3: forward merge of main 6cdb9995 for a GitHub-reported conflict in packages/envoy/CHANGELOG.md, scripts/e2e/stage2-tmux-supervision.sh and scripts/e2e/stage3-devbox-workflow.sh. Fingerprint 4faa5738 → 69bcdf6c: stage3's held-port start_daemon now carries #2242's `env -u LEGION_OMP_PATH` and its daemon_runs_the_pinned_omp check, with the log offset taken before start_kept; stage2 keeps the keeper stops beside #2242's box-login teardown and python3 in the tool list; no new server in main's changes starts on a released port.",
+    "Forward merge of main fab8de3510 for a GitHub-reported conflict in scripts/e2e/claude-backend-tmux.sh (#2206's model route). Fingerprint 69bcdf6c → c5e74ae2: only the required-tool line pair moved, since #2206 dropped hawk-token from it (now required under the gateway route alone); the PR's ss → python3 change is unchanged and every held-port start is untouched.",
+    "Forward merge of main 1357b95c27 (#2264, DISPATCH_PPROF_PORT) for a GitHub-reported conflict in cmd/dispatch main.go, settings.go, settings_test.go, README.md and CHANGELOG.md, both sides kept. Fingerprint c5e74ae2 → 890278d4: #2264's TestPprofServesTheIndexOnLoopbackAndStopsWithTheContext used a listen-and-close port (freeLoopbackPort); it now starts pprof on 127.0.0.1:0 and checks the reported address, and freeLoopbackPort is removed. Real binary: pprof binds its own loopback address, never the inherited socket, and a DISPATCH_PPROF_PORT equal to the held socket's port exits 1 naming DISPATCH_PPROF_PORT, address already in use.",
+    "Forward merge of main ef3a531d (#2270) for a GitHub-reported conflict in scripts/e2e/stage1-skeleton.sh's cleanup: the keeper stop and #2270's `docker rm -f -v` both kept. Fingerprint unchanged (890278d4). Retro's docs/solutions/ files stay; .legion/INFRA-253/ is written again here, so READY needs retro's removal again."
+  ],
+  "openQuestions": [
+    "envoy-smoke at the code head is the first run of SCM_RIGHTS into a host-network container (plan risk 6); if it fails the plan says report to the architect, no fallback.",
+    "skill-scenarios: judge.test.ts fails 8 rows in this pod when run after rig.test.ts in one bun process, also with main's rig.sh (pod environment); each file passes alone."
+  ],
+  "discoveredComplexity": [
+    "The Dispatch memory tests that reset peak memory need write access to /proc/<pid>/clear_refs, which gVisor pods refuse; CI's dispatch-memory job is their surface (the same failure on the base harness).",
+    "WebKit and Firefox Playwright projects cannot launch in the pod (missing system libraries, no root); CI's dispatch job runs them."
+  ],
+  "round": 10,
+  "notRunEndToEnd": [
+    "stage3-devbox-workflow.sh, stage3-4b13b-acceptance.sh, claude-backend-tmux.sh, dispatch-user-turns.sh, and stage2-tmux-supervision.sh from model-turn-through-the-route on: the devbox has no working model route. Their changed functions ran against real processes: rig.sh start_held/keep_port/start_kept/report_port/held_only_by with the real envoy-listener, envoy-dispatch (env -i, DISPATCH_LISTEN_FD=3), run-server.sh, nats-server -p -1 and legion start on a keeper, in the pod; the keeper daemon path is Stage 1's (pod and CI PASS); the stage3/4b13b cleanup with keeper stops runs in smoke-cleanup.test.ts and stage3-4b13b-notes.test.ts (pod, CI); stage2's gate checks, architect-registers-and-is-ready and envoy-role-held passed on the devbox with the two gate strings patched.",
+    "lib/bridge-tunnel.sh (stage4a bridge mode): no cluster with pods/portforward and no devbox result; ran in the pod against a stub kubectl that binds :0 and stub chisel (port read from the Forwarding line, port-forward and chisel restarted on a new port, bridge_stop leaves nothing).",
+    "verifiers-staging-token.sh: no devbox result; its refusals exit before any bind, and its boots use held-port.py exec --port-file inside env -i, which held-port.test.ts runs against the real listener."
+  ]
+}
