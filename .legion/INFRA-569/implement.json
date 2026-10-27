@@ -2,17 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-569",
-  "completed": "2026-10-27T13:16:23Z",
+  "completed": "2026-10-27T15:02:46Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2363",
-  "codeHead": "a494be24a8adb25db77f275b72e18e98f867bf65",
+  "codeHead": "e72fb7e79669f0d559dc94d9fe1e85666a751299",
   "proof": [
     {
-      "criterion": "The merged head still marks an answered ask with its latest answer in the search panel, and the event log fix and its test hold after the four minor items.",
-      "surface": "Dispatch's browser suite (Playwright chromium + iphone) and the Dispatch server's Go api tests against Postgres on the pod harness",
-      "command": "( source /legion/harness/env.sh && cd packages/contracts && bun run build && cd ../dispatch && bun run e2e -- search.e2e.ts ); go test ./internal/dispatch/api -run 'TestSearch|TestAsk|TestAnswer|TestEvent|TestLive' -count=1",
-      "observed": "20 passed, 6 skipped (spec's own skips), including `✓ [chromium] › e2e/search.e2e.ts:169:1 › an ask hit says whether it is answered, …` (e2e-r5.log); Go api ok (TestAnsweredEventStoredWithNullSelectedServesEmptyLists and TestLiveAskEventFrameCarriesTheReadTimeFields among them); dispatch unit 2518 pass, envoy-client 920, contracts 293; check-dist matches.",
-      "headSha": "a494be24a8adb25db77f275b72e18e98f867bf65",
-      "negativeControl": "Round 1's base-app run (94ab028a) failed this browser test on `Expected substring: \"Answered\"`; at b7b1325d TestAnsweredEventStoredWithNullSelectedServesEmptyLists failed `\"selected\":null, want \"selected\":[]`. SearchPalette.test.tsx's fixed expected cut fails if markdownHead cuts anywhere else."
+      "criterion": "The merged head carries the same change the reviewer approved at a494be24.",
+      "surface": "the pull request diff against main (unchanged-diff fingerprint) and the repository's fast gates at the merged head",
+      "command": "fingerprint per skill://legion-worker/references/conflicts-and-rewrites.md at 1382ed2e and e72fb7e7; diff of the two fingerprint inputs; check-dist, tsc, envoy-client bun test, dispatch search/activity/refs unit tests, go build ./..., the ask-state Go tests",
+      "observed": "Both fingerprints are 2ad6e933f431814fc8ef1d472ee3771c1f189052b5f65f9e3cc93c1ec2160bfa, and the two fingerprint inputs are byte for byte the same (`diff` printed IDENTICAL). check-dist matches; tsc OK; envoy-client 920 pass; dispatch 320 pass; Go ok.",
+      "headSha": "e72fb7e79669f0d559dc94d9fe1e85666a751299",
+      "negativeControl": "The round-5 merge's fingerprint changed (de44852… → 563d0ec…) for one added blank line, so the check catches a one-line change; a failed step or an unresolvable SHA counts as changed."
     }
   ],
   "filesChanged": [
@@ -72,22 +72,18 @@
   "discoveredComplexity": [
     "dispatch://INFRA-568 adds the same SearchAsk/attachAskStates names on its branch; whichever pull request merges second resolves the overlap in model.go, search_ask.go and search.go."
   ],
-  "round": 5,
-  "answersReview": "conflict with main (CONFLICTING/DIRTY at 99d7c49d) plus the reviewer's four round-3 minor items; nothing else",
+  "round": 6,
+  "answersReview": "conflict with main (59f6647d) in documentation only: forward merge, both sides kept, nothing else changed",
   "fingerprint": {
     "before": {
-      "head": "99d7c49da05fcf70e33593645638d2bcfd7dfdb3",
-      "sha256": "de44852171837f82ae218fa7fc913b6edc03f9a4b788d4ed8ae07297e61c98d3"
-    },
-    "afterMerge": {
-      "head": "a38994a231288b78e47f7a5b49c77aeb0fbc0ef6",
-      "sha256": "563d0ecdd62406c459dbf2e1f5bf29b449e9115d8b76dd1777c56f755dfea52d"
-    },
-    "afterItems": {
-      "head": "a494be24a8adb25db77f275b72e18e98f867bf65",
+      "head": "1382ed2e8e82a7fe9abe9cbb66a79387aaed59e6",
       "sha256": "2ad6e933f431814fc8ef1d472ee3771c1f189052b5f65f9e3cc93c1ec2160bfa"
     },
-    "verdict": "changed: the merge differs only by one blank line in packages/envoy/CHANGELOG.md; the items commit changes the four named sites",
-    "comment": "https://github.com/sjawhar/legion/pull/2363#issuecomment-6442833871"
+    "after": {
+      "head": "e72fb7e79669f0d559dc94d9fe1e85666a751299",
+      "sha256": "2ad6e933f431814fc8ef1d472ee3771c1f189052b5f65f9e3cc93c1ec2160bfa"
+    },
+    "verdict": "unchanged",
+    "comment": "https://github.com/sjawhar/legion/pull/2363#issuecomment-6445439091"
   }
 }
