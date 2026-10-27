@@ -1312,15 +1312,21 @@ the server on a tailnet-reachable address, open it from a phone, open the
 review panel, and answer an open ask in Waiting on you.
 
 The rules below apply only to a test that `iphone` can run at its own
-viewport. A test stays untagged, whatever its title says, when it skips every
-project but `chromium` (`test.skip(project.name !== "chromium", …)`) or every
-project but `webkit-iphone`, sets a desktop viewport for every project before
-it checks anything, or starts at the project's own width expecting a desktop
-one and then narrows the window itself. Under `iphone` such a test would skip,
-run at a desktop width where a phone branch (`setSheet`, `openedThreadCard`)
-finds no phone layout, or start from the wrong layout. It passes `"chromium"`
-rather than the project name to a helper that branches on it. Any other test
-takes the tag when, under `iphone`, it takes a phone-only path. That is, it:
+viewport. A test stays untagged, whatever its title says, when it:
+
+- skips every project but `chromium`
+  (`test.skip(project.name !== "chromium", …)`) or every project but
+  `webkit-iphone`;
+- sets a desktop width for every project before it checks anything and never
+  reaches a phone width, so `iphone` would only repeat the desktop run, and a
+  phone branch (`setSheet`, `openedThreadCard`) would find no phone layout; or
+- starts at the project's own width expecting a desktop one and then narrows
+  the window itself, so under `iphone` it would start from the wrong layout.
+
+Such a test passes `"chromium"` rather than the project name to a helper that
+branches on it. A test that skips every project but `iphone` is always tagged
+(R5), whatever widths it sets. Any other test takes the tag when, under
+`iphone`, it takes a phone-only path. That is, it:
 
 - **R1** chooses what to do by which project runs it, and `iphone` takes
   another branch than `chromium`, directly, in a hook, or in a helper it calls:
