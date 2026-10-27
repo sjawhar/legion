@@ -609,6 +609,33 @@ describe("replay sweep", () => {
     expect(engine.state().subjects).toEqual({ [AGENT]: { since: 0, after: 2 } });
   });
 
+  test("a stream that keeps its id but stands behind a cursor (restored from an older backup) shows what is stored after the restore", async () => {
+    const { stream, host, engine } = setup();
+    stream.identify("stream-1");
+    await engine.sweep();
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+    await engine.sweep();
+    expect(engine.state().subjects).toEqual({ [AGENT]: { since: 0, after: 3 } });
+
+    // The hub moves: a backup taken at seq 1 is restored, keeping the stream's id (its config
+    // metadata), and one message is published to it while the session is away. The stream now
+    // ends at seq 2, behind the session's cursor at 3.
+    stream.recreate("2026-10-26T00:00:00Z");
+    stream.publish(AGENT, envelope());
+    const lost = envelope();
+    stream.publish(AGENT, lost);
+
+    await engine.sweep();
+
+    // A cursor past the stream's end cannot name this stream's messages: the session must see
+    // what was published after the restore, or be told the stream changed under it; it must not
+    // pass it over in silence.
+    const told = host.notices.length > 0;
+    expect(told || ids(host.shown).includes(lost.event_id)).toBe(true);
+  });
+
   test("a stream whose id changed was recreated: every cursor restarts at its end, with one notice", async () => {
     const { stream, host, engine } = setup();
     stream.identify("stream-1");
