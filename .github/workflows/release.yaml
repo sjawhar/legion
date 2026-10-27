@@ -72,7 +72,7 @@ on:
 # that is what skipped legion's publish job in the first run on the build/publish split (run
 # 38822866387) while legion_build had cut a version. `always()` turns that gating off, so each such
 # condition tests the result of every job whose outputs it reads, else a skipped or failed job is
-# read through its empty outputs. check-release-credentials.sh rule 6 pins it.
+# read through its empty outputs. check-release-credentials.sh rule 5 pins it.
 permissions: {}
 
 concurrency:

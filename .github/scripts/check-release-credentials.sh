@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # The release workflows keep every credential away from the code the releases are built from. Each
-# release is a build job, which runs the dependencies' code (install, pack, build, test, smoke) and
-# holds no write scope and no secret, and a publish job, which holds the credentials and runs no
-# dependency code: only release-push.sh, git, gh, jq, sha256sum, npm view and npm publish and a
-# handful of pinned actions, with no cache restored and the deploy key in the env of the one or two
-# steps that push. This check pins that shape, so a later edit cannot undo it quietly:
+# release is built by a build job, which runs the dependencies' code (install, pack, build, test,
+# smoke) and holds no write scope and no secret, and published by a publish job, which holds the
+# credentials and runs no dependency code: only release-push.sh, git, gh, jq, sha256sum, npm view
+# and npm publish and a handful of pinned actions, with no cache restored and the deploy key only
+# in the env of the steps that push. (release.yaml's one publish job publishes the packages of its
+# four build jobs, one after another.) This check pins that shape, so a later edit cannot undo it
+# quietly:
 #
 # 1. A credentialed job — one whose `permissions` grants contents, id-token, attestations or
 #    actions: write (the workflow's `permissions` when the job declares none, as GitHub gives it;
@@ -30,12 +32,10 @@
 # 3. Every `actions/checkout` (its owner and repository compared lower-cased, as GitHub resolves
 #    them) sets `persist-credentials: false` (the boolean), so no token is left in the checkout for
 #    a later step.
-# 4. release.yaml's pi_legion_publish needs pi_envoy_publish: both end in `release-push.sh
-#    push-main`, whose rebase repair handles one package's bump at a time.
-# 5. release-envoy-listener.yaml's release_publish runs in the concurrency group
+# 4. release-envoy-listener.yaml's release_publish runs in the concurrency group
 #    `release-envoy-listener` with `cancel-in-progress: false` and `queue: max`: a pending job that
 #    GitHub cancelled for the next one would leave its commit in no release.
-# 6. A job's `if:` that calls `always()` tests `needs.<X>.result` for every X whose
+# 5. A job's `if:` that calls `always()` tests `needs.<X>.result` for every X whose
 #    `needs.<X>.outputs` it reads; one that calls no `always()` belongs to a job with no skippable
 #    ancestor — no job upstream of it through `needs`, at any distance, carrying an `if:` of its
 #    own. GitHub gives an `if:` that calls no status function an implicit `success()`, false
@@ -47,9 +47,10 @@
 #    GitHub's plain, visible behaviour. The job-level `if:` only: a step's implicit `success()` is
 #    over the job's own earlier steps, not over `needs`. A string literal is text (`'always()'`
 #    calls nothing), the context and functions are case-insensitive, and `needs['x'].outputs` is
-#    `needs.x.outputs`. This is what skipped legion_publish in the first run on the build/publish
-#    split: its `if:` read legion_build's outputs behind an implicit `success()` that
-#    envoy_plugin_publish, four jobs upstream, had already made false.
+#    `needs.x.outputs`. This is what skipped legion_publish, a job release.yaml had then, in run
+#    38822866387, the first on the build/publish split: its `if:` read legion_build's outputs
+#    behind an implicit `success()` that envoy_plugin_publish, four jobs upstream, had already
+#    made false.
 #
 # "Runs dependency code" is a tripwire over named patterns, not a proof that no other code runs: a
 # step runs dependency code when its `uses:` starts with one of DEPENDENCY_USES, when the shell its
@@ -94,8 +95,8 @@
 #
 # Scope: exactly the three release workflows named in WORKFLOWS. Rules 1-3 read every job that has
 # `steps:`; a job that calls a reusable workflow (`uses:` and no steps, release.yaml's
-# worker_image) is out of their scope, since what it runs is that workflow's own jobs. Rules 4-5
-# read the jobs they name. Rule 6 reads every job's `if:`, steps or not.
+# worker_image) is out of their scope, since what it runs is that workflow's own jobs. Rule 4
+# reads the job it names. Rule 5 reads every job's `if:`, steps or not.
 #
 # Run from anywhere: .github/scripts/check-release-credentials.sh
 # CI runs it in the lint job of pr-and-main.yaml, and its tests in that workflow's test job.
@@ -695,7 +696,7 @@ def ancestors(jobs: Mapping, name: str) -> list[str]:
 
 
 def check_conditions(path: Path, jobs: Mapping) -> None:
-    """6. Each job-level `if:`, steps or not (a step's `if:` is never read: its implicit success()
+    """5. Each job-level `if:`, steps or not (a step's `if:` is never read: its implicit success()
     is over the job's own earlier steps, not over `needs`). A non-string `if:` (`if: true`) calls
     no always() and reads nothing."""
     for name, job in jobs.items():
@@ -705,7 +706,7 @@ def check_conditions(path: Path, jobs: Mapping) -> None:
         cond = STRING_LITERAL.sub(r"\1", cond) if isinstance(cond, str) else ""
         line = job.lines.get("if", jobs.lines.get(name, 1))
         if ALWAYS.search(cond):
-            # 6a. always() turns GitHub's gating off, so every job whose outputs the condition
+            # 5a. always() turns GitHub's gating off, so every job whose outputs the condition
             # reads must have its result tested, else a failed or skipped one is read through its
             # empty outputs (`'' != 'true'` is true).
             tested = {
@@ -727,7 +728,7 @@ def check_conditions(path: Path, jobs: Mapping) -> None:
                     f"is read through its empty outputs",
                 )
             continue
-        # 6b. Without always(), GitHub's implicit success() decides first (an explicit success()
+        # 5b. Without always(), GitHub's implicit success() decides first (an explicit success()
         # is the implicit one), and it is false whenever any job upstream through `needs`, at any
         # distance, was skipped (actions/runner#491): a job upstream with an `if:` of its own can
         # be, so the condition never decides anything.
@@ -781,20 +782,7 @@ def required_job(path: Path, name: str, must: str) -> tuple[Mapping, int] | None
     return None
 
 
-# 4. The two npm publishes that push a bump to main run one after the other.
-if RELEASE in loaded:
-    path = RELEASE
-    must = "must need 'pi_envoy_publish', so the two bump commits to main never race"
-    if found := required_job(path, "pi_legion_publish", must):
-        job, job_line = found
-        needs = job.get("needs")
-        if "pi_envoy_publish" not in needs_of(job):
-            problem(
-                path, job.lines.get("needs", job_line),
-                f"job 'pi_legion_publish' {must} (found needs: {json.dumps(needs)})",
-            )
-
-# 5. The listener's publish job moves `latest` and tags one run at a time, and finishes.
+# 4. The listener's publish job moves `latest` and tags one run at a time, and finishes.
 if LISTENER in loaded:
     path = LISTENER
     must = (
@@ -813,7 +801,7 @@ if LISTENER in loaded:
                 f"job 'release_publish' {must} (found concurrency: {json.dumps(concurrency)})",
             )
 
-# 6. Every job-level `if:` either calls always() and tests the result of each job it reads, or
+# 5. Every job-level `if:` either calls always() and tests the result of each job it reads, or
 # belongs to a job with no skippable ancestor, where GitHub's implicit success() can decide.
 for path, (_, jobs) in loaded.items():
     check_conditions(path, jobs)

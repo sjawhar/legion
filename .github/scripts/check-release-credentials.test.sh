@@ -2,12 +2,11 @@
 # Tests for `check-release-credentials.sh`: a job of the three release workflows that holds a
 # credential runs no dependency code, uses only allow-listed actions, restores no cache and holds
 # the deploy key only in the env of a step that pushes; a job that runs dependency code holds no
-# credential and ends in the no-credential tripwire; every checkout persists no credential; the
-# two release orderings (pi_legion_publish after pi_envoy_publish, release_publish in its
-# concurrency group) stay; and a job condition downstream of a skippable job calls `always()` and
-# tests the result of every job whose outputs it reads. The check is a tripwire over named
-# patterns (the commands, actions and paths its lists hold), not a proof that no other code runs,
-# and these cases exercise those patterns, on each side of each line.
+# credential and ends in the no-credential tripwire; every checkout persists no credential;
+# release_publish stays in its concurrency group; and a job condition downstream of a skippable job
+# calls `always()` and tests the result of every job whose outputs it reads. The check is a
+# tripwire over named patterns (the commands, actions and paths its lists hold), not a proof that
+# no other code runs, and these cases exercise those patterns, on each side of each line.
 #
 # Each case builds a miniature repository under a temporary directory, with the real script
 # symlinked into it and a green trio of release workflows written, and mutates one file.
@@ -625,21 +624,6 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "wants the tripwire last" "$(contains "$out" "job 'pi_envoy_build' runs dependency code (.*), so its last step must be the tripwire")"
 
-echo "case: pi_legion_publish not needing pi_envoy_publish"
-root=$(fixture needs-lacks-envoy)
-mutate "$root/$RELEASE" $'    needs: [pi_legion_build, pi_envoy_build, pi_envoy_publish]\n' $'    needs: [pi_legion_build, pi_envoy_build]\n'
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the needs at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    needs: \[pi_legion_build, pi_envoy_build\]$'): job 'pi_legion_publish' must need 'pi_envoy_publish'")"
-
-echo "case: no pi_legion_publish"
-root=$(fixture no-pi-legion-publish)
-mutate "$root/$RELEASE" $'  pi_legion_publish:\n' $'  pi_legion_release:\n'
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the missing job" "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^jobs:$'): no job 'pi_legion_publish'")"
-
 echo "case: release_publish with cancel-in-progress: true"
 root=$(fixture cancel-true)
 mutate "$root/$LISTENER" $'      cancel-in-progress: false\n' $'      cancel-in-progress: true\n'
@@ -685,7 +669,7 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the missing job" "$(contains "$out" "^::error::$LISTENER:$(line_of "$root/$LISTENER" '^jobs:$'): no job 'release_publish'")"
 
-# The green job-level conditions of the two publish jobs, for the rule-6 cases to replace.
+# The green job-level conditions of the two publish jobs, for the rule-5 cases to replace.
 envoy_if=$'    if: always() && needs.pi_envoy_build.result == \'success\' && needs.pi_envoy_build.outputs.skip != \'true\'\n'
 legion_if=$'    if: always() && needs.pi_legion_build.result == \'success\' && needs.pi_legion_build.outputs.skip != \'true\' && (needs.pi_envoy_publish.result == \'success\' || needs.pi_envoy_publish.result == \'skipped\')\n'
 
