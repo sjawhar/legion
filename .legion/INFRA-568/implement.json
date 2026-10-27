@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-568",
-  "completed": "2026-10-27T12:17:29Z",
+  "completed": "2026-10-27T13:11:42Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2397",
   "proof": [
     {
@@ -84,6 +84,14 @@
       "observed": "total 50, by_source_kind ask 7 / decision_block 1 / issue 42, completed 49, skipped_for_time 1, keyword_ms p50 7 p95 30 max 921 over_300ms 1",
       "headSha": "cdfddb65c5d6d6b366db7f53df096e6581b53c58",
       "negativeControl": "?source_kind=comment answers 400 INVALID_QUERY"
+    },
+    {
+      "criterion": "Tester's failure (test.json at 6bc3a488): dispatch issue --external on an issue Dispatch already holds must not say it created one; the related-item line stays consistent",
+      "surface": "dispatch (head build, packages/claude-envoy/dist/dispatch.js) against bun run dispatch:local with acme/widgets mapped to CORE",
+      "command": "PUT /api/v1/settings/repo-projects/acme/widgets {project: CORE}; dispatch issue --project CORE --external acme/widgets#7 --title 'External widget seven armadillo' twice; bun test src/__tests__/dispatch-advice.test.ts (the tester's red test from c1a975c1, unmodified)",
+      "observed": "second filing (server 200): 'Dispatch already holds CORE-8: External widget seven armadillo → http://127.0.0.1:8777/issues/CORE-8; nothing was created; unassigned (not subscribed …)' and no related-item line; the tester's test passes unchanged",
+      "headSha": "247b43fd729285f19cae2c206225d7bb4ec02c7d",
+      "negativeControl": "the first filing (server 201) still prints 'Created CORE-8: …' followed by 'Related-item check searched (keywords only: meaning search is off on this server) and found nothing.'"
     }
   ],
   "filesChanged": [
@@ -93,7 +101,8 @@
     "packages/envoy/cmd/dispatch/main.go, multiprocess_test.go, README.md, AGENTS.md; packages/envoy/AGENTS.md; packages/envoy/scripts/related-recall.sh, scripts/README.md",
     "packages/contracts/src/dispatch-api.ts, dispatch-tools.ts (+test), AGENTS.md; packages/envoy-client/src/related-check.ts, dispatch-execute.ts, dispatch-http.ts (+tests); packages/claude-envoy/dist/*.js",
     ".dispatch/architecture/{dispatch-api,dispatch-store,dispatch-docs,dispatch-model,dispatch-server,contracts,envoy-client,envoy,claude-envoy-bridge}.md; CHANGELOGs of envoy, envoy-client, contracts, claude-envoy; two docs/solutions notes",
-    "Tests: api/related_check_test.go, related_terms_test.go, related_routes_test.go, decision_block_checks_test.go, related_recall_test.go (env-gated), suggestions_test.go, search_meaning_test.go, write_advice_test.go; embedqueue/coverage_test.go; docs/service_test.go"
+    "Tests: api/related_check_test.go, related_terms_test.go, related_routes_test.go, decision_block_checks_test.go, related_recall_test.go (env-gated), suggestions_test.go, search_meaning_test.go, write_advice_test.go; embedqueue/coverage_test.go; docs/service_test.go",
+    "Round 2 (tester's failure): packages/envoy-client/src/dispatch-http.ts (issue() returns created = status 201), dispatch-execute.ts (the already-holds line, no check lines), tests (fixture create mocks answer 201 as the server does; one new test), CHANGELOG, claude-envoy dist"
   ],
   "trickyParts": [
     "Harness for the tester: rootless Postgres 17 + pgvector under $TMPDIR/pg (debs unpacked per the INFRA-42 solution doc); start: . $TMPDIR/pg/env.sh; pg_ctl -D $TMPDIR/pg/data -l $TMPDIR/pg/pg.log -o \"-k $TMPDIR/pg/sock -h 127.0.0.1 -p 5433\" -w start. Go tests: export DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable'. dispatch:local: env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u DISPATCH_PUBLIC_URL DATABASE_URL='postgres://postgres@127.0.0.1:5433/dispatch_local?sslmode=disable' bun run dispatch:local. Head CLI wrapper: $TMPDIR/infra568/e2e/d.sh (DISPATCH_HOST=omp, DISPATCH_URL=http://127.0.0.1:8777, DISPATCH_TOKEN=e2e-token, DISPATCH_PUBLIC_URL unset so links stay local); the full E2E is $TMPDIR/infra568/e2e/run-e2e.sh seed, wait for the leased term-statistics refresh (10 min after boot), then run-e2e.sh rows.",
@@ -110,7 +119,8 @@
     "Search words for the not-made form are spelled from the title (or question) only, which cut the 10,000-word stage-1 p95 from 326-376 ms to about 210 ms without changing the chosen terms.",
     "An ask on a document no project holds answers not_made ('the item it sits on belongs to no project') and is not recorded (a related_checks row needs a project); before, it searched every project.",
     "The decision line also prints the decision ask's latest answer, options and text, since the one-item-per-owner rule can collapse an answered ask into its issue's item.",
-    "Migrations renumbered after two forward merges of main: 0121/0122 -> 0129/0130 (main reached 0128), then -> 0130_related_checks / 0131_issue_embedding_spec (main took 0129_document_edit_notices); lease pool 11."
+    "Migrations renumbered after two forward merges of main: 0121/0122 -> 0129/0130 (main reached 0128), then -> 0130_related_checks / 0131_issue_embedding_spec (main took 0129_document_edit_notices); lease pool 11.",
+    "Round 2: existing created-path test fixtures now answer POST /api/v1/issues with 201, as the server does; with 200 they would read as an issue Dispatch already holds. The tester's red test is unchanged."
   ],
   "openQuestions": [
     "Latency on the full production copy was not measured: DISPATCH_BACKUP_BUCKET is unset, no AWS credentials, the pod's agent-secrets enrollment has no grants, and gcloud is not installed. The recall corpus holds issues and specs only.",
