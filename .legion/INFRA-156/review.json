@@ -2,37 +2,53 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-156",
-  "completed": "2026-10-27T13:41:30Z",
-  "decision": "approved",
-  "round": 2,
-  "headReviewed": "f6f6d14d53841f39e80ba202916dedf18fb5b61b",
-  "codeHead": "bca854bac517802f180c9d295a99150c99ee695a",
-  "previousReview": "5666190909 (REQUEST_CHANGES at 946d77466aea)",
+  "completed": "2026-10-27T15:06:00Z",
+  "decision": "changes_requested",
+  "round": 3,
+  "headReviewed": "1988f41c9236d44ed4eb4e7a2eb4169e2f5a0218",
+  "codeHead": "4f84c42bc495",
+  "previousReview": "5667991189 (APPROVE at dec7209ec77f); voided by ce7d869f (the acceptance send-back's proof-editor items) and merge 4f84c42b",
   "critical": 0,
-  "important": 0,
+  "important": 3,
   "minor": 3,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection lists none. CI head 034a1b3c (compare to f6f6d14d: handoffsOnly true, 1 file). lint, typecheck, test and pr-title completed success at 13:40Z. Non-required envoy-go, dispatch and contracts were still queued (runner backlog); the reviewer ran locally at the head: go test pmdoc/text/refs/store (all ok except three wall-clock linearity tests in pmdoc, TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestBareURLShapesParseAndRenderLinearly and TestUpdateIsLinearInTheBlockCount, whose failures show a 10 ms clock and '0s' baselines on a shared gVisor pod and touch no code this PR changes), docs and api filtered to Pointer|BlockLink|Reference|Kind|Rebuild|Retype|Graph|Typed (ok), contracts dispatch-block-ref.test.ts (80 pass) and proof-editor bun test (132 pass).",
-  "threads": "Two threads, both the reviewer's, both fixed in bca854ba and answered by the reviewer (PRRT_kwDORFy7ds6wqJPu, PRRT_kwDORFy7ds6wqJP0); the implementer resolved both. No other threads.",
-  "census": "Re-ran all ten searches of the PR's Contract change census at the head. One hit was missing (useMarginItems.test.ts:626 under INVALID_OP), and one Plan-names bullet gave the old resolver signature. The implementer edited the body for both (no commit), and both are verified in the body. The rollout is immediate and unreachable: no shipped schema declares block[].",
+  "ci": "Required set: lint, typecheck, test, pr-title. CI head 645a7712 (compare to 1988f41c: handoffsOnly true, 1 file). At 15:04Z lint, typecheck and pr-title were success and test was in_progress. A request for changes does not wait on CI.",
+  "threads": "Two threads, both the reviewer's, both answered in round 2 and resolved. No new threads.",
+  "census": "Re-ran the ten searches at the head: the same hits as at bca854ba, with line numbers moved by the merges and no new hit. The renumber will move the 0130 references.",
+  "roundDelta": "ce7d869f is behaviour-preserving: setAttributes' held is still the located node's attrs, retype's held is empty when the type changes, the block id from blockIdOf(prior) equals the old argument, and parseBlockPointers takes its split from contracts. The merge 4f84c42b keeps both edit kinds in proof-editor/AGENTS.md (eighteen) and drops nothing else.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at f6f6d14d. Both round-1 fixes hold. findBlock returning the first holder of a repeated id matches the server's rule, and no shipped host calls retypeBlock or setBlockAttributes. Minor: stale body lines (fixed: risk bullet and Plan-names bullet); TS JSON.stringify versus Go %q quoting differ for non-printable characters in refusal text, though the comments say the two use the same words.",
-    "codeQuality": "Verdict: CHANGES at f6f6d14d. Two structural items that change no behaviour: the same-type held rule sits in retype's call site rather than in blockPointerRefusal, and parseBlockPointers repeats parseBlockPointerValue's one-line split. Both are on the fast-follow line."
+    "deepReview": "Medium 1 (verified): the contracts CI filter misses pmdoc/testdata/block-pointer-values.json, which src/dispatch-block-ref.test.ts reads. Minor 2 (promoted, the filter rule of packages/envoy/AGENTS.md): envoy_go_race misses packages/contracts/src/**, which the editor that pmdoc/gen imports now loads. Minor 3: the body's Size line is stale. Hardening: the schema.go:471-472 comment says 'written as is', yet the value still passes escapeDirectiveAttribute and strconv.Quote.",
+    "codeQuality": "Verdict: CHANGES at 1988f41c. typed_blocks_test.go grows past 1000 lines (799 -> 1036) by appending the pointer suite, which belongs in pointers_test.go. Round delta and merge sound."
   },
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "packages/proof-editor/src/typed-block-commands.ts",
-      "description": "Fast-follow: move the same-type held rule into blockPointerRefusal (pass the prior node) so it cannot be forgotten by a future command; Go keeps it inside CheckBlockPointers."
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/store/migrations/0130_block_pointer_links.up.sql",
+      "description": "Migration number collides with main: sjawhar/legion#2389 (c210f10d) merged 0130-0134. Merge main c210f10d or later forward, renumber to the next number after main's highest (0135 today) with every reference to it, and check main's highest again before each push."
+    },
+    {
+      "severity": "important",
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "description": "The contracts filter (:373-388) lacks packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json, which dispatch-block-ref.test.ts:118-129 reads, so a Go-only edit of the table skips the parity test."
+    },
+    {
+      "severity": "important",
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "description": "The envoy_go_race filter (:312-326) lacks packages/contracts/src/**. pmdoc tests run pmdoc/gen, which imports the editor, and the editor's block-pointers.ts now imports @legion/contracts. packages/envoy/AGENTS.md's filter rule requires the entry in this PR."
     },
     {
       "severity": "minor",
-      "file": "packages/proof-editor/src/block-pointers.ts",
-      "description": "Fast-follow: parseBlockPointers repeats contracts' parseBlockPointerValue split; call it and use blockPointerValueProblem only for the message."
+      "file": "packages/envoy/internal/dispatch/pmdoc/typed_blocks_test.go",
+      "description": "The file passes 1000 lines (799 -> 1036) because the pointer suite (blockPointerTestSchema, useTestBlockSchema and four tests from :688) was appended there. Move it to pointers_test.go."
     },
     {
       "severity": "minor",
-      "file": "packages/contracts/src/dispatch-block-ref.ts",
-      "description": "Fast-follow: 'in the same words' comments overstate parity, since JSON.stringify and Go %q quote non-printable and non-ASCII characters differently; soften the comments or align the quoting."
+      "file": "packages/envoy/internal/dispatch/pmdoc/schema.go",
+      "description": "The comment at :471-472 says a canonical reference 'is written as is', but the value still passes escapeDirectiveAttribute and strconv.Quote (:481). It is safe, but the comment misdescribes it."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "The Size line (50 files, +3042/-119) is stale: the diff against merge base 8ea7d06d is 46 files, +2727/-119."
     }
   ]
 }
