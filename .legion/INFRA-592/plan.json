@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-592",
+  "completed": "2026-10-27T04:41:40Z",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: PR body, proofs at the merging head, pushes and the production check",
+      "ce-simplify-code: the simplify pass on the settled diff (plan T11)",
+      "dispatch: messages to other lanes' roles and the production record"
+    ],
+    "test": [
+      "legion-worker: proof entries with criterion, surface, command, observed, head SHA and negative control; re-run the Go tests and the 10x step and recovery schedule on INFRA-589's harness"
+    ],
+    "review": [
+      "legion-worker: merge-gate and review-threads references; check the plan's T10 doc list and the one-caller-one-connection rule against every new wait"
+    ]
+  },
+  "plan": "dispatch://INFRA-592/artifact/plan-md",
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "No machine check for acceptance lines 1-4 and 6; line 5 omitted request and delivery latency.",
+        "answer": "Plan's acceptance table gives each spec line a re-runnable check: T1-T8 name the Go and bun tests with their assertions (refusal shape and timing, deadline, client cancel, pool busy, pool isolation both ways, settlement concurrency/deadline/render-outside-lock, writer-gate connection growth, lease spare, blocked-stderr logging, scrape series, application_name); T9's table includes request p50/p99 by route and delivery latency from arrival and from commit; T10 lists the architecture files."
+      },
+      {
+        "finding": "Writer gate (DR-09) missed most live-write entry points; no-deadlock claim unshown; self-deadlock with AcquireConditionalEdit; admission order; per-process scope.",
+        "answer": "T3 lists every applyLive entry (comment_create.go:520,570; comment_actions.go:99,191,319,321,382; asks.go:439; ask_transitions.go:215,295 with pre-read and in-tx recheck; artifact_rebuild.go:46; editArtifact; ReplaceText), replaces conditionalEditGate (no double take), sorts multi-document IDs, refuses a gate wait while the context holds a connection, parks the admission ticket while waiting (decision 7), states the gate is per process, and makes joinLiveWrite refuse a caller without the gate."
+      },
+      {
+        "finding": "A request deadline can cancel a commit and fail the room; deadline/pool-busy settlement failures would count toward maxSettleFailures.",
+        "answer": "Decision 4 and T2: commits run on context.WithoutCancel bounded at 10 s in store.trackedTx.Commit and docs/ledger.go commitConsuming (also fixes today's client-disconnect case), with a test that a deadline during commit leaves the room resident and equal to the stored head. T4: deadline and ErrPoolBusy settlement failures do not count toward maxSettleFailures."
+      },
+      {
+        "finding": "36 reads + 12 writes on 48 connections leaves no headroom; limits unsourced; heavy routes; shutdown drain and Close miss new pools; shutdown settlement concurrency.",
+        "answer": "Decision 2: admission 28 reads + 8 writes = 36, leaving 12 for named request-pool users outside admission; weight 2 for concurrent-read routes and timeline SetLimit(2); implementer tunes on the reproduction and records the measurement; 1x no-worse criterion (decision 11). T1: Use()/Close() cover every pool, drain waits on requests/rooms/settlements. T4: shutdown settles through the same semaphore of 4; leftovers stay owed for the next process."
+      },
+      {
+        "finding": "Acquire timeout approach vs pgx v5.11: Conn methods do not release; raw pools unbounded; distinguishing errors.",
+        "answer": "Read pgxpool/pool.go:615-660 in the module cache: Acquire uses the context TraceAcquireStart returns. Decision 5/T1 bound every acquire on every pool (wrapped or raw) with an AcquireTracer; statements keep the caller's context and pgxpool's own release paths are unchanged; ErrPoolBusy is a DeadlineExceeded while the caller context is live; a sooner caller deadline wins; leak tests assert AcquiredConns()==0 on every path."
+      },
+      {
+        "finding": "Metrics: second convention (client_golang); events committed has no single post-commit point; outbox lag must use claim eligibility; endpoint bind; contention profiles skew after-runs.",
+        "answer": "Decision 8/T7: extend internal/metrics, no new dependency; events_committed_total at each listed post-commit site with a test against the count(*) delta; outbox_lag_seconds = oldest published_at-null event that is not a pending command (INFRA-590 planner's definition, Envoy 04:40Z), counter where the outbox marks published; DISPATCH_METRICS_ADDR host:port (INFRA-598 scrapes from another pod); low profile rates and a 1x A/B run in T9."
+      },
+      {
+        "finding": "Success threshold and recovery definition not machine-checkable; unequal offered load; connection-wait metric changes meaning; drop-back level; harness files are INFRA-589's.",
+        "answer": "Decision 11 fixes numbers with reasons (>=10% success, goodput >=80% of the build's 1x, 1x no worse; drop back to 0.5x; recovery window rule by request start time); the completion summary flags them to the architect. INFRA-589 reports sent vs target and drops (cap 25,000). T9 reports puddle waiters beside admission, gate and pool gauges. INFRA-589's planner agreed (Envoy 04:39Z) that metrics scrape, refusal codes and -schedule go in this PR on packages/envoy/loadtest/."
+      },
+      {
+        "finding": "Lane overlaps missed: INFRA-591, INFRA-258 idempotency order and certain SSE deletion, INFRA-558 hold renewals, INFRA-555 heartbeat, INFRA-561 budget, INFRA-598, INFRA-179, INFRA-605 CompactAll/DR-11, INFRA-593 LoadDoc context.",
+        "answer": "Coordination section covers each; planner sent Envoy notes to INFRA-589, 590, 591, 593, 605, 606, 607, 63, 492, 512 and folded in the answers (INFRA-590 outbox pool 2 and lag rule; INFRA-555 registry pool and prune lease; INFRA-63 holds on Leases()). INFRA-179's architect had no holder (implementer re-sends). Admission runs before INFRA-258's key layer; Stream rows go with 258's deletion; CompactAll's withRoomLock stays INFRA-605's; LoadDoc's background context told to INFRA-593."
+      },
+      {
+        "finding": "Settlement scheduler drops behaviour: settleLastPeer counting, unbounded re-queue, repairs in own transaction changes atomicity.",
+        "answer": "T4 uses a semaphore inside settleRoomWithin before warm-up instead of a new queue, so settleLastPeer, settleWG, settling and slot take-over keep their behaviour; re-arm after a changed cursor is bounded at 3 per trigger, then the document stays owed; the repairs-then-version split is stated, with the tests whose expectations change named in the PR."
+      },
+      {
+        "finding": "Asynchronous logging loses fatal boot lines.",
+        "answer": "T6: every slog.Error-then-os.Exit boot path flushes through one helper; shutdown flushes last; drops are counted per level with a summary line; real-process tests reading stderr stay green."
+      },
+      {
+        "finding": "Retryable depends on clients; CLI does not retry Dispatch's own 503; web ignores Retry-After; identity.WriteError bypasses mapping.",
+        "answer": "Decision 10/T8: the agent CLI retries OVERLOADED and EDIT_QUEUE_FULL for any method and DATABASE_BUSY/REQUEST_TIMEOUT for GET, honouring Retry-After within its deadline; writes that may have committed are left to INFRA-258's keyed retries; INFRA-492 told about the web. T2 maps busy/deadline in writeHandlerError, identity.WriteError and the routes error writer."
+      },
+      {
+        "finding": "What API-7 in acceptance line 1 asks is unstated; unsourced claim that INFRA-512 edits store/pool.go.",
+        "answer": "Decision 5: reading (a), a per-acquire bound under a per-request deadline that bounds the sum of an issue read's ~11 acquires; batching stays INFRA-512's per the review's ranked table. The unsourced claim was dropped; INFRA-512's architect was told."
+      },
+      {
+        "finding": "No documentation listed.",
+        "answer": "T10 lists packages/envoy/AGENTS.md:1140-1190, cmd/dispatch/AGENTS.md:9-13, cmd/dispatch/README.md (settings, codes, pprof lines 361-363), store/pool.go comments, five .dispatch/architecture files, contracts dispatch-tools.ts, both CHANGELOGs."
+      },
+      {
+        "finding": "Unsourced numbers and inconsistent 81 arithmetic.",
+        "answer": "Decision 1 recounts before and after the same way (82 each); each number now carries its reason (20 s below client timeouts, settlements 4 from DR-05's 2-4, acquire bounds relative to deadline and loop periods, limits tuned and recorded on the reproduction)."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}
