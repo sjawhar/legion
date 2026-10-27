@@ -1413,6 +1413,13 @@ export type SearchOwner =
       readonly name: string;
     };
 
+/** Where an ask hit stands, read when the search ran. `answer` on a resolved ask is the last
+ *  answer a person gave before it was closed (rows document settlement retracted while answered). */
+export type SearchAsk =
+  | { readonly state: "open" }
+  | { readonly state: "answered"; readonly answer: AskAnswer }
+  | { readonly state: "resolved"; readonly resolution: AskResolution; readonly answer?: AskAnswer };
+
 export interface SearchResult {
   readonly kind: SearchResultKind;
   /** Who owns the hit: the issue (with its title and status) or the standalone project document. */
@@ -1434,6 +1441,9 @@ export interface SearchResult {
   /** The hit's fused score: 1/(60 + its position in its kind's ranked list). */
   readonly rank: number;
   readonly href: string;
+  /** Where the ask stands: present on every `ask` hit from a Dispatch of this release, absent on
+   *  every other kind and on any hit from an older Dispatch. */
+  readonly ask?: SearchAsk;
 }
 
 /** The four paging fields a Dispatch that supports search paging always answers together. */

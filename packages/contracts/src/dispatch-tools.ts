@@ -1220,6 +1220,9 @@ export const dispatchToolSpecs = [
       'Websearch syntax: "quoted phrase", -excluded, OR. ' +
       "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " +
       "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " +
+      "An ask hit says whether it is answered: an answered one shows the latest answer, who gave it, " +
+      "when, the options chosen and its text; a closed one says it was closed with no answer, or " +
+      "shows the last answer it had. " +
       `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` +
       "so narrow the query or name a project to reach the rest. Paging is exact only while the " +
       "corpus holds still: content added, changed, or removed between two offsets can shift rows " +

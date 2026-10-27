@@ -59,6 +59,7 @@ import {
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
 import { z } from "zod";
+import { actorText } from "./actor-text";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine, commandName } from "./dispatch-command";
 import type { ActiveDispatchConfig } from "./dispatch-config";
@@ -1986,19 +1987,6 @@ function eventHead(event: Event): string | undefined {
     default:
       return undefined;
   }
-}
-
-/** How an event, comment, message or ask author reads in the tools: `<kind> <id>`, plus
- *  ` (as <namespace>/<name>)` — the verified service token's subject through
- *  `serviceSubjectLabel`, which keeps the namespace because every namespace has a `default`
- *  service account — when a service token authenticated the write. A claim's holder is named by
- *  `claimText` instead, which follows the dashboard's session label. */
-function actorText(actor: Actor): string {
-  const service = actor.kind === "session" ? actor.service : undefined;
-  if (service === undefined) {
-    return `${actor.kind} ${actor.id}`;
-  }
-  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
 }
 
 /** The `dispatch://` reference of the message, comment or ask an issue event carries, so a log

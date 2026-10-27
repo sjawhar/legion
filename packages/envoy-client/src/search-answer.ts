@@ -1,10 +1,14 @@
 import {
+  type AskAnswer,
+  type AskResolution,
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
   SEARCH_KIND_DEPTH,
+  type SearchAsk,
   type SearchResponse,
   type SearchResult,
   snippetText,
 } from "@legion/contracts";
+import { actorText } from "./actor-text";
 import { dispatchDocumentRef } from "./dispatch-owner";
 
 /** The "showing a-b of N" phrasing a paged tool result builds from its offset, row count, and total. */
@@ -12,7 +16,7 @@ export function pageSummaryText(offset: number, count: number, total: number): s
   return `showing ${offset + 1}-${offset + count} of ${total}`;
 }
 
-function searchResultLine(result: SearchResult, baseUrl: string): string {
+function searchHitLine(result: SearchResult, baseUrl: string): string {
   const href = new URL(result.href, baseUrl).toString();
   const { owner } = result;
   if (owner.kind === "document") {
@@ -22,6 +26,51 @@ function searchResultLine(result: SearchResult, baseUrl: string): string {
   const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
   const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
   return `${label}: ${snippetText(result.snippet)} -> ${href}`;
+}
+
+/** An answer's two lines under its hit: who gave it, when and the options chosen, then its text,
+ *  every later line of which is indented four spaces so it stays under the hit. */
+function answerLines(lead: string, answer: AskAnswer): string[] {
+  const selected = answer.selected.length === 0 ? "none" : answer.selected.join(", ");
+  const text =
+    answer.text === null || answer.text === ""
+      ? "none"
+      : answer.text.split(/\r?\n/u).join("\n    ");
+  return [
+    `  ${lead} by ${answer.user} at ${answer.at} · options chosen: ${selected}`,
+    `  Answer text: ${text}`,
+  ];
+}
+
+function resolutionText(resolution: AskResolution): string {
+  return `${resolution.kind} by ${actorText(resolution.actor)} at ${resolution.at}: ${resolution.reason}`;
+}
+
+/** Where an ask hit stands, as the lines under its hit; `undefined` is a Dispatch that predates
+ *  reporting it. */
+function askStateLines(ask: SearchAsk | undefined): string[] {
+  if (ask === undefined) {
+    return ["  Answer state not reported by this Dispatch; open the link to read the ask."];
+  }
+  switch (ask.state) {
+    case "open":
+      return ["  Open: no answer yet."];
+    case "answered":
+      return answerLines("Answered", ask.answer);
+    case "resolved":
+      return ask.answer === undefined
+        ? [`  Closed with no answer: ${resolutionText(ask.resolution)}`]
+        : [
+            `  Closed after an answer: ${resolutionText(ask.resolution)}`,
+            ...answerLines("Last answer", ask.answer),
+          ];
+  }
+}
+
+/** One hit as text: its line, then, for an ask, where the ask stands. */
+function searchResultLine(result: SearchResult, baseUrl: string): string {
+  const line = searchHitLine(result, baseUrl);
+  return result.kind === "ask" ? [line, ...askStateLines(result.ask)].join("\n") : line;
 }
 
 /**

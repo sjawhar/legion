@@ -14400,7 +14400,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_search",
     example: { query: "astrolabe" },
-    description: "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " + "Use it before creating an issue or a design document, and to find where a word was written. " + 'Websearch syntax: "quoted phrase", -excluded, OR. ' + "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " + "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " + `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` + "so narrow the query or name a project to reach the rest. Paging is exact only while the " + "corpus holds still: content added, changed, or removed between two offsets can shift rows " + "across a page boundary, so one hit can come back twice and another never.",
+    description: "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " + "Use it before creating an issue or a design document, and to find where a word was written. " + 'Websearch syntax: "quoted phrase", -excluded, OR. ' + "Each kind of content is ranked on its own and the lists are merged, so the top holds the best " + "issue, document, ask, comment and message; an issue key searched alone lists that issue first. " + "An ask hit says whether it is answered: an answered one shows the latest answer, who gave it, " + "when, the options chosen and its text; a closed one says it was closed with no answer, or " + "shows the last answer it had. " + `The answer names how many results match; offset pages through them, and each kind lists at most its best ${SEARCH_KIND_DEPTH}, ` + "so narrow the query or name a project to reach the rest. Paging is exact only while the " + "corpus holds still: content added, changed, or removed between two offsets can shift rows " + "across a page boundary, so one hit can come back twice and another never.",
     arguments: (z2) => ({
       query: z2.string({
         min: 2,
@@ -15086,6 +15086,15 @@ function commandsHelp() {
 
 // ../envoy-client/src/dispatch-execute.ts
 import { resolve as resolvePath2 } from "path";
+
+// ../envoy-client/src/actor-text.ts
+function actorText(actor) {
+  const service = actor.kind === "session" ? actor.service : undefined;
+  if (service === undefined) {
+    return `${actor.kind} ${actor.id}`;
+  }
+  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
+}
 
 // ../envoy-client/src/ask-answer.ts
 var HEAD_LENGTH = 120;
@@ -16354,7 +16363,7 @@ function subscriptionRemovedTopics(raw, sessionID) {
 function pageSummaryText(offset, count, total) {
   return `showing ${offset + 1}-${offset + count} of ${total}`;
 }
-function searchResultLine(result, baseUrl) {
+function searchHitLine(result, baseUrl) {
   const href = new URL(result.href, baseUrl).toString();
   const { owner } = result;
   if (owner.kind === "document") {
@@ -16364,6 +16373,39 @@ function searchResultLine(result, baseUrl) {
   const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
   const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
   return `${label}: ${snippetText(result.snippet)} -> ${href}`;
+}
+function answerLines(lead, answer) {
+  const selected = answer.selected.length === 0 ? "none" : answer.selected.join(", ");
+  const text = answer.text === null || answer.text === "" ? "none" : answer.text.split(/\r?\n/u).join(`
+    `);
+  return [
+    `  ${lead} by ${answer.user} at ${answer.at} \xB7 options chosen: ${selected}`,
+    `  Answer text: ${text}`
+  ];
+}
+function resolutionText(resolution) {
+  return `${resolution.kind} by ${actorText(resolution.actor)} at ${resolution.at}: ${resolution.reason}`;
+}
+function askStateLines(ask) {
+  if (ask === undefined) {
+    return ["  Answer state not reported by this Dispatch; open the link to read the ask."];
+  }
+  switch (ask.state) {
+    case "open":
+      return ["  Open: no answer yet."];
+    case "answered":
+      return answerLines("Answered", ask.answer);
+    case "resolved":
+      return ask.answer === undefined ? [`  Closed with no answer: ${resolutionText(ask.resolution)}`] : [
+        `  Closed after an answer: ${resolutionText(ask.resolution)}`,
+        ...answerLines("Last answer", ask.answer)
+      ];
+  }
+}
+function searchResultLine(result, baseUrl) {
+  const line = searchHitLine(result, baseUrl);
+  return result.kind === "ask" ? [line, ...askStateLines(result.ask)].join(`
+`) : line;
 }
 function searchAnswer(search, query, offset, configUrl) {
   const results = search.results;
@@ -17505,13 +17547,6 @@ function eventHead(event) {
     default:
       return;
   }
-}
-function actorText(actor) {
-  const service = actor.kind === "session" ? actor.service : undefined;
-  if (service === undefined) {
-    return `${actor.kind} ${actor.id}`;
-  }
-  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
 }
 function eventRef(event) {
   const payload = event.payload;
