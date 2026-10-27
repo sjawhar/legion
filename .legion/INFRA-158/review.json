@@ -2,28 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T07:21:00Z",
-  "round": 9,
+  "completed": "2026-10-27T12:07:30Z",
+  "round": 10,
   "generation": 4,
-  "head": "4440fc7b57a27f3aa25936fc470183036e4db1e8",
+  "head": "b3855fb2027f28a87ccd000901cfb777db072f78",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
+  "important": 2,
   "minor": 0,
-  "ci": "Required set: lint, typecheck, test, pr-title. All four queued at CI head 4440fc7b when this round ended; compare 4440fc7b...b37aa423 changes only .legion/. A request for changes does not wait on CI.",
-  "thermonuclear": "At 4440fc7b, scoped to the fourteenth merge (fingerprint b9213970 -> 2eeecd82): thermonuclear-deep-review CHANGES (65 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality APPROVE (13 assistant turns, all anthropic / claude-opus-5-5). Read turn by turn from each pass's session transcript.",
-  "mergeChecks": {
-    "leasePoolSize 10": "matches the ten duty.Exclusive callers on the merged tree (compaction, suggestion-outcome, reference-excerpt, block-index, webhook redelivery, architecture, delivery reconcile, issue-ask-repair, consumerLease x2); the pool comment lists them",
-    "README eight loops": "matches: main's seven periodic leased loops plus issue-ask-repair; the per-durable consumer leases are not periodic, as before",
-    "main.go": "both loops start; the boot repair still runs before either",
-    "merged test file": "both tests whole"
+  "ci": "Required set: lint, typecheck, test, pr-title. All four queued at CI head b3855fb2 when this round ended; compare b3855fb2...e6876f3a changes only .legion/. A request for changes does not wait on CI.",
+  "thermonuclear": "At b3855fb2, scoped to what changed since review 5663501165: thermonuclear-deep-review CHANGES (58 assistant turns, all anthropic / claude-opus-5-5); thermonuclear-code-quality CHANGES on cleanup only (24 assistant turns, all anthropic / claude-opus-5-5). Read turn by turn from each pass's session transcript.",
+  "checks": {
+    "decision 22 block index": "a closed issue's owed live-ahead document is indexed at its latest version's own text; an open issue's is skipped as before; #b- references resolve; the two defects below stand",
+    "leasePoolSize 11": "matches the eleven duty.Exclusive callers (issue-ask-repair, suggestion-outcomes, architecture-import, two delivery durables, delivery-reconcile, block-index, edit-notices, reference-excerpts, document-compaction, webhook-redelivery); README's nine loops and the test comment's nine leases leave out the two durables, as before",
+    "settleOutcome join": "main's #2137 paths map to stoppedShort and abandon with main's behaviour",
+    "edit notices": "a close, reopen or repair writes none: lifecycle writes credit no author, and recordEditNotice fires only for a version listing a user (edit_notices.go:93)"
   },
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/block_index.go:339",
-      "description": "The close's and the repair's block-state writes leave a closed issue's document live ahead of its latest version (state is rendered, pmdoc/schema.go:377; no settlement runs while closed), and #2210's block index skips a document owed an index that is live ahead (pending && markdown != stored) until it reopens. Migration 0121 marks every document owed and the boot repair (main.go:286) runs before the loop (main.go:422), so on the deploy that ships both, every closed issue the repair writes, and every issue this release closes before its documents are indexed, gets no block graph until it reopens; rebuild-refs (refs/rebuild.go:97) re-marks every document owed, so the same happens after any rebuild for every closed issue whose close wrote a block state. Their #b- references resolve to no node (refs/graph.go), search links ?ask= instead of #b-, and owed_documents never reaches 0. Fix: index a live-ahead document of a closed issue at its latest version's stored rendering, whose blocks are that version's own."
+      "file": "packages/envoy/internal/dispatch/docs/block_index.go:514",
+      "description": "closedVersionBlocks adds every untyped live block with a row to liveSums keyed by block.ID, so a pasted copy carrying its source's id (an unsettled paste at the close) adds that row twice, and the anchors give two version blocks one id. Pure probe: stored 'Foo.\\n\\nFoo.\\n', rows p1 and p2, live p1, p1, p2 -> p1, p1. refs.IndexBlocks keeps the first holder, so p2 is recorded deleted at a version that holds its text, #b-p2 resolves to nothing while closed, and the reopen's settlement records it restored. Reproduced by the reviewer."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/block_index.go:363",
+      "description": "The skip now depends on whether the issue is open, but the loop's live-ahead cache (stillLiveAhead) is keyed on version, marked_at and no resident room only. An open document cached as live ahead whose close changes none of these (pre-close settlement stopped short, no open ask so no live write, persistLastActor does not move marked_at) is counted live ahead and never indexed after the close, until a restart or a room load; the previous round's symptom returns for it. Deep-review DB probe: three ticks with the same map leave it unindexed, a fresh map indexes it."
     }
   ],
-  "fastFollow": "Wording only: the retro learning docs/solutions/envoy/a-new-duty-exclusive-caller-raises-lease-pool-size-and-a-shortfall-is-silent-INFRA-158.md cites nine callers and 8 to 9 (now ten, 9 to 10); cmd/dispatch/multiprocess_test.go:1301 says 'four of the seven leases' (eight); packages/envoy/CHANGELOG.md:1475 'never counts or stores'."
+  "fastFollow": "Cleanup, no behaviour change: closedVersionBlocks is 174 lines of five passes in the loop's file (own file, one function per pass); its last two passes are one operation; the three repeated live-ahead switch cases; docs recomputes refs' block text hash (export one helper from refs); the PR body still names leasePoolSize 10 and round 9 open."
 }
