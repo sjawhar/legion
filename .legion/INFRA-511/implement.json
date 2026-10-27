@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T04:30:00Z",
+  "completed": "2026-10-27T05:40:00Z",
   "proof": [
+    {
+      "criterion": "Round 2 (tester's failure): /legion-controller-start or /legion-claim-controller typed while the start command's claim is in flight cannot run a second, overlapping registration; the start message is sent once and the session keeps the secret the daemon issued last",
+      "surface": "pi-legion unit suite (the tester's red test, unmodified) and the real interactive Oh My Pi 18.12.2 under a pseudo-terminal with both plugins, stand-ins issuing a distinct secret per registration, real NATS",
+      "command": "cd packages/pi-legion && bun test ./extensions/legion.test.ts -t 'run again while the start command|typed during the start command'; and the tester's probe /legion/scratch/tmp/i511-zz-tester-probe.test.ts P6 (copied into the package for the run, the 'second registration' wait replaced by a 2 s window that counts registrations while the first is held)",
+      "observed": "red test passes unmodified (second run: NOTHING_TO_DO, 1 registration, one start message); new test: /legion-claim-controller typed during the claim registers only after it (2 registrations, never 2 in flight). Probe: /legion-controller-start typed again -> registrations while held 1, total 1, grant secret secret-1 = current, set_status written (statusWrites=1); /legion-claim-controller typed -> registrations while held 1, total 2 sequential, current secret-2, grant used secret-2, set_status written",
+      "headSha": "b507c98c40d305040ab4f36fa76aaf867684e0b8",
+      "negativeControl": "with controller-session.ts from d3f73ec4 (no serialisation): the red test fails (second run returns [] after a second claim) and the new test fails with mostInFlight 2 (Received: 2), 3 of 3 runs"
+    },
     {
       "criterion": "A1: before the change, what the operator sees during the start turn is recorded",
       "surface": "real interactive Oh My Pi 18.12.2 (.omp-pin) under a pseudo-terminal read through @xterm/headless, both plugins, stand-in daemon/listener/gateway with held Messages requests, real NATS",
@@ -40,12 +48,14 @@
     "packages/pi-shared/test/omp-harness.ts: spawnInteractive PTY runner, ompFlags/ompEnv",
     "packages/pi-legion/extensions/legion.test.ts, controller-start-omp.test.ts; package.json test script runs the real-binary file in its own process",
     ".github/workflows/envoy-and-contracts.yaml: NATS service (pinned by digest) and LEGION_TEST_NATS_URL for the pi-legion job",
-    "docs: root AGENTS.md, packages/pi-legion/AGENTS.md, packages/pi-shared/AGENTS.md, docs/kubernetes.md, docs/site troubleshooting, scripts/e2e/README.md and two script comments, pi-legion/pi-envoy/claude-envoy CHANGELOGs"
+    "docs: root AGENTS.md, packages/pi-legion/AGENTS.md, packages/pi-shared/AGENTS.md, docs/kubernetes.md, docs/site troubleshooting, scripts/e2e/README.md and two script comments, pi-legion/pi-envoy/claude-envoy CHANGELOGs",
+    "Round 2: packages/pi-legion/src/controller-session.ts (claims serialised through one in-flight claim; /legion-controller-start waits for it and decides again), packages/pi-legion/extensions/legion.test.ts (test for /legion-claim-controller during the start claim), packages/pi-legion/AGENTS.md"
   ],
   "trickyParts": [
     "Sending the start message after the Envoy role claim was flaky (4/30): the listener forwards a role-lane card as soon as it records the role, which can reach the session before claimEnvoyRole resolves; the send now happens right after claims/register, before the role claim and the subscription.",
     "Oh My Pi's TUI render is throttled, so the claim's first daemon requests can precede the first painted frame by ~25 ms in some runs; the command still runs after Oh My Pi's startup code (startupComplete) and the start turn always comes after the first frame.",
-    "extensions/legion.test.ts mocks nats process-wide, so controller-start-omp.test.ts (real NATS) runs in its own process via the package test script."
+    "extensions/legion.test.ts mocks nats process-wide, so controller-start-omp.test.ts (real NATS) runs in its own process via the package test script.",
+    "Round 2: Oh My Pi reads the terminal while /legion-controller-start's claim runs; every registration replaces the daemon's controller secret, so overlapping claims could leave the session with a replaced secret (grants refused 403). claim() now waits for the claim in flight; the new test proves the absence of overlap with event-loop turns, not a clock."
   ],
   "deviations": [
     "Worked from plan.md version 2 and spec version 3 (the architect's scope change on 2026-10-27): task 5 (pi-envoy deferral), A6 and A13 are not in this pull request; they are built and proven on branch legion/INFRA-511-startup-wait (on #2278's head) for INFRA-497's implementer to move into #2278.",
