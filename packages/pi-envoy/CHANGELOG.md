@@ -57,7 +57,7 @@
   people's comments on it to the claiming session. It said a claim delivers no comments. Routing
   the issue to the session (and clearing the route on release), or subscribing to the issue's
   topic, stays the way to get everything else. Its Legion sentence now forbids writing the route
-  of a `legion` issue or one under it, as well as its status (INFRA-596).
+  of a `legion` issue or one under it, as well as its status.
 
 - A live view held open while its session is relaunched with `--resume` now shows the resumed
   process's model, thinking level and command changes. Two things stopped it. Every process
