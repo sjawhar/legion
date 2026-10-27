@@ -158,6 +158,10 @@ func TestClusteredNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 		{"an empty listener memory", func(a *A) { listener(a).Memory = str("") }, "tailnet.listener.memory",
 			[]string{"tailnet.listener.memory is empty; leave it unset for 1Gi"}},
 		{"a listener memory that is no quantity", func(a *A) { listener(a).Memory = str("1 GB") }, "tailnet.listener.memory", []string{"not a Kubernetes quantity"}},
+		{"a listener cpu that leaves the tailnet pod below Autopilot's floor", func(a *A) { listener(a).Cpu = str("100m") }, "tailnet.listener.cpu",
+			[]string{"tailnet.listener.cpu \"100m\" must be at least 200m", "the tailnet pod would request less than 500m"}},
+		{"a listener memory too small for the tailnet pod's CPU", func(a *A) { listener(a).Cpu = str("4"); listener(a).Memory = str("1Gi") }, "tailnet.listener.memory",
+			[]string{"the tailnet pod must hold between 1 and 6.5 GiB of memory per CPU"}},
 
 		{"no users and no tailnet", func(a *A) { withoutTailnet(a).Users = nil }, "users", []string{"at least one user is required"}},
 		{"a user with no nkey", func(a *A) { a.Users[1].NKey = "" }, "users", []string{"users[1]: nkey is required"}},

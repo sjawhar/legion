@@ -557,27 +557,23 @@ func newClusteredHubTailnet(args *ClusteredNatsHubArgs, s clusteredHubSettings) 
 		machineID:      machineID,
 		seedSecretName: l.SeedSecretName,
 		seedSecretKey:  l.SeedSecretKey,
-		cpu:            defaultClusteredHubListenerCPU,
-		memory:         defaultClusteredHubListenerMemory,
 	}
-	for _, q := range []struct {
-		input, examples string
-		value           *string
-		into            *string
-	}{
-		{"tailnet.listener.cpu", "500m or 1", l.Cpu, &listener.cpu},
-		{"tailnet.listener.memory", "1Gi or 512Mi", l.Memory, &listener.memory},
-	} {
-		if q.value == nil {
-			continue
-		}
-		if *q.value == "" {
-			return nil, nil, core.InputErrorf(q.input, "%s is empty; leave it unset for %s", q.input, *q.into)
-		}
-		if _, err := appQuantity(q.input, *q.value, q.examples); err != nil {
-			return nil, nil, &core.InputError{Input: q.input, Err: err}
-		}
-		*q.into = *q.value
+	// The listener is the tailnet pod's one sized input; the tailscale and advertiser containers
+	// have fixed sizes, so the pod's total is refused where Autopilot would raise or reject it, as
+	// the hub pod's is.
+	var err error
+	if listener.cpu, listener.memory, err = autopilotPodSize(autopilotPod{
+		name:     "the tailnet pod",
+		cpuInput: "tailnet.listener.cpu", memoryInput: "tailnet.listener.memory",
+		cpu: l.Cpu, memory: l.Memory,
+		defaultCPU: defaultClusteredHubListenerCPU, defaultMemory: defaultClusteredHubListenerMemory,
+		memoryExamples: "1Gi or 512Mi",
+		sidecars: []autopilotSidecar{
+			{name: "the tailscale container", cpu: clusteredHubTailscaleCPU, memory: clusteredHubTailscaleMemory},
+			{name: "the advertiser", cpu: clusteredHubAdvertiserCPU, memory: clusteredHubAdvertiserMemory},
+		},
+	}); err != nil {
+		return nil, nil, err
 	}
 	host := core.TailnetHostName(t.ServiceName, t.TailnetDnsName)
 	env, err := core.ListenerConfig{

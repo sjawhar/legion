@@ -104,7 +104,11 @@ func TestClusteredNatsHubOutputs(t *testing.T) {
 			}
 		})
 		require.NoError(t, err)
-		require.ElementsMatch(t, clusteredHubTypes, m.Types())
+		types := clusteredHubTypes
+		if !tailnet {
+			types = clusteredHubBaseTypes
+		}
+		require.ElementsMatch(t, types, m.Types())
 		want := map[string]any{
 			"serviceUrl": "nats://envoy-nats.envoy.svc.cluster.local:4222",
 			"podSelector": map[string]string{

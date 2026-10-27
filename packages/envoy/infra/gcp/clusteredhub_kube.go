@@ -57,7 +57,8 @@ func clusteredHubTailnetSelector(release string) map[string]string {
 
 // newClusteredHubKubernetes registers the hub's Kubernetes children, each the component's child
 // on the Kubernetes provider it builds from kubeconfig: the priority class read, the nats chart,
-// the hub pods' NetworkPolicy and their PodMonitoring.
+// the hub pods' NetworkPolicy and their PodMonitoring and, with tailnet, the tailnet hosts
+// (newClusteredHubTailnetHosts).
 func newClusteredHubKubernetes(ctx *pulumi.Context, comp *ClusteredNatsHub, name string, args *ClusteredNatsHubArgs, s clusteredHubSettings) error {
 	// The provider is the component's own, so it can promise mutable ConfigMaps: pulumi-kubernetes
 	// replaces a ConfigMap whose data changes otherwise, deleting it first, and a hub pod
@@ -76,13 +77,16 @@ func newClusteredHubKubernetes(ctx *pulumi.Context, comp *ClusteredNatsHub, name
 		pulumi.Transforms([]pulumi.ResourceTransform{protectClusteredHubStatefulSet}),
 	}
 	// Kubernetes refuses every pod naming a class that does not exist, so the class is read first
-	// and the chart waits on the read: a missing class fails the preview rather than the rollout.
+	// and the chart and the tailnet hosts wait on the read: a missing class fails the preview rather
+	// than the rollout.
+	var classRead []pulumi.Resource
 	if s.priorityClassName != "" {
 		class, err := schedulingv1.GetPriorityClass(ctx, s.name+"-priority-class", pulumi.ID(s.priorityClassName), nil, child...)
 		if err != nil {
 			return err
 		}
-		chartOpts = append(chartOpts, pulumi.DependsOn([]pulumi.Resource{class}))
+		classRead = []pulumi.Resource{class}
+		chartOpts = append(chartOpts, pulumi.DependsOn(classRead))
 	}
 	if _, err := helmv4.NewChart(ctx, s.name, &helmv4.ChartArgs{
 		Chart:          pulumi.String(clusteredHubChart),
@@ -109,7 +113,10 @@ func newClusteredHubKubernetes(ctx *pulumi.Context, comp *ClusteredNatsHub, name
 			}},
 		}},
 	}, child...)
-	return err
+	if err != nil || s.tailnet == nil {
+		return err
+	}
+	return newClusteredHubTailnetHosts(ctx, name, args.TailnetAuthKey, s, classRead, child...)
 }
 
 // clusteredHubIngress is what the hub pods' NetworkPolicy admits, by TCP port: NATS's client port

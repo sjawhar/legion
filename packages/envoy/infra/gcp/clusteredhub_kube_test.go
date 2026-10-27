@@ -2,6 +2,7 @@ package gcp_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -17,6 +18,10 @@ const (
 	chartType              = "kubernetes:helm.sh/v4:Chart"
 	networkPolicyType      = "kubernetes:networking.k8s.io/v1:NetworkPolicy"
 	podMonitoringType      = "kubernetes:monitoring.googleapis.com/v1:PodMonitoring"
+	kubeSecretType         = "kubernetes:core/v1:Secret"
+	configMapType          = "kubernetes:core/v1:ConfigMap"
+	serviceAccountType     = "kubernetes:core/v1:ServiceAccount"
+	deploymentType         = "kubernetes:apps/v1:Deployment"
 
 	clusteredHubURN = "urn:pulumi:s::p::" + clusteredHubType + "::example-clustered-hub"
 	// clusteredProviderRef starts the reference to the provider the hub builds, which every
@@ -24,9 +29,17 @@ const (
 	clusteredProviderRef = "urn:pulumi:s::p::" + clusteredHubType + "$" + kubernetesProviderType + "::envoy-nats-kubernetes::"
 )
 
-// clusteredHubTypes are what a hub registers without a priority class: itself, its Kubernetes
-// provider, the chart, the hub pods' NetworkPolicy and their PodMonitoring.
-var clusteredHubTypes = []string{clusteredHubType, kubernetesProviderType, chartType, networkPolicyType, podMonitoringType}
+var (
+	// clusteredHubBaseTypes are what a hub registers without tailnet or a priority class: itself,
+	// its Kubernetes provider, the chart, the hub pods' NetworkPolicy and their PodMonitoring.
+	clusteredHubBaseTypes = []string{clusteredHubType, kubernetesProviderType, chartType, networkPolicyType, podMonitoringType}
+	// clusteredHubTailnetTypes are what tailnet adds: the tailnet hosts' auth key Secret, serve
+	// ConfigMap, ServiceAccount, Deployment and budget.
+	clusteredHubTailnetTypes = []string{kubeSecretType, configMapType, serviceAccountType, deploymentType, podDisruptionBudgetType}
+	// clusteredHubTypes are what clusteredArgs' hub registers: with tailnet, without a priority
+	// class.
+	clusteredHubTypes = slices.Concat(clusteredHubBaseTypes, clusteredHubTailnetTypes)
+)
 
 // runClusteredHub constructs a clustered hub named example-clustered-hub from args under the
 // mocks, failing the test on an error.
@@ -84,7 +97,7 @@ func TestClusteredNatsHubBuildsItsOwnKubernetesProvider(t *testing.T) {
 			requireClusteredKubernetesChild(t, r)
 		}
 	}
-	require.ElementsMatch(t, append(clusteredHubTypes, priorityClassType), m.Types())
+	require.ElementsMatch(t, slices.Concat(clusteredHubTypes, []string{priorityClassType}), m.Types())
 }
 
 // The chart is nats 2.15.1 from the NATS project's repository, installed under the release name

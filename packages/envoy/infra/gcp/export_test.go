@@ -106,6 +106,14 @@ func RefuseClusteredHubSecret(value pulumi.StringInput, name, input string) pulu
 // calls it directly: chart children are not registered under the mocks.
 var ProtectClusteredHubStatefulSet = protectClusteredHubStatefulSet
 
+// The two shutdown budgets of a gcp:ClusteredNatsHub tailnet host pod, for the test that holds
+// each within the pod's grace period: the tailscale container's preStop hook and containerboot's
+// shutdown, and the session listener's own shutdown on its SIGTERM, after its preStop wait.
+const (
+	TailnetShutdownSeconds              = tailnetShutdownSeconds
+	ClusteredHubListenerShutdownSeconds = clusteredHubListenerShutdownSeconds
+)
+
 // DispatchRollingUpdate is the resolved rolling update's bounds, for the tests outside the package.
 type DispatchRollingUpdate struct {
 	MaxUnavailable int

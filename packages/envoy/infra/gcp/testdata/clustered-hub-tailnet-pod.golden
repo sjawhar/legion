@@ -1,0 +1,390 @@
+{
+  "metadata": {
+    "labels": {
+      "app.kubernetes.io/component": "tailnet",
+      "app.kubernetes.io/instance": "envoy-nats",
+      "app.kubernetes.io/name": "nats-tailnet"
+    }
+  },
+  "spec": {
+    "containers": [
+      {
+        "env": [
+          {
+            "name": "TS_AUTHKEY",
+            "valueFrom": {
+              "secretKeyRef": {
+                "key": "TS_AUTHKEY",
+                "name": "envoy-nats-tailnet-authkey"
+              }
+            }
+          },
+          {
+            "name": "TS_AUTH_ONCE",
+            "value": "true"
+          },
+          {
+            "name": "TS_USERSPACE",
+            "value": "true"
+          },
+          {
+            "name": "TS_STATE_DIR",
+            "value": "/var/lib/tailnet/tailscale"
+          },
+          {
+            "name": "TS_LOGS_DIR",
+            "value": "/var/lib/tailnet/tailscale"
+          },
+          {
+            "name": "TS_KUBE_SECRET",
+            "value": ""
+          },
+          {
+            "name": "TS_ACCEPT_DNS",
+            "value": "false"
+          },
+          {
+            "name": "TS_HOSTNAME",
+            "valueFrom": {
+              "fieldRef": {
+                "fieldPath": "metadata.name"
+              }
+            }
+          },
+          {
+            "name": "TS_EXTRA_ARGS",
+            "value": "--advertise-tags=tag:envoy-hub-host"
+          },
+          {
+            "name": "TS_SERVE_CONFIG",
+            "value": "/etc/tailscale/serve.json"
+          },
+          {
+            "name": "TS_EXPERIMENTAL_SERVICE_AUTO_ADVERTISEMENT",
+            "value": "false"
+          },
+          {
+            "name": "TS_ENABLE_HEALTH_CHECK",
+            "value": "true"
+          },
+          {
+            "name": "TS_LOCAL_ADDR_PORT",
+            "value": "127.0.0.1:9002"
+          },
+          {
+            "name": "TS_SOCKET",
+            "value": "/var/lib/tailnet/tailscaled.sock"
+          }
+        ],
+        "image": "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "lifecycle": {
+          "preStop": {
+            "exec": {
+              "command": [
+                "/bin/sh",
+                "-c",
+                "read -r id _ 2\u003e/dev/null \u003c/var/lib/tailnet/node-id \u0026\u0026 printf '%s %s\\n' \"$id\" \"$(date -u +%s)\" \u003e/var/lib/tailnet/draining.tmp \u0026\u0026 mv /var/lib/tailnet/draining.tmp /var/lib/tailnet/draining; rm -f /var/lib/tailnet/service-ready\ntimeout 5 tailscale --socket=/var/lib/tailnet/tailscaled.sock serve drain svc:envoy-hub\nsleep 20\ntimeout 5 tailscale --socket=/var/lib/tailnet/tailscaled.sock logout\n"
+              ]
+            }
+          }
+        },
+        "livenessProbe": {
+          "exec": {
+            "command": [
+              "tailscale",
+              "--socket=/var/lib/tailnet/tailscaled.sock",
+              "version",
+              "--daemon"
+            ]
+          },
+          "failureThreshold": 6,
+          "periodSeconds": 10,
+          "timeoutSeconds": 5
+        },
+        "name": "tailscale",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "/bin/sh",
+              "-c",
+              "test -e /var/lib/tailnet/service-ready"
+            ]
+          },
+          "failureThreshold": 1,
+          "periodSeconds": 5
+        },
+        "resources": {
+          "limits": {
+            "cpu": "250m",
+            "memory": "512Mi"
+          },
+          "requests": {
+            "cpu": "250m",
+            "memory": "512Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          }
+        },
+        "startupProbe": {
+          "exec": {
+            "command": [
+              "wget",
+              "-qO-",
+              "http://127.0.0.1:9002/healthz"
+            ]
+          },
+          "failureThreshold": 36,
+          "periodSeconds": 5
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/var/lib/tailnet",
+            "name": "state"
+          },
+          {
+            "mountPath": "/etc/tailscale",
+            "name": "serve",
+            "readOnly": true
+          }
+        ]
+      },
+      {
+        "command": [
+          "/bin/sh",
+          "-c",
+          "socket=/var/lib/tailnet/tailscaled.sock\nready_file=/var/lib/tailnet/service-ready\ndraining_file=/var/lib/tailnet/draining\nnode_file=/var/lib/tailnet/node-id\nflag_file=''\nservice=svc:envoy-hub\ncertificate=''\nhealth=http://127.0.0.1:9020/healthz\ngrace=60\nstuck_first=120\nstuck_max=960\npause=15\nattempts=6\nperiod=5\nhealth_timeout=6\nrise=2\nfall=3\nset -u\nat() { date -u +%Y-%m-%dT%H:%M:%SZ; }\nnow() { date -u +%s; }\nlog() { echo \"$(at) $1 | $2 | $3\"; }\nts() { tailscale --socket=\"$socket\" \"$@\"; }\nerr=${TMPDIR:-/tmp}/tailnet-advertiser.err\nhealth_out=${TMPDIR:-/tmp}/tailnet-advertiser.health\n# follow sets id to Self.ID and st to the status it read, and keeps the node id file on id. It\n# fails, and writes nothing, while tailscaled does not answer as a logged-in node, or names an id\n# that is not alphanumeric, as no StableNodeID is.\nfollow() {\n  id=\n  st=$(ts status --json --peers=false 2\u003e/dev/null) || return 1\n  printf '%s\\n' \"$st\" | grep -q '^[[:space:]]*\"BackendState\": \"Running\",*$' || return 1\n  id=$(printf '%s\\n' \"$st\" | sed -n 's/^[[:space:]]*\"ID\": \"\\([^\"]*\\)\",*$/\\1/p' | head -n 1)\n  case \"$id\" in\n    '') return 1 ;;\n    *[!A-Za-z0-9]*) log \"node id\" \"tailscale status --json --peers=false\" \"$id is not alphanumeric: not written\"; id=; return 1 ;;\n  esac\n  was=$(cat \"$node_file\" 2\u003e/dev/null)\n  if [ \"$id\" != \"$was\" ]; then\n    printf '%s\\n' \"$id\" \u003e\"$node_file.tmp\" \u0026\u0026 mv \"$node_file.tmp\" \"$node_file\"\n    log \"node id\" \"tailscale status --json --peers=false\" \"$id, was ${was:-none}: written to $node_file\"\n  fi\n}\n# draining: the draining file names this cycle's node and is younger than the grace period. One\n# older than that is from a termination that is over (the kubelet has killed the container whose\n# preStop hook wrote it), and is removed: else a tailscale container that came back as the same\n# node, after a logout that failed, would never be advertised again. A time that is not a number\n# counts as over.\ndraining() {\n  [ -e \"$draining_file\" ] \u0026\u0026 read -r drained began _ \u003c\"$draining_file\" || return 1\n  case \"$began\" in ''|*[!0-9]*) began=0 ;; esac\n  if [ $(($(now) - began)) -gt \"$grace\" ]; then\n    rm -f \"$draining_file\"\n    log \"service advertisement\" \"rm -f $draining_file\" \"the preStop hook's drain of node ${drained:-none}, begun at $began, is more than ${grace}s old: over\"\n    return 1\n  fi\n  [ \"$drained\" = \"$node\" ]\n}\n# may: no preStop hook drains this cycle's node and, with an advertise gate, its flag names it.\nmay() {\n  if [ -n \"$flag_file\" ]; then\n    [ -e \"$flag_file\" ] \u0026\u0026 read -r flagged _ \u003c\"$flag_file\" \u0026\u0026 [ \"$flagged\" = \"$node\" ] || return 1\n  fi\n  ! draining\n}\n# still: tailscaled still runs as this cycle's node, and it may advertise.\nstill() { follow \u0026\u0026 [ \"$id\" = \"$node\" ] \u0026\u0026 may; }\nadvertising() { ts debug prefs 2\u003e/dev/null | grep -q \"\\\"$service\\\"\"; }\n# approved: the status follow last read lists the Service in the self node's service-host\n# capability.\napproved() {\n  printf '%s\\n' \"$st\" | awk -v want=\"\\\"$service\\\": [\" '\n    !inside \u0026\u0026 /^ *\"service-host\": \\[$/ { inside = 1; match($0, /^ */); indent = RLENGTH; next }\n    inside {\n      match($0, /^ */)\n      if (RLENGTH \u003c= indent) { inside = 0; next }\n      if (index(substr($0, RLENGTH + 1), want) == 1) found = 1\n    }\n    END { exit !found }'\n}\n# healthy: one GET of the health URL answered HTTP 200 (the last status line wget -S prints, after\n# any redirect). Each change of answer is logged once.\nlast_code=unknown\nhealthy() {\n  wget -S -O /dev/null -T \"$health_timeout\" \"$health\" \u003e\"$health_out\" 2\u003e\u00261\n  rc=$?\n  code=$(sed -n 's/^[[:space:]]*HTTP\\/[0-9.]* \\([0-9][0-9][0-9]\\).*/\\1/p' \"$health_out\" | tail -n 1)\n  [ -n \"$code\" ] || code=\"no answer: $(tr '\\n' ' ' \u003c\"$health_out\")\"\n  if [ \"$code\" != \"$last_code\" ]; then\n    log \"health\" \"wget $health\" \"HTTP $code, was $last_code\"\n    last_code=$code\n  fi\n  [ \"$rc\" -eq 0 ] \u0026\u0026 [ \"$code\" = 200 ]\n}\n# unstick drains the Service and advertises it again once the node has been advertised and\n# unapproved for more than stuck seconds, doubling stuck up to stuck_max. It returns 1 when the\n# cycle must start again: the node changed or may no longer advertise during the pause, or the new\n# advertisement failed.\nunstick() {\n  waited=$(($(now) - since))\n  [ \"$waited\" -gt \"$stuck\" ] || return 0\n  recoveries=$((recoveries + 1))\n  stuck=$((stuck * 2))\n  [ \"$stuck\" -le \"$stuck_max\" ] || stuck=$stuck_max\n  recovery=\"recovery $recoveries: not approved ${waited}s after advertising\"\n  if ! ts serve drain \"$service\" \u003e/dev/null 2\u003e\"$err\"; then\n    log \"service advertisement\" \"tailscale serve drain $service\" \"$recovery: the drain failed: $(tr '\\n' ' ' \u003c\"$err\"); next recovery after ${stuck}s\"\n    return 0\n  fi\n  sleep \"$pause\"\n  still || return 1\n  if ! ts serve advertise \"$service\" \u003e/dev/null 2\u003e\"$err\"; then\n    log \"service advertisement\" \"tailscale serve drain $service; sleep $pause; tailscale serve advertise $service\" \"$recovery: drained, and the advertisement failed: $(tr '\\n' ' ' \u003c\"$err\"); advertising again\"\n    return 1\n  fi\n  since=$(now)\n  log \"service advertisement\" \"tailscale serve drain $service; sleep $pause; tailscale serve advertise $service\" \"$recovery: drained and advertised again; next recovery after ${stuck}s\"\n}\norders=0\nwhile :; do\n  rm -f \"$ready_file\"\n  until follow; do sleep \"$period\"; done\n  node=$id\n  good=0\n  while :; do\n    if may; then\n      [ -z \"$health\" ] \u0026\u0026 break\n      if healthy; then good=$((good + 1)); else good=0; fi\n      [ \"$good\" -ge \"$rise\" ] \u0026\u0026 break\n    else\n      good=0\n    fi\n    sleep \"$period\"\n    follow \u0026\u0026 [ \"$id\" = \"$node\" ] || continue 2\n  done\n  [ -z \"$flag_file\" ] || log \"service advertisement\" \"cat $flag_file\" \"$(cat \"$flag_file\")\"\n  until ts serve advertise \"$service\" \u003e/dev/null 2\u003e\"$err\"; do\n    log \"service advertisement\" \"tailscale serve advertise $service\" \"failed: $(tr '\\n' ' ' \u003c\"$err\"); again in 10s\"\n    sleep 10\n    still || continue 2\n  done\n  log \"service advertisement\" \"tailscale serve advertise $service\" \"advertised as node $node\"\n  since=$(now)\n  stuck=$stuck_first\n  recoveries=0\n  bad=0\n  held=\n  while :; do\n    if ! follow; then gone=\"tailscaled answers as no logged-in node\"; break\n    elif [ \"$id\" != \"$node\" ]; then gone=\"tailscaled is node $id now, not $node\"; break\n    elif ! may; then gone=\"node $node may not advertise: a preStop hook drains it${flag_file:+, or the advertise flag does not name it}\"; break\n    fi\n    if [ -n \"$health\" ]; then\n      if healthy; then bad=0; else bad=$((bad + 1)); fi\n      if [ \"$bad\" -ge \"$fall\" ]; then\n        ts serve drain \"$service\" \u003e/dev/null 2\u003e\"$err\" || log \"service advertisement\" \"tailscale serve drain $service\" \"failed: $(tr '\\n' ' ' \u003c\"$err\")\"\n        gone=\"$bad health checks of $health failed in a row: $service drained\"\n        break\n      fi\n    fi\n    if ! advertising; then gone=\"node $node no longer advertises $service\"; break; fi\n    if ! approved; then\n      if [ -e \"$ready_file\" ]; then\n        rm -f \"$ready_file\"\n        log \"readiness\" \"rm -f $ready_file\" \"node $node is no longer approved to host $service: not ready\"\n      fi\n      if ! unstick; then gone=\"node $node changed, may no longer advertise, or was not advertised again during a recovery\"; break; fi\n      sleep \"$period\"\n      continue\n    fi\n    if [ -n \"$certificate\" ] \u0026\u0026 [ \"$held\" != \"$node\" ]; then\n      if ts cert --cert-file=- --key-file=- \"$certificate\" \u003e/dev/null 2\u003e\"$err\"; then\n        held=$node\n        log \"service certificate\" \"tailscale cert $certificate\" \"in tailscaled's cache\"\n      else\n        why=$(tr '\\n' ' ' \u003c\"$err\")\n        if grep -q 'invalid domain' \"$err\"; then\n          backoff=30\n        else\n          orders=$((orders + 1))\n          if [ \"$orders\" -ge \"$attempts\" ]; then\n            ts serve drain \"$service\" \u003e/dev/null 2\u003e\u00261\n            log \"service certificate\" \"tailscale cert $certificate\" \"$orders orders failed, the last: $why; no more from this pod: $service drained, not ready\"\n            while sleep 30; do follow; done\n          fi\n          backoff=$((60 * orders + ${RANDOM:-0} % 30))\n        fi\n        log \"service certificate\" \"tailscale cert $certificate\" \"not yet: $why; again in ${backoff}s\"\n        sleep \"$backoff\"\n        continue\n      fi\n    fi\n    if [ ! -e \"$ready_file\" ]; then\n      printf '%s\\n' \"$node\" \u003e\"$ready_file.tmp\" \u0026\u0026 mv \"$ready_file.tmp\" \"$ready_file\"\n      log \"readiness\" \"write $ready_file\" \"node $node is approved to host $service${certificate:+ and tailscaled holds its certificate}: ready\"\n    fi\n    sleep \"$period\"\n  done\n  rm -f \"$ready_file\"\n  log \"readiness\" \"rm -f $ready_file\" \"$gone: not ready; advertising again once the node may\"\ndone\n"
+        ],
+        "image": "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "name": "advertiser",
+        "resources": {
+          "limits": {
+            "cpu": "50m",
+            "memory": "64Mi"
+          },
+          "requests": {
+            "cpu": "50m",
+            "memory": "64Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/var/lib/tailnet",
+            "name": "state"
+          }
+        ]
+      },
+      {
+        "env": [
+          {
+            "name": "PORT",
+            "value": "9020"
+          },
+          {
+            "name": "ENVOY_LISTEN_HOST",
+            "value": "127.0.0.1"
+          },
+          {
+            "name": "ENVOY_ALLOWED_HOSTS",
+            "value": "envoy-hub.example-tailnet.ts.net"
+          },
+          {
+            "name": "ENVOY_MACHINE_ID",
+            "value": "envoy-hub"
+          },
+          {
+            "name": "NATS_URLS",
+            "value": "nats://envoy-nats.envoy.svc.cluster.local:4222"
+          },
+          {
+            "name": "ENVOY_ALLOW_REMOTE_NATS",
+            "value": "1"
+          },
+          {
+            "name": "NATS_NKEY_SEED_FILE",
+            "value": "/var/run/secrets/envoy/nats-seed"
+          }
+        ],
+        "image": "example.invalid/envoy@sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "lifecycle": {
+          "preStop": {
+            "exec": {
+              "command": [
+                "sleep",
+                "25"
+              ]
+            }
+          }
+        },
+        "livenessProbe": {
+          "exec": {
+            "command": [
+              "curl",
+              "-sS",
+              "-o",
+              "/dev/null",
+              "--max-time",
+              "6",
+              "http://127.0.0.1:9020/healthz"
+            ]
+          },
+          "failureThreshold": 6,
+          "periodSeconds": 10,
+          "timeoutSeconds": 7
+        },
+        "name": "listener",
+        "resources": {
+          "limits": {
+            "cpu": "500m",
+            "memory": "1Gi"
+          },
+          "requests": {
+            "cpu": "500m",
+            "memory": "1Gi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          }
+        },
+        "startupProbe": {
+          "exec": {
+            "command": [
+              "curl",
+              "-sS",
+              "-o",
+              "/dev/null",
+              "--max-time",
+              "6",
+              "http://127.0.0.1:9020/healthz"
+            ]
+          },
+          "failureThreshold": 24,
+          "periodSeconds": 5,
+          "timeoutSeconds": 7
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/var/run/secrets/envoy",
+            "name": "nats-seed",
+            "readOnly": true
+          }
+        ]
+      }
+    ],
+    "enableServiceLinks": false,
+    "initContainers": [
+      {
+        "command": [
+          "mkdir",
+          "-p",
+          "/var/lib/tailnet/tailscale"
+        ],
+        "image": "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "name": "tailscale-state",
+        "resources": {
+          "limits": {
+            "cpu": "50m",
+            "memory": "64Mi"
+          },
+          "requests": {
+            "cpu": "50m",
+            "memory": "64Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/var/lib/tailnet",
+            "name": "state"
+          }
+        ]
+      }
+    ],
+    "securityContext": {
+      "runAsGroup": 999,
+      "runAsNonRoot": true,
+      "runAsUser": 999,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "serviceAccountName": "envoy-nats-tailnet",
+    "terminationGracePeriodSeconds": 60,
+    "topologySpreadConstraints": [
+      {
+        "labelSelector": {
+          "matchLabels": {
+            "app.kubernetes.io/component": "tailnet",
+            "app.kubernetes.io/instance": "envoy-nats",
+            "app.kubernetes.io/name": "nats-tailnet"
+          }
+        },
+        "maxSkew": 1,
+        "minDomains": 2,
+        "topologyKey": "topology.kubernetes.io/zone",
+        "whenUnsatisfiable": "DoNotSchedule"
+      },
+      {
+        "labelSelector": {
+          "matchLabels": {
+            "app.kubernetes.io/component": "tailnet",
+            "app.kubernetes.io/instance": "envoy-nats",
+            "app.kubernetes.io/name": "nats-tailnet"
+          }
+        },
+        "maxSkew": 1,
+        "topologyKey": "kubernetes.io/hostname",
+        "whenUnsatisfiable": "DoNotSchedule"
+      }
+    ],
+    "volumes": [
+      {
+        "emptyDir": {},
+        "name": "state"
+      },
+      {
+        "configMap": {
+          "name": "envoy-nats-tailnet"
+        },
+        "name": "serve"
+      },
+      {
+        "name": "nats-seed",
+        "secret": {
+          "items": [
+            {
+              "key": "seed",
+              "path": "nats-seed"
+            }
+          ],
+          "secretName": "envoy-hub-listener-seed"
+        }
+      }
+    ]
+  }
+}
