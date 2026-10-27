@@ -30,18 +30,33 @@ type BlockPointer struct {
 // hold, a block's attributes by name. A schema declaring no `block[]` attribute (every shipped
 // schema) lists none without walking tree. A tree inside the schema holds only canonical
 // references (ParseBlockPointerValue); any other value is skipped.
+//
+// Only the first holder of a repeated block id holds pointers, as the block index takes the first
+// holder for the id's node (refs.IndexBlocks): a typed block whose id a block before it in document
+// order already carries, typed or not, lists none. The walk visits a block before the blocks it
+// holds, as the renderer records their offsets, so a typed block inside another follows it.
 func BlockPointers(tree *Node) []BlockPointer {
 	if len(schemaLinkKinds) == 0 {
 		return nil
 	}
 	var pointers []BlockPointer
+	held := make(map[string]struct{})
 	Walk(tree, func(node *Node) bool {
+		if node.Type == "doc" || isInlineNodeType(node.Type) {
+			return true
+		}
+		id, _ := node.Attrs[BlockIDAttr].(string)
+		if id != "" {
+			if _, repeated := held[id]; repeated {
+				return true
+			}
+			held[id] = struct{}{}
+		}
 		names, ok := schemaPointerAttributes[node.Type]
 		if !ok {
 			return true
 		}
 		typ, _ := typedBlock(node.Type)
-		id, _ := node.Attrs[BlockIDAttr].(string)
 		for _, name := range names {
 			refs, _ := stringSlice(node.Attrs[name])
 			for _, ref := range refs {
@@ -64,6 +79,9 @@ func BlockPointers(tree *Node) []BlockPointer {
 // or a block retyped into a type declaring the attribute, whatever the type before declared under
 // that name. A nil prior (a new document, or one outside the schema) holds none. A pointer the
 // write leaves unchanged is never refused, so a target retyped elsewhere blocks no unrelated edit.
+// Its pointers are BlockPointers', so a typed block repeating an id a block before it carries is
+// never checked, as the block index never writes its pointers: the refusal and the index judge one
+// set of pointers.
 //
 // resolve is called at most once, with the target of each introduced pointer whose attribute has
 // targets, and returns the current types of the blocks they name by node id (text.TargetID); none

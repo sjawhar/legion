@@ -55,11 +55,16 @@ func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID strin
 	if rendered.tree == nil {
 		return s.indexUnrenderedVersion(ctx, tx, artifactID, versionAt, markdown)
 	}
-	blocks := make([]model.ArtifactBlock, len(rendered.offsets))
-	for index, offset := range rendered.offsets {
+	return s.indexRenderedVersion(ctx, tx, artifactID, version, versionAt, markdown, offsetBlocks(rendered.offsets), rendered.tree)
+}
+
+// offsetBlocks is the blocks a render's offsets name, as the block index takes them.
+func offsetBlocks(offsets []pmdoc.BlockOffset) []model.ArtifactBlock {
+	blocks := make([]model.ArtifactBlock, len(offsets))
+	for index, offset := range offsets {
 		blocks[index] = model.ArtifactBlock{ID: offset.ID, Type: offset.Type, From: offset.From, To: offset.To}
 	}
-	return s.indexRenderedVersion(ctx, tx, artifactID, version, versionAt, markdown, blocks, rendered.tree)
+	return blocks
 }
 
 // indexRenderedVersion indexes one document version, written at versionAt, in a transaction
@@ -105,7 +110,7 @@ func blockPointers(artifactID, markdown string, blocks []model.ArtifactBlock, tr
 	found := pmdoc.BlockPointers(tree)
 	pointers := make([]refs.Pointer, len(found))
 	for index, pointer := range found {
-		pointers[index] = refs.Pointer{Block: pointer.Block, Kind: pointer.Attribute, Target: pointer.Target, Targets: pointer.Targets}
+		pointers[index] = refs.Pointer{Block: pointer.Block, BlockType: pointer.BlockType, Kind: pointer.Attribute, Target: pointer.Target, Targets: pointer.Targets}
 	}
 	return pointers
 }

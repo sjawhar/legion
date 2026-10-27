@@ -2016,9 +2016,11 @@ a pointer is introduced when the tree before the write holds no pointer with the
 id, typed block type, attribute and reference (a new pointer, a changed value, or a block retyped
 into a type declaring the attribute, whatever the type before declared under that name), and every
 pointer is when there is no such tree (a new document, a repair of a tree outside the schema, a
-rebuild whose latest version does not read back). A target in the written document is read from
-the tree the write leaves, any other from its current `document_blocks` rows (one query for all of
-a write's introduced pointers), and a target no block holds is accepted. The refusal is `400 INVALID_OP`
+rebuild whose latest version does not read back). `refs.BlockTypes` reads each target's type as
+the block index will hold it: a target in the written document from the blocks the write's render
+leaves (the first holder of a repeated id, as `refs.IndexBlocks` takes it), any other from its
+current `document_blocks` rows (one query for all of a write's introduced pointers), and a target
+no block holds is accepted. The refusal is `400 INVALID_OP`
 on `attributes` on the edit route and `400 INVALID_MARKDOWN` on every other; a pointer the write
 leaves unchanged is never refused. A browser's write and the block-index reconciliation are never
 refused, and store the pointer as any other. Every block-aware read lists a pointer's edge only
@@ -2039,7 +2041,12 @@ typed block, attribute and target, and keeps the typed block's own `mentions` ed
 only while the block holds more references to it than its pointers do (a string attribute citing
 it too, say). Prose in the typed block's children is held by those children, so a pointer and a
 prose citation of one target are two edges. A pointer whose typed block is no graph node writes no
-row. `heldByABlock` hides the citing document's own `mentions` edge behind a block row of any kind,
+row, and a typed block repeating an id a block before it in document order carries, typed or not,
+holds no pointer (`pmdoc.BlockPointers`): the id's node is its first holder, so the later holder's
+values are neither edges from that node, nor charged against its mentions, nor checked by the
+refusal; and `refs.IndexBlocks` writes a pointer only when the id's node is the typed block holding
+it (its type), since a version read back from markdown by the reconciliation carries no
+paragraph's id. `heldByABlock` hides the citing document's own `mentions` edge behind a block row of any kind,
 listed or not, so that edge never shows beside or in place of a pointer's. The document-level reads
 that never looked at blocks - `GET /api/v1/artifacts/{id}/references` (`refs.ReferencedBy`,
 `refs.Outgoing`) and the issue references closure (`refs.Closure`) - keep listing the citing

@@ -20,6 +20,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -255,52 +256,14 @@ func joinedSchemaError(err error, start func() error) error {
 
 // refuseBlockPointers refuses tree, the tree a write to artifactID leaves (rendered as offsets),
 // when a `block[]` pointer it introduces over prior names a block of a type the attribute does not
-// allow (pmdoc.CheckBlockPointers): a block of this document as tree holds it, any other as its
-// document's current blocks (document_blocks) hold it, read in the write's transaction with one
-// query for every such target. The refusal is pmdoc.ErrBlockPointer, which no schema refusal path
-// (joinedSchemaError) reclassifies. A browser's write (settlement) and the reconciliation never
-// come here: what a browser wrote is already stored, so it is never refused.
+// allow (pmdoc.CheckBlockPointers), each target's type read as the block index would hold it once
+// the write is indexed (refs.BlockTypes) in the write's transaction. The refusal is
+// pmdoc.ErrBlockPointer, which no schema refusal path (joinedSchemaError) reclassifies. A
+// browser's write (settlement) and the reconciliation never come here: what a browser wrote is
+// already stored, so it is never refused.
 func refuseBlockPointers(ctx context.Context, tx pgx.Tx, artifactID string, tree, prior *pmdoc.Node, offsets []pmdoc.BlockOffset) error {
 	return pmdoc.CheckBlockPointers(tree, prior, func(targets []text.Ref) (map[string][]string, error) {
-		var refKey string
-		if err := tx.QueryRow(ctx, `select coalesce(ref_key, '') from artifacts where id = $1`, artifactID).Scan(&refKey); err != nil {
-			return nil, fmt.Errorf("read the reference of document %s: %w", artifactID, err)
-		}
-		// The blocks the write leaves, as its version will index them: the first holder of a
-		// repeated id is the block (refs.IndexBlocks).
-		written := make(map[string]string, len(offsets))
-		for _, offset := range offsets {
-			if _, held := written[offset.ID]; !held {
-				written[offset.ID] = offset.Type
-			}
-		}
-		types := make(map[string][]string, len(targets))
-		var elsewhere []string
-		for _, target := range targets {
-			nodeID := text.TargetID(target)
-			// A ref_key holds no '#', so the node id's document part ends at its first one.
-			if document, _, _ := strings.Cut(nodeID, "#"); document != refKey {
-				elsewhere = append(elsewhere, nodeID)
-			} else if typ, ok := written[target.Block]; ok {
-				types[nodeID] = []string{typ}
-			}
-		}
-		if len(elsewhere) == 0 {
-			return types, nil
-		}
-		rows, err := tx.Query(ctx, `select node_id, type from document_blocks where node_id = any($1)`, elsewhere)
-		if err != nil {
-			return nil, fmt.Errorf("read the types of the blocks %s points at: %w", artifactID, err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var nodeID, typ string
-			if err := rows.Scan(&nodeID, &typ); err != nil {
-				return nil, fmt.Errorf("scan the type of a block %s points at: %w", artifactID, err)
-			}
-			types[nodeID] = append(types[nodeID], typ)
-		}
-		return types, rows.Err()
+		return refs.BlockTypes(ctx, tx, artifactID, offsetBlocks(offsets), targets)
 	})
 }
 
