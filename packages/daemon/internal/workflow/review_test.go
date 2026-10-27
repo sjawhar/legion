@@ -366,11 +366,11 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 				case "comment":
 					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: id, State: "commented", CommitID: "head-2", Body: "a comment"}
 				case "push handoff", "push code", "push code unplaced", "push truncated", "push paths unmarked":
-					paths, truncated := ".legion/review.json", "false"
+					paths, truncated := ".legion/LEGION-208/review.json", "false"
 					marker := &truncated
 					switch step {
 					case "push code", "push code unplaced":
-						paths = ".legion/review.json\nsrc/widget.go"
+						paths = ".legion/LEGION-208/review.json\nsrc/widget.go"
 					case "push truncated":
 						truncated = "true"
 					case "push paths unmarked":
@@ -942,7 +942,10 @@ func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 		return intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: from, After: to,
 			ChangedPaths: &paths, Truncated: &whole, Forced: &unforced, Pusher: "legion-reviewer[bot]"}
 	}
-	const handoff, code = ".legion/review.json", ".legion/review.json\nsrc/widget.go"
+	const handoff, code = ".legion/LEGION-208/review.json", ".legion/LEGION-208/review.json\nsrc/widget.go"
+	// Another issue's handoffs are code to this round: its reviewer never read them, and READY
+	// refuses them as it refuses code.
+	const otherHandoffs = ".legion/LEGION-209/review.json"
 	for _, tc := range []struct {
 		name  string
 		steps []intake.Fact
@@ -959,6 +962,9 @@ func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 		{name: "a push since the approved head changed code, then a request for changes",
 			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", code), complete},
 			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{requestChanges}, want: phase.Implementing},
+		{name: "a push since the approved head changed another issue's handoffs",
+			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", otherHandoffs), complete},
+			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-2")}, want: phase.Accepting},
 		{name: "the handoff push over a code push is classified after the completion",
 			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", code), sync("head-3"), complete, push("head-2", "head-3", handoff)},
 			told:  []string{"head-3"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-3")}, want: phase.Accepting},
@@ -1030,7 +1036,7 @@ func TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound(t *testing.T) {
 	complete := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}
 	approve := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", Author: testReviewApp, Body: "approved"}
 	sync := intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-2"}
-	handoff, unforced, whole := ".legion/review.json", "false", "false"
+	handoff, unforced, whole := ".legion/LEGION-208/review.json", "false", "false"
 	push := intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "head", After: "head-2",
 		ChangedPaths: &handoff, Truncated: &whole, Forced: &unforced, Pusher: "legion-reviewer[bot]"}
 	for _, tc := range []struct {
@@ -1068,6 +1074,45 @@ func TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound(t *testing.T) {
 				if got[i].Summary != want.Summary || !strings.Contains(got[i].Reason, want.Reason) {
 					t.Fatalf("notice %d was written by %q naming %q, want by %q naming %q", i, got[i].Summary, got[i].Reason, want.Summary, want.Reason)
 				}
+			}
+		})
+	}
+}
+
+// An approval of a head the record has not reached - the reviewer approved its own handoff head
+// while the synchronize that brings it was still on its way - leaves the round stuck at the head the
+// record holds. That head's arrival ends the round even when its push is lost, since no push can
+// change what an approval of the head itself approves; any other head arriving without its push
+// leaves the round as it was, told nothing more, for the push or the required-checks pass's compare
+// to decide.
+func TestTheArrivalOfTheApprovedHeadEndsTheRoundWithoutItsPush(t *testing.T) {
+	complete := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}
+	approve := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-2", Author: testReviewApp, Body: "approved"}
+	sync := func(head string) intake.Fact {
+		return intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
+	}
+	for _, tc := range []struct {
+		name string
+		head string
+		want phase.Phase
+	}{
+		{name: "the approved head arrives", head: "head-2", want: phase.Accepting},
+		{name: "a head above the approved one arrives", head: "head-3", want: phase.Reviewing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedReviewOf(t, pool, "head", "green")
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+			for i, fact := range []intake.Fact{approve, complete, sync(tc.head)} {
+				if result := apply(fmt.Sprintf("step-%d", i), fact); result.Refusal != nil {
+					t.Fatalf("step %d (%T) was refused: %+v", i, fact, result.Refusal)
+				}
+			}
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("the issue is in %s, want %s", got, tc.want)
+			}
+			if got := reviewStuckNotices(t, pool); len(got) != 1 || got[0].Summary != byCompletion {
+				t.Fatalf("the architect was told %+v, want once, by the reviewer's completion", got)
 			}
 		})
 	}
