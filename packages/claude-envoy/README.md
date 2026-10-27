@@ -58,10 +58,11 @@ events and sends them to the current Claude Code session as supported
   in envoy.json runs in a process of its own that the hook starts detached, one per session at a
   time, and waits on until that same deadline: a slower command costs that hook the fresh list,
   never the bound, and still runs to its end (or its 10 s timeout, its output file removed either
-  way) in that process, which reads the list with its token for the next hook. On every
-  `UserPromptSubmit`, `dist/session-title-hook.js` records the name a person gave the session
-  (below, "Session title"); its `timeout` is 5 s, and it is a bundle of its own because Claude
-  Code holds the prompt until it returns.
+  way) in that process, which reads the list with its token for the next hook; until then only a
+  list read from the Dispatch URL envoy.json names now stands in, never one another Dispatch
+  answered. On every `UserPromptSubmit`, `dist/session-title-hook.js` records the name a person
+  gave the session (below, "Session title"); its `timeout` is 5 s, and it is a bundle of its own
+  because Claude Code holds the prompt until it returns.
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
   followed by `envoy_subscribe`. It renders every envelope with the shared
   `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.

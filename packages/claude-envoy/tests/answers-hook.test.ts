@@ -436,6 +436,44 @@ test("a token command slower than the hook's deadline finishes and cleans up aft
   expect(processesWith(pause)).toBe("")
 }, 20_000)
 
+test("with a slow token command, a list read from another Dispatch than envoy.json names now never stands in", async () => {
+  const before = standinDispatch()
+  before.route = { kind: "list", items: [answer("ask-a", "Read from the Dispatch before.", 1)] }
+  const now = standinDispatch()
+  now.route = { kind: "list", items: [answer("ask-b", "Read from the Dispatch now.", 1)] }
+  const { home, state, config, tmp } = await scratch()
+  const env = { HOME: home, DISPATCH_STATE_DIR: state, CLAUDE_CONFIG_DIR: config, TMPDIR: tmp }
+  const envoyJson = join(config, "envoy.json")
+
+  await writeFile(
+    envoyJson,
+    JSON.stringify({ dispatch: { serverUrl: before.base, token: "!printf before-token" } }),
+  )
+  const first = await runHook(env, sessionStart("startup", home))
+  expect(contextOf(first, "SessionStart")).toContain("Read from the Dispatch before.")
+  const cache = JSON.parse(await readFile(join(state, "sessions", SESSION, "answers.json"), "utf8"))
+  expect(cache.dispatch_url).toBe(before.base)
+
+  await writeFile(
+    envoyJson,
+    JSON.stringify({ dispatch: { serverUrl: now.base, token: "!sleep 3; printf now-token" } }),
+  )
+  const since = Date.now()
+  cleanup.push(() => refresherFinished(state, since))
+  const hanging = await runHook(env, sessionStart("resume", home))
+  expect(contextOf(hanging, "SessionStart")).toBe(
+    sessionAnswersFailureLine(
+      `a "!" command in envoy.json had not finished 800 ms after the hook started`,
+    ),
+  )
+  expect(hanging.wallMs).toBeLessThan(1_000)
+
+  // The refresher reads the Dispatch named now, with the token its command printed.
+  await refresherFinished(state, since)
+  expect(now.requests).toEqual([`Bearer now-token /api/v1/agents/${SESSION}/answers`])
+  expect(before.requests).toHaveLength(1)
+}, 20_000)
+
 test("hooks started together run a slow token command once", async () => {
   const dispatch = standinDispatch()
   dispatch.route = { kind: "list", items: [answer("ask-6", "One run.", 1)] }

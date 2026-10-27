@@ -29,8 +29,9 @@
   the list could not be read and why. A `!` command in envoy.json runs in a process the hook starts
   detached, one per session at a time, and waits on until that same deadline; a slower command
   still runs to its end or its 10 s timeout in that process, which removes its output file and
-  reads the list with its token for the next hook. Against a Dispatch older than this release, the
-  line says that Dispatch has no answers route.
+  reads the list with its token for the next hook. While it runs, only a list read from the
+  Dispatch URL envoy.json names now stands in, never one another Dispatch answered. Against a
+  Dispatch older than this release, the line says that Dispatch has no answers route.
 - `tests/answers-claude.test.ts` runs the real Claude Code, the release the new repository-root
   `.claude-code-pin` pins (2.1.311), against a stand-in model and Dispatch, and shows the list on
   the Messages request after startup, `--resume`, `/compact` and a subagent's start. CI's

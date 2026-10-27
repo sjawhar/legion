@@ -105,7 +105,9 @@
   72 hours could not be read (<reason>); run `dispatch answers`.]`` when no cached list renders
   (none read, an empty list, or every item past 72 hours), and a Dispatch that answers 404 (`this
   Dispatch build has no answers route`) not asked again for 5 minutes. With Dispatch off with an
-  error, which names no URL, the last list the session read from any Dispatch stands in.
+  error, which names no URL, only a list read from the URL the caller names as `dispatchUrl` (the
+  configured one, `sessionDispatchUrl`) stands in, and with none named the failure line does: a list
+  another Dispatch answered is never carried.
   `sessionAnswersSettled(session)` lets a short-lived host wait for a
   late read to write the disk cache. `DispatchClient.sessionAnswers(session, {since?, maxChars?,
   signal?})` reads `GET /api/v1/agents/{session_id}/answers`.
@@ -116,6 +118,9 @@
   `commands: "kept"`, which never runs a `!` token command: it takes the outcome another call
   already kept in the process, and with none Dispatch reads as off with an error saying the
   command has not run. Every existing caller keeps running the command as before.
+  `dispatchUrl(env, config)` and `sessionDispatchUrl(file, env, { cwd })` return the URL alone,
+  resolved as `dispatchSettings` resolves it but without reading the token, so no `!` command runs:
+  undefined when Dispatch is off before its token is read.
 - `dispatch issues --all` reads the whole filtered listing in one request. The client gains
   `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch
   answers for that request, refusing any other shape by name: a page back from a request carrying

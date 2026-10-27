@@ -48,10 +48,12 @@
 // `answers-refresh` (never named by hooks.json): that process resolves Dispatch with commands run,
 // reads the list with a long deadline, which writes `answers.json`, and leaves what it read in
 // `answers-refresh.json` beside it. The hook carries that when it lands by the print deadline, and
-// otherwise exits without it: the refresher is in its own session with no stdio of the hook's, so
-// the command always runs to its end or its 10 s timeout inside `envoy-config`'s own run, which
-// kills its process group and removes its temporary output, and the next hook carries the list
-// it read. One refresher runs per session at a time (`answers-refresh.lock`, holding its pid), so
+// otherwise the last list read from the Dispatch URL envoy.json names now (`sessionDispatchUrl`,
+// which runs no command; a list another Dispatch answered never stands in) or the failure line:
+// the refresher is in its own session with no stdio of the hook's, so the command always runs to
+// its end or its 10 s timeout inside `envoy-config`'s own run, which kills its process group and
+// removes its temporary output, and the next hook carries the list it read. One refresher runs per
+// session at a time (`answers-refresh.lock`, holding its pid), so
 // a burst of SubagentStart hooks runs the command once.
 //
 // The name a person gave the session is recorded by a bundle of its own,
@@ -75,7 +77,11 @@ import {
   SESSION_ANSWERS_DEADLINE_MS,
   sessionAnswersSettled,
 } from "@legion/envoy-client/session-answers"
-import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings"
+import {
+  sessionConfigFile,
+  sessionDispatchSettings,
+  sessionDispatchUrl,
+} from "@legion/envoy-client/session-settings"
 import { z } from "zod"
 import { claudeProjectDirectory, configuredValue } from "../src/claude-session"
 import { sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
@@ -324,7 +330,8 @@ async function refreshedAnswers(
 
 /** The answers hook's message for `session`. Dispatch is read first without running any `!`
  *  command; when that is off with an error, the refresher's message stands, or, when it has not
- *  landed by `by`, the last list read or the failure line naming why. */
+ *  landed by `by`, the last list read from the Dispatch URL envoy.json names now (resolved without
+ *  the token), never another's, or the failure line naming why. */
 async function answersMessage(
   session: string,
   cwd: string,
@@ -333,7 +340,10 @@ async function answersMessage(
 ): Promise<string | undefined> {
   const file = sessionConfigFile("claude", process.env)
   let { dispatch } = sessionDispatchSettings(file, process.env, { cwd, commands: "kept" })
+  let dispatchUrl: string | undefined
   if (!dispatch.enabled && dispatch.error !== null) {
+    // Resolved before the wait, which absorbs its cost: the configured URL alone, no command run.
+    dispatchUrl = sessionDispatchUrl(file, process.env, { cwd })
     const refreshed = await refreshedAnswers(session, cwd, startedAt, by)
     if ("text" in refreshed) return refreshed.text
     dispatch = offWithError(refreshed.reason)
@@ -341,6 +351,7 @@ async function answersMessage(
   const read = await readSessionAnswers({
     session,
     dispatch,
+    dispatchUrl,
     env: process.env,
     // The read itself always gets the least wait, so a start-up and a resolution that spent the
     // budget on a loaded host never cost a list Dispatch answers at once.

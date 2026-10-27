@@ -2,6 +2,7 @@ import {
   type DispatchConfigResolution,
   type DispatchEnvironment,
   dispatchSettings,
+  dispatchUrl,
 } from "./dispatch-config";
 import {
   type CommandMode,
@@ -162,6 +163,20 @@ export function sessionDispatchSettings(
     warnings: config.kind === "read" ? config.warnings : [],
     missing: config.kind === "read" ? config.missing : null,
   };
+}
+
+/** The Dispatch URL `file` and the environment configure now (`dispatchUrl`), read without its
+ * token, so no `!` command runs; undefined when Dispatch is off before its token is read or the
+ * file's location could not be worked out. What a caller on a deadline names to
+ * `readSessionAnswers` while `sessionDispatchSettings(…, { commands: "kept" })` is off with an
+ * error, so only a list read from that URL stands in. */
+export function sessionDispatchUrl(
+  file: SessionConfigFile,
+  env: DispatchEnvironment,
+  options: { readonly cwd: string }
+): string | undefined {
+  if (file.path === null) return undefined;
+  return dispatchUrl(env, readEnvoyConfig(file.path, env, options));
 }
 
 /** Envoy from `file` (`envoySettings`), for a command that resolves Envoy alone. A file whose

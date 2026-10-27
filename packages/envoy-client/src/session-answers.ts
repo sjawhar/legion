@@ -152,7 +152,7 @@ export function renderSessionAnswers(
   const header =
     options.cached === undefined
       ? SESSION_ANSWERS_MARKER
-      : `${SESSION_ANSWERS_MARKER}\nAs read at ${options.cached.readAt}; this read failed: ${options.cached.reason.replace(/\s+/g, " ").trim()}.`;
+      : `${SESSION_ANSWERS_MARKER}\nAs read at ${options.cached.readAt}; this read failed: ${failureSentence(options.cached.reason)}`;
   const blocks: string[] = [];
   let length = header.length;
   for (const item of shown) {
@@ -179,6 +179,13 @@ export function renderSessionAnswersList(
     `${shown.length} ${shown.length === 1 ? "item" : "items"} people wrote to this session in the last 72 hours, newest first, word for word:`,
     ...shown.map(renderSessionAnswerItem),
   ].join("\n\n");
+}
+
+/** A read's failure reason as the end of a sentence: whitespace collapsed, and a full stop added
+ *  only when the reason does not already end in `.`, `?` or `!`. */
+function failureSentence(reason: string): string {
+  const text = reason.replace(/\s+/g, " ").trim();
+  return /[.?!]$/.test(text) ? text : `${text}.`;
 }
 
 /** The line a request carries in place of the list when no list it could carry renders. */
@@ -235,13 +242,10 @@ processGlobal[STATE_KEY] = state;
 
 const CACHE_FILE = "answers.json";
 
-/** `answers.json` under `directory` when it holds a list read from `url` (from any Dispatch when
- *  `url` is undefined), else undefined: a missing or broken cache, or one another Dispatch
- *  answered, only means the request has no list to carry. */
-function readCacheFile(
-  directory: string,
-  url: string | undefined
-): SessionAnswersCache | undefined {
+/** `answers.json` under `directory` when it holds a list read from `url`, else undefined: a
+ *  missing or broken cache, or one another Dispatch answered, only means the request has no list
+ *  to carry. */
+function readCacheFile(directory: string, url: string): SessionAnswersCache | undefined {
   try {
     const value: unknown = JSON.parse(readFileSync(join(directory, CACHE_FILE), "utf-8"));
     if (
@@ -249,7 +253,7 @@ function readCacheFile(
       value !== null &&
       "dispatch_url" in value &&
       typeof value.dispatch_url === "string" &&
-      (url === undefined || value.dispatch_url === url) &&
+      value.dispatch_url === url &&
       "read_at" in value &&
       typeof value.read_at === "string" &&
       "total" in value &&
@@ -279,6 +283,10 @@ export interface ReadSessionAnswersOptions {
    *  command runs on the request path. Off with a notice (nothing configures Dispatch) reads
    *  nothing; off with an error is a failed read with that error as its reason. */
   readonly dispatch: DispatchConfigResolution;
+  /** The Dispatch URL the session is configured with (`sessionDispatchUrl`), for `dispatch` off
+   *  with an error, which names none: only a list read from this URL stands in. Unset, such a read
+   *  carries the failure line. Not read while `dispatch` is on: its own URL is the one. */
+  readonly dispatchUrl?: string | undefined;
   /** The environment the session's state directory is worked out from
    *  (`sessionDirectory(env, session)`), which holds `answers.json`. A session id that is not one
    *  plain path segment keeps the cache in memory only. */
@@ -341,9 +349,9 @@ async function settleWithin<T>(
  * A cached list is rendered with its read time and the reason this read failed, and filtered by
  * the 72 hours again. When no cached list renders (none was read, it was empty, or every item is
  * now past 72 hours), a failed read carries the failure line naming why. Dispatch off with an
- * error has no URL to check a cache against: the last list the session read, from any Dispatch,
- * stands in. A Dispatch that answers 404 has no answers route: no request goes to its URL for 5
- * minutes, process-wide.
+ * error names no URL: only a list read from `dispatchUrl` stands in, and with none given the
+ * failure line does. A Dispatch that answers 404 has no answers route: no request goes to its URL
+ * for 5 minutes, process-wide.
  */
 export async function readSessionAnswers(
   options: ReadSessionAnswersOptions
@@ -378,14 +386,12 @@ export async function readSessionAnswers(
     return { text, source: "cache", readAt: cache.read_at, reason };
   };
   if (!dispatch.enabled) {
-    let newest: SessionAnswersCache | undefined;
-    for (const { cache } of entries.values()) {
-      if (cache !== undefined && (newest === undefined || cache.read_at > newest.read_at)) {
-        newest = cache;
-      }
-    }
-    newest ??= directory === undefined ? undefined : readCacheFile(directory, undefined);
-    return carry(newest, dispatch.error);
+    const url = options.dispatchUrl;
+    if (url === undefined) return carry(undefined, dispatch.error);
+    const cache =
+      entries.get(url)?.cache ??
+      (directory === undefined ? undefined : readCacheFile(directory, url));
+    return carry(cache, dispatch.error);
   }
   const { url } = dispatch;
   const current: SessionEntry = entries.get(url) ?? {

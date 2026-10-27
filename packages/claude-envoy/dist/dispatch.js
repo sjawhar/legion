@@ -16642,7 +16642,7 @@ function renderSessionAnswers(items, options) {
   if (count === 0)
     return;
   const header = options.cached === undefined ? SESSION_ANSWERS_MARKER : `${SESSION_ANSWERS_MARKER}
-As read at ${options.cached.readAt}; this read failed: ${options.cached.reason.replace(/\s+/g, " ").trim()}.`;
+As read at ${options.cached.readAt}; this read failed: ${failureSentence(options.cached.reason)}`;
   const blocks = [];
   let length = header.length;
   for (const item of shown) {
@@ -16670,6 +16670,10 @@ function renderSessionAnswersList(items, options) {
 
 `);
 }
+function failureSentence(reason) {
+  const text = reason.replace(/\s+/g, " ").trim();
+  return /[.?!]$/.test(text) ? text : `${text}.`;
+}
 function sessionAnswersFailureLine(reason) {
   return `${FAILURE_MARKER}${reason.replace(/\s+/g, " ").trim()}); run \`dispatch answers\`.]`;
 }
@@ -16684,7 +16688,7 @@ var CACHE_FILE = "answers.json";
 function readCacheFile(directory, url2) {
   try {
     const value = JSON.parse(readFileSync(join2(directory, CACHE_FILE), "utf-8"));
-    if (typeof value === "object" && value !== null && "dispatch_url" in value && typeof value.dispatch_url === "string" && (url2 === undefined || value.dispatch_url === url2) && "read_at" in value && typeof value.read_at === "string" && "total" in value && typeof value.total === "number" && "items" in value && Array.isArray(value.items)) {
+    if (typeof value === "object" && value !== null && "dispatch_url" in value && typeof value.dispatch_url === "string" && value.dispatch_url === url2 && "read_at" in value && typeof value.read_at === "string" && "total" in value && typeof value.total === "number" && "items" in value && Array.isArray(value.items)) {
       return {
         dispatch_url: value.dispatch_url,
         read_at: value.read_at,
@@ -16737,14 +16741,11 @@ async function readSessionAnswers(options) {
     return { text, source: "cache", readAt: cache.read_at, reason };
   };
   if (!dispatch.enabled) {
-    let newest;
-    for (const { cache } of entries.values()) {
-      if (cache !== undefined && (newest === undefined || cache.read_at > newest.read_at)) {
-        newest = cache;
-      }
-    }
-    newest ??= directory === undefined ? undefined : readCacheFile(directory, undefined);
-    return carry(newest, dispatch.error);
+    const url3 = options.dispatchUrl;
+    if (url3 === undefined)
+      return carry(undefined, dispatch.error);
+    const cache = entries.get(url3)?.cache ?? (directory === undefined ? undefined : readCacheFile(directory, url3));
+    return carry(cache, dispatch.error);
   }
   const { url: url2 } = dispatch;
   const current = entries.get(url2) ?? {
@@ -20071,6 +20072,33 @@ function writtenToken(config2, checkout) {
   };
 }
 function dispatchSettings(env, config2, options = {}) {
+  const target = dispatchTarget(env, config2);
+  if (!target.enabled)
+    return target;
+  const { url: url2, source } = target;
+  let token;
+  try {
+    token = source.kind === "variable" ? source.token : fileBearer(source, url2, "DISPATCH", env, options.commands);
+  } catch (error48) {
+    return offWithError(messageFor(error48));
+  }
+  const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
+  const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
+  if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
+    return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
+  }
+  return {
+    enabled: true,
+    url: url2,
+    token,
+    ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
+  };
+}
+function dispatchUrl(env, config2) {
+  const target = dispatchTarget(env, config2);
+  return target.enabled ? target.url : undefined;
+}
+function dispatchTarget(env, config2) {
   if (config2.kind === "failed")
     return offWithError(config2.error);
   const explicitUrl = nonEmpty(env.DISPATCH_URL);
@@ -20093,27 +20121,17 @@ function dispatchSettings(env, config2, options = {}) {
   if (explicitUrl !== undefined && httpUrl2(explicitUrl) === undefined) {
     return offWithError("DISPATCH_URL must be an http or https URL");
   }
+  let source;
   try {
-    const source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config2, checkout));
-    if (source.kind === "none") {
-      return offWithError(explicitUrl === undefined ? `${config2.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config2.path}`);
-    }
-    const url2 = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
-    const token = source.kind === "variable" ? source.token : fileBearer(source, url2, "DISPATCH", env, options.commands);
-    const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
-    const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
-    if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
-      return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
-    }
-    return {
-      enabled: true,
-      url: url2,
-      token,
-      ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
-    };
+    source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config2, checkout));
   } catch (error48) {
     return offWithError(messageFor(error48));
   }
+  if (source.kind === "none") {
+    return offWithError(explicitUrl === undefined ? `${config2.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config2.path}`);
+  }
+  const url2 = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
+  return { enabled: true, url: url2, source };
 }
 
 // ../envoy-client/src/envoy-settings.ts
@@ -20303,6 +20321,11 @@ function sessionDispatchSettings(file2, env, options) {
     warnings: config2.kind === "read" ? config2.warnings : [],
     missing: config2.kind === "read" ? config2.missing : null
   };
+}
+function sessionDispatchUrl(file2, env, options) {
+  if (file2.path === null)
+    return;
+  return dispatchUrl(env, readEnvoyConfig(file2.path, env, options));
 }
 function sessionEnvoySettings(file2, env, options) {
   if (file2.path === null)

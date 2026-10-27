@@ -210,6 +210,20 @@ describe("renderSessionAnswers", () => {
       "As read at 2026-10-27T11:59:00.000Z; this read failed: token revoked.",
     ]);
   });
+
+  test("a reason that already ends a sentence gets no second full stop", () => {
+    const secondLine = (reason: string) =>
+      renderSessionAnswers([direct], {
+        now: NOW,
+        cached: { readAt: "2026-10-27T11:59:00.000Z", reason },
+      })?.split("\n")[1];
+    expect(secondLine("Dispatch is restarting, so a retry may succeed.")).toBe(
+      "As read at 2026-10-27T11:59:00.000Z; this read failed: Dispatch is restarting, so a retry may succeed."
+    );
+    expect(secondLine("Is the computer able to access the url?")).toBe(
+      "As read at 2026-10-27T11:59:00.000Z; this read failed: Is the computer able to access the url?"
+    );
+  });
 });
 
 describe("renderSessionAnswersList", () => {
@@ -706,26 +720,46 @@ describe("readSessionAnswers", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("Dispatch off with an error, which names no URL, carries the last list the session read", async () => {
+  test("Dispatch off with an error carries only the list read from the configured URL, from memory or answers.json, and none when no URL is named", async () => {
+    const root = stateDir();
+    const env = envAt(root);
     const session = newSession();
-    const env = envAt(stateDir());
+    const a = dispatchAt();
+    const b = dispatchAt();
     const { fetchImpl } = fakeDispatch(() => listed(recent));
-    await readSessionAnswers({ session, dispatch: dispatchAt(), env, fetchImpl, now: () => NOW });
+    await readSessionAnswers({ session, dispatch: a, env, fetchImpl, now: () => NOW });
     const notRun = "dispatch.token's command has not run in this process yet";
+    const off = { enabled: false, notice: null, error: notRun } as const;
     const readAt = new Date(NOW).toISOString();
-    expect(
-      await readSessionAnswers({
-        session,
-        dispatch: { enabled: false, notice: null, error: notRun },
-        env,
-        now: () => NOW,
-      })
-    ).toEqual({
+    const fromA: SessionAnswersRead = {
       text: renderSessionAnswers(recent, { now: NOW, cached: { readAt, reason: notRun } }),
       source: "cache",
       readAt,
       reason: notRun,
-    });
+    };
+    const failure: SessionAnswersRead = {
+      text: sessionAnswersFailureLine(notRun),
+      source: "failure",
+      reason: notRun,
+    };
+    const options = { dispatch: off, env, now: () => NOW };
+
+    // In memory, as in the process that read it.
+    expect(await readSessionAnswers({ ...options, session, dispatchUrl: b.url })).toEqual(failure);
+    expect(await readSessionAnswers({ ...options, session, dispatchUrl: a.url })).toEqual(fromA);
+    expect(await readSessionAnswers({ ...options, session })).toEqual(failure);
+
+    // From A's answers.json, in a process with no list in memory (another session's directory).
+    const restarted = newSession();
+    mkdirSync(join(root, "sessions", restarted), { recursive: true });
+    writeFileSync(cacheFile(root, restarted), readFileSync(cacheFile(root, session)));
+    expect(
+      await readSessionAnswers({ ...options, session: restarted, dispatchUrl: b.url })
+    ).toEqual(failure);
+    expect(await readSessionAnswers({ ...options, session: restarted })).toEqual(failure);
+    expect(
+      await readSessionAnswers({ ...options, session: restarted, dispatchUrl: a.url })
+    ).toEqual(fromA);
   });
 
   test("writes answers.json atomically: a new file renamed over the old, owner-only, no temporary left", async () => {
