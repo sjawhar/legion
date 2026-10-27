@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-546",
+  "completed": "2026-10-27T09:36:40Z",
+  "round": 1,
+  "reviewedHead": "7d4bdf147372a22850a7be6315a8c51e3d5a1423",
+  "codeHead": "1ecd5dc8a3a131e91bb4252641431f82386de5ed",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 6,
+  "minor": 2,
+  "ci": "Base legion/INFRA-439 requires no check; main (the base after #2228 merges) requires lint, typecheck, test, pr-title. At code head 1ecd5dc8 (compare to 7d4bdf14: handoffsOnly true, 2 files), read 2026-10-27T09:35Z: lint, typecheck, build success; test FAILURE (job 122063190138, step 'Test the Go daemon': packages/daemon/internal/daemon timed out after 10m, plugin_test.go stale-plugin tests; this diff touches no packages/daemon file); envoy-go, envoy-go-race, envoy-infra-go and the other envoy lanes still queued.",
+  "thermonuclear": "deep-review and code-quality at 7d4bdf14 (code 1ecd5dc8): both CHANGES.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/bus/keeper.go:108", "description": "keepStream writes back the whole config it read (keptStream starts from info.Config), so a concurrent start's subject change landing between the keeper's read and write is undone and stays undone (no start runs again; the keeper never re-adds subjects). Contradicts keeper.go:95, CHANGELOG, the docs/solutions page, envoy.md and the PR body. Fix: the keeper adds back its own compiled subjects the deployed list lacks and that overlap nothing deployed (add-only, no replacements, role-lane subjects never re-added), with a test forcing the interleaving; docs say what the code does."},
+    {"severity": "important", "file": "packages/envoy/infra/aws/rendering/listener.go:23", "description": "MaxNatsReplicas=5 duplicates config.MaxNATSReplicas (internal/config/config.go:94) with no test tying them; infra already compiles internal/bus. Move MaxReplicas, ParseNATSReplicas, ParseStreamMaxBytes into bus beside ReplicasEnvVar (the bus.CheckSOCKS5Proxy pattern) and use it in config, cmd/dispatch and rendering."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/main.go:542", "description": "The keeper's listener bucket list copies infra/core/permissions.go:34 listenerBuckets; a bucket added to one but not the other is silently never raised or warns every 30 s. Export one list and use it in both."},
+    {"severity": "important", "file": "packages/envoy/internal/bus/kv.go:73", "description": "The update-unanswered-then-reread rule exists three times (stream.go:415, keeper.go:108, kv.go:73); one helper keyed on the update's stream name."},
+    {"severity": "important", "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:68", "description": "clusterJetStream/streamCopies/awaitSettledStream, streamWrites/watchStreamWrites/take and the deployed three-copy stream are copied between the two cmd tests, and the settle loop repeats in bus, integration, delivery, infra/core and testnats tests; move them into testnats."},
+    {"severity": "important", "file": "PR body", "description": "No '## Contract change census' although the PR adds refusals at a process boundary (ENVOY_NATS_REPLICAS 0/negative/>5 and invalid ENVOY_STREAM_MAX_BYTES refused at load, aws:WebhookListener and render --nats-replicas refuse >5) and changes NATS grants; needs search commands, hits with dispositions and a rollout line."},
+    {"severity": "minor", "file": "packages/envoy/internal/bus/keeper.go:50", "description": "select picks at random when stop and tick are both ready, so a pass can run after stop (Drain's delivery phase still reads Connected), and a pass Close interrupts logs a false WARN. Check stopped() after the select and log nothing once stopped."},
+    {"severity": "minor", "file": "packages/envoy/internal/bus/keeper_test.go:80", "description": "The mixed-settings race test passed 7 of 10 rounds with the keeper restoring nothing (quality reviewer's -count=2 -v run); force the losing order (as countingJetStream does) or drop it."}
+  ]
+}
