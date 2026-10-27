@@ -20,6 +20,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 type versionWrite struct {
@@ -53,13 +54,15 @@ func recoverMutation(room string, err *error) {
 // applyLive runs mutate against artifactID's live document inside the transaction the context's
 // ledger joined, and credits actor with the content it changes. Every document write a caller
 // makes runs here - an upload's, an edit's, an accepted or rejected suggestion's, an ask's text
-// and its answer, a comment's anchor and its margin record - so two rules hold for each by
+// and its answer, a comment's anchor and its margin record - so three rules hold for each by
 // structure rather than by its caller remembering them:
 //
 //   - It refuses a context Join did not return (errUnjoined), as SeedText and the version writes
 //     do: an unjoined write would reach no transaction to be weighed and appended in.
 //   - It weighs what the write leaves, and refuses one that would grow the document past what one
 //     upload may hold (refuseGrowth), before anything is appended.
+//   - It refuses a write introducing a block pointer to a block of a type its attribute does not
+//     allow (refuseBlockPointers), before anything is appended.
 //
 // It writes the transaction's fork of the room (see liveWrite), appends the update inside the
 // transaction, and leaves the room and the credit to its ledger's Commit, so a transaction that
@@ -177,6 +180,12 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	}}); err != nil {
 		return err
 	}
+	// An agent's or API write is refused when a block pointer it introduces names a block of a
+	// type its attribute does not allow, compared with the tree before the write (nil when that
+	// tree was outside the schema: every pointer of a repair is introduced).
+	if err := refuseBlockPointers(ctx, tx, artifactID, tree, weighedFrom, offsets); err != nil {
+		return err
+	}
 	// Every write is refused when the live state it leaves could not be decoded, the one check
 	// that decodes a whole second copy of the document. The tree before the write has served
 	// every use it has, so it is let go first: the decode runs beside the fork and the tree the
@@ -244,6 +253,59 @@ func joinedSchemaError(err error, start func() error) error {
 	return producedSchemaError(err)
 }
 
+// refuseBlockPointers refuses tree, the tree a write to artifactID leaves (rendered as offsets),
+// when a `block[]` pointer it introduces over prior names a block of a type the attribute does not
+// allow (pmdoc.CheckBlockPointers): a block of this document as tree holds it, any other as its
+// document's current blocks (document_blocks) hold it, read in the write's transaction. The
+// refusal is pmdoc.ErrBlockPointer, which no schema refusal path (joinedSchemaError) reclassifies.
+// A browser's write (settlement) and the reconciliation never come here: what a browser wrote is
+// already stored, so it is never refused.
+func refuseBlockPointers(ctx context.Context, tx pgx.Tx, artifactID string, tree, prior *pmdoc.Node, offsets []pmdoc.BlockOffset) error {
+	var refKey *string
+	var written map[string]string
+	return pmdoc.CheckBlockPointers(tree, prior, func(value string) ([]string, error) {
+		ref, ok := text.CanonicalBlockRef(value)
+		if !ok {
+			// The schema admits no other value into a tree.
+			return nil, fmt.Errorf("block pointer %q is not a canonical block reference", value)
+		}
+		nodeID := text.TargetID(ref)
+		if refKey == nil {
+			var key string
+			if err := tx.QueryRow(ctx, `select coalesce(ref_key, '') from artifacts where id = $1`, artifactID).Scan(&key); err != nil {
+				return nil, fmt.Errorf("read the reference of document %s: %w", artifactID, err)
+			}
+			refKey = &key
+		}
+		// A ref_key holds no '#', so the node id's document part ends at its first one.
+		if document, _, _ := strings.Cut(nodeID, "#"); document == *refKey {
+			if written == nil {
+				// The blocks the write leaves, as its version will index them: the first holder
+				// of a repeated id is the block (refs.IndexBlocks).
+				written = make(map[string]string, len(offsets))
+				for _, offset := range offsets {
+					if _, held := written[offset.ID]; !held {
+						written[offset.ID] = offset.Type
+					}
+				}
+			}
+			if typ, ok := written[ref.Block]; ok {
+				return []string{typ}, nil
+			}
+			return nil, nil
+		}
+		rows, err := tx.Query(ctx, `select type from document_blocks where node_id = $1`, nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("read the type of block %s: %w", nodeID, err)
+		}
+		types, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, fmt.Errorf("read the type of block %s: %w", nodeID, err)
+		}
+		return types, nil
+	})
+}
+
 func mergeUpdates(updates [][]byte) ([]byte, error) {
 	switch len(updates) {
 	case 0:
@@ -278,6 +340,10 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 		return "", err
 	}
 	if err := weighRendering("", canonical); err != nil {
+		return "", err
+	}
+	// A new document holds no pointer before this write, so every pointer it seeds is checked.
+	if err := refuseBlockPointers(ctx, tx, artifactID, tree, nil, offsets); err != nil {
 		return "", err
 	}
 	update, err := encodeDocumentTree(tree)
@@ -998,6 +1064,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if errors.Is(err, websocket.ErrNoChanges) {
 			return outcome, nil
 		}
+		err = invalidBlockPointerOp(err)
 		if isEditRefusal(err) {
 			return EditOutcome{}, err
 		}
@@ -1056,6 +1123,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if errors.Is(err, websocket.ErrNoChanges) {
 			return outcome, nil
 		}
+		err = invalidBlockPointerOp(err)
 		if isEditRefusal(err) {
 			return EditOutcome{}, err
 		}
