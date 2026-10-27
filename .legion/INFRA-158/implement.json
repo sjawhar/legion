@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T10:30:02Z",
+  "completed": "2026-10-27T11:21:45Z",
   "proof": [
+    {
+      "criterion": "Testing round 14: with no row, a closed document's repeated text is matched only when the version and the live document hold equally many copies, so a copy typed after the close is never dated version 1, while equal counts resolve every copy at version 1",
+      "surface": "real Postgres with the docs service, block-index tick, settlement after the reopen and refs resolution; the full docs package and cmd/dispatch at the sixteenth merge",
+      "command": "go test -count=1 -run 'BlockIndex|TestTheReopens|TestAClosed' -v ./internal/dispatch/docs/ ; go test -count=1 ./internal/dispatch/docs/ (at b3855fb2) ; go test ./cmd/dispatch/ ; api close/reopen/repair/edit-notice/deploy-order tests",
+      "observed": "c12da9a2's test passes unmodified with both halves; 44cf9cac, 2f3a9b7f, 196f5a85 and the crossing test pass; the docs package passes in full (776 s), cmd/dispatch and the api subset pass at the merge",
+      "headSha": "b3855fb2027f28a87ccd000901cfb777db072f78",
+      "negativeControl": "6c7b9483's block_index.go: the tester's test reads 'spec paragraph … \"Same.\" is dated 1 (text at version 1 true) while closed'"
+    },
     {
       "criterion": "Testing round 13: on a closed issue, existing block rows claim their blocks before text alignment, so identical paragraphs, moved, deleted-then-retyped and newly typed blocks each keep a true history, with rows and in the deploy order",
       "surface": "real Postgres with the docs service, the block-index tick, settlement after the reopen, and refs resolution; the api deploy-order test",
@@ -46,6 +54,7 @@
     }
   ],
   "filesChanged": [
+    "round 14: docs/block_index.go (repeated text paired only on equal counts), packages/envoy/AGENTS.md; sixteenth forward merge b3855fb2 (store/pool.go leasePoolSize 11, cmd/dispatch/README.md nine loops, cmd/dispatch/multiprocess_test.go nine leases, docs/service.go main's settle code to settleOutcome, docs/ask_lifecycle_test.go settlementAuthors' new argument), docs/solutions lease learning (sixteenth merge)",
     "round 13: docs/block_index.go (rows claim first: stage A, stored-row claim, gap text alignment, unique-text pass), docs/block_index_test.go (crossing test), packages/envoy/AGENTS.md; fifteenth forward merge 6c7b9483 (packages/envoy/CHANGELOG.md, both kept)",
     "round 12: docs/block_index.go (closedVersionBlocks with difflib alignment and stored-row hash match; live-text path removed), docs/block_index_test.go (edited-untyped-block test; round-9 docs test back to version text), packages/envoy/AGENTS.md",
     "round 10: docs/block_index.go (closed issue's live text indexed; closedVersionBlocks removed), docs/block_index_test.go (round-9 test expects live text; skip test on an open issue), packages/envoy/AGENTS.md",
@@ -53,6 +62,7 @@
     "fourteenth forward merge 4440fc7b: packages/envoy/internal/dispatch/store/pool.go (leasePoolSize 10, ten-name comment), packages/envoy/cmd/dispatch/main.go (both loops start), packages/envoy/cmd/dispatch/README.md (eight loops), packages/dispatch/web/src/features/doc/ProofDocument.decisions.test.tsx (both tests kept)"
   ],
   "deviations": [
+    "Accepted limit (architect): with no row, an original copy of a repeated text the counts leave unmatched is dated to the reopen's version.",
     "In a document with no rows (deploy order), a deleted-then-retyped identical paragraph takes the deleted one's version text under the retyped id: text-true, identity unknowable without rows.",
     "Decision 22 (architect, ship as is): a block only a closed document's live text holds has no row until a settlement versions it; its #b- reference resolves after the reopen.",
     "Residual: a stored row indexed at an older version whose text the latest version changed is still recorded deleted at the latest version.",
