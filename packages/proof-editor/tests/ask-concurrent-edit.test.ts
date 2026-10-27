@@ -120,19 +120,6 @@ function peerAppendsList(ydoc: Y.Doc, ids: boolean): void {
   deliver(peer, ydoc);
 }
 
-/** Presses `key` in the editor, offering the keydown to every plugin's `handleKeyDown` in order,
- *  as ProseMirror's own listener does (happy-dom does not deliver a synthetic keydown to it). */
-function pressKey(view: EditorView, key: "Backspace" | "Enter"): void {
-  const { KeyboardEvent } = window;
-  const event = new KeyboardEvent("keydown", {
-    bubbles: true,
-    cancelable: true,
-    key,
-    keyCode: key === "Backspace" ? 8 : 13,
-  });
-  view.someProp("handleKeyDown", (handleKeyDown) => handleKeyDown(view, event));
-}
-
 /** Asserts every word of the document and the collaborator's list is in the view and in Yjs. */
 function expectEveryWord(view: EditorView, ydoc: Y.Doc): void {
   const yText = ydoc.getXmlFragment("prosemirror").toString();
@@ -189,7 +176,7 @@ test("a collaborator's second option list without block ids gets one from the ne
 test("edits on an ask holding two option lists keep every word and join the lists back into one", async () => {
   await withMarksEditor(
     ASK_DOC,
-    ({ view, ydoc }) => {
+    ({ press, view, ydoc }) => {
       peerAppendsList(ydoc, true);
       expectTwoListAsk(view, ydoc);
 
@@ -211,7 +198,7 @@ test("edits on an ask holding two option lists keep every word and join the list
       // Backspace at the start of the second list joins it to the first.
       const secondList = textblockStart(view.state.doc, "Option B");
       view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, secondList)));
-      pressKey(view, "Backspace");
+      press("Backspace");
       const ask = requireAsk(view.state.doc);
       expect(blocks(ask)).toEqual([
         ["paragraph", "Which one? Pick"],
@@ -228,11 +215,11 @@ test("edits on an ask holding two option lists keep every word and join the list
 test("Enter at the end of an option in an ask holding two option lists keeps every word", async () => {
   await withMarksEditor(
     ASK_DOC,
-    ({ view, ydoc }) => {
+    ({ press, view, ydoc }) => {
       peerAppendsList(ydoc, true);
       const optionEnd = textblockStart(view.state.doc, "Option A") + "Option A".length;
       view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, optionEnd)));
-      pressKey(view, "Enter");
+      press("Enter");
       const ask = requireAsk(view.state.doc);
       expect(ask.childCount).toBe(3);
       expect(ask.child(1).childCount).toBe(3);
@@ -284,10 +271,7 @@ test("the server's block types and the schema's typed blocks are the live schema
       const blockGroup = Object.values(view.state.schema.nodes)
         .filter((type) => type.isInGroup("block"))
         .map((type) => type.name);
-      const accepted = [
-        ...Object.keys(SERVER_BLOCK_TYPES),
-        ...blockSchema.types.map((type) => type.name),
-      ];
+      const accepted = [...SERVER_BLOCK_TYPES, ...blockSchema.types.map((type) => type.name)];
       expect(accepted.sort()).toEqual(blockGroup.sort());
     },
     { blockSchema }
@@ -297,10 +281,10 @@ test("the server's block types and the schema's typed blocks are the live schema
 test("Enter at the end of a valid ask's question splits it as before", async () => {
   await withMarksEditor(
     ASK_DOC,
-    ({ view }) => {
+    ({ press, view }) => {
       const questionEnd = textblockStart(view.state.doc, "Which one?") + "Which one?".length;
       view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, questionEnd)));
-      pressKey(view, "Enter");
+      press("Enter");
       const ask = requireAsk(view.state.doc);
       expect(blocks(ask)).toEqual([
         ["paragraph", "Which one?"],

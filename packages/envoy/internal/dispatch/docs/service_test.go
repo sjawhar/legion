@@ -637,7 +637,6 @@ func parsedBlock(t *testing.T, markdown string) *pmdoc.Node {
 	if err != nil {
 		t.Fatalf("parse block: %v", err)
 	}
-	pmdoc.EnsureBlockIDs(parsed)
 	return parsed.Children[0]
 }
 

@@ -85,9 +85,12 @@ async function expectWordsKept(
       await expect(askBlock(page)).toContainText(word);
     }
   }
-  for (const word of words) {
-    await expect.poll(async () => (await getArtifactText(artifactId)).markdown).toContain(word);
-  }
+  await expect
+    .poll(async () => {
+      const { markdown } = await getArtifactText(artifactId);
+      return words.filter((word) => !markdown.includes(word));
+    })
+    .toEqual([]);
 }
 
 test("two editors that each add an option list to an ask while their edits cross keep the question and both options", async ({

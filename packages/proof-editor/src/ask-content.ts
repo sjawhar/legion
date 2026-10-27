@@ -6,18 +6,18 @@ import type { BlockSchema } from "./block-schema.js";
  * schema's typed blocks: the list in pmdoc's `isBlockNodeType`
  * (packages/envoy/internal/dispatch/pmdoc/node.go), which a change to either side must keep equal.
  */
-export const SERVER_BLOCK_TYPES: Readonly<Record<string, true>> = {
-  paragraph: true,
-  heading: true,
-  blockquote: true,
-  bullet_list: true,
-  ordered_list: true,
-  code_block: true,
-  hr: true,
-  table: true,
-  footnote_definition: true,
-  frontmatter: true,
-};
+export const SERVER_BLOCK_TYPES: ReadonlySet<string> = new Set([
+  "paragraph",
+  "heading",
+  "blockquote",
+  "bullet_list",
+  "ordered_list",
+  "code_block",
+  "hr",
+  "table",
+  "footnote_definition",
+  "frontmatter",
+]);
 
 /**
  * Makes `schema`'s `ask` node (when it has one) accept, as a node's content, what the document
@@ -36,13 +36,15 @@ export const SERVER_BLOCK_TYPES: Readonly<Record<string, true>> = {
 export function relaxAskContentCheck(schema: Schema, blockSchema: BlockSchema | undefined): void {
   const ask = schema.nodes.ask;
   if (ask === undefined) return;
-  const typedBlocks = new Set(blockSchema?.types.map((type) => type.name));
+  const accepted: ReadonlySet<string> = new Set([
+    ...SERVER_BLOCK_TYPES,
+    ...(blockSchema?.types.map((type) => type.name) ?? []),
+  ]);
   ask.validContent = (content: Fragment): boolean => {
     if (content.childCount === 0) return false;
     for (let index = 0; index < content.childCount; index++) {
       const child = content.child(index);
-      const name = child.type.name;
-      if (SERVER_BLOCK_TYPES[name] !== true && !typedBlocks.has(name)) return false;
+      if (!accepted.has(child.type.name)) return false;
       if (!ask.allowsMarks(child.marks)) return false;
     }
     return true;

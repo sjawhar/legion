@@ -238,12 +238,13 @@ func (s *Service) reconcileAskBlocks(
 	if err != nil {
 		return settlementReconciliation{}, err
 	}
-	// An ask that parses but breaks its content rule (readAskBlockStrictly) is flagged as one the
-	// parse refuses is, and its row left as it was. The collector still reads it, so the ask-edit
-	// route can rewrite it (askBlockOf).
-	readable := make([]askBlock, 0, len(blocks))
+	// An ask that parses but breaks its content rule (pmdoc.AskContentError) is flagged as one the
+	// parse refuses is, and its row left as it was. The collector already parsed these, so only the
+	// content rule is left to check. The collector still reads such an ask, so the ask-edit route
+	// can rewrite it (askBlockOf).
+	readable := blocks[:0]
 	for _, block := range blocks {
-		if _, err := readAskBlockStrictly(block.node); err != nil {
+		if err := pmdoc.AskContentError(block.node); err != nil {
 			invalidBlocks = append(invalidBlocks, invalidAskBlock{node: block.node, id: block.id, reason: err})
 			continue
 		}
@@ -616,27 +617,25 @@ func askReadability(tree *pmdoc.Node, visit func(id string, reason error) bool) 
 		if _, duplicate := seen[id]; duplicate {
 			reason = fmt.Errorf("duplicate ask block id %q", id)
 		} else {
-			_, reason = readAskBlockStrictly(node)
+			reason = readAskBlockStrictly(node)
 		}
 		seen[id] = struct{}{}
 		return visit(id, reason)
 	})
 }
 
-// readAskBlockStrictly is node read as settlement indexes it: parseAskBlock, then the content rule
-// the browser editor holds an ask to (pmdoc.AskContentError). An ask breaking the rule - which
-// concurrent edits can leave, and the browser keeps - is unreadable even where the parse reads it:
-// the browser's card takes its question from its first child and its options from its last, where
-// the parse joins them all, so settlement marks it `invalid` and leaves its row as it was.
-func readAskBlockStrictly(node *pmdoc.Node) (askBlock, error) {
-	block, err := parseAskBlock(node)
-	if err != nil {
-		return askBlock{}, err
+// readAskBlockStrictly is why node is unreadable as settlement reads it, nil when it is readable:
+// parseAskBlock, then the content rule the browser editor holds an ask to (pmdoc.AskContentError).
+// Settlement checks the same two, the parse in collectAskBlocksForSettlement. An ask breaking the
+// rule - which concurrent edits can leave, and the browser keeps - is unreadable even where the
+// parse reads it: the browser's card takes its question from its first child and its options from
+// its last, where the parse joins them all, so settlement marks it `invalid` and leaves its row as
+// it was.
+func readAskBlockStrictly(node *pmdoc.Node) error {
+	if _, err := parseAskBlock(node); err != nil {
+		return err
 	}
-	if err := pmdoc.AskContentError(node); err != nil {
-		return askBlock{}, err
-	}
-	return block, nil
+	return pmdoc.AskContentError(node)
 }
 
 func parseAskBlock(node *pmdoc.Node) (askBlock, error) {
