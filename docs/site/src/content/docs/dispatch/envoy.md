@@ -47,6 +47,33 @@ notifications.github.<owner>.<repo>.job.<run_id>.completed    a finished Actions
 A dot in an owner, repository, or ref name is written `_` in the subject, so `acme/site.io` is
 `notifications.github.acme.site_io`. A redelivered webhook is recognised and stored once.
 
+A third source covers the owners the App is not installed on. When a listener holds
+`ENVOY_GITHUB_NOTIFICATIONS_TOKEN` (a classic personal access token, kept in the Secret Manager
+secret `<notifications-token-secret>`), it polls your GitHub notifications at most once a minute
+and publishes an event for each new comment, review, and close or reopen on a thread you take part
+in, under the same topics and with the same fields a webhook makes:
+
+```text
+notifications.github.<owner>.<repo>.issue.<n>           an issue closed or reopened
+notifications.github.<owner>.<repo>.issue.<n>.comment  a comment on an issue
+notifications.github.<owner>.<repo>.pr.<n>             a pull request closed, merged or reopened
+notifications.github.<owner>.<repo>.pr.<n>.comment     a comment or review comment on a pull request
+notifications.github.<owner>.<repo>.pr.<n>.review      a submitted review
+notifications.github.<owner>.<repo>.pr.<n>.mention     a comment or review that mentions the trigger (@legion)
+```
+
+So an agent subscribes to a pull request on one of those owners exactly as to any other. The
+poller sends only GET requests — it never marks a notification read or changes a subscription — and
+only the one `gke` listener runs it; every other listener starts no poller and leaves your GitHub
+notifications alone. Three settings the cluster gives that listener shape it:
+`ENVOY_GITHUB_NOTIFICATIONS_SKIP_OWNERS` names the owners the App already covers, so the poller
+publishes nothing for them and no comment arrives twice; `ENVOY_GITHUB_NOTIFICATIONS_LOOKBACK` is
+how far back its first poll reads (`1h`, at most `48h`); and the token itself. It keeps its state
+in memory, and the stream's 72-hour duplicate window drops any event it re-reads after a restart or
+during a rolling deploy. `/healthz` reports it under `github_notifications`, which says
+`degraded` when it has had no successful poll for ten minutes; a degraded poller never stops the
+listener.
+
 ## How Slack mentions arrive, and how an agent replies
 
 A Slack app sends its events to the listener's public route `/webhook/slack`, which the listener
