@@ -52,3 +52,5 @@ func (s *server) introspect(w http.ResponseWriter, r *http.Request, _ string) {
 	}
 	writeJSON(w, http.StatusOK, answer)
 }
+
+// INFRA-583 tester probe: a broker-only change.
