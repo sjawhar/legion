@@ -1239,10 +1239,12 @@ its connection until it closes.
 **No Envoy listener call runs with a transaction or a pooled connection held.** One caller, one
 connection bounds how many of the pool's connections a caller takes; this bounds how long it
 keeps the one it has. The listener is a cross-service HTTP call bounded only by its five-second
-client timeout (`internal/dispatch/envoy/client.go`), and production runs one Dispatch task on
-a pool of `store.sharedPoolSize` connections, so a call made inside a transaction holds one of
-them - and the rows it locked - until the listener answers; that many concurrent ones empty the
-pool and stall every unrelated request, which a listener restart alone is enough to cause. A
+client timeout (`internal/dispatch/envoy/client.go`), and each Dispatch process serves the
+requests it takes from its own pool of `store.sharedPoolSize` connections, so a call made inside
+a transaction holds one of them - and the rows it locked, which every other process's requests
+wait on too - until the listener answers; that many concurrent ones empty that process's pool and
+stall every unrelated request it serves, and the other processes' requests behind those row
+locks, which a listener restart alone is enough to cause. A
 read (`Session`, `Sessions`, `Role`, `Interest`, `ListInterests`) is resolved first, with nothing
 held; the transaction then re-reads under its own lock whatever the resolution depended on and
 decides with the resolution only while the locked row still agrees, taking it once more when it
@@ -1281,8 +1283,11 @@ sent, and each of those statements is its own short transaction or single pooled
 step of a delivery holds a connection across another.
 
 **A send that meets a listener take-over waits it out under the attempt it holds.** While the
-active listener pod is replaced its successor refuses connections, answers 503, or does not hold
-the session yet for a few seconds (INFRA-557's take-over target is under 10). A try whose outcome
+active listener pod is replaced its successor refuses connections, answers 503 (its starting
+gate's `{"error":"service starting"}`), or does not hold the session yet for a few seconds
+(INFRA-557's take-over target is under 10). The listener client reads a 502, 503 or 504 on any
+route, a role lookup and a send included, as `ErrUnavailable` whatever its body says, keeping the
+body's reason in the text. A try whose outcome
 is one of those - the listener unreachable (`envoy listener: …`, never the `ENVOY_URL is not
 configured` text), a receipt timeout, or `no live session` (`retryableDeliveryFailure`) - is
 tried again under the same attempt and the same idempotency key, without a new claim: the sender

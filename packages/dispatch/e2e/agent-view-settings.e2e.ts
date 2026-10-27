@@ -639,10 +639,13 @@ test("an agent's bearer cannot switch a session: the messages route answers 403 
 // A4: a session that stopped running never answers. Thirty seconds after Dispatch took the
 // switch the page says no answer came, keeps the values the session last reported, and gives the
 // pickers back; an answer that still comes replaces the line. A switch whose send already failed
-// (no live session took it) says so at once.
-test("a switch the session never answers says so after 30 seconds and keeps the header, a late answer replaces that, and a send that failed says so at once", async ({
+// (no live session took it) says so as soon as Dispatch answers with the failed attempt, without
+// waiting for that deadline.
+test("a switch the session never answers says so after 30 seconds and keeps the header, a late answer replaces that, and a send that failed says so without waiting for the deadline", async ({
   browser,
 }, testInfo) => {
+  // Room for the failed send's 12 s listener take-over wait at the end of the row.
+  test.setTimeout(60_000);
   const session = liveSession(9);
   const id = session.session_id;
   await setLiveSessions([session]);
@@ -680,10 +683,13 @@ test("a switch the session never answers says so after 30 seconds and keeps the 
     await expect(status).toHaveText("The session answered: Model set to anthropic/model-b.");
 
     // The send itself fails: Dispatch answers with a failed attempt, and the page says so with no
-    // wait for the deadline.
+    // wait for the deadline. Dispatch answers only once the listener take-over window has passed
+    // (listenerTakeoverWindow, 12 s, in packages/envoy/internal/dispatch/api/envoy_resolve.go),
+    // in real time the page's installed clock does not hold back, so this wait gets more than the
+    // default 15 s expect timeout.
     await setSessionSendStatus(id, 404);
     await model.selectOption("openai/model-c");
-    await expect(status).toHaveText(/^No answer came from the session: \S/);
+    await expect(status).toHaveText(/^No answer came from the session: \S/, { timeout: 30_000 });
     await expect(status).not.toHaveText(NO_ANSWER);
     await expect(model).toBeEnabled();
     await expect(send).toBeEnabled();

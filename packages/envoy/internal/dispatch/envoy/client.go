@@ -429,12 +429,27 @@ func sendTransportError(err error, requestWritten bool) error {
 	return fmt.Errorf("%w: POST /v1/messages/send: %w", ErrUnavailable, err)
 }
 
+// listenerResponseError is the error a role lookup or a send reports for a non-200 answer. A 502,
+// 503 or 504 is ErrUnavailable whatever its body says: the listener behind its starting gate
+// answers 503 {"error":"service starting"} (cmd/listener/main.go startingGate), and a gateway in
+// front of one that is gone answers 502 or 504, so either is "ask again" rather than the
+// listener's verdict on the request. Any other status with a JSON reason is that reason alone,
+// which a delivery records and a person reads verbatim ("no live session <id>", "message is
+// required"). The reason is kept on the unavailable error too, for the same reader.
 func listenerResponseError(response *http.Response) error {
 	var body struct {
 		Error string `json:"error"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&body); err == nil && body.Error != "" {
-		return errors.New(body.Error)
+	reason := ""
+	if err := json.NewDecoder(response.Body).Decode(&body); err == nil {
+		reason = body.Error
+	}
+	switch code := response.StatusCode; {
+	case reason == "":
+	case code == http.StatusBadGateway || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout:
+		return fmt.Errorf("%w: listener returned %d: %s", ErrUnavailable, code, reason)
+	default:
+		return errors.New(reason)
 	}
 	return fmt.Errorf("%w: listener returned %d", ErrUnavailable, response.StatusCode)
 }

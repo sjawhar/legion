@@ -26,9 +26,12 @@ const DeliveryResumeInterval = 10 * time.Second
 const deliveryResumeLease = "delivery-resume"
 
 // deliveryResumeBatch bounds the attempts one pass reads from each table, oldest first, and
-// deliveryResumeSenders how many of them it sends at once. A send is bounded by the listener
-// client's five-second window, so a full batch takes a few minutes at worst; the lease is held
-// for the whole pass, so the next pass, on whichever process, starts after it.
+// deliveryResumeSenders how many of them it sends at once. A try is bounded by the listener
+// client's five-second window on its resolution and on its send, and a send that meets a listener
+// take-over keeps trying for up to listenerTakeoverWindow (12 s) from its first try, so one send
+// takes up to about twenty seconds, and a full batch through a listener that stays down for the
+// whole pass over half an hour at worst; the lease is held for the whole pass, so the next pass,
+// on whichever process, starts after it.
 const (
 	deliveryResumeBatch   = 200
 	deliveryResumeSenders = 4
@@ -102,8 +105,10 @@ type strandedCommentAttempt struct {
 // A send resumes its attempt or nothing. Another sender that took the attempt since it was read
 // owns it, and a send whose claim or settle cannot be written leaves the row pending under the
 // claim it took, which makes it a candidate again a minute later; the horizon bounds the tries.
-// A listener failure settles the attempt failed with its receipt, as every send does, and a
-// failed attempt is never a candidate.
+// A send that meets a listener take-over tries again under the attempt's own number and key,
+// renewing its claim before each try, for up to listenerTakeoverWindow (takeoverRetry). Any other
+// listener failure, and a take-over's once that window has passed, settles the attempt failed
+// with its receipt, as every send does, and a failed attempt is never a candidate.
 func (s *server) resumeStrandedDeliveries(ctx context.Context) error {
 	messages, err := s.strandedMessageAttempts(ctx)
 	if err != nil {

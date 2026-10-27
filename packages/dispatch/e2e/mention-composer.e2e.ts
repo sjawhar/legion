@@ -476,6 +476,11 @@ test("a thread's own reply out when the viewport narrows to a phone keeps its dr
 test("E7b and Retry: removing a prefilled mention creates a plain reply, and retries name their target", async ({
   browser,
 }) => {
+  // Two failed sends run end to end here, the seeded mention's and the Retry's, and each waits out
+  // the listener take-over window (listenerTakeoverWindow, 12 s, in
+  // packages/envoy/internal/dispatch/api/envoy_resolve.go) before it settles failed, so the row
+  // needs about 26 s of Playwright's default 30.
+  test.setTimeout(60_000);
   await setLiveSessions([planner]);
   // The mention's first delivery has to FAIL for a retry to be offered at all: a same-mode
   // retry of a delivery that landed is a repeat that is recognised and dropped, so the row no
