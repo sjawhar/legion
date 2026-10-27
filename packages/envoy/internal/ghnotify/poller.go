@@ -91,10 +91,7 @@ type Poller struct {
 	mu            sync.Mutex
 	cur           cursor
 	threads       map[string]*threadState
-	deferred      map[string]deferredThread
-	dropped       map[string]droppedThread
 	ssoUntil      map[string]time.Time
-	unreadable    map[string]time.Time
 	lastSuccess   time.Time
 	pollInterval  time.Duration
 	rateRemaining int
@@ -148,11 +145,9 @@ func New(cfg Config, pub Publisher, logger *logging.Logger, reg *metrics.Registr
 		reg = metrics.New()
 	}
 	skip := map[string]struct{}{}
-	owners := parseOwners(strings.Join(cfg.SkipOwners, ","))
-	for _, owner := range owners {
+	for _, owner := range normalizeOwners(cfg.SkipOwners) {
 		skip[owner] = struct{}{}
 	}
-	cfg.SkipOwners = owners
 	now := cfg.Now()
 	return &Poller{
 		cfg:           cfg,
@@ -164,10 +159,7 @@ func New(cfg Config, pub Publisher, logger *logging.Logger, reg *metrics.Registr
 		started:       now,
 		cur:           cursor{since: now.Add(-cfg.Lookback)},
 		threads:       map[string]*threadState{},
-		deferred:      map[string]deferredThread{},
-		dropped:       map[string]droppedThread{},
 		ssoUntil:      map[string]time.Time{},
-		unreadable:    map[string]time.Time{},
 		pollInterval:  minInterval,
 		rateRemaining: -1,
 	}, nil
@@ -202,8 +194,8 @@ func (p *Poller) Health() Health {
 		reference = p.started
 	}
 	unreadable := 0
-	for _, at := range p.unreadable {
-		if now.Sub(at) <= unreadableWindow {
+	for _, s := range p.threads {
+		if !s.unreadableAt.IsZero() && now.Sub(s.unreadableAt) <= unreadableWindow {
 			unreadable++
 		}
 	}
@@ -225,7 +217,8 @@ type pollOutcome struct {
 }
 
 // poll lists the threads changed since the cursor, processes each, and returns how long to wait
-// before the next poll. The cursor moves only when every listed thread succeeded.
+// before the next poll. The cursor moves only when every listed thread is done; the poll succeeds
+// when no thread failed, so a thread the rate floor held back keeps the cursor but is no failure.
 func (p *Poller) poll(ctx context.Context) time.Duration {
 	now := p.cfg.Now()
 	p.prune(now)
@@ -256,33 +249,47 @@ func (p *Poller) poll(ctx context.Context) time.Duration {
 	if ctx.Err() != nil {
 		return minInterval
 	}
-	listedOK, allOK := true, true
+	cursorHeld, failed, floor := false, false, false
 	for i, result := range results {
 		out.published += result.published
-		if result.outcome == outcomeDone || result.outcome == outcomeDeferred {
+		switch result.outcome {
+		case outcomeDone, outcomeDeferred:
 			continue
+		case outcomeFloor:
+			// The floor is the poller keeping to GitHub's budget, not a failed poll: the poll still
+			// succeeds, but the thread it held back is read again, so the cursor stays.
+			floor = true
+		default:
+			failed = true
+			out.result = worse(out.result, result.outcome)
+			out.wait = max(out.wait, result.wait)
+			if out.err == nil {
+				out.err = result.err
+			}
 		}
-		allOK = false
 		if jobs[i].listed {
-			listedOK = false
-		}
-		out.result = worse(out.result, result.outcome)
-		if result.wait > out.wait {
-			out.wait = result.wait
-		}
-		if out.err == nil {
-			out.err = result.err
+			cursorHeld = true
 		}
 	}
-	if !list.notModified && listedOK {
+	if !list.notModified && !cursorHeld {
+		lastModified := list.lastModified
+		if lastModified == "" {
+			// An answer without Last-Modified keeps the one the poller has, so the next poll is
+			// still conditional and a quiet one still costs no rate limit.
+			lastModified = cur.lastModified
+		}
 		p.mu.Lock()
-		p.cur = cursor{lastModified: list.lastModified, since: list.date.Add(-overlap)}
+		p.cur = cursor{lastModified: lastModified, since: list.date.Add(-overlap)}
 		p.mu.Unlock()
 	}
-	if allOK {
-		out.result = resultOK
-		if list.notModified {
+	if !failed {
+		switch {
+		case floor:
+			out.result = resultRateFloor
+		case list.notModified:
 			out.result = resultNotModified
+		default:
+			out.result = resultOK
 		}
 		p.mu.Lock()
 		p.lastSuccess = now
@@ -294,20 +301,35 @@ func (p *Poller) poll(ctx context.Context) time.Duration {
 
 // worse is the poll result naming the gravest thread failure seen so far.
 func worse(result string, o outcome) string {
-	rank := map[string]int{"": 0, resultError: 1, resultRateFloor: 2, resultUnauthorized: 3, resultRateLimited: 4}
-	next := map[outcome]string{
-		outcomeRetry: resultError, outcomeFloor: resultRateFloor,
-		outcomeUnauthorized: resultUnauthorized, outcomeRateLimited: resultRateLimited,
-	}[o]
-	if rank[next] > rank[result] {
+	next := resultError
+	switch o {
+	case outcomeUnauthorized:
+		next = resultUnauthorized
+	case outcomeRateLimited:
+		next = resultRateLimited
+	}
+	if severity(next) > severity(result) {
 		return next
 	}
 	return result
 }
 
+func severity(result string) int {
+	switch result {
+	case resultError:
+		return 1
+	case resultUnauthorized:
+		return 2
+	case resultRateLimited:
+		return 3
+	}
+	return 0
+}
+
 // finish records a poll and returns the next interval: the larger of 60 s and the last
 // X-Poll-Interval, or the wait a rate-limited answer asked for when that is longer. A poll that
-// published or failed writes one INFO line; a quiet one writes none, and the metrics count it.
+// published or failed writes one INFO line; a quiet one, the rate floor's included, writes none,
+// and the metrics count it.
 func (p *Poller) finish(out pollOutcome) time.Duration {
 	p.mu.Lock()
 	next := p.pollInterval
@@ -316,7 +338,7 @@ func (p *Poller) finish(out pollOutcome) time.Duration {
 	next = max(next, out.wait)
 	p.m.pollInterval.Set(int64(next / time.Second))
 	p.m.polls.Inc([2]string{"result", out.result})
-	if out.published > 0 || (out.result != resultOK && out.result != resultNotModified) {
+	if out.published > 0 || severity(out.result) > 0 {
 		attrs := []slog.Attr{
 			slog.Int("status", out.status),
 			slog.String("result", out.result),
@@ -503,34 +525,41 @@ func (p *Poller) detailObject(ctx context.Context, path string) (map[string]any,
 	return object, nil
 }
 
-// detailList reads one of a thread's lists, 100 items a page. A list read with since follows its
-// pages from the first, up to maxDetailPages; tail is for a list without since, oldest first, and
-// reads its newest maxDetailPages pages when it has more.
-func (p *Poller) detailList(ctx context.Context, path string, query url.Values, tail bool) ([]map[string]any, error) {
-	query.Set("per_page", strconv.Itoa(detailPageSize))
+// listSince reads a list GitHub filters by since, oldest first, 100 items a page, following its
+// pages from the first up to maxDetailPages. What is past them is read by the next poll, which
+// starts from the newest item this one read.
+func (p *Poller) listSince(ctx context.Context, path string, since time.Time) ([]map[string]any, error) {
+	query := url.Values{"since": {since.UTC().Format(time.RFC3339)}, "per_page": {strconv.Itoa(detailPageSize)}}
 	items, links, err := p.detailPage(ctx, path, query)
 	if err != nil {
 		return nil, err
 	}
-	if last := links["last"]; tail && pageOf(last) > maxDetailPages {
-		items = nil
-		for page := pageOf(last) - maxDetailPages + 1; page <= pageOf(last); page++ {
-			got, _, err := p.detailPage(ctx, withPage(last, page), nil)
-			if err != nil {
-				return nil, err
-			}
-			items = append(items, got...)
+	for pages := 1; links["next"] != "" && pages < maxDetailPages; pages++ {
+		var page []map[string]any
+		if page, links, err = p.detailPage(ctx, links["next"], nil); err != nil {
+			return nil, err
 		}
-		return items, nil
+		items = append(items, page...)
 	}
-	next := links["next"]
-	for pages := 1; next != "" && pages < maxDetailPages; pages++ {
-		got, links, err := p.detailPage(ctx, next, nil)
+	return items, nil
+}
+
+// listNewestPages reads a list GitHub cannot filter by time, oldest first, 100 items a page: its
+// first page, which names the last, then the newest pages, maxDetailPages in all. The first page's
+// items are kept like any other; the thread's time filter drops those that are too old.
+func (p *Poller) listNewestPages(ctx context.Context, path string) ([]map[string]any, error) {
+	items, links, err := p.detailPage(ctx, path, url.Values{"per_page": {strconv.Itoa(detailPageSize)}})
+	if err != nil {
+		return nil, err
+	}
+	lastURL := links["last"]
+	last := pageOf(lastURL)
+	for page := max(2, last-maxDetailPages+2); page <= last; page++ {
+		got, _, err := p.detailPage(ctx, withPage(lastURL, page), nil)
 		if err != nil {
 			return nil, err
 		}
 		items = append(items, got...)
-		next = links["next"]
 	}
 	return items, nil
 }

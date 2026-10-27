@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,6 +15,26 @@ const (
 	issue7Comment = "notifications.github.acme.widgets.issue.7.comment"
 	pr8           = "notifications.github.acme.widgets.pr.8"
 )
+
+// pollRequests runs one poll and returns every request it sent.
+func pollRequests(ctx context.Context, h *harness) []recordedRequest {
+	mark := h.f.mark()
+	h.p.poll(ctx)
+	return h.f.requestsSince(mark)
+}
+
+// listOf is the first page of the notification list among requests: its since and its
+// If-Modified-Since are the poller's cursor.
+func listOf(t *testing.T, requests []recordedRequest) recordedRequest {
+	t.Helper()
+	for _, request := range requests {
+		if request.path == "/notifications" && request.query.Get("page") == "" {
+			return request
+		}
+	}
+	t.Fatalf("no notification list request among %d requests", len(requests))
+	return recordedRequest{}
+}
 
 func TestPollerFakeGitHub(t *testing.T) {
 	ctx := context.Background()
@@ -54,6 +75,7 @@ func TestPollerFakeGitHub(t *testing.T) {
 		if next := h.p.poll(ctx); next != time.Minute {
 			t.Fatalf("next interval %s, want 1m", next)
 		}
+		lastModified := f.lastModified()
 		want := map[string]string{
 			"notifications.issue_comment.9001":               issue7Comment,
 			"notifications.issue_comment.9002":               issue7Comment,
@@ -108,9 +130,6 @@ func TestPollerFakeGitHub(t *testing.T) {
 				t.Fatalf("%s carried Authorization %q", request.path, request.header.Get("Authorization"))
 			}
 		}
-		if cur := h.p.cursor(); !cur.since.Equal(t0.Add(-5*time.Minute)) || cur.lastModified == "" {
-			t.Fatalf("cursor %+v, want since the answer's Date less 5 minutes and its Last-Modified", cur)
-		}
 		for series, value := range map[string]int64{
 			`envoy_github_notifications_polls_total{result="ok"}`:                         1,
 			`envoy_github_notifications_events_total{kind="issue_comment"}`:               3,
@@ -132,6 +151,17 @@ func TestPollerFakeGitHub(t *testing.T) {
 		if len(lines) != 1 || lines[0]["published"] != float64(6) || lines[0]["status"] != float64(200) ||
 			lines[0]["threads"] != float64(2) || lines[0]["next_interval_seconds"] != float64(60) || lines[0]["rate_remaining"] != float64(4500) {
 			t.Fatalf("poll lines %v", lines)
+		}
+
+		// The next poll starts where this one's answer left the cursor: its Date less 5 minutes,
+		// conditional on its Last-Modified.
+		h.clock.Advance(time.Minute)
+		next := listOf(t, pollRequests(ctx, h))
+		if got := next.query.Get("since"); got != stamp(t0.Add(-5*time.Minute)) {
+			t.Fatalf("next poll since %s, want the answer's Date less 5 minutes", got)
+		}
+		if got := next.header.Get("If-Modified-Since"); got != lastModified {
+			t.Fatalf("next poll If-Modified-Since %q, want the answer's Last-Modified %q", got, lastModified)
 		}
 	})
 
@@ -168,31 +198,45 @@ func TestPollerFakeGitHub(t *testing.T) {
 		h.f.addIssue("acme", "widgets", 7, false)
 		h.f.addComment("acme", "widgets", 7, 9001, "maintainer", "Reproduced.", t0.Add(-3*time.Minute))
 		h.p.poll(ctx)
-		before := h.p.cursor()
-		h.clock.Advance(time.Minute)
-		mark := h.f.mark()
-		next := h.p.poll(ctx)
-		requests := h.f.requestsSince(mark)
-		if len(requests) != 1 || requests[0].path != "/notifications" {
-			t.Fatalf("a 304 poll sent %v, want the list request alone", requests)
+		lastModified := h.f.lastModified()
+		for poll := 2; poll <= 3; poll++ {
+			h.clock.Advance(time.Minute)
+			requests := pollRequests(ctx, h)
+			if len(requests) != 1 || requests[0].path != "/notifications" {
+				t.Fatalf("poll %d sent %v, want the list request alone", poll, requests)
+			}
+			if got := requests[0].header.Get("If-Modified-Since"); got != lastModified {
+				t.Fatalf("poll %d If-Modified-Since %q, want the first answer's Last-Modified %q", poll, got, lastModified)
+			}
+			if got := requests[0].query.Get("since"); got != stamp(t0.Add(-5*time.Minute)) {
+				t.Fatalf("poll %d since %s; a 304 moves no cursor", poll, got)
+			}
 		}
-		if got := requests[0].header.Get("If-Modified-Since"); got != before.lastModified || got == "" {
-			t.Fatalf("If-Modified-Since %q, want the last Last-Modified %q", got, before.lastModified)
-		}
-		if after := h.p.cursor(); after != before {
-			t.Fatalf("cursor %+v after a 304, want %+v", after, before)
-		}
-		if next != time.Minute {
-			t.Fatalf("next interval %s", next)
-		}
-		if got := metricValue(t, h.reg, `envoy_github_notifications_polls_total{result="not_modified"}`); got != 1 {
+		if got := metricValue(t, h.reg, `envoy_github_notifications_polls_total{result="not_modified"}`); got != 2 {
 			t.Fatalf("not_modified polls %d", got)
 		}
-		if health := h.p.Health(); !health.LastSuccess.Equal(t0.Add(time.Minute)) {
+		if health := h.p.Health(); !health.LastSuccess.Equal(t0.Add(2 * time.Minute)) {
 			t.Fatalf("a 304 is a successful poll; last success %s", health.LastSuccess)
 		}
 		if lines := h.logs.lines(t, "INFO", msgPoll); len(lines) != 1 {
 			t.Fatalf("a quiet poll wrote a line: %v", lines)
+		}
+	})
+
+	t.Run("a 200 without Last-Modified keeps the last one for If-Modified-Since", func(t *testing.T) {
+		h := newHarness(t, nil)
+		h.f.addThread("1", "acme", "widgets", "Issue", 7, t0.Add(-2*time.Minute))
+		h.f.addIssue("acme", "widgets", 7, false)
+		h.p.poll(ctx)
+		lastModified := h.f.lastModified()
+		h.clock.Advance(time.Minute)
+		h.f.touch()
+		h.f.omitLastModified(true)
+		h.p.poll(ctx)
+		h.clock.Advance(time.Minute)
+		h.f.omitLastModified(false)
+		if got := listOf(t, pollRequests(ctx, h)).header.Get("If-Modified-Since"); got != lastModified {
+			t.Fatalf("If-Modified-Since %q after an answer without Last-Modified, want the last one, %q", got, lastModified)
 		}
 	})
 
@@ -216,15 +260,15 @@ func TestPollerFakeGitHub(t *testing.T) {
 		if _, ok := h.pub.get("notifications.issue_comment.9000", issue7Comment); !ok {
 			t.Fatal("the late comment was not published")
 		}
-		state, ok := h.p.threadState("1")
-		if !ok || !state.highWater.Equal(t0.Add(-2*time.Minute)) {
-			t.Fatalf("thread state %+v, want high water at the latest comment", state)
+		// Listed again inside the overlap with both comments inside the margin: nothing is
+		// published a second time.
+		h.clock.Advance(time.Minute)
+		h.f.touch()
+		if requests := pollRequests(ctx, h); countPath(requests, "/repos/acme/widgets/issues/7/comments") != 1 {
+			t.Fatalf("the third poll did not read the thread again: %v", requests)
 		}
-		if _, ok := state.margin["notifications.issue_comment.9001"]; !ok {
-			t.Fatalf("margin %v lacks the published comment", state.margin)
-		}
-		if _, ok := state.margin["notifications.issue_comment.9000"]; !ok {
-			t.Fatalf("margin %v lacks the late comment", state.margin)
+		if h.pub.callCount() != 2 {
+			t.Fatalf("the third poll published again: %d publishes", h.pub.callCount())
 		}
 	})
 
@@ -261,7 +305,7 @@ func TestPollerFakeGitHub(t *testing.T) {
 	})
 
 	t.Run("a skipped owner's thread makes no detail call", func(t *testing.T) {
-		h := newHarness(t, func(c *Config) { c.SkipOwners = []string{"Covered-Org"} })
+		h := newHarness(t, func(c *Config) { c.SkipOwners = []string{" Covered-Org "} })
 		h.f.addThread("1", "covered-org", "tools", "Issue", 4, t0.Add(-2*time.Minute))
 		h.f.addIssue("covered-org", "tools", 4, false)
 		h.f.addComment("covered-org", "tools", 4, 9400, "maintainer", "Covered by the App.", t0.Add(-3*time.Minute))
@@ -282,24 +326,36 @@ func TestPollerFakeGitHub(t *testing.T) {
 		}
 	})
 
+	t.Run("New takes each skip owner as one owner, a comma and all", func(t *testing.T) {
+		h := newHarness(t, func(c *Config) { c.SkipOwners = []string{"acme,covered-org"} })
+		h.f.addThread("1", "acme", "widgets", "Issue", 7, t0.Add(-2*time.Minute))
+		h.f.addIssue("acme", "widgets", 7, false)
+		h.f.addComment("acme", "widgets", 7, 9001, "maintainer", "Reproduced.", t0.Add(-3*time.Minute))
+		h.p.poll(ctx)
+		if h.pub.storedCount() != 1 {
+			t.Fatalf("stored %v; the entry \"acme,covered-org\" names no owner acme", h.pub.sourceIDs())
+		}
+	})
+
 	t.Run("a 403 with Retry-After waits as GitHub says and keeps the state", func(t *testing.T) {
 		h := newHarness(t, nil)
 		h.f.addThread("1", "acme", "widgets", "Issue", 7, t0.Add(-2*time.Minute))
 		h.f.addIssue("acme", "widgets", 7, false)
 		h.f.addComment("acme", "widgets", 7, 9001, "maintainer", "Reproduced.", t0.Add(-3*time.Minute))
 		h.f.answer("/notifications", http.StatusForbidden, http.Header{"Retry-After": {"300"}}, 1)
-		before := h.p.cursor()
 		if next := h.p.poll(ctx); next != 5*time.Minute {
 			t.Fatalf("next interval %s, want Retry-After's 5m", next)
 		}
-		if h.p.cursor() != before || len(h.f.detailsSince(0)) != 0 {
-			t.Fatal("a rate-limited list moved the cursor or fetched a thread")
+		if len(h.f.detailsSince(0)) != 0 || h.pub.callCount() != 0 {
+			t.Fatal("a rate-limited list fetched a thread or published")
 		}
 		if got := metricValue(t, h.reg, `envoy_github_notifications_polls_total{result="rate_limited"}`); got != 1 {
 			t.Fatalf("rate_limited polls %d", got)
 		}
 		h.clock.Advance(5 * time.Minute)
-		h.p.poll(ctx)
+		if got := listOf(t, pollRequests(ctx, h)).query.Get("since"); got != stamp(t0.Add(-time.Hour)) {
+			t.Fatalf("after the wait the list started at %s; a rate-limited list moves no cursor", got)
+		}
 		if h.pub.storedCount() != 1 {
 			t.Fatalf("after the wait, stored %v", h.pub.sourceIDs())
 		}
@@ -313,19 +369,16 @@ func TestPollerFakeGitHub(t *testing.T) {
 		h.f.answer("/repos/acme/widgets/issues/7", http.StatusForbidden, http.Header{
 			"X-RateLimit-Remaining": {"0"}, "X-RateLimit-Reset": {strconv.FormatInt(reset.Unix(), 10)},
 		}, 1)
-		before = h.p.cursor()
-		stateBefore, _ := h.p.threadState("1")
 		if next := h.p.poll(ctx); next != 10*time.Minute {
 			t.Fatalf("next interval %s, want the 10m to the reset", next)
 		}
-		if h.p.cursor() != before || h.pub.storedCount() != 1 {
-			t.Fatal("a rate-limited thread moved the cursor or published")
-		}
-		if stateAfter, _ := h.p.threadState("1"); !stateAfter.highWater.Equal(stateBefore.highWater) {
-			t.Fatalf("high water moved from %s to %s", stateBefore.highWater, stateAfter.highWater)
+		if h.pub.storedCount() != 1 {
+			t.Fatal("a rate-limited thread published")
 		}
 		h.clock.Advance(10 * time.Minute)
-		h.p.poll(ctx)
+		if got := listOf(t, pollRequests(ctx, h)).query.Get("since"); got != stamp(t0) {
+			t.Fatalf("after the reset the list started at %s; a rate-limited thread moves no cursor", got)
+		}
 		if _, ok := h.pub.get("notifications.issue_comment.9002", issue7Comment); !ok {
 			t.Fatalf("after the reset, stored %v", h.pub.sourceIDs())
 		}
@@ -358,22 +411,19 @@ func TestPollerFakeGitHub(t *testing.T) {
 			}
 		}
 		warn(1)
-		if cur := h.p.cursor(); !cur.since.Equal(t0.Add(-5 * time.Minute)) {
-			t.Fatalf("cursor since %s; a thread behind single sign-on holds the cursor back", cur.since)
-		}
 		h.clock.Advance(time.Minute)
 		h.f.touch()
-		mark := h.f.mark()
-		h.p.poll(ctx)
-		if got := countPath(h.f.requestsSince(mark), ssoIssue); got != 0 {
+		requests := pollRequests(ctx, h)
+		if got := listOf(t, requests).query.Get("since"); got != stamp(t0.Add(-5*time.Minute)) {
+			t.Fatalf("second poll since %s; a thread behind single sign-on holds the cursor back", got)
+		}
+		if got := countPath(requests, ssoIssue); got != 0 {
 			t.Fatalf("the thread was fetched %d times within the hour", got)
 		}
 		warn(1)
 		h.clock.Advance(time.Hour)
 		h.f.clearAnswer(ssoIssue)
-		mark = h.f.mark()
-		h.p.poll(ctx)
-		if got := countPath(h.f.requestsSince(mark), ssoIssue); got != 1 {
+		if got := countPath(pollRequests(ctx, h), ssoIssue); got != 1 {
 			t.Fatalf("after the hour the thread was fetched %d times, want 1", got)
 		}
 		if _, ok := h.pub.get("notifications.issue_comment.9301", "notifications.github.sso-org.private-tools.issue.3.comment"); !ok {
@@ -382,42 +432,189 @@ func TestPollerFakeGitHub(t *testing.T) {
 		warn(1)
 	})
 
-	t.Run("another 403 or a 404 marks the thread unreadable and advances its high water", func(t *testing.T) {
+	t.Run("another 403 or a 404 marks the thread unreadable once for each update", func(t *testing.T) {
 		h := newHarness(t, nil)
 		h.f.addThread("1", "acme", "widgets", "Issue", 7, t0.Add(-2*time.Minute))
 		h.f.answer("/repos/acme/widgets/issues/7", http.StatusNotFound, nil, -1)
 		h.f.addThread("2", "acme", "gadgets", "Issue", 9, t0.Add(-3*time.Minute))
 		h.f.answer("/repos/acme/gadgets/issues/9", http.StatusForbidden, nil, -1)
 		h.p.poll(ctx)
-		lines := h.logs.lines(t, "WARN", msgUnreadable)
-		statuses := map[string]float64{}
-		for _, line := range lines {
-			statuses[line["repository"].(string)] = line["status"].(float64)
+		check := func(wantLines int, wantStatus map[string]float64) {
+			t.Helper()
+			lines := h.logs.lines(t, "WARN", msgUnreadable)
+			statuses := map[string]float64{}
+			for _, line := range lines {
+				statuses[line["repository"].(string)] = line["status"].(float64)
+			}
+			if len(lines) != wantLines || statuses["acme/widgets"] != wantStatus["acme/widgets"] || statuses["acme/gadgets"] != wantStatus["acme/gadgets"] {
+				t.Fatalf("unreadable lines %v, want %d", lines, wantLines)
+			}
+			if got := metricValue(t, h.reg, `envoy_github_notifications_threads_dropped_total{reason="unreadable"}`); got != int64(wantLines) {
+				t.Fatalf("unreadable drops %d, want %d", got, wantLines)
+			}
 		}
-		if len(lines) != 2 || statuses["acme/widgets"] != 404 || statuses["acme/gadgets"] != 403 {
-			t.Fatalf("unreadable lines %v", lines)
-		}
-		if got := metricValue(t, h.reg, `envoy_github_notifications_threads_dropped_total{reason="unreadable"}`); got != 2 {
-			t.Fatalf("unreadable drops %d", got)
-		}
+		statuses := map[string]float64{"acme/widgets": 404, "acme/gadgets": 403}
+		check(2, statuses)
 		if got := h.p.Health().Unreadable24h; got != 2 {
 			t.Fatalf("unreadable in 24h %d", got)
 		}
-		for id, want := range map[string]time.Time{"1": t0.Add(-2 * time.Minute), "2": t0.Add(-3 * time.Minute)} {
-			if state, ok := h.p.threadState(id); !ok || !state.highWater.Equal(want) {
-				t.Fatalf("thread %s state %+v, want high water %s", id, state, want)
-			}
-		}
-		if cur := h.p.cursor(); !cur.since.Equal(t0.Add(-5 * time.Minute)) {
-			t.Fatalf("cursor since %s; an unreadable thread holds nothing back", cur.since)
-		}
 		if got := metricValue(t, h.reg, `envoy_github_notifications_polls_total{result="ok"}`); got != 1 {
 			t.Fatalf("ok polls %d", got)
+		}
+
+		// Listed again inside the overlap, unchanged: neither thread is fetched or logged again,
+		// and an unreadable thread holds the cursor back no more than a published one.
+		h.clock.Advance(time.Minute)
+		h.f.touch()
+		requests := pollRequests(ctx, h)
+		if got := listOf(t, requests).query.Get("since"); got != stamp(t0.Add(-5*time.Minute)) {
+			t.Fatalf("second poll since %s", got)
+		}
+		if len(requests) != 1 {
+			t.Fatalf("an unchanged unreadable thread was fetched again: %v", requests)
+		}
+		check(2, statuses)
+
+		// A change to the thread reads it again.
+		h.f.bumpThread("1", h.clock.Now())
+		h.clock.Advance(time.Minute)
+		if got := countPath(pollRequests(ctx, h), "/repos/acme/widgets/issues/7"); got != 1 {
+			t.Fatalf("the changed thread was fetched %d times, want 1", got)
+		}
+		lines := h.logs.lines(t, "WARN", msgUnreadable)
+		if len(lines) != 3 || lines[2]["repository"] != "acme/widgets" {
+			t.Fatalf("unreadable lines %v, want a third for the changed thread", lines)
+		}
+		if got := h.p.Health().Unreadable24h; got != 2 {
+			t.Fatalf("unreadable in 24h %d; it counts threads", got)
 		}
 		// A day later the count is spent.
 		h.clock.Advance(25 * time.Hour)
 		if got := h.p.Health().Unreadable24h; got != 0 {
 			t.Fatalf("unreadable in 24h %d a day later", got)
+		}
+	})
+
+	t.Run("a thread failing transiently for 5 polls in a row is written off, and the cursor moves on", func(t *testing.T) {
+		h := newHarness(t, nil)
+		comments7 := "/repos/acme/widgets/issues/7/comments"
+		h.f.addThread("1", "acme", "widgets", "Issue", 7, t0)
+		h.f.addIssue("acme", "widgets", 7, false)
+		h.f.answer(comments7, http.StatusBadGateway, nil, -1)
+		h.f.addThread("2", "acme", "gadgets", "Issue", 9, t0.Add(-3*time.Minute))
+		h.f.addIssue("acme", "gadgets", 9, false)
+		h.f.addComment("acme", "gadgets", 9, 9901, "maintainer", "Fine here.", t0.Add(-4*time.Minute))
+		for poll := 1; poll <= 5; poll++ {
+			if poll > 1 {
+				h.clock.Advance(time.Minute)
+			}
+			if got := listOf(t, pollRequests(ctx, h)).query.Get("since"); got != stamp(t0.Add(-time.Hour)) {
+				t.Fatalf("poll %d listed since %s; a failing thread holds the cursor", poll, got)
+			}
+			if poll == 5 {
+				break
+			}
+			if lines := h.logs.lines(t, "WARN", msgUnreadable); len(lines) != 0 {
+				t.Fatalf("poll %d wrote the thread off: %v", poll, lines)
+			}
+			if !h.p.Health().LastSuccess.IsZero() {
+				t.Fatalf("poll %d counted as a success", poll)
+			}
+		}
+		lines := h.logs.lines(t, "WARN", msgUnreadable)
+		if len(lines) != 1 || lines[0]["repository"] != "acme/widgets" || lines[0]["status"] != float64(502) || lines[0]["failures"] != float64(5) {
+			t.Fatalf("unreadable lines %v, want one for the failing thread after 5 polls", lines)
+		}
+		if health := h.p.Health(); !health.LastSuccess.Equal(t0.Add(4*time.Minute)) || health.Unreadable24h != 1 {
+			t.Fatalf("health %+v after the write-off", health)
+		}
+		for series, value := range map[string]int64{
+			`envoy_github_notifications_polls_total{result="error"}`:                4,
+			`envoy_github_notifications_polls_total{result="ok"}`:                   1,
+			`envoy_github_notifications_threads_dropped_total{reason="unreadable"}`: 1,
+		} {
+			if got := metricValue(t, h.reg, series); got != value {
+				t.Fatalf("%s = %d, want %d", series, got, value)
+			}
+		}
+
+		// The cursor moved, and the written-off thread, listed again unchanged, is not fetched.
+		h.clock.Advance(time.Minute)
+		requests := pollRequests(ctx, h)
+		if got := listOf(t, requests).query.Get("since"); got != stamp(t0.Add(-time.Minute)) {
+			t.Fatalf("poll 6 since %s, want poll 5's Date less 5 minutes", got)
+		}
+		if countPath(requests, "/repos/acme/widgets/issues/7") != 0 || countPath(requests, comments7) != 0 {
+			t.Fatalf("the written-off thread was fetched again: %v", requests)
+		}
+		if lines := h.logs.lines(t, "WARN", msgUnreadable); len(lines) != 1 {
+			t.Fatalf("unreadable lines %v after poll 6", lines)
+		}
+		if h.pub.storedCount() != 1 || h.pub.callCount() != 1 {
+			t.Fatalf("the other thread: %d stored, %d publishes; want its comment once", h.pub.storedCount(), h.pub.callCount())
+		}
+	})
+
+	t.Run("transient failures that stop short of 5 polls in a row write nothing off", func(t *testing.T) {
+		h := newHarness(t, nil)
+		comments7 := "/repos/acme/widgets/issues/7/comments"
+		h.f.addThread("1", "acme", "widgets", "Issue", 7, t0)
+		h.f.addIssue("acme", "widgets", 7, false)
+		h.f.addComment("acme", "widgets", 7, 9001, "maintainer", "Reproduced.", t0.Add(-time.Minute))
+		h.f.answer(comments7, http.StatusBadGateway, nil, 4)
+		for range 5 {
+			h.p.poll(ctx)
+			h.clock.Advance(time.Minute)
+		}
+		if _, ok := h.pub.get("notifications.issue_comment.9001", issue7Comment); !ok {
+			t.Fatalf("after 4 failures and a success, stored %v", h.pub.sourceIDs())
+		}
+		h.f.addComment("acme", "widgets", 7, 9002, "reporter", "Thanks.", h.clock.Now())
+		h.f.bumpThread("1", h.clock.Now())
+		h.f.answer(comments7, http.StatusBadGateway, nil, 4)
+		for range 5 {
+			h.p.poll(ctx)
+			h.clock.Advance(time.Minute)
+		}
+		if _, ok := h.pub.get("notifications.issue_comment.9002", issue7Comment); !ok {
+			t.Fatalf("after 4 more failures and a success, stored %v", h.pub.sourceIDs())
+		}
+		if lines := h.logs.lines(t, "WARN", msgUnreadable); len(lines) != 0 {
+			t.Fatalf("a success between failures still wrote the thread off: %v", lines)
+		}
+	})
+
+	t.Run("a publish that fails does not count toward writing a thread off", func(t *testing.T) {
+		h := newHarness(t, nil)
+		comments7 := "/repos/acme/widgets/issues/7/comments"
+		h.f.addThread("1", "acme", "widgets", "Issue", 7, t0)
+		h.f.addIssue("acme", "widgets", 7, false)
+		h.f.addComment("acme", "widgets", 7, 9001, "maintainer", "Reproduced.", t0.Add(-time.Minute))
+		// Four polls whose fetch failed, then four whose read succeeded and whose publish failed:
+		// the read that succeeded cleared the count, so the next fetch failure starts again at one.
+		h.f.answer(comments7, http.StatusBadGateway, nil, 4)
+		h.pub.failPublishes(4)
+		for poll := 1; poll <= 8; poll++ {
+			h.p.poll(ctx)
+			if h.pub.storedCount() != 0 {
+				t.Fatalf("poll %d stored through a failing stream", poll)
+			}
+			h.clock.Advance(time.Minute)
+		}
+		if lines := h.logs.lines(t, "WARN", msgUnreadable); len(lines) != 0 {
+			t.Fatalf("a failing stream wrote the thread off: %v", lines)
+		}
+		h.f.answer(comments7, http.StatusBadGateway, nil, 4)
+		for poll := 9; poll <= 12; poll++ {
+			h.p.poll(ctx)
+			h.clock.Advance(time.Minute)
+		}
+		if lines := h.logs.lines(t, "WARN", msgUnreadable); len(lines) != 0 {
+			t.Fatalf("the fetch failures counted on past the read that succeeded: %v", lines)
+		}
+		h.p.poll(ctx)
+		if _, ok := h.pub.get("notifications.issue_comment.9001", issue7Comment); !ok {
+			t.Fatalf("once both answer, stored %v", h.pub.sourceIDs())
 		}
 	})
 
@@ -427,13 +624,9 @@ func TestPollerFakeGitHub(t *testing.T) {
 		h.f.addIssue("acme", "widgets", 7, false)
 		h.f.addComment("acme", "widgets", 7, 9001, "maintainer", "Reproduced.", t0.Add(-3*time.Minute))
 		h.f.answer("/repos/acme/widgets/issues/7/comments", http.StatusBadGateway, nil, 1)
-		before := h.p.cursor()
 		h.p.poll(ctx)
-		if h.pub.callCount() != 0 || h.p.cursor() != before {
-			t.Fatal("a 5xx published or moved the cursor")
-		}
-		if _, ok := h.p.threadState("1"); ok {
-			t.Fatal("a 5xx wrote a thread state")
+		if h.pub.callCount() != 0 {
+			t.Fatal("a 5xx published")
 		}
 		if got := metricValue(t, h.reg, `envoy_github_notifications_polls_total{result="error"}`); got != 1 {
 			t.Fatalf("error polls %d", got)
@@ -445,12 +638,15 @@ func TestPollerFakeGitHub(t *testing.T) {
 			t.Fatal("a failed poll counted as a success")
 		}
 		h.clock.Advance(time.Minute)
-		h.p.poll(ctx)
+		if got := listOf(t, pollRequests(ctx, h)).query.Get("since"); got != stamp(t0.Add(-time.Hour)) {
+			t.Fatalf("the retry listed since %s; a 5xx moves no cursor", got)
+		}
 		if h.pub.storedCount() != 1 {
 			t.Fatalf("the retry stored %v", h.pub.sourceIDs())
 		}
-		if cur := h.p.cursor(); !cur.since.Equal(t0.Add(-4 * time.Minute)) {
-			t.Fatalf("cursor since %s after the retry", cur.since)
+		h.clock.Advance(time.Minute)
+		if got := listOf(t, pollRequests(ctx, h)).query.Get("since"); got != stamp(t0.Add(-4*time.Minute)) {
+			t.Fatalf("after the retry the list started at %s, want its Date less 5 minutes", got)
 		}
 	})
 
@@ -507,34 +703,47 @@ func TestPollerFakeGitHub(t *testing.T) {
 		}
 	})
 
-	t.Run("a rate floor of 500 skips detail fetches until the reset", func(t *testing.T) {
+	t.Run("a rate floor of 500 skips detail fetches until the reset, and is no failed poll", func(t *testing.T) {
 		h := newHarness(t, nil)
 		h.f.addThread("1", "acme", "widgets", "Issue", 7, t0.Add(-2*time.Minute))
 		h.f.addIssue("acme", "widgets", 7, false)
 		h.f.addComment("acme", "widgets", 7, 9001, "maintainer", "Reproduced.", t0.Add(-3*time.Minute))
-		h.f.setRate(499, t0.Add(10*time.Minute))
-		before := h.p.cursor()
-		h.p.poll(ctx)
-		if details := h.f.detailsSince(0); len(details) != 0 {
-			t.Fatalf("fetched %v under the rate floor", details)
+		reset := t0.Add(15 * time.Minute)
+		h.f.setRate(499, reset)
+		// Longer than the 10-minute degraded bound: the floor is the poller keeping to GitHub's
+		// budget, not a poller that fails.
+		for minute := range 15 {
+			if minute > 0 {
+				h.clock.Advance(time.Minute)
+			}
+			requests := pollRequests(ctx, h)
+			if got := listOf(t, requests).query.Get("since"); got != stamp(t0.Add(-time.Hour)) {
+				t.Fatalf("minute %d listed since %s; the thread the floor held back holds the cursor", minute, got)
+			}
+			if len(requests) != 1 {
+				t.Fatalf("minute %d sent %v under the rate floor", minute, requests)
+			}
+			if health := h.p.Health(); health.Degraded || !health.LastSuccess.Equal(h.clock.Now()) {
+				t.Fatalf("minute %d health %+v; a poll the floor held back is still a success", minute, health)
+			}
 		}
-		if h.p.cursor() != before || h.pub.callCount() != 0 {
-			t.Fatal("a poll under the rate floor moved the cursor or published")
+		if h.pub.callCount() != 0 {
+			t.Fatal("a poll under the rate floor published")
 		}
-		if got := metricValue(t, h.reg, `envoy_github_notifications_polls_total{result="rate_floor"}`); got != 1 {
+		if got := metricValue(t, h.reg, `envoy_github_notifications_polls_total{result="rate_floor"}`); got != 15 {
 			t.Fatalf("rate_floor polls %d", got)
 		}
 		if got := metricValue(t, h.reg, "envoy_github_notifications_rate_remaining"); got != 499 {
 			t.Fatalf("rate gauge %d", got)
 		}
-		h.clock.Advance(5 * time.Minute)
-		mark := h.f.mark()
-		h.p.poll(ctx)
-		if details := h.f.detailsSince(mark); len(details) != 0 {
-			t.Fatalf("fetched %v before the reset", details)
+		if got := metricValue(t, h.reg, "envoy_github_notifications_last_success_timestamp_seconds"); got != h.clock.Now().Unix() {
+			t.Fatalf("last success gauge %d", got)
 		}
-		h.clock.Advance(6 * time.Minute)
-		h.f.setRate(4999, t0.Add(71*time.Minute))
+		if lines := h.logs.lines(t, "INFO", msgPoll); len(lines) != 0 {
+			t.Fatalf("a poll the floor held back wrote a line: %v", lines)
+		}
+		h.clock.Advance(time.Minute)
+		h.f.setRate(4999, reset.Add(time.Hour))
 		h.p.poll(ctx)
 		if h.pub.storedCount() != 1 {
 			t.Fatalf("after the reset, stored %v", h.pub.sourceIDs())
@@ -600,6 +809,34 @@ func TestPollerFakeGitHub(t *testing.T) {
 		}
 		if pages[1] != "2" {
 			t.Fatalf("comment pages %q, want the second read as page 2", pages)
+		}
+	})
+
+	t.Run("a list GitHub cannot filter by time is read in 10 pages: its first and its newest 9", func(t *testing.T) {
+		h := newHarness(t, nil)
+		reviews := "/repos/acme/widgets/pulls/8/reviews"
+		h.f.addThread("1", "acme", "widgets", "PullRequest", 8, t0.Add(-time.Minute))
+		h.f.addIssue("acme", "widgets", 8, true)
+		for i := range 1199 {
+			h.f.addReview("acme", "widgets", 8, 20000+i, "reviewer", "COMMENTED", t0.Add(-3*time.Hour))
+		}
+		h.f.addReview("acme", "widgets", 8, 21199, "reviewer", "APPROVED", t0.Add(-2*time.Minute))
+		h.p.poll(ctx)
+		var pages []string
+		for _, request := range h.f.requestsSince(0) {
+			if request.path == reviews {
+				pages = append(pages, request.query.Get("page"))
+			}
+		}
+		want := []string{"", "4", "5", "6", "7", "8", "9", "10", "11", "12"}
+		if !slices.Equal(pages, want) {
+			t.Fatalf("review pages read %q, want %q: the first, then the newest 9 of 12", pages, want)
+		}
+		if h.pub.storedCount() != 1 {
+			t.Fatalf("stored %v, want the newest review alone", h.pub.sourceIDs())
+		}
+		if _, ok := h.pub.get("notifications.pull_request_review.21199", pr8+".review"); !ok {
+			t.Fatalf("the newest review was not published: %v", h.pub.sourceIDs())
 		}
 	})
 }

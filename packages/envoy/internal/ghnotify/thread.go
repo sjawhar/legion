@@ -15,14 +15,15 @@ import (
 type outcome int
 
 const (
-	// outcomeDone: the thread was published, dropped or found unreadable, and its state written.
+	// outcomeDone: the thread was published, dropped or found unreadable, and its record written.
 	outcomeDone outcome = iota
 	// outcomeDeferred: the thread's owner requires single sign-on; it is kept for a retry an hour
 	// on, so the cursor may move past it.
 	outcomeDeferred
-	// outcomeRetry: a transient failure; nothing was written and the cursor stays.
+	// outcomeRetry: a transient failure; the thread is read again next poll and the cursor stays.
 	outcomeRetry
-	// outcomeFloor: the rate floor held a detail fetch back; the cursor stays.
+	// outcomeFloor: the rate floor held a detail fetch back; the cursor stays, but the poll is no
+	// failure.
 	outcomeFloor
 	// outcomeUnauthorized: GitHub refused the token; the cursor stays.
 	outcomeUnauthorized
@@ -37,9 +38,9 @@ type threadResult struct {
 	err       error
 }
 
-// job is one thread to process in a poll and the since a thread with no state starts from. listed
-// is a thread of this poll's list, which alone decide the cursor; deferred is a thread kept for a
-// single sign-on retry.
+// job is one thread to process in a poll and the since a thread with no published state starts
+// from. listed is a thread of this poll's list, which alone decide the cursor; deferred is a
+// thread kept for a single sign-on retry.
 type job struct {
 	n        notification
 	since    time.Time
@@ -60,17 +61,17 @@ func (p *Poller) plan(threads []notification, since, now time.Time) []job {
 			continue
 		}
 		seen[n.ID] = true
-		if d, ok := p.deferred[n.ID]; ok {
-			if !now.Before(d.retryAt) {
-				jobs = append(jobs, job{n: n, since: d.since, listed: true, deferred: true})
+		if s := p.threads[n.ID]; s != nil && s.deferred != nil {
+			if !now.Before(s.deferred.retryAt) {
+				jobs = append(jobs, job{n: n, since: s.deferred.since, listed: true, deferred: true})
 			}
 			continue
 		}
 		jobs = append(jobs, job{n: n, since: since, listed: true})
 	}
-	for threadID, d := range p.deferred {
-		if !seen[threadID] && !now.Before(d.retryAt) {
-			jobs = append(jobs, job{n: d.n, since: d.since, deferred: true})
+	for threadID, s := range p.threads {
+		if s.deferred != nil && !seen[threadID] && !now.Before(s.deferred.retryAt) {
+			jobs = append(jobs, job{n: s.deferred.n, since: s.deferred.since, deferred: true})
 		}
 	}
 	return jobs
@@ -107,24 +108,27 @@ func (p *Poller) processAll(ctx context.Context, jobs []job) []threadResult {
 func (p *Poller) processThread(ctx context.Context, j job) threadResult {
 	result := p.thread(ctx, j)
 	if j.deferred && result.outcome == outcomeDone {
-		p.mu.Lock()
-		delete(p.deferred, j.n.ID)
-		p.mu.Unlock()
+		p.update(j.n.ID, func(s *threadState) { s.deferred = nil })
 	}
 	return result
 }
 
-// thread processes one thread (the spec's "One thread"): it reads the issue, and the pull request
-// for one, then every comment, review comment, submitted review, close and reopen after the
-// thread's high water less the margin, publishes those not already published in time order, and
-// writes the thread's new state.
+// thread processes one thread (the spec's "One thread"): it reads every comment, review comment,
+// submitted review, close and reopen after the thread's high water less the margin, publishes
+// those not already published in time order, and writes the thread's new record.
 func (p *Poller) thread(ctx context.Context, j job) threadResult {
 	n := j.n
 	now := p.cfg.Now()
+	rec := p.record(n.ID)
+	if rec.settledAt(n) {
+		// Dropped or written off at this very update: nothing to read until the thread changes.
+		return threadResult{outcome: outcomeDone}
+	}
+	start := rec.startHighWater(j.since)
 	owner, name := repositoryNames(n.Repository)
 	repository := owner + "/" + name
 	if owner == "" || name == "" {
-		p.markUnreadable(n, repository, 0, p.startState(n.ID, j.since), now)
+		p.markUnreadable(n, repository, 0, 0, start, now)
 		return threadResult{outcome: outcomeDone}
 	}
 	if _, skip := p.skip[strings.ToLower(owner)]; skip {
@@ -137,7 +141,7 @@ func (p *Poller) thread(ctx context.Context, j job) threadResult {
 	}
 	number := subjectNumber(n.Subject.URL)
 	if number == "" {
-		p.markUnreadable(n, repository, 0, p.startState(n.ID, j.since), now)
+		p.markUnreadable(n, repository, 0, 0, start, now)
 		return threadResult{outcome: outcomeDone}
 	}
 	if until, waiting := p.ssoActive(owner, now); waiting {
@@ -145,62 +149,15 @@ func (p *Poller) thread(ctx context.Context, j job) threadResult {
 		return threadResult{outcome: outcomeDeferred}
 	}
 
-	state := p.startState(n.ID, j.since)
-	changes := changeSet{after: state.highWater.Add(-overlap), items: map[string]item{}}
-	fail := func(err error) threadResult { return p.failed(err, j, owner, repository, state, now) }
-	base := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
-	since := func() url.Values { return url.Values{"since": {changes.after.UTC().Format(time.RFC3339)}} }
-
-	issue, err := p.detailObject(ctx, base+"/issues/"+number)
+	changes, err := p.readThread(ctx, n, owner, name, number, start)
 	if err != nil {
-		return fail(err)
+		return p.failed(err, j, owner, repository, start, now)
 	}
-	isPull := n.Subject.Type == "PullRequest"
-	var pull map[string]any
-	if isPull {
-		if pull, err = p.detailObject(ctx, base+"/pulls/"+number); err != nil {
-			return fail(err)
-		}
+	if rec.failures > 0 {
+		p.update(n.ID, func(s *threadState) { s.failures = 0 })
 	}
-	comments, err := p.detailList(ctx, base+"/issues/"+number+"/comments", since(), false)
-	if err != nil {
-		return fail(err)
-	}
-	for _, comment := range comments {
-		p.collect(&changes, repository)(issueCommentItem(comment, issue, n.Repository))
-	}
-	if isPull {
-		reviewComments, err := p.detailList(ctx, base+"/pulls/"+number+"/comments", since(), false)
-		if err != nil {
-			return fail(err)
-		}
-		for _, comment := range reviewComments {
-			p.collect(&changes, repository)(reviewCommentItem(comment, pull, n.Repository))
-		}
-		reviews, err := p.detailList(ctx, base+"/pulls/"+number+"/reviews", url.Values{}, true)
-		if err != nil {
-			return fail(err)
-		}
-		for _, review := range reviews {
-			if state, _ := review["state"].(string); strings.EqualFold(state, "PENDING") {
-				continue
-			}
-			p.collect(&changes, repository)(reviewItem(review, pull, n.Repository))
-		}
-	}
-	events, err := p.detailList(ctx, base+"/issues/"+number+"/events", url.Values{}, true)
-	if err != nil {
-		return fail(err)
-	}
-	for _, event := range events {
-		if kind, _ := event["event"].(string); kind != "closed" && kind != "reopened" {
-			continue
-		}
-		p.collect(&changes, repository)(issueEventItem(event, issue, pull, n.Repository))
-	}
-
 	items := changes.sorted()
-	highWater := state.highWater
+	highWater := start
 	for _, it := range items {
 		if it.at.After(highWater) {
 			highWater = it.at
@@ -208,12 +165,15 @@ func (p *Poller) thread(ctx context.Context, j job) threadResult {
 	}
 	published := 0
 	for _, it := range items {
-		if _, seen := state.margin[it.sourceID]; seen {
+		if _, seen := rec.margin[it.sourceID]; seen {
 			continue
 		}
 		stored, err := p.publish(it, repository)
 		published += stored
 		if err != nil {
+			// The stream did not take the change, so the thread is read again next poll from the
+			// same record. A stream that does not answer is the listener's trouble, not the
+			// thread's: it counts nothing toward writing the thread off.
 			return threadResult{outcome: outcomeRetry, published: published, err: fmt.Errorf("publish %s: %w", it.sourceID, err)}
 		}
 	}
@@ -223,8 +183,100 @@ func (p *Poller) thread(ctx context.Context, j job) threadResult {
 			margin[it.sourceID] = it.at
 		}
 	}
-	p.writeThread(n.ID, threadState{highWater: highWater, margin: margin, lastChange: latest(highWater, updatedAt(n))})
+	p.update(n.ID, func(s *threadState) {
+		s.highWater, s.margin = highWater, margin
+		s.lastChange = latest(s.lastChange, latest(highWater, changedAt(n, now)))
+		s.failures, s.settled = 0, ""
+	})
 	return threadResult{outcome: outcomeDone, published: published}
+}
+
+// detailSource is one of a thread's lists: its path, how it is paged, and how one of its objects
+// becomes a change, or is passed over (keep false).
+type detailSource struct {
+	path  string
+	read  func(ctx context.Context, path string) ([]map[string]any, error)
+	build func(object map[string]any) (it item, keep bool, err error)
+}
+
+// readThread reads one thread's changes after its high water less the margin: the issue, the pull
+// request for one, then each of its lists.
+func (p *Poller) readThread(ctx context.Context, n notification, owner, name, number string, highWater time.Time) (*changeSet, error) {
+	base := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
+	issue, err := p.detailObject(ctx, base+"/issues/"+number)
+	if err != nil {
+		return nil, err
+	}
+	var pull map[string]any
+	if n.Subject.Type == "PullRequest" {
+		if pull, err = p.detailObject(ctx, base+"/pulls/"+number); err != nil {
+			return nil, err
+		}
+	}
+	changes := &changeSet{after: highWater.Add(-overlap), items: map[string]item{}}
+	for _, source := range p.detailSources(base, number, issue, pull, n.Repository, changes.after) {
+		objects, err := source.read(ctx, source.path)
+		if err != nil {
+			return nil, err
+		}
+		for _, object := range objects {
+			it, keep, err := source.build(object)
+			switch {
+			case err != nil:
+				p.log.Warn(msgUnbuildable, slog.String("repository", owner+"/"+name), slog.String("error", err.Error()))
+			case keep:
+				changes.add(it)
+			}
+		}
+	}
+	return changes, nil
+}
+
+// detailSources are the lists a thread's changes come from: the issue comments, and for a pull
+// request its review comments and reviews, then the issue events. A list GitHub filters by since
+// is read from after; the others are read by their newest pages.
+func (p *Poller) detailSources(base, number string, issue, pull, repository map[string]any, after time.Time) []detailSource {
+	sinceAfter := func(ctx context.Context, path string) ([]map[string]any, error) {
+		return p.listSince(ctx, path, after)
+	}
+	kept := func(it item, err error) (item, bool, error) { return it, true, err }
+	issuePath := base + "/issues/" + number
+	sources := []detailSource{{
+		path: issuePath + "/comments",
+		read: sinceAfter,
+		build: func(comment map[string]any) (item, bool, error) {
+			return kept(issueCommentItem(comment, issue, repository))
+		},
+	}}
+	if pull != nil {
+		pullPath := base + "/pulls/" + number
+		sources = append(sources, detailSource{
+			path: pullPath + "/comments",
+			read: sinceAfter,
+			build: func(comment map[string]any) (item, bool, error) {
+				return kept(reviewCommentItem(comment, pull, repository))
+			},
+		}, detailSource{
+			path: pullPath + "/reviews",
+			read: p.listNewestPages,
+			build: func(review map[string]any) (item, bool, error) {
+				if reviewState, _ := review["state"].(string); strings.EqualFold(reviewState, "PENDING") {
+					return item{}, false, nil
+				}
+				return kept(reviewItem(review, pull, repository))
+			},
+		})
+	}
+	return append(sources, detailSource{
+		path: issuePath + "/events",
+		read: p.listNewestPages,
+		build: func(event map[string]any) (item, bool, error) {
+			if kind, _ := event["event"].(string); kind != "closed" && kind != "reopened" {
+				return item{}, false, nil
+			}
+			return kept(issueEventItem(event, issue, pull, repository))
+		},
+	})
 }
 
 // changeSet is a thread's changes after the margin's start, one per source event id, so a change
@@ -232,6 +284,12 @@ func (p *Poller) thread(ctx context.Context, j job) threadResult {
 type changeSet struct {
 	after time.Time
 	items map[string]item
+}
+
+func (s *changeSet) add(it item) {
+	if it.at.After(s.after) {
+		s.items[it.sourceID] = it
+	}
 }
 
 func (s *changeSet) sorted() []item {
@@ -246,20 +304,6 @@ func (s *changeSet) sorted() []item {
 		return out[i].sourceID < out[j].sourceID
 	})
 	return out
-}
-
-// collect adds a built change to s when it is after the margin's start, and logs one it could not
-// build from GitHub's object.
-func (p *Poller) collect(s *changeSet, repository string) func(item, error) {
-	return func(it item, err error) {
-		if err != nil {
-			p.log.Warn(msgUnbuildable, slog.String("repository", repository), slog.String("error", err.Error()))
-			return
-		}
-		if it.at.After(s.after) {
-			s.items[it.sourceID] = it
-		}
-	}
 }
 
 // publish publishes a change's envelopes and counts those the stream stored. An envelope that does
@@ -284,8 +328,11 @@ func (p *Poller) publish(it item, repository string) (int, error) {
 	return stored, nil
 }
 
-// failed is what a thread's failed fetch means for the thread (the spec's "One thread").
-func (p *Poller) failed(err error, j job, owner, repository string, state threadState, now time.Time) threadResult {
+// failed is what a thread's failed fetch means for the thread (the spec's "One thread"). A
+// transient failure keeps the thread's record and the cursor, until the thread has failed
+// maxFailures polls in a row: then it is written off as unreadable, so the cursor and the
+// poller's health move on.
+func (p *Poller) failed(err error, j job, owner, repository string, start, now time.Time) threadResult {
 	fe := failureOf(err)
 	switch fe.kind {
 	case failRateLimited:
@@ -299,9 +346,17 @@ func (p *Poller) failed(err error, j job, owner, repository string, state thread
 		p.deferThread(j.n, j.since, p.ssoRefused(owner, repository, now))
 		return threadResult{outcome: outcomeDeferred}
 	case failUnreadable:
-		p.markUnreadable(j.n, repository, fe.status, state, now)
+		p.markUnreadable(j.n, repository, fe.status, 0, start, now)
 		return threadResult{outcome: outcomeDone}
 	default:
+		rec := p.update(j.n.ID, func(s *threadState) {
+			s.failures++
+			s.lastChange = latest(s.lastChange, changedAt(j.n, now))
+		})
+		if rec.failures >= maxFailures {
+			p.markUnreadable(j.n, repository, fe.status, rec.failures, start, now)
+			return threadResult{outcome: outcomeDone}
+		}
 		return threadResult{outcome: outcomeRetry, err: err}
 	}
 }
@@ -324,34 +379,52 @@ func (p *Poller) ssoRefused(owner, repository string, now time.Time) time.Time {
 	return until
 }
 
-// markUnreadable records a thread the poller cannot read (any 403 but a rate limit or single
-// sign-on, a 404, or a thread GitHub described without a repository or number): one WARN line, the
-// unreadable count, and the thread's high water moved to its update, so it is not read again until
-// it changes.
-func (p *Poller) markUnreadable(n notification, repository string, status int, state threadState, now time.Time) {
-	p.log.Warn(msgUnreadable,
+// deferThread keeps n for a retry at retryAt, from the since it was first deferred with.
+func (p *Poller) deferThread(n notification, since, retryAt time.Time) {
+	now := p.cfg.Now()
+	p.update(n.ID, func(s *threadState) {
+		d := deferral{n: n, since: since, retryAt: retryAt}
+		if s.deferred != nil {
+			d.since = s.deferred.since
+		}
+		s.deferred = &d
+		s.lastChange = latest(s.lastChange, changedAt(n, now))
+	})
+}
+
+// markUnreadable writes a thread off at its current update: one WARN line, the unreadable count,
+// and its high water moved to that update, so it is neither read nor logged again until it
+// changes (thread's settled guard). It is a 403 that is neither a rate limit nor single sign-on, a
+// 404, a thread GitHub described without a repository or number, or maxFailures transient failures
+// in a row, whose count the line carries.
+func (p *Poller) markUnreadable(n notification, repository string, status, failures int, start, now time.Time) {
+	attrs := []slog.Attr{
 		slog.String("repository", repository),
 		slog.Int("status", status),
 		slog.String("thread_id", n.ID),
 		slog.String("subject_type", n.Subject.Type),
-		slog.String("reason", reasonUnreadable))
+		slog.String("reason", reasonUnreadable),
+	}
+	if failures > 0 {
+		attrs = append(attrs, slog.Int("failures", failures))
+	}
+	p.log.Warn(msgUnreadable, attrs...)
 	p.m.dropped.Inc([2]string{"reason", reasonUnreadable})
-	highWater := latest(state.highWater, updatedAt(n))
-	p.mu.Lock()
-	p.unreadable[n.ID] = now
-	p.threads[n.ID] = &threadState{highWater: highWater, margin: state.margin, lastChange: highWater}
-	p.mu.Unlock()
+	highWater := latest(start, updatedAt(n))
+	p.update(n.ID, func(s *threadState) {
+		s.highWater = highWater
+		s.lastChange = latest(s.lastChange, latest(highWater, changedAt(n, now)))
+		s.failures, s.settled, s.unreadableAt = 0, n.UpdatedAt, now
+	})
 }
 
-// drop records a thread the poller publishes nothing for, once for each of its updates.
+// drop records a thread the poller publishes nothing for, with one INFO line for each of its
+// updates (thread's settled guard).
 func (p *Poller) drop(n notification, repository, reason string, now time.Time) {
-	p.mu.Lock()
-	if prior, ok := p.dropped[n.ID]; ok && prior.updatedAt == n.UpdatedAt {
-		p.mu.Unlock()
-		return
-	}
-	p.dropped[n.ID] = droppedThread{updatedAt: n.UpdatedAt, at: now}
-	p.mu.Unlock()
+	p.update(n.ID, func(s *threadState) {
+		s.settled = n.UpdatedAt
+		s.lastChange = latest(s.lastChange, changedAt(n, now))
+	})
 	p.m.dropped.Inc([2]string{"reason", reason})
 	p.log.Info(msgDropped,
 		slog.String("repository", repository),
@@ -391,6 +464,15 @@ func subjectNumber(raw string) string {
 func updatedAt(n notification) time.Time {
 	at, _ := time.Parse(time.RFC3339, n.UpdatedAt)
 	return at
+}
+
+// changedAt is the thread's update, or now when GitHub gave none the poller can read, so its
+// record is not forgotten at once.
+func changedAt(n notification, now time.Time) time.Time {
+	if at := updatedAt(n); !at.IsZero() {
+		return at
+	}
+	return now
 }
 
 func latest(a, b time.Time) time.Time {

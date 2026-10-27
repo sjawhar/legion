@@ -96,13 +96,19 @@ func LoadConfig(getenv func(string) string) (cfg Config, enabled bool, err error
 
 // parseOwners reads a comma list of owners, trimmed and lower-cased, without blanks.
 func parseOwners(raw string) []string {
-	var owners []string
-	for _, owner := range strings.Split(raw, ",") {
+	return normalizeOwners(strings.Split(raw, ","))
+}
+
+// normalizeOwners is owners trimmed and lower-cased, without blanks. Each entry is one owner:
+// owners compare without regard to case, as GitHub's do.
+func normalizeOwners(owners []string) []string {
+	var out []string
+	for _, owner := range owners {
 		if owner = strings.ToLower(strings.TrimSpace(owner)); owner != "" {
-			owners = append(owners, owner)
+			out = append(out, owner)
 		}
 	}
-	return owners
+	return out
 }
 
 // parseDuration reads a Go duration, 0 when unset; a negative one is refused.

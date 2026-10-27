@@ -11,12 +11,12 @@ import (
 	"testing"
 )
 
-// TestImportsAreModular: the poller is an optional module, so it imports five Envoy packages and
+// TestImportsAreModular: the poller is an optional module, so it imports four Envoy packages and
 // no other (R13, A13's static half). internal/bus above all: the listener hands it a publisher,
 // and a poller that reached for the bus could not be left out of a listener that has no token.
+// Its publisher interface is its own, so it needs internal/webhook no more than the bus.
 func TestImportsAreModular(t *testing.T) {
 	allowed := map[string]bool{
-		"github.com/sjawhar/envoy/internal/webhook":   true,
 		"github.com/sjawhar/envoy/internal/contracts": true,
 		"github.com/sjawhar/envoy/internal/id":        true,
 		"github.com/sjawhar/envoy/internal/logging":   true,

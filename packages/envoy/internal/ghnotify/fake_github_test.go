@@ -3,6 +3,7 @@ package ghnotify
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -80,13 +81,15 @@ func (s *syncBuffer) lines(t *testing.T, level, msg string) []map[string]any {
 }
 
 // fakePublisher stores envelopes as the notification stream does: under the message id
-// DedupeKey:Topic, reporting a second envelope with a stored id as a duplicate.
+// DedupeKey:Topic, reporting a second envelope with a stored id as a duplicate. failNext makes the
+// next publishes fail, as a stream that does not answer does, storing nothing.
 type fakePublisher struct {
 	mu         sync.Mutex
 	stored     map[string]contracts.Envelope
 	order      []contracts.Envelope
 	calls      int
 	duplicates int
+	failNext   int
 }
 
 func newFakePublisher() *fakePublisher {
@@ -97,6 +100,10 @@ func (p *fakePublisher) PublishReportingDuplicate(item contracts.Envelope) (bool
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
+	if p.failNext > 0 {
+		p.failNext--
+		return false, errors.New("fake stream: no answer")
+	}
 	id := item.DedupeKey + ":" + item.Topic
 	if _, ok := p.stored[id]; ok {
 		p.duplicates++
@@ -105,6 +112,13 @@ func (p *fakePublisher) PublishReportingDuplicate(item contracts.Envelope) (bool
 	p.stored[id] = item
 	p.order = append(p.order, item)
 	return false, nil
+}
+
+// failPublishes makes the next n publishes fail.
+func (p *fakePublisher) failPublishes(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failNext = n
 }
 
 func (p *fakePublisher) storedCount() int {
@@ -224,6 +238,21 @@ type fakeGitHub struct {
 	answers        map[string]*fakeAnswer
 	requests       []recordedRequest
 	others         []recordedRequest
+	noLastModified bool
+}
+
+// omitLastModified makes the notification list's 200 answers carry no Last-Modified header.
+func (f *fakeGitHub) omitLastModified(omit bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.noLastModified = omit
+}
+
+// lastModified is the Last-Modified the notification list answers now.
+func (f *fakeGitHub) lastModified() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.modified.Format(http.TimeFormat)
 }
 
 func newFakeGitHub(t *testing.T, clock *fakeClock) *fakeGitHub {
@@ -628,10 +657,13 @@ func (f *fakeGitHub) serveList(w http.ResponseWriter, r *http.Request, items []m
 
 func (f *fakeGitHub) serveNotifications(w http.ResponseWriter, r *http.Request) {
 	modified := f.modified.Format(http.TimeFormat)
-	w.Header().Set("Last-Modified", modified)
 	if r.Header.Get("If-Modified-Since") == modified {
+		w.Header().Set("Last-Modified", modified)
 		w.WriteHeader(http.StatusNotModified)
 		return
+	}
+	if !f.noLastModified {
+		w.Header().Set("Last-Modified", modified)
 	}
 	since, _ := time.Parse(time.RFC3339, r.URL.Query().Get("since"))
 	var items []map[string]any

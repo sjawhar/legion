@@ -129,22 +129,19 @@ func TestNew(t *testing.T) {
 		}
 	})
 
+	// The defaults the fake GitHub cannot show: every request a test makes goes to the fake, on
+	// the fake's client. The lookback, the degraded bound and owner matching are shown by the
+	// requests and health the poller tests read.
 	t.Run("zero values take the defaults", func(t *testing.T) {
-		p, err := New(Config{Token: "ghp_example", SkipOwners: []string{"Acme"}}, pub, logger, nil)
+		p, err := New(Config{Token: "ghp_example"}, pub, logger, nil)
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
-		if p.cfg.Lookback != time.Hour || p.cfg.DegradedAfter != 10*time.Minute || p.cfg.MentionTrigger != "@legion" {
-			t.Fatalf("defaults: lookback %s degraded %s trigger %q", p.cfg.Lookback, p.cfg.DegradedAfter, p.cfg.MentionTrigger)
+		if p.cfg.MentionTrigger != "@legion" || p.cfg.BaseURL != "https://api.github.com" || p.cfg.Now == nil {
+			t.Fatalf("defaults: trigger %q base %q", p.cfg.MentionTrigger, p.cfg.BaseURL)
 		}
-		if p.cfg.BaseURL != "https://api.github.com" || p.cfg.HTTPClient == nil || p.cfg.HTTPClient.Timeout != 30*time.Second || p.cfg.Now == nil {
-			t.Fatalf("defaults: base %q client %v", p.cfg.BaseURL, p.cfg.HTTPClient)
-		}
-		if _, ok := p.skip["acme"]; !ok {
-			t.Fatalf("skip owners %v, want them lower-cased", p.skip)
-		}
-		if p.cursor().since.IsZero() {
-			t.Fatal("the cursor starts with no since")
+		if p.cfg.HTTPClient == nil || p.cfg.HTTPClient.Timeout != 30*time.Second {
+			t.Fatalf("defaults: client %v, want one with a 30 s timeout", p.cfg.HTTPClient)
 		}
 	})
 }
