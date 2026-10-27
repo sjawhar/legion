@@ -21,8 +21,8 @@ import type {
   EditOp,
   EditPrecondition,
   Event,
-  GraphEdge,
   GraphNode,
+  GraphReferences,
   Issue,
   IssueClaim,
   IssueComponents,
@@ -1925,12 +1925,12 @@ function issueSummary(
   ].join("\n");
 }
 
-/** One graph edge as a read shows it: edge type, the other node and its address, excerpt, when,
- *  and on a document's read the document's block at the queried end. */
-function referenceLines(edges: readonly GraphEdge[] | string): string[] {
-  if (typeof edges === "string") return [`- ${edges}`];
-  if (edges.length === 0) return ["- none"];
-  return edges.map((edge) => {
+/** A graph read's edges as a read shows them: edge type, the other node and its address,
+ *  excerpt, when, and on a document's read the document's block at the queried end. */
+function referenceLines(read: GraphReferences | string): string[] {
+  if (typeof read === "string") return [`- ${read}`];
+  if (read.edges.length === 0) return ["- none"];
+  return read.edges.map((edge) => {
     const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} · `;
     const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
     return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})${block}`;
@@ -1945,12 +1945,14 @@ function unavailableReason(error: unknown): string {
   return dispatchAnswered(error, 404) ? "unavailable" : `unavailable: ${messageFor(error)}`;
 }
 
-async function graphEdges(
+/** One direction of a node's reference graph: the answer's node and its edges, or why the server
+ *  could not serve it. */
+async function graphReferences(
   client: DispatchClient,
   query: GraphReferencesQuery
-): Promise<GraphEdge[] | string> {
+): Promise<GraphReferences | string> {
   try {
-    return (await client.getReferences(query)).edges;
+    return await client.getReferences(query);
   } catch (error) {
     return unavailableReason(error);
   }
@@ -1968,24 +1970,53 @@ async function issueReferencesOrUnavailable(
 }
 
 /**
- * The two sections every read ends with: `Referenced by:` (edges pointing at the node, mentions
- * and structure alike) and `Links:` (edges it writes), read from the reference graph in both
- * directions. A graph the server cannot serve degrades to one "unavailable" row, like the
- * closure section, so the read itself still answers.
+ * The sections every read ends with: the `Node:` line (the read node's maker, last change and
+ * parent), `Referenced by:` (edges pointing at the node, mentions and structure alike) and
+ * `Links:` (edges it writes), read from the reference graph in both directions. A graph the
+ * server cannot serve degrades to one "unavailable" row, like the closure section, so the read
+ * itself still answers.
  */
 async function graphSections(client: DispatchClient, ref: string): Promise<string[]> {
   const [incoming, outgoing] = await Promise.all([
-    graphEdges(client, { to: ref }),
-    graphEdges(client, { from: ref }),
+    graphReferences(client, { to: ref }),
+    graphReferences(client, { from: ref }),
   ]);
   return graphSectionLines(incoming, outgoing);
 }
 
 function graphSectionLines(
-  incoming: readonly GraphEdge[] | string,
-  outgoing: readonly GraphEdge[] | string
+  incoming: GraphReferences | string,
+  outgoing: GraphReferences | string
 ): string[] {
-  return ["Referenced by:", ...referenceLines(incoming), "Links:", ...referenceLines(outgoing)];
+  return [
+    ...(typeof incoming === "string" ? [] : nodeLine(incoming.node)),
+    "Referenced by:",
+    ...referenceLines(incoming),
+    "Links:",
+    ...referenceLines(outgoing),
+  ];
+}
+
+/**
+ * The read node's facts on one line: `Node: <kind> <ref> · made by <actors> at <time> · changed
+ * by <actors> at <time> · part of <parent> (version <N>)`. An empty actor list is "nobody
+ * recorded"; a null time, version or parent leaves its part out. A server older than the facts
+ * sends no `made_by`, and the read prints no line.
+ */
+function nodeLine(node: GraphNode): string[] {
+  if (node.made_by === undefined) return [];
+  const fact = (by: Actor[] | undefined, time: string | null | undefined) =>
+    `${by === undefined || by.length === 0 ? "nobody recorded" : by.map(actorText).join(", ")}${time == null ? "" : ` at ${time}`}`;
+  const made = fact(node.made_by, node.made_at);
+  const changed = fact(node.changed_by, node.changed_at);
+  const { parent } = node;
+  const partOf =
+    parent == null
+      ? ""
+      : ` · part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (version ${node.parent_version})`}`;
+  return [
+    `Node: ${node.kind} ${node.ref ?? node.id} · made by ${made} · changed by ${changed}${partOf}`,
+  ];
 }
 
 /**
@@ -4185,13 +4216,12 @@ export async function executeDispatchTool(
             }
             throw error;
           }),
-          graphEdges(client, { from: blockRef }),
+          graphReferences(client, { from: blockRef }),
         ]);
         return {
-          text: [
-            ...blockLines(incoming.node, ref),
-            ...graphSectionLines(incoming.edges, outgoing),
-          ].join("\n"),
+          text: [...blockLines(incoming.node, ref), ...graphSectionLines(incoming, outgoing)].join(
+            "\n"
+          ),
           details: {
             ...(ref.owner.kind === "project"
               ? { project: ref.owner.project }

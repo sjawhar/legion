@@ -13,7 +13,7 @@ import (
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 // The read of a session's message deliveries (S2) is an index-only scan of
-// message_deliveries_session_created (0132), never a read through message_deliveries_session
+// message_deliveries_session_created (0137), never a read through message_deliveries_session
 // (0051) of every delivery the session ever received. It is explained twice: as the custom plan a
 // statement's first runs get, and as the generic plan Postgres caches for it afterwards, which
 // knows neither the session nor the window's start.

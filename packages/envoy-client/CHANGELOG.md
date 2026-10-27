@@ -61,6 +61,14 @@
 
 ### Added
 
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. The line comes before
+  `Referenced by:` on the read of an issue, a document, a block, an ask, a comment and an issue
+  message:
+  `Node: <kind> <ref> · made by <actors> at <time> · changed by <actors> at <time> · part of <parent> (version <N>)`,
+  an empty actor list written `nobody recorded` and a null time, version or parent left out.
+  Against a Dispatch older than the facts, whose nodes carry no `made_by`, the read prints no
+  `Node:` line.
 - `renderInbound` renders an `artifact.human_edited` card as `edit: spec.md v4 to v7, edited by
   person@example.com`, then the diff in a fenced `diff` block after the card, then `(diff cut at
   4,096 bytes)` when Dispatch cut it; an issue's event log (`dispatch read dispatch://KEY/log`)
