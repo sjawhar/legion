@@ -76,11 +76,18 @@
   `envoyNoticeText` renders a notice in TOON, so a sender's multi-line summary cannot forge a
   field; a recreated stream (a stored `stream_id` the listener's `stream.id` no longer matches, or,
   from a listener that answers no id, a changed `created`; a `created` that moved under the same
-  id is no recreation, and a state stored before ids takes the answer's id unless a cursor stands
-  past the stream's end), a cursor older than the stream's oldest message,
+  id is no recreation, and a state stored before ids takes the answer's id), a stream that moved
+  back, a cursor older than the stream's oldest message,
   and a listener that does not replay (404) or cannot (503 `REPLAY_UNAVAILABLE`, 401, 403) are
-  each told once. A sweep that only moved its cursors to the stream's end is written at most
-  hourly; a recreation's cursor reset and a retention gap's cursor move are written with their
+  each told once. A stream that is not recreated has moved back when any cursor stands past its
+  end (restored from a backup older than the cursor, or re-added empty from its exported
+  configuration, keeping its id): every followed subject is read again from the stream's oldest
+  message, so the session is shown what was published after the restore and, through the ledger,
+  nothing it was shown before, and is told once (`stream_moved_back`) that messages may be shown
+  again and any published between the backup and the restore are missing. A sweep that only moved
+  its cursors to the stream's end is written at most hourly; a recreation's cursor reset, a
+  moved-back stream's cursor rewind and a retention gap's cursor move are written at once with
+  their
   notice pending in the state (`notices`), so a session that ends before the notice is raised
   raises it once at its first sweep after the restart, and a resume does not find the gap again.
   A host that handed a frame or a failure

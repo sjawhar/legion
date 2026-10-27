@@ -2,47 +2,52 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-439",
-  "completed": "2026-10-27T01:12:00Z",
-  "round": 16,
-  "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
-  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6431096471",
+  "completed": "2026-10-27T04:06:00Z",
+  "round": 18,
+  "headSha": "fcc7d0087be41e9cc7146aafa0ebc0eed44cd8f9",
+  "evidence": "https://github.com/sjawhar/legion/pull/2228#issuecomment-6433409623",
   "answeringProvider": "anthropic/claude-haiku-4-5 answered every omp 18.12.2 turn",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The implementer proved the cut-short gap with unit tests only (its deviation). I drove it live with a kill inside that window; it passes. I re-ran notice4.sh and notice5.sh at this head: all legs pass. Smoke passes in both modes."
+    "how": "Re-ran its two commands (sidm.sh, sid3.sh) myself at fcc7d008, with checks added for an exact notice count and for no repeat of messages shown before the move. Both pass. Red test 46751dc66075 is unchanged and passes."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review 5660734397's important item: a retention gap is told once when its sweep is cut short after the notice",
-      "surface": "real omp --mode rpc 18.12.2 with this checkout's pi-envoy, natsd -js and the listener built from this head",
-      "command": "/legion/scratch/tmp/adv/cut.sh",
-      "observed": "omp was killed; 260 own messages were stored behind 3 unfollowed fillers, and the stream was purged below the first of them; omp was resumed and SIGKILLed as soon as the gap was recorded, with 85 of the 260 cards written; after the second resume: 1 gap notice in total, 0 of the 260 messages missing, 0 shown twice",
-      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
-      "negativeControl": "the implementer's engine test against 6eba519f's replay.ts gives ['retention_gap','retention_gap']"
+      "criterion": "A same-id stream restored from a backup older than a session's cursor shows every message published after the restore, with one notice, and does not show again what the ledger holds",
+      "surface": "real omp 18.12.2 session, natsd -js, listener built from fcc7d008, natscli v0.5.1 backup, rm and restore of ENVOY_NOTIFICATIONS while the session's NATS connection was cut",
+      "command": "bash /legion/scratch/tmp/adv/sidm2.sh (sidm.sh with exact checks added)",
+      "observed": "The backup was taken at last_seq 1, and the session then read 421..423, so its cursor was at 4. After the restore, 424 was published at seq 2. Result: 424 shown once, 1 'stream moved back' notice, 0 'stream recreated', and the cursor now at 2. 420 (seq 1 in the restored stream, shown before) and 421..423 were each shown only once in total.",
+      "headSha": "fcc7d0087be41e9cc7146aafa0ebc0eed44cd8f9",
+      "negativeControl": "At 067a15af the same leg lost 424 with no notice (round 17, M:LOSS)."
     },
     {
-      "criterion": "The earlier kill legs: retention gap and stream recreated, each held mid-turn and killed while held",
-      "surface": "same rig",
-      "command": "/legion/scratch/tmp/adv/notice4.sh; /legion/scratch/tmp/adv/notice5.sh",
-      "observed": "gap-a, gap-b, recreate-idle, recreate-a, recreate-b: all PASS (each notice once, no extra turn)",
-      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
-      "negativeControl": "gap-b at 489fd64d showed 2 notices; recreate-b at 232a541e showed 0"
+      "criterion": "A same-id stream re-added from its exported config, with its messages gone, shows what is published after it, with one notice",
+      "surface": "real omp 18.12.2 session, natsd -js, listener built from fcc7d008; stream deleted and re-added with its own config and metadata while the session's NATS connection was cut",
+      "command": "bash /legion/scratch/tmp/adv/sid32.sh (sid3.sh with exact checks added)",
+      "observed": "The cursor was at 5 (410..414 shown). After the re-add, 415 and 416 were published at seq 1 and 2. Result: each shown once, 1 'stream moved back' notice, and 410..414 each still shown once in total.",
+      "headSha": "fcc7d0087be41e9cc7146aafa0ebc0eed44cd8f9",
+      "negativeControl": "At 067a15af the same leg lost 415 and 416 with no notice (round 17, B3:LOSS)."
     },
     {
-      "criterion": "Bare gates",
-      "surface": "real omp, natsd -js and the listener built from this head; the plugin and listener suites",
-      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh (local and remote as committed); bun test extensions/envoy.test.ts -t \"a retention gap|a BTW refused live\"; go test ./cmd/listener -run 'TestReplayNeverReturnsAnotherSessions…'",
-      "observed": "SMOKE REPLAY PASS in both modes; 13 pass 0 fail (red tests cf65bda2 and bddc5c2a unchanged); listener red tests pass",
-      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
-      "negativeControl": "the released plugin loses its messages in the smoke's controls"
+      "criterion": "The fix keeps the earlier stream-id rules: a whole same-id restore resets nothing, a new id resets with one notice, and the upgrade adopts the id",
+      "surface": "real omp 18.12.2 session, natsd -js, listener built from fcc7d008, natscli v0.5.1",
+      "command": "bash /legion/scratch/tmp/adv/sid.sh",
+      "observed": "SID RESULT: A:PASS B-newid:PASS B2-keepid-404-shown:PASS C:PASS. Leg A had 0 notices of either kind and 401 and 402 each shown once. Leg B had 1 'stream recreated' notice. Leg C took the id with no notice, and 405 was shown once.",
+      "headSha": "fcc7d0087be41e9cc7146aafa0ebc0eed44cd8f9",
+      "negativeControl": "Leg B, a new id, is the reset case: it produced exactly one 'stream recreated' notice, where leg A produced none."
+    },
+    {
+      "criterion": "Bare gates: smoke in both modes, red tests, CI",
+      "surface": "packages/pi-envoy/scripts/smoke-replay.sh in local mode, and in remote mode against services from svc.sh; bun test and go test for the red tests; GitHub Actions read for CI",
+      "command": "bash packages/pi-envoy/scripts/smoke-replay.sh; SMOKE_REPLAY_ENVOY_URL=… SMOKE_REPLAY_NATS_URL=… bash packages/pi-envoy/scripts/smoke-replay.sh; cd packages/envoy-client && bun test src/__tests__/replay.test.ts; cd packages/pi-envoy && bun test extensions/envoy.test.ts -t 'a retention gap|a BTW refused live'; go test ./cmd/listener -run 'TestReplayNeverReturnsAnotherSessions…'",
+      "observed": "Smoke PASS in both modes, exit 0. replay.test.ts: 51 pass, 0 fail, and red test 46751dc66075 is byte-for-byte unchanged. pi-envoy red tests: 13 pass, 0 fail. Listener red tests: ok. CI at fcc7d008, when read: Tests and Legion Envoy and Contracts queued; Worker Image and Docs pending.",
+      "headSha": "fcc7d0087be41e9cc7146aafa0ebc0eed44cd8f9",
+      "negativeControl": "The red test 46751dc66075 failed against 067a15af's replay.ts in round 17."
     }
   ],
-  "minors": "Fork re-queue keyed by session and id (unit test); nats-hub.md names the replay read; the PR body's no-auth NATS user sentence is conditional on sessionUser.",
-  "ci": {
-    "head": "c95305504d295746517ef9dbc9b21b36147d685d",
-    "observed": "Tests, Legion Envoy and Contracts, Docs and Worker Image queued when read (the repository's runner queue is backed up).",
-    "envoyConfigTest": "envoy-client 'a ! command in envoy.json > still running after 10 s …' passes in CI: job 121528826179 (run 40301975592, e0ed6d23, the last completed envoy-client job on this branch), 10026 ms, 897 pass 0 fail. Its file is untouched by this PR; its failure is specific to the pod."
-  }
+  "observations": [
+    "The implementer removed the engine test 'a state stored before stream ids whose cursor stands past the stream's end restarts at its end, with one notice': the moved-back rule replaces that upgrade-path behaviour. None of my red tests was changed."
+  ]
 }

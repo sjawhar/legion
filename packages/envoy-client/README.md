@@ -70,16 +70,25 @@ when `followedBefore(topic, seq)`; `replaySuppressed` says which rendered frames
 not show, `replayedText`, `failureNoticeFields` and `replayNoticeFields` word the cards, and
 `envoyNoticeText` renders a notice's fields under `envoy:` in TOON, so a sender's summary that
 holds a newline stays inside its own field. The session is
-told once when the stream was recreated, when its cursor fell behind the stream's oldest message
-(older than 72 hours), and when the listener does not replay (404) or cannot (503
-`REPLAY_UNAVAILABLE`, 401, 403). A stream is recreated when its `id` differs from the stored one;
-a `created` that moved under the same id is a restore (or, after a clustered restore, a later
-leader election), not a recreation. An
+told once when the stream was recreated, when it moved back, when its cursor fell behind the
+stream's oldest message (older than 72 hours), and when the listener does not replay (404) or
+cannot (503 `REPLAY_UNAVAILABLE`, 401, 403). A stream is recreated when its `id` differs from the
+stored one; a `created` that moved under the same id is a restore (or, after a clustered restore,
+a later leader election), not a recreation. An
 answer without an id (an older listener) is judged by `created`, and a state stored before ids
-takes the answer's id unless a cursor stands past the stream's end. A recreation's cursor reset
-and a retention gap's cursor move are written with their notice in `notices`, which is dropped
-once told: a session that ends before telling it tells it once at its first sweep after the
-restart. Work started for one session stops, writing nothing, once `sessionID()` names another.
+takes the answer's id. A stream that is not recreated has moved back when any cursor's `after` is
+past the stream's `last_seq`: restored from a backup older than the cursors, or re-added empty
+from its exported configuration, which keeps the id, so its sequences restarted below them.
+Nothing tells which of its messages the session was shown, so every followed subject's `after`
+becomes `first_seq - 1` (each `since` stays) and the sweep reads everything the stream holds
+again: the ledger passes over what the session was already shown (a restore keeps event ids),
+what was published after the restore is shown, and the session is told once (`stream_moved_back`)
+that messages may be shown again and that any published between the backup and the restore are
+missing. A message may be shown twice; none is lost. A recreation's cursor reset, a moved-back
+stream's cursor rewind, and a retention gap's cursor move are written at once, with their notice
+in `notices`, which is dropped once told: a session that ends before telling it tells it once at
+its first sweep after the restart. Work started for one session stops, writing nothing, once
+`sessionID()` names another.
 
 The host policy both plugins share sits beside the engine, so each host keeps only how it shows a
 card, how it warns, and how it persists. `replayFollowedSubjects(ownAgentSubject, topics,
@@ -95,8 +104,8 @@ subject but agent subjects and role lanes. `closeReplayedRemoval(frame, host)` a
 frame was stored (`followedBefore`, through the host's `close`), then starts the host's
 `unregister` of the closed topics from the listener's registry and waits on it and on the host's
 `followedChanged`. `routeReplayNotice(notice, {warn, card})` sends a one-time notice where its kind
-belongs: `not_served` and `unavailable` are a warning, `stream_recreated` and `retention_gap` a
-card rendered by `envoyNoticeText`.
+belongs: `not_served` and `unavailable` are a warning, `stream_recreated`, `stream_moved_back` and
+`retention_gap` a card rendered by `envoyNoticeText`.
 
 ## NATS connection
 

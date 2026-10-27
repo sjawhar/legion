@@ -42,7 +42,7 @@ func TestProvisioningParsesUncoloredReadsUnderColorAlways(t *testing.T) {
 		t.Fatalf("first provision: %v", err)
 	}
 	commit := strings.TrimSpace(runSetup(t, first.Clone, "jj", "log", "-r", first.Bookmark, "--no-graph", "-T", "commit_id", "--ignore-working-copy", "--color=never"))
-	if err := Remove(context.Background(), run, first); err != nil {
+	if err := Remove(context.Background(), run, first, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	before := len(local.Calls())
@@ -93,7 +93,7 @@ func TestProvisioningSnapshotsTheSharedCloneOnlyInWorkspaceAdd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	if err := Remove(context.Background(), run, working); err != nil {
+	if err := Remove(context.Background(), run, working, nil); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if _, err := Provision(context.Background(), run, req); err != nil {

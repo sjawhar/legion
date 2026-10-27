@@ -98,7 +98,11 @@ export type ReplayCursor = z.infer<typeof ReplayCursorSchema>;
  * change that raised it: a process that ends before the notice is raised raises it after the
  * restart, at its first sweep, instead of losing it.
  */
-const ReplayPendingNoticeSchema = z.enum(["retention_gap", "stream_recreated"]);
+const ReplayPendingNoticeSchema = z.enum([
+  "retention_gap",
+  "stream_moved_back",
+  "stream_recreated",
+]);
 
 type ReplayPendingNotice = z.infer<typeof ReplayPendingNoticeSchema>;
 
@@ -106,6 +110,8 @@ type ReplayPendingNotice = z.infer<typeof ReplayPendingNoticeSchema>;
 const PENDING_NOTICE_MESSAGES: Record<ReplayPendingNotice, string> = {
   stream_recreated:
     "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
+  stream_moved_back:
+    "Envoy's notification stream was restored to an earlier point, so messages published to this session while its connection was down may be shown again, and any published between that point and the restore are missing.",
   retention_gap:
     "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing.",
 };
@@ -181,11 +187,13 @@ export type ReplayNoticeOutcome = "shown" | "queued";
 
 /**
  * Something the session is told once, because replay could not keep its promise: the stream was
- * replaced, retention dropped messages before they were read, or the listener does not replay.
- * `message` is ready to show; `kind` lets a host word it its own way.
+ * replaced, or restored to an earlier point (moved back), retention dropped messages before they
+ * were read, or the listener does not replay. `message` is ready to show; `kind` lets a host word
+ * it its own way.
  */
 export type ReplayNotice =
   | { readonly kind: "stream_recreated"; readonly message: string }
+  | { readonly kind: "stream_moved_back"; readonly message: string }
   | { readonly kind: "retention_gap"; readonly message: string }
   | { readonly kind: "not_served"; readonly message: string }
   | {
@@ -233,9 +241,9 @@ export interface ReplayFailureNotice {
  * present only when it differs from the last state written or restored. A sweep that handled no
  * message, found no retention gap, and changed nothing but where its cursors stand writes nothing
  * (see `REPLAY_STATE_REFRESH_MS`), so an unchanged sweep writes nothing at all. A retention gap's
- * cursor move, or a recreated stream's cursor reset, is written with its notice pending in the
- * same write, before the notice is raised, so a resume neither loses the notice nor finds the gap
- * again.
+ * cursor move, a recreated stream's cursor reset, or a moved-back stream's cursor rewind is
+ * written with its notice pending in the same write, before the notice is raised, so a resume
+ * neither loses the notice nor finds the gap again.
  */
 export interface ReplayChange {
   readonly delivered: readonly ReplayLedgerEntry[];
@@ -490,11 +498,11 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   };
 
   // Writes run one after another in call order, so a host that rewrites a file never has an older
-  // snapshot land after a newer one. `atOnce`: the cursors moved past messages a sweep handled, or
-  // past a retention gap, which is a change written at once. Without it, a change of nothing but
-  // the `after`s is the stream's end moving, held until the state written is
-  // `REPLAY_STATE_REFRESH_MS` old. A change to the pending notices is a change of more than the
-  // `after`s, so it is always written at once.
+  // snapshot land after a newer one. `atOnce`: the cursors moved past messages a sweep handled,
+  // past a retention gap, or back on a stream that moved back, which is a change written at once.
+  // Without it, a change of nothing but the `after`s is the stream's end moving, held until the
+  // state written is `REPLAY_STATE_REFRESH_MS` old. A change to the pending notices is a change of
+  // more than the `after`s, so it is always written at once.
   const flush = (alive: () => boolean, atOnce = false): Promise<void> => {
     writes = writes.then(async () => {
       if (!alive()) return;
@@ -694,16 +702,22 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
   // judged by it alone: a stored id that differs is a new stream, and a creation time that changed
   // is not, since a restore changes it, and after a clustered restore a cluster's servers can
   // report different ones, so a later leader election can change it too. A state stored before
-  // ids (a creation time, no id) takes the answer's id, unless a cursor stands past the stream's
-  // end, which only a new stream explains. An answer without an id is judged by its creation time.
+  // ids (a creation time, no id) takes the answer's id. An answer without an id is judged by its
+  // creation time. A stream that is not replaced can still have moved back (`streamMovedBack`).
   const streamReplaced = (stream: ReplayResult["stream"]): boolean => {
     if (stream.id === undefined) {
       return (
         streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated
       );
     }
-    if (streamID !== undefined && streamID !== "") return stream.id !== streamID;
-    if (streamCreated === undefined || streamCreated === "") return false;
+    return streamID !== undefined && streamID !== "" && stream.id !== streamID;
+  };
+
+  // Whether a stream that is not replaced was moved back: a cursor stands past its end, so its
+  // sequences restarted below the cursors, as when it is restored from a backup older than them
+  // or re-added empty from its exported configuration, both keeping its id. Its messages from the
+  // restore on would sit at or below the cursors and never be read.
+  const streamMovedBack = (stream: ReplayResult["stream"]): boolean => {
     for (const cursor of cursors.values()) {
       if (cursor.after !== undefined && cursor.after > stream.last_seq) return true;
     }
@@ -788,6 +802,37 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
         tell("stream_recreated");
         await flush(alive);
         return;
+      }
+
+      if (streamMovedBack(stream)) {
+        // Nothing tells which of the stream's messages the session was shown, so every followed
+        // subject is read again from the oldest message the stream holds, and the ledger passes
+        // over what the session was already shown: a message may be shown twice, none is lost.
+        // `since` stays: it marks which replayed removals predate a follow. This page's answers,
+        // what earlier pages buffered, and each failure count name sequences of the stream before
+        // it moved back, so they are dropped and the next page asks again. The rewind is written
+        // with its notice pending, so a process that ends before telling it tells it after the
+        // restart, and a resume reads from where the rewind left the cursors.
+        const from = Math.max(0, stream.first_seq - 1);
+        for (const [subject, cursor] of cursors) {
+          if (cursor.after === undefined) continue;
+          cursors.set(subject, { ...cursor, after: from });
+          const reading = readings.get(subject);
+          if (reading !== undefined) {
+            reading.read = from;
+            reading.more = true;
+          }
+        }
+        buffer.clear();
+        holes.clear();
+        failures.clear();
+        pending.add("stream_moved_back");
+        await flush(alive, true);
+        if (!alive()) return;
+        tell("stream_moved_back");
+        await flush(alive);
+        if (!alive()) return;
+        continue;
       }
 
       for (const [, reading] of asking) reading.more = false;
@@ -1014,10 +1059,16 @@ export function failureNoticeFields(notice: ReplayFailureNotice): Readonly<Recor
   };
 }
 
+/** The `notice:` value of a one-time notice whose kind has a name of its own. */
+const REPLAY_NOTICE_NAMES: Partial<Record<ReplayNotice["kind"], string>> = {
+  stream_recreated: "stream recreated",
+  stream_moved_back: "stream moved back",
+};
+
 /** What the one-time notice that replay may have missed messages says, field by field. */
 export function replayNoticeFields(notice: ReplayNotice): Readonly<Record<string, string>> {
   return {
-    notice: notice.kind === "stream_recreated" ? "stream recreated" : "messages may be missing",
+    notice: REPLAY_NOTICE_NAMES[notice.kind] ?? "messages may be missing",
     detail: notice.message,
   };
 }
@@ -1158,8 +1209,8 @@ export interface ReplayNoticeRoutes {
   /** The listener does not replay (`not_served`, `unavailable`): a standing condition of the
    *  session's setup, which the person is warned of as a start notice is, not a model's card. */
   warn(message: string): void;
-  /** Messages may be missing (`stream_recreated`, `retention_gap`): a card the session is shown,
-   *  its text rendered as every notice is (`envoyNoticeText`). */
+  /** Messages may be missing (`stream_recreated`, `stream_moved_back`, `retention_gap`): a card
+   *  the session is shown, its text rendered as every notice is (`envoyNoticeText`). */
   card(text: string): void;
 }
 
