@@ -4,6 +4,21 @@
 
 ### Added
 
+- `packages/envoy/loadtest/` reproduces the load of the 2026-10-26 Dispatch outage on one 2-core
+  machine, so a fix of the commit-order lock or the shared pool is measured before and after on
+  the same load. `run-step.sh <name> --events --sessions --requests` sets up a local stack built
+  from the checkout (Postgres with pgvector from the `pgserver` wheel, a 1 ms latency proxy,
+  `nats-server` with JetStream, the listener and Dispatch, no Docker), seeds it once with 1,000
+  issues and 8,000 comments, resets it to that seed before every step, and runs sessions on agent
+  and issue topics, five kinds of write at production's mix and GET requests at a route mix read
+  from a file. Each step writes `summary.json`, Dispatch's CPU and heap profiles and a `TABLES.md`
+  with delivery latency from the write's arrival and from its commit, write latency by kind,
+  process CPU and memory, the commit-order lock's holds and waiters, and latency by route.
+  `run-series.sh` runs the six steps from 0.25x to 10x into one `TABLES.md`. Every endpoint comes
+  from the stack's own `stack.json`, and a step checks that NATS, Dispatch and the listener hold
+  the stack's name and random tokens before its first write, so it refuses the pod's live listener
+  and production. `packages/envoy/loadtest/README.md` says how to run it, what every column means
+  and how the stack differs from production.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
