@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -116,6 +117,44 @@ func NewSigningKey() (string, error) {
 
 func mac(payload, key string) []byte {
 	hash := hmac.New(sha256.New, []byte(key))
+	hash.Write([]byte(payload))
+	return hash.Sum(nil)
+}
+
+// SignFor returns the lowercase hex HMAC-SHA256 of payload under a key derived from the set's
+// current key for purpose alone (purposeMAC). A value signed for one purpose therefore verifies
+// neither for another purpose nor as a session cookie, whose MAC is made under the signing key
+// itself, and a session cookie verifies for no purpose. Each caller names its own purpose, a
+// label no other use of the signing key shares. keys must not be empty.
+func (k SigningKeys) SignFor(purpose, payload string) string {
+	return hex.EncodeToString(purposeMAC(purpose, payload, k.keys[0]))
+}
+
+// VerifyFor reports whether signature is SignFor(purpose, payload) under any key of the set, so a
+// value signed before a rotation stays good while its own lifetime lasts.
+func (k SigningKeys) VerifyFor(purpose, payload, signature string) bool {
+	sigBytes, err := hex.DecodeString(signature)
+	if err != nil {
+		return false
+	}
+	// As in VerifySession: each key's MAC is compared in constant time and every key is tried
+	// whichever matches, so the timing gives away no byte of any MAC.
+	matched := false
+	for _, key := range k.keys {
+		matched = hmac.Equal(sigBytes, purposeMAC(purpose, payload, key)) || matched
+	}
+	return matched
+}
+
+// purposeMAC is payload's HMAC-SHA256 under the key HKDF-SHA256 derives from the signing key key
+// with purpose as its info, as the refresh-token seal derives its own key.
+func purposeMAC(purpose, payload, key string) []byte {
+	derived, err := hkdf.Key(sha256.New, []byte(key), nil, purpose, sha256.Size)
+	if err != nil {
+		// HKDF-SHA256 refuses only a length beyond 255 hashes; sha256.Size never is.
+		panic(fmt.Sprintf("dispatch: derive the %q key from the signing key: %v", purpose, err))
+	}
+	hash := hmac.New(sha256.New, derived)
 	hash.Write([]byte(payload))
 	return hash.Sum(nil)
 }

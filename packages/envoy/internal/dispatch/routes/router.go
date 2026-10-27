@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -201,32 +200,20 @@ func (ctx *AppContext) GitHub() *githubapp.Client {
 	return ctx.apiDeps.GitHub
 }
 
-const (
-	pendingStateTTL  = 10 * time.Minute
-	maxPendingStates = 1000
-	oauthStateCookie = "dispatch_oauth_state"
-	oauthStateMaxAge = 10 * 60
-)
+// oauthStateTTL is how long a sign-in may take between /auth/start and the issuer's callback.
+const oauthStateTTL = oauthStateMaxAge * time.Second
 
 type router struct {
-	ctx           *AppContext
-	pendingMu     sync.Mutex
-	pendingStates map[string]pendingState
+	ctx *AppContext
 	// retainedHeld counts the bytes of retained objects held by responses in flight, up to
 	// maxRetainedBytesHeld (serveRetainedAsset).
 	retainedHeld *semaphore.Weighted
 }
 
-type pendingState struct {
-	next      string
-	nonce     string
-	expiresAt time.Time
-}
-
 // New returns an http.Handler that serves all dispatch routes, and a wait that returns once the
 // delivery hub and its sockets have ended after the process lifetime is cancelled.
 func New(ctx *AppContext) (http.Handler, func()) {
-	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState), retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
+	r := &router{ctx: ctx, retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
 	mux := http.NewServeMux()
 	// Every route the server itself answers writes one access-log line (accesslog.Handler); the
 	// dashboard's own files, served by staticHandler, write none.
@@ -246,6 +233,10 @@ func New(ctx *AppContext) (http.Handler, func()) {
 
 // ───── auth ─────────────────────────────────────────────────────────────────
 
+// authStart sends the browser to the issuer to sign in. The sign-in in flight (its state, nonce,
+// the page it returns to and when it lapses) travels in the browser's dispatch_oauth_state cookie,
+// signed under a key derived from the current signing key (signOAuthState), and no process keeps
+// it: whichever process holding that key the issuer's redirect reaches completes the sign-in.
 func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 	if r.ctx.SignIn == nil {
 		signInUnconfigured(w)
@@ -261,12 +252,17 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "state")
 		return
 	}
-	next := sanitizeNext(req.URL.Query().Get("next"))
-	if !r.putPendingState(state, nonce, next) {
-		writeError(w, http.StatusTooManyRequests, "too many pending sign-in attempts")
+	value, err := signOAuthState(r.ctx.SigningKey, oauthState{
+		State: state,
+		Nonce: nonce,
+		Next:  signInNext(req.URL.Query().Get("next")),
+		Exp:   time.Now().Add(oauthStateTTL).Unix(),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "state")
 		return
 	}
-	http.SetCookie(w, oauthStateCookieFor(nonce, oauthStateMaxAge, !r.ctx.InsecureCookie))
+	http.SetCookie(w, oauthStateCookieFor(value, oauthStateMaxAge, !r.ctx.InsecureCookie))
 	http.Redirect(w, req, r.ctx.SignIn.AuthURL(callbackURL(r.ctx.ServerURL, req), state, nonce), http.StatusFound)
 }
 
@@ -276,6 +272,12 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 // their pool username carries; under a domain, by the email of a Google account of the domain,
 // and the account's subject is recorded with the sign-in, which ends the address's sessions when
 // another account held it (auth.PeopleStore.SignInSubject).
+//
+// The sign-in must be one this browser started: its state cookie verifies under a key of the set,
+// has not lapsed, and names the state the issuer returned in the URL. Nothing records that a
+// state was used, yet each completes at most once: the callback clears the cookie before anything
+// else, the issuer's authorization code is single-use, and Exchange accepts only an ID token
+// carrying the nonce the cookie bound the sign-in to.
 func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	if r.ctx.SignIn == nil {
 		signInUnconfigured(w)
@@ -287,17 +289,17 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	http.SetCookie(w, oauthStateCookieFor("", -1, !r.ctx.InsecureCookie))
-	pending, ok := r.takePendingState(state)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
-		return
-	}
 	cookie, err := req.Cookie(oauthStateCookie)
-	if err != nil || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(pending.nonce)) != 1 {
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
 		return
 	}
-	session, err := r.ctx.SignIn.Exchange(req.Context(), callbackURL(r.ctx.ServerURL, req), code, pending.nonce)
+	pending, ok := verifyOAuthState(r.ctx.SigningKey, cookie.Value, time.Now())
+	if !ok || subtle.ConstantTimeCompare([]byte(state), []byte(pending.State)) != 1 {
+		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
+		return
+	}
+	session, err := r.ctx.SignIn.Exchange(req.Context(), callbackURL(r.ctx.ServerURL, req), code, pending.Nonce)
 	if err != nil {
 		slog.Warn("dispatch: sign-in code exchange failed", "error", err)
 		writeError(w, http.StatusBadGateway, "sign-in failed: "+err.Error())
@@ -319,7 +321,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	accesslog.Note(req.Context(), accesslog.KindUser, email)
-	http.Redirect(w, req, pending.next, http.StatusFound)
+	http.Redirect(w, req, sanitizeNext(pending.Next), http.StatusFound)
 }
 
 // issueSession ensures the person's session generation and sets the session cookie a sign-in
@@ -709,33 +711,6 @@ func sanitizeNext(raw string) string {
 		return "/"
 	}
 	return raw
-}
-
-func (r *router) putPendingState(token, nonce, next string) bool {
-	now := time.Now()
-	r.pendingMu.Lock()
-	defer r.pendingMu.Unlock()
-	for token, pending := range r.pendingStates {
-		if !pending.expiresAt.After(now) {
-			delete(r.pendingStates, token)
-		}
-	}
-	if len(r.pendingStates) >= maxPendingStates {
-		return false
-	}
-	r.pendingStates[token] = pendingState{next: next, nonce: nonce, expiresAt: now.Add(pendingStateTTL)}
-	return true
-}
-
-func (r *router) takePendingState(token string) (pendingState, bool) {
-	r.pendingMu.Lock()
-	defer r.pendingMu.Unlock()
-	pending, ok := r.pendingStates[token]
-	if !ok {
-		return pendingState{}, false
-	}
-	delete(r.pendingStates, token)
-	return pending, pending.expiresAt.After(time.Now())
 }
 
 func oauthStateCookieFor(value string, maxAge int, secure bool) *http.Cookie {

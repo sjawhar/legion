@@ -194,6 +194,35 @@ func TestFingerprintsNameEachKeyCurrentFirst(t *testing.T) {
 	}
 }
 
+// A value signed for a purpose verifies under every set holding the key it was signed with, for
+// that purpose alone: not for another purpose, not under a set without the key, and a session
+// cookie's signature (the signing key's own MAC) never verifies for a purpose.
+func TestSignForVerifiesForItsPurposeUnderAnyKeyOfTheSet(t *testing.T) {
+	const purpose, payload = "dispatch test purpose v1", "s1.payload"
+	signature := parseKeys(t, "K0 K1").SignFor(purpose, payload)
+	for _, setting := range []string{"K0", "K1 K0", "K0 K1"} {
+		if !parseKeys(t, setting).VerifyFor(purpose, payload, signature) {
+			t.Errorf("a value signed under \"K0 K1\" does not verify under %q", setting)
+		}
+	}
+	keys := parseKeys(t, "K1 K0")
+	if keys.VerifyFor(purpose, payload+"x", signature) {
+		t.Error("the signature verifies another payload")
+	}
+	if keys.VerifyFor("dispatch other purpose v1", payload, signature) {
+		t.Error("a value signed for one purpose verifies for another")
+	}
+	if parseKeys(t, "K1 K2").VerifyFor(purpose, payload, signature) {
+		t.Error("a value signed with K0 verifies under a set without K0")
+	}
+	if keys.VerifyFor(purpose, payload, sign256(payload, "K0")) {
+		t.Error("the signing key's own MAC, a session cookie's signature, verifies for a purpose")
+	}
+	if keys.VerifyFor(purpose, payload, "not hex") {
+		t.Error("a signature that is not hex verifies")
+	}
+}
+
 // A server with no DISPATCH_SIGNING_KEY keeps one key in its data dir: the first start writes it,
 // a later one reads the same key back, and the set it yields holds that one key.
 func TestLoadOrCreateSigningKeyYieldsTheFileKeyAlone(t *testing.T) {
