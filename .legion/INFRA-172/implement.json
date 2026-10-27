@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T04:02:30Z",
+  "completed": "2026-10-27T09:20:34Z",
   "pinnedCommit": "ad909178a0cbc43e0deef1a528051bc499ce1fb0",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2272",
   "documents": [
@@ -149,5 +149,10 @@
   ],
   "round6": [
     "GitHub reported #2272 CONFLICTING on packages/envoy/CHANGELOG.md against main's #2302: forward-merged main (ff9c859b), kept both entries, changed nothing else. Fingerprint 4c40c69a… → 4c40c69a…, unchanged; posted on the PR. claude-envoy check-dist passes at the merge. The proof entries' head 00428c9f stands: rebase re-check 00428c9f → ff9c859b, fingerprint unchanged, bare gates only."
+  ],
+  "round7": [
+    "CI red at d68a0506 (run on 6483af7e): required 'test' failed in 'Test the Go daemon', packages/daemon/internal/admit (TestApplyFact*, TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun): main's, fixed by #2317 after that CI's merge base. At the new merge 98892d9c those tests pass against Postgres locally. The non-required 'dispatch' browser job failed issue.e2e.ts:697 (issue header layout), code this PR does not touch.",
+    "GitHub reported #2272 CONFLICTING on the three claude-envoy dist bundles: forward-merged main (98892d9c), took main's dist and rebuilt; check-dist passes. Fingerprint 4c40c69a… → cbd0eabf…, changed only in the three generated bundles (each tool description is one line there, so this PR's line now carries main's own edit to the doc-edit description); every hand-written file's diff is byte-identical. Posted on the PR. Changed nothing else.",
+    "At 98892d9c: go build, go vet, pmdoc table/pipe tests, docs code-pipe tests (real Postgres) and the contracts suite (293 tests) pass."
   ]
 }
