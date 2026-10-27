@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-629",
+  "completed": "2026-10-27T17:27:00Z",
+  "round": 1,
+  "reviewedCodeHead": "0bcd639c45ab77b00c886000ba3e1c2eb4436041",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 2,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; no branch protection checks. CI head 0bcd639c45ab: every check-run still queued at review time (lint, test, typecheck, build, changes, pr-title); compare 0bcd639c...0d4da201 is handoffs-only (2 files). Not read as green; the request for changes does not wait on it.",
+  "thermonuclear": "Both run once at 0bcd639c. deep-review: CHANGES (Security[secret] build output picks the deploy-key job's checkout; silently skipped fragments; hardening: fold-notes exempt in the credential check, no size bound on notes). code-quality: CHANGES (land_on_main drift with #2423, deferral complexity, file growth, trap override, jq docs, duplicate version compare, fixture-echo test asserts).",
+  "keyFindings": [
+    {"severity": "important", "file": ".github/workflows/changelog-fold.yaml:149", "description": "Security[secret]: fold_publish checks out ref: needs.fold_build.outputs.base and runs release-push.sh from that checkout with DEPLOY_KEY and GH_TOKEN. The build job is the untrusted half (it runs changie), and push-fold's 40-hex/HEAD==base checks live in the script just checked out, so they check themselves; actions/checkout fetches any reachable sha (fork PR heads under refs/pull/* included). Fix: check out github.sha in both jobs, pass BASE: github.sha, drop the base output, correct the :127 comment."},
+    {"severity": "important", "file": ".github/scripts/release-push.sh:463", "description": "fold-plan silently skips every entry under .changes/unreleased/ that is not a regular *.yaml blob directly in it (reproduced: unreleased/sjawhar/fix-thing.yaml and INFRA-1-a.yml print nothing, exit 0), and AGENTS.md:147's 'use the branch name in place of the key' produces exactly such a subdirectory for a branch name with '/'. An entry is lost with no signal. Fix: fail naming each such entry, as the plan treats a malformed fragment, and say '/' becomes '-' in AGENTS.md."},
+    {"severity": "important", "file": ".github/scripts/check-release-credentials.sh:408", "description": "release-push.sh stays exempt wholesale while this PR adds fold-notes, a release-push.sh subcommand that runs changie; a 'release-push.sh fold-notes' step in fold_publish passes the check (deep-review ran it). Fix: treat 'release-push.sh fold-notes' as dependency code, with a test case."},
+    {"severity": "minor", "file": ".github/scripts/release-push.sh:215", "description": "push-fold is described as using 'git, jq and gh only' here and at changelog-fold.yaml:24,126; it calls no jq (awk, sed, grep, tr, cut, find, sort)."},
+    {"severity": "minor", "file": ".github/scripts/release-push.sh:401", "description": "check_hand_over, now shared, sets trap ... EXIT, replacing any EXIT trap set before it (deploy_key_env's at :320); safe today only by call order."}
+  ],
+  "notBlocking": [
+    "No size bound on the build's notes (transport row hardening): the notes' bytes are the build's by design.",
+    "push-fold's partial deferral is tested and works; the simpler push-nothing alternative is a design preference, not a defect.",
+    "#2423 (INFRA-630) defines its own land_on_main with return 0 vs this PR's exit 0 and different parent checks; reported to the INFRA-588 architect as the integration owner."
+  ]
+}
