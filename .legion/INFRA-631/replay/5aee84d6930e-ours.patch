@@ -1,4 +1,5 @@
 diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
+index 45625edc1..d58bdfb83 100644
 --- a/packages/envoy/AGENTS.md
 +++ b/packages/envoy/AGENTS.md
 @@ -38,14 +38,6 @@ Each item below names a task and where its code is, then notes on it.
@@ -16,7 +17,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  - **Live topics lane**: `cmd/listener/live_topics.go` (`openLiveTopics`, `liveDeliveryHandler`), `internal/config/config.go`
  
    `ENVOY_SUBSCRIBE_ALL_TOPICS`: unset, empty or `0` off, `1` on, anything else refuses startup naming the variable.
-@@ -1916,7 +1908,6 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
+@@ -1920,7 +1912,6 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
    `delivery_failed` is a claim whose message is not known to have reached the holder (holder lookup failed, holder stale, the publish or flush failed or was denied); `no_holder` is no claim at all.
    Every reason emits an exception; the attempt cache holds an entry only while a forward is in flight and both forward failures roll it back, while the dedupe cache records a forward only when its receipt arrived
    — so a publish that re-uses a `dedupe_key` after a `receipt_timeout` is forwarded again, while one after a delivered forward is skipped.
@@ -24,7 +25,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    Do not add durable role consumers or retry transit for role messages.
  
  - Role ownership is durable in the `envoy_roles` JetStream KV bucket.
-@@ -1927,16 +1918,15 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
+@@ -1931,16 +1922,15 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
    A listener reads a claim from the role bucket itself but a holder's liveness from its cache of `envoy_sessions`, which trails that bucket, so a holder another listener registered and gave the role a moment ago is in both buckets before it is in this cache;
    during a rolling deploy the old task resolves every claim the replacement accepts.
    Nothing is taken from a holder on the cache's word:
@@ -43,7 +44,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  - The interest reaper (`Registry.Reap`, `internal/store/kv.go`) deletes a dead session's interest only once its row was last written more than the grace window plus `store.InterestRefreshAge` (5 minutes) ago;
    the listener passes `store.InterestReapGrace` (10 minutes), so a dead session's interest stays 15 minutes after its row's last write, and a row exactly that old is kept.
-@@ -2239,55 +2229,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
+@@ -2243,55 +2233,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
    Each request a starting gate refuses logs `request refused while starting` with `gate` (`webhook` or `v1`), `method` and `path`, the listener's only record of a caller it turned away.
    `packages/envoy/scripts/listener-deploy-probe.sh` watches a deploy from a client's seat (`packages/envoy/scripts/README.md`).
  
@@ -100,7 +101,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  - CI settlements are published by the listeners that receive GitHub webhooks, which in production is the Fargate listener behind the webhook load balancer (its deployment sets `ENVOY_WEBHOOKS=github,slack`).
    Only the GitHub route records checks, so a listener whose `ENVOY_WEBHOOKS` does not name `github` - the on-prem fleet's, which sets no webhook variable - opens no CI store:
-@@ -2373,15 +2315,6 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2377,15 +2319,6 @@ Each item below names an endpoint and its method, then its contract, and an item
  - `/v1/messages/send` (POST)
  
    Sends to a live `target_session`.
@@ -116,7 +117,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`;
    the response is the envelope plus `recipient` with the full target session ID, and `duplicate: true` when JetStream already held this message.
  
-@@ -2400,20 +2333,7 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2404,20 +2337,7 @@ Each item below names an endpoint and its method, then its contract, and an item
  - `/v1/messages/publish` (POST)
  
    Publishes a non-agent topic, through JetStream when the stream captures it and over core NATS for a role lane or an ad-hoc topic it does not (`bus.usesCoreTransport`), answering once the server has accepted the publish;
@@ -138,7 +139,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  - A topic that does not begin with `notifications.` is refused `400 {"error":"topic must begin with notifications.","expected":["topic"]}` and nothing is published, which closes the raw-subject route a bearer could otherwise use to write the listener's own key-value buckets
    — the role-claim records among them — and reach `$JS.API.*`.
-@@ -2433,11 +2353,6 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2437,11 +2357,6 @@ Each item below names an endpoint and its method, then its contract, and an item
    falls back to `machine_id` for a session whose plugin predates the field) and `last_seen`.
    A 404 has `reason: "unclaimed"` when no role claim exists;
    for an absent holder it has `reason: "holder_lapsed"` with the prior holder's ID, whether this lookup released the claim, and any final last-seen time retained for one TTL.
@@ -150,7 +151,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  - `/v1/roles/set` (POST)
  
-@@ -2507,9 +2422,6 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2511,9 +2426,6 @@ Each item below names an endpoint and its method, then its contract, and an item
  - `/v1/interests/<session_id>` (GET, DELETE)
  
    Gets or removes a session's persisted interests.
@@ -160,7 +161,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    A DELETE removes a record this build cannot decode as it removes one it can, releasing every role claim the session holds, and answers 204; it is a write route (below the list).
  
  - `/v1/registry/<session_id>` (GET)
-@@ -2517,12 +2429,9 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2521,12 +2433,9 @@ Each item below names an endpoint and its method, then its contract, and an item
    The authoritative answer for one session: is it live, and how is it named?
    The read goes through this listener's cache to the session bucket, so a session the cache does not hold yet
    — the bucket was recreated and the watcher is still refilling it, or another listener registered the session — is still found.

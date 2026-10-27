@@ -1,7 +1,8 @@
 diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
+index 45625edc1..facbec151 100644
 --- a/packages/envoy/AGENTS.md
 +++ b/packages/envoy/AGENTS.md
-@@ -1938,12 +1938,6 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
+@@ -1942,12 +1942,6 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
    That read is a direct get, so the listener's NATS user needs publish on `$JS.API.DIRECT.GET.KV_envoy_sessions.>`.
    A session-addressed send and an agent delivery read the session they name through the same read-through (`liveSessionEntry`), each under its own bound - `sendSessionReadTimeout` (1 s, inside the send's own budget) and `deliverySessionReadTimeout` (2 s) - so neither needs any NATS permission beyond that same direct get.
  

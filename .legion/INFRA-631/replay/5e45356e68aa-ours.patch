@@ -1,4 +1,5 @@
 diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
+index 45625edc1..38334a741 100644
 --- a/packages/envoy/AGENTS.md
 +++ b/packages/envoy/AGENTS.md
 @@ -17,7 +17,10 @@ Envoy owns transport, routing, delivery, and the native Dispatch event path:
@@ -13,7 +14,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  It does not own Legion workflow policy.
  The daemon/controller decides what to do; Envoy moves events to the right session.
-@@ -2427,6 +2430,24 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2431,6 +2434,24 @@ Each item below names an endpoint and its method, then its contract, and an item
    Its 404 adds `reason: "unclaimed"` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the final heartbeat remains in its one-TTL diagnostic window.
    A message NATS cannot take whole is a 413 naming its size against the server's max payload, and a topic NATS does not accept (one holding whitespace or an empty token) a 400.
  

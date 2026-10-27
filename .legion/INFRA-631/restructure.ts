@@ -200,6 +200,8 @@ interface Rewording {
   replace: string;
   /** Rewrite every occurrence (at least one) instead of requiring exactly one. */
   every?: true;
+  /** The split this citation names the item of; when that split is skipped, so is this. */
+  after?: string;
   reason: string;
 }
 
@@ -241,6 +243,13 @@ const REWORDINGS: Rewording[] = [
     replace: "The items below add only",
     reason: "the Required configuration table is now a list",
   },
+  {
+    id: "reword-dev-signin-fence",
+    guide: "readme",
+    find: "boots only behind the fence the configuration table lists",
+    replace: "boots only behind the fence its Required configuration item lists",
+    reason: "the fence is the `DISPATCH_DEV_SIGNIN` item of the Required configuration list",
+  },
 ];
 
 /** Step 3. Two statements the new layout makes false. */
@@ -270,6 +279,12 @@ const MIGRATION_NOTE = {
   anchor: "Migrations `0056`–`0062` make search indexing linear.",
   /** The heading that ends the notes the highest migration number is read from. */
   until: "### Pre-deploy census",
+  /**
+   * The highest migration the notes describe on main. A constant, not read from the input, so a
+   * port from an older base and main write the same sentence; a log naming a higher number is
+   * reported (--strict fails: raise this; --lenient warns: move that note into its `.up.sql`).
+   */
+  through: "0134",
   text: (through: string) => [
     `The notes below describe migrations through \`${through}\`.`,
     "A new migration describes itself in the header comment of its own `.up.sql`, as `0129_document_edit_notices.up.sql` does, and adds nothing here, so two pull requests that each add a migration do not edit this section.",
@@ -446,6 +461,7 @@ const SPLIT_CITATIONS: Rewording[] = [
     find: "until the shutdown ends it (the self-health bullet below)",
     replace: "until the shutdown ends it (the shutdown bullet below)",
     reason: "split-self-health-shutdown moves the shutdown text into its own item",
+    after: "split-self-health-shutdown",
   },
 ];
 
@@ -457,6 +473,8 @@ interface Problem {
   id: string;
   anchor: string;
   message: string;
+  /** The edit was made all the same; the problem is a warning about the input. */
+  applied?: true;
 }
 
 const ITEM_START = /^([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)/;
@@ -706,8 +724,16 @@ function addMigrationNote(text: string, guide: Guide, problems: Problem[]): stri
   const numbers = [...text.slice(match.index, end).matchAll(/`(0\d{3})(?!\d)/g)].map(
     (found) => found[1] ?? ""
   );
-  const through = numbers.reduce((highest, number) => (number > highest ? number : highest), "");
-  return `${text.slice(0, match.index)}${note.text(through).join("\n")}\n\n${text.slice(match.index)}`;
+  const highest = numbers.reduce((top, number) => (number > top ? number : top), "");
+  if (highest > note.through) {
+    problems.push({
+      id: note.id,
+      anchor: `\`${highest}\``,
+      message: `the log notes a migration above \`${note.through}\`; that note belongs in the header comment of its own .up.sql`,
+      applied: true,
+    });
+  }
+  return `${text.slice(0, match.index)}${note.text(note.through).join("\n")}\n\n${text.slice(match.index)}`;
 }
 
 function addHeadNote(text: string, guide: Guide, problems: Problem[]): string {
@@ -779,7 +805,20 @@ function restructure(text: string, guide: Guide, problems: Problem[], warnings: 
   out = addMigrationNote(out, guide, problems);
   out = addHeadNote(out, guide, problems);
   out = applySplits(out, guide, problems);
-  return applyRewordings(out, SPLIT_CITATIONS, guide, problems);
+  const skipped = new Set(problems.map((problem) => problem.id));
+  for (const citation of SPLIT_CITATIONS) {
+    if (citation.guide === guide && citation.after !== undefined && skipped.has(citation.after)) {
+      problems.push({
+        id: citation.id,
+        anchor: citation.find,
+        message: `${citation.after} skipped`,
+      });
+    }
+  }
+  const citations = SPLIT_CITATIONS.filter(
+    (citation) => citation.after === undefined || !skipped.has(citation.after)
+  );
+  return applyRewordings(out, citations, guide, problems);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -864,7 +903,7 @@ async function main(argv: string[]): Promise<number> {
       let next = restructure(text, guide, problems, warnings);
       for (const warning of warnings) process.stderr.write(`${input}: warning: ${warning}\n`);
       for (const problem of problems) {
-        const level = strict ? "error" : "warning, edit skipped";
+        const level = strict ? "error" : problem.applied ? "warning" : "warning, edit skipped";
         process.stderr.write(
           `${input}: ${level}: ${problem.id}: ${problem.message}: ${JSON.stringify(problem.anchor)}\n`
         );

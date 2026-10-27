@@ -1,4 +1,5 @@
 diff --git a/packages/envoy/cmd/dispatch/README.md b/packages/envoy/cmd/dispatch/README.md
+index ee5cd6971..a4b6a8376 100644
 --- a/packages/envoy/cmd/dispatch/README.md
 +++ b/packages/envoy/cmd/dispatch/README.md
 @@ -1556,6 +1556,10 @@ Each item below names a path with its method and identity, then its purpose.

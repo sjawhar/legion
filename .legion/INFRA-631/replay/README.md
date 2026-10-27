@@ -71,24 +71,24 @@ The controls conflict as expected.
 ### 5e45356e68aa (AGENTS; ours 7fca5b7a1958 forward, theirs 12cbe2cdcc62 reverse; base af460a46bb16)
 
 - ours: rewrote the Overview bullet "delivers by hot `prompt_async`" (serve-port push versus self-subscribed sessions, `POST /v1/replay`), restored the `- ` of the next bullet ("publishes retained"), and added a `/v1/replay` row after the `/v1/messages/publish` row.
-  New layout: the Overview item at head line 20 becomes two lines plus its own "publishes retained" item, and a `/v1/replay` (POST) item is inserted after the `/v1/messages/publish` item (after line 2429).
+  New layout: the Overview item at head line 20 becomes two lines plus its own "publishes retained" item, and a `/v1/replay` (POST) item is inserted after the `/v1/messages/publish` item (after line 2433).
 - theirs (main): added the "Live topics lane" Where to look row, and edited sentences about room close (`closeRoomInstance`), the architecture importer's sources, `/healthz` `live_topics`, the shutdown drain, and the `/v1/roles/<role>`, `/v1/interests/subscribe` and `/v1/sessions` rows (the stored subscription owns delivery), and the ad-hoc topic bullet (the live topics lane).
-  New layout: the patch removes the Live topics lane item (lines 49-53) and puts back those sentences' base wording; on the `/v1/roles/<role>` item it touches line 2432, with lines 2430-2431 between it and ours' insertion.
+  New layout: the patch removes the Live topics lane item (lines 49-53) and puts back those sentences' base wording; on the `/v1/roles/<role>` item it touches line 2436, with lines 2434-2435 between it and ours' insertion.
 
 ### 4671996e14fd (AGENTS; ours ca51db66954f reverse, theirs 2e8c68cd98ce reverse; base 448a41003a17)
 
 - ours: added the Critical conventions bullet "The interest reaper (`Registry.Reap`, …)", with no blank line, right after the "Role ownership" bullet.
-  New layout: it is the item at lines 1941-1946, and the patch removes it.
+  New layout: it is the item at lines 1945-1950, and the patch removes it.
 - theirs (main): edited the "Role lanes" and "Role ownership" bullets just above it (the role claim watcher), and added and edited sentences across the file, among them the block graph, the Where to look Listener HTTP API and Unplaceable items, and the Listener API rows.
-  New layout: the patch undoes them; its nearest change is line 1939, the last line of the Role ownership item, with a blank line between that item and ours'.
+  New layout: the patch undoes them; its nearest change is line 1943, the last line of the Role ownership item, with a blank line between that item and ours'.
 
 ### 5aee84d6930e (AGENTS; ours 1ff60404b284 reverse, theirs 748e8d952a76 reverse; base 4ceb3aa9c553)
 
 - ours: added the Where to look rows "Listener HTTP API" and "Unplaceable agent delivery" after "Listener behavior", changed "a lookup answers 500, a soft claim 503" to "a lookup and a soft claim answer 503", and replaced the bullet "If a session is not live …" with the unplaceable-delivery bullets.
   It also edited sentences of the `/v1/messages/send`, `/v1/messages/publish`, `/v1/roles/<role>`, `/v1/interests/<session_id>` and `/v1/registry/<session_id>` rows.
-  New layout: the patch removes the two items (lines 41-48) and undoes the sentences; on the `/v1/roles/<role>` item it touches lines 2436-2440.
+  New layout: the patch removes the two items (lines 41-48) and undoes the sentences; on the `/v1/roles/<role>` item it touches lines 2440-2444.
 - theirs (main): added the "Live topics lane" row after "Listener behavior", and edited the `/v1/roles/<role>` row's `machine_id` sentence and the subscribe, sessions, healthz and shutdown sentences that 5e45356e68aa's main side also edited.
-  New layout: the patch removes the Live topics lane item (lines 49-53), so it meets ours at lines 48/49; its edit of the `/v1/roles/<role>` item is line 2432, apart from ours' 2436.
+  New layout: the patch removes the Live topics lane item (lines 49-53), so it meets ours at lines 48/49; its edit of the `/v1/roles/<role>` item is line 2436, apart from ours' 2440.
 
 ### 56d31191f8f1 (README; ours 4ff4dc39319c reverse, theirs df396380c0ef reverse; base 3f34ba120984)
 
@@ -124,7 +124,7 @@ The controls conflict as expected.
 ### Controls
 
 - 728b5e297fb5 (AGENTS; ours 43105ca3fa06 forward, theirs 2e8c68cd98ce reverse; base 657c24e44a73): ours changed the Health endpoints bullet's first sentence (", except Dispatch's `GET /livez` …") and one access-log sentence, and theirs (main) changed that bullet's next sentence ("`/healthz` returns `degraded` for a JetStream/KV probe that answered …").
-  In the old layout both were on one line; in the new layout they are lines 2087 and 2088, which are adjacent.
+  In the old layout both were on one line; in the new layout they are lines 2091 and 2092, which are adjacent.
 - 4440fc7b57a2 (README; ours f509fd0f18df forward, theirs b69f636f2ca1 reverse; base 448a41003a17): both changed the loop-count sentence.
   Ours is ported as Eight to "Nine … not per process" (one loop more, and its wording change); theirs (main) as Eight back to Seven.
   Ours' paragraphs on the ask repair (`api.RepairIssueAsks`, after line 545 and after line 832) are not migration paragraphs, so they are ported.

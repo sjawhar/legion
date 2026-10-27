@@ -1,9 +1,10 @@
 diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
+index 45625edc1..462ae1a9e 100644
 --- a/packages/envoy/AGENTS.md
 +++ b/packages/envoy/AGENTS.md
-@@ -62,6 +62,10 @@ Each item below names a task and where its code is, then notes on it.
-   a value that is not `host:port`, or that holds an nkey seed, refuses without printing it, and a set proxy is remote reach, refused without `ENVOY_ALLOW_REMOTE_NATS=1`) from the process environment, or from the lookup `bus.WithEnvironment` hands them;
-   `Dial` from the lookup its caller passes. envoy-dispatch hands both its settings table
+@@ -63,6 +63,10 @@ Each item below names a task and where its code is, then notes on it.
+   `Dial` from the lookup its caller passes.
+   envoy-dispatch hands both its settings table
  
 +- **Replay demo B**: `internal/bus/replay_demo_b.go`
 +

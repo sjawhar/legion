@@ -1,4 +1,5 @@
 diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
+index 45625edc1..25045c4e4 100644
 --- a/packages/envoy/AGENTS.md
 +++ b/packages/envoy/AGENTS.md
 @@ -38,14 +38,6 @@ Each item below names a task and where its code is, then notes on it.
@@ -16,7 +17,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  - **Live topics lane**: `cmd/listener/live_topics.go` (`openLiveTopics`, `liveDeliveryHandler`), `internal/config/config.go`
  
    `ENVOY_SUBSCRIBE_ALL_TOPICS`: unset, empty or `0` off, `1` on, anything else refuses startup naming the variable.
-@@ -77,8 +69,8 @@ Each item below names a task and where its code is, then notes on it.
+@@ -78,8 +70,8 @@ Each item below names a task and where its code is, then notes on it.
  
  - **KV cache watchers**: `internal/kvwatch/kvwatch.go`, `internal/kvwatch/scan.go`
  
@@ -27,7 +28,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    and the one-shot scan of a bucket's existing keys (`ScanExistingKeys`); `kvwatchtest` fakes nats.go's scan idle timeout
  
  - **Topic matching**: `internal/routing/match.go`
-@@ -1916,7 +1908,6 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
+@@ -1920,7 +1912,6 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
    `delivery_failed` is a claim whose message is not known to have reached the holder (holder lookup failed, holder stale, the publish or flush failed or was denied); `no_holder` is no claim at all.
    Every reason emits an exception; the attempt cache holds an entry only while a forward is in flight and both forward failures roll it back, while the dedupe cache records a forward only when its receipt arrived
    — so a publish that re-uses a `dedupe_key` after a `receipt_timeout` is forwarded again, while one after a delivered forward is skipped.
@@ -35,7 +36,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    Do not add durable role consumers or retry transit for role messages.
  
  - Role ownership is durable in the `envoy_roles` JetStream KV bucket.
-@@ -1927,16 +1918,11 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
+@@ -1931,16 +1922,11 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
    A listener reads a claim from the role bucket itself but a holder's liveness from its cache of `envoy_sessions`, which trails that bucket, so a holder another listener registered and gave the role a moment ago is in both buckets before it is in this cache;
    during a rolling deploy the old task resolves every claim the replacement accepts.
    Nothing is taken from a holder on the cache's word:
@@ -54,7 +55,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  - The interest reaper (`Registry.Reap`, `internal/store/kv.go`) deletes a dead session's interest only once its row was last written more than the grace window plus `store.InterestRefreshAge` (5 minutes) ago;
    the listener passes `store.InterestReapGrace` (10 minutes), so a dead session's interest stays 15 minutes after its row's last write, and a row exactly that old is kept.
-@@ -2085,17 +2071,12 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
+@@ -2089,17 +2075,12 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
    It is always on rather than a setting because that is under a thousandth of a route's own cost, and the question it answers - which caller is making the requests - is asked when a deployment is already in trouble and nobody can turn a setting on retroactively.
  
  - Health endpoints reflect dependency health, not just process liveness.
@@ -73,7 +74,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  - NATS reconnects indefinitely, in place:
    the bus starts from `nats.GetDefaultOptions` (reconnect, client pings, drain and flusher timeouts), so the connection object and every JetStream or KV handle taken from it survive a server restart.
-@@ -2103,7 +2084,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
+@@ -2107,7 +2088,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
    A publish while reconnecting waits for the reconnect within its own deadline (5 s for a publish, 2 s for a role-lane forward), and reconnect attempts run every second.
    The reconnect buffer is off, so a publish that fails was not sent.
    A subscription nats.go re-sent on the reconnected connection is kept as it is; one on a replaced connection is bound again.
@@ -82,7 +83,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    After each of those connection events a run of the reconnect hooks that do this begins that covers it, whatever re-subscribing returned, since a listener waiting out the task that holds its durable has that durable's re-subscribe refused by design while `/v1` and the role lane already read the caches.
    A run covers every event counted before it began, so an event that lands between runs gets a run of its own and a burst of events that land before one begins gets one.
    Runs take turns (`bus.Client.rewatch`), so a recovery retrying that re-subscribe waits for a run in progress rather than starting a second beside it.
-@@ -2113,8 +2094,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
+@@ -2117,8 +2098,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
    a registration has one bind at a time, so the restore leaves that registration to its bind, and the recovery the reconnect starts binds it should that bind fail.
    Nothing has failed there, so the restore logs it at INFO, `envoy nats resubscribe left to the bind in flight` with the `subject`, and `envoy nats resubscribe failed` and `envoy nats recovery resubscribe failed` stay ERRORs for binds that failed.
    While NATS is connected, the self-health monitor also rebuilds those watchers and a missing durable consumer when a probe finds a stopped watcher, a closed KV handle or a lost consumer.
@@ -92,7 +93,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    The first start runs in the background.
    When it fails with no watcher current, it records the failure and releases the cache's readiness;
    when a Rewatch's watcher is current, it does neither, and that watcher releases readiness once it has delivered every existing key.
-@@ -2126,9 +2106,6 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
+@@ -2130,9 +2110,6 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
    A watch whose stream is older than a running, healthy watcher's (it read the bucket before a newer watch switched to a recreated one) is discarded, and read and dropped until it ends;
    against an ended or flagged watcher it installs as usual, since a restored or clock-stepped bucket can have an older creation time.
    Only the current watcher releases readiness, at the end of its scan or when it ends on its own; a replaced watcher's end-of-scan releases nothing.
@@ -102,7 +103,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    An entry from a watcher already replaced is dropped.
    A watcher that ends on its own records the terminal error `/healthz` and self-health read.
    A stopped watcher arms nothing, and one armed while the stop ran is read and dropped until the shutdown ends it (the shutdown bullet below).
-@@ -2149,14 +2126,6 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
+@@ -2153,14 +2130,6 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
    `<cache> watcher stopped` at WARN when the stop happens, and one ERROR, `<cache> watcher was not repaired` with the bucket, the recorded error and a `reason` of `repair failed` or `no repair within 1m0s`, only once a repair has failed or no repair has run within a minute (`unrepairedDelay`), because an ERROR at the stop itself is noise whenever the self-health rebuild repairs it a moment later.
    A repair that lands first clears the wait, so a repaired stop leaves the WARN alone, and the ERROR is logged at most once however a failed repair and the wait race.
  
@@ -117,7 +118,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  - Each listener collects the interest bucket's delete markers, because nothing else does:
    every delete path leaves one (the reaper for each dead session, an unsubscribe-all, the admin delete), the bucket has no `MaxAge` and keeps one message per subject, and each marker is replayed by every restart's cache warm-up before that listener serves, so uncollected markers grow every restart's time with no deliveries (LEGION-374).
    A pass reads the stream (read 1), runs one MetaOnly scan of the bucket, takes the **floor** = the lowest revision that scan delivered as a PUT, reads the stream again (read 2), and sends one unfiltered `STREAM.PURGE` of everything below the floor.
-@@ -2188,14 +2157,15 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
+@@ -2192,14 +2161,15 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
    An unbound durable is read twice before it counts, a confirming read a quarter-second after the first, since the rebuild unsubscribes the live handle before it binds and a single stale answer taken during another rebuild would cost this listener a working subscription;
    the rebuild binds the durable again and reports success only once the server itself reports this listener bound (`awaitDurableBound`), rather than once the subscribe call returned, so a rebind that never binds fails the rebuild instead of clearing the count.
    A listener bucket deleted and not recreated (the interest, session, CI or role bucket) fails every rebuild, because a rebuild opens a bucket and never creates one, so it ends in a restart, and the next start creates the bucket again;
@@ -135,7 +136,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    The drain stops the client first, so it never reconnects, re-subscribes or registers a subscription, and lets deliveries already in their handlers finish, role-lane forwards included, within all but the last 3 s of its timeout (`drainHookReserve` keeps them for what follows, so a slow delivery cannot leave it no time;
    at the listener's thirteen seconds the deliveries keep the ten they had before the drain hooks).
    It then ends the retired watchers, and any a watch still starting armed after the stop (`kvwatch.Watcher.End`, the drain hook the listener adds with `bus.Client.AddDrainHook`), while the connection still carries requests, whether the deliveries drained or ran out their share:
-@@ -2239,55 +2209,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
+@@ -2243,55 +2213,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
    Each request a starting gate refuses logs `request refused while starting` with `gate` (`webhook` or `v1`), `method` and `path`, the listener's only record of a caller it turned away.
    `packages/envoy/scripts/listener-deploy-probe.sh` watches a deploy from a client's seat (`packages/envoy/scripts/README.md`).
  
@@ -192,7 +193,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  - CI settlements are published by the listeners that receive GitHub webhooks, which in production is the Fargate listener behind the webhook load balancer (its deployment sets `ENVOY_WEBHOOKS=github,slack`).
    Only the GitHub route records checks, so a listener whose `ENVOY_WEBHOOKS` does not name `github` - the on-prem fleet's, which sets no webhook variable - opens no CI store:
-@@ -2301,10 +2223,6 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
+@@ -2305,10 +2227,6 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
    One that runs out answers every delivery in its batch 503, which Dispatch's redelivery sweep resends, and logs one JSON line at ERROR, `ci record exceeded its retry budget`, carrying `owner`, `repo`, `number`, `sha`, `checks` (the record's checks with the batch applied, or 0 when no attempt could read the record), `attempts`, `observations` (the deliveries it answered 503) and `error` (`cistore: record exceeded CAS budget` when the last attempt lost its compare-and-swap).
    It is an ERROR because each one means GitHub was answered 503, and it is meant for an alarm on the CI-record budget to count.
    The CI store's other lines go through the same JSON logger, so they carry the listener's `machine_id`.
@@ -203,7 +204,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  - Every write of a CI record stamps it `schema: 1` (`encodeRecord`), so a record without the field was last written by a listener that settled only its pull request's head and left every other terminal commit unsettled.
    Such a record settles only in `[debounce, debounce + 5 min)` after its `last_event_at` (`handoverGrace`), which covers the time between the old listener's last tick and this one's first:
-@@ -2373,15 +2291,6 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2377,15 +2295,6 @@ Each item below names an endpoint and its method, then its contract, and an item
  - `/v1/messages/send` (POST)
  
    Sends to a live `target_session`.
@@ -219,7 +220,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`;
    the response is the envelope plus `recipient` with the full target session ID, and `duplicate: true` when JetStream already held this message.
  
-@@ -2400,20 +2309,7 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2404,20 +2313,7 @@ Each item below names an endpoint and its method, then its contract, and an item
  - `/v1/messages/publish` (POST)
  
    Publishes a non-agent topic, through JetStream when the stream captures it and over core NATS for a role lane or an ad-hoc topic it does not (`bus.usesCoreTransport`), answering once the server has accepted the publish;
@@ -241,7 +242,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  - A topic that does not begin with `notifications.` is refused `400 {"error":"topic must begin with notifications.","expected":["topic"]}` and nothing is published, which closes the raw-subject route a bearer could otherwise use to write the listener's own key-value buckets
    — the role-claim records among them — and reach `$JS.API.*`.
-@@ -2433,19 +2329,13 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2437,19 +2333,13 @@ Each item below names an endpoint and its method, then its contract, and an item
    falls back to `machine_id` for a session whose plugin predates the field) and `last_seen`.
    A 404 has `reason: "unclaimed"` when no role claim exists;
    for an absent holder it has `reason: "holder_lapsed"` with the prior holder's ID, whether this lookup released the claim, and any final last-seen time retained for one TTL.
@@ -262,7 +263,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  - `/v1/interests/subscribe` (POST)
  
-@@ -2468,9 +2358,6 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2472,9 +2362,6 @@ Each item below names an endpoint and its method, then its contract, and an item
    Since the recorded `host` goes into the delivery URL, with `port` above 0 a non-empty `host` that is neither an IP literal nor a plain host name (letters, digits, `_`, `.`, `-`;
    `session.ValidHost`) is refused `400 {"error":"host is not a host name or address","expected":["host"]}`, and neither the interests nor the session entry change;
    a registration with no port is never dialled, so its `host` is stored unchecked.
@@ -272,7 +273,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    The response can include `warnings` when a GitHub repository has no retained events, and when a GitHub topic's token after its owner and name is not one of `contracts.GithubTopicKinds` or a wildcard.
    When a kind follows the extra tokens, or the name holds an empty token, the name was spelled with its dot, and the warning names the spelling Envoy publishes (`notifications.github.acme.site.io.pr.7.>` → `acme.site_io`).
    Otherwise the warning says the token is not a GitHub topic kind and names the kinds (`notifications.github.acme.widgets.checks.>`).
-@@ -2478,8 +2365,6 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2482,8 +2369,6 @@ Each item below names an endpoint and its method, then its contract, and an item
  - `/v1/interests/unsubscribe` (POST)
  
    Removes the supplied topics and returns them in `removed`.
@@ -281,7 +282,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  - `/v1/sessions` (GET)
  
-@@ -2487,18 +2372,9 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2491,18 +2376,9 @@ Each item below names an endpoint and its method, then its contract, and an item
    Rows include `roles`, `capabilities`, `last_seen`, `machine_id` (the listener the session last registered through;
    which listener fans a topic out to the session and owns it is the one its stored subscription names, as `/v1/interests/subscribe` above says, and this one only when none is stored) and `host` (the session's real machine, and where its owning listener reaches a serve-port session;
    falling back to `machine_id` for a session whose plugin predates the field).
@@ -300,7 +301,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  - `/v1/interests/` (GET)
  
-@@ -2507,43 +2383,19 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2511,43 +2387,19 @@ Each item below names an endpoint and its method, then its contract, and an item
  - `/v1/interests/<session_id>` (GET, DELETE)
  
    Gets or removes a session's persisted interests.
@@ -347,7 +348,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  
  `send` and `publish` accept optional `in_reply_to`, `supersedes`, `urgency`, `expects_reply`, and `expires_at`, and `publish` additionally `dedupe_key`; empty optional fields are omitted.
  `urgency` is `low`, `med`, `high`, or `blocking`; `expects_reply` is `none`, `optional`, or `required`.
-@@ -2742,11 +2594,6 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
+@@ -2746,11 +2598,6 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
    Only the GitHub route's answer can outlast the HTTP shutdown's 10 s.
    A body read that fails is logged `github body read failed` with the delivery id, event, declared length, bytes read and elapsed time, and answered 400 (413 past GitHub's 25 MB cap).
  
@@ -359,7 +360,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  - A `pull_request_review` payload carries the review's own `commit_id` and the PR's current `head_sha` so consumers can tell whether the review is at head, and `submitted_at` (GitHub's RFC 3339 time) and `review_id` (GitHub's review id as a decimal string), so consumers can order reviews by when they were submitted, then by id, rather than by delivery.
    The id alone is not enough: GitHub assigns it when a review is created, and a pending review keeps it when it is submitted later.
    `pull_request_review_comment` carries `head_sha` too, and all three comment/review events set `legion_footer: "true"` when the uncapped body contains a `<!-- legion:` worker footer.
-@@ -2775,17 +2622,6 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
+@@ -2779,17 +2626,6 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
    Consumers subscribe or tail that document topic directly;
    a document has no delivery route, so the same author routes above are the only way an involved session learns about a human reply, resolution, reopening, or edit on its ask or comment thread, or a human's new comment on a document it wrote.
  
@@ -377,7 +378,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  - Dispatch project events use `notifications.dispatch.project.<PROJECT>.<type>` and are retained in JetStream.
    They have no issue route; project, repository-setting, and user-interface state consumers refresh from the event stream.
  
-@@ -3201,8 +3037,7 @@ turns on best-effort wake notifications to the requesting session through Envoy'
+@@ -3288,8 +3124,7 @@ turns on best-effort wake notifications to the requesting session through Envoy'
  — how long a machine login lasts without a refresh:
  an approval mints its credential for this long, and each refresh of its device login moves its expiry to this long from then;
  past it the machine logs in again, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60
@@ -387,7 +388,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  — how long a stopping process goes on serving while `/healthz` answers 503;
  it is configuration rather than a constant because the right value is the cluster's EndpointSlice propagation time, which lives in the deployment's own repository, and 0 is for a local run), and `BROKER_TRUSTED_PROXY_HEADER` (optional;
  names a request header, e.g. `X-Forwarded-For`, the launcher-credential and reread rate limiters' per-address buckets trust for the caller's real address (`clientAddress`)
-@@ -3314,8 +3149,6 @@ this is inherent to a per-login limit on an unauthenticated route and is an acce
+@@ -3401,8 +3236,6 @@ this is inherent to a per-login limit on an unauthenticated route and is an acce
  A request object `LoginDevice` refuses (a person's login with no `login_hint`, or `anyone`, a replayed `jti`) is `400 REQUEST_INVALID`.
  `POST /v1/launcher-credentials/token`, a service's token login, spends its source address's bucket before the token verifies (`refuseAddress`), whatever account the token claims, since a refused token signature makes the verifier fetch the issuer's keys again;
  a verified account then spends an `account:<subject>` bucket of the per-login limit (`refuseAccount`), the same address-then-key pair the device-code route spends.
@@ -396,7 +397,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the address bucket on the caller's own address.
  Read `routes()` for the current, authoritative route list.
  
-@@ -3555,27 +3388,9 @@ every `BROKER_SWEEP_SECONDS` tick it first ends every enrollment whose lease has
+@@ -3642,27 +3475,9 @@ every `BROKER_SWEEP_SECONDS` tick it first ends every enrollment whose lease has
  a gone pod, a box whose launcher stopped renewing, a machine session whose helper died), as a revoke ends one, so its grants are revoked and its pending requests cancelled and dropped from the approver's list, with an `enrollment.expired` audit row and one log line each;
  then it expires overdue pending `agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending machine logins.
  It reads fresh from Postgres every time, so a restart resumes exactly where the rows are.

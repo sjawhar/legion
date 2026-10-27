@@ -1,4 +1,5 @@
 diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
+index 45625edc1..26bea6f71 100644
 --- a/packages/envoy/AGENTS.md
 +++ b/packages/envoy/AGENTS.md
 @@ -46,11 +46,6 @@ Each item below names a task and where its code is, then notes on it.
@@ -13,7 +14,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  - **NATS client**: `internal/bus/nats.go`, `internal/bus/recovery.go`
  
    connect, subscribe and publish; reconnect, recovery and the reconnect hooks
-@@ -188,8 +183,7 @@ A task never reads, consumes, or releases another task's F; every author crosses
+@@ -189,8 +184,7 @@ A task never reads, consumes, or releases another task's F; every author crosses
  A settlement that wrote into the room commits what it wrote even when the document moved after its read, since the room and its browsers hold it;
  one that wrote nothing leaves a moved document to the settlement the move scheduled.
  A repair is written only into the document the settlement read (`applySuppressed`): one whose room was evicted and reloaded since is refused and retried.
@@ -23,7 +24,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  That close waits for a repair committing into the room and refuses new repairs while it closes;
  a repair never waits for a close and gives the write up as for a replaced room (`holdOpen`).
  `roomServer` says why a close retiring the room's worker under a repair's commit hung (LEGION-498).
-@@ -203,7 +197,7 @@ a failed room's eviction is the exception and compacts under the lock before rec
+@@ -204,7 +198,7 @@ a failed room's eviction is the exception and compacts under the lock before rec
  Every write path that changes a document queues that closer once its transaction commits:
  a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation, so ask blocks written by any of them become asks without waiting for a later live change.
  The closer attributes a new ask and its `ask.opened` event to whoever introduced its block:
@@ -32,16 +33,16 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  Registration happens before the update can reach any observer, rather than leaving attribution to whichever update's observer ends up rendering a merged catch-up first (LEGION-503);
  an id no write registered this way can only be a browser's, and gets the one browser connected when its update arrived, or `SettlementActor` while several are (`observeAskBlocks`).
  A settlement's own id repair and an edit's repair of an existing, unrelated block (`ApplyOps`'s `EnsureBlockIDs`) each carry forward the author recorded for the id a rename replaces, unless it is a copy of the block that keeps that id (`recordStampedAskBlocks`, staged on the write by `registerStampedAskBlocks`'s `carriedAskAuthors` and registered at the same commit, `registerCarriedAskAuthors`) - on a transaction's write too, where the generic before/after diff above would otherwise count the renamed id as newly added and claim it for the write's own actor instead.
-@@ -499,7 +493,7 @@ the callback's write then lands on the evicted room and reaches the store only t
- Two such writes, each a diff of the same document, merge into a document neither wrote, and into one holding no block at all once each kept a block the other replaced:
+@@ -502,7 +496,7 @@ Two such writes, each a diff of the same document, merge into a document neither
  the healthy-room probe met it as a socket closed with `DOC_SCHEMA`.
  The idle sweeper evicts a room only while no Apply holds it, counts its idle minute from its last peer leaving or the last Apply on it returning, and flushes it before it evicts it (`provider/websocket/idle_sweep.go`), so every write a room the sweeper evicts has taken is durable before another instance of it loads, and a peer that returns within the minute rejoins the warm room.
--`TestAHealthyRoomUnderWritesIsNeverRefused` checks every load of a room against the writes its earlier instances took, and `TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout` that a room only the API touches is evicted and reads back what the API wrote. ygo's `CloseRoom` checks only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`), for a room with an editor at `Shutdown`, to evict one (`evictRoom`), and to close a room behind the durable head (`roomServer.closeInstance`):
-+`TestAHealthyRoomUnderWritesIsNeverRefused` checks every load of a room against the writes its earlier instances took, and `TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout` that a room only the API touches is evicted and reads back what the API wrote. ygo's `CloseRoom` checks only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`), for a room with an editor at `Shutdown`, and to evict one (`evictRoom`):
+ `TestAHealthyRoomUnderWritesIsNeverRefused` checks every load of a room against the writes its earlier instances took, and `TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout` that a room only the API touches is evicted and reads back what the API wrote.
+-ygo's `CloseRoom` checks only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`), for a room with an editor at `Shutdown`, to evict one (`evictRoom`), and to close a room behind the durable head (`roomServer.closeInstance`):
++ygo's `CloseRoom` checks only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`), for a room with an editor at `Shutdown`, and to evict one (`evictRoom`):
  a write that commits on a room it has retired reaches the store through ygo's stranded persistence, on the committing goroutine (`provider/websocket/persistence.go`).
  A committed write's publish (`publishLiveUpdate`) is already durable and suppresses that append;
  the room's own update observer finishes its suppression slot before ygo's persistence observer runs (`onLoadDocument`), so the stranded append never waits on the publish it runs inside, and the publish, its request and the document's writer slot are released (`TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
-@@ -518,34 +512,12 @@ A version reads R under that lock and F from its own room, deletes the R rows it
+@@ -521,34 +515,12 @@ A version reads R under that lock and F from its own room, deletes the R rows it
  A version on another task sees and removes R but never that task's F.
  Thus a room can disappear or the process can restart after every pending author has reached R, without losing or duplicating a later version's authors; a service repair is credited to no one.
  An in-flight credit holds its state until its append lands (`unusedLocked`).
@@ -78,7 +79,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
  What is per-process is the room: while a room is resident in one process it receives none of the other's updates, so presence and cursors show only the peers on that process.
  Every durable change notifies `dispatch_doc_changed` from inside the transaction holding the room's advisory lock, and the other process's listener (`docs/stale_room.go`, over `internal/pglisten`) closes the room that notification leaves behind the head, so within that round trip the browser reconnects, re-syncs and shows the current text - a brief reconnect, never stale text a reader can act on.
  Cross-process live co-editing of one document, two rooms with updates streaming between them, is a follow-up issue and out of scope here.
-@@ -1692,56 +1664,41 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
+@@ -1696,56 +1668,41 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
    it locks them deterministically before any transaction can hold the global lock.
    This deliberately serializes concurrent event-producing transactions across every owner; do not bypass the broker with direct event inserts.
  
@@ -150,7 +151,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    the closed-issue gate exempts `components` like `rank`, and a write bumps `issues.updated_at` and rides the ordinary `issue.updated` event with the whole issue.
    Resolution is on read, never stored: `issueComponentsLateral` is one `left join lateral` (a depth-capped `union` walk up `parent_key` to the nearest row of either mode
    — `none` is inherited exactly like `explicit` — splitting members into live and retired ids) that `loadIssue`, both list queries, and the tree route share, so every `Issue`/`IssueSummary` carries `components {mode, ids, unknown, reason, inherited_from}` from the same query.
-@@ -2088,10 +2045,6 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
+@@ -2092,10 +2049,6 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
    `/healthz` returns `degraded` for a JetStream/KV probe that answered with a transient failure and `unhealthy` for NATS loss, a JetStream check that did not answer within its budget, a stopped interest, role claim, session or CI KV watcher, a missing durable consumer, or a durable consumer `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves.
    The role claim watcher is the interest registry's second (`store.Registry.Ping` and `WatchErr` read both), so its stop, and a role bucket recreated under it, are answered under the registry's dependency name, `interest KV watcher unavailable: role claims watcher stopped` or `interest KV watcher unavailable: role claims bucket envoy_roles was recreated under its watcher` (`interest KV unavailable: ...` from the request whose own ping finds the recreate), and the self-health monitor rebuilds it as it does the others.
    A listener that mounts no GitHub webhook route keeps no CI cache, and its healthy answer carries `"ci_cache": "not_applicable"`.
@@ -161,7 +162,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    Its bus checks - the flush, each cache's KV ping and the durable consumer's info read - share one 3 s budget taken from the request (`healthzBudget`), so a stall in JetStream alone, which the flush's core PING does not see, is answered inside it, not after the 10 s JetStream wait.
    A ping or info read that has not answered when the budget ends is `503 unhealthy` naming the dependency and `context deadline exceeded`, so the ECS container health check (`curl -sf`) still fails and replaces the task, as it did when that wait ran past the check's timeout;
    a check that answered with a failure keeps its answer.
-@@ -2194,8 +2147,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
+@@ -2198,8 +2151,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
    The two counts are independent: a failure the first count tolerates while connected (an unclassified JetStream timeout) never advances the second, and the reverse holds too, so neither bound is reached by mixing the other's failures in.
  
  - Shutdown stops HTTP first (up to ten seconds), waits within that window for a self-health rebuild still running and for a pass of the two reapers or the interest marker collector still running (each lists its bucket through a watcher whose consumer nats.go creates and deletes;
@@ -171,7 +172,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    The drain stops the client first, so it never reconnects, re-subscribes or registers a subscription, and lets deliveries already in their handlers finish, role-lane forwards included, within all but the last 3 s of its timeout (`drainHookReserve` keeps them for what follows, so a slow delivery cannot leave it no time;
    at the listener's thirteen seconds the deliveries keep the ten they had before the drain hooks).
    It then ends the retired watchers, and any a watch still starting armed after the stop (`kvwatch.Watcher.End`, the drain hook the listener adds with `bus.Client.AddDrainHook`), while the connection still carries requests, whether the deliveries drained or ran out their share:
-@@ -2211,7 +2163,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
+@@ -2215,7 +2167,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
    It does not wait for a bind in flight: a subscription such a bind makes after the stop is drained with the rest, so the messages the server already routed to it reach its handler rather than being discarded, and the close ends a bind still in flight.
    It is bounded to thirteen seconds, and a connection that is reconnecting is closed at once, ending no watcher, since nothing it sends reaches the server.
    It logs completion and exits non-zero so Docker's restart policy can restore it.
@@ -180,7 +181,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    the compose files set `stop_grace_period: 30s` (`deploy/compose/listener.compose.yml`, `single-node.compose.yml`), the on-prem fleet's Pulumi a 30 s `stopTimeout` (`infra/host/listener.go`), the GCP hub's unit `docker stop -t 30` (`infra/gcp/cloudconfig.go`), and ECS's default `stopTimeout`, which the Fargate listener's task definition leaves unset, is 30 seconds.
  
  - The listener refuses to bind its durable (`listener-<machine id>`) when the durable's idle heartbeat or ack policy differs from the listener's consumer policy (no heartbeat, explicit acks), because NATS cannot change either in place.
-@@ -2429,7 +2381,7 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2433,7 +2385,7 @@ Each item below names an endpoint and its method, then its contract, and an item
  
  - `/v1/roles/<role>` (GET)
  
@@ -189,7 +190,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    falls back to `machine_id` for a session whose plugin predates the field) and `last_seen`.
    A 404 has `reason: "unclaimed"` when no role claim exists;
    for an absent holder it has `reason: "holder_lapsed"` with the prior holder's ID, whether this lookup released the claim, and any final last-seen time retained for one TTL.
-@@ -2450,24 +2402,8 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2454,24 +2406,8 @@ Each item below names an endpoint and its method, then its contract, and an item
  - `/v1/interests/subscribe` (POST)
  
    Persists session topics, route metadata, optional delivery `capabilities`, and `host` (where the session process actually runs, as the client's `machineID()` reports it
@@ -215,7 +216,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    A stored subscription this build cannot decode (`store.ErrMalformedInterest`) is replaced by the one the registration names, with this listener's `machine_id`, not merged with it, and the registry logs `registry replaced an interest record it cannot decode` at WARN naming the session;
    its role claims, in the role bucket, are kept.
    `/v1/roles/set` writes the claimant's subscription the same way.
-@@ -2484,9 +2420,8 @@ Each item below names an endpoint and its method, then its contract, and an item
+@@ -2488,9 +2424,8 @@ Each item below names an endpoint and its method, then its contract, and an item
  - `/v1/sessions` (GET)
  
    Lists live sessions; optional case-sensitive substring filters are `dir` and `title`.
@@ -227,7 +228,7 @@ diff --git a/packages/envoy/AGENTS.md b/packages/envoy/AGENTS.md
    A row's `roles` are the roles whose claims in `envoy_roles` name the session, read from the registry's watched view of that bucket (`store.Registry.RolesHeldBy`), whatever role topics its interest record carries and with no record at all;
    a view that is not complete (`store.ErrRoleViewNotReady`:
    its watcher's first scan has not delivered every claim, nats.go's idle timer ended that scan and the rescan has not completed, a recreated bucket's refill is still running, or the watcher has ended) ends the list with the 503 below, never a row missing a role its holder has.
-@@ -2794,17 +2729,11 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
+@@ -2798,17 +2733,11 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
  - Role topics use `notifications.role.<role>` and are normally published to, rather than subscribed to by role holders.
  
  - An ad-hoc topic is any other `notifications.` topic an agent names, such as `notifications.team.deploy-squad`.
