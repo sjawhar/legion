@@ -2,27 +2,20 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-560",
-  "completed": "2026-10-27T11:52:06Z",
-  "round": 7,
+  "completed": "2026-10-27T15:17:58Z",
+  "round": 8,
+  "rebaseRecheck": "rebase re-check d31fcb180037 → ccc1b49e89d6: fingerprint unchanged (f3dabfcd80e92eb4c94e7cdc98442fb685ab5726ea57fd965b4e336a3f09ded4 at both, by the unchanged-diff check with the base's fork point at each head), bare gates only",
   "implementerProof": {
     "verdict": "verified",
-    "how": "d31fcb18 removes dispatchDefaultTierRollingReplicas, its two input constants and every stated replica bound for the default tier (per the INFRA-63 architect after review round 4). It states the connection rule instead in dispatch.go:27-30, README.md:197-202, CHANGELOG.md:937-941 and pool.go:157-165: every app pod holding connections during a roll (replicas, surge pod, pods still terminating) times ConnectionsPerProcess must fit in max_connections less 3 superuser slots. A grep of packages/envoy (*.go, *.md) finds no reference left to dispatchDefaultTierRollingReplicas, dispatchDefaultTierMaxConnections or postgresSuperuserReservedConnections, and no stale '4 replicas', '82 in all' or '82 connections'. In pool.go only comments changed; ConnectionsPerProcess is still 64+4+1+10+1+3 = 83. `go vet ./gcp/` is clean, and TestDispatchConnectionsPerPodIsTheServers, TestDispatchDatabaseTierReachesTheInstance and TestDispatchProxyContainerDefaultsToOneCPUAnd2Gi pass."
+    "how": "The conflict merge ccc1b49e leaves this pull request's own diff unchanged (equal fingerprint at d31fcb18 and ccc1b49e), as the implementer states. The conflict was in cmd/dispatch/main.go: main.go:478 still builds the server with newHTTPServer(handler, time.Now), now beside main's inherited-socket adoption (listenfd.Adopt). Main changed no pool constant between the two fork points (pool.go has no diff), so store.ConnectionsPerProcess stands."
   },
   "failed": 0,
   "failures": [],
-  "changedSince": "Round 6 tested code head cde9232f. Round 7 (d31fcb18) changes only comments, docs, one removed constant block and one shortened test. No golden or rendered object changes, and no run-time code of the server changes, so round 5's live server and listener run and rounds 3-4's preview, schema and script results stand.",
-  "proof": [
-    {
-      "criterion": "Spec BG-12: the component's sizing text matches the server's pools, and the component's count follows the server's",
-      "surface": "the server's pool constants and the component's dispatchConnectionsPerPod, through the repository's test, run at the head and against a mutation of the head",
-      "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchConnectionsPerPodIsTheServers|TestDispatchDatabaseTierReachesTheInstance|TestDispatchProxyContainerDefaultsToOneCPUAnd2Gi' -count=1 -v",
-      "observed": "all three PASS at the head; store.ConnectionsPerProcess = dispatchConnectionsPerPod = 83",
-      "headSha": "d31fcb180037",
-      "negativeControl": "leasePoolSize temporarily raised to 11 (reverted with jj restore): TestDispatchConnectionsPerPodIsTheServers FAIL 'expected: 84 actual: 83'"
-    }
-  ],
+  "bareGates": {
+    "ci": "Read on GitHub at code head ccc1b49e (head 7b5e4596 carries skip-checks: true): build x2, changes, lint, pr-title, test and typecheck all queued at 2026-10-27T15:17Z, so read as running and not settled. The reviewer reads them before READY.",
+    "smoke": "Ran envoy-dispatch built at ccc1b49e (-X main.buildCommit=ccc1b49e-smoke) against the round-5 Postgres 16 + pgvector and NATS 2.11.9. /livez 204 in 0.0016 s; /healthz 200 with commit ccc1b49e-smoke and schema_version 134 (main's new migrations applied). connage.py on one keep-alive socket: no Connection header at 0 s and 30 s, 'close' at 61.5 s and then EOF; aged requests with 'Upgrade: websocket' and 'h2c' were not closed. SIGTERM: 'dispatch: shutting down' and exit within 3 s. Postgres, NATS and the server were stopped by PID."
+  },
   "observations": [
-    "CI at fd132522 was queued when read (2026-10-27T11:52Z). No head of this PR has had settled CI yet; the reviewer reads it.",
     "Unchanged from earlier rounds: hand-edited claim ledgers with tabs, newlines or escaped quotes between entries are undercounted; kube() has no --max-time (the architect left that out)."
   ]
 }
