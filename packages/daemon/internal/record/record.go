@@ -410,7 +410,7 @@ type PullRequest struct {
 	HeadCountedBefore string
 	// HeadCountedFrom is the recorded head (HeadSHA) that HeadCounted replaced when it was counted:
 	// the head the counted move started from. The count is taken back once the recorded pushes chain
-	// from this head to HeadCounted, each handoff-only or the review App's and none forced
+	// from this head to HeadCounted, each the review App's or an unforced handoff-only push
 	// (classify.ApplyPush); a push that reached the counted head from another head - the
 	// required-checks pass's compare from an approved head, say - is on no such chain. Empty when no
 	// count stands, and for a mark a take-back restored, which nothing takes back.

@@ -77,8 +77,9 @@ func TestApplyPushTakesBackOnlyTheCountedMovesOwnPush(t *testing.T) {
 // when the pushes chain from h2 to h4, each handoff-only or the review App's, and counted otherwise
 // - also when the pushes arrive first and h4's own handoff push left a head (h3) the implementer's
 // fix made. The planned mark is the chain's last push that may change code: the review App's red
-// tests at h3 plan a red at h4 above them, though h4's own push is a handoff. A forced push may
-// change code whatever its paths say, so it counts, takes nothing back, and decides the mark. Each
+// tests at h3 plan a red at h4 above them, though h4's own push is a handoff. A forced handoff may
+// change code whatever its paths say, so it counts, takes nothing back, and decides the mark; a
+// forced push of the review App's is spared by who pushed it, as an unforced one is. Each
 // case runs from an unplanned red, where the count is decided, and from a planned one, where
 // nothing counts and a move of handoffs alone carries the mark.
 func TestAMoveCountsAndPlansTheSameInEveryOrderOfItsPushesAndItsHead(t *testing.T) {
@@ -104,7 +105,7 @@ func TestAMoveCountsAndPlansTheSameInEveryOrderOfItsPushesAndItsHead(t *testing.
 			{SHA: "h3", Before: "h2", HandoffOnly: true}, {SHA: "h4", Before: "h3", HandoffOnly: true, Forced: true}}, true, &unplanned},
 		{"one handoff", "h3", []record.ClassifiedPush{{SHA: "h3", Before: "h2", HandoffOnly: true}}, false, nil},
 		{"one forced handoff", "h3", []record.ClassifiedPush{{SHA: "h3", Before: "h2", HandoffOnly: true, Forced: true}}, true, &unplanned},
-		{"one forced push of the review App's", "h3", []record.ClassifiedPush{{SHA: "h3", Before: "h2", ByReviewApp: true, Forced: true}}, true, &planned},
+		{"one forced push of the review App's", "h3", []record.ClassifiedPush{{SHA: "h3", Before: "h2", ByReviewApp: true, Forced: true}}, false, &planned},
 	} {
 		for _, wasPlanned := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s, from a red planned %v", tc.name, wasPlanned), func(t *testing.T) {
@@ -213,6 +214,13 @@ func TestTheCountedMarkStaysUntilAHeadIsPushedOntoGreen(t *testing.T) {
 	}
 	if got := ApplyPush(unjudged, record.ClassifiedPush{SHA: "h5", Before: "h4", HandoffOnly: true}); got.FixAttempts != 3 || got.HeadCounted != "h4" {
 		t.Fatalf("h5's late handoff-only push = %#v, want nothing taken back: h5 was not counted", got)
+	}
+	// h4's own late push, a handoff from h3, completes the chain that spares h4's count - but h5
+	// has arrived on top of h4, so the take-back waits for nothing: the count stays where it stood
+	// when the head moved on.
+	if got := ApplyPush(unjudged, record.ClassifiedPush{SHA: "h4", Before: "h3", HandoffOnly: true}); got.FixAttempts != 3 || got.HeadCounted != "h4" {
+		t.Fatalf("h4's late handoff-only push after h5 arrived = fixAttempts=%d headCounted=%q, want 3 and \"h4\": the counted head is no longer the head",
+			got.FixAttempts, got.HeadCounted)
 	}
 	unjudged.CheckedHead, unjudged.Failing, unjudged.CheckRuns = "h5", []string{}, []record.AttemptRun{{Name: "ci", ID: 1}}
 	onGreen := AdvancePullRequestHead(unjudged, "h6")

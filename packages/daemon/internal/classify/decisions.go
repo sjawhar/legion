@@ -9,10 +9,10 @@ import (
 // AdvancePullRequestHead applies the shipped resetPrHead fix-attempt decision to a new observed
 // head. A red prior verdict counts once, unless the red was planned (PlannedRed: the review App's
 // red tests) or the recorded pushes show the move spares the count (sparedMove): a chain of pushes
-// from the recorded head to the new one, each handoff-only or the review App's and none rewriting
-// history. The recorded CI settlement stays, as CheckedHead's: it is the new head's too once every
-// push between them is known to change only .legion/ (HeadVerdict), and a settlement for another
-// head replaces it (SettlementFor). The pushes it keeps are keptPushes'.
+// from the recorded head to the new one, each the review App's or an unforced handoff-only push
+// (sparesAttempt). The recorded CI settlement stays, as CheckedHead's: it is the new head's too
+// once every push between them is known to change only .legion/ (HeadVerdict), and a settlement
+// for another head replaces it (SettlementFor). The pushes it keeps are keptPushes'.
 //
 // The move's planned mark is its last push that may change code (arrivalPlan): the review App's
 // sets it, anyone else's clears it, and a move of handoffs alone carries it. The head records the
@@ -178,12 +178,12 @@ func carriesApproval(p record.ClassifiedPush) bool {
 	return !p.MayChangeCode() && p.Before != ""
 }
 
-// sparesAttempt is whether a push onto a red is no fix attempt: it said which head it replaced, did
-// not rewrite history (a forced push's paths do not describe what it did to that head, so it may
-// change code), and changed only the issue's own handoffs or was the review App's (its red tests,
-// a red it plans).
+// sparesAttempt is whether a push onto a red is no fix attempt: it said which head it replaced,
+// and it was the review App's (its red tests, a red it plans) - which who pushed it says, forced
+// or not - or it changed only the issue's own handoffs without rewriting history (a forced push's
+// paths do not describe what it did to that head, so it may change code).
 func sparesAttempt(p record.ClassifiedPush) bool {
-	return p.Before != "" && !p.Forced && (p.HandoffOnly || p.ByReviewApp)
+	return p.Before != "" && (p.ByReviewApp || (p.HandoffOnly && !p.Forced))
 }
 
 // sparedMove is whether the recorded pushes show the move from from to to is no fix attempt: a

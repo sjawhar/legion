@@ -4,7 +4,7 @@
 --
 -- head_counted_from (record.PullRequest.HeadCountedFrom) is the head a counted fix attempt moved
 -- from. The count is taken back (classify.ApplyPush) once the recorded pushes chain from it to the
--- counted head, each handoff-only or the review App's and none forced. A push that reached the
+-- counted head, each the review App's or an unforced handoff-only push. A push that reached the
 -- counted head from another head (the required-checks pass's compare from an approved head) is on
 -- no such chain, and takes nothing back: the counted move can carry code that push does not.
 --
