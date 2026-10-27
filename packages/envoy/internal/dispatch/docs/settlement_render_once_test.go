@@ -1,0 +1,249 @@
+package docs
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+)
+
+// A settlement renders the tree it read once, and its version reuses that rendering only while the
+// tree is unchanged. A settlement that repairs an ask block's server attributes changes that tree
+// in place, and a peer can have written the same attributes into the room first, so the repair
+// writes nothing into the room. The version still holds the repaired block, with the answered
+// state, and its indexed blocks are the room's: reusing the rendering made before the repair would
+// version the block as still open and index the open block's text (LEGION/INFRA-647).
+func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n\n- Yes: Monday.\n- No: Later.\n:::\n\nContext before.\n")
+	service.settleRoom(artifactID, 0)
+	// The answer selects an option. setAskServerAttributes writes an empty selection as a nil
+	// list, which renders as selected="null" from the tree the settlement repaired and as
+	// selected="[]" once it has gone through the room, so an empty one would part the version
+	// from the room for a reason this test is not about.
+	answer := answerBlockAskSelecting(t, service, artifactID, "Yes")
+	ask, err := ScanAsk(service.store.Pool.QueryRow(context.Background(), `
+		select `+AskColumns+` from asks a where a.block_artifact_id = $1
+	`, artifactID))
+	if err != nil {
+		t.Fatalf("read the answered ask: %v", err)
+	}
+	// A content edit, so the settlement has something to version.
+	editAsPeer(t, service, artifactID, replaceRun("Context before.", "Context after."))
+	if repairs := pmdoc.BlockIDRepairCount(roomTree(t, service, artifactID)); repairs != 0 {
+		t.Fatalf("the room has %d blocks to stamp, want none: the settlement must reconcile the tree it read", repairs)
+	}
+	versionsBefore := latestVersionNumber(t, service, artifactID)
+
+	var release func()
+	service.afterSettleReconcile = func(room string) {
+		if room != artifactID || release != nil {
+			return
+		}
+		// A peer writes the answered ask's server attributes into the block first, so the
+		// settlement's own repair finds nothing to write and holds no slot. The peer's observer is
+		// held once it has classified and credited the edit and before it arms a settlement, so
+		// the room's generation stays where the settlement read it. Held before it classifies
+		// anything (beforeObserveUpdate), the edit would be classified by the observer of the
+		// repair's own empty transaction, which drains the room's update log too and arms a
+		// settlement, and the superseded settlement would write no version at all.
+		release = holdPeerEdit(t, service, artifactID, &service.afterCreditUpdate, func(tree *pmdoc.Node) *pmdoc.Node {
+			pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+				if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id == "ask-block" {
+					setAskServerAttributes(node, ask, "", false)
+					return false
+				}
+				return true
+			})
+			return tree
+		})
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if release == nil {
+		t.Fatal("settlement never reached the window between its reconciliation and its repair")
+	}
+	release()
+	service.afterSettleReconcile = nil
+	requireNoSuppressedSlots(t, service, artifactID, "after the repair")
+
+	if versions := latestVersionNumber(t, service, artifactID); versions != versionsBefore+1 {
+		t.Fatalf("latest version = %d, want %d: the settlement wrote no version of the edited document", versions, versionsBefore+1)
+	}
+	want := ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"" +
+		answer.At.Format(time.RFC3339Nano) + "\" selected=\"[&#x22;Yes&#x22;]\"}\nShip it?\n\n- Yes: Monday.\n- No: Later.\n:::\n\nContext after.\n"
+	markdown, offsets := roomRendering(t, service, artifactID)
+	if markdown != want {
+		t.Fatalf("the room renders %q, want %q", markdown, want)
+	}
+	requireLatestVersionMarkdown(t, service, artifactID, want)
+	requireIndexedBlocks(t, service, artifactID, markdown, offsets)
+}
+
+// answerBlockAskSelecting answers the document's one indexed ask in its row alone, as
+// answerBlockAsk does, with selected as the options the answer selects.
+func answerBlockAskSelecting(t *testing.T, service *Service, artifactID string, selected ...string) model.AskAnswer {
+	t.Helper()
+	answer := model.AskAnswer{User: "alice", Selected: selected, At: time.Now().UTC()}
+	answerJSON, err := json.Marshal(answer)
+	if err != nil {
+		t.Fatalf("encode answer: %v", err)
+	}
+	tag, err := service.store.Pool.Exec(context.Background(), `
+		update asks set state = 'answered', answer = $2 where block_artifact_id = $1
+	`, artifactID, answerJSON)
+	if err != nil {
+		t.Fatalf("answer indexed ask: %v", err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("answered %d asks, want the document's one", tag.RowsAffected())
+	}
+	return answer
+}
+
+// A settlement that stamps block ids versions the tree its stamp left, not the one it read before
+// it. Another writer can stamp the ids first, so the settlement's stamp mints nothing and writes
+// nothing into the room, and the tree it reconciles and versions is still the stamp's, not the
+// read. The version holds the ids the room's document holds, rendered and indexed: reusing the
+// rendering of the read would index no row for the appended paragraph, and version and index the
+// pasted callout under the id of the callout it copies (LEGION/INFRA-647).
+func TestSettlementVersionsTheTreeOfAStampThatMintedNothing(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before\n\n:::callout{#note kind=\"note\" title=\"\"}\nNoted.\n:::\n")
+	settleCurrentGeneration(t, service, artifactID)
+	// A paragraph without an id, and a pasted copy of the callout carrying the callout's own id.
+	// Typed blocks render their ids, so the stamp that gives the copy an id of its own changes the
+	// room's rendering, which the hold below needs.
+	editLiveTree(t, service, artifactID, appendUnidentifiedBlocks(t, "added"))
+	editLiveTree(t, service, artifactID, appendBlockWithCraftedID(t, ":::callout{kind=\"note\" title=\"\"}\nCopied.\n:::\n", "note"))
+	if repairs := pmdoc.BlockIDRepairCount(roomTree(t, service, artifactID)); repairs == 0 {
+		t.Fatal("the room has no block to stamp, so nothing here is tested")
+	}
+	versionsBefore := latestVersionNumber(t, service, artifactID)
+
+	var release func()
+	var copyID atomic.Value
+	service.afterSettleRead = func(room string) {
+		if room != artifactID || release != nil {
+			return
+		}
+		// Another writer identifies the blocks first, as an agent's edit stamps every block it
+		// addresses. Its observer is held once it has classified and credited the stamp and
+		// before it arms a settlement, so the room's generation stays where the settlement read
+		// it: the observer of the settlement's own empty stamp then drains nothing but its own
+		// update.
+		release = holdPeerEdit(t, service, artifactID, &service.afterCreditUpdate, func(tree *pmdoc.Node) *pmdoc.Node {
+			pmdoc.EnsureBlockIDs(tree)
+			copyID.Store(tree.Children[len(tree.Children)-1].Attrs[pmdoc.BlockIDAttr])
+			return tree
+		})
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if release == nil {
+		t.Fatal("settlement never reached the window between its read and its stamp")
+	}
+	release()
+	service.afterSettleRead = nil
+	requireNoSuppressedSlots(t, service, artifactID, "after the stamp")
+
+	if versions := latestVersionNumber(t, service, artifactID); versions != versionsBefore+1 {
+		t.Fatalf("latest version = %d, want %d: the settlement wrote no version of the appended blocks", versions, versionsBefore+1)
+	}
+	stamped, _ := copyID.Load().(string)
+	if stamped == "" || stamped == "note" {
+		t.Fatalf("the other writer left the pasted callout id %q, want one of its own", stamped)
+	}
+	tree := roomTree(t, service, artifactID)
+	if repairs := pmdoc.BlockIDRepairCount(tree); repairs != 0 {
+		t.Fatalf("the room has %d blocks left to stamp, want none", repairs)
+	}
+	if held, _ := tree.Children[len(tree.Children)-1].Attrs[pmdoc.BlockIDAttr].(string); held != stamped {
+		t.Fatalf("the pasted callout carries id %q, want %q, the other writer's: the settlement's stamp minted one", held, stamped)
+	}
+	markdown, offsets := roomRendering(t, service, artifactID)
+	if !strings.Contains(markdown, "#"+stamped) {
+		t.Fatalf("the room renders %q, want the pasted callout's id %q in it", markdown, stamped)
+	}
+	requireIndexedBlocks(t, service, artifactID, markdown, offsets)
+	requireLatestVersionMarkdown(t, service, artifactID, markdown)
+}
+
+// roomTree is the room's live document as it stands, read under its lock.
+func roomTree(t *testing.T, service *Service, artifactID string) *pmdoc.Node {
+	t.Helper()
+	tree, err := service.liveTree(artifactID, service.srv.GetDoc(artifactID))
+	if err != nil {
+		t.Fatalf("read live tree: %v", err)
+	}
+	return tree
+}
+
+// roomRendering is the room's live document rendered with its block offsets, as a settlement
+// renders the tree it versions.
+func roomRendering(t *testing.T, service *Service, artifactID string) (string, []pmdoc.BlockOffset) {
+	t.Helper()
+	markdown, offsets, err := renderTreeWithOffsets(roomTree(t, service, artifactID))
+	if err != nil {
+		t.Fatalf("render live tree: %v", err)
+	}
+	return markdown, offsets
+}
+
+// requireIndexedBlocks requires the document's blocks to be indexed at its latest version as the
+// blocks of markdown's rendering: one document_blocks row for the first block of each id in
+// offsets, with that block's type and the sha256 of its text, and no other row.
+func requireIndexedBlocks(t *testing.T, service *Service, artifactID, markdown string, offsets []pmdoc.BlockOffset) {
+	t.Helper()
+	ctx := context.Background()
+	var indexedAt *int
+	if err := service.store.Pool.QueryRow(ctx, `
+		select version from document_block_versions where artifact_id = $1
+	`, artifactID).Scan(&indexedAt); err != nil {
+		t.Fatalf("read the version the document's blocks are indexed at: %v", err)
+	}
+	if latest := latestVersionNumber(t, service, artifactID); indexedAt == nil || *indexedAt != latest {
+		t.Fatalf("the document's blocks are indexed at version %v, want the latest, %d", indexedAt, latest)
+	}
+	var want []string
+	seen := map[string]bool{}
+	for _, offset := range offsets {
+		if offset.ID == "" || seen[offset.ID] {
+			continue
+		}
+		seen[offset.ID] = true
+		sum := sha256.Sum256([]byte(markdown[offset.From:offset.To]))
+		want = append(want, offset.ID+" "+offset.Type+" "+hex.EncodeToString(sum[:]))
+	}
+	rows, err := service.store.Pool.Query(ctx, `
+		select block_id, type, text_sha256 from document_blocks where artifact_id = $1
+	`, artifactID)
+	if err != nil {
+		t.Fatalf("read the document's indexed blocks: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var id, kind, sum string
+		if err := rows.Scan(&id, &kind, &sum); err != nil {
+			t.Fatalf("scan an indexed block: %v", err)
+		}
+		got = append(got, id+" "+kind+" "+sum)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the document's indexed blocks: %v", err)
+	}
+	slices.Sort(want)
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("the document's indexed blocks (id type text_sha256) = %q, want the room rendering's %q", got, want)
+	}
+}
