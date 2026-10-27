@@ -268,7 +268,7 @@ jobs:
           outputs: type=image,name=ghcr.io/sjawhar/legion/envoy,push-by-digest=true,name-canonical=true,push=true
           # Layer cache: see BUILD_CACHE in the job's env.
           cache-from: ${{ env.BUILD_CACHE }}
-          cache-to: ${{ github.ref == 'refs/heads/legion/INFRA-522' && format('{0},mode=min', env.BUILD_CACHE) || '' }}
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('{0},mode=min', env.BUILD_CACHE) || '' }}
           # envoy-dispatch's /healthz reports this as the commit it was built from; the
           # Dockerfile refuses anything but a full sha.
           build-args: |
