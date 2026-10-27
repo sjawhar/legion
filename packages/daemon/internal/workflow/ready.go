@@ -73,7 +73,8 @@ func (e *Engine) mergeFailed(ctx context.Context, tx pgx.Tx, fact intake.MergeFa
 // head it does not name, and nothing withdraws a READY the issue never reached awaiting_merge to
 // hold. The route held the commit to GitHub's head, and passes the record as it read it, head and
 // clock (intake.HandoffComplete.RecordedHead, RecordedHeadAt), and GitHub's clock in its read
-// (HeadAt): the record follows GitHub only by webhook, so one still exactly that snapshot is
+// (HeadAt): the record follows GitHub only by webhook and the daemon's two-minute read of each pull
+// request (daemon's followHead), so one still exactly that snapshot is
 // lagging, not moved, one at the commit has caught up, and one with a clock still before GitHub's
 // read applied only pushes that read had passed, so it is behind, not moved (a push between the
 // snapshot's head and the commit, its webhook applied while the route checked READY). Any other

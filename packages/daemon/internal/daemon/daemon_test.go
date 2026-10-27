@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
@@ -57,7 +58,7 @@ func testDSN(t *testing.T) string {
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
+			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
 			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
 			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/daemon/")
 	}
@@ -1375,4 +1376,34 @@ func workflowNATS(t *testing.T) string {
 	}
 	testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
 	return url
+}
+
+// The `runtime.tmux` block's take_over reaches the tmux runtime as the value the runtime knows,
+// and a block without it, or no block, takes nothing over.
+func TestTheTmuxOptionsCarryTheTakeOver(t *testing.T) {
+	cfg := config.Config{Runtime: config.Runtime{Name: "tmux", Tmux: &config.Tmux{TakeOver: config.TakeOverKubernetes}}}
+	if got := tmuxOptions(cfg, "test", nil, "", "", quietLogger()).TakeOver; got != tmux.TakeOverKubernetes {
+		t.Errorf("TakeOver = %q, want %q", got, tmux.TakeOverKubernetes)
+	}
+	for _, block := range []*config.Tmux{nil, {}} {
+		cfg.Runtime.Tmux = block
+		if got := tmuxOptions(cfg, "test", nil, "", "", quietLogger()).TakeOver; got != "" {
+			t.Errorf("TakeOver with block %+v = %q, want none", block, got)
+		}
+	}
+}
+
+// Every launch secret's pointer is a pane variable the operator may not set
+// (runtime.PaneVariableRefusal), refused at load and at boot rather than at every launch.
+func TestEveryLaunchSecretsPointerIsRefusedAsAPaneVariable(t *testing.T) {
+	cfg := config.Config{EnvoyTokenFile: "/var/run/legion/ENVOY_TOKEN", NatsNkeySeedFile: "/var/run/legion/NATS_NKEY_SEED"}
+	names := launchSecretNames(cfg, lookup(nil))
+	if len(names) != 2 {
+		t.Fatalf("launchSecretNames = %v, want both launch secrets of a daemon configured with each", names)
+	}
+	for _, name := range names {
+		if runtime.PaneVariableRefusal(name+"_FILE", "/etc/acme/secret") == "" {
+			t.Errorf("runtime.tmux.pane_env may set %s_FILE, the pointer every launch sets to the launch secret %s", name, name)
+		}
+	}
 }
