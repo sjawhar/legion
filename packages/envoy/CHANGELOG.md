@@ -4,6 +4,20 @@
 
 ### Added
 
+- Dispatch serves `GET /api/v1/agents/{session_id}/answers` (any caller): what people wrote that
+  Dispatch delivered to one session since `since` (default 72 hours ago, at most 7 days), newest
+  first, which every agent host will carry on each model request (INFRA-148). It lists a person's
+  `ask.answered`, `comment.created`, `message.created` and `message.answered` events whose
+  `published_destinations` hold the session's own topic, its sent message deliveries (targeted and
+  broadcast messages) and its sent comment deliveries (mentions), each item once at its current
+  words: an ask's current answer (`replaced` when it changed an earlier one), a comment's current
+  body (`edited_at` when edited), a message's body. Each carries its relation to the session, the
+  ask and its question where it is in one, its owner, `dispatch://` ref and deep link. `max_chars`
+  stops the list after the item that takes the running sum of text lengths past it, while `total`
+  counts the whole window. The read is `store.SessionAnswers`, which the outbox's tests read back
+  through after publishing. Migrations `0121` (`events_person_words`, a partial index on a person's
+  events of those four types by time) and `0122` (`comment_deliveries_session`) serve it; on
+  1,000,000 events `0121` built in about a second and the route's query ran in 6-8 ms.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update

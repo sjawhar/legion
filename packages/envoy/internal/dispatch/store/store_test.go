@@ -203,6 +203,8 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"ask_followers_ask_id_text",
 		"events_ask_answered_by_user",
 		"comments_ask_replies_by_user",
+		"events_person_words",
+		"comment_deliveries_session",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname

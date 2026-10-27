@@ -801,6 +801,24 @@ the release before it runs over the new schema unchanged, and the trigger gives 
 release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
 schema has moved it refuses to start the previous tag, and recovery there is forward.
 
+Migrations `0121_events_person_words` and `0122_comment_deliveries_session` add two partial
+indexes for `GET /api/v1/agents/{session_id}/answers` (`store.SessionAnswers`, Routes below), which
+every agent host reads on every model request. `0121` creates `events_person_words` on `events
+(created_at desc, id desc)` where the actor is a person and the type is `ask.answered`,
+`comment.created`, `message.created` or `message.answered`: the route reads the window's human
+events of those types through it, newest first, and keeps those whose `published_destinations`
+hold the session's own topic. It names no column the outbox updates, so the outbox's append of
+each topic it published an event to stays a HOT update, which a GIN index on that array would end.
+`0122` creates `comment_deliveries_session` on `comment_deliveries (session_id, created_at desc)`
+where `session_id` is not null, the session's mentions, as `message_deliveries_session` (`0051`)
+already serves its message deliveries. Each is a plain `create index` inside the runner's
+transaction, so it holds `SHARE` on its table while it builds: writes to it wait, reads do not. On
+a local Postgres 17 (two CPUs, `maintenance_work_mem` 64 MB) with `events` seeded to 1,000,000
+rows (421 MB with its indexes, 126,541 of them in the index), `0121` built in 0.66-1.13 s over
+three runs and `0122` in 0.11-0.14 s on 50,003 deliveries. Both censuses answer `0`: an index
+build refuses and rewrites no row, and the census report already counts and sizes each table it
+reads.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -1203,6 +1221,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/me/replies?limit=&offset=&issue=\|artifact=` | GET | cookie or trusted header (human only) | List the threads the caller wrote in where someone else has written since the caller last read them, newest reply first, less an open ask the Inbox lists. A row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time. `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`); `limit` is 1–200 (default 50). |
 | `/api/v1/me/threads/{id}/read` | PUT | cookie or trusted header (human only) | Move the caller's read mark on one thread forward to `{read_through}`; it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`. Answers `204`, writing nothing for a thread the caller never wrote in. |
 | `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached. |
+| `/api/v1/agents/{session_id}/answers?since=&max_chars=` | GET | cookie, trusted header, or bearer | What people wrote that Dispatch delivered to one session, newest first: each ask's current answer (`replaced` when it changed an earlier one), each comment at its current body (`edited_at` when edited) and each message, once however it arrived: a person's `ask.answered`, `comment.created`, `message.created` or `message.answered` event whose `published_destinations` hold the session's own topic, its sent message deliveries, and its sent comment deliveries (mentions). Never an agent's or the system's words, an ask's resolution or hand-back, or a delivery to a `role:` route. Each item carries its `relation`, the `ask` and its question where it answers or replies in one, and its `owner`, `ref` and `href`. `since` defaults to 72 hours ago (older than 7 days or in the future is `400 INVALID_QUERY`); `max_chars` (1–100,000) stops the list after the item whose text takes the running sum past it, `total` still counting every item; a bad `session_id` is `400 INVALID_SESSION_ID`. Not an authorization boundary: direct-message text already reaches every caller through `GET /api/v1/events`, and a person may read any session's list. |
 | `/api/v1/projects` | GET | cookie, trusted header, or bearer | List projects (`key`, `name`, `open_asks`, `created_at`), ordered by key. |
 | `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie, trusted header, or bearer | List repository-to-project mappings, each with `default`, whether it is its project's default repository. |
