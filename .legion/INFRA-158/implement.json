@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T02:18:54Z",
+  "completed": "2026-10-27T03:26:15Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2233",
-  "head": "83649d6aa94f89254e8c6143308cce339fe1de7d",
+  "head": "86b33b75d8927336bbf994d6ab13023901655968",
   "proof": [
+    {
+      "criterion": "Review round 7: no reconnect, close or reopen order makes the editor's own derived-attribute updates (heading id, list label/listType) count or be stored as an unsent edit; real typing still stored and restored",
+      "surface": "the real Hocuspocus provider in ygo's frame order (connection.test.ts); Dispatch's browser suite (Playwright, chromium and iphone) on the real Go server, production SPA and Postgres",
+      "command": "cd packages/dispatch && bun test web/src/features/doc (176 pass); bun run e2e -- offline-edits.e2e.ts close-withdraws-asks.e2e.ts --project chromium --project iphone (20 passed)",
+      "observed": "Writable load, drop, close, read-only reconnect with the stamp between SyncStep2 and Authenticated: no row, count 0, no notice. Offline stamp then typing: the typing restores after reload with no rebuiltAt. Online stamp: acknowledged, never counted or stored, no error. The reopen browser case's polled count is 0 and no notice shows while offline.",
+      "headSha": "86b33b75d8927336bbf994d6ab13023901655968",
+      "negativeControl": "With 83649d6a's pending-sync.ts and connection.ts the reviewer's path stores one row of this client; built with 52159aaf's two files the reopen browser case fails at its poll (Expected 0, Received 1) on both projects"
+    },
     {
       "criterion": "Eleventh forward merge leaves the change intact and the pull request mergeable",
       "surface": "the merged tree's builds and GitHub's mergeability",
@@ -176,6 +184,7 @@
     }
   ],
   "filesChanged": [
+    "round 10: pending-sync.ts (derived-only updates held, never counted or stored), connection.ts (admitted flag removed), connection.test.ts, pending-sync.test.ts, offline-edits.e2e.ts, packages/dispatch/AGENTS.md; docs/ask_lifecycle.go, docs/rebuild.go, api/issue_ask_lifecycle.go (WriteIssueAskStates logs, helper unexported); packages/envoy/CHANGELOG.md",
     "round 9: eleventh forward merge 83649d6a (packages/envoy/CHANGELOG.md, both sides kept)",
     "round 8: tenth forward merge 707b80e2; pending-sync.ts/connection.ts (held stamp removed, authenticated(readOnly) + synced(), provider's own isSynced/isAuthenticated), connection.test.ts (one real-provider harness, ygo order), pending-fixture.ts, offline-edits.e2e.ts (real-order case), e2e/editor.ts back to its pre-52159aaf form; docs.LogUnindexedAskBlocks shared by api and rebuild.go; issue_close_unloadable_test.go",
     "round 7: dispatch web pending-sync.ts (authenticated() flag at authentication, read-only own updates held in memory and stored first on the writable flip), connection.ts, pending-sync.test.ts, e2e/editor.ts (admitWithoutSync), e2e/offline-edits.e2e.ts (gap case on the heading spec)",
@@ -213,5 +222,5 @@
     "R7 local runs at 39c12172 (from a git archive of the head): api ok (1562 s), store ok, cmd/dispatch ok, -tags multiprocess cmd/dispatch ok (350 s); docs failed only TestAHealthyRoomUnderWritesIsNeverRefused ('too few to say anything' under load), which passes alone (ok 6.6 s) and is not in the diff; pmdoc failed only its timing tests and the differential tests that need the workspace's @legion/proof-editor link absent from the archive (pmdoc is not in the diff). bun test packages/contracts packages/envoy-client: one envoy-config timing test failed under load and passes alone. packages/dispatch: typecheck clean; bun test 2388 pass on the re-run (the first run under load had 2 failures not reproduced). biome check of contracts, dispatch, claude-envoy, envoy-client: no errors. claude-envoy check-dist passes. -race was not run locally (the pod has no C compiler); CI's envoy-go-race lane runs it."
   ],
   "openQuestions": [],
-  "round": 9
+  "round": 10
 }
