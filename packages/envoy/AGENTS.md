@@ -1535,10 +1535,13 @@ deleted by an unsettled edit) takes the stored row of its type and text whose id
 took, a live id first, else by id. Only then are the version blocks no row claimed aligned by type
 and live text with the live blocks whose id no row claimed, within the gaps between first-step
 matches (every block of a document the index holds none of yet), so a paragraph an edit deleted
-and retyped with the same text keeps the deleted block's row and the retyped one gets none. Last,
-a version block and a live block both still unmatched take each other where each is the only one
-left on its side holding that text, so a block an edit moved in a document with no row yet keeps
-its version, and a repeated text names none. A
+and retyped with the same text keeps the deleted block's row and the retyped one gets none. A text
+either side still holds more than once takes no part in that alignment: its copies are paired in
+order only where the version and the live document hold equally many, and otherwise none is
+matched until a settlement, so a copy typed after the close is never dated to the version (an
+original left unmatched is dated to the reopen's version). Last, a version block and a live block
+both still unmatched take each other where each is the only one left on its side holding that
+text, so a block an edit moved in a document with no row yet keeps its version. A
 stored row whose text the version does not hold (indexed at an older version this one changed)
 and whose live text it does not hold either is still recorded deleted at it. A live block only an
 unsettled edit made is not indexed until the reopen's settlement writes the version that holds it,

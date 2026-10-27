@@ -453,11 +453,14 @@ func indexedBlocks(ctx context.Context, tx pgx.Tx, artifactID string) ([]indexed
 // an id no live block holds has no place in the live document to cross. The text alignment
 // matches every untyped block of a document none of whose blocks the index holds yet, and a block
 // whose row holds an older version's text that this version changed. A version is compared and
-// indexed as it renders today, as the live text is. Last, a block of the version and a live block
-// both still unmatched take each other where each is the only one left on its side holding that
-// text: a block an edit moved across others, in a document with no row to name it, matches no
-// block within its gap, and a text held more than once on either side names none, so a repeated
-// paragraph is never given another's id.
+// indexed as it renders today, as the live text is. A text either side still holds more than once
+// takes no part in that alignment: with no row to name its copies, the version's copies and the
+// live ones are paired in order only where both hold equally many, and otherwise none is matched
+// until a settlement versions them, so a copy an edit typed never takes an original's id and
+// history (an original left unmatched is dated to the version the reopen's settlement writes).
+// Last, a block of the version and a live block both still unmatched take each other where each
+// is the only one left on its side holding that text: a block an edit moved across others, in a
+// document with no row to name it, matches no block within its gap.
 //
 // A row whose text the version does not hold - indexed at an older version whose text of that
 // block this version changed - and whose block's live text the version does not hold either
@@ -551,19 +554,36 @@ func closedVersionBlocks(stored, live string, liveBlocks []model.ArtifactBlock, 
 			}
 		}
 	}
+	// Text names a block only where it is not repeated. A text the version or the live document
+	// still holds more than once, with no row to name its copies, says which copy is which only when
+	// both hold the same number of copies, in order; otherwise a copy an edit typed would take an
+	// original's id and history, so no copy is matched until a settlement versions them.
+	versionCopies := map[string]int{}
+	for at, index := range versionUntyped {
+		if ids[index] == "" {
+			versionCopies[versionKeys[at]]++
+		}
+	}
+	liveCopies := map[string]int{}
+	for at, index := range liveUntyped {
+		if !used[liveBlocks[index].ID] {
+			liveCopies[liveKeys[at]]++
+		}
+	}
+	repeated := func(key string) bool { return versionCopies[key] > 1 || liveCopies[key] > 1 }
 	var gapVersion, gapLive []string
 	var gapVersionAt, gapLiveAt []int
 	fromVersion, fromLive := 0, 0
 	for _, anchor := range append(anchors, [2]int{len(versionUntyped), len(liveUntyped)}) {
 		gapVersion, gapVersionAt = gapVersion[:0], gapVersionAt[:0]
 		for at := fromVersion; at < anchor[0]; at++ {
-			if ids[versionUntyped[at]] == "" {
+			if ids[versionUntyped[at]] == "" && !repeated(versionKeys[at]) {
 				gapVersion, gapVersionAt = append(gapVersion, versionKeys[at]), append(gapVersionAt, versionUntyped[at])
 			}
 		}
 		gapLive, gapLiveAt = gapLive[:0], gapLiveAt[:0]
 		for at := fromLive; at < anchor[1]; at++ {
-			if !used[liveBlocks[liveUntyped[at]].ID] {
+			if !used[liveBlocks[liveUntyped[at]].ID] && !repeated(liveKeys[at]) {
 				gapLive, gapLiveAt = append(gapLive, liveKeys[at]), append(gapLiveAt, liveUntyped[at])
 			}
 		}
@@ -577,10 +597,24 @@ func closedVersionBlocks(stored, live string, liveBlocks []model.ArtifactBlock, 
 		}
 		fromVersion, fromLive = anchor[0]+1, anchor[1]+1
 	}
+	// A repeated text whose copies the version and the live document hold equally many of pairs
+	// them in order: the first copy with the first, and so on.
+	copiesLeft := map[string][]int{}
+	for at, index := range liveUntyped {
+		if key := liveKeys[at]; !used[liveBlocks[index].ID] && repeated(key) && versionCopies[key] == liveCopies[key] {
+			copiesLeft[key] = append(copiesLeft[key], index)
+		}
+	}
+	for at, index := range versionUntyped {
+		if key := versionKeys[at]; ids[index] == "" && len(copiesLeft[key]) > 0 {
+			id := liveBlocks[copiesLeft[key][0]].ID
+			ids[index], used[id] = id, true
+			copiesLeft[key] = copiesLeft[key][1:]
+		}
+	}
 	// A block an edit moved across others, with no row to claim it (a document none of whose blocks
 	// the index holds yet), matches no block in its gap. Its text names it where exactly one block
-	// of the version and one live block still unmatched hold it; a text held more than once on
-	// either side names no block, so a repeated paragraph is never given another's id.
+	// of the version and one live block still unmatched hold it.
 	versionHolding := map[string][]int{}
 	for at, index := range versionUntyped {
 		if ids[index] == "" {
