@@ -2,22 +2,23 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T04:16:00Z",
+  "completed": "2026-10-27T05:32:30Z",
   "round": 9,
   "generation": 4,
-  "head": "5d17db145c276bdd38f259b024f3aa64c6635186",
+  "head": "21c784af1c137773a07a1f18f2704bd3a6e53d9c",
   "verdictProvider": "No subagent judged anything in this round; the tester's own session ran every check, so no provider or model needs naming.",
   "rebaseRecheck": {
-    "from": "86b33b75d8927336bbf994d6ab13023901655968",
-    "to": "5d17db145c276bdd38f259b024f3aa64c6635186",
+    "from": "5d17db145c276bdd38f259b024f3aa64c6635186",
+    "to": "21c784af1c137773a07a1f18f2704bd3a6e53d9c",
     "fingerprint": "b9213970aa87bfe6dac2fe0b10698ddb85734c319f784073ad257f0db01ffaf8 at both heads: unchanged, so bare gates only",
-    "merge": "5d17db14 resolves packages/envoy/internal/dispatch/store/pool.go (keeps leasePoolSize 9 with main's comment wording) and packages/pi-legion/CHANGELOG.md",
-    "smoke": "The merged head booted on a fresh database, logged the repair pass (withdrawn=0 restored=0 swept=0), and ran its leased loops (reference-excerpts, delivery-reconcile). A SetStatus close of a seeded issue gave open_asks 0 and the approval draft; the open decision was withdrawn by legion-daemon:TT; the answered decision was unchanged; the blocks read resolved in the spec and in its copy.",
-    "ci": "At 5d17db14: Tests 40448347760, Docs 40448347727, Legion Envoy and Contracts 40448347724 and PR Title 40448347731 queued; Worker Image 40448347722 pending. At 86b33b75, Tests and Legion Envoy and Contracts were cancelled when this head arrived."
+    "merge": "21c784af is a conflict-free merge of main that picks up its fix of the daemon admission tests (#2317); it changes no file of this pull request's diff",
+    "smoke": "The merged head booted on a fresh database and logged the repair pass (withdrawn=0 restored=0 swept=0). A SetStatus close of a seeded issue gave open_asks 0 and the approval draft; the open decision was withdrawn by legion-daemon:TT; the answered decision was unchanged; the blocks read resolved in the spec and in its copy.",
+    "previous": "Rebase re-check 86b33b75 → 5d17db14: fingerprint b9213970… unchanged; the merge resolved pool.go and a CHANGELOG.",
+    "ci": "At 21c784af: Tests 40455544826, Docs 40455544847, Legion Envoy and Contracts 40455544875 and PR Title 40455546469 queued; Worker Image 40455544830 pending. At 5d17db14, Tests 40448347760 failed only in the Go daemon admission tests (TestApplyFactAdmitsRootAndQueuesWhenFull, TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun and others): main's failure, which #2317 fixes. This branch changes nothing under packages/daemon."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 9, at 86b33b75, reproduced the review's path in a real browser on the builds without the fix and drove it on the head, in the server's own frame order, with only the Auth frame delayed. It also drove the stamp-then-type, ordered-list and many-reconnect cases the architect named, all with my own throwaway Playwright spec rather than the implementer's tests. The merged head 5d17db14 has the same fingerprint, so that verification carries over."
+    "how": "Round 9, at 86b33b75, reproduced the review's path in a real browser on the builds without the fix and drove it on the head, in the server's own frame order, with only the Auth frame delayed. It also drove the stamp-then-type, ordered-list and many-reconnect cases the architect named, all with my own throwaway Playwright spec rather than the implementer's tests. The merged heads 5d17db14 and 21c784af have the same fingerprint, so that verification carries over."
   },
   "failed": 0,
   "failures": [],
@@ -26,32 +27,32 @@
       "criterion": "Review round 7: a writable tab reconnecting to an issue closed meanwhile never stores or counts the editor's own heading or list stamp, so a person who typed nothing sees no unsent-edit notice",
       "surface": "Dispatch's Playwright harness (chromium and iphone) against the head's Go server and Postgres, with a throwaway spec that keeps the server's frame order (Sync.Step1 > Sync.Step2 > Awareness > Auth) and delays only the reconnect's Auth frame, and everything after it, by 3 s (deleted after)",
       "command": "Probe 5: alice opens an open issue writable; hold and cut; the agent inserts '## Added by the agent' plus an ordered list and closes the issue; bob opens it as a read-only peer and clicks into it; alice's tab is released; during the delayed Auth, bob moves his caret and alice clicks into her page and presses ArrowLeft (no typing); read alice's heading ids, rows and status; reload; read again. bunx playwright test zz-tester-probe.e2e.ts --project chromium --project iphone --repeat-each 2 --workers 1 (DISPATCH_E2E_REUSE_SERVERS=1)",
-      "observed": "At 86b33b75, 4 of 4: alice's editor stamped every heading id (probe, detail, added-by-the-agent); 0 rows before and after; status 'connected' with no notice, the same after the reload. Rebase re-check 86b33b75 → 5d17db14: fingerprint unchanged, bare gates only.",
-      "headSha": "5d17db145c276bdd38f259b024f3aa64c6635186",
+      "observed": "At 86b33b75, 4 of 4: alice's editor stamped every heading id (probe, detail, added-by-the-agent); 0 rows before and after; status 'connected' with no notice, the same after the reload. Rebase re-checks 86b33b75 → 5d17db14 → 21c784af: fingerprint unchanged, bare gates only.",
+      "headSha": "21c784af1c137773a07a1f18f2704bd3a6e53d9c",
       "negativeControl": "The same probe against the web app with 83649d6a's connection.ts and pending-sync.ts failed 2 of 2, and against the 52159aaf web app failed 2 of 2. Each stored 1 row and showed 'connected · 1 edit saved in this browser can't be sent: this document is read-only.' to a person who typed nothing."
     },
     {
       "criterion": "A person's edit typed after stamps is kept and applies cleanly, with no heading or list item lost or doubled, whether the stamps were acknowledged online or held before Auth and never acknowledged",
       "surface": "Same harness",
       "command": "Probe 6: offline, the agent inserts a heading and an ordered list; reconnect online (stamps acknowledged); cut; type; reload; release; count each heading and list item in the stored markdown. Probe 8: the same insert, but the reconnect's Auth is delayed 4 s, alice clicks before Auth (stamps held), the tab is cut before Auth arrives (never acknowledged), then she types offline, reloads and releases.",
-      "observed": "At 86b33b75, 4 of 4 each. Probe 6 counts: typed 1, '## Server heading' 1, '## Detail' 1, 'server two' 1, 'second step' 1. Probe 8: 0 rows while the stamps were held, 26 rows after typing, 'not sent yet' shown after the reload, and once released the counts were typed 1, '## Held heading' 1, 'held two' 1, '## Detail' 1, 'second step' 1, with no rebuild notice and the rows cleared. Rebase re-check 86b33b75 → 5d17db14: fingerprint unchanged, bare gates only.",
-      "headSha": "5d17db145c276bdd38f259b024f3aa64c6635186",
+      "observed": "At 86b33b75, 4 of 4 each. Probe 6 counts: typed 1, '## Server heading' 1, '## Detail' 1, 'server two' 1, 'second step' 1. Probe 8: 0 rows while the stamps were held, 26 rows after typing, 'not sent yet' shown after the reload, and once released the counts were typed 1, '## Held heading' 1, 'held two' 1, '## Detail' 1, 'second step' 1, with no rebuild notice and the rows cleared. Rebase re-checks 86b33b75 → 5d17db14 → 21c784af: fingerprint unchanged, bare gates only.",
+      "headSha": "21c784af1c137773a07a1f18f2704bd3a6e53d9c",
       "negativeControl": "Probe 6 also passes on 83649d6a, so typing was kept before the fix too; the fix's risk was losing or doubling a stamp, and none was lost or doubled."
     },
     {
       "criterion": "No false notice in the orders already tested (a closed document reloaded, a reopen then offline then a second close, typing after a reopen), and the held set does not grow on a tab that stays read-only across many reconnects",
       "surface": "Same harness",
       "command": "Probe 1: a closed document with headings and a list, reconnected and reloaded twice. Probe 2: reopen, writable reconnect, offline, close again. Probe 3: reopen, reconnect, cut, type, reload, release. Probe 7: bob as a read-only peer; alice's read-only tab cut and reconnected 15 times; rows, status and Chromium's performance.memory.usedJSHeapSize read; then offline and a reload while held.",
-      "observed": "At 86b33b75: probes 1, 3 and 7 4 of 4; probe 2 3 of 4 (see observedNotReproduced). Probe 7: 0 rows and no notice after 15 reconnects, offline, and the reload; heap 20.5 to 21.7 MB. The in-memory held set itself is not observable from the page, so its size was not measured beyond the heap. Rebase re-check 86b33b75 → 5d17db14: fingerprint unchanged, bare gates only.",
-      "headSha": "5d17db145c276bdd38f259b024f3aa64c6635186",
+      "observed": "At 86b33b75: probes 1, 3 and 7 4 of 4; probe 2 3 of 4 (see observedNotReproduced). Probe 7: 0 rows and no notice after 15 reconnects, offline, and the reload; heap 20.5 to 21.7 MB. The in-memory held set itself is not observable from the page, so its size was not measured beyond the heap. Rebase re-checks 86b33b75 → 5d17db14 → 21c784af: fingerprint unchanged, bare gates only.",
+      "headSha": "21c784af1c137773a07a1f18f2704bd3a6e53d9c",
       "negativeControl": "Probe 2 failed 1 of 2 on 52159aaf (1 row after the reopen's reconnect), as in round 8."
     },
     {
       "criterion": "Server side: closes withdraw every open ask naming the closer, a reopen restores them, races stay consistent",
       "surface": "dispatch:local with the branch's CLI and the daemon's SetStatus",
-      "command": "At 86b33b75: seed.ts TT 3; closes by alice (cookie), dcli issue-update --status done and daemonclose; reopen TT-1; race.ts resolve 6, double 4, unsettled 6, flip 4. At 5d17db14: boot on a fresh database, seed.ts TT 1, daemonclose TT-1 done (smoke).",
-      "observed": "At 86b33b75: on each issue open_asks is 0 and the approval draft; d1 is withdrawn by alice | tester-agent-9 | legion-daemon:TT; d2 stays answered; the blocks and the copy read resolved; the reopen restored 5 asks with the blocks open; races found 0 problems; no ERROR in the server log. At 5d17db14 the smoke close gave open_asks 0 and withdrew the open decision, naming legion-daemon:TT, and the leased loops ran.",
-      "headSha": "5d17db145c276bdd38f259b024f3aa64c6635186",
+      "command": "At 86b33b75: seed.ts TT 3; closes by alice (cookie), dcli issue-update --status done and daemonclose; reopen TT-1; race.ts resolve 6, double 4, unsettled 6, flip 4. At 5d17db14 and at 21c784af: boot on a fresh database, seed.ts TT 1, daemonclose TT-1 done (smoke).",
+      "observed": "At 86b33b75: on each issue open_asks is 0 and the approval draft; d1 is withdrawn by alice | tester-agent-9 | legion-daemon:TT; d2 stays answered; the blocks and the copy read resolved; the reopen restored 5 asks with the blocks open; races found 0 problems; no ERROR in the server log. At 5d17db14 and 21c784af the smoke close gave open_asks 0 and withdrew the open decision, naming legion-daemon:TT.",
+      "headSha": "21c784af1c137773a07a1f18f2704bd3a6e53d9c",
       "negativeControl": "Round 6's control (main 1357b95c) left open_asks 5 on the same closes; the server's ask code is unchanged since apart from where one log line is written."
     }
   ],
