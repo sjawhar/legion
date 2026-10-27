@@ -186,8 +186,9 @@ type Build struct {
 // ctx decides one thing: how long the daemon serves. The boot record and its stamp are the
 // daemon's own bookkeeping and run on a context the shutdown did not cancel, so a signal that
 // arrives mid-startup still leaves a recorded, stamped boot rather than a row with no end. A
-// signal that arrives while the plugin gate, the GitHub App tokens' mint, or the image probe waits
-// ends the daemon there, cleanly: it has served nothing and records nothing.
+// signal that arrives while the plugin gate, the repository mapping read, the GitHub App tokens'
+// mint, or the image probe waits ends the daemon there, cleanly: it has served nothing and records
+// nothing.
 //
 // build is the binary's own build (Build), which the boot compares against the open production
 // checks of the repository it is built from.
@@ -250,14 +251,15 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
-	// The mapping read and the App mint wait out GitHub's and Dispatch's transient failures, which the
-	// boot budget does not bound, as it does not bound the plugin gate or the image probe: the work
-	// after them has a budget of its own.
+	// The mapping read waits out an unreachable Dispatch without limit, and the mapping's
+	// installation check and the App mint wait out GitHub's transient failures within appMintRetry;
+	// the boot budget bounds none of them, as it does not bound the plugin gate or the image probe:
+	// the work after them has a budget of its own.
 	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, build)
 	if err != nil {
 		st.Close()
 		if ctx.Err() != nil {
-			log.Info("legion daemon stopped before its GitHub App tokens were minted", "project", cfg.Project)
+			log.Info("legion daemon stopped before it read its repository mapping and minted its GitHub App tokens", "project", cfg.Project)
 			return nil
 		}
 		return err
@@ -269,6 +271,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		workflow.controllerFirstWake = o.controllerFirstWake
 		plan.identity = workflow.identity
 		plan.repository = workflow.issueRepository
+		plan.ensureWorkspace = workflow.ensureWorkspace
 		// Only a daemon with the workflow configured has issue records to read a phase or a tree
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
@@ -517,12 +520,15 @@ type plan struct {
 	// (workflowRuntime.issueRepository: its record's, or the project's default for an issue the
 	// workflow does not record); nil without a workflow.
 	repository func(ctx context.Context, issue string) (ghrepo.Repository, string, error)
+	// ensureWorkspace provisions an issue's workspace on the daemon's host when a launch finds it
+	// missing or not checked out (workflowRuntime.ensureWorkspace); nil without a workflow.
+	ensureWorkspace func(ctx context.Context, issue string, repo ghrepo.Repository, defaultBranch string) error
 	// repositories is the project's repository mapping as the workflow serves it, empty until the
 	// workflow reads it at boot: every role's gh bundle holds a directory for each of its owners.
 	repositories *repositories
 	// phaseHolds and treeClosable are the workflow's answers to the supervisor's two predicates;
 	// nil without a workflow, where every delivery holds and every tree closes.
-	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
+	phaseHolds   func(ctx context.Context, issue string, p phase.Phase, generation uint64) (bool, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
 	// taskConfirmed tells the workflow each agent that took its task; nil without a workflow.
 	taskConfirmed func(c supervise.Claim)
@@ -714,7 +720,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 		return err
 	}
 	if p.newRuntime == nil {
-		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir)
+		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir, cfg.Runtime.Tmux)
 		if err != nil {
 			return err
 		}
@@ -798,9 +804,10 @@ func claimRepositoryOwner(issueOf func(context.Context, claim.Token) (string, er
 }
 
 // tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
-// stream and the GitHub credential function, which boot hands the factory.
+// stream and the GitHub credential function, which boot hands the factory: the `runtime.tmux`
+// block's pane variables, Oh My Pi overlays and take_over among them.
 func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
-	return tmux.Options{
+	opts := tmux.Options{
 		Project:           project,
 		StateDir:          cfg.StateDir,
 		DaemonURL:         cfg.DaemonURL,
@@ -815,6 +822,10 @@ func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backen
 		ProviderEnvDir:    providerEnvDir,
 		Log:               log,
 	}
+	if block := cfg.Runtime.Tmux; block != nil {
+		opts.PaneEnv, opts.PiConfigFiles, opts.TakeOver = block.PaneEnv, block.PiConfigFiles, block.TakeOver
+	}
+	return opts
 }
 
 // reconfigureCloneCredential brings every shared clone an earlier daemon provisioned under the state
@@ -991,7 +1002,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			repositories: func() api.RepositoriesView { return p.repositories.view(nil) },
 			designGate:   cfg.Gates.Design, slackChannels: cfg.Projects[cfg.Project].SlackChannels,
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
-			backend: cfg.BackendFor,
+			backend: cfg.BackendFor, hostWorkspaces: !rt.ProvisionsWorkspaces(), ensureWorkspace: p.ensureWorkspace,
 		},
 		Identity:      adoptIdentity(p.identity, p.repository),
 		Secrets:       p.secretsEnroller,
@@ -1360,6 +1371,11 @@ func (s *supervision) stop() {
 	})
 }
 
+// phaseRole is the role that works a phase (workflow.RoleFor), which the operator's retry of a
+// held phase checks (api.Options.RoleFor). It is named at package level because serve's own
+// workflow parameter hides the package there.
+var phaseRole = workflow.RoleFor
+
 // serve runs the API on the listener the daemon already took until ctx is done or the server
 // fails, and returns once it is closed: one goroutine serves, the other shuts down, and the
 // shutdown runs on a context of its own so a cancelled ctx still drains the connections it has.
@@ -1420,6 +1436,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Pool:               st.Pool(),
 		Handlers:           handlers,
 		PrepareRepository:  prepare,
+		RoleFor:            phaseRole,
 		Record:             records,
 		Dispatch:           client,
 		Tokens:             tokens,

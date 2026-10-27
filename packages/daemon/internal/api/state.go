@@ -511,9 +511,9 @@ func StrandedMoves() []StrandedMove {
 //     task or its phase start waits, otherwise the operator's delivery of its phase's resume task.
 //   - StrandedRetry, a failed architect: the operator's retry (`legion claims retry`), which
 //     relaunches its session with fresh budgets, and a catch-up follows.
-//   - StrandedWorkflowStart, a failed phase worker: its architect's retry of the held phase, since
-//     a failed claim ignores resume and deliver and the operator's retry relaunches only an
-//     architect.
+//   - StrandedWorkflowStart, a failed phase worker: the retry of its held phase — its architect's
+//     retry_or_escalate, or the operator's retry (`legion claims retry`, which applies the same
+//     retry) — since a failed claim ignores resume and deliver.
 func (c StrandedClaim) Move() StrandedMove {
 	failed := c.State == string(supervise.StateFailed)
 	switch {

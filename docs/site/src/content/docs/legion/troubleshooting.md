@@ -341,8 +341,15 @@ its tree stands:
   legion status <KEY> todo    --config legion.yaml --operator-token-file operator-token
   ```
 
-`legion claims retry` relaunches only a failed architect. It refuses a claim in any other state,
-naming the state, and a failed phase worker or controller, naming who retries it.
+`legion claims retry --claim <token>` relaunches a failed architect on its session with fresh
+budgets, and retries a failed phase worker whose issue is held for that worker's own role by
+applying the held phase's retry, as its architect's `retry_or_escalate` would. It refuses a claim
+in any other state, naming the state, a failed phase worker whose issue is not held or is held for
+another role, and a failed controller, naming who retries it; a retry that leaves the issue held,
+as a lingering tree's does, is refused naming the issue. `legion claims retry --failed` asks the
+same of every failed claim the daemon holds, in turn, prints each one it retried, and exits 1
+naming each it refused: run it once the cause of a run of failed launches is gone (a host moved
+onto tmux, a broken key replaced).
 
 To see why the launches failed, read the failed role's lines of the `roles` container's log in the
 issue's pod. The launcher prefixes each role's lines with the role's name:
@@ -426,7 +433,11 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
 
 - **`retry`** (a failed architect): retry it. The daemon relaunches it on the session it kept,
   with fresh budgets, and sends it a catch-up of its tree once it is ready, so the tree carries on
-  at the generation and phase it stands at:
+  at the generation and phase it stands at. The daemon drops every notice it could not deliver to
+  the failed architect, the reviewer's approval that moved an issue into `accepting` among them,
+  so the catch-up's reason names each issue of the tree waiting in `accepting` for the architect's
+  acceptance (nothing beneath it still in the workflow); no worker runs there, and nothing else
+  would wake the architect for it:
 
   ```sh
   legion claims retry --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-14-architect
@@ -437,8 +448,8 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
 
 - **`needsWorkflowStart`** (a failed phase worker): its issue is held
   ([An issue is held](#an-issue-is-held)), and its tree's architect retries the phase or escalates
-  it to the controller. A failed claim ignores `legion claims resume` and `legion claims deliver`,
-  and `legion claims retry` refuses a phase worker's.
+  it to the controller; `legion claims retry` applies the same retry when the architect cannot. A
+  failed claim ignores `legion claims resume` and `legion claims deliver`.
 
 The list names only claims of trees that hold an admission slot, and leaves out claims that
 something will still start: a worker whose phase is not its own is started again when its phase
@@ -686,6 +697,15 @@ it, then look at what the row `waitsOn` names is doing.
   the `operation` and `subject`). The daemon's NATS user is missing a grant;
   [Envoy](/legion/dispatch/envoy/) lists the subjects it needs. A daemon can boot healthy and
   consume events with one grant missing, so search the log for this line after a NATS change.
+- **`intake: a durable consumer is behind its stream; every event it has not reached yet waits for
+  it`** (a warning with `consumer`, `behindSeconds`, `pending` and `delivered`). The daemon is
+  handling events JetStream stored more than five minutes before; it says so at most once a minute
+  per consumer. `pending` near zero with `delivered` above one is one event retried after
+  failures, not a backlog: a retried event keeps the time it was first stored.
+  Every event that consumer has not reached waits: on the GitHub consumer a pull request's opened
+  or push, on the Dispatch consumer a status change. The daemon's two-minute read of each open
+  pull request still follows its head, and records the pull request of an issue whose implementer
+  completed, so neither waits for the backlog to drain.
 - **`agent-secrets: the token login failed; retrying`** (an error line with the broker's answer).
   With `runtime.kubernetes.agent_secrets` set, the daemon logs in to the
   [Secrets Broker](/legion/broker/) with its own ServiceAccount token, read from `token_file`, at

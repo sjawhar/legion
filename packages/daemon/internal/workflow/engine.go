@@ -207,7 +207,10 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	// An event carries the whole issue, so it writes a status only when its status differs from the
 	// one Dispatch showed at the event before it. One that does not is an edit — a rank, title or
 	// label change — made while a status the daemon queued has not reached Dispatch, whoever made it.
-	if fact.Status == issue.DispatchStatus {
+	// A route's own write (intake.DispatchIssue.StatusMove) is a status Dispatch confirmed the daemon
+	// wrote, applied ahead of events the consumer has not delivered, so it is a move whatever the
+	// record last saw Dispatch show.
+	if fact.Status == issue.DispatchStatus && !fact.StatusMove {
 		return intake.Result{}, e.keepStatus(ctx, tx, *issue, fact)
 	}
 	if reasserted, err := e.sessionStatusWrite(ctx, tx, *issue, fact); err != nil || reasserted {
@@ -1167,6 +1170,11 @@ func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue)
 	if err != nil {
 		return nil, err
 	}
+	return openBeneathIn(members, issue.Key), nil
+}
+
+// openBeneathIn is openBeneath's walk over members, the issues of key's tree as already read.
+func openBeneathIn(members []record.Issue, key string) []string {
 	// The index holds each child's place in members rather than its record: an Issue is a wide
 	// struct, and the walk reads only its key and whether it is in the workflow.
 	children := map[string][]int{}
@@ -1176,8 +1184,8 @@ func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue)
 		}
 	}
 	running := []string{}
-	seen := map[string]bool{issue.Key: true}
-	for frontier := []string{issue.Key}; len(frontier) > 0; {
+	seen := map[string]bool{key: true}
+	for frontier := []string{key}; len(frontier) > 0; {
 		current := frontier[len(frontier)-1]
 		frontier = frontier[:len(frontier)-1]
 		for _, index := range children[current] {
@@ -1193,7 +1201,7 @@ func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue)
 		}
 	}
 	slices.Sort(running)
-	return running, nil
+	return running
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {
