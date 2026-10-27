@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-528",
+  "completed": "2026-10-27T07:45:00Z",
+  "proof": [
+    {
+      "criterion": "The conflict with main is resolved by a forward merge that keeps both INFRA-529's read-only directive fallback (#2303) and the mermaid drawing, and changes nothing else",
+      "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector, in Desktop Chrome, iPhone 13 (Chromium), Desktop Safari (WebKit) and Desktop Firefox",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox; then e2e/unknown-directive.e2e.ts (INFRA-529's spec) --project chromium --project iphone",
+      "observed": "At the merge 25fba83e: mermaid suite 32 passed (3.4m); INFRA-529's unknown-directive spec 8 passed (30.1s); `bun test --parallel web/src e2e/__tests__` 2519 pass / 0 fail; proof-editor 138 pass; biome, tsc, check:classes green.",
+      "headSha": "25fba83e57509f251052e760cb2e60370da6baa9",
+      "negativeControl": "Before the merge GitHub reported the pull request CONFLICTING (mergeStateStatus DIRTY) and ran no checks on 725db66a; the red commit ecc18ff3 still fails every drawing row (24 failed / 4 passed, round 1)."
+    }
+  ],
+  "filesChanged": [
+    "biome.json (merge resolution: INFRA-529's read-only-directives line kept beside the two mermaid lines)",
+    "packages/proof-editor/AGENTS.md (merge resolution: 'Twelve files', INFRA-529's read-only-directives row and both mermaid rows, the Conventions list naming all three)"
+  ],
+  "trickyParts": [
+    "Only biome.json and packages/proof-editor/AGENTS.md conflicted; useRenderedMarkdown.tsx, MarkdownBody.tsx and markdown-engine.ts merged without a conflict, and the merged diff against main (b08a56bc) in those files holds only this pull request's hunks.",
+    "Fingerprint 725db66a 0bbefab27a05... -> merge 25fba83e 314ca169ce85...: changed, and only in two documentation lines of packages/proof-editor/AGENTS.md (the legion-own file count, now 'Twelve' over main's 'Ten', and the Conventions list, which now also names main's read-only-directives.ts), because main changed the same two lines. No code line and no function differs; the diffs of the two fingerprint inputs show only those lines."
+  ],
+  "deviations": [],
+  "openQuestions": []
+}
