@@ -268,8 +268,8 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // once. Eight connections are exactly those eight: the headroom is zero, not one, and the next
 // leased loop added here makes a ninth caller that waits for a connection rather than failing,
 // for as long as the longest pass then holding one. They cannot come from the shared pool:
-// a lease is held for the whole pass, which is minutes for the compaction, and sharedPoolSize's
-// sixteen are what every request reads through.
+// a lease is held for the whole pass, which is minutes for the compaction, and the shared pool's
+// sharedPoolSize connections are what every request reads through.
 const leasePoolSize = 8
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that

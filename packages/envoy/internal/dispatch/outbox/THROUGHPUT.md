@@ -13,8 +13,11 @@ Treat the numbers as order-of-magnitude figures.
 - Load: 200 events across 20 issues, each routed to `role:reviewer`. Half are human replies to a
   session's message, which take an author lookup and a third destination. That is 500
   destinations in all: 200 issue topics, 200 role-lane publishes and 100 session topics.
-- The "busy pool" case keeps the shared 16-connection pool full with 32 goroutines running
-  `select pg_sleep(0.01)` back to back (`loadSharedPool`).
+- The "busy pool" case keeps a full shared pool busy. The table's readings ran 32 goroutines of
+  `select pg_sleep(0.01)` back to back on the 16-connection shared pool production then had.
+  Since the shared pool holds 64, the test fills a shared pool of 8 of its own with 16 such
+  goroutines (`busySharedPool`), so it does not hold 64 server connections while other packages'
+  tests share the server; on 2026-10-27 that read 1,050-1,260 ev/s at 50 ms and 517-566 at 150 ms.
 - The rate is (events marked published) / (time from start until none is left).
 
 ## Results

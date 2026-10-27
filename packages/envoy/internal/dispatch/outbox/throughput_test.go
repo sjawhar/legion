@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
@@ -139,17 +140,32 @@ func (p *latencyProxy) close() {
 	p.conns = nil
 }
 
-// loadSharedPool keeps every connection of database's shared pool busy until t ends, with more
-// callers queued behind them, the way the API's requests keep the pool the outbox used to share
-// with them.
-func loadSharedPool(t *testing.T, database *store.Store) {
+// busyPoolSize is the shared pool's size in the busy case. A full pool is what the case needs, of
+// any size; filling one of production's store.sharedPoolSize would hold that many server
+// connections while the other packages' tests share the server, past a default Postgres's
+// hundred.
+const busyPoolSize = 8
+
+// busySharedPool opens a second store on database's database whose shared pool holds
+// busyPoolSize connections, and keeps every one of them busy until t ends, with as many callers
+// again queued behind them, the way the API's requests keep the pool the outbox used to share
+// with them. The outbox pool it hands out is derived from it, as production's is.
+func busySharedPool(t *testing.T, database *store.Store) *store.Store {
 	t.Helper()
+	config := database.Pool.Config().Copy()
+	config.MaxConns = busyPoolSize
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open the busy shared pool: %v", err)
+	}
+	busy := &store.Store{Pool: store.NewPool(pool)}
+	t.Cleanup(busy.Pool.Close)
 	ctx, cancel := context.WithCancel(context.Background())
 	var callers sync.WaitGroup
-	for range 32 {
+	for range 2 * busyPoolSize {
 		callers.Go(func() {
 			for ctx.Err() == nil {
-				_, _ = database.Pool.Exec(ctx, `select pg_sleep(0.01)`)
+				_, _ = busy.Pool.Exec(ctx, `select pg_sleep(0.01)`)
 			}
 		})
 	}
@@ -157,6 +173,7 @@ func loadSharedPool(t *testing.T, database *store.Store) {
 		cancel()
 		callers.Wait()
 	})
+	return busy
 }
 
 // seedThroughputBacklog appends count events across issues issues, each routed to role:reviewer,
@@ -335,12 +352,13 @@ func TestOutboxThroughputUnderRemoteLatency(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rig := newThroughputRig(t, rtt)
 			seeded := seedThroughputBacklog(t, rig.database, rig.broker, issues, count)
+			outboxStore := rig.database
 			if tc.busy {
-				loadSharedPool(t, rig.database)
+				outboxStore = busySharedPool(t, rig.database)
 			}
 
 			started := time.Now()
-			stop := runOutbox(t, rig.database, rig.client, rig.broker)
+			stop := runOutbox(t, outboxStore, rig.client, rig.broker)
 			defer stop()
 			deadline := started.Add(waitTime)
 			for unpublishedCount(t, rig.database) > 0 && time.Now().Before(deadline) {
