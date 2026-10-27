@@ -164,7 +164,6 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
       skip: ${{ steps.version.outputs.skip }}
       pi_legion_version: ${{ steps.plugin_versions.outputs.pi_legion_version }}
       pi_envoy_version: ${{ steps.plugin_versions.outputs.pi_envoy_version }}
@@ -204,10 +203,12 @@ jobs:
               sed -n 's/^version=//p' <<<"$1"
             fi
           }
+          # The plugins' own build jobs write their "No release published" summary lines; with
+          # GITHUB_STEP_SUMMARY empty these two calls write none into this job's summary.
           # shellcheck disable=SC2086 # $PI_ENVOY_VERSION_ARGS is the argument list, split on purpose
-          envoy=$(.github/scripts/release-push.sh version pi-envoy-v $PI_ENVOY_VERSION_ARGS)
+          envoy=$(GITHUB_STEP_SUMMARY='' .github/scripts/release-push.sh version pi-envoy-v $PI_ENVOY_VERSION_ARGS)
           # shellcheck disable=SC2086 # $PI_LEGION_VERSION_ARGS is the argument list, split on purpose
-          legion=$(.github/scripts/release-push.sh version pi-legion-v $PI_LEGION_VERSION_ARGS)
+          legion=$(GITHUB_STEP_SUMMARY='' .github/scripts/release-push.sh version pi-legion-v $PI_LEGION_VERSION_ARGS)
           envoy_version=$(pair_member "$envoy" pi-envoy)
           legion_version=$(pair_member "$legion" pi-legion)
           if [ -z "$legion_version" ]; then
@@ -541,15 +542,13 @@ jobs:
       # For release-push.sh, the bump commits and the tags, with every tag (legion's existing-tag
       # check reads them). No credential is left in the checkout: the deploy key reaches the push
       # steps alone.
-      - id: checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
       # Only the npm publishes use node.
-      - id: setup_node
-        if: (needs.pi_envoy_build.result == 'success' && needs.pi_envoy_build.outputs.skip != 'true') || (needs.pi_legion_build.result == 'success' && needs.pi_legion_build.outputs.skip != 'true') || (needs.envoy_plugin_build.result == 'success' && needs.envoy_plugin_build.outputs.skip != 'true')
+      - if: (needs.pi_envoy_build.result == 'success' && needs.pi_envoy_build.outputs.skip != 'true') || (needs.pi_legion_build.result == 'success' && needs.pi_legion_build.outputs.skip != 'true') || (needs.envoy_plugin_build.result == 'success' && needs.envoy_plugin_build.outputs.skip != 'true')
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
@@ -757,18 +756,17 @@ jobs:
           PI_LEGION_VERSION: ${{ needs.pi_legion_build.outputs.version }}
           PI_LEGION_PUSHED: ${{ steps.pi_legion_push_main.outcome }}
         run: |
-          pi_envoy=""
-          if [ "$PI_ENVOY_RESULT" = success ] && [ "$PI_ENVOY_SKIP" = true ]; then
-            pi_envoy=$(git show "$GITHUB_SHA:packages/pi-envoy/package.json" | jq -r '.version // empty')
-          elif [ "$PI_ENVOY_RESULT" = success ] && [ "$PI_ENVOY_PUSHED" = success ]; then
-            pi_envoy=$PI_ENVOY_VERSION
-          fi
-          pi_legion=""
-          if [ "$PI_LEGION_RESULT" = success ] && [ "$PI_LEGION_SKIP" = true ]; then
-            pi_legion=$(git show "$GITHUB_SHA:packages/pi-legion/package.json" | jq -r '.version // empty')
-          elif [ "$PI_LEGION_RESULT" = success ] && [ "$PI_LEGION_PUSHED" = success ]; then
-            pi_legion=$PI_LEGION_VERSION
-          fi
+          # pair_member <build result> <skip> <pushed outcome> <released version> <package>: the
+          # version npm carries for the package, or nothing when its release did not publish.
+          pair_member() {
+            if [ "$1" = success ] && [ "$2" = true ]; then
+              git show "$GITHUB_SHA:packages/$5/package.json" | jq -r '.version // empty'
+            elif [ "$1" = success ] && [ "$3" = success ]; then
+              printf '%s\n' "$4"
+            fi
+          }
+          pi_envoy=$(pair_member "$PI_ENVOY_RESULT" "$PI_ENVOY_SKIP" "$PI_ENVOY_PUSHED" "$PI_ENVOY_VERSION" pi-envoy)
+          pi_legion=$(pair_member "$PI_LEGION_RESULT" "$PI_LEGION_SKIP" "$PI_LEGION_PUSHED" "$PI_LEGION_VERSION" pi-legion)
           ok=true
           if [ -z "$pi_envoy" ]; then
             echo "::warning::@sjawhar/pi-envoy had a release in this run that did not publish, so legion is not released and the worker image is not attested"
@@ -986,9 +984,12 @@ jobs:
         run: .github/scripts/release-push.sh push-main packages/envoy-plugin "$VERSION"
 
   # The worker image, built from this run's commit with the plugin pair legion_build decided (empty
-  # off main, where legion_build skips and the Dockerfile links none). This first call of
-  # worker-image.yaml builds and pushes the image's sha- tag only (`skip_attest`):
-  # worker_image_attest attests it and worker_image_release names it on the legion release.
+  # off main, where legion_build skips and the Dockerfile links none) and labelled with the legion
+  # version legion_build decided (`legion_version`; empty when legion_build skips or has nothing to
+  # release, which leaves the label sha-<short>). This first call of worker-image.yaml builds and
+  # pushes the image's sha- tag only (`skip_attest`): worker_image_attest attests it and
+  # worker_image_release tags it with that version and names it on the legion release once publish
+  # released it.
   worker_image:
     needs: legion_build
     if: always() && (needs.legion_build.result == 'success' || needs.legion_build.result == 'skipped')
@@ -1007,6 +1008,7 @@ jobs:
       attestations: write
     with:
       skip_attest: true
+      legion_version: ${{ needs.legion_build.outputs.version }}
       pi_legion_version: ${{ needs.legion_build.outputs.pi_legion_version }}
       pi_envoy_version: ${{ needs.legion_build.outputs.pi_envoy_version }}
 

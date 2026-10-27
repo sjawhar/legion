@@ -76,14 +76,17 @@ RELEASE=.github/workflows/release.yaml
 LISTENER=.github/workflows/release-envoy-listener.yaml
 INFRA=.github/workflows/release-envoy-infra.yaml
 
-# write_green <workflows dir>: the trio in its intended shape. release.yaml: a build job (install,
-# setup-bun, a `go build` behind `&&`, upload, tripwire) with an `if:` of its own, two credentialed
-# publish jobs (setup-node, `npm publish` of the handed tarball, the tag push, a GitHub release and
-# the bump push) whose `if:` calls `always()` and tests the result of the build whose outputs it
-# reads, a plain job that runs no dependency code and a reusable-workflow call with no steps and no
-# `if:`. The listener: a docker build job (`packages: write`, a build-push) and release_publish in
-# its concurrency group, with `docker buildx imagetools create`. Infra: a build job
-# (install-pulumi, `pulumi package get-schema`, tripwire) and a publish job.
+# write_green <workflows dir>: the trio in a shape every rule passes, not a copy of the real files.
+# release.yaml: a build job (install, setup-bun, a `go build` behind `&&`, upload, tripwire) with an
+# `if:` of its own, two credentialed publish jobs (setup-node, `npm publish` of the handed tarball,
+# the tag push, a GitHub release and the bump push) whose `if:` calls `always()` and tests the result
+# of the build whose outputs it reads, a plain job that runs no dependency code and a
+# reusable-workflow call with no steps and no `if:`. pi_legion_publish needing pi_envoy_publish and
+# testing its result is a generic rule-5 shape, a chain of skippable jobs, which the
+# if-two-needs-one-result and if-steps-less-job cases below mutate; the real release.yaml publishes
+# every package from one job. The listener: a docker build job (`packages: write`, a build-push) and
+# release_publish in its concurrency group, with `docker buildx imagetools create`. Infra: a build
+# job (install-pulumi, `pulumi package get-schema`, tripwire) and a publish job.
 write_green() {
   local dir=$1
   cat > "$dir/release.yaml" <<'YAML'
@@ -361,7 +364,7 @@ add_push_tag_step() {
   add_publish_step "$1" "      - name: $2"$'\n        env:\n          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n          TAG: ${{ steps.handed.outputs.tag }}\n        run: |\n'"$3"$'          .github/scripts/release-push.sh push-tag "$TAG"\n'
 }
 
-echo "case: the trio in its intended shape"
+echo "case: the trio in a shape every rule passes"
 root=$(fixture green)
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
