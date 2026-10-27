@@ -2,34 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T08:56:00Z",
-  "round": 12,
+  "completed": "2026-10-27T09:47:00Z",
+  "round": 13,
   "generation": 4,
-  "head": "cb3a27117232",
+  "head": "3a58ed47b6d2",
   "verdictProvider": "No subagent judged anything in this round; the tester's own session ran every check, so no provider or model needs naming.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the implementer's case on dispatch:local at the head. In the deploy order from main 1357b95c, a closed ED-1 with an unsettled typed line logs documents=1 owed_documents=0 live_ahead=0, and all 4 blocks resolve; after rebuild-refs the next tick gives 0 again. After a failed close settlement (versions refused by a trigger), closed ED-1 is indexed and open ED-2 is skipped (live_ahead=1) until its settlement resumes at version 2. The red test of round 11 (196f5a85) is unchanged (same sha256 of the function body), and the implementer reports it passes. The proof is verified for what it claims. It misses the history defect below."
+    "how": "The red tests 2f3a9b7f and 196f5a85 are unchanged (sha256 of each function body equal at 3a58ed47). On the surface, after main 1357b95c's close, the typed line answers 'No block' while closed and is dated v2 after the reopen. honest.sh finds no recorded text that its version lacks. d1@v4 gives version 4's state=\"open\". owed_documents reaches 0 in the deploy order and after rebuild-refs. The implementer's case is verified. It misses identical paragraphs."
   },
   "failed": 1,
   "failures": [
     {
-      "criterion": "Architect's point (2): after the reopen, the settlement re-indexes and the block graph reflects the reopened document. Under #2210, block history names only versions that hold the text: a closed document indexed from its live text must not leave a block dated to, or pinned with a text at, a version that does not hold it",
-      "evidence": "Red test TestTheReopensSettlementDatesAClosedDocumentsUnsettledEditToItsVersion, commit 2f3a9b7f in packages/envoy/internal/dispatch/docs/block_index_test.go. Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://… go test -count=1 -run TestTheReopensSettlementDatesAClosedDocumentsUnsettledEditToItsVersion ./internal/dispatch/docs/. Head: FAIL 'the block the unsettled edit made is dated version 1, want 2, the first version that holds it'. a0484132 (the same test appended): ok. Real surface on the head: closed ED-1's typed line shows 'Changed in version: 1', and #b-681699f2-…@v1 answers 'Unchanged since version 1. Text at version 1: unsettled line of ED-1', while version 1's markdown lacks the line. After alice's reopen, the settlement wrote version 2, which holds the line, and indexed it; the block still shows 'Changed in version: 1' and the @v1 pin still gives the text. The ask-state case does the same: dispatch://UP-1/spec#b-d1@v4 answers state=\"resolved\" where version 4 holds state=\"open\", and the implementer changed the round-9 ask-state test to assert the live state at version 1. On a0484132 the reopen dates the line to version 2, and @v1 answers 'version 1 … has no record of its blocks'. The open ED-2 on the head is dated to 2 the same way. Round 11's red test still holds alongside this one."
+      "criterion": "Architect points (3) and (4) for decision 22: every block a version holds resolves on the closed page, identical paragraphs included, and after the reopen each block is dated to the first version that holds it",
+      "evidence": "Red test TestAClosedDocumentsIdenticalParagraphsKeepTheirOwnHistory, commit 44cf9cac in packages/envoy/internal/dispatch/docs/block_index_test.go. Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://… go test -count=1 -run TestAClosedDocumentsIdenticalParagraphsKeepTheirOwnHistory ./internal/dispatch/docs/. Head: FAIL 'block f3387491-… that version 1 holds is dated 0 (text at version 1 false, deleted at version 1 true)'. cb3a2711: FAIL on the other half ('the inserted paragraph … which no version holds, has a text at version 1'). Real surface (edge_h4, head): version 1 '## Plan / Same. / Same. / Other. / Same. / Alpha. / Beta. / Gamma.' was indexed while ED-1 was open (third Same. = 538a70a2, v1). With versions refused, alice typed a new 'Same.' after 'Other.' (49a2b5b9) and moved Alpha by cut and paste (a new id). SetStatus closed ED-1 and rebuild-refs ran. Closed: 538a70a2 answers 'No block', with a deletion row at version 1; 49a2b5b9 answers 'Changed in version: 1'. After the reopen and version 2: 538a70a2 is 'Changed in version: 2' and its @v1 pin answers 'no block … at version 1'; 49a2b5b9 stays 'Changed in version: 1' with a text at version 1. The cause: closedVersionBlocks aligns untyped blocks by text alone with difflib, whose longest match pairs version 1's third 'Same.' with the new paragraph, although the index holds 538a70a2's own row with that text. Edge the design leaves open: in the deploy order with no earlier index, a block that version 1 holds and that an unsettled edit changed in place has no row and no live match, so it answers 'No block' while the issue is closed."
     }
   ],
   "proof": [
     {
-      "criterion": "A closed issue's live-ahead document (an unsettled edit or ask states) is indexed in the deploy order and after rebuild-refs, and its #b- references resolve; an open issue's stays skipped until it settles; the reopen's later edits and deletes are reflected",
-      "surface": "dispatch:local with the head's Go server, the dispatch CLI and Chromium (as alice), on databases written by main 1357b95c",
-      "command": "old-edge.sh dep_e3 and old-seed.sh dep_h3 on 1357b95c; run-server.sh at the head; dcli read --ref for each block; dispatch-e2e rebuild-refs; reopen; type.ts NOENTER into the Context paragraph; POST /edits delete of the Ship it block. On edge_h2: a trigger refuses versions, type.ts writes into ED-1 and ED-2, daemonclose ED-1, rebuild-refs, then the trigger is dropped",
-      "observed": "dep_e3: documents=1 owed_documents=0, 4 of 4 blocks resolve, and the same after rebuild-refs. After the reopen and the edits, version 5 is indexed: the edited block shows 'Changed in version: 5' with its new text, and the deleted block answers 'No block'. dep_h3: withdrawn=15, documents=6 owed_documents=0, 7 of 7 resolve, and the same after rebuild-refs. edge_h2: ED-1 is indexed while closed; ED-2 is skipped (live_ahead=1) until the resumption settles it at version 2, then its line is 'Changed in version: 2'.",
-      "headSha": "cb3a27117232",
-      "negativeControl": "a0484132 on the same seed (dep_e3n) logs owed_documents=1 live_ahead=1, and the typed line answers 'No block … in dispatch://ED-1/spec'"
+      "criterion": "Points (1), (2) and (5): no history or pin names a version lacking the text, ask state included; owed_documents reaches 0 in the deploy order and after rebuild-refs; open issues unchanged",
+      "surface": "dispatch:local with the head's Go server, the dispatch CLI and Chromium (as alice), on databases written by main 1357b95c; honest.sh audits document_block_texts and document_blocks against artifact_versions",
+      "command": "old-edge.sh dep_e4, NOENTER=1 old-edge.sh dep_c4 and old-seed.sh dep_h4 on 1357b95c; srv.sh head on each; resolve.sh and honest.sh; dispatch-e2e rebuild-refs; reopen; dcli read --ref …@v1 and UP-1#b-d1@v4. On dep_h4, open OP-1 with versions refused: type.ts, rebuild-refs, then the refusal lifted",
+      "observed": "dep_e4: documents=1 owed_documents=0. Heading, Context and Ship it resolve at v1; the typed line answers No block, and @v1 answers no block at version 1. After the reopen the line is v2, and honest.sh is clean. dep_h4: withdrawn=15, documents=6 owed_documents=0, 12 of 12 of each issue's blocks resolve at v4, d1@v4 gives state=\"open\", and the same after rebuild-refs and after UP-1's reopen. OP-1: live_ahead=1 and the line answers No block until the settlement indexes v2.",
+      "headSha": "3a58ed47b6d2",
+      "negativeControl": "cb3a2711 on the same seed (dep_e4n) records 'unsettled typed line' at version 1 (honest.sh: ED-1|c196f9ce…|1), and last round cb3a2711 gave d1@v4 as state=\"resolved\""
     }
   ],
-  "ci": "At cb3a2711: Tests 40474546192, Docs 40474546313 and Legion Envoy and Contracts 40474546087 are queued, and Worker Image 40474546085 is pending. At a0484132 every run was cancelled.",
+  "ci": "At 3a58ed47: Tests 40480590080, Docs 40480590066 and Legion Envoy and Contracts 40480589994 are queued, and Worker Image 40480590025 is pending.",
   "evidenceComments": [
-    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6437572577"
+    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6438564749"
   ]
 }
