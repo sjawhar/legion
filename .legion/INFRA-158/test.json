@@ -2,59 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T07:05:00Z",
-  "round": 10,
+  "completed": "2026-10-27T08:24:00Z",
+  "round": 11,
   "generation": 4,
-  "head": "4440fc7b57a27f3aa25936fc470183036e4db1e8",
+  "head": "a0484132d5bb",
   "verdictProvider": "No subagent judged anything in this round; the tester's own session ran every check, so no provider or model needs naming.",
-  "fingerprint": {
-    "from": "21c784af1c137773a07a1f18f2704bd3a6e53d9c b9213970aa87bfe6dac2fe0b10698ddb85734c319f784073ad257f0db01ffaf8",
-    "to": "4440fc7b57a27f3aa25936fc470183036e4db1e8 2eeecd82abdaac937332726088c7f04b8fb02a978fdd85d8fbd207372a21f752",
-    "result": "changed, so this was a full round",
-    "why": "The merge brought in main's block index (#2210), which leases a ninth maintenance loop (block-index). This branch's repair makes ten, so leasePoolSize goes from 9 to 10, and the README's loop count and main.go's goroutine order were resolved to match. Retro's commits (docs/solutions and the removal of .legion/) are outside the fingerprint."
-  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the merged head independently on dispatch:local: two processes sharing the leases, closes through the daemon's new SetStatus that parses the response, block ids and references across a close, races, an upgrade from main b69f636f, the unloadable close and rebuild, the round-9 web-app probes, and the browser suites."
+    "how": "The implementer's case was driven independently in the deploy's order. Main's build before the block index (1357b95c) wrote 3 closed issues with 5 open asks each. The head's migration 0121, boot repair and block-index loop then logged withdrawn=15, documents=6 owed_documents=0 live_ahead=0. dispatch://UP-1/spec#b-85a89d0c-… and #b-e169c632-… resolve. After rebuild-refs (blocks_owed=6), the next tick gives owed_documents=0 and the references still resolve. On the same seed, 4440fc7b logs owed_documents=6 live_ahead=6 and the reference answers 'No block'. The proof is verified, but it covers only a difference in ask attributes."
   },
-  "failed": 0,
-  "failures": [],
-  "proof": [
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "Every leased maintenance loop, the asks repair and main's new block index included, runs once across processes with leasePoolSize 10",
-      "surface": "Two head processes (A on 8797, B on 8796) on one Postgres database for 13 minutes",
-      "command": "run-server.sh twice on tester_r13; drive closes and races through both; then grep the 'leased pass ran|skipped' lines from both logs",
-      "observed": "B ran issue-ask-repair once at 06:55:35 and A skipped it at 06:55:36. block-index ran 26 times on B and A skipped it 25 times. suggestion-outcomes, architecture-import, delivery-reconcile and reference-excerpts each ran on B with A's skips matching. No pass ran on both.",
-      "headSha": "4440fc7b57a27f3aa25936fc470183036e4db1e8",
-      "negativeControl": "Each A skip line is the lease refusing a second holder; with a pool short of the leased names a loop would wait for a connection instead of logging a ran or skipped line, and every loop logged one."
-    },
-    {
-      "criterion": "Close by a person, an agent session and the Legion daemon withdraws every open ask naming the closer and changes nothing else; the daemon's SetStatus, which now parses the PATCH response, reads a last_seq equal to the issue's; reopen restores the asks; block ids and block references survive the close",
-      "surface": "dispatch:local with the branch's CLI and the daemon's dispatch.HTTPClient.SetStatus (rebuilt for main's new signature)",
-      "command": "seed.ts TT 3; dcli doc-read --issue TT-1 --blocks; alice cookie PATCH TT-1; dcli issue-update --issue TT-2 --status done; daemonclose TT-3 done and GET TT-3; state.ts; --blocks again; reopen TT-1 (PATCH response and GET); --blocks again; comment citing dispatch://TT-1/spec#b-563e44c0-…; daemonclose TT-1; dcli read --ref of that block",
-      "observed": "SetStatus answered status=done last_seq=26, and GET answered last_seq=26. On each issue open_asks is 0 and the approval draft; d1, p1, p3, h1 and ap read withdrawn by alice | tester-agent-9 | legion-daemon:TT; d2 answered, p2 retracted, p4 resolved; blocks and the copy read resolved; the named versions read d1=open. The --blocks listing differs across the close only in d1's state attribute, and is identical after the reopen. The reopen's response last_seq 32 equals GET's, and the 5 asks are restored. After the close the block reference still resolves, listing the comment under 'Referenced by'.",
-      "headSha": "4440fc7b57a27f3aa25936fc470183036e4db1e8",
-      "negativeControl": "The same closes on main's build b69f636f left open_asks 5, the approval awaiting and every block open"
-    },
-    {
-      "criterion": "Asks already open on closed issues are repaired, naming each closer; later passes write nothing; concurrent and cross-process closes stay consistent; a close beside an unloadable document succeeds and a rebuild shows the withdrawn block resolved",
-      "surface": "Main's build b69f636f, then the head on the same database; two head processes; dispatch:local",
-      "command": "Main seeds UP-1..3, adds an unindexed block to each and closes them (alice, old-agent-5, SetStatus); the head boots; two repair passes with an md5 before and after; race.ts resolve 8, double 5, unsettled 6, flip 5; race2.ts 8; UP-4 with notes.md corrupted, daemonclose, rebuild as alice, reopen",
-      "observed": "Boot: withdrawn=15 restored=0 swept=3, naming alice, old-agent-5 and legion-daemon:UP; the passes left the md5 unchanged. Races: 0 problems on one process and across two. UP-4: close 200 with the ask withdrawn; rebuild 200 with block state=\"resolved\"; after the reopen state=\"open\".",
-      "headSha": "4440fc7b57a27f3aa25936fc470183036e4db1e8",
-      "negativeControl": "On main's build the three closed issues kept 5 open asks each, the approval awaiting and the blocks open"
-    },
-    {
-      "criterion": "The web app after main's editor changes: no false unsent-edit notice in any tested order, and typed text kept exactly once",
-      "surface": "Dispatch's Playwright harness (chromium and iphone) with a throwaway spec keeping the server's frame order and delaying only Auth where a probe needs it (deleted after); Dispatch's own browser suites",
-      "command": "Probes 1, 2, 5 and 8 of round 9, --repeat-each 2; bunx playwright test close-withdraws-asks offline-edits doc margin ask-blocks references --project chromium --project iphone",
-      "observed": "16 of 16: a closed document stores 0 rows; the reopen then offline then a second close shows no notice; the review's path stores 0 rows with status 'connected'; held stamps, then a cut, typing and a reload give typed 1, '## Held heading' 1, 'held two' 1, '## Detail' 1 and 'second step' 1. Suites: 165 passed, 0 failed, 1 skipped.",
-      "headSha": "4440fc7b57a27f3aa25936fc470183036e4db1e8",
-      "negativeControl": "Round 9: the web apps without the fix (83649d6a's and 52159aaf's connection.ts and pending-sync.ts) failed the review's path 2 of 2 each with 'can't be sent: this document is read-only.'"
+      "criterion": "Architect's edge for the fix: a closed issue whose live document also differs from its latest version in something other than an ask attribute, with the pre-close settlement failing as the close allows, must still be block-indexed, so owed_documents reaches 0 and its #b- references resolve",
+      "evidence": "Red test TestBlockIndexIndexesAClosedDocumentWithAnUnsettledEdit, commit 196f5a85 in packages/envoy/internal/dispatch/docs/block_index_test.go. Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://… go test -count=1 -run TestBlockIndexIndexesAClosed ./internal/dispatch/docs/. It fails with 'tick = {Documents:0 LiveAhead:1 OwedDocuments:1}, want the closed document indexed and nothing owed'; the two existing closed-document tests pass. Real surface, case 1, on the head: a trigger refused the document's versions while Chromium typed a line (settle ERROR); the daemon's SetStatus closed ED-1, logging 'close an issue whose documents did not all settle first'; the trigger was then dropped and rebuild-refs ran (blocks_owed=1); the block index logged owed_documents=1 live_ahead=1 and stayed owed through 2 more ticks, because resume.go:50 skips closed issues; a reopen settled the document at version 3 and indexed it. Case 2, the deploy order: main's build 1357b95c closed ED-1 with the typed line unsettled; the head's deploy logged documents=0 owed_documents=1 live_ahead=1, and each of the 4 blocks answers 'No block <id> in dispatch://ED-1/spec' while the issue stays closed. Main b69f636f gives the same result for case 1, so the cause is #2210's skip of a live-ahead document together with the rule that a closed issue settles nothing. This change did not introduce it, but the fix covers only a difference in ask attributes."
     }
   ],
-  "ci": "At 4440fc7b: Tests 40462526216, Docs 40462526004 and Legion Envoy and Contracts 40462526026 queued; Worker Image 40462526183 and PR Title 40462526032 pending. At 21c784af, Tests 40455544826 succeeded, so main's daemon admission-test failure is gone.",
+  "proof": [
+    {
+      "criterion": "A closed issue's document that the close or the ask repair left live ahead only in ask attributes is block-indexed in the deploy's order and after rebuild-refs, and its #b- references resolve",
+      "surface": "dispatch:local with the head's Go server on a database written by main before the block index, plus the dispatch CLI",
+      "command": "old-seed.sh dep_h (main 1357b95c: seed UP 3 and close by alice, by an agent and by SetStatus); run-server.sh at the head on dep_h; dcli doc-read --issue UP-1 --blocks; dcli read --ref dispatch://UP-1/spec#b-<id>; dispatch-e2e rebuild-refs with DISPATCH_SERVER_URL; wait 35 s; check document_block_versions",
+      "observed": "The boot repair gave withdrawn=15. The block index logged documents=6 owed_documents=0 live_ahead=0. The question block and the heading resolve ('Changed in version: 4'). rebuild-refs gave blocks_owed=6 with 6 of 6 null; the next tick gave documents=6 owed_documents=0, and the references still resolve.",
+      "headSha": "a0484132d5bb",
+      "negativeControl": "4440fc7b on the same seed (dep_n) logs documents=0 owed_documents=6 live_ahead=6, and dcli read --ref …#b-aa1f21e1-… answers 'No block … in dispatch://UP-1/spec'"
+    }
+  ],
+  "ci": "At a0484132: Tests 40470630331, Docs 40470630488 and Legion Envoy and Contracts 40470630316 are queued; Worker Image 40470630324 is pending.",
   "evidenceComments": [
-    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6435877973"
+    "https://github.com/sjawhar/legion/pull/2233#issuecomment-6437010605"
   ]
 }
