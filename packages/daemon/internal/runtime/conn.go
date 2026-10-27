@@ -12,8 +12,20 @@ import (
 // for a refusal and for nothing else, because the two failures are charged differently: an agent
 // that refuses prompts spends its prompt budget (a worker that refused every prompt would
 // otherwise be retried forever), while a prompt lost to the transport was never the agent's
-// answer and is sent again at no charge.
+// answer and is sent again at no charge. A refusal also carries the words Oh My Pi gave
+// (RefusalReason), since one of them — a turn already running — is no refusal of the work.
 var ErrPromptRefused = errors.New("runtime: the agent refused the prompt")
+
+// RefusalReason is the words the agent refused with — Oh My Pi's `error` beside its
+// `success: false` — read from the error in err's chain that carries them, or "" when none does.
+// The stream's refusal carries them (stream.RefusedError), and so does the fake connection's.
+func RefusalReason(err error) string {
+	var refusal interface{ RefusalReason() string }
+	if errors.As(err, &refusal) {
+		return refusal.RefusalReason()
+	}
+	return ""
+}
 
 // ErrTokenRefused is the agent's shim answering AgentSecretsToken without a token: it could not
 // read its projected token, or it was built before the request and Oh My Pi refused the frame as

@@ -875,6 +875,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
+- The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
+  daemon records. The daemon now refuses a completion of a run the issue has left before it applies
+  any fact and names the current run's queued task, so the worker ends the turn and calls
+  `handoff_complete` again at the same commit in that task's turn, which is applied.
 - The `legion` tool's `handoff_complete`, `sign_off` and `register_gate` wait out a daemon restart
   instead of failing on the first refused connection: a connection refused, reset or closed before
   a response, or a 502 or 503 from a proxy (a body that is not the daemon's refusal), is retried
@@ -884,7 +888,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   final result. The daemon applies each of the three at most once however often it arrives. Every
   answer the daemon gives, a 4xx or 409 or its own coded 502/503, is passed on at once; after an
   attempt whose connection dropped, that refusal says the dropped attempt may have been applied.
-
 - The `legion-architect` skill was 51,256 bytes, over Oh My Pi's 51,200-byte spill threshold, so it
   reached an architect with its middle cut out; its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).

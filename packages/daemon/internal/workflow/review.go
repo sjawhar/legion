@@ -58,7 +58,7 @@ func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.Requ
 }
 
 // mergeability records what GitHub's last read found for whether the pull request's head can be
-// merged into its base (intake.PullRequestMergeability, pullRequestMergeability's own GitHub
+// merged into its base (intake.PullRequestMergeability, readPullRequest's own GitHub
 // answer). In awaiting_merge it withdraws a conflicting head the way decideChecks's AwaitingMerge
 // case withdraws a red one (classify.ConflictWithdrawsReady, the same TriggerChecksRed
 // transition), since GitHub computes no merge ref for a conflicting head and no CI result will

@@ -71,6 +71,9 @@ func claudeInnerCommand(legion string, launch ClaudeLaunch, mcpConfig, session s
 
 // claudeEnvironment are the -e pairs a Claude Code pane carries beside every pane's: tmux's form of
 // the environment claudelaunch.Environment names, the claim's own configuration directory included.
+// Its names are runtime.ClaudeConfigDirVariable and runtime.ClaudeDisabledFeatures, which an
+// operator's pane variable may not name (runtime.PaneVariableRefusal): these pairs come after the
+// operator's and would override them without a word.
 func claudeEnvironment(configDir string) []string {
 	assignments := claudelaunch.Environment(configDir)
 	pairs := make([]string, 0, 2*len(assignments))
@@ -78,6 +81,13 @@ func claudeEnvironment(configDir string) []string {
 		pairs = append(pairs, "-e", assignment)
 	}
 	return pairs
+}
+
+// SessionsDir is the claim's own Claude Code projects directory, under which Claude Code keeps each
+// transcript as `<folder named for the working directory>/<session id>.jsonl`: the directory a
+// resumed transcript must be under (claudeResumeSession).
+func (claudeLauncher) SessionsDir(spec runtime.SpawnSpec, host Host, _ map[string]string, _ string) (string, error) {
+	return filepath.Join(ClaudeConfigDir(host.StateDir, spec.Claim), "projects"), nil
 }
 
 // Launch is the inner command and the extra -e pairs of a Claude Code launch: the claim's

@@ -505,7 +505,7 @@ func (r *noRequiredChecksLive) publishSynchronize(issue noRequiredChecksIssue, h
 
 // noRequiredChecksGitHub is GitHub's REST API for acme/widgets as this proof's daemon reads it,
 // answering every read of the required-checks pass (readRequiredChecks) with a 2xx: each pull
-// request with its base, head and `mergeable: true` (pullRequestMergeability), its reviews as none
+// request with its base, head and `mergeable: true` (readPullRequest), its reviews as none
 // (readReviews), each base branch's rulesets as the driver last set them (requiredchecks.Required's
 // /rules/branches/<base>) and the branch itself as unprotected (its /branches/<base>, which a 404
 // would make an error that keeps the set last read). It also answers what a launch and a disarm

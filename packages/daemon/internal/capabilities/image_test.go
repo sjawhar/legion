@@ -287,6 +287,63 @@ func TestCheckImageResolvesTheBrowserAsOhMyPiDoes(t *testing.T) {
 	})
 }
 
+// SkipBrowser (`probe-image --skip-browser`) leaves the browser row unchecked and runs no browser,
+// so an image with no Chromium passes while every other image row is still checked: one that
+// lacks another capability still fails, naming that row and not the browser.
+func TestCheckImageSkipBrowserLeavesTheBrowserRowUnchecked(t *testing.T) {
+	const detail = "not checked (--skip-browser): the image is for a deployment that turns Oh My Pi's browser off"
+	t.Run("no chromium anywhere", func(t *testing.T) {
+		s := newStubs(t)
+		s.remove("chromium")
+		img := s.image()
+		img.SkipBrowser = true
+
+		states, err := CheckImage(context.Background(), img)
+
+		if err != nil {
+			t.Fatalf("CheckImage = %v, want no error: the browser row is the only one the image lacks", err)
+		}
+		got := byName(states)
+		if got[Browser].Status != StatusUnchecked || got[Browser].Detail != detail {
+			t.Errorf("browser state = %+v, want %s (%s)", got[Browser], StatusUnchecked, detail)
+		}
+		for _, row := range Table {
+			if row.Site == SiteImage && row.Name != Browser && got[row.Name].Status != StatusPresent {
+				t.Errorf("%s state = %+v, want %s: SkipBrowser leaves only the browser row unchecked", row.Name, got[row.Name], StatusPresent)
+			}
+		}
+	})
+	t.Run("a chromium on PATH is not run", func(t *testing.T) {
+		s := newStubs(t)
+		ran := filepath.Join(t.TempDir(), "ran")
+		s.install("chromium", "#!/bin/sh\ntouch "+ran+"\nexit 1\n")
+		img := s.image()
+		img.SkipBrowser = true
+
+		states, err := CheckImage(context.Background(), img)
+
+		if err != nil || byName(states)[Browser].Status != StatusUnchecked {
+			t.Errorf("CheckImage = %v, browser state %+v, want no error and the row unchecked", err, byName(states)[Browser])
+		}
+		if _, statErr := os.Stat(ran); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("the chromium on PATH ran (stat %s: %v), want no browser run under SkipBrowser", ran, statErr)
+		}
+	})
+	t.Run("another capability missing", func(t *testing.T) {
+		s := newStubs(t)
+		s.remove("chromium")
+		s.remove("gopls")
+		img := s.image()
+		img.SkipBrowser = true
+
+		_, err := CheckImage(context.Background(), img)
+
+		if err == nil || !strings.Contains(err.Error(), "capability lsp is missing") || strings.Contains(err.Error(), "capability browser") {
+			t.Errorf("CheckImage = %v, want an error naming lsp and not the browser", err)
+		}
+	})
+}
+
 // CodeGraph is the CLI on PATH and its plugin enabled in the profile's lock, both; each failure is
 // named, and the row is missing and in CheckImage's error — the gate refuses an image lacking
 // either half.

@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // Paths are the absolute paths a Claude Code agent command names, each resolved by the caller: the
@@ -77,15 +79,17 @@ func MCPConfig(bun, pluginDir, configDir string) ([]byte, error) {
 }
 
 // Environment is what a Claude Code worker carries beside its runtime's own pairs, each a
-// `NAME=VALUE`: its Claude Code configuration directory, and Claude Code's background tasks and
-// scheduled prompts off, since the bridge reports a turn's end when its last user message's result
-// arrives and nothing may run after it unseen.
+// `NAME=VALUE`: its Claude Code configuration directory (runtime.ClaudeConfigDirVariable), and
+// Claude Code's background tasks and scheduled prompts off (runtime.ClaudeDisabledFeatures, each
+// set to 1), since the bridge reports a turn's end when its last user message's result arrives and
+// nothing may run after it unseen.
 func Environment(configDir string) []string {
-	return []string{
-		"CLAUDE_CONFIG_DIR=" + configDir,
-		"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1",
-		"CLAUDE_CODE_DISABLE_CRON=1",
+	env := make([]string, 0, 1+len(runtime.ClaudeDisabledFeatures))
+	env = append(env, runtime.ClaudeConfigDirVariable+"="+configDir)
+	for _, feature := range runtime.ClaudeDisabledFeatures {
+		env = append(env, feature+"=1")
 	}
+	return env
 }
 
 // SessionVariable is how the Kubernetes runtime tells a pod's role launcher that a generation runs

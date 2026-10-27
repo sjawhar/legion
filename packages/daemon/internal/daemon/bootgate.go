@@ -21,6 +21,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ompdirs"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/procgroup"
@@ -161,11 +162,19 @@ type pluginGate struct {
 }
 
 // gateEnvironment is the environment a pane's Oh My Pi runs with, which the boot gate probes under:
-// the pane environment, and each provider key the pane's shim exports from providerEnvDir as the
-// shim exports it (shim.ReadProviderEnv), so a task agent whose model's key comes only through a
-// provider key resolves as it will in a pane.
-func gateEnvironment(environ []string, stateDir, providerEnvDir string) (map[string]string, error) {
+// the pane environment, the operator's `runtime.tmux` block — its pane variables, and its Oh My Pi
+// overlays as PI_CONFIG_FILES, so a model its overlays route resolves as it will in a pane — and
+// each provider key the pane's shim exports from providerEnvDir as the shim exports it
+// (shim.ReadProviderEnv), so a task agent whose model's key comes only through a provider key
+// resolves as it will in a pane.
+func gateEnvironment(environ []string, stateDir, providerEnvDir string, block *config.Tmux) (map[string]string, error) {
 	env := tmux.PaneEnvironment(environ, stateDir)
+	if block != nil {
+		maps.Copy(env, block.PaneEnv)
+		if len(block.PiConfigFiles) > 0 {
+			env["PI_CONFIG_FILES"] = strings.Join(block.PiConfigFiles, ":")
+		}
+	}
 	if providerEnvDir == "" {
 		return env, nil
 	}

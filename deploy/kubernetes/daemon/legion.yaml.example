@@ -27,7 +27,8 @@ advertise_host: legion-daemon-widgets.legion.svc
 daemon_url: http://legion-daemon-widgets.legion.svc:13370
 admission_cap: 4                       # trees running at once
 controller: operator                   # who runs the controller: operator (legion controller start,
-                                       # the default) or daemon (a pod this daemon launches and keeps)
+                                       # the default) or daemon (a pod this daemon launches and keeps;
+                                       # under runtime: tmux, a pane in a window of its own)
 
 operator_token_file: ./operator-token  # the operator's bearer, in a file only you can read
 dispatch_url: https://dispatch.example.com
@@ -68,6 +69,23 @@ github_apps:
 #                                      # holds no model route for it either: put ANTHROPIC_API_KEY in
 #                                      # provider_keys (pod.env refuses a credential-shaped name) and
 #                                      # ANTHROPIC_BASE_URL and ANTHROPIC_MODEL in runtime.kubernetes.pod.env.
+# Under runtime: tmux — the daemon and every pane on one host, as one Unix user — the runtime block
+# is instead (docs/deployment.md, "The runtime.tmux block"):
+# runtime:
+#   tmux:
+#     pane_env: { ELAN_HOME: /opt/elan } # plain variables added to every pane; refused: PATH, a name the
+#                                      # runtime sets, the git identity, a launch secret's _FILE
+#                                      # pointer, a variable that places Oh My Pi's sessions, a provider
+#                                      # key or its _FILE pointer, a credential-shaped name, and a URL
+#                                      # value with a password (a secret reaches a pane as a file,
+#                                      # never as a value on tmux's command line)
+#     pi_config_files: [./overlay.yml] # Oh My Pi overlays every pane names in PI_CONFIG_FILES, in order,
+#                                      # before the runtime's own turn-scope overlay, which stays last
+#     take_over: kubernetes            # only while moving a project from runtime kubernetes onto this
+#                                      # host: take over the claims its pods held (docs/deployment.md,
+#                                      # "Moving a project onto tmux")
+# and a provider key may be a file the daemon reads once at boot (readable by its owner alone):
+# provider_keys: { ANTHROPIC_API_KEY: file:/etc/legion/providers/ANTHROPIC_API_KEY }
 
 runtime:
   kubernetes:
