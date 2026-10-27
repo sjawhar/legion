@@ -2,27 +2,29 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-439",
-  "completed": "2026-10-27T09:06:35Z",
-  "round": "7, continued against the forward merge",
-  "reviewedHead": "34b3e846cb6e35bb661f02261d2fab236a2ca3f0",
-  "decision": "approved",
+  "completed": "2026-10-27T10:34:03Z",
+  "round": "confirmation after the forward merge 5579f099 (fingerprint equal), held by a new conflict",
+  "reviewedHead": "5579f099d21e36d1a81e13e9a880efcad0522aff",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 0,
   "fingerprint": {
-    "before": "fcfbc288f05b54a8f89461975c53a87e0da717f16b03149df2a0cf507b638fcf (fcc7d008, my round 7 review's code)",
-    "after": "fcfbc288f05b54a8f89461975c53a87e0da717f16b03149df2a0cf507b638fcf (34b3e846)",
-    "verdict": "equal; round 7 was REQUEST_CHANGES for CI alone, so the round continues against the new head with no new thermonuclear pass"
+    "approved": "fcfbc288f05b54a8f89461975c53a87e0da717f16b03149df2a0cf507b638fcf (34b3e846, approval 5664587411 at 21808616)",
+    "now": "fcfbc288f05b54a8f89461975c53a87e0da717f16b03149df2a0cf507b638fcf (5579f099)",
+    "verdict": "equal: the code is the approved code"
   },
-  "verifiedFixed": [
-    "Round 7's only finding: required `test` is green at 34b3e846. The merge carries main's #2317 (baadccdc). The first run there failed TestOutboxRunSurvivesAFailedClaimAndAFailedFinish under the race detector in packages/daemon, which this PR does not change; a rerun of the failed job (122056606620) passed."
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "pull request",
+      "description": "GitHub reports #2228 CONFLICTING with main again as of 10:33Z, and the required checks at 5579f099 have not finished (test in progress; lint, typecheck and pr-title queued, 80 minutes after the push). Merge main forward again on this reported conflict, changing nothing else, so the next head carries the merge and its CI. No code finding stands."
+    }
   ],
-  "keyFindings": [],
   "ci": {
-    "codeHead": "34b3e846cb6e35bb661f02261d2fab236a2ca3f0",
+    "codeHead": "5579f099d21e36d1a81e13e9a880efcad0522aff",
     "required": ["lint", "typecheck", "test", "pr-title"],
-    "observed": "lint success (122056607959), typecheck success (122056608766), test success (122056606620, rerun), pr-title success (122035693865); newest pull_request run head is 34b3e846; compare 34b3e846...a92387a8 changes only .legion/. GitHub reports the pull request CONFLICTING with main as of 09:03Z."
+    "observed": "test in_progress (122105373105); lint (122105372859), typecheck (122105373080), pr-title (122105623650) queued at 10:33Z; compare 5579f099...a817758f changes only .legion/."
   },
-  "threads": "19 threads, all answered and resolved; none opened since round 4.",
-  "fastFollow": "none"
+  "nextRound": "After the next forward merge: an equal fingerprint and the four required checks green at the code head, then APPROVE with Fast-follow none."
 }
