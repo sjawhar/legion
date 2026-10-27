@@ -163,8 +163,8 @@ func unavailable(w http.ResponseWriter, message string) {
 }
 
 // rateLimited answers a GitHub rate limit: 503 GITHUB_RATE_LIMITED, Retry-After the whole seconds
-// left of GitHub's wait (at least one), so the web app waits as GitHub asks rather than reading a
-// refusal or an outage.
+// left of GitHub's wait (at least one), so a client that honours the header waits as GitHub asks,
+// and the code tells any client the refusal is a rate limit rather than an outage.
 func rateLimited(w http.ResponseWriter, limited *githubapp.RateLimitError) {
 	seconds := max(int64(math.Ceil(limited.Wait.Seconds())), 1)
 	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))

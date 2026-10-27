@@ -584,7 +584,7 @@ func (s *server) deliverBroadcast(messages []model.Message, delivery string, act
 				// agent card while this worker is queued settles that attempt and sends their
 				// own; the worker must then send nothing, because an attempt of its own would
 				// put a second frame on the session's subject.
-				_, err := s.deliverMessageResuming(ctx, message, delivery, nil, actor, nil, 1)
+				_, err := s.deliverMessageResuming(ctx, message, delivery, actor, nil, 1)
 				if errors.Is(err, errAttemptNotPending) {
 					continue
 				}

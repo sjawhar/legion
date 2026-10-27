@@ -144,7 +144,7 @@ func TestABoundSendTakesAnUnpinnedAttemptAndPinsTheSessionItsTargetResolvedTo(t 
 		t.Fatalf("open the unpinned attempt 1: %v", err)
 	}
 
-	attempt, err := direct.deliverMessageResuming(context.Background(), message, "steer", nil, alice, nil, 1)
+	attempt, err := direct.deliverMessageResuming(context.Background(), message, "steer", alice, nil, 1)
 	if err != nil {
 		t.Fatalf("bound send of the unpinned attempt 1: %v", err)
 	}
@@ -282,5 +282,68 @@ func TestTheDeliveryResumePassSendsOnlyTheStrandedAttemptsItOwes(t *testing.T) {
 		if states := attemptStates(t, database, row.table, row.column, row.id); !slices.Equal(states, row.want) {
 			t.Errorf("%s: attempts = %v, want %v", row.name, states, row.want)
 		}
+	}
+}
+
+// A person's Retry in the same mode, once the claim on a stranded attempt has lapsed, resumes that
+// attempt under its own number and key - the send the resume loop would have made - so it must
+// carry the urgency the attempt recorded, as the resume loop's does. A Retry that opens an
+// attempt of its own instead - in another mode, or beside a sender still holding the stranded
+// one - is a new send of the person's, which asked for no urgency.
+func TestARetryCarriesTheUrgencyOfTheAttemptItResumesAndNoneOnANewAttempt(t *testing.T) {
+	listener := startResumeListener(t)
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
+	issue := createInteractionIssue(t, handler, "TEST", "Urgent retries", "before")
+	urgent := func(body string) model.Message {
+		t.Helper()
+		return createIssueMessage(t, handler, issue.Key, map[string]any{
+			"body": body, "target": "session:s1", "delivery": "steer", "urgency": "high",
+		}, "alice")
+	}
+	for _, test := range []struct {
+		name, claimed, delivery string
+		wantAttempt             int
+		wantSend                func(model.Message) resumeSend
+	}{
+		{
+			name: "a same-mode Retry of a lapsed attempt resumes it", claimed: "'2 minutes'", delivery: "steer",
+			wantAttempt: 1,
+			wantSend: func(m model.Message) resumeSend {
+				return resumeSend{key: m.ID + ":steer", target: "s1", urgency: "high"}
+			},
+		},
+		{
+			name: "a Retry in another mode opens a new attempt", claimed: "'2 minutes'", delivery: "btw",
+			wantAttempt: 2,
+			wantSend: func(m model.Message) resumeSend {
+				return resumeSend{key: m.ID + ":btw", target: "s1"}
+			},
+		},
+		{
+			name: "a Retry beside a live claim opens a new attempt", claimed: "'0 seconds'", delivery: "steer",
+			wantAttempt: 2,
+			wantSend: func(m model.Message) resumeSend {
+				return resumeSend{key: m.ID + ":steer", target: "s1"}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			message := urgent(test.name)
+			strandAttempt(t, database, "message_deliveries", "message_id", message.ID, test.claimed, "'2 minutes'")
+			listener.forget()
+
+			retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/deliveries",
+				map[string]any{"delivery": test.delivery}, "alice")
+			if retry.Code != http.StatusCreated {
+				t.Fatalf("retry: status=%d body=%s", retry.Code, retry.Body.String())
+			}
+			if attempt := decodeBody[model.MessageDelivery](t, retry); attempt.Attempt != test.wantAttempt || attempt.State != "sent" {
+				t.Fatalf("retry = attempt %d %s, want attempt %d sent", attempt.Attempt, attempt.State, test.wantAttempt)
+			}
+			want := test.wantSend(message)
+			if sends := listener.answered(); len(sends) != 1 || sends[0] != want {
+				t.Fatalf("retry sent %#v, want exactly %#v", sends, want)
+			}
+		})
 	}
 }

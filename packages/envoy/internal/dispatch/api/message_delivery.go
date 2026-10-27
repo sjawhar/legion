@@ -46,8 +46,9 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 	}
 	// The send outlives the request's connection, keeping its values and dropping its
 	// cancellation, as createStoredMessage's does: the attempt is committed before the listener
-	// call, and a cut connection must not strand it.
-	attempt, err := s.deliverMessage(context.WithoutCancel(r.Context()), message, input.Delivery, nil, actor, nil)
+	// call, and a cut connection must not strand it. It carries the urgency of the attempt it
+	// resumes, and none on an attempt it opens: a Retry asks for none.
+	attempt, err := s.deliverMessage(context.WithoutCancel(r.Context()), message, input.Delivery, actor, nil)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -256,10 +257,14 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 }
 
 // pendingMessageDelivery is the attempt one targeted send owns: committed as pending under
-// the message's lock, carrying the frame and the listener resolution it is sent with.
+// the message's lock, carrying the frame, the listener resolution and the urgency it is sent
+// with. The urgency is the one the attempt's row recorded (message_deliveries.urgency), so every
+// send of one attempt - its first, a resume loop's, a person's same-mode Retry - carries the same
+// one, and an attempt a Retry opens, which records none, carries none.
 type pendingMessageDelivery struct {
 	attemptClaim
 	resolved ResolvedMention
+	urgency  *string
 	frame    []byte
 }
 
@@ -345,11 +350,11 @@ func (s *server) recordPendingMessageDelivery(
 		var bound model.MessageDelivery
 		var free bool
 		err = tx.QueryRow(ctx, `
-			select attempt, delivery, session_id, `+claimLapsed+`
+			select attempt, delivery, session_id, urgency, `+claimLapsed+`
 			from message_deliveries
 			where message_id = $1 and attempt = $2 and state = 'pending'
 			for update
-		`, message.ID, resumeAttempt).Scan(&bound.Attempt, &bound.Delivery, &bound.SessionID, &free)
+		`, message.ID, resumeAttempt).Scan(&bound.Attempt, &bound.Delivery, &bound.SessionID, &pending.urgency, &free)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return pendingMessageDelivery{}, errAttemptNotPending
 		}
@@ -382,15 +387,16 @@ func (s *server) recordPendingMessageDelivery(
 		return pending, nil
 	}
 	var stranded model.MessageDelivery
+	var strandedUrgency *string
 	var lapsed bool
 	err = tx.QueryRow(ctx, `
-		select attempt, delivery, session_id, `+claimLapsed+`
+		select attempt, delivery, session_id, urgency, `+claimLapsed+`
 		from message_deliveries
 		where message_id = $1 and state = 'pending'
 		order by attempt
 		limit 1
 		for update
-	`, message.ID).Scan(&stranded.Attempt, &stranded.Delivery, &stranded.SessionID, &lapsed)
+	`, message.ID).Scan(&stranded.Attempt, &stranded.Delivery, &stranded.SessionID, &strandedUrgency, &lapsed)
 	var superseded *model.Event
 	switch {
 	case err != nil && !errors.Is(err, pgx.ErrNoRows):
@@ -439,11 +445,12 @@ func (s *server) recordPendingMessageDelivery(
 		}
 		// The same mode: resume it under its original number, and so its original
 		// idempotency key, whose repeat of a send that did land is recognised and dropped
-		// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). An attempt that already names
+		// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts), and with the urgency it
+		// recorded, as the resume loop would send it. An attempt that already names
 		// a session keeps it; one stranded before anything was resolved takes the recipient
 		// this resolution found, so the row names the session its frame is going to either
 		// way and that session can answer it.
-		pending.attempt = stranded.Attempt
+		pending.attempt, pending.urgency = stranded.Attempt, strandedUrgency
 		if err := tx.QueryRow(ctx, `
 			update message_deliveries
 			set delivery = $3, session_id = coalesce(nullif(session_id, ''), $4), claimed_at = now()
@@ -605,11 +612,10 @@ func (s *server) deliverMessage(
 	ctx context.Context,
 	message model.Message,
 	delivery string,
-	urgency *string,
 	actor model.Actor,
 	replyThread *messageReplyThread,
 ) (model.MessageDelivery, error) {
-	return s.deliverMessageResuming(ctx, message, delivery, urgency, actor, replyThread, 0)
+	return s.deliverMessageResuming(ctx, message, delivery, actor, replyThread, 0)
 }
 
 // errAttemptNotPending reports that the attempt a bound sender owns is no longer its to send:
@@ -633,7 +639,6 @@ func (s *server) deliverMessageResuming(
 	ctx context.Context,
 	message model.Message,
 	delivery string,
-	urgency *string,
 	actor model.Actor,
 	replyThread *messageReplyThread,
 	resumeAttempt int,
@@ -668,7 +673,7 @@ func (s *server) deliverMessageResuming(
 		func() string {
 			var failure string
 			envelopeID, duplicate, failure = s.sendResolvedDelivery(
-				ctx, pending.resolved, message.Body, key, urgency, pending.frame,
+				ctx, pending.resolved, message.Body, key, pending.urgency, pending.frame,
 			)
 			return failure
 		},

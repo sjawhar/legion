@@ -247,8 +247,20 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if routed := slices.ContainsFunc(issues, func(issue model.IssueSummary) bool { return issue.Route != nil }); routed {
-		roster := s.readRouteRoster(r.Context())
-		if routeStatus != "" && routeStatus != model.RouteUnknown && !roster.answered {
+		judged := routeStatus != "" && routeStatus != model.RouteUnknown
+		var roster routeRoster
+		if judged {
+			// A filter for a judged state cannot be cut from an answer it could not read: a failed
+			// read of the stored answer is the database's failure and is answered as one, and only
+			// a listener that did not answer is the listener's.
+			if roster, err = s.readRouteRoster(r.Context()); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		} else {
+			roster = s.routeRosterOrUnknown(r.Context())
+		}
+		if judged && !roster.answered {
 			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable,
 				"the Envoy listener did not answer, so Dispatch cannot tell which routes reach a live session; route_status=unknown lists the routed issues")
 			return
@@ -340,7 +352,7 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	var reach model.IssueRouteReach
 	if issue.Route != nil {
-		reach = s.readRouteRoster(r.Context()).reach(issue.Route)
+		reach = s.routeRosterOrUnknown(r.Context()).reach(issue.Route)
 	}
 	WriteJSON(w, http.StatusOK, struct {
 		model.Issue

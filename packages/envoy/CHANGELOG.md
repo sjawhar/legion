@@ -914,7 +914,9 @@
   `route_status: unknown` at once instead of each waiting up to 2 s. A `route_status` can
   therefore be up to 5 s old, and every process reads the same one, so a page filtered on
   `route_status` holds the same issues whichever process serves it; its values and the
-  `503 ENVOY_UNAVAILABLE` of a `live` or `no_holder` filter are unchanged.
+  `503 ENVOY_UNAVAILABLE` of a `live` or `no_holder` filter are unchanged. Such a filter whose
+  read of the stored answer fails answers `500 INTERNAL`, the database's failure, rather than
+  `503 ENVOY_UNAVAILABLE`; an unfiltered list and an issue's detail read its route `unknown`.
 - **Breaking:** `envoy-dispatch backfill-embeddings` is removed: the server's coverage pass does
   its work at boot and every 10 minutes, and an operator script that still runs it exits 2.
   Migration `0119` drops its checkpoint table, `embeddings_backfill_progress`, in the same release,
@@ -1720,9 +1722,10 @@
     first deploy therefore sends, at its first passes, any attempt stranded in the hour before it.
     A resumed direct message is more than a minute old, so its session shows it as a card
     rather than as its user's own turn. Migration `0130` adds `message_deliveries.urgency`, so a
-    resumed direct message keeps the urgency it was sent with, and two partial indexes the loop
-    reads pending attempts through. The loop takes one more connection in the lease pool, which is
-    now eleven connections (`store.leasePoolSize`).
+    resumed direct message keeps the urgency it was sent with, whether the loop or a person's
+    same-mode Retry resumes it (an attempt a Retry opens carries none), and two partial indexes
+    the loop reads pending attempts through. The loop takes one more connection in the lease
+    pool, which is now eleven connections (`store.leasePoolSize`).
   - A send that meets an Envoy listener take-over (the new pod refusing connections, answering
     502, 503 or 504, or not yet holding the session) or a receipt timeout tries again under the
     same attempt and idempotency key, backing off from 250 ms to 2 s, for up to 12 s from its

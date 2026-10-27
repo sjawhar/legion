@@ -85,7 +85,6 @@ type strandedMessageAttempt struct {
 	messageID   string
 	attempt     int
 	delivery    string
-	urgency     *string
 	requestedBy []byte
 }
 
@@ -156,7 +155,7 @@ func (s *server) resumeStrandedDeliveries(ctx context.Context) error {
 // (requireOpenIssue), and an untargeted message's, which no send can have.
 func (s *server) strandedMessageAttempts(ctx context.Context) ([]strandedMessageAttempt, error) {
 	rows, err := s.deps.Store.Pool.Query(ctx, `
-		select d.message_id::text, d.attempt, d.delivery, d.urgency, d.requested_by
+		select d.message_id::text, d.attempt, d.delivery, d.requested_by
 		from message_deliveries d
 		join messages m on m.id = d.message_id
 		where `+strandedAttempt+`
@@ -170,7 +169,7 @@ func (s *server) strandedMessageAttempts(ctx context.Context) ([]strandedMessage
 	}
 	attempts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (strandedMessageAttempt, error) {
 		var attempt strandedMessageAttempt
-		err := row.Scan(&attempt.messageID, &attempt.attempt, &attempt.delivery, &attempt.urgency, &attempt.requestedBy)
+		err := row.Scan(&attempt.messageID, &attempt.attempt, &attempt.delivery, &attempt.requestedBy)
 		return attempt, err
 	})
 	if err != nil {
@@ -211,9 +210,10 @@ func (s *server) strandedCommentAttempts(ctx context.Context) ([]strandedComment
 }
 
 // resumeMessageAttempt sends one stranded message attempt, bound to it, so it sends that attempt
-// or nothing under the key `<message>:<mode>` its first send used. It carries the urgency the
-// attempt recorded and the actor who asked for it, or the message's author for an attempt that
-// recorded none (written before requested_by was).
+// or nothing under the key `<message>:<mode>` its first send used. The send carries the urgency
+// the attempt recorded, which its claim reads off the row (pendingMessageDelivery), and the actor
+// who asked for it, or the message's author for an attempt that recorded none (written before
+// requested_by was).
 func (s *server) resumeMessageAttempt(ctx context.Context, stranded strandedMessageAttempt) {
 	message, err := s.loadMessage(ctx, s.deps.Store.Pool, "", stranded.messageID)
 	if err != nil {
@@ -229,7 +229,7 @@ func (s *server) resumeMessageAttempt(ctx context.Context, stranded strandedMess
 			return
 		}
 	}
-	_, err = s.deliverMessageResuming(ctx, message, stranded.delivery, stranded.urgency, actor, nil, stranded.attempt)
+	_, err = s.deliverMessageResuming(ctx, message, stranded.delivery, actor, nil, stranded.attempt)
 	if err != nil && !errors.Is(err, errAttemptNotPending) {
 		slog.Warn("dispatch: resume a stranded message attempt", "message", stranded.messageID,
 			"attempt", stranded.attempt, "error", err)

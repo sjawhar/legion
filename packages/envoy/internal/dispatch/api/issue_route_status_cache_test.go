@@ -28,6 +28,18 @@ func sreReach(roster routeRoster) string {
 	return reachText(reach.RouteStatus, reach.RouteHolder)
 }
 
+// readRoster is served's readRouteRoster for a read whose database answers: a failed read of the
+// stored answer fails the test. It reports with Errorf, so a read on a goroutine of its own may
+// use it.
+func readRoster(t *testing.T, served *server, ctx context.Context) routeRoster {
+	t.Helper()
+	roster, err := served.readRouteRoster(ctx)
+	if err != nil {
+		t.Errorf("read the route roster: %v", err)
+	}
+	return roster
+}
+
 // heldRosterServer is a test server on a database of its own whose listener's GET /v1/sessions
 // lists ses-sre holding sre, but only once release is called: until then every call waits, so a
 // test can hold one fetch open while other reads arrive. calls counts the requests that reached
@@ -191,7 +203,7 @@ func TestAListenerThatDoesNotAnswerHoldsAReadOnlyForTheFetchBound(t *testing.T) 
 	served.rosters.timeout, served.rosters.silenceTTL = 500*time.Millisecond, time.Minute
 
 	started := time.Now()
-	if roster := served.readRouteRoster(context.Background()); roster.answered {
+	if roster := readRoster(t, served, context.Background()); roster.answered {
 		t.Fatal("a read answered a roster though the listener never answered")
 	}
 	if waited := time.Since(started); waited > 10*time.Second {
@@ -201,7 +213,7 @@ func TestAListenerThatDoesNotAnswerHoldsAReadOnlyForTheFetchBound(t *testing.T) 
 	if first != 1 {
 		t.Fatalf("the first read made %d listener calls, want 1", first)
 	}
-	if roster := served.readRouteRoster(context.Background()); roster.answered {
+	if roster := readRoster(t, served, context.Background()); roster.answered {
 		t.Fatal("a read inside the silence window answered a roster")
 	}
 	if got := calls.Load(); got != first {
@@ -241,11 +253,11 @@ func TestAnAnswersTTLCountsFromWhenItsCallWasSent(t *testing.T) {
 	served, calls := timedRosterServer(t, time.Second, false, nil)
 	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = 1500*time.Millisecond, time.Minute, time.Minute
 	started := time.Now()
-	if !served.readRouteRoster(context.Background()).answered {
+	if !readRoster(t, served, context.Background()).answered {
 		t.Fatal("the first read did not answer")
 	}
 	time.Sleep(time.Until(started.Add(2200 * time.Millisecond)))
-	_ = served.readRouteRoster(context.Background())
+	_ = readRoster(t, served, context.Background())
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("a read 2.2 s after a 1 s fetch with a 1.5 s TTL made %d listener calls in all, want 2: the TTL must count from when the call was sent", got)
 	}
@@ -259,13 +271,14 @@ func TestAFailuresWindowCountsFromWhenTheFailureIsKnown(t *testing.T) {
 	served, calls := timedRosterServer(t, 0, true, nil)
 	served.rosters.ttl, served.rosters.silenceTTL, served.rosters.timeout = time.Minute, 1500*time.Millisecond, time.Second
 	started := time.Now()
-	if served.readRouteRoster(context.Background()).answered {
+	if readRoster(t, served, context.Background()).answered {
 		t.Fatal("a listener that hangs answered")
 	}
 	time.Sleep(time.Until(started.Add(2000 * time.Millisecond)))
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_ = served.readRouteRoster(ctx)
+	// The read may end before its read of the stored answer does; only the calls it made count.
+	_, _ = served.readRouteRoster(ctx)
 	// Long enough for a call a read started to reach the listener.
 	time.Sleep(300 * time.Millisecond)
 	if got := calls.Load(); got != 1 {
@@ -282,7 +295,7 @@ func TestAShutdownEndsAFetchInFlight(t *testing.T) {
 	served, _ := timedRosterServer(t, 0, true, lifetime)
 	served.rosters.timeout = time.Minute
 	answer := make(chan routeRoster, 1)
-	go func() { answer <- served.readRouteRoster(context.Background()) }()
+	go func() { answer <- readRoster(t, served, context.Background()) }()
 	time.Sleep(200 * time.Millisecond)
 	shutdown()
 	select {
@@ -308,7 +321,7 @@ func TestConcurrentReadsOnAColdCacheMakeOneListenerCall(t *testing.T) {
 		go func() {
 			defer done.Done()
 			started.Done()
-			results[index] = served.readRouteRoster(context.Background())
+			results[index] = readRoster(t, served, context.Background())
 		}()
 	}
 	started.Wait()
@@ -335,7 +348,12 @@ func TestAReadWhoseRequestEndsWhileItWaitsReturnsPromptly(t *testing.T) {
 	served, calls, release := heldRosterServer(t)
 	read := func(ctx context.Context) <-chan routeRoster {
 		answer := make(chan routeRoster, 1)
-		go func() { answer <- served.readRouteRoster(ctx) }()
+		// A read whose request ends may end before its read of the stored answer does, which
+		// reads unknown as well.
+		go func() {
+			roster, _ := served.readRouteRoster(ctx)
+			answer <- roster
+		}()
 		return answer
 	}
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
@@ -373,7 +391,7 @@ func TestAReadWhoseRequestEndsWhileItWaitsReturnsPromptly(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the read that waited never returned")
 	}
-	if got := sreReach(served.readRouteRoster(context.Background())); got != "live ses-sre" {
+	if got := sreReach(readRoster(t, served, context.Background())); got != "live ses-sre" {
 		t.Fatalf("the cached answer reads %s, want live ses-sre: the fetch whose starter left must still fill the cache", got)
 	}
 	if got := calls.Load(); got != 1 {

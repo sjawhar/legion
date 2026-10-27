@@ -326,6 +326,34 @@ func TestRouteStatusFilterListsOnlyOpenIssuesInThatState(t *testing.T) {
 	}
 }
 
+// A route is judged against the stored listener answer, the route_roster row. When the database
+// cannot read that row, the failure is the database's: a filter for a judged state answers it as
+// one, never as the listener's silence (503 ENVOY_UNAVAILABLE, whose remedy - route_status=unknown
+// - points an operator at the listener). A read that only shows a route still serves the issue,
+// with its route unknown.
+func TestARouteStatusFilterAnswersAFailedRosterReadAsTheDatabases(t *testing.T) {
+	roster := &fakeRoster{}
+	roster.set("ses-sre", "sre")
+	handler, database := routeStatusServer(t, roster)
+	key := routedIssueKey(t, handler, "role:sre")
+	requireReach(t, handler, key, "live", "ses-sre")
+
+	if _, err := database.Pool.Exec(context.Background(), `alter table route_roster rename to route_roster_unreadable`); err != nil {
+		t.Fatalf("make the route_roster row unreadable: %v", err)
+	}
+	for _, filter := range []string{"live", "no_holder"} {
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST&route_status="+filter, nil, "alice")
+		code := decodeBody[struct {
+			Code string `json:"code"`
+		}](t, response).Code
+		if response.Code != http.StatusInternalServerError || code == "ENVOY_UNAVAILABLE" {
+			t.Fatalf("route_status=%s with the roster unreadable: status=%d body=%s, want 500 naming no listener failure",
+				filter, response.Code, response.Body.String())
+		}
+	}
+	requireReach(t, handler, key, "unknown", "")
+}
+
 // secondRouteStatusServer is a second server process beside served: the same database and the
 // same listener, but a pool of its own (storetest.SecondProcess), a roster cache of its own with
 // served's TTLs and fetch bound, and its own single-flight fetch, so the two share only what
@@ -432,9 +460,9 @@ func TestAnOlderListenerAnswerNeverReplacesANewerOne(t *testing.T) {
 	_, second := secondRouteStatusServer(t, first)
 
 	older := make(chan routeRoster, 1)
-	go func() { older <- first.readRouteRoster(context.Background()) }()
+	go func() { older <- readRoster(t, first, context.Background()) }()
 	awaitCalls(t, &calls, 1)
-	if got := sreReach(second.readRouteRoster(context.Background())); got != "live ses-sre" {
+	if got := sreReach(readRoster(t, second, context.Background())); got != "live ses-sre" {
 		t.Fatalf("the second server's own fetch reads %s, want live ses-sre", got)
 	}
 	release()
@@ -446,7 +474,7 @@ func TestAnOlderListenerAnswerNeverReplacesANewerOne(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the read waiting on the older fetch never returned")
 	}
-	if got := sreReach(first.readRouteRoster(context.Background())); got != "live ses-sre" {
+	if got := sreReach(readRoster(t, first, context.Background())); got != "live ses-sre" {
 		t.Fatalf("the first server's next read reads %s, want the newer stored live ses-sre", got)
 	}
 	if got := calls.Load(); got != 2 {

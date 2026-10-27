@@ -185,7 +185,8 @@ func (s *server) createStoredMessage(
 	// process that dies, or a request whose connection is cut, between this commit and the send
 	// then leaves a pending attempt the resume loop (delivery_resume.go) sends, where opening it
 	// after the listener lookup left a stored message with no attempt that nothing would ever
-	// send. It records who asked for it and the urgency they chose, which a resumed send carries.
+	// send. It records who asked for it and the urgency they chose, which every send of it
+	// carries (pendingMessageDelivery), this request's own and a resumed one alike.
 	if message.Target != nil {
 		if _, err := tx.Exec(ctx, `
 			insert into message_deliveries (message_id, attempt, delivery, session_id, state, requested_by, urgency)
@@ -215,7 +216,7 @@ func (s *server) createStoredMessage(
 		// attempt beside one the resume loop or a person's Retry already took. Another sender
 		// owning attempt 1 means the message's delivery is under way there: the message is
 		// stored, so it is answered with attempt 1 as that sender has left it.
-		attempt, err := s.deliverMessageResuming(sendCtx, message, delivery, input.Urgency, actor, &thread, 1)
+		attempt, err := s.deliverMessageResuming(sendCtx, message, delivery, actor, &thread, 1)
 		if errors.Is(err, errAttemptNotPending) {
 			attempts, err := s.loadMessageDeliveries(sendCtx, s.deps.Store.Pool, []string{message.ID})
 			if err != nil {

@@ -59,6 +59,16 @@ const (
 	// which the browser suite sets - is often larger, so a call is split into parts sent in one
 	// transaction; the remaining hundred bytes are each part's header (splitTestHookCall).
 	testHookPartBytes = 7900
+	// testHookMaxCallBytes bounds a call's encoding. Only a published frame is long, and it is at
+	// most maxJSONRequestBytes (publishAgentStreamFrame); json.Marshal writes at most six bytes
+	// for each byte of it (a control character's \u00XX), and the call's other fields - a hook
+	// name, a session uuid, an `as` form - fit in the kilobyte beside it.
+	testHookMaxCallBytes = 6*maxJSONRequestBytes + 1024
+	// testHookMaxParts is the most parts a call can be split into: every part but the last
+	// carries at least testHookPartBytes-3 bytes, since splitTestHookCall moves a cut back to a
+	// character boundary, at most three bytes. A notification naming more is no call any
+	// process sends, and heard drops it before allocating its parts.
+	testHookMaxParts = int((testHookMaxCallBytes + testHookPartBytes - 4) / (testHookPartBytes - 3))
 )
 
 // The hooks a call names.
@@ -197,6 +207,11 @@ func (f *testHookFanout) heard(payload string) {
 	id, part, parts, piece, ok := parseTestHookPart(payload)
 	if !ok {
 		slog.Warn("dispatch: a test-hook notification is malformed; ignored", "payload_bytes", len(payload))
+		return
+	}
+	if parts > testHookMaxParts {
+		slog.Warn("dispatch: a test-hook notification names more parts than any call is split into; ignored",
+			"call", id, "parts", parts, "max_parts", testHookMaxParts)
 		return
 	}
 	f.mu.Lock()

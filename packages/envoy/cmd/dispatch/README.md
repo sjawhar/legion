@@ -961,10 +961,12 @@ is written. Its own migration, so its transaction holds `comments` alone: the dr
 refuses and rewrites no row; its census answers `0`.
 
 Migration `0130_message_delivery_urgency` adds `message_deliveries.urgency`, the urgency a targeted
-message was sent with, so a send that resumes a stranded attempt (`api/delivery_resume.go`) hands
-the listener the urgency the person chose. A direct message's attempt 1 is written with it in the
-transaction that stores the message; a broadcast recipient's carries none. It is internal: no API
-read selects it. It is nullable with no default, so it writes the catalog alone under
+message was sent with, so a send that resumes a stranded attempt - the resume loop's
+(`api/delivery_resume.go`) or a person's same-mode Retry - hands the listener the urgency the
+person chose; an attempt a Retry opens records none and sends none. A direct message's attempt 1
+is written with it in the transaction that stores the message; a broadcast recipient's carries
+none. It is internal: no API read selects it. It is nullable with no default, so it writes the
+catalog alone under
 `message_deliveries`' `ACCESS EXCLUSIVE` lock, refuses and rewrites no row, and the release before
 it, which names no urgency in its inserts, rolls beside it; an attempt that release wrote is resumed
 without an urgency, as its first send was. Its check, one of `low`, `med`, `high` and `blocking`, is

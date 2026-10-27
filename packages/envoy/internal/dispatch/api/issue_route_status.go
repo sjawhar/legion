@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -124,7 +125,9 @@ type rosterSession struct {
 // listener's account: a listener that is unconfigured, does not answer, or answers late leaves
 // every route unknown, and so does a read whose own request ends while it waits; the fetch runs on
 // for the other reads, and stores its answer for every process. A read whose own read of the row
-// fails reads unknown too, since the stored answer is the one every process judges by.
+// fails answers that error: the failure is the database's, and a caller that filters by a judged
+// state answers it as one rather than as the listener's silence, while a caller that only shows a
+// route may read it unknown (routeRosterOrUnknown).
 //
 // A read that found the row stale may reach the lock only after the fetch that was in flight
 // while it read has stored its answer and gone. It then takes the answer this process built
@@ -133,19 +136,16 @@ type rosterSession struct {
 // found the row stale - by this process's fetch, or by another process's later one, which counts
 // as storeRouteRoster counts it - and it is the answer the read would have waited for had it
 // reached the lock a moment sooner.
-func (s *server) readRouteRoster(ctx context.Context) routeRoster {
+func (s *server) readRouteRoster(ctx context.Context) (routeRoster, error) {
 	if s.deps.Envoy == nil {
-		return routeRoster{}
+		return routeRoster{}, nil
 	}
 	roster, fresh, now, seen, err := s.storedRouteRoster(ctx)
 	if err != nil {
-		if ctx.Err() == nil {
-			slog.Warn("dispatch: read the stored listener answer; routes read unknown", "error", err)
-		}
-		return routeRoster{}
+		return routeRoster{}, fmt.Errorf("read the stored listener answer: %w", err)
 	}
 	if fresh {
-		return roster
+		return roster, nil
 	}
 	cache := &s.rosters
 	cache.mu.Lock()
@@ -154,7 +154,7 @@ func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 		if cache.builtSent.After(seen) {
 			roster = cache.built
 			cache.mu.Unlock()
-			return roster
+			return roster, nil
 		}
 		fetch = &rosterFetch{done: make(chan struct{})}
 		cache.fetch = fetch
@@ -168,10 +168,20 @@ func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 	cache.mu.Unlock()
 	select {
 	case <-fetch.done:
-		return fetch.roster
+		return fetch.roster, nil
 	case <-ctx.Done():
-		return routeRoster{}
+		return routeRoster{}, nil
 	}
+}
+
+// routeRosterOrUnknown is readRouteRoster for a read that only shows a route: a failed read of the
+// stored answer is logged and every route reads unknown, since the issue itself was read.
+func (s *server) routeRosterOrUnknown(ctx context.Context) routeRoster {
+	roster, err := s.readRouteRoster(ctx)
+	if err != nil && ctx.Err() == nil {
+		slog.Warn("dispatch: routes read unknown", "error", err)
+	}
+	return roster
 }
 
 // routeRosterQuery reads the stored answer and the database's now() in one statement, which

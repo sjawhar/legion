@@ -194,3 +194,31 @@ func TestAFrameLargerThanOneNotificationReachesAViewerOnTheOtherProcessWhole(t *
 		t.Fatalf("the other process's viewer read %q of %d bytes, want the %d-byte frame whole", event, len(data), len(want))
 	}
 }
+
+// A call's part count is read off the notification, which any connection to the database can
+// send, so a process caps it at the most any call is split into before it allocates a slot per
+// part. The cap still admits the largest call a request can make: a frame of maxJSONRequestBytes
+// made wholly of a byte json.Marshal escapes widest, to a session id in its longest form.
+func TestAHookNotificationNamingMorePartsThanAnyCallIsDropped(t *testing.T) {
+	encoded, err := json.Marshal(testHookCall{
+		Hook: hookPublishFrame, Session: "urn:uuid:" + plannerSessionID, As: "replay",
+		Frame: strings.Repeat("\x01", int(maxJSONRequestBytes)),
+	})
+	if err != nil {
+		t.Fatalf("encode the largest call: %v", err)
+	}
+	largest := splitTestHookCall("largest", string(encoded))
+	if len(largest) > testHookMaxParts {
+		t.Fatalf("the largest call a request can make is split into %d parts, past the cap of %d", len(largest), testHookMaxParts)
+	}
+	fanout := &testHookFanout{partial: map[string]*testHookParts{}}
+	fanout.heard(largest[0])
+	if partial := fanout.partial["largest"]; partial == nil || len(partial.pieces) != len(largest) || partial.have != 1 {
+		t.Fatalf("the largest call's first part was not kept for its %d parts: %#v", len(largest), partial)
+	}
+
+	fanout.heard("too-many 1 " + strconv.Itoa(testHookMaxParts+1) + " {")
+	if partial, kept := fanout.partial["too-many"]; kept {
+		t.Fatalf("a notification naming %d parts, one past the cap, was kept for %d parts", testHookMaxParts+1, len(partial.pieces))
+	}
+}

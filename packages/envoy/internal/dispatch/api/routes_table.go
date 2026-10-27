@@ -189,8 +189,10 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/machine-logins", authHuman, "List the machine logins the caller may revoke that can still reach a secret: the secrets broker's launcher credentials for every service's login, whoever approved it, and for the caller's own machines, unexpired or expired with a session still running, each naming who approved it.", s.listMachineLogins},
 		{http.MethodPost, "/api/v1/machine-logins/{id}/revoke", authHuman, "Revoke a machine login, expired or not, ending every session it enrolled, a service's pods included: anyone signed in revokes a service's login, and only the person who approved a person's machine login revokes that one.", s.revokeMachineLogin},
 	}
-	// The first four hooks act on every process serving the database, answering once each has
-	// (test_hooks_fanout.go); outside-schema writes the stored history, which every process reads.
+	// The event-stream disconnect, delivery-socket disconnect, quiesce and publish hooks (the 1st,
+	// 2nd, 3rd and 5th below) act on every process serving the database, answering once each has
+	// (test_hooks_fanout.go); outside-schema (the 4th) writes the stored history, which every
+	// process reads, and runs only where its call lands.
 	if s.deps.TestHooksEnabled {
 		routes = append(routes,
 			apiRoute{http.MethodPost, "/api/v1/events/_test/disconnect", authAny, "Test hook: drop every open event stream on every process.", s.disconnectAllStreams},
