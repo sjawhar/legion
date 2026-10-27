@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-528",
+  "completed": "2026-10-27T14:17:28Z",
+  "decision": "approved",
+  "reviewedHead": "the handoff head this commit makes (code: merge fc920c24dd5702480bdcec53ddc1d76491a6969b of main a9f5c529, #2310 INFRA-526)",
+  "round": "New round: fingerprint b63ce8e7… at my last review 631248de, 5e380076… at ce432603; it changed only in useRenderedMarkdown.tsx's doc comment, where the merge joined the two paragraphs.",
+  "critical": 0,
+  "important": 0,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/mermaid.e2e.ts:42",
+      "description": "Test only, Fast-follow (INFRA-532): the implementer saw Firefox's comment row fail 2 of 5 runs ('Expand thread' left the thread collapsed); the tester reproduced 0 of 33. Neither review finds a product cause: the collapsed card paints MarkdownPreview, which writes no pre, so no diagram draws before the click, and only toggleThread changes the open state. The likely cause is the helper clicking before the collapsed preview has painted (the card grows one line when the engine arrives); wait for the turn's lead text, or wrap the click and its check in toPass(). Judged not a product correctness defect; the e2e lane that runs it (envoy-and-contracts.yaml dispatch job) is not required."
+    }
+  ],
+  "merge": "git merge-tree 2693fd06 a9f5c529 differs from the merge's tree only in the three conflict hunks. useRenderedMarkdown.tsx keeps main's ask-host collection and Card dependency and this branch's draw and cancel. MarkdownBody.test.tsx keeps every test from both sides; the one base test missing was removed by main. packages/dispatch/AGENTS.md keeps both paragraphs, each byte for byte.",
+  "interaction": "The draw runs after paint, ask-host collection, linkify, decorate and pictures, and replaces only pre elements. Card slots are empty at that point, since the card mounts in a later commit; RefLink skips PRE/CODE. Typed shells keep content in document order, so blocks.pop() and the probe pair correctly. A Card change re-runs the effect synchronously, before dropAbandoned's microtask. The tester drove 6 callout and decision-card bodies on the real surface, all as expected.",
+  "ci": "Required lint, typecheck, test, pr-title all completed success at the CI head c75b7947; compare c75b7947...ce432603 handoffsOnly true (2 files).",
+  "threads": "7 threads, all mine, answered and accepted in earlier rounds, all resolved; none new.",
+  "thermonuclear": "Both at fc920c24: deep review APPROVE (no finding at critical or important); code quality APPROVE (no product defect; the e2e helper wait as test-only fast-follow).",
+  "fastFollow": "For INFRA-532: openCommentThread in mermaid.e2e.ts waits for the turn's lead text before clicking Expand thread. Plus round 2's and round 4's items."
+}
