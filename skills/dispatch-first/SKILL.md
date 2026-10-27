@@ -27,7 +27,7 @@ dispatch search --query 'reviewer threads OR review comments'
 - **Work already tracked:** put the finding on that issue. File a new issue only when no hit covers the work, and cite the nearest one you ruled out (`dispatch://KEY`).
 - **Question already decided:** the answered ask is the record. Cite it (`dispatch://KEY/ask/<id>`). Do not ask again.
 - **Duplicate found:** keep the issue with the spec, copy to it what only the duplicate has, and close the duplicate (`--status done --reason 'Duplicate of dispatch://KEY.'`). When it has the `legion` label or another holder's claim, comment the kept issue's name on it instead.
-- **Each ask and message stands alone:** the reader sees only that text. Put the facts, options and your recommendation in it.
+- **Each ask and message stands alone:** the reader sees only that text. Name the concrete case (which machines, files, people, numbers), ask the choice in its terms, and recommend.
 - In Legion, file no finding outside your issue (`skill://legion-worker/references/findings.md`).
 
 ## Reach a person only through Dispatch
@@ -42,6 +42,6 @@ A person does not watch your chat. Reach them through an ask, an ask block or an
 | Before you | Read |
 | --- | --- |
 | run your first `dispatch` command in this session | `skill://dispatch` |
-| write or change a spec, or write an ask, comment or message a person reads | `skill://dispatch-writing-specs` (in a session with Dispatch it replaces superpowers' `brainstorming`) |
+| write or change a spec, or write an ask, comment or message a person reads | `skill://dispatch-writing-specs` |
 | plan work whose spec a person approved | superpowers' `writing-plans`, stored as the issue's `plan.md` (`skill://dispatch-writing-specs`, "The plan") |
 | write a Legion architect's own spec | `skill://legion-architect` too |

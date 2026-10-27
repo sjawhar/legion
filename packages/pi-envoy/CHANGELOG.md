@@ -141,6 +141,11 @@
 
 ### Changed
 
+- `dispatch-writing-specs`, `dispatch` and `dispatch-first` tell a session to name the concrete
+  case in an ask first (which machines, files, sessions or people, and the numbers) and to ask the
+  choice in those terms, never "Which option?". The ask block template shows that shape. To stay
+  under the 2,000-word guard, lines another of the three skills already says are cut.
+
 - `dispatch` and `dispatch-first` say that a Legion session files no issue for a finding outside its
   own issue, and point to `legion-worker/references/findings.md`: a defect with a clear fix in code
   the session's own tree touches is fixed in that tree's pull request, any other goes to the

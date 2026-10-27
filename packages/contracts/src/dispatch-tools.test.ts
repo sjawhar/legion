@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-api";
 import {
+  ASK_QUESTION_MAX,
   DISPATCH_BODY_MAX,
   dispatchToolSchema,
   dispatchToolSpecs,
@@ -132,11 +133,11 @@ describe("zodSchemaApi", () => {
   test("names how far an over-limit string is over its cap", () => {
     const result = schemaFor("dispatch_ask").safeParse({
       issue: "DSP-1",
-      question: "x".repeat(850),
+      question: "x".repeat(ASK_QUESTION_MAX + 50),
     });
     expect(result.success).toBe(false);
     expect(result.error?.issues.map((issue) => issue.message)).toEqual([
-      "is 50 characters over the 800-character limit (850/800)",
+      `is 50 characters over the ${ASK_QUESTION_MAX}-character limit (${ASK_QUESTION_MAX + 50}/${ASK_QUESTION_MAX})`,
     ]);
   });
 

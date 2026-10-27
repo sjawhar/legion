@@ -4,6 +4,10 @@
 
 ### Changed
 
+- `dispatch ask` and `dispatch edit-ask` take a question of up to 2,000 characters, from 800, the
+  `--ref` line and picture lines counted, and their `--help` asks for the concrete case first and
+  the choice in its terms (`@legion/contracts`' question contract).
+
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The

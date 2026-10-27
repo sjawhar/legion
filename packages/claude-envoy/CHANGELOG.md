@@ -26,6 +26,10 @@
 
 ### Changed
 
+- The `dispatch` command (`dist/dispatch.js`) and the bundled tool descriptions take an ask
+  question of up to 2,000 characters and ask for its concrete case first; the generated
+  `legion/skills/legion-worker/references/findings.md` carries the concrete finding ask.
+
 - The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
   `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
   while its architect waits on a person's answer, and the issue field `waitingOn`, naming the

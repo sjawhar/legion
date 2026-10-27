@@ -18,15 +18,15 @@ Dispatch is a record for the people who decide, never a log of your work.
 
 ```md
 :::ask{urgency="med"}
-The problem and why it matters. Recommendation: the option and its reason.
+Which machines, files or people, the numbers, then "A happens to X, or B to Y?" Recommendation: the option and its reason.
 
 - Option one: what it costs.
 - Option two: what it costs.
 :::
 ```
 
-- A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`. A Legion phase worker sends its decision to its architect.
-- In Legion, file no issue for an outside finding. Fix a clear defect in code your tree uses. Hand others to the controller. Ask about decisions (`skill://legion-worker/references/findings.md`).
+- A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`.
+- In Legion, fix a clear defect in code your tree uses, hand others to the controller, and ask about decisions (`skill://legion-worker/references/findings.md`).
 - An open ask is the request. Do not raise it again in each message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
 - Answer a person's reply to an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note that needs nothing from them.
@@ -54,7 +54,7 @@ A claim delivers no comments: that turn, `dispatch issue-update --route session:
 
 ## Structure over stream
 
-- One issue per deliverable, its content the issue's document. Decisions are asks. A message only announces.
+- One issue per deliverable, its content the issue's document. Decisions are asks.
 - A message replies to a person or tells them what they must know now.
 - Text a person must read to decide belongs in the spec. An artifact is a real file.
 

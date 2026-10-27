@@ -36613,7 +36613,7 @@ function dispatchToolSchema(spec, z2, opts) {
 var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
 var BOARD_NEIGHBOUR_REFUSAL = "The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.";
 var OWNER_REFERENCE = "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
-var ASK_QUESTION_CONTRACT = "The question carries the problem the reader recognises and why it matters now, what constrains " + "the answer, and the recommendation with its reason. It asks how to solve the problem or which " + "outcome is wanted; never enumerate choices in the question.";
+var ASK_QUESTION_CONTRACT = "The question names the concrete case first: which machines, files, sessions or people, and the " + "numbers. It asks the choice in those terms, saying what happens to whom under each option " + '("Ship Friday and risk signing out 1,240 users, or hold to Monday?"), never "How should we ' + 'proceed?" or "Which option?". It carries every fact the reader needs to decide and nothing ' + "that does not change the decision. Generalize only after the specifics, if at all. Then give " + "your recommendation and its reason.";
 var ASK_OPTIONS_CONTRACT = "Options carry the genuinely different approaches. Each option has a label, and its description " + "says what that approach costs.";
 var HUMAN_AGREED_TO_DOCUMENT = "the human has agreed to every point in the document";
 function documentOwnerValidation(requireArtifact, alwaysRequireArtifact = false) {
@@ -36699,7 +36699,7 @@ function imagesArgument(z2, owner, cap) {
   return z2.array(z2.string({ min: 1 }), { min: 1 }).describe(`Optional local picture files to show inline: PNG, JPEG, GIF or WebP (by their bytes, not their name), each at most 25 MiB. Each is uploaded to ${owner} and appended after a blank line as one ![<file name>](dispatch://\u2026@vN) line, in this order; those lines count toward ${cap}.`).optional();
 }
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
-var ASK_QUESTION_MAX = 800;
+var ASK_QUESTION_MAX = 2000;
 var DISPATCH_BODY_MAX = 32000;
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
@@ -36793,15 +36793,15 @@ var dispatchToolSpecs = [
     name: "dispatch_ask",
     example: {
       issue: "DSP-1",
-      question: "The release cannot pass its review gate because the revised plan is unreviewed. " + "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+      question: "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the " + "sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a " + "wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships " + "Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user " + "waits on 4.2, and 1,240 forced sign-ins cost more than three days.",
       options: [
         {
-          label: "Review the revised plan",
-          description: "Delays release for review but keeps the release gate."
+          label: "Hold to Monday",
+          description: "4.2 ships three days late, with the column drop reviewed."
         },
         {
-          label: "Release without review",
-          description: "Ships sooner but bypasses the review gate."
+          label: "Ship Friday",
+          description: "On time; a wrong drop signs out 1,240 users."
         }
       ]
     },
@@ -36831,15 +36831,15 @@ var dispatchToolSpecs = [
     name: "dispatch_edit_ask",
     example: {
       ask: "01234567-0000-4000-8000-000000000001",
-      question: "The release cannot pass its review gate because the revised plan is unreviewed. " + "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+      question: "Release 4.2 ships Friday. Tuesday's plan change makes its migration drop the " + "sessions.legacy_token column, and nobody has reviewed that change. Shipped unreviewed, a " + "wrong drop signs out the 1,240 users still on legacy tokens. Held for review, 4.2 ships " + "Monday. Ship Friday unreviewed, or hold to Monday? Recommendation: hold to Monday; no user " + "waits on 4.2, and 1,240 forced sign-ins cost more than three days.",
       options: [
         {
-          label: "Review the revised plan",
-          description: "Delays release for review but keeps the release gate."
+          label: "Hold to Monday",
+          description: "4.2 ships three days late, with the column drop reviewed."
         },
         {
-          label: "Release without review",
-          description: "Ships sooner but bypasses the review gate."
+          label: "Ship Friday",
+          description: "On time; a wrong drop signs out 1,240 users."
         }
       ]
     },

@@ -208,6 +208,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- `legion-worker/references/findings.md`: a finding ask names what went wrong, where and to whom,
+  with the numbers, and what each option does to whom, in up to 2,000 characters; only evidence
+  the decision does not need goes to the cited comment.
+
 - A finding outside a role's own issue takes the first of three steps that fits. A
   defect with a clear fix in code the role's own tree touches or depends on is fixed in that
   tree's own pull request, while the role is there. Any other clear defect goes to the controller

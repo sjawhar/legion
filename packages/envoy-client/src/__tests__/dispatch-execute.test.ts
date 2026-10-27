@@ -4236,7 +4236,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_ask",
-        args: { issue: "DSP-41", question: "x".repeat(801) },
+        args: { issue: "DSP-41", question: "x".repeat(ASK_QUESTION_MAX + 1) },
         cwd: "/workspace",
         host: "omp",
         config,

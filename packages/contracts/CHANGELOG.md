@@ -176,6 +176,14 @@
 
 ### Changed
 
+- `ASK_QUESTION_MAX` is 2,000, from 800, and `scripts/gen-go.ts` emits it as
+  `contracts.AskQuestionMax`, which the Dispatch server enforces in place of its own literal. The
+  question contract `dispatch ask` and `dispatch edit-ask` print in `--help` now asks for the
+  concrete case first: which machines, files, sessions or people, and the numbers, then the choice
+  in those terms, saying what happens to whom under each option, never "How should we proceed?"
+  or "Which option?", with every fact the decision needs and nothing else. It no longer forbids
+  naming the choices in the question. Both commands' example is a concrete question.
+
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
   place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
   dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`

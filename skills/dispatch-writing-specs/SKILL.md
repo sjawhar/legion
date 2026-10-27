@@ -7,7 +7,7 @@ description: "Use in a session with Dispatch before you write or change a spec, 
 
 ## The aim
 
-Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes no spec: it sends decisions to its architect (`skill://legion-worker`).
+Reach shared understanding with the person at the least cost of their time. A Legion phase worker writes no spec (`skill://legion-worker`).
 
 ## The outline
 
@@ -32,19 +32,19 @@ For each spec, ask, comment and message:
 - Write in `skill://asd-ste100`'s strict mode.
 - State the current design, never how people reached it.
 - Link each source where the person wrote it: `dispatch://KEY/comment/<id>`, `/ask/<id>`, `/message/<id>`, or a Slack URL. With no link, state the design.
-- Write about the design, never the person. Never quote people, repeat an answered ask, or upload their words.
+- Write about the design, never the person. Never quote people or upload their words.
 - Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
-- Explain each name or term a new reader may not know. Name an issue by its `dispatch://` link, and say in a clause what it does for this reader. Never write a bare key.
+- Explain each name or term a new reader may not know. Name an issue by its `dispatch://` link, and say in a clause what it does for this reader.
 - In an ask, ask block, comment or message, name a requirement or check by what it is, never its number.
 
 ## Questions
 
+- Name the concrete case first: which machines, files, sessions or people, and the numbers. Ask the choice in those terms ("Ship Friday and sign out 1,240 users, or hold to Monday?"), never "Which option?". Generalize only after, if at all.
 - Propose an answer to each point, numbers included, with a reason.
 - A choice inside what the person asked for, or one their messages favour, is settled: decide it.
 - Ask only for the person's authority, taste or risk appetite, when options differ on what they care about.
-- Ask with an [ask block](skill://dispatch/SKILL.md#asks-and-ask-blocks) at the end of its section: 2 to 4 options with costs, your recommendation, answerable on a phone.
-- Chat reaches nobody: use an ask or approval request.
+- Ask with an [ask block](skill://dispatch/SKILL.md#asks-and-ask-blocks): 2 to 4 options with costs, your recommendation, answerable on a phone.
 
 ## Each version
 

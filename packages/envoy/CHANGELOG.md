@@ -785,6 +785,10 @@
 
 ### Changed
 
+- Dispatch accepts an ask question of up to 2,000 UTF-16 units, from 800, on `POST .../asks` and
+  `PATCH /api/v1/asks/{id}`, read from the generated `contracts.AskQuestionMax`; an approval
+  request's `summary` gets what its question leaves of the same limit.
+
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
