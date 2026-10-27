@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -334,6 +335,27 @@ func TestWithoutTakeOverAMissingSessionIsRefused(t *testing.T) {
 			}
 			if opened(f.argvs) {
 				t.Errorf("a refused resume opened a pane: %q", f.argvs)
+			}
+		})
+	}
+}
+
+// A take_over the operator forgets to remove leaves the same-agent refusal off for the whole
+// project, so the boot says it once in the log an operator reads first, naming the key and where
+// the move's last step is. With the key off there is no such line.
+func TestTheBootWarnsWhileTakeOverIsSet(t *testing.T) {
+	for name, tc := range map[string]struct {
+		takeOver string
+		want     bool
+	}{"set": {TakeOverKubernetes, true}, "unset": {"", false}} {
+		t.Run(name, func(t *testing.T) {
+			logs := &strings.Builder{}
+			log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			newFakeServerRuntimeWith(t, staticCredential, log, func(o *Options) { o.TakeOver = tc.takeOver })
+			line := strings.Contains(logs.String(), "runtime.tmux.take_over is set") &&
+				strings.Contains(logs.String(), "step 5")
+			if line != tc.want {
+				t.Fatalf("the boot's warning with take_over %q = %v, want %v; log: %s", tc.takeOver, line, tc.want, logs.String())
 			}
 		})
 	}

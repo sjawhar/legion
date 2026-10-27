@@ -49,9 +49,10 @@ type Runtime interface {
 	// a claim that had one is the failure the same-agent refusal exists to catch, so a session file
 	// found nowhere is a refusal, charged as any launch failure is, and the claim keeps its
 	// session. The one exception is the operator's takeover of another runtime's claims (the tmux
-	// runtime's `runtime.tmux.take_over`): a Resume over a prev that runtime recorded, whose session
-	// file is found nowhere the agent would run, returns an error wrapping ErrSessionFileMissing,
-	// having started nothing, and the caller then forgets the session and starts a fresh agent. On
+	// runtime's `runtime.tmux.take_over`): while that key is set, any Resume whose session file is
+	// found nowhere the agent would run — the taken-over runtime's session or this host's own,
+	// which nothing tells apart — returns an error wrapping ErrSessionFileMissing, having started
+	// nothing, and the caller then forgets the session and starts a fresh agent. On
 	// an error the caller owns stopping prev (Suspend), and Resume has stopped any process it
 	// started itself.
 	Resume(ctx context.Context, prev *Locator, spec SpawnSpec) (Locator, error)
@@ -115,11 +116,13 @@ type Runtime interface {
 	CleanupTree(ctx context.Context, tree string) error
 }
 
-// ErrSessionFileMissing is a Resume over a previous incarnation of a runtime the operator chose to
-// take over (the tmux runtime's `runtime.tmux.take_over: kubernetes`) that found the spec's
-// ResumeSessionFile nowhere the agent would run: the session was that runtime's, kept where this
-// one cannot read it. Nothing was started, and the caller starts a fresh agent in the session's
-// place. A session file missing on any other Resume is a refusal that does not wrap it.
+// ErrSessionFileMissing is a Resume made while the operator's takeover of another runtime's claims
+// is on (the tmux runtime's `runtime.tmux.take_over: kubernetes`) that found the spec's
+// ResumeSessionFile nowhere the agent would run. Most such sessions are the taken-over runtime's,
+// kept where this one cannot read it, and neither the recorded path nor the previous incarnation
+// tells them from this host's own, so every missing session is this error while the key is set.
+// Nothing was started, and the caller starts a fresh agent in the session's
+// place. A session file missing with the key off is a refusal that does not wrap it.
 var ErrSessionFileMissing = errors.New("the recorded session file is missing")
 
 // IssueSuspender stops an issue's pod once authorize, called under the runtime's issue launch

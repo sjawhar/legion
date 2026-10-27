@@ -368,7 +368,7 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 	if spec.ResumeSessionFile != "" {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: a ResumeSessionFile is Resume's to set", spec.Claim)
 	}
-	return r.launch(ctx, spec, false)
+	return r.launch(ctx, spec)
 }
 
 // Resume starts the agent prev's claim recorded, again, from spec.ResumeSessionFile — after
@@ -400,7 +400,7 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 			return runtime.Locator{}, err
 		}
 	}
-	return r.launch(ctx, spec, takenOver)
+	return r.launch(ctx, spec)
 }
 
 // awaitGone waits, up to the stop grace, until loc's incarnation is no longer its pane's process,
@@ -430,10 +430,11 @@ func (r *Runtime) awaitGone(ctx context.Context, loc runtime.Locator) error {
 }
 
 // launch is Spawn's and Resume's shared half: every check that needs no tmux, the secret files,
-// the claim's gh bundle, then the pane. takenOver is a resume over a previous incarnation of the
-// runtime this one takes over (Resume); its session, or any session while take_over is set
-// (takingOverSession), found nowhere is runtime.ErrSessionFileMissing rather than a refusal.
-func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec, takenOver bool) (runtime.Locator, error) {
+// the claim's gh bundle, then the pane. While the operator's takeover is on (takingOverSession), a
+// session found nowhere is runtime.ErrSessionFileMissing rather than a refusal, whatever the
+// claim recorded: a resume over the taken-over runtime's own incarnation is one such launch, and
+// nothing tells its session from this host's own (sessionfile.go).
+func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if err := validateSpawnSpec(spec, r.providerKeys, r.operatorEnv); err != nil {
 		return runtime.Locator{}, err
 	}
@@ -469,7 +470,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec, takenOver 
 		switch {
 		case err != nil:
 			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
-		case found == "" && (takenOver || r.takingOverSession()):
+		case found == "" && r.takingOverSession():
 			return runtime.Locator{}, fmt.Errorf("resume %s: %w: no %s session at %s, and no other folder of %s holds that session",
 				spec.Claim, runtime.ErrSessionFileMissing, harness, spec.ResumeSessionFile, searchedIn(searched))
 		case found == "":

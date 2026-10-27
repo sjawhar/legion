@@ -967,15 +967,17 @@ func (m *Machine) backOff(ctx context.Context) error {
 }
 
 // start launches the claim's process for this try: a Resume of its recorded session, or a Spawn
-// when it records none. A Resume the runtime answers with runtime.ErrSessionFileMissing is the
-// operator's takeover of another runtime's claims (the tmux runtime's `runtime.tmux.take_over`): the
-// previous process was that runtime's, and its session is found nowhere this one runs the agent. It
+// when it records none. A Resume the runtime answers with runtime.ErrSessionFileMissing was made
+// while the operator's takeover of another runtime's claims is on (the tmux runtime's
+// `runtime.tmux.take_over`): the session is found nowhere this runtime runs the agent, and while
+// that key is set nothing tells the taken-over runtime's session from this host's own, so every
+// such session answers this way. It
 // would fail the same way on every try and wedge the claim until its launch budget ran out, so the
 // claim forgets the session and the same try spawns a fresh agent, which registers its own session;
-// the runtime has started nothing first. It is logged, never charged: the session stayed with the
-// runtime the operator moved the project off. Any other refusal of a Resume, a session file missing
-// elsewhere among them, is a launch failure the caller charges, and the claim keeps its session:
-// a fresh agent on a claim that had one is what the same-agent refusal exists to catch.
+// the runtime has started nothing first. It is logged, never charged: the session is one the
+// operator accepted losing for the move's duration. Any other refusal of a Resume, a session file
+// missing with the key off among them, is a launch failure the caller charges, and the claim keeps
+// its session: a fresh agent on a claim that had one is what the same-agent refusal exists to catch.
 func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, error) {
 	spec, err := m.deps.Specs.SpawnSpec(ctx, m.claim)
 	if err != nil {
