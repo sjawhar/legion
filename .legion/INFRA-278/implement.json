@@ -2,44 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-278",
-  "completed": "2026-10-27T16:54:42Z",
+  "completed": "2026-10-27T17:29:11Z",
   "generation": 3,
-  "round": 5,
-  "scope": "The architect cancelled the skill split at 16:34Z: no skill pull request was opened, no ask was drafted or sent, and skills/dispatch/SKILL.md keeps its approved lines 46 and 48. The round is the forward merge of main after GitHub reported CONFLICTING.",
+  "round": 6,
+  "answers": "the reviewer's pre-review of b31c73a4 (four items) and the tester's confirmation of items 1 and 4 (handoff 26557553); there are no review threads, and none is open",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2225",
-  "headSha": "b31c73a4447ec80e5198f8dcff303399e0a549ee",
-  "mergedMain": "2df3353c523c (merge commit b31c73a4); fingerprint ec72728b… → d5d5835f…, changed (PR comment 6448097510); main moved on to 2dbeca18 after that, and a trial merge with it was clean; MERGEABLE after the push",
+  "headSha": "970b120978cebe49b893e9fa4c35cee35af3808b",
   "proof": [
     {
-      "criterion": "Claimant delivery holds after merging main's pipelined outbox (#2302)",
-      "surface": "real envoy-dispatch built from the head, natsd, Postgres 17 + pgvector, fake Envoy listener",
-      "command": ". /legion/harness/env.sh && DATABASE_URL='postgres://postgres@127.0.0.1:5433/claimant?sslmode=disable' bash scripts/e2e/dispatch-claimant-delivery.sh",
-      "observed": "summary: 9 ok, 0 FAIL (claimant cases, controls, delivered and failed mentions for the claimant and a follower)",
-      "headSha": "b31c73a4447ec80e5198f8dcff303399e0a549ee",
-      "negativeControl": "a binary built from main fails the claimant cases (generation 3 round 1: 5 ok, 4 FAIL)"
+      "criterion": "Item 2: a held-back copy defers only an attempt that failed nowhere else; a denial backs the event off and a lost connection releases it",
+      "surface": "Go outbox suite on real Postgres, driving the real scan",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/outbox_test?sslmode=disable' go test -count=1 -v -run 'Defer|Denied|Mention|Claimant' ./internal/dispatch/outbox/; then go test -count=1 ./internal/dispatch/outbox/",
+      "observed": "TestAHeldBackClaimantCopyDefersNoAttemptThatFailedElsewhere passes: a_denied_role_route_backs_the_event_off (attempt_count 1, next_attempt_at at retry.Delay(1), published_destinations [issue, agent.writer]) and an_unavailable_connection_releases_the_event (attempt_count 0, next_attempt_at null); whole package ok",
+      "headSha": "970b120978cebe49b893e9fa4c35cee35af3808b",
+      "negativeControl": "settle checking errMentionPending before failures makes both subtests fail"
     },
     {
-      "criterion": "The Reaches panel holds after the merge",
+      "criterion": "Item 1: the follower-holds-claim scenario no longer races the 5 s route roster",
       "surface": "Dispatch browser suite, Chromium",
       "command": ". /legion/harness/e2e-env.sh && cd packages/dispatch && bun run e2e -- recipients-claim.e2e.ts followers.e2e.ts --project chromium --retries 0",
-      "observed": "8 passed. Before the test fix, two scenarios failed at the merge (route_holder null): main's #2267 caches the listener roster for 5 s, so the test now polls the ask read until the newly live sessions show",
-      "headSha": "b31c73a4447ec80e5198f8dcff303399e0a549ee",
-      "negativeControl": "the same two scenarios fail with an immediate read under the roster cache, which is the failure the poll fixes; recipients-claim fails on a build of main (generation 3 round 1)"
+      "observed": "8 passed. Before the role-route change, the scenario reads a probe issue routed to role:reviewer until route_holder is the reviewer, so the card's one SSE refresh reads a roster that holds it",
+      "headSha": "970b120978cebe49b893e9fa4c35cee35af3808b",
+      "negativeControl": "the tester saw the roster read no_holder at once and live 5.5 s later at b31c73a4: an unwarmed refresh shows a bare role row, and the scenario fails without the poll"
     },
     {
-      "criterion": "Outbox rules, ask reads and skill guards at the merge",
-      "surface": "Go suites on real Postgres; skills guards",
-      "command": "go test -count=1 ./internal/dispatch/outbox/; go test -count=1 -timeout 30m -run 'Ask|Inbox|RouteStatus|Comment|Mention|Delivery' ./internal/dispatch/api/; bun test src/skills-guard.test.ts in pi-envoy and pi-legion",
-      "observed": "outbox ok (claimant, deferral, retry-follows-claim and mention tests pass, plus main's #2137 test); api ok; guards 10 and 13 pass at 1999 words",
-      "headSha": "b31c73a4447ec80e5198f8dcff303399e0a549ee",
-      "negativeControl": "the skill guard fails at 2002 words without the three-word trim"
+      "criterion": "Item 4: SKILL.md:46's last clause names what it refers to",
+      "surface": "repository text and the skills word guard",
+      "command": "sed -n 46p skills/dispatch/SKILL.md; find skills/dispatch skills/dispatch-first skills/dispatch-writing-specs -type f | xargs cat | wc -w; bun test src/skills-guard.test.ts in packages/pi-envoy and packages/pi-legion",
+      "observed": "'… as a suspended architect's does: taking it removes the tree from the workflow.'; 1999 words; guards 10 and 13 pass",
+      "headSha": "970b120978cebe49b893e9fa4c35cee35af3808b",
+      "negativeControl": "at b31c73a4 the clause read 'that takes the tree out of the workflow', where 'that' could point at the suspended architect's claim"
     }
   ],
   "filesChanged": [
-    "b31c73a4: packages/envoy/internal/dispatch/outbox/publisher.go (this PR's routing, claimant route, leftToMention and deferral inside main's pipelined window; the deferral is a 'deferred' outcome in settle and recordBatch), publisher_test.go and publisher_document_authors_test.go (helper signatures), packages/envoy/AGENTS.md (the deferral description), packages/contracts/src/dispatch-api.ts, the CHANGELOGs, scripts/e2e/README.md and dispatch-claimant-delivery.sh, packages/dispatch/e2e/recipients-claim.e2e.ts (polls past the roster cache), and skills/dispatch/SKILL.md"
+    "6ff13d39: packages/envoy/internal/dispatch/outbox/publisher.go (settle defers only when err is exactly errMentionPending), publisher_mentions_test.go (scan test), packages/envoy/AGENTS.md (item 3: a deferral that meets a lost connection or a stopping process is released, not backed off)",
+    "d56b0642: packages/dispatch/e2e/recipients-claim.e2e.ts",
+    "970b1209: skills/dispatch/SKILL.md"
   ],
-  "deviations": [
-    "skills/dispatch/SKILL.md: main rewrote line 46. The approved 'or route' is now in main's wording ('never write its status or route it'), line 48 is the approved text, and three words were cut elsewhere with no change in meaning ('sends decisions to', 'Do not repeat it', 'that takes the tree') to stay under the 2,000-word guard, as the architect directed on 2026-10-27 03:08Z."
-  ],
+  "deviations": [],
   "openQuestions": []
 }
