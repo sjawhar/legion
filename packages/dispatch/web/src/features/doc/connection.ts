@@ -119,11 +119,8 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
   return (artifactId, callbacks) => {
     const doc = new Doc();
     let destroyed = false;
-    // Whether the current socket's admission has been handed to the pending sync. The provider
-    // tracks whether the socket has synced and authenticated, and resets both as it closes; it does
-    // not track this, so a close resets it here.
-    let admitted = false;
-    // Whether any admission has: the first one's restore ends in the host's `onSynced`.
+    // Whether any admission has been handed to the pending sync: the first one's restore ends in
+    // the host's `onSynced`.
     let announced = false;
     let provider: HocuspocusProvider;
     // `connect: false` below means this class cannot instantiate a socket until `sync` is assigned
@@ -153,12 +150,15 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
     // token, so the authentication does. A writable admission restores the rows other tabs stored,
     // judging each against this document; before the reconnect's sync applies, the document lacks
     // what the server took meanwhile, so a row that builds on it would look as if it were typed
-    // against a rebuilt history and be dropped.
+    // against a rebuilt history and be dropped. The provider reports each once per socket: `synced`
+    // only as `isSynced` changes, which a close resets, and `authenticated` once per Authenticated
+    // frame, which the server sends once in answer to the one token each socket sends. So this
+    // hands the pending sync one admission per socket, and `synced()` takes a repeated one as a
+    // no-op all the same.
     const notifyAdmitted = () => {
-      if (!provider.isSynced || !provider.isAuthenticated || admitted) {
+      if (!provider.isSynced || !provider.isAuthenticated) {
         return;
       }
-      admitted = true;
       const restoring = sync?.synced().catch((error: unknown) => {
         console.error("Could not restore this document's pending browser edits", error);
       });
@@ -184,9 +184,6 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         notifyAdmitted();
       },
       onClose: ({ event }) => {
-        // A closed socket's admission is over; the reconnect's waits for its own sync and
-        // authentication.
-        admitted = false;
         // Hocuspocus answers every other close by reconnecting. This one is the server's decision
         // about the stored document (`DOCUMENT_SCHEMA_CLOSE_CODE`), so the provider stops here and
         // the host reads it again.

@@ -222,12 +222,17 @@ test("a reopened issue's page names no unsent edit before typing, and an edit ty
     await transport.sever();
     await expect(editor).toHaveAttribute("contenteditable", "true");
     await expect(connectedDot(page)).toHaveText("connected");
+    await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
+
+    // The connection is severed and its reconnect held. A page that is not connected names every
+    // row this browser holds, so a row the reconnect left would show here.
+    transport.hold();
+    await transport.sever();
+    await expect(connectedDot(page)).toHaveCount(0);
     await expect(page.getByRole("status", { name: unsentNotice })).toHaveCount(0);
     expect(await pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
 
-    // The typing waits in this browser: the connection is severed and its reconnect held.
-    transport.hold();
-    await transport.sever();
+    // The typing waits in this browser while the reconnect is held.
     await typeAtEnd(page, paragraph);
     await waitForPersistedTyping(page, issue.primary_artifact_id, paragraph);
     await page.reload();

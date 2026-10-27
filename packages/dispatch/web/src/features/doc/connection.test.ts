@@ -185,17 +185,20 @@ function syncPayloads(socket: OpenSocket, name: string, step: number): Uint8Arra
  * answers the socket's own SyncStep1 with a SyncStep2, and the SyncStep2 the provider wrote in
  * answer to the server's SyncStep1 with a SyncStatus: a writable admission applies it to `server`
  * and answers 1; a read-only one applies nothing and answers 1 only when `server` already holds
- * every struct in it.
+ * every struct in it. `beforeAuthentication` runs once the awareness has arrived, before the
+ * socket is authenticated: the span in which the admission is not known yet.
  */
 function serveInYgoOrder(
   socket: OpenSocket,
   server: Y.Doc,
   scope: "readonly" | "read-write",
-  name: string
+  name: string,
+  beforeAuthentication: () => void = () => {}
 ): void {
   socket.receive(syncStep1Frame(Y.encodeStateVector(server), name));
   socket.receive(syncStep2Frame(Y.encodeStateAsUpdate(server), name));
   socket.receive(awarenessFrame(name));
+  beforeAuthentication();
   socket.receive(authenticatedFrame(scope, name));
   socket.receive(syncStep2Frame(Y.encodeStateAsUpdate(server), name));
   const answer = syncPayloads(socket, name, 1).at(-1);
@@ -411,6 +414,144 @@ test("a reopen and a second close name no unsent edit to a person who typed noth
     serveInYgoOrder(third, server, "readonly", artifact);
     await expectNoNotice(true);
   });
+});
+
+/**
+ * Loads `server`'s heading through a writable admission: the editor stamps the heading's id, and
+ * the room takes the stamp and acknowledges it. The socket then drops, and while it is down an
+ * agent's write leaves the heading's id empty again, as the server writes a heading, so the
+ * reconnect's SyncStep2 brings an id for the editor to stamp anew.
+ */
+async function loadWritableThenDrop(
+  { connection, pending, socket, synced }: ProviderHarness,
+  server: Y.Doc,
+  artifact: string
+): Promise<void> {
+  const first = await socket(0);
+  serveInYgoOrder(first, server, "read-write", artifact);
+  await waitFor(() => expect(synced()).toBe(true));
+  stampHeadingId(connection.doc);
+  answerUpdates(first, server, artifact);
+  await waitFor(() => expect(pending.at(-1)).toMatchObject({ count: 0, readOnly: false }));
+  expect(await rowsOf(artifact)).toEqual([]);
+
+  first.drop();
+  const heading = server.getXmlFragment("prosemirror").get(0);
+  if (!(heading instanceof Y.XmlElement)) {
+    throw new Error("the server's first block is a heading");
+  }
+  heading.setAttribute("id", "");
+}
+
+test("a writable page's reconnect to an issue closed meanwhile names no edit for a stamp its editor made before the admission", async () => {
+  const artifact = artifactId();
+  const server = serverWithHeading(100);
+  await withProvider(artifact, async (harness) => {
+    const { connection, pending, socket } = harness;
+    await loadWritableThenDrop(harness, server, artifact);
+    const reconnecting = pending.length;
+
+    // The issue closed while the socket was down. The editor stamps the id the reconnect's
+    // SyncStep2 brought before the read-only admission arrives, and the room refuses the stamp.
+    const second = await socket(1);
+    serveInYgoOrder(second, server, "readonly", artifact, () => stampHeadingId(connection.doc));
+    second.receive(syncStatusFrame(false, artifact));
+
+    await waitFor(() => expect(pending.at(-1)).toMatchObject({ readOnly: true }));
+    expect(await rowsOf(artifact)).toEqual([]);
+    for (const state of pending.slice(reconnecting)) {
+      expect(state.count).toBe(0);
+      for (const shown of ["connecting", "connected", "offline"] satisfies ConnectionState[]) {
+        expect(pendingNotice(shown, state)).toBeUndefined();
+      }
+    }
+  });
+});
+
+test("a writable reconnect never stores a stamp made before its admission, and the stamp's acknowledgement drops it", async () => {
+  const artifact = artifactId();
+  const server = serverWithHeading(100);
+  await withProvider(artifact, async (harness) => {
+    const { connection, pending, socket } = harness;
+    await loadWritableThenDrop(harness, server, artifact);
+    const doc = connection.doc;
+
+    // The issue stays open: the stamp made before the admission is held, not stored.
+    const second = await socket(1);
+    serveInYgoOrder(second, server, "read-write", artifact, () => stampHeadingId(doc));
+    await waitFor(() => expect(pending.at(-1)).toMatchObject({ readOnly: false }));
+    expect(await rowsOf(artifact)).toEqual([]);
+
+    // The room applies the stamp's own Update frame and acknowledges it, and nothing was counted.
+    answerUpdates(second, server, artifact);
+    expect(server.getXmlFragment("prosemirror").toString()).toContain('id="plan"');
+    expect(await rowsOf(artifact)).toEqual([]);
+    expect(pending.every((state) => state.count === 0)).toBe(true);
+  });
+});
+
+test("a writable page stores the stamp it made offline ahead of what its person types, so a reload restores the typing", async () => {
+  const artifact = artifactId();
+  const server = serverWithHeading(100);
+  await withProvider(artifact, async ({ connection, socket, synced }) => {
+    const first = await socket(0);
+    serveInYgoOrder(first, server, "read-write", artifact);
+    await waitFor(() => expect(synced()).toBe(true));
+    // The socket drops and nothing answers the reconnect. The editor stamps the heading's id, then
+    // the person types: the typing continues the clock of the stamp, which the server never took.
+    first.drop();
+    const doc = connection.doc;
+    stampHeadingId(doc);
+    typeParagraph(doc);
+    await waitFor(async () =>
+      expect(await rowsOf(artifact)).toEqual([1, 2].map((seq) => [artifact, doc.clientID, seq]))
+    );
+  });
+
+  // The reload: a new page, whose pending sync restores the rows of the same store.
+  await withProvider(artifact, async ({ connection, pending, socket, synced }) => {
+    serveInYgoOrder(await socket(0), server, "read-write", artifact);
+    await waitFor(() => expect(synced()).toBe(true));
+    expect(connection.doc.getXmlFragment("prosemirror").toString()).toContain("Typed.");
+    expect(pending.every((state) => state.rebuiltAt === undefined)).toBe(true);
+  });
+});
+
+test("a writable page's stamp the server acknowledges is never counted or stored, and logs no error", async () => {
+  const artifact = artifactId();
+  const server = serverWithHeading(100);
+  const logged = spyOn(console, "error");
+  try {
+    await withProvider(artifact, async ({ connection, pending, socket, synced }) => {
+      const first = await socket(0);
+      serveInYgoOrder(first, server, "read-write", artifact);
+      await waitFor(() => expect(synced()).toBe(true));
+      const doc = connection.doc;
+      stampHeadingId(doc);
+      answerUpdates(first, server, artifact);
+      expect(server.getXmlFragment("prosemirror").toString()).toContain('id="plan"');
+      expect(await rowsOf(artifact)).toEqual([]);
+
+      // What the person types next is stored alone: the acknowledged stamp left memory, so once
+      // the room acknowledges the typing too, no row is left.
+      typeParagraph(doc);
+      await waitFor(async () =>
+        expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]])
+      );
+      const typing = syncPayloads(first, artifact, 2).at(-1);
+      if (typing === undefined) {
+        throw new Error("the provider sends the typing in an Update frame");
+      }
+      Y.applyUpdate(server, typing);
+      first.receive(syncStatusFrame(true, artifact));
+      await waitFor(async () => expect(await rowsOf(artifact)).toEqual([]));
+      await waitFor(() => expect(pending.at(-1)).toMatchObject({ count: 0, readOnly: false }));
+      expect(pending.every((state) => state.count <= 1)).toBe(true);
+    });
+    expect(logged).not.toHaveBeenCalled();
+  } finally {
+    logged.mockRestore();
+  }
 });
 
 test("a document whose browser keeps no edits says so, and still connects", async () => {

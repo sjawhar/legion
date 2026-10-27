@@ -217,6 +217,48 @@ function changesNothing(doc: Y.Doc, updates: readonly Uint8Array[]): boolean {
   );
 }
 
+/**
+ * The attributes the editor derives from the document rather than takes from a person, by the node
+ * that carries them. Milkdown's `syncHeadingIdPlugin` slugs every heading's id from its text as it
+ * loads the document, and its `syncListOrderPlugin` labels every ordered list item with its number
+ * and types it as ordered on the first caret move or edit. No rendering carries either, so the
+ * server settles an update that changes only these without a version (envoy's
+ * `TestAttributesTheEditorDerivesSettleWithoutAVersion`), and the next load derives them again.
+ */
+const DERIVED_ATTRIBUTES: Record<string, readonly string[]> = {
+  heading: ["id"],
+  list_item: ["label", "listType"],
+};
+
+/**
+ * Whether a transaction changed nothing but `DERIVED_ATTRIBUTES`. Yjs lists each type that existed
+ * before the transaction and that it changed, with the attribute keys it set or removed and `null`
+ * for a change to the type's children or text. A type the transaction created is inserted into one
+ * that existed, so it shows as that parent's `null`.
+ */
+function changesOnlyDerived(transaction: Y.Transaction): boolean {
+  if (transaction.changed.size === 0) {
+    return false;
+  }
+  for (const [type, keys] of transaction.changed) {
+    // `Object.hasOwn`, not indexing alone: the table inherits `Object.prototype`, so a node named
+    // `constructor` would read a function.
+    const attributes =
+      type instanceof Y.XmlElement && Object.hasOwn(DERIVED_ATTRIBUTES, type.nodeName)
+        ? DERIVED_ATTRIBUTES[type.nodeName]
+        : undefined;
+    if (attributes === undefined) {
+      return false;
+    }
+    for (const key of keys) {
+      if (key === null || !attributes.includes(key)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 export function startPendingSync({
   doc,
   onChange,
@@ -226,6 +268,14 @@ export function startPendingSync({
   let destroyed = false;
   // Whether the current socket's admission is read-only, from its authentication on.
   let readOnly = false;
+  // This tab's local updates that changed only what the editor derives, each with the ordinal it
+  // was made at, kept in memory until the server acknowledges one. Counted or stored, one would
+  // name an edit nobody made - a read-only admission refuses a heading-id stamp, and the stamp of a
+  // reconnect's editor can come before its admission is known. Each is still a struct of this
+  // tab's client, though, and every later update of the client continues its clock: a stored row
+  // typed after one parks on a reload unless the server or the store holds it. So a person's edit
+  // records the held updates first, in order.
+  let derived: { ordinal: number; update: Uint8Array }[] = [];
   // Whether the stored rows were last restored for a writable admission (false) or pruned for a
   // read-only one (true); undefined before the first. A later admission with the same flag
   // changes nothing the stored rows need.
@@ -250,6 +300,7 @@ export function startPendingSync({
       if (!storageAvailable) {
         recorded = [];
         sent = [];
+        derived = [];
       }
       return edits;
     });
@@ -292,10 +343,9 @@ export function startPendingSync({
     return reporting;
   };
 
-  const record = (update: Uint8Array): RecordedUpdate => {
-    nextOrdinal += 1;
+  const record = (update: Uint8Array, ordinal: number): RecordedUpdate => {
     const entry: RecordedUpdate = {
-      ordinal: nextOrdinal,
+      ordinal,
       seq: undefined,
       update,
       written: Promise.resolve(),
@@ -379,21 +429,43 @@ export function startPendingSync({
     return pruning;
   };
 
-  const onUpdate = (update: Uint8Array, origin: unknown) => {
+  const onUpdate = (
+    update: Uint8Array,
+    origin: unknown,
+    _doc: Y.Doc,
+    transaction: Y.Transaction
+  ) => {
     if (destroyed || storageAvailable === false || origin === remoteOrigin) {
       return;
     }
-    // A read-only admission's editor takes no typing, so a local update it makes is one the editor
-    // derives from the document as loaded - Milkdown stamps each heading's id from its text, for
-    // one - which the server refuses and the next load derives again: no edit of a person's to
-    // keep. Should the admission turn writable, the reconnect's SyncStep2, which carries all this
-    // document holds that the server lacks, sends it. What it derived can make a row an earlier
-    // load stored the same way change nothing, so the stored rows are judged again.
+    // An update that changes only what the editor derives is held in memory, uncounted and
+    // unstored, until the server acknowledges it or a person's edit stores it. What a read-only
+    // admission's editor derives can make a row an earlier read-only load stored change nothing,
+    // so such an admission judges the stored rows again.
+    if (changesOnlyDerived(transaction)) {
+      nextOrdinal += 1;
+      derived.push({ ordinal: nextOrdinal, update });
+      if (readOnly) {
+        void dropRedundantRows();
+      }
+      return;
+    }
+    // A read-only admission's editor takes no typing, so any other update it makes is still one
+    // the editor derives from the document as loaded, which the server refuses and the next load
+    // derives again: no edit of a person's to keep. Should the admission turn writable, the
+    // reconnect's SyncStep2, which carries all this document holds that the server lacks, sends it.
     if (readOnly) {
       void dropRedundantRows();
       return;
     }
-    record(update);
+    // A person's edit continues the clock of the updates held before it, so they are stored first
+    // and in order, and its row applies on a reload whether or not the server took them.
+    for (const held of derived) {
+      record(held.update, held.ordinal);
+    }
+    derived = [];
+    nextOrdinal += 1;
+    record(update, nextOrdinal);
   };
   doc.on("update", onUpdate);
 
@@ -404,6 +476,11 @@ export function startPendingSync({
     }
     // A provider Update frame carries exactly the Yjs event bytes. Separate local Yjs updates
     // have distinct client-id/clock ranges, so only a retry of this same row can match these bytes.
+    const held = derived.findIndex((entry) => equals(entry.update, frame.update));
+    if (held !== -1) {
+      derived.splice(held, 1);
+      return;
+    }
     const index = recorded.findIndex((entry) => equals(entry.update, frame.update));
     if (index === -1) {
       console.error("The document server acknowledged an update this browser did not store.");
@@ -427,6 +504,7 @@ export function startPendingSync({
     if (edits === undefined || through === 0) {
       return;
     }
+    derived = derived.filter((entry) => entry.ordinal > through);
     const covered = recorded.filter((entry) => entry.ordinal <= through);
     await Promise.all(covered.map((entry) => entry.written));
     // Filter the list as it is now, not as it was before the await: an edit typed while those
@@ -489,13 +567,14 @@ export function startPendingSync({
           scratch = scratchOf(doc);
           continue;
         }
-        const before = nextOrdinal;
+        const before = recorded.length;
         // Applying through the live document deliberately reuses the normal local-update path:
-        // the provider sends this restored diff and this listener records its new client row.
+        // the provider sends this restored diff and this listener records its new client row,
+        // after any held updates it continues; a diff that changes only what the editor derives
+        // is held as this tab's own is.
         Y.applyUpdate(doc, row.update, { restored: true });
-        const restoredEntry = recorded.at(-1);
-        if (nextOrdinal !== before && restoredEntry !== undefined) {
-          rerecorded.push(restoredEntry.written);
+        for (const entry of recorded.slice(before)) {
+          rerecorded.push(entry.written);
         }
       }
       // The old rows go only once every re-recorded row is stored, in one IndexedDB write.
@@ -591,6 +670,7 @@ export function startPendingSync({
         return;
       }
       destroyed = true;
+      derived = [];
       doc.off("update", onUpdate);
       void ready.then((edits) => edits?.close());
     },

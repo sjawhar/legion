@@ -106,6 +106,43 @@ test("a local edit is recorded, and an acknowledgement of its frame clears that 
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 2]]);
 });
 
+test("an update that changes only attributes the editor derives is stored only ahead of a person's edit", async () => {
+  const server = new Y.Doc();
+  server.clientID = 100;
+  const heading = new Y.XmlElement("heading");
+  heading.setAttribute("level", "2");
+  const list = new Y.XmlElement("ordered_list");
+  list.insert(0, [new Y.XmlElement("list_item")]);
+  server.getXmlFragment("prosemirror").insert(0, [heading, list]);
+  const { artifact, doc, states, sync } = await scripted(
+    artifactId(),
+    Y.encodeStateAsUpdate(server)
+  );
+  await admit(sync, false);
+  const [loadedHeading, loadedList] = doc.getXmlFragment("prosemirror").toArray();
+  const item = loadedList instanceof Y.XmlElement ? loadedList.get(0) : undefined;
+  if (!(loadedHeading instanceof Y.XmlElement && item instanceof Y.XmlElement)) {
+    throw new Error("the document holds a heading and an ordered list item");
+  }
+
+  // The editor stamps the heading's id and labels the ordered list's item: nothing is stored.
+  doc.transact(() => {
+    loadedHeading.setAttribute("id", "plan");
+    item.setAttribute("label", "1.");
+    item.setAttribute("listType", "ordered");
+  });
+  expect(await rowsOf(artifact)).toEqual([]);
+  expect(states.every((state) => state.count === 0)).toBe(true);
+
+  // A heading's level is a person's choice: its change is stored, after the update it builds on.
+  loadedHeading.setAttribute("level", "3");
+  await waitFor(async () =>
+    expect(await rowsOf(artifact)).toEqual(
+      [1, 2].map((seq): PendingKey => [artifact, doc.clientID, seq])
+    )
+  );
+});
+
 for (const queued of [0, 1, 3]) {
   test(`a reconnect with ${queued} queued updates clears each row only once its own frame is acknowledged`, async () => {
     const { artifact, doc, sync, type } = await scripted();

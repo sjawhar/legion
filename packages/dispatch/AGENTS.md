@@ -739,8 +739,13 @@ so the retry can reject too); a failure while online, or a retry that rejects, r
 `pending-edits.ts` keeps each local Yjs update in IndexedDB until its own Hocuspocus `SyncStatus`
 acknowledgement arrives: `pending-sync.ts` pairs acknowledgements with frames by update payload
 rather than a provider counter, so reconnect queues cannot clear an earlier unconfirmed edit, and
-reads every frame field through `sync-frame.ts`'s bounds-checked `readField`. The first synced
-admission judges each saved row on a scratch copy of the live document before applying it: the
+reads every frame field through `sync-frame.ts`'s bounds-checked `readField`. A local update that
+changes only attributes the editor derives (a heading's `id`, an ordered list item's `label` and
+`listType`; the server settles these without a version) is never counted or stored, whatever the
+admission or the order of reconnect, close and reopen: it is held in memory until the server
+acknowledges it, and the next local update a person makes stores the held ones first, in order,
+because its row continues their client's clock and would park on a reload without them. The first
+synced admission judges each saved row on a scratch copy of the live document before applying it: the
 copy takes every row the live document takes and is copied afresh after a row it refuses, so a
 row a rebuild leaves parked is dropped and reported alone while the others apply, and the rows it
 handled are deleted in one IndexedDB write once their re-recorded rows are stored. A read-only
