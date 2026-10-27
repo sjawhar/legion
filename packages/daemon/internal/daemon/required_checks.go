@@ -27,11 +27,13 @@ import (
 // and its protection), and, when the base requires a workflow, each pull request's workflow runs
 // once more, all on the implement App's installation, whose hourly limit every pane's gh shares:
 // about a hundred and twenty reads an hour for a pull request on a base of its own, sixty for each
-// more on the same base, and thirty more for each pull request whose base requires a workflow; and
-// it lists the open pull requests on the branch of each issue whose implementer completed with no
-// pull request recorded, thirty an hour while one waits. Two minutes also gives a newly opened pull
-// request its set well before its first CI settles, and bounds how long a review decision, a head
-// or a pull request whose webhook never arrived stays unread.
+// more on the same base, and thirty more for each pull request whose base requires a workflow; it
+// compares an approved head with the head once for each review round whose approval is set aside
+// below the head (readApprovalCarry), until the approval stands or GitHub answers; and it lists the
+// open pull requests on the branch of each issue whose implementer completed with no pull request
+// recorded, thirty an hour while one waits. Two minutes also gives a newly opened pull request its
+// set well before its first CI settles, and bounds how long a review decision, a head or a pull
+// request whose webhook never arrived stays unread.
 const requiredChecksInterval = 2 * time.Minute
 
 // requiredChecksRead bounds one pull request's reads in a pass: its base branch, its reviews, then
@@ -68,7 +70,9 @@ func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 // read every time, even one that only confirms the stored value, so a conflict the poll recorded
 // before the issue reached awaiting_merge is still acted on once it gets there. It then reads the
 // pull request's reviews and applies a deciding one the daemon has not recorded, whose webhook
-// never arrived (readReviews), whatever phase the issue is in. It then reads what the base branch
+// never arrived (readReviews), whatever phase the issue is in, and, for a review round whose
+// approval is set aside below the head, GitHub's compare of the approved head with the head,
+// applying the handoff-only push it shows (readApprovalCarry). It then reads what the base branch
 // requires with the implement App's installation token, the credential the daemon reads GitHub
 // with for its own work (requiredchecks.Required, which this pass is the only reader of), and, when
 // that includes a workflow, each required workflow's latest run on the head whose settlement stands
@@ -133,7 +137,7 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 				w.log.Warn("apply whether a pull request's head can be merged into its base", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
 			}
 		}
-		if w.readReviews(ctx, prCtx, github, pr) {
+		if w.readReviews(ctx, prCtx, github, pr) || w.readApprovalCarry(ctx, prCtx, github, pr) {
 			cancel()
 			return
 		}
