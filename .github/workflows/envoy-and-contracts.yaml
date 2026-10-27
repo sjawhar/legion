@@ -401,6 +401,7 @@ jobs:
               - 'skills/**'
             # envoy-go's gate alone; every other Go job has a filter of its own.
             envoy:
+              - '.github/workflows/envoy-and-contracts.yaml'
               - 'packages/envoy/**'
               - 'packages/proof-editor/**'
               - 'packages/contracts/**'
