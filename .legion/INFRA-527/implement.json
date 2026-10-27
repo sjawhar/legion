@@ -2,14 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-527",
-  "completed": "2026-10-27T08:55:00Z",
+  "completed": "2026-10-27T10:55:00Z",
   "pr": "https://github.com/sjawhar/legion/pull/2322",
-  "head": "84f50938f2b741fa1f714cc765e1a35bc9c551f0",
+  "head": "ce06b30f1f3471b052ec79e661effefb6faa3cf8",
   "base": "b08a56bce0c8",
-  "round": 4,
+  "round": 5,
+  "reviewRound4Answered": "Review round 4 (approve-ready, one finding: required `test` red at 84f50938 on TestFetchKeepsAFeedAfterGitGC/killed_during_repack in packages/daemon/internal/workspace, Go code this PR does not touch). The test passed 5 of 5 in the pod (`go test ./internal/workspace -run TestFetchKeepsAFeedAfterGitGC -count=5` -> ok in 49.9s). The reviewer's two fast-follow comment fixes landed in ce06b30f (comments only), whose push runs `test` again on the new head instead of a re-run of the old job. Fast-follow: none.",
   "mergeForward": "GitHub reported #2322 CONFLICTING at 1ab4b685 after #2303 (INFRA-529) merged. Forward merge of main at b08a56bc into legion/INFRA-527 as 84f50938 (no rebase). Only conflict: packages/dispatch/AGENTS.md line 291, the MarkdownBody paragraph; resolved keeping #2303's read-only-engine clause and this branch's task-checkbox sentence (word diff vs main shows only this branch's sentence; vs 1ab4b685 only #2303's changes). Fingerprint f3549e3d486deea516dd1bd45d81ed86c8153dee4ec7583a2288810a740019f6 -> 5a80822aa077a2a8bc91d213bd3694223ec2451adeedd5b3f0656b811da35e3c, changed only in that AGENTS.md line; every code and test line identical. The two changes do not meet in one function (#2303: markdown-engine.ts, proof-editor; this branch: paintBlock, task-checkboxes.ts, styles.css). PR comment https://github.com/sjawhar/legion/pull/2322#issuecomment-6437276823.",
   "reviewRound2Answered": "Thread PRRT_kwDORFy7ds6wj7qi fixed in 5e832b77 and resolved: expectTickedFilledUntickedEmpty measures each box against the background ring of its own padded clip (taken once two shots in a row match), ticked middle ink >= 0.25 (measured 0.500-0.626), unticked <= 0.05 (measured 0.000); sameSize dropped. Reviewer's fast-follow done: forced-colors row no longer scrolls or destructures ticked; openChecklistThread comment cut to its first clause. Round-1 threads PRRT_kwDORFy7ds6wi-zl and PRRT_kwDORFy7ds6wi-zu answered and resolved.",
   "proof": [
+    {
+      "criterion": "Round 4: the reviewer's comment fixes leave the task-items rows passing",
+      "surface": "Issue page Conversation tab and document decision-block thread; Chromium desktop and Chromium as iPhone 13; real Go server, Postgres 17 + pgvector",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && ( . /legion/scratch/harness-527/env.sh && DATABASE_URL=\"$DB_URL\" bun run e2e -- e2e/task-items.e2e.ts --project=chromium --project=iphone )",
+      "observed": "10 passed; typecheck exit 0; biome check of the file no fixes. The change since 84f50938 is two comment edits in e2e/task-items.e2e.ts.",
+      "headSha": "ce06b30f1f3471b052ec79e661effefb6faa3cf8",
+      "negativeControl": "The rows' negative controls are unchanged by a comment edit: at the fork point b08a56bc the tester saw 10 of 10 fail (toHaveCount(2), Received 0), and with the forced-colors block removed 20 of 20 forced-colors runs failed (round 3)."
+    },
     {
       "criterion": "Merge forward keeps both changes: task checkboxes (this branch) and #2303's read-only directive fallback both work on the merged head",
       "surface": "Issue page Conversation tab and document decision-block thread (task-items) and #2303's unknown-directive rows; Chromium desktop and Chromium as iPhone 13; real Go server, Postgres 17 + pgvector",
