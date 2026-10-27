@@ -1146,3 +1146,56 @@ func TestARetryOfAClaimThatKeptOtherWorkStillDeliversItsTask(t *testing.T) {
 		})
 	}
 }
+
+// An operator's suspension keeps the claim's queued phase task, and a re-admission can restart
+// the issue in the phase it stood in. The operator's resume then must not send the run that is
+// over's task into the new run: it is dropped (phaseHolds compares the run), and the new run's
+// start gives the worker its own task.
+func TestAnOperatorResumeAfterAReadmissionDropsTheOldRunsTask(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what the daemon wires
+	tester := launchedClaim(t, sup, issue.Tree, issue.Key, claim.RoleTester)
+	machine, _ := sup.Machine(tester)
+
+	// Generation 1's task is sent and not yet started when the operator suspends the tester.
+	if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: tester, Task: "Test generation 1.", ID: "outbox:7", Phase: phase.Testing, Generation: 1}); err != nil {
+		t.Fatalf("deliver generation 1's task: %v", err)
+	}
+	operatorSuspend(t, sup, tester)
+	if pending := machine.Claim().Pending; pending == nil || pending.Generation != 1 {
+		t.Fatalf("after the operator's suspend pending %+v, want generation 1's task kept", pending)
+	}
+
+	// The issue is re-admitted and restarts in testing at generation 2.
+	issue.Generation = 2
+	putOutboxIssue(t, pool, records, issue)
+	if err := machine.Handle(ctx, supervise.RequestResume{Claim: tester}); err != nil {
+		t.Fatalf("the operator's resume: %v", err)
+	}
+	if resumes := resumesOf(rt, tester); len(resumes) != 1 {
+		t.Fatalf("the operator's resume relaunched the tester %d times, want once", len(resumes))
+	}
+	readyClaimOf(t, sup, tester, claim.RoleTester)
+	machine.Wait()
+	if pending := machine.Claim().Pending; pending != nil {
+		t.Fatalf("after the resume pending %+v, want generation 1's task dropped", pending)
+	}
+
+	clock := time.Now()
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion",
+		now: func() time.Time { return clock }}
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleTester,
+		Generation: 2, Phase: phase.Testing, Task: "Test generation 2."}, clock))
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run generation 2's start: %v", err)
+	}
+	machine.Wait()
+	if pending := machine.Claim().Pending; outboxRows(t, pool) != 0 || pending == nil || pending.Generation != 2 || pending.Task != "Test generation 2." || pending.DeliveredAt.IsZero() {
+		t.Fatalf("after generation 2's start: %d rows, pending %+v; want the start run and its task sent", outboxRows(t, pool), pending)
+	}
+}

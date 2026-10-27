@@ -754,6 +754,10 @@ type Store interface {
 	// waiting line may hold under a live root on a chain key is on (Waiting), whose Ancestry an
 	// event of key reads again.
 	QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]Issue, error)
+	// SlottedIssues is the record of each issue of project that holds an admission slot, in slot
+	// order, in one read: another project's slot in the shared table, and every issue holding no
+	// slot, are left out of the read rather than of the caller's loop.
+	SlottedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	// PutIssue writes issue, refusing one without its repository, default branch or GitHub's
 	// spelling of the repository, one whose GitHub spelling names another repository, and one that
 	// would give a recorded issue another of any of them.

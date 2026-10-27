@@ -90,6 +90,34 @@ func queryIssues(ctx context.Context, tx pgx.Tx, query string, args ...any) ([]I
 	return issues, rows.Err()
 }
 
+// SlottedIssues is the record of each issue of project that holds an admission slot, in slot order
+// (index, then issue), in one read: what admission judges when it releases the slots a fact has
+// finished with (admit's releaseSlots), on every fact and under the one fact lock. The slots table
+// is shared by every project's daemon, so another project's slot is left out here rather than by
+// the caller, and no issue of another project, and no issue holding no slot, is read at all. It
+// reads issueColumns itself, which no column of slots (issue, index, admitted_at) shares a name
+// with, so every record reads the columns every other read of an issue does.
+func (s *Postgres) SlottedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	rows, err := tx.Query(ctx, `select `+issueColumns+` from slots s join issues i on i.key = s.issue
+		where i.project = $1 order by s.index, s.issue`, project)
+	if err != nil {
+		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
+	}
+	defer rows.Close()
+	issues := []Issue{}
+	for rows.Next() {
+		issue, err := scanIssue(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read a slotted issue of project %s: %w", project, err)
+		}
+		issues = append(issues, *issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
+	}
+	return issues, nil
+}
+
 func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	switch {
 	case issue.Repo == "":

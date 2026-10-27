@@ -94,9 +94,9 @@ func (d *outboxDispatch) ListIssues(context.Context, string, []string) ([]dispat
 func (d *outboxDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
 	return d.issue, d.getErr
 }
-func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) error {
+func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) (dispatch.Issue, error) {
 	d.statuses = append(d.statuses, status)
-	return d.statusErr
+	return dispatch.Issue{}, d.statusErr
 }
 func (d *outboxDispatch) HandOver(_ context.Context, issue dispatch.Issue, status string) error {
 	d.handOvers = append(d.handOvers, fmt.Sprintf("%s %s %v", issue.Key, status, issue.Labels))
@@ -1897,48 +1897,53 @@ func TestTheControllersTerminalStatesNeverReachTheWorkflow(t *testing.T) {
 }
 
 // The answer supervise asks for before it sends a queued task: is the issue still in the phase
-// the task was queued for. The role is not what is compared — one role runs several phases — and
-// a task of no phase never reaches this answer at all, which is supervise's own rule.
+// and run the task was queued for. The role is not what is compared — one role runs several
+// phases — and a task of no phase never reaches this answer at all, which is supervise's own rule.
 func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	putOutboxIssue(t, pool, records, record.Issue{
 		Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
-		Phase: phase.Implementing, Status: "in_progress", Rank: "00000",
+		Phase: phase.Implementing, Generation: 2, Status: "in_progress", Rank: "00000",
 	})
 	holds := (&workflowRuntime{pool: pool, records: records}).phaseHolds
 
 	for _, tc := range []struct {
-		name      string
-		issue     string
-		queuedFor phase.Phase
-		want      bool
+		name       string
+		issue      string
+		queuedFor  phase.Phase
+		generation uint64
+		want       bool
 	}{
-		{name: "the issue's own phase", issue: "LEGION-208", queuedFor: phase.Implementing, want: true},
-		{name: "a phase the issue has not reached", issue: "LEGION-208", queuedFor: phase.Testing, want: false},
+		{name: "the issue's own phase and run", issue: "LEGION-208", queuedFor: phase.Implementing, generation: 2, want: true},
+		{name: "a phase the issue has not reached", issue: "LEGION-208", queuedFor: phase.Testing, generation: 2, want: false},
 		// The implementer works implementing, retro and the production check: a task written for
 		// one of them is not the work of another, which the role alone cannot tell.
-		{name: "another phase of the same role", issue: "LEGION-208", queuedFor: phase.Retro, want: false},
+		{name: "another phase of the same role", issue: "LEGION-208", queuedFor: phase.Retro, generation: 2, want: false},
+		// A re-admission restarts the issue in the phase it stood in: the run that is over's task
+		// of that phase is not the new run's work.
+		{name: "the issue's phase of a run that is over", issue: "LEGION-208", queuedFor: phase.Implementing, generation: 1, want: false},
+		{name: "a task of no run in the issue's phase", issue: "LEGION-208", queuedFor: phase.Implementing, generation: 0, want: true},
 		// The workflow never deletes an issue, so no record means the claim is not the workflow's:
 		// an operator spawn, whose task the workflow has no standing to drop.
-		{name: "an issue the workflow never recorded", issue: "LEGION-999", queuedFor: phase.Implementing, want: true},
+		{name: "an issue the workflow never recorded", issue: "LEGION-999", queuedFor: phase.Implementing, generation: 1, want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := holds(context.Background(), tc.issue, tc.queuedFor)
+			got, err := holds(context.Background(), tc.issue, tc.queuedFor, tc.generation)
 			if err != nil {
 				t.Fatalf("phaseHolds: %v", err)
 			}
 			if got != tc.want {
-				t.Fatalf("phaseHolds(%s, %s) = %v, want %v", tc.issue, tc.queuedFor, got, tc.want)
+				t.Fatalf("phaseHolds(%s, %s, %d) = %v, want %v", tc.issue, tc.queuedFor, tc.generation, got, tc.want)
 			}
 		})
 	}
 
 	putOutboxIssue(t, pool, records, record.Issue{
 		Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
-		Phase: phase.Testing, Status: "testing", Rank: "00000",
+		Phase: phase.Testing, Generation: 2, Status: "testing", Rank: "00000",
 	})
-	implementing, err := holds(context.Background(), "LEGION-208", phase.Implementing)
+	implementing, err := holds(context.Background(), "LEGION-208", phase.Implementing, 2)
 	if err != nil {
 		t.Fatalf("phaseHolds after the phase moved: %v", err)
 	}

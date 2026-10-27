@@ -527,7 +527,7 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 			return err
 		}
 	}
-	if err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
+	if _, err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
 		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
 	}
 	return nil
