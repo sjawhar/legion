@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -371,6 +373,12 @@ func messageBlockLayout(t *testing.T, database *store.Store, messageID string) s
 	return strings.Join(parts, " | ")
 }
 
+// blockOf reports whether node is a block of the comment or message kind id: the source a
+// graph read lists for a mention the item writes, in place of the item (R7).
+func blockOf(node model.GraphNode, kind, id string) bool {
+	return node.Kind == "block" && node.Parent != nil && node.Parent.Kind == kind && node.Parent.ID == id
+}
+
 // itemBlockRefs reads the block mentions of a comment or message as <block>-><to_kind>:<to_id>,
 // failing the test when a row's from_node is not its block's node id.
 func itemBlockRefs(t *testing.T, database *store.Store, kind, itemID string) []string {
@@ -480,19 +488,21 @@ func TestEveryMessageWriteIndexesItsBlocks(t *testing.T) {
 	}
 }
 
-// R7's storage: a mention in a comment starts at the block holding it, one row per (block,
-// target), so a comment citing one target from two paragraphs holds two; the comment's own refs
-// row stays. A link that moves between two blocks of a comment is a change the edit's event
-// names, though the comment still cites the target.
-//
-// The graph reads of the same edges (?from= the comment listing the edge with block b2, ?to= the
-// issue listing the block node with the comment as its parent, and referenced_by_count 2 for two
-// paragraphs) need the item block node kinds, which come with references to item blocks.
+// R7: a mention in a comment starts at the block holding it, one row per (block, target), so a
+// comment citing one target from two paragraphs holds two; the comment's own refs row stays. The
+// graph reads the block's edge in place of the comment's: ?from= the comment lists the mention
+// with the block holding it, ?to= the target lists the block node, whose parent is the comment,
+// and referenced_by_count counts each citing paragraph. A link that moves between two blocks of a
+// comment is a change the edit's event names, though the comment still cites the target.
 func TestAMentionStartsAtItsBlock(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Mentions in blocks", "before")
 	target := createInteractionIssue(t, handler, "ACME", "Cited issue", "before")
 	cited := "dispatch://" + target.Key
+	// The count before any comment cites the issue: its spec's attached_to edge.
+	uncited := decodeBody[struct {
+		ReferencedByCount int `json:"referenced_by_count"`
+	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+target.Key, nil, "alice")).ReferencedByCount
 
 	once := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Intro.\n\nSee " + cited + " for context."}, "alice")
 	if got := itemBlockRefs(t, database, "comment", once.ID); strings.Join(got, ",") != "b2->issue:"+target.Key {
@@ -507,6 +517,22 @@ func TestAMentionStartsAtItsBlock(t *testing.T) {
 		t.Fatalf("block mentions stamped with the comment.created event = %d (%v), want 1", stamped, err)
 	}
 
+	outgoing := readGraph(t, handler, url.Values{"from": {"dispatch://" + issue.Key + "/comment/" + once.ID}})
+	if len(outgoing.Edges) != 1 || outgoing.Edges[0].Kind != "mentions" || outgoing.Edges[0].Node.ID != target.Key ||
+		outgoing.Edges[0].Block == nil || outgoing.Edges[0].Block.BlockID != "b2" || outgoing.Edges[0].Block.ID != "comment/"+once.ID+"#b2" {
+		t.Fatalf("?from= the comment = %#v, want the mention of %s held by block b2", outgoing.Edges, target.Key)
+	}
+	incoming := readGraph(t, handler, url.Values{"to": {cited}, "kind": {"mentions"}})
+	if len(incoming.Edges) != 1 {
+		t.Fatalf("?to= the issue lists %d edges, want the block's alone: %#v", len(incoming.Edges), incoming.Edges)
+	}
+	if source := incoming.Edges[0].Node; source.Kind != "block" || source.ID != "comment/"+once.ID+"#b2" || source.BlockID != "b2" ||
+		source.Parent == nil || source.Parent.Kind != "comment" || source.Parent.ID != once.ID ||
+		source.Ref != "dispatch://"+issue.Key+"/comment/"+once.ID+"#b-b2" || source.Text != "See "+cited+" for context." {
+		t.Fatalf("?to= the issue lists the source %#v, want block b2 of comment %s", source, once.ID)
+	}
+	requireIssueBacklinkCount(t, handler, target.Key, uncited+1)
+
 	twice := createThreadComment(t, handler, issue.Key, map[string]any{"body": "First cites " + cited + ".\n\nSecond cites " + cited + " again."}, "alice")
 	if got := itemBlockRefs(t, database, "comment", twice.ID); strings.Join(got, ",") != "b1->issue:"+target.Key+",b2->issue:"+target.Key {
 		t.Fatalf("block mentions = %v, want b1 and b2 -> %s", got, target.Key)
@@ -517,6 +543,19 @@ func TestAMentionStartsAtItsBlock(t *testing.T) {
 	`, twice.ID, target.Key).Scan(&own); err != nil || own != 1 {
 		t.Fatalf("the comment's own refs rows to the issue = %d (%v), want 1", own, err)
 	}
+	// twice cites the issue from both its paragraphs: two edges, each from its block, and two more
+	// in the count beside once's one.
+	var fromTwice []string
+	for _, edge := range readGraph(t, handler, url.Values{"to": {cited}, "kind": {"mentions"}}).Edges {
+		if edge.Node.Parent != nil && edge.Node.Parent.ID == twice.ID {
+			fromTwice = append(fromTwice, edge.Node.Kind+":"+edge.Node.BlockID)
+		}
+	}
+	slices.Sort(fromTwice)
+	if strings.Join(fromTwice, ",") != "block:b1,block:b2" {
+		t.Fatalf("?to= the issue lists %v from the comment citing it twice, want blocks b1 and b2", fromTwice)
+	}
+	requireIssueBacklinkCount(t, handler, target.Key, uncited+3)
 
 	// Both paragraphs are reworded, so the ids follow position: the link moves from b2 to b1.
 	requireEdit(t, "move the link", editCommentAs(t, handler, once.ID, "Intro cites "+cited+".\n\nSee it for context.", nil, nil))
@@ -524,4 +563,176 @@ func TestAMentionStartsAtItsBlock(t *testing.T) {
 		t.Fatalf("block mentions after the edit = %v, want b1 -> %s", got, target.Key)
 	}
 	requireReferencesChanged(t, handler, issue.Key, "comment.edited", once.ID, []model.ChangedReference{{Kind: "issue", ID: target.Key}})
+}
+
+// A block of a comment or an issue message is a node a reference names: ?to= the block lists the
+// mention of it, from the block of the comment that holds the link, and reads the block with its
+// whole text and R12's facts; ?to= its item lists the same edge at the block. A block the item
+// does not hold answers 404, and a message block pinned to a revision is no reference. A reply
+// that names a block of the item read is listed once, under that block, and belongs to it.
+func TestABlockOfACommentIsAddressable(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Comment block references", "before")
+	x := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Alpha.\n\nBeta."}, "alice")
+	xRef := "dispatch://" + issue.Key + "/comment/" + x.ID
+	y := createThreadComment(t, handler, issue.Key, map[string]any{"body": "See " + xRef + "#b-b2."}, "alice")
+
+	if got := itemBlockRefs(t, database, "comment", y.ID); strings.Join(got, ",") != "b1->comment_block:comment/"+x.ID+"#b2" {
+		t.Fatalf("Y's block mentions = %v, want b1 -> comment_block comment/%s#b2", got, x.ID)
+	}
+	var stored string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select string_agg(to_kind || ' ' || to_id, ',') from refs where from_kind = 'comment' and from_id = $1
+	`, y.ID).Scan(&stored); err != nil || stored != "comment_block comment/"+x.ID+"#b2" {
+		t.Fatalf("Y's own refs = %q (%v), want the comment_block target alone", stored, err)
+	}
+
+	block := readGraph(t, handler, url.Values{"to": {xRef + "#b-b2"}})
+	node := block.Node
+	if node.Kind != "block" || node.ID != "comment/"+x.ID+"#b2" || node.BlockID != "b2" || node.Ref != xRef+"#b-b2" ||
+		node.Text != "Beta." || node.Document != "" || node.ChangedVersion != 1 {
+		t.Fatalf("?to= block b2 reads the node %#v", node)
+	}
+	if node.Parent == nil || *node.Parent != (model.NodeParent{Kind: "comment", ID: x.ID, Ref: xRef}) || node.ParentVersion == nil || *node.ParentVersion != 1 {
+		t.Fatalf("block b2's parent = %#v at version %v, want comment %s at revision 1", node.Parent, node.ParentVersion, x.ID)
+	}
+	if len(node.MadeBy) != 1 || node.MadeBy[0].ID != "alice" || node.MadeAt == nil || !node.MadeAt.Equal(x.CreatedAt) ||
+		len(node.ChangedBy) != 1 || node.ChangedBy[0].ID != "alice" || node.ChangedAt == nil || !node.ChangedAt.Equal(x.CreatedAt) {
+		t.Fatalf("block b2's facts = made %v at %v, changed %v at %v; want alice at the comment's created_at", node.MadeBy, node.MadeAt, node.ChangedBy, node.ChangedAt)
+	}
+	if len(block.Edges) != 1 || block.Edges[0].Kind != "mentions" || block.Edges[0].Node.Kind != "block" ||
+		block.Edges[0].Node.ID != "comment/"+y.ID+"#b1" || block.Edges[0].Node.Parent == nil || block.Edges[0].Node.Parent.ID != y.ID {
+		t.Fatalf("?to= block b2 lists %#v, want the mention from block b1 of comment %s", block.Edges, y.ID)
+	}
+
+	whole := readGraph(t, handler, url.Values{"to": {xRef}})
+	if len(whole.Edges) != 1 || whole.Edges[0].Kind != "mentions" || whole.Edges[0].Block == nil || whole.Edges[0].Block.BlockID != "b2" ||
+		whole.Edges[0].Node.ID != "comment/"+y.ID+"#b1" {
+		t.Fatalf("?to= comment X lists %#v, want the mention at its block b2", whole.Edges)
+	}
+	if parts := readGraph(t, handler, url.Values{"to": {xRef}, "kind": {"part_of"}}).Edges; len(parts) != 2 {
+		t.Fatalf("?to= comment X with kind=part_of lists %d edges, want its two blocks", len(parts))
+	}
+
+	missing := graphRequest(t, handler, url.Values{"to": {xRef + "#b-b9"}})
+	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), `"code":"NOT_FOUND"`) ||
+		!strings.Contains(missing.Body.String(), `no block \"b9\" in comment `+x.ID) {
+		t.Fatalf("?to= block b9: status=%d body=%s", missing.Code, missing.Body.String())
+	}
+
+	message := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "One.\n\nTwo."}, "alice")
+	mRef := "dispatch://" + issue.Key + "/message/" + message.ID
+	z := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Re " + mRef + "#b-b2."}, "alice")
+	messageBlock := readGraph(t, handler, url.Values{"to": {mRef + "#b-b2"}})
+	if node := messageBlock.Node; node.Kind != "block" || node.ID != "message/"+message.ID+"#b2" || node.Text != "Two." ||
+		node.Parent == nil || node.Parent.Kind != "message" || node.Parent.ID != message.ID || node.ParentVersion != nil ||
+		node.MadeAt == nil || !node.MadeAt.Equal(message.CreatedAt) {
+		t.Fatalf("?to= message block b2 reads the node %#v", node)
+	}
+	if len(messageBlock.Edges) != 1 || messageBlock.Edges[0].Node.ID != "comment/"+z.ID+"#b1" {
+		t.Fatalf("?to= message block b2 lists %#v, want the mention from comment %s", messageBlock.Edges, z.ID)
+	}
+	pinned := graphRequest(t, handler, url.Values{"to": {mRef + "#b-b2@v1"}})
+	if pinned.Code != http.StatusBadRequest || !strings.Contains(pinned.Body.String(), `"code":"INVALID_REFERENCE"`) {
+		t.Fatalf("?to= a pinned message block: status=%d body=%s", pinned.Code, pinned.Body.String())
+	}
+
+	// Until a reply names its block through the API, the reply is written as a reply naming a block
+	// is stored: its thread root in reply_to, the block's node id in replies_to_block.
+	var reply string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into comments (issue_key, author, body, reply_to, replies_to_block)
+		values ($1, '{"kind":"user","id":"alice"}', 'On beta.', $2, $3) returning id::text
+	`, issue.Key, x.ID, "comment/"+x.ID+"#b2").Scan(&reply); err != nil {
+		t.Fatalf("insert a reply naming b2: %v", err)
+	}
+	replies := readGraph(t, handler, url.Values{"to": {xRef}, "kind": {"replies_to"}}).Edges
+	if len(replies) != 1 || replies[0].Node.ID != reply || replies[0].Block == nil || replies[0].Block.BlockID != "b2" {
+		t.Fatalf("?to= comment X lists the replies %#v, want the reply once, under block b2", replies)
+	}
+	if parent := replies[0].Node.Parent; parent == nil || *parent != (model.NodeParent{Kind: "block", ID: "comment/" + x.ID + "#b2", Ref: xRef + "#b-b2"}) {
+		t.Fatalf("the reply's parent = %#v, want block b2 of comment %s", parent, x.ID)
+	}
+	if replies := readGraph(t, handler, url.Values{"to": {xRef + "#b-b2"}, "kind": {"replies_to"}}).Edges; len(replies) != 1 || replies[0].Node.ID != reply {
+		t.Fatalf("?to= block b2 lists the replies %#v, want the reply", replies)
+	}
+	if all := readGraph(t, handler, url.Values{"to": {xRef}}).Edges; len(all) != 2 {
+		t.Fatalf("?to= comment X lists %d edges, want the mention and the reply, each once: %#v", len(all), all)
+	}
+
+	// A message reply naming a block keeps the message it answers in in_reply_to.
+	var messageReply string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into messages (issue_key, author, body, in_reply_to, replies_to_block)
+		values ($1, '{"kind":"user","id":"alice"}', 'On two.', $2, $3) returning id::text
+	`, issue.Key, message.ID, "message/"+message.ID+"#b2").Scan(&messageReply); err != nil {
+		t.Fatalf("insert a message reply naming b2: %v", err)
+	}
+	messageReplies := readGraph(t, handler, url.Values{"to": {mRef}, "kind": {"replies_to"}}).Edges
+	if len(messageReplies) != 1 || messageReplies[0].Node.ID != messageReply || messageReplies[0].Block == nil || messageReplies[0].Block.BlockID != "b2" {
+		t.Fatalf("?to= the message lists the replies %#v, want the reply once, under block b2", messageReplies)
+	}
+	if parent := messageReplies[0].Node.Parent; parent == nil || *parent != (model.NodeParent{Kind: "block", ID: "message/" + message.ID + "#b2", Ref: mRef + "#b-b2"}) {
+		t.Fatalf("the message reply's parent = %#v, want block b2 of message %s", parent, message.ID)
+	}
+}
+
+// A15's comment half: a link pinned to revision N of a comment's block reads the block as N
+// recorded it, and says how it stands now: unchanged, changed (after an edit rewords it) or
+// removed (after an edit deletes it, with the revision that removed it). The unpinned link reads
+// the current text, or 404 once the block is gone; a pin past the comment's revision answers 404.
+func TestAPinnedCommentBlockReadsItsRevision(t *testing.T) {
+	handler, _ := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Pinned comment blocks", "before")
+	x := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Alpha.\n\nBeta."}, "alice")
+	blockRef := "dispatch://" + issue.Key + "/comment/" + x.ID + "#b-b2"
+	createThreadComment(t, handler, issue.Key, map[string]any{"body": "Now " + blockRef + ", then " + blockRef + "@v1."}, "alice")
+
+	requirePin := func(step, ref, text, state string, removedVersion int, current string) model.GraphReferences {
+		t.Helper()
+		read := readGraph(t, handler, url.Values{"to": {ref}})
+		want := model.BlockPin{Version: 1, Ref: blockRef + "@v1", Text: text, State: state, RemovedVersion: removedVersion}
+		if read.Node.Pin == nil || *read.Node.Pin != want {
+			t.Fatalf("%s: the pin reads %#v, want %#v", step, read.Node.Pin, want)
+		}
+		if read.Node.Text != current {
+			t.Fatalf("%s: the pinned node's text = %q, want %q", step, read.Node.Text, current)
+		}
+		return read
+	}
+	requireUnpinned := func(step, text string) {
+		t.Helper()
+		if read := readGraph(t, handler, url.Values{"to": {blockRef}}); read.Node.Pin != nil || read.Node.Text != text {
+			t.Fatalf("%s: the unpinned read = %#v, want the text %q and no pin", step, read.Node, text)
+		}
+	}
+	requireNotFound := func(step, ref, message string) {
+		t.Helper()
+		response := graphRequest(t, handler, url.Values{"to": {ref}})
+		if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), message) {
+			t.Fatalf("%s: status=%d body=%s, want 404 saying %q", step, response.Code, response.Body.String(), message)
+		}
+	}
+
+	if read := requirePin("before an edit", blockRef+"@v1", "Beta.", "unchanged", 0, "Beta."); len(read.Edges) != 1 {
+		t.Fatalf("before an edit: the pinned read lists %d edges, want the one mention (pinned and unpinned are one target)", len(read.Edges))
+	}
+	requireUnpinned("before an edit", "Beta.")
+	requireNotFound("a pin past the revision", blockRef+"@v2", "no revision 2 of comment "+x.ID)
+
+	requireEdit(t, "reword", editCommentAs(t, handler, x.ID, "Alpha.\n\nBeta, reworded.", nil, nil))
+	requirePin("after the reword", blockRef+"@v1", "Beta.", "changed", 0, "Beta, reworded.")
+	requireUnpinned("after the reword", "Beta, reworded.")
+
+	requireEdit(t, "delete", editCommentAs(t, handler, x.ID, "Alpha.", nil, nil))
+	removed := requirePin("after the deletion", blockRef+"@v1", "Beta.", "removed", 3, "")
+	if len(removed.Edges) != 0 || removed.Node.ChangedVersion != 0 || removed.Node.ParentVersion == nil || *removed.Node.ParentVersion != 2 ||
+		removed.Node.Parent == nil || removed.Node.Parent.ID != x.ID {
+		t.Fatalf("after the deletion: the removed block reads %#v with %d edges, want no edge, part of comment %s at revision 2", removed.Node, len(removed.Edges), x.ID)
+	}
+	if read := readGraph(t, handler, url.Values{"to": {blockRef + "@v2"}}); read.Node.Pin == nil || read.Node.Pin.Text != "Beta, reworded." || read.Node.Pin.State != "removed" {
+		t.Fatalf("after the deletion: the pin at revision 2 reads %#v, want its reworded text, removed", read.Node.Pin)
+	}
+	requireNotFound("the unpinned read after the deletion", blockRef, `no block \"b2\" in comment `+x.ID)
+	requireNotFound("a pin to the revision that removed it", blockRef+"@v3", `no block \"b2\" in comment `+x.ID+" at revision 3")
 }

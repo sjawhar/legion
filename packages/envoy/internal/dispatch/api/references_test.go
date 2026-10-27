@@ -214,9 +214,10 @@ func graphEdges(t *testing.T, handler http.Handler, query url.Values) model.Grap
 }
 
 // A message on an ACME issue that cites a LEGION ask is a backlink on that ask: the edge names
-// the message with its own issue, project, and dispatch:// address, carries the message body as
-// excerpt, and is stamped with the events.id of the message.created write. Read from the
-// message, the same edge points out at the ask. Filters narrow it and malformed input is 400.
+// the message's block holding the link (R7), under the message's own issue, project, and
+// dispatch:// address, carries the block's text as excerpt, and is stamped with the events.id of
+// the message.created write. Read from the message, the same edge points out at the ask. Filters
+// narrow it and malformed input is 400.
 func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "LEGION")
@@ -259,16 +260,17 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	}
 	edge := incoming.Edges[0]
 	acmeKey := acme.Key
+	messageRef := "dispatch://" + acme.Key + "/message/" + message.ID
 	wantNode := model.GraphNode{
-		Kind: "message", ID: message.ID, IssueKey: &acmeKey, Project: "ACME", Ref: "dispatch://" + acme.Key + "/message/" + message.ID,
+		Kind: "block", ID: "message/" + message.ID + "#b1", BlockID: "b1", IssueKey: &acmeKey, Project: "ACME", Ref: messageRef + "#b-b1",
 		MadeBy: []model.Actor{message.Author}, MadeAt: &message.CreatedAt, ChangedBy: []model.Actor{message.Author}, ChangedAt: &message.CreatedAt,
-		Parent: &model.NodeParent{Kind: "issue", ID: acme.Key, Ref: "dispatch://" + acme.Key},
+		Parent: &model.NodeParent{Kind: "message", ID: message.ID, Ref: messageRef}, Text: message.Body,
 	}
 	if edge.Kind != "mentions" || edge.Direction != "in" || !reflect.DeepEqual(edge.Node, wantNode) {
 		t.Fatalf("backlink edge = %#v; want mentions in from %#v", edge, wantNode)
 	}
-	if edge.Excerpt == nil || edge.Excerpt.BlockID != "" || edge.Excerpt.Text != message.Body {
-		t.Fatalf("backlink excerpt = %#v; want the message body", edge.Excerpt)
+	if edge.Excerpt == nil || edge.Excerpt.BlockID != "b1" || edge.Excerpt.Text != message.Body {
+		t.Fatalf("backlink excerpt = %#v; want the message's one block", edge.Excerpt)
 	}
 	if edge.SourceSeq == nil || *edge.SourceSeq != messageEventID || !edge.CreatedAt.Equal(message.CreatedAt) {
 		t.Fatalf("backlink provenance = seq %v at %v; want event %d at %v", edge.SourceSeq, edge.CreatedAt, messageEventID, message.CreatedAt)
@@ -410,8 +412,8 @@ func TestReferencesAnswerAroundAnEdgeOfAKindThisBuildCannotAddress(t *testing.T)
 		{"comment", comment.ID, "future", "x#y"},
 	})
 
-	// The target's own spec is attached to it and the comment cites it: two edges this build
-	// can address, and the header counts the same edges the panel lists.
+	// The target's own spec is attached to it and the comment cites it, from its block: two edges
+	// this build can address, and the header counts the same edges the panel lists.
 	incoming := graphRequest(t, handler, url.Values{"to": {"dispatch://" + target.Key}})
 	if incoming.Code != http.StatusOK {
 		t.Errorf("GET references to %s: status=%d body=%s", target.Key, incoming.Code, incoming.Body.String())
@@ -422,8 +424,8 @@ func TestReferencesAnswerAroundAnEdgeOfAKindThisBuildCannotAddress(t *testing.T)
 			byKind[edge.Kind] = edge
 		}
 		mention, attached := byKind["mentions"], byKind["attached_to"]
-		if len(edges) != 2 || mention.Node.Kind != "comment" || mention.Node.ID != comment.ID || attached.Node.Kind != "artifact" || attached.Node.ID != target.PrimaryArtifactID {
-			t.Errorf("backlinks of %s = %#v; want the comment's mention and the attached spec, nothing of kind future", target.Key, edges)
+		if len(edges) != 2 || !blockOf(mention.Node, "comment", comment.ID) || attached.Node.Kind != "artifact" || attached.Node.ID != target.PrimaryArtifactID {
+			t.Errorf("backlinks of %s = %#v; want the comment's mention, from its block, and the attached spec, nothing of kind future", target.Key, edges)
 		}
 	}
 

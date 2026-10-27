@@ -38,7 +38,7 @@ func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, located []te
 		if holders[i] < 0 {
 			continue
 		}
-		target, ok := targetOf(mention.Ref)
+		target, ok := TargetOf(mention.Ref)
 		if !ok {
 			continue
 		}

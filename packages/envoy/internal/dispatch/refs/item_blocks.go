@@ -42,6 +42,13 @@ func (kind ItemKind) tables() (itemTables, error) {
 	return itemTables{}, fmt.Errorf("index the blocks of a %q: not an item kind", string(kind))
 }
 
+// BlockKind is the storage kind of a block of an item of this kind, in graph_edges and refs:
+// comment_block or message_block. The API names every block node kind block; the storage kind
+// keeps a build that predates item blocks from counting or resolving their rows (TargetOf).
+func (kind ItemKind) BlockKind() string {
+	return string(kind) + "_block"
+}
+
 // CarriedEdit is the block ids an edit of a comment carries (PATCH /api/v1/comments/{id}'s
 // `blocks` and `base_revision`): the comment's revision the editor read its blocks at, and each
 // carried block's id with its From in UTF-16 code units into the body the edit writes, in body
@@ -444,7 +451,7 @@ func itemBlockPairs(next []itemblocks.Block, ids []string, located []text.Locate
 		if holder < 0 {
 			continue
 		}
-		target, ok := targetOf(mention.Ref)
+		target, ok := TargetOf(mention.Ref)
 		if !ok {
 			continue
 		}
