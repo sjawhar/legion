@@ -384,25 +384,6 @@ func TestTheSummaryLoopSleepsWhileNothingChanges(t *testing.T) {
 	waitGauge(0, "the pass after one record changed")
 }
 
-// failingPub fails every publication, as NATS does while it is unreachable, and counts them.
-type failingPub struct {
-	mu       sync.Mutex
-	attempts int
-}
-
-func (p *failingPub) Publish(contracts.Envelope) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.attempts++
-	return errors.New("nats unavailable")
-}
-
-func (p *failingPub) count() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.attempts
-}
-
 // A settlement whose publication fails is retried at the next tick, not at once: each attempt
 // writes the record (its claim, then its release), and a loop that ran a pass for each such change
 // would retry as fast as the store writes.
@@ -410,7 +391,8 @@ func TestAFailingPublisherIsRetriedOncePerTick(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	store := openStore(t, conn)
-	pub := &failingPub{}
+	// NATS fails every publication while it is unreachable.
+	pub := &failingPub{err: errors.New("nats unavailable")}
 	const (
 		tick   = 50 * time.Millisecond
 		owner  = "example-org"

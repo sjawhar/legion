@@ -98,20 +98,21 @@ func TestACommitRecordRefusesACheckPastItsBoundsAndNeverSettles(t *testing.T) {
 	}
 }
 
-// refusingPub refuses every settlement as NATS refuses one it cannot take whole, and counts them.
-type refusingPub struct {
+// failingPub fails every publication with err and counts them.
+type failingPub struct {
+	err      error
 	mu       sync.Mutex
 	attempts int
 }
 
-func (p *refusingPub) Publish(contracts.Envelope) error {
+func (p *failingPub) Publish(contracts.Envelope) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.attempts++
-	return fmt.Errorf("publish: %w", bus.ErrTooLarge)
+	return p.err
 }
 
-func (p *refusingPub) count() int {
+func (p *failingPub) count() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.attempts
@@ -125,7 +126,8 @@ func TestASettlementNATSRefusesIsNotPublishedAgain(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	store := openStore(t, conn)
-	pub := &refusingPub{}
+	// NATS refuses a settlement it cannot take whole.
+	pub := &failingPub{err: fmt.Errorf("publish: %w", bus.ErrTooLarge)}
 	const (
 		owner  = "example-org"
 		repo   = "example-repo"

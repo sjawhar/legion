@@ -500,7 +500,6 @@ func (s *Store) attachSummary() <-chan struct{} {
 		panic("cistore: a second summary loop attached to one store")
 	}
 	s.feedAttached = true
-	s.cacheReset = false
 	s.changed = make(map[string]struct{}, len(s.cache))
 	for key := range s.cache {
 		s.changed[key] = struct{}{}
@@ -519,19 +518,13 @@ func (s *Store) detachSummary() {
 }
 
 // takeChanges returns the keys whose cached record changed since the last call, and whether the
-// cache was emptied for a recreated bucket since then, and clears both.
-func (s *Store) takeChanges() (keys []string, reset bool) {
+// cache was emptied for a recreated bucket since then, and clears both. The caller owns the map
+// it returns.
+func (s *Store) takeChanges() (keys map[string]struct{}, reset bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.changed) > 0 {
-		keys = make([]string, 0, len(s.changed))
-		for key := range s.changed {
-			keys = append(keys, key)
-		}
-		s.changed = nil
-	}
-	reset = s.cacheReset
-	s.cacheReset = false
+	keys, s.changed = s.changed, nil
+	reset, s.cacheReset = s.cacheReset, false
 	return keys, reset
 }
 

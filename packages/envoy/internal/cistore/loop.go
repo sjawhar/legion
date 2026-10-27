@@ -158,7 +158,7 @@ func schedule(st State, now int64, debounce time.Duration) (verdict, int64) {
 		}
 		return verdictWait, at
 	}
-	return verdictAttempt, now
+	return verdictAttempt, 0
 }
 
 // queueEntry is a record's entry in the summarizer's queue: the pass at or after at (wall-clock
@@ -255,12 +255,12 @@ func (z *summarizer) pass(pub Publisher, logger *logging.Logger, now int64) (hel
 		z.queue = deadlineQueue{index: map[string]int{}}
 		z.held = map[string]struct{}{}
 	}
-	for _, key := range keys {
+	var batch []string
+	for key := range keys {
 		if _, attempt := z.fileLocked(key, now); attempt {
-			z.queue.set(key, now)
+			batch = append(batch, key)
 		}
 	}
-	var batch []string
 	for z.queue.Len() > 0 && z.queue.entries[0].at <= now {
 		batch = append(batch, heap.Pop(&z.queue).(queueEntry).key)
 	}
