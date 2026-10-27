@@ -277,6 +277,25 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	if filtered := graphEdges(t, handler, url.Values{"to": {askRef}, "kind": {"replies_to,followed_by"}}); len(filtered.Edges) != 0 {
 		t.Fatalf("kind filter kept %#v; want no edges", filtered.Edges)
 	}
+	// A newer build may name an edge kind this build does not emit. Its edges are none here, and
+	// the answer names the kinds it did not know, rather than refusing the read.
+	type knownEdges struct {
+		Edges        []model.GraphEdge `json:"edges"`
+		UnknownKinds []string          `json:"unknown_kinds"`
+	}
+	for kinds, wantEdges := range map[string]int{"future": 0, "mentions,future": 1} {
+		query := url.Values{"to": {askRef}, "kind": {kinds}}
+		response := graphRequest(t, handler, query)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET /api/v1/references?%s: status=%d body=%s; want 200", query.Encode(), response.Code, response.Body.String())
+		}
+		if got := decodeBody[knownEdges](t, response); len(got.Edges) != wantEdges || !reflect.DeepEqual(got.UnknownKinds, []string{"future"}) {
+			t.Fatalf("kind=%s answered %#v; want %d edges and unknown_kinds [future]", kinds, got, wantEdges)
+		}
+	}
+	if response := graphRequest(t, handler, url.Values{"to": {askRef}}); strings.Contains(response.Body.String(), "unknown_kinds") {
+		t.Fatalf("a read naming no kind answered %s; want no unknown_kinds", response.Body.String())
+	}
 	if since := graphEdges(t, handler, url.Values{"to": {askRef}, "since": {strconv.FormatInt(messageEventID, 10)}}); len(since.Edges) != 0 {
 		t.Fatalf("since the introducing event kept %#v; want no edges", since.Edges)
 	}
@@ -292,7 +311,6 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 		"neither to nor from": {url.Values{}, http.StatusBadRequest, "INVALID_REFERENCE"},
 		"both to and from":    {url.Values{"to": {askRef}, "from": {askRef}}, http.StatusBadRequest, "INVALID_REFERENCE"},
 		"not a reference":     {url.Values{"to": {"LEGION-1 spec"}}, http.StatusBadRequest, "INVALID_REFERENCE"},
-		"unknown kind":        {url.Values{"to": {askRef}, "kind": {"mentions,linked"}}, http.StatusBadRequest, "INVALID_KIND"},
 		"since not an id":     {url.Values{"to": {askRef}, "since": {"yesterday"}}, http.StatusBadRequest, "INVALID_SINCE"},
 		"missing node":        {url.Values{"to": {"dispatch://" + legion.Key + "/ask/00000000-0000-0000-0000-000000000000"}}, http.StatusNotFound, "NOT_FOUND"},
 		"missing document":    {url.Values{"from": {"dispatch://LEGION/artifact/ghost"}}, http.StatusNotFound, "NOT_FOUND"},

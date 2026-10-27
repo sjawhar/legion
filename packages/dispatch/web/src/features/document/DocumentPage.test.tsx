@@ -5,7 +5,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { ApiError, api } from "../../api/client";
-import type { Artifact, Subscriber } from "../../api/types";
+import type { Artifact, GraphEdge, Subscriber } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/margin-context";
 import { DocumentPage } from "./DocumentPage";
@@ -115,6 +115,67 @@ test("renders the header, the document, versions, and Referenced by for an unlin
     expect(
       within(referencedBy).getByRole("link", { name: "Comment · CORE-1" }).getAttribute("href")
     ).toBe("/issues/CORE-1/comments/comment-1");
+  } finally {
+    view.unmount();
+    getArtifactText.mockRestore();
+    getArtifactSubscribers.mockRestore();
+    getArtifact.mockRestore();
+    getProjectArtifact.mockRestore();
+  }
+});
+
+// During a release a newer Dispatch can answer with an edge kind, or a node kind at its other end,
+// that this page does not render. The page leaves such an edge out of the list and its count.
+test("Referenced by leaves out an edge whose kind or node kind the page does not render", async () => {
+  const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue(artifact);
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue(artifact);
+  const getArtifactSubscribers = spyOn(api, "getArtifactSubscribers").mockResolvedValue([]);
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "# Design notes",
+    version: 1,
+    token: "sha256:design-notes",
+  });
+  const mention: GraphEdge = {
+    created_at: "2026-09-10T00:00:00Z",
+    direction: "in",
+    kind: "mentions",
+    node: {
+      id: "comment-1",
+      issue_key: "CORE-1",
+      kind: "comment",
+      project: "CORE",
+      ref: "dispatch://CORE-1/comment/comment-1",
+    },
+    source_seq: 1,
+  };
+  getReferences.mockResolvedValueOnce({
+    edges: [
+      mention,
+      { ...mention, kind: "supersedes" } as unknown as GraphEdge,
+      {
+        ...mention,
+        node: { id: "future-1", kind: "future", ref: "dispatch://CORE-1/future/future-1" },
+      } as unknown as GraphEdge,
+    ],
+    node: {
+      id: "artifact-1",
+      kind: "artifact",
+      project: "CORE",
+      ref: "dispatch://CORE/artifact/design-notes",
+    },
+  });
+  const { runtime, view } = renderDocumentPage();
+
+  try {
+    await screen.findByTestId("artifact-header");
+    await waitFor(() => expect(runtime.connections).toHaveLength(1));
+    const referencedBy = screen.getByRole("region", { name: "Referenced by" });
+    expect(
+      await within(referencedBy).findByRole("heading", { name: "Referenced by (1)" })
+    ).toBeTruthy();
+    expect(within(referencedBy).getAllByRole("listitem")).toHaveLength(2);
+    expect(referencedBy.textContent).toContain("Comment · CORE-1");
+    expect(referencedBy.textContent).not.toContain("undefined");
   } finally {
     view.unmount();
     getArtifactText.mockRestore();

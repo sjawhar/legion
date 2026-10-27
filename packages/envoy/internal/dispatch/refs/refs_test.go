@@ -237,6 +237,32 @@ func TestReplaceReconcilesAndStampPreservesSurvivingProvenance(t *testing.T) {
 	}
 }
 
+// A newer build can mention a node kind this build does not know, and both builds rewrite the
+// same sources during a release. A rewrite here reconciles the targets of the kinds this build
+// knows and keeps the newer build's edge, which this build cannot read back out of the body.
+func TestReplaceKeepsAnEdgeOfANodeKindThisBuildDoesNotKnow(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin fixture transaction: %v", err)
+	}
+	insertReference(t, tx, "comment", "c1", "future", "x#y")
+	insertReference(t, tx, "comment", "c1", "issue", "CORE-9")
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit fixture: %v", err)
+	}
+
+	replaceAndStamp(t, database, "comment", "c1", "now see dispatch://CORE-1", 3)
+	var targets []string
+	for _, row := range readProvenance(t, database, "comment", "c1") {
+		targets = append(targets, row.ToKind+"/"+row.ToID)
+	}
+	if want := []string{"future/x#y", "issue/CORE-1"}; !reflect.DeepEqual(targets, want) {
+		t.Fatalf("edges after the rewrite = %v; want %v", targets, want)
+	}
+}
+
 func TestClosureFollowsArtifactLinksToDepthEightAndReportsTruncation(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
