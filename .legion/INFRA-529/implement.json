@@ -2,53 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-529",
-  "completed": "2026-10-27T04:20:00Z",
-  "round": 4,
+  "completed": "2026-10-27T05:05:00Z",
+  "round": 5,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2303",
-  "codeHead": "0d5fff64e7ad941b54c4a297937dda9c21092703",
-  "answers": "Review round 2 at 000cbca96df5, narrowed by the architect: the leading byte-order mark finding plus the two named small items (read-only-directives.ts:159, AGENTS.md:46). Nothing else changed; the tester's round-1 red test is kept unchanged. Three threads replied to and resolved.",
+  "codeHead": "bd81c99b6daa9f475cb99673ec6be8170833b893",
+  "answers": "Review round 3 at ee1734a1663a: no finding in the change; the required `test` check was red on main's daemon breakage (#2289), fixed on main by #2317 (baadccdc). The architect allowed a merge of main and nothing else.",
   "proof": [
     {
-      "criterion": "Review finding (round 2): a body that starts with U+FEFF draws its unknown block's fence lines and loses no text",
-      "surface": "Dispatch Conversation tab, Chromium, real Go Dispatch server and Postgres 17 + pgvector in the issue pod; message bodies are stored as sent (harness /legion/harness/setup.sh + env.sh)",
-      "command": "cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium (implementer lane port 18777, database dispatch_infra529; and LEGION_ROLE=tester, port 28777, database dispatch_infra529_tester)",
-      "observed": "✓ 4 … :119:1 Conversation draws the unknown block of a message that starts with a byte-order mark (3.6s): ':::a', 'body words', ':::', 'After' each exactly one paragraph, strong 'bold', no fallback. Implementer lane 4 passed (22.1s); tester lane 4 passed (21.3s). Runs: https://github.com/sjawhar/legion/pull/2303#issuecomment-6433008305",
-      "headSha": "0d5fff64e7ad941b54c4a297937dda9c21092703",
-      "negativeControl": "Row 4 on the round-3 code head 65158f49 (SPA rebuilt there): 'locator(\\'p\\').filter({ hasText: /^:::a$/ }) Expected: 1 Received: 0', the fences cut one character early."
+      "criterion": "The branch's diff is unchanged by the merge of main (rebase re-check, bare gates only)",
+      "surface": "jj diff of the branch against its fork point, excluding .legion and docs/solutions (skill://legion-worker/references/conflicts-and-rewrites.md, The unchanged-diff check)",
+      "command": "jj -R \"$LEGION_WORKSPACE\" diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at ee1734a1663a and at bd81c99b6daa",
+      "observed": "a5647b0894f9b42645105ad26fc51a50a146714d1d729725775474b536d36639 at both heads: unchanged. Posted: https://github.com/sjawhar/legion/pull/2303#issuecomment-6434000946",
+      "headSha": "bd81c99b6daa9f475cb99673ec6be8170833b893",
+      "negativeControl": "The same command at the round-1 code head 0f615248 (before the review fixes) gives 23cc32de1a6b10f38b93ea5455cd207ed29729ba1817e22e118db29330f56dcd, a different hash, so the check tells a changed diff apart."
     },
     {
-      "criterion": "A1 and the earlier rows still hold: unknown directives drawn as text in comment, message and ask; typed blocks whose content breaks their rule keep every line; lone-CR bodies draw each line once",
-      "surface": "Dispatch Conversation tab, Chromium, real Go Dispatch server and Postgres (same lanes)",
+      "criterion": "Bare gates at the merge head: the changed packages' tests, types and lint, and main's daemon fix in effect",
+      "surface": "@legion/proof-editor and Dispatch package checks; packages/daemon internal/admit on a real Postgres (the harness cluster, a throwaway database)",
+      "command": "cd packages/proof-editor && bun run test && bun run typecheck && bun run lint; cd packages/dispatch && bun test web/src/features/refs && bun run typecheck && bun run lint; cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:55432/<throwaway db>?sslmode=disable go test -p 1 -skip TestCapturedDispatch ./internal/admit/",
+      "observed": "proof-editor 128 pass, 0 fail, tsc and biome clean; Dispatch refs 195 pass, 0 fail, tsc and biome ('Checked 614 files') clean; internal/admit ok (313.5s), and no 'number of field descriptions' error anywhere in the full admit run.",
+      "headSha": "bd81c99b6daa9f475cb99673ec6be8170833b893",
+      "negativeControl": "The skipped TestCapturedDispatch rows need testcontainers and panic 'rootless Docker not found' in this pod; CI runs them. Without LEGION_TEST_PG_DSN every admit row fails 'LEGION_TEST_PG_DSN is required for real Postgres admission tests'."
+    },
+    {
+      "criterion": "A1 and every later row in the browser (unchanged diff, so not re-run)",
+      "surface": "Dispatch Conversation tab, Chromium, real Go Dispatch server and Postgres 17 + pgvector in the issue pod",
       "command": "cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium",
-      "observed": "✓ 1 … :19:1 (3.7s), ✓ 2 … :52:1 (2.6s), ✓ 3 … :89:1 (2.4s) at the head on both lanes.",
+      "observed": "4 passed (22.1s) on the implementer lane and 4 passed (21.3s) on the tester lane at 0d5fff64, whose product diff equals bd81c99b's (fingerprint above). Runs: https://github.com/sjawhar/legion/pull/2303#issuecomment-6433008305",
       "headSha": "0d5fff64e7ad941b54c4a297937dda9c21092703",
-      "negativeControl": "Row 1 on base 7f7edb8de3e3 shows one raw-text node; row 2 on 0f615248 loses the ask's lines; row 3 on f213a0a6 runs the opening line past the lone CR (earlier rounds' runs linked on the PR)."
-    },
-    {
-      "criterion": "Engine rows: BOM-led bodies, the reviewer's mark-span example, default refusals unchanged, tester's red test unchanged",
-      "surface": "@legion/proof-editor headless engine with the real server schema (packages/envoy/internal/dispatch/pmdoc/schema/blocks.json)",
-      "command": "cd packages/proof-editor && bun run test && bun run typecheck && bun run lint",
-      "observed": "128 pass, 0 fail across 19 files; tsc exit 0; biome 'Checked 29 files … No fixes applied.' jj diff --from 000cbca9 of the test file adds lines only.",
-      "headSha": "0d5fff64e7ad941b54c4a297937dda9c21092703",
-      "negativeControl": "On 65158f49's transform: '\\ufeff:::note\\nbody\\n:::\\n' drew '\\ufeff:::note' and lost ':::'; '\\ufeffHello **b**\\n\\n:::note…' drew an empty opening paragraph (RangeError: Empty text nodes are not allowed) and lost both fences."
-    },
-    {
-      "criterion": "MarkdownBody and server parity unchanged",
-      "surface": "MarkdownBody in happy-dom; pmdoc fixture generator (default engine)",
-      "command": "cd packages/dispatch && bun test web/src/features/refs && bun run typecheck && bun run lint; cd packages/envoy/internal/dispatch/pmdoc/gen && bun run check",
-      "observed": "195 pass, 0 fail; tsc exit 0; biome 'Checked 613 files … No fixes applied.'; 'fixtures up to date (84 documents, 43 splice cases)'",
-      "headSha": "0d5fff64e7ad941b54c4a297937dda9c21092703",
-      "negativeControl": "With only readOnly: true reverted in markdown-engine.ts the MarkdownBody cases fail on data-markdown-fallback (round 1)."
+      "negativeControl": "Row 4 on 65158f49: ':::a' paragraph expected 1, received 0; row 1 on base 7f7edb8de3e3: one raw-text node."
     }
   ],
   "filesChanged": [
-    "packages/proof-editor/src/read-only-directives.ts (source without one leading U+FEFF; readOnlyChildren and the kept-directive branch return copies; colon run counted with a loop)",
-    "packages/proof-editor/tests/read-only-directives.test.ts (three rows added)",
-    "packages/proof-editor/AGENTS.md (row 46: 'with NodeType.createAndFill')",
-    "packages/dispatch/e2e/unknown-directive.e2e.ts (byte-order-mark browser row)"
+    "none of the branch's own files: one forward-merge commit of main at baadccdc"
   ],
-  "deviations": [
-    "Kept the `type === undefined` guard in fitsContentRule that the reviewer called dead: remarkReadOnlyDirectives is exported, and without it a block schema naming a type the ProseMirror schema lacks would throw instead of keeping the block; the architect narrowed the round to the named fixes."
-  ],
+  "deviations": [],
   "openQuestions": []
 }
