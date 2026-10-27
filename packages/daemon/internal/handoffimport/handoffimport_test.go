@@ -792,6 +792,42 @@ func TestUnderTheRecordsDaemonTestingAndReviewingDeferTheRemoval(t *testing.T) {
 		"imported 0, unchanged 8, kept worker record 0, removed .legion/ 1, deferred 1, no branch 1, failed 0")
 }
 
+// Under the records' daemon, a push past the head an awaiting_merge issue's READY named withdraws
+// that READY and sends the issue back to implementing (workflow's withdrawMovedReady): the new
+// daemon carries no push, so the import's removal commit is such a push. A branch in awaiting_merge
+// can still carry .legion/ at the cutover: retro removed only its own .legion/<KEY>/, and a child
+// branch can carry its parent's directory (on 2026-10-27, legion/INFRA-547, -548 and -549, in
+// needs_review, carried .legion/INFRA-439/). The import must leave such a branch where it is, so the
+// issue keeps its phase and its READY (A9), and must not report the branch failed.
+func TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved(t *testing.T) {
+	w := newWorld(t)
+	w.schema = recordsSchema
+	base := w.commits[w.branches["legion/LEG-1"]].parent
+	files := maps.Clone(w.commits[base].files)
+	files[".legion/OTHER-3/plan.json"] = handoffText("OTHER-3", "plan")
+	w.branches["legion/LEG-8"] = w.commit(base, "LEG-8: the work, its parent's handoffs merged in, its own removed by retro", files)
+	w.states["LEG-8"] = seededIssue{"awaiting_merge", []string{".legion/OTHER-3/plan.json"}}
+	o := w.serve()
+	before := w.branches["legion/LEG-8"]
+
+	code, stdout, stderr := run(t, o)
+
+	if code != 0 || stderr != "" {
+		t.Fatalf("exit %d, stderr %q; want 0 and nothing:\n%s", code, stderr, stdout)
+	}
+	for _, update := range w.updates {
+		if update.branch == "legion/LEG-8" {
+			t.Errorf("legion/LEG-8, in awaiting_merge, was moved to %s: the push withdraws its READY and sends it back to implementing", update.sha)
+		}
+	}
+	if w.branches["legion/LEG-8"] != before {
+		t.Errorf("legion/LEG-8 moved from %s to %s", before, w.branches["legion/LEG-8"])
+	}
+	if strings.Contains(stdout, "LEG-8: failed") {
+		t.Errorf("the awaiting_merge branch was reported failed:\n%s", stdout)
+	}
+}
+
 // The records' daemon is told by its store's schema version: recordsSchema is migration
 // 0060_handoff_records, the one the records' release added.
 func TestTheRecordsSchemaIsTheHandoffRecordsMigration(t *testing.T) {
