@@ -162,8 +162,15 @@ cat >> "$root/.github/actions/setup-bun/action.yml" <<'YAML'
         bun-download-url: https://example.com/bun-v1.4.2.zip
 YAML
 run_check "$root"
-check "any extra input on the wrapper fails, since setup-bun prefers them" "$(is "$status" 1)"
+check "any other input on the wrapper fails, since setup-bun prefers them" "$(is "$status" 1)"
 check "names the input" "$(contains "$out" 'bun-download-url')"
+
+root=$(fixture wrapper-no-cache-off-main)
+cat >> "$root/.github/actions/setup-bun/action.yml" <<'YAML'
+        no-cache: ${{ github.ref != 'refs/heads/main' }}
+YAML
+run_check "$root"
+check "a wrapper passing no-cache passes" "$(is "$status" 0)"
 
 echo "case: rule 4 — a step or a RUN that installs Bun itself"
 installers=(

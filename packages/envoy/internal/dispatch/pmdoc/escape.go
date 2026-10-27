@@ -842,21 +842,16 @@ func imageAlt(alt string, context inlineContext) string {
 // under Parse (reads), and if so whether it also does under storedMarkdown (stored). Parse reads it
 // in the block it is written in: a table cell, where the cell takes its escaped pipes first and a
 // line ending ends the row; a heading, which a line ending ends; or a paragraph, where a line of
-// the label can open a block. In a table cell a label holding a `|` after an even run of
-// backslashes does not read back: Parse reads that pipe as escaped, while the browser editor's
-// parser, which pairs backslashes before a pipe, ends the cell there. storedMarkdown reads the
-// image alone, as inline markdown: once Parse reads the block as one holding only the image, the
-// block is the same block under storedRules, which change only how delimiter runs pair, and the
-// cell's pipes come out as inline markdown reads their escapes. `![\~b\~\~](u)`, written while
-// Dispatch read by storedRules, stays as it was, where `![~b~~](u)` reads back only under Parse.
+// the label can open a block. storedMarkdown reads the image alone, as inline markdown: once Parse
+// reads the block as one holding only the image, the block is the same block under storedRules,
+// which change only how delimiter runs pair, and the cell's pipes come out as inline markdown
+// reads their escapes. `![\~b\~\~](u)`, written while Dispatch read by storedRules, stays as it
+// was, where `![~b~~](u)` reads back only under Parse.
 func altReadsBack(written, alt string, context inlineContext) (reads, stored bool) {
 	image := "![" + written + "](u)"
 	var markdown string
 	switch {
 	case context.tableCell:
-		if pipeAfterEvenBackslashes(written) {
-			return false, false
-		}
 		markdown = "| h |\n| - |\n| " + image + " |\n"
 	case context.heading:
 		markdown = "# " + image + "\n"
@@ -888,17 +883,6 @@ func isAlt(nodes []*Node, alt string) bool {
 	}
 	got, _ := nodes[0].Attrs["alt"].(string)
 	return got == alt
-}
-
-// pipeAfterEvenBackslashes reports whether value holds a `|` the browser editor's parser ends a
-// table cell at (escapedByBackslashes).
-func pipeAfterEvenBackslashes(value string) bool {
-	for index := range len(value) {
-		if value[index] == '|' && !escapedByBackslashes(value, index) {
-			return true
-		}
-	}
-	return false
 }
 
 // escapedByBackslashes reports whether the character at index stands after an odd run of
