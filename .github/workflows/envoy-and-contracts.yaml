@@ -46,7 +46,7 @@ on:
       - ".github/actions/install-omp/**"
       # The Pulumi CLI envoy-smoke's envoy-infra live tests run.
       - ".github/actions/install-pulumi/**"
-      # The image pull envoy-go, envoy-infra-go, envoy-go-race and envoy-smoke run first.
+      # The image pull envoy-go, envoy-infra-go and envoy-smoke run first.
       - ".github/actions/pull-test-images/**"
       # The envoy-smoke job builds packages/envoy/docker/Dockerfile, so this list owes every
       # file that build reads: the six below before the target list are the ones the entries
@@ -136,6 +136,11 @@ jobs:
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
       pi_legion: ${{ steps.filter.outputs.pi_legion }}
       dispatch: ${{ steps.filter.outputs.dispatch }}
+      dispatch_memory: ${{ steps.filter.outputs.dispatch_memory }}
+      dispatch_multiprocess: ${{ steps.filter.outputs.dispatch_multiprocess }}
+      broker_multiprocess: ${{ steps.filter.outputs.broker_multiprocess }}
+      envoy_go_race: ${{ steps.filter.outputs.envoy_go_race }}
+      envoy_infra_go: ${{ steps.filter.outputs.envoy_infra_go }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -146,14 +151,210 @@ jobs:
           # Each filter names everything its job's checks read: the package and what its tests
           # and typecheck read outside it, the composite actions the job installs its tools
           # through, and, for a Go build in workspace mode, every module go.work binds, whose
-          # go.mod moves the versions the build compiles. `bun_toolchain` is no job's gate: it is
-          # the Bun pin and the action that installs it (.github/actions/setup-bun reads
-          # .bun-version), written once and named by every Bun job's filter through its anchor,
+          # go.mod moves the versions the build compiles. A Go job's filter names the packages
+          # `go list -deps -test` lists for its test command, with that command's build tags, and
+          # the files its tests read outside them; a test that comes to import or read something
+          # new adds it to that job's filter. bun_toolchain, bun_install, go_workspace,
+          # dispatch_server, listener_command and dispatch_command_tests are no job's gate: each
+          # is a group written once and named by the filters that need it through its anchor,
           # which dorny/paths-filter flattens into the list that names it.
           filters: |
+            # The Bun pin and the action that installs it (.github/actions/setup-bun reads
+            # .bun-version).
             bun_toolchain: &bun_toolchain
               - '.bun-version'
               - '.github/actions/setup-bun/**'
+            # A frozen Bun install and the Bun it runs: `bun install --frozen-lockfile` reads the
+            # root manifest, the lockfile, the patches package.json:45-49 applies, and the manifest
+            # of every workspace package.json:19-31 lists; .github/actions/setup-bun installs the
+            # Bun .bun-version pins.
+            bun_install: &bun_install
+              - 'package.json'
+              - 'bun.lock'
+              - 'patches/**'
+              - 'packages/contracts/package.json'
+              - 'packages/envoy-client/package.json'
+              - 'packages/pi-envoy/package.json'
+              - 'packages/pi-legion/package.json'
+              - 'packages/pi-shared/package.json'
+              - 'packages/envoy-plugin/package.json'
+              - 'packages/claude-envoy/package.json'
+              - 'packages/proof-editor/package.json'
+              - 'packages/dispatch/package.json'
+              - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
+              - 'docs/site/package.json'
+              - '.bun-version'
+              - '.github/actions/setup-bun/**'
+            # The root Go workspace: a go command under go.work reads it, go.work.sum, and the
+            # go.mod and go.sum of every module it binds, whose requirements move the versions the
+            # build compiles.
+            go_workspace: &go_workspace
+              - 'go.work'
+              - 'go.work.sum'
+              - 'packages/daemon/go.mod'
+              - 'packages/daemon/go.sum'
+              - 'packages/envoy/go.mod'
+              - 'packages/envoy/go.sum'
+            # The Dispatch server, `go list -deps ./cmd/dispatch` in packages/envoy (its embedded
+            # migrations and pmdoc schema included): what envoy-infra's natslive test builds
+            # (infra/core/dispatch_permissions_live_test.go:51, through
+            # infra/core/permissions_live_test.go:298-299).
+            dispatch_server: &dispatch_server
+              - 'packages/envoy/cmd/dispatch/*'
+              - 'packages/envoy/internal/bus/*'
+              - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/dispatch/accesslog/*'
+              - 'packages/envoy/internal/dispatch/agentsecrets/*'
+              - 'packages/envoy/internal/dispatch/agentstream/*'
+              - 'packages/envoy/internal/dispatch/api/*'
+              - 'packages/envoy/internal/dispatch/architecture/*'
+              - 'packages/envoy/internal/dispatch/asks/*'
+              - 'packages/envoy/internal/dispatch/auth/*'
+              - 'packages/envoy/internal/dispatch/config/*'
+              - 'packages/envoy/internal/dispatch/delivery/**'
+              - 'packages/envoy/internal/dispatch/docs/*'
+              - 'packages/envoy/internal/dispatch/duty/*'
+              - 'packages/envoy/internal/dispatch/embed/*'
+              - 'packages/envoy/internal/dispatch/embedqueue/*'
+              - 'packages/envoy/internal/dispatch/envoy/*'
+              - 'packages/envoy/internal/dispatch/events/*'
+              - 'packages/envoy/internal/dispatch/files/*'
+              - 'packages/envoy/internal/dispatch/githubapi/*'
+              - 'packages/envoy/internal/dispatch/githubapp/*'
+              - 'packages/envoy/internal/dispatch/identity/*'
+              - 'packages/envoy/internal/dispatch/model/*'
+              - 'packages/envoy/internal/dispatch/outbox/*'
+              - 'packages/envoy/internal/dispatch/pmdoc/**'
+              - 'packages/envoy/internal/dispatch/rank/*'
+              - 'packages/envoy/internal/dispatch/redeliver/*'
+              - 'packages/envoy/internal/dispatch/refs/*'
+              - 'packages/envoy/internal/dispatch/retry/*'
+              - 'packages/envoy/internal/dispatch/routes/*'
+              - 'packages/envoy/internal/dispatch/startup/*'
+              - 'packages/envoy/internal/dispatch/store/*'
+              - 'packages/envoy/internal/dispatch/store/migrations/**'
+              - 'packages/envoy/internal/dispatch/text/*'
+              - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/oidc/*'
+              - 'packages/envoy/internal/pglisten/*'
+              - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/routing/*'
+            # The listener's packages, `go list -deps ./cmd/listener` in packages/envoy.
+            listener_command: &listener_command
+              - 'packages/envoy/cmd/listener/*'
+              - 'packages/envoy/internal/bus/*'
+              - 'packages/envoy/internal/cistore/*'
+              - 'packages/envoy/internal/config/*'
+              - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/dedupe/*'
+              - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/kvwatch/*'
+              - 'packages/envoy/internal/logging/*'
+              - 'packages/envoy/internal/metrics/*'
+              - 'packages/envoy/internal/oidc/*'
+              - 'packages/envoy/internal/routing/*'
+              - 'packages/envoy/internal/session/*'
+              - 'packages/envoy/internal/store/*'
+              - 'packages/envoy/internal/verify/*'
+              - 'packages/envoy/internal/webhook/*'
+            # What `go test ./cmd/dispatch` reads under both its memory and its multiprocess tag:
+            # the packages it compiles, with the whole of cmd/dispatch and internal/dispatch, whose
+            # .go files cmd/dispatch/settings_test.go:136 walks, and the pod spec
+            # cmd/dispatch/pod_grace_period_test.go:17 reads.
+            dispatch_command_tests: &dispatch_command_tests
+              - 'packages/envoy/cmd/dispatch/**'
+              - 'packages/envoy/internal/dispatch/**'
+              - 'packages/envoy/internal/bus/*'
+              - 'packages/envoy/internal/cmdtest/*'
+              - 'packages/envoy/internal/contracts/**'
+              - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/oidc/**'
+              - 'packages/envoy/internal/pglisten/*'
+              - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/routing/*'
+              - 'packages/envoy/internal/testsocks5/*'
+              - 'packages/envoy/infra/gcp/testdata/dispatch-pod.golden'
+            # The envoy-infra module's own workspace (packages/envoy/infra/go.work binds it and
+            # packages/envoy), the envoy packages its tests compile, and the Dispatch server and
+            # listener infra/core/permissions_live_test.go:298-299 builds in the root workspace.
+            envoy_infra_go:
+              - '.github/workflows/envoy-and-contracts.yaml'
+              - *go_workspace
+              - 'packages/envoy/infra/**'
+              - *dispatch_server
+              - *listener_command
+              - 'packages/envoy/daemonpermissions/*'
+              - 'packages/envoy/internal/cmdtest/*'
+              - 'packages/envoy/internal/contracts/**'
+              - 'packages/envoy/internal/dispatch/githubapp/**'
+              - 'packages/envoy/internal/testnats/*'
+              - 'packages/envoy/internal/testpg/*'
+              # The image pull before its tests, of the consts in testnats/nats.go and
+              # testpg/testpg.go.
+              - '.github/actions/pull-test-images/**'
+            envoy_go_race:
+              - '.github/workflows/envoy-and-contracts.yaml'
+              - *bun_install
+              - *go_workspace
+              # Its packages' tests walk every Go and Markdown file under packages/envoy
+              # (internal/dispatch/api/lock_level_test.go:121-133,
+              # internal/dispatch/store/search_text_test.go:102-121).
+              - 'packages/envoy/**'
+              # pmdoc's tests run pmdoc/gen, which imports the editor
+              # (internal/dispatch/pmdoc/update_test.go:236-239, render_readback_test.go:32).
+              - 'packages/proof-editor/**'
+              # internal/dispatch/api/delivery_live_diff_test.go:965 and
+              # internal/dispatch/docs/approval_carry_test.go:26.
+              - 'packages/contracts/fixtures/delivery-live/**'
+              - 'packages/contracts/fixtures/decision-blocks/**'
+            # `go test -tags memory ./cmd/dispatch`; memory_profile_test.go:147-148 reads four
+            # guides only when DISPATCH_EDIT_PROFILE_OUT is set, which CI never sets, so none is
+            # named.
+            dispatch_memory:
+              - '.github/workflows/envoy-and-contracts.yaml'
+              - *go_workspace
+              - *dispatch_command_tests
+            # `go test -tags multiprocess ./cmd/dispatch`, as dispatch_memory plus the in-process
+            # NATS its rows start.
+            dispatch_multiprocess:
+              - '.github/workflows/envoy-and-contracts.yaml'
+              - *go_workspace
+              - *dispatch_command_tests
+              - 'packages/envoy/internal/testnats/*'
+            # `go test -tags multiprocess ./cmd/broker`.
+            broker_multiprocess:
+              - '.github/workflows/envoy-and-contracts.yaml'
+              - *go_workspace
+              - 'packages/envoy/cmd/broker/*'
+              # cmd/broker/main_test.go:220 (sslrootcert).
+              - 'packages/envoy/docker/rds-global-bundle.pem'
+              - 'packages/envoy/internal/broker/api/*'
+              - 'packages/envoy/internal/broker/brokertest/*'
+              - 'packages/envoy/internal/broker/config/*'
+              - 'packages/envoy/internal/broker/enroll/*'
+              - 'packages/envoy/internal/broker/exchange/*'
+              - 'packages/envoy/internal/broker/helper/*'
+              - 'packages/envoy/internal/broker/machine/*'
+              - 'packages/envoy/internal/broker/oauth/*'
+              - 'packages/envoy/internal/broker/oauthstore/*'
+              - 'packages/envoy/internal/broker/oauthwire/*'
+              - 'packages/envoy/internal/broker/policy/**'
+              - 'packages/envoy/internal/broker/proof/*'
+              - 'packages/envoy/internal/broker/ratelimit/*'
+              - 'packages/envoy/internal/broker/record/*'
+              - 'packages/envoy/internal/broker/requests/*'
+              - 'packages/envoy/internal/broker/reread/*'
+              - 'packages/envoy/internal/broker/secrets/*'
+              - 'packages/envoy/internal/broker/store/**'
+              - 'packages/envoy/internal/broker/wake/*'
+              - 'packages/envoy/internal/cmdtest/*'
+              - 'packages/envoy/internal/dispatch/githubapp/githubapptest/*'
+              - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/oidc/**'
+              - 'packages/envoy/internal/pglisten/*'
+              - 'packages/envoy/internal/pgmigrate/*'
             contracts:
               - 'packages/contracts/**'
               - 'skills/dispatch/**'
@@ -179,6 +380,7 @@ jobs:
               # src/__tests__/dispatch-advice.test.ts holds every skill section a notice cites to a
               # heading of that skill's SKILL.md.
               - 'skills/**'
+            # envoy-go's gate alone; the other Go jobs have filters of their own above.
             envoy:
               - 'packages/envoy/**'
               - 'packages/proof-editor/**'
@@ -204,11 +406,11 @@ jobs:
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
-              # The image pull envoy-go, envoy-infra-go and envoy-go-race run before their tests.
+              # The image pull envoy-go runs before its tests.
               - '.github/actions/pull-test-images/**'
             # Every file packages/envoy/docker/Dockerfile builds from, so the envoy-smoke job
             # runs whenever the image it smokes changes. `envoy` is deliberately not widened to
-            # this: that would run the whole Go suite on every Dispatch pull request.
+            # this: that would run envoy-go's suite on every Dispatch pull request.
             # .github/scripts/check-image-trigger-paths.sh fails the build when this list misses
             # a file the build reads.
             envoy_image:
@@ -895,10 +1097,11 @@ jobs:
   # tests start no container; the natslive files run in a step of their own against real
   # nats-server and Postgres, on testnats.Image, testnats.HubImage and testpg.Image, pulled first
   # for the reason .github/actions/pull-test-images gives. The per-target compile runs in
-  # pr-and-main.yaml's required lint job.
+  # pr-and-main.yaml's required lint job. It runs when a file its `envoy_infra_go` filter names
+  # changes.
   envoy-infra-go:
     needs: changes
-    if: needs.changes.outputs.envoy == 'true'
+    if: needs.changes.outputs.envoy_infra_go == 'true'
     runs-on: ubuntu-24.04
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
@@ -951,10 +1154,10 @@ jobs:
   # date" step), so this job needs Bun installed and its workspace linked the same way, though not
   # that freshness check itself - a stale fixture is envoy-go's failure to catch, not a race.
   # delivery's and the bus's NATS runs in the test process (internal/testnats), so the job needs
-  # no container runtime of its own.
+  # no container runtime of its own. It runs when a file its `envoy_go_race` filter names changes.
   envoy-go-race:
     needs: changes
-    if: needs.changes.outputs.envoy == 'true'
+    if: needs.changes.outputs.envoy_go_race == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
@@ -987,10 +1190,11 @@ jobs:
   # row starts a Dispatch server, drives it over HTTP and the document websocket and reads its
   # resident memory from /proc, and together they run past go test's default ten-minute deadline,
   # which took envoy-go red at 600 s (run 37116639565). They build only under the `memory` tag, so
-  # envoy-go's unit run leaves them out and this job runs them with a deadline of its own.
+  # envoy-go's unit run leaves them out and this job runs them with a deadline of its own. It
+  # runs when a file its `dispatch_memory` filter names changes.
   dispatch-memory:
     needs: changes
-    if: needs.changes.outputs.envoy == 'true'
+    if: needs.changes.outputs.dispatch_memory == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     services:
@@ -1025,10 +1229,11 @@ jobs:
   # step runs under go test's default ten-minute package deadline, which the memory tests
   # already took red at 600 s (run 37116639565), and one row here waits out a durable hand-over
   # or a maintenance loop's tick, tens of seconds each. Each row's NATS runs in its own test
-  # process (internal/testnats), so the job needs no container runtime of its own.
+  # process (internal/testnats), so the job needs no container runtime of its own. It runs when a
+  # file its `dispatch_multiprocess` filter names changes.
   dispatch-multiprocess:
     needs: changes
-    if: needs.changes.outputs.envoy == 'true'
+    if: needs.changes.outputs.dispatch_multiprocess == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
@@ -1068,12 +1273,13 @@ jobs:
   # package deadline, which the memory tests already took red at 600 s (run 37116639565), and the
   # rows here wait out a migration race, a ten-second fan-out window and a twelve-second drain,
   # tens of seconds each. A job of their own rather than a step in dispatch-multiprocess, whose
-  # Postgres service and shape this copies: that job is a required check, and adding the broker
-  # to it would mean renaming it. They need no NATS and no test-container pull - the broker
-  # starts nothing in a container - so neither step is here.
+  # Postgres service and shape this copies: the broker rows read their own Postgres variable
+  # (BROKER_TEST_DATABASE_URL) and compile their own import closure, so they get their own job and
+  # their own filter, `broker_multiprocess`, which gates this one. They need no NATS and no
+  # test-container pull - the broker starts nothing in a container - so neither step is here.
   broker-multiprocess:
     needs: changes
-    if: needs.changes.outputs.envoy == 'true'
+    if: needs.changes.outputs.broker_multiprocess == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
@@ -1103,7 +1309,7 @@ jobs:
   # The container smoke test, the envoy-infra plugin's live tests, and the image both run. Its own
   # job, gated on envoy_image rather than envoy: the image is built from the Dispatch SPA and the
   # Bun workspace as well as the Go sources, so a Dispatch-only change changes the image and must
-  # smoke it, while widening `envoy` would run the whole Go suite on every Dispatch pull request
+  # smoke it, while widening `envoy` would run envoy-go's suite on every Dispatch pull request
   # instead. Before this split the smoke lived in envoy-go, so PR #1562 (packages/dispatch only)
   # skipped envoy-go and never smoked the image it changed (run 36494702052).
   # .github/scripts/check-image-trigger-paths.sh fails the build when envoy_image misses a file
