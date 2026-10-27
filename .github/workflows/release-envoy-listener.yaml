@@ -265,7 +265,7 @@ jobs:
           # platform has a tag of its own: two legs writing one cache ref would overwrite each
           # other's cache manifest.
           cache-from: type=registry,ref=ghcr.io/sjawhar/legion/envoy:buildcache-${{ matrix.arch }}
-          cache-to: ${{ github.ref == 'refs/heads/legion/INFRA-522' && format('type=registry,ref=ghcr.io/sjawhar/legion/envoy:buildcache-{0},mode=max', matrix.arch) || '' }}
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref=ghcr.io/sjawhar/legion/envoy:buildcache-{0},mode=max', matrix.arch) || '' }}
           # envoy-dispatch's /healthz reports this as the commit it was built from; the
           # Dockerfile refuses anything but a full sha.
           build-args: |
