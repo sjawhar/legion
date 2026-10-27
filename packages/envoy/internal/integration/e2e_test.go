@@ -466,7 +466,7 @@ func TestE2E_InterestReaperCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get stale interest: %v", err)
 	}
-	interest.UpdatedAt = time.Now().Add(-11 * time.Minute).UnixMilli()
+	interest.UpdatedAt = time.Now().Add(-(store.InterestReapGrace + store.InterestRefreshAge + time.Minute)).UnixMilli()
 	data, err := json.Marshal(interest)
 	if err != nil {
 		t.Fatalf("marshal stale interest: %v", err)
@@ -487,7 +487,7 @@ func TestE2E_InterestReaperCleanup(t *testing.T) {
 		return getErr == nil && current.UpdatedAt == interest.UpdatedAt
 	})
 
-	reaped, err := env.registry.Reap(func(string) bool { return false }, 10*time.Minute)
+	reaped, err := env.registry.Reap(func(string) bool { return false }, store.InterestReapGrace)
 	if err != nil {
 		t.Fatalf("reap stale interests: %v", err)
 	}

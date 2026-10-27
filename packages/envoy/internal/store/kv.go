@@ -764,11 +764,26 @@ func curValue(value string) string {
 	return value
 }
 
+const (
+	// InterestReapGrace is the grace window the listener passes to StartReaper: a dead
+	// session's interest stays at least this long after its row's last write, plus
+	// InterestRefreshAge.
+	InterestReapGrace = 10 * time.Minute
+	// InterestRefreshAge is the age by which an unchanged interest row must be rewritten.
+	// Today every heartbeat rewrites the row; a later build will skip rewriting an unchanged
+	// row younger than this, so a row's UpdatedAt may lag the session's last heartbeat by up
+	// to this age. Reap adds it to the grace window so that lag never shortens the grace a
+	// paused session gets.
+	InterestRefreshAge = 5 * time.Minute
+)
+
 // Reap cross-references the interest cache with a session liveness check and
-// deletes interests whose sessions are dead AND whose UpdatedAt exceeds the
-// grace window. A role claim is intentionally not an interest: it remains
-// available for its holder to re-register after a listener restart, and the
-// role delivery path drops it if that holder never becomes live again.
+// deletes an interest only when its session is dead AND more than the grace
+// window plus InterestRefreshAge has passed since the row's last write
+// (UpdatedAt); a row exactly that old is kept. A role claim is intentionally
+// not an interest: it remains available for its holder to re-register after a
+// listener restart, and the role delivery path drops it if that holder never
+// becomes live again.
 func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (int, error) {
 	now := r.now().UnixMilli()
 	graceMs := graceWindow.Milliseconds()
@@ -779,8 +794,8 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 		if isAlive(sid) {
 			continue // session still alive
 		}
-		if now-item.UpdatedAt <= graceMs {
-			continue // within grace window
+		if now-item.UpdatedAt <= graceMs+InterestRefreshAge.Milliseconds() {
+			continue // within grace window plus refresh age
 		}
 		stale = append(stale, sid)
 	}
@@ -849,10 +864,11 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 }
 
 // StartReaper runs Reap in a background goroutine at the given interval until ctx ends, and returns
-// a channel closed once it has returned: a pass in flight when ctx ends finishes first. A pass
-// lists the bucket through watchers whose consumers nats.go creates and deletes, so the listener's
-// shutdown waits for it before it drains NATS (kvwatch.Watcher.End says what a drain does to such
-// a delete).
+// a channel closed once it has returned: a pass in flight when ctx ends finishes first. Each pass
+// deletes the interest of a dead session whose row was last written more than graceWindow plus
+// InterestRefreshAge ago, as Reap says. A pass lists the bucket through watchers whose consumers
+// nats.go creates and deletes, so the listener's shutdown waits for it before it drains NATS
+// (kvwatch.Watcher.End says what a drain does to such a delete).
 func (r *Registry) StartReaper(ctx context.Context, isAlive func(string) bool, interval, graceWindow time.Duration) <-chan struct{} {
 	return everyInterval(ctx, interval, func() {
 		count, err := r.Reap(isAlive, graceWindow)
