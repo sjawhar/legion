@@ -601,3 +601,5 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
 
     console.log("PASS: topic set, structured payloads, checks settlement, and both renderers match the local acceptance contract");
   '
+
+# scratch INFRA-520 envoy-e2e-local
