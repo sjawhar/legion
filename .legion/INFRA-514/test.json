@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-514",
+  "completed": "2026-10-27T16:59:30Z",
+  "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
+  "branchHead": "d7ebb1ee02c70155d376c7dfea152af3d660fd64",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's harness driver (harness-514.sh) and analyzer (analyze-514.py) on a listener I built at d7ebb1ee (code identical to 278c9c06): 1.30 KV writes per heartbeat at 1x and 1.28 at 10x against its 1.30 and 1.26, resumed warm-ups after the nats-server restart, reaper elapsed_ms 0; a main ae36683e listener I built from git archive gave 2.00 and completed warm-ups. Re-ran its Go benchmarks base (main plus the head's benchmark files) against head: Registry/Get 1.14x from 400 to 3,000 sessions (base 8.1x), Reap 7.2x (base 76x), kvwatch and cistore Rewatch flat at about 4-5 ms at 1,000 and 25,000 keys (base 15 ms/336 ms and 3.20 s at 25,000 for cistore)."
+  },
+  "failures": [
+    {
+      "criterion": "R7 EV-11: review only after INFRA-610's production check shows all three listeners (Dispatch's in-cluster listener, gke, envoy-hub) on its build (ae36683e); the architect's instruction of 2026-10-27 15:51Z: end the round with verdict fail naming this gate while it has not passed",
+      "evidence": "gh pr view 2374 -R sjawhar/legion --json body at 2026-10-27 16:55Z: the body's line reads '**Production:** pending deploy of ae36683e4df982273cd5cb72968eed24504bf0b1'. INFRA-610 is done in Dispatch with no production record. Every other criterion passed (proof below); the code needs no change for this gate, only the three listener pin moves and INFRA-610's production check."
+    }
+  ],
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "R6 EV-11: an unchanged heartbeat writes the interest row only once it is 5 minutes old, a changed row at once; KV writes per heartbeat 2.0 -> <=1.3 at 1x and 10x",
+      "surface": "INFRA-589 reproduction harness (three real envoy-listener processes, nats-server 2.10.29, Dispatch, Postgres, loadgen 400/1,000 sessions heartbeating every 90 s through POST /v1/interests/subscribe), and partition.py: two real listeners on one nats-server",
+      "command": "harness-514.sh tester-1x-q 1 / tester-10x 10 bin/envoy-listener-tester; analyze-514.py; python3 partition.py head bin/envoy-listener-tester (dispatch://INFRA-514/artifact/infra514-tester-evidence-tar-gz)",
+      "observed": "KV writes per heartbeat 1.30 at 1x (interest 0.300, session 1.000; 1,333 heartbeats in minutes 1-6) and 1.279 at 10x (interest 0.295, session 0.983; 3,336 heartbeats); partition.py: 50 identical heartbeats wrote 0 interest rows and 50 session rows (KV LastSeq deltas from /jsz), one heartbeat adding a topic wrote 1 interest row",
+      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
+      "negativeControl": "main's listener (ae36683e) in the same harness (testerctl-main-1x): 2.001 KV writes per heartbeat, interest 1.000; partition.py main: 50 identical heartbeats wrote 50 interest rows"
+    },
+    {
+      "criterion": "R4/R5 EV-7: a rewatch applies only what was written since the last revision applied, warm-up outcome resumed, and the cache equals the bucket afterwards",
+      "surface": "INFRA-589 harness with a nats-server restart 6 minutes in; partition.py: listener B dials NATS through a TCP relay that is killed while listener A writes",
+      "command": "harness-514.sh tester-1x-q 1 and tester-10x 10; python3 partition.py head bin/envoy-listener-tester",
+      "observed": "harness: every listener's interest and session warm-up after the restart was outcome resumed with 0-9 entries (1x: 0 and 1-2; 10x: 0 and 6-9); partition: while B was away A added 25 sessions, deleted 10, changed 10 topic sets and deleted 5 interests; after the relay came back B's GET /v1/sessions and GET /v1/interests/ equalled A's within 1.0 s, warm-ups resumed with 0 entries (the old watcher's ordered consumer had already caught up)",
+      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
+      "negativeControl": "main's listener: completed warm-ups reading all 400 keys of each bucket after the restart, and after the partition B replayed 81 interests (5 markers) and 76 sessions (10 markers) in full"
+    },
+    {
+      "criterion": "R1 EV-5: an expired session is absent at once and leaves the cache at its deadline with no read; Get at 3,000 sessions within 2x of 400; a reaper pass at 3,000 within 10x of 400",
+      "surface": "expiry.py: a real listener on an envoy_sessions bucket created with MaxAge 20 s, read only through /metrics' envoy_active_sessions gauge, GET /v1/sessions and GET /v1/roles/<role>; Go benchmarks internal/session and cmd/listener",
+      "command": "python3 expiry.py head bin/envoy-listener-tester; go test -run '^$' -bench 'Registry/Get/' -count 10 ./internal/session/; go test -run '^$' -bench 'Reap' -benchtime 20x -count 3 ./cmd/listener/ (base: main ae36683e plus the head's benchmark files, GOWORK=off)",
+      "observed": "21 sessions that stopped heartbeating left envoy_active_sessions 31 -> 10 at about 20 s; GET /v1/sessions listed the 10 live sessions; the lapsed holder's role answered 404 holder_lapsed with last_seen and claim_released; Registry/Get median 153.6 ns at 400 and 174.6 ns at 3,000 (1.14x); Reap 6.97/22.3/50.2 us at 400/1,000/3,000 (7.2x)",
+      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
+      "negativeControl": "the same benchmarks on main's code: Registry/Get 12.3 us -> 99.3 us (8.1x), Reap 5.08 ms -> 385 ms (76x)"
+    },
+    {
+      "criterion": "R9 delivery p99 no worse at head",
+      "surface": "INFRA-589 harness, Dispatch -> NATS -> sessions, run with nothing else on the pod",
+      "command": "harness-514.sh tester-1x-q 1 and testerctl-main-1x 1; summary.json events.delivery_ms_from_response_all",
+      "observed": "head: delivery p50/p99 54.9/270 ms at 3.05 events committed/s; main control: 83.4/536 ms at 0.73 events/s (the implementer's main run: 56.2/351 ms at 2.92/s); 5 of 10,231 head receipts missing, the self_subscribed port-0 pattern the implementer recorded",
+      "headSha": "278c9c06140d1b26f678ff2b31b8c64cbac3da6a",
+      "negativeControl": "tester-1x, run while my race stress test shared the pod's 2 cores: 1.63 events/s and p99 455 ms, so the comparison uses the quiet run only"
+    }
+  ],
+  "adversarial": [
+    "A throwaway race test (not committed) wrote and deleted 50 keys continuously while 20 Rewatches ran, every other one onto a fresh connection after closing the old one: go test -race -count 3 converged to the bucket each time with 19-20 resumed warm-ups. No defect found, so no red test.",
+    "Read every new test against the ways I tried to break the change (chained resumes, writes racing the switch, a recreated or rolled-back stream, a stale delivery after the fence leaves, a re-upsert during a reaper pass, a paused session at 6 and 9 minutes): each has a test that would catch it."
+  ],
+  "observations": [
+    "Dispatch's subscribers list (internal/dispatch/api/subscribers.go:123) shows a subscriber that is no longer live with last_seen = the interest row's updated_at. With the unchanged-row skip that time can be up to 5 minutes before the session's last heartbeat. Live subscribers read the session row, which is still written on every heartbeat. The listener's AGENTS.md table now says the stored subscription's updated_at is its last change or refresh; Dispatch's view does not say so.",
+    "The review document's EV-5 and EV-11 rows (dispatch://INFRA-514/artifact/architecture-review-md) quote the earlier 1357b95c measurements (Get 17.5/54.7/146 us, 1.93 -> 1.27 at 10x), not the PR body's ae36683e figures (14.2/36.3/122 us, 1.96 -> 1.26). Both runs agree in direction; the rows name sjawhar/legion#2377 as R10 requires.",
+    "CI at 278c9c06 when read at 16:55Z: Tests (lint, typecheck, test), Docs, Worker Image, PR Title and dispatch-multiprocess green; Legion Envoy and Contracts' envoy-go-race, envoy-go, envoy-smoke, dispatch, broker-multiprocess, envoy-e2e-local and envoy-infra-go still queued, dispatch-memory in progress."
+  ]
+}
