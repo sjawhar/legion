@@ -281,11 +281,13 @@ a {
 /* A typed block's header is a label, not a dump. No stylesheet targeted it, so the block's
    name and its attributes rendered as bare prose lines down the page (#1434/#1452, LEGION-67).
    The name is the eyebrow role, a `kind` is a badge beside it, a `title` is the header's text,
-   and any remaining author-written attribute is a quiet inline pair. The selectors sit under
-   `.dispatch-doc` so they outrank the unlayered library typography the way the decision block's
-   own rules below do. Colours are the palette swatches their comments name; the pin test holds
-   them to it. */
-.dispatch-doc [data-proof-block-summary] {
+   and any remaining author-written attribute is a quiet inline pair. The rules apply in a
+   document and in a Markdown body (`.dispatch-markdown`: a comment, ask or message, where
+   `MarkdownBody` draws a typed block the same way). The scope outranks the unlayered library
+   typography in a document, the way the decision block's own rules below do, and in a body
+   the Typography rules, whose `.prose :where(…)` selectors carry one class to this scope's two.
+   Colours are the palette swatches their comments name; the pin test holds them to it. */
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-summary] {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -293,7 +295,7 @@ a {
   margin-bottom: 0.5rem;
 }
 
-.dispatch-doc [data-proof-block-name] {
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-name] {
   font-size: 10px;
   font-weight: 600;
   line-height: 1rem;
@@ -302,7 +304,7 @@ a {
   color: #62748e; /* slate-500 */
 }
 
-.dispatch-doc [data-proof-block-badge] {
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-badge] {
   border-radius: 9999px;
   padding: 0 0.5rem;
   font-size: 12px;
@@ -314,14 +316,14 @@ a {
 
 /* The block's own leading text, so it takes the primary-body role: 15px medium, the same as
    an ask's question and the document's prose, rather than a size of its own. */
-.dispatch-doc [data-proof-block-title] {
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-title] {
   font-size: 15px;
   font-weight: 500;
   line-height: 1.625;
   color: #0f172b; /* slate-900 */
 }
 
-.dispatch-doc [data-proof-block-attributes] {
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] {
   display: flex;
   flex-wrap: wrap;
   gap: 0 0.5rem;
@@ -331,41 +333,47 @@ a {
   color: #62748e; /* slate-500 */
 }
 
-.dispatch-doc [data-proof-block-attributes] dt {
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] dt {
   font-weight: 600;
 }
 
-.dispatch-doc [data-proof-block-attributes] dt::after {
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] dt::after {
   content: ":";
 }
 
-.dispatch-doc [data-proof-block-attributes] dd {
+:is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] dd {
   margin: 0;
 }
 
 @media (prefers-color-scheme: dark) {
-  .dispatch-doc [data-proof-block-name],
-  .dispatch-doc [data-proof-block-attributes] {
+  :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-name],
+  :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-attributes] {
     color: #90a1b9; /* slate-400 */
   }
 
-  .dispatch-doc [data-proof-block-badge] {
+  :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-badge] {
     background-color: #1d293d; /* slate-800 */
     color: #90a1b9; /* slate-400 */
   }
 
-  .dispatch-doc [data-proof-block-title] {
+  :is(.dispatch-doc, .dispatch-markdown) [data-proof-block-title] {
     color: #f1f5f9; /* slate-100 */
   }
 }
 
 /* A decision block is a card inside prose. Its first/last child would otherwise carry the
    prose paragraph margins into the card (a 20px gap under a 12px header). */
-.dispatch-doc .proof-typed-block-ask [data-proof-block-content] > :first-child {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-proof-block-content]
+  > :first-child {
   margin-top: 0;
 }
 
-.dispatch-doc .proof-typed-block-ask [data-proof-block-content] > :last-child {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-proof-block-content]
+  > :last-child {
   margin-bottom: 0;
 }
 
@@ -404,8 +412,11 @@ a {
    show every option twice. The list is the only place a human edits the options, so it appears
    only on the block the caret is inside (`askBlockEditingPlugin` in `features/doc/ask-block.ts`
    marks it `data-dispatch-ask-editing`) — click into the question to reveal it — and never where
-   nothing can be edited (a read-only render) or once the decision is no longer open. */
-.dispatch-doc .proof-typed-block-ask[data-dispatch-ask-options="rows"]
+   nothing can be edited (a read-only render) or once the decision is no longer open. In a body
+   the list folds only where the app mounts the card's rows (`useRenderedMarkdown` sets
+   `data-dispatch-ask-options`), and it never shows, since nothing there is edited. */
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask[data-dispatch-ask-options="rows"]
   [data-proof-block-content]
   > ul {
   display: none;
@@ -492,12 +503,17 @@ a {
    ancestor value to inherit, so `prose`'s `color` falls back to the parent's; here the editor
    root's `prose` supplies one (gray-700), so the colour is inherited explicitly. The rest of the
    palette comes from the `--tw-prose-*` variables `.dispatch-markdown` and `prose-invert` set on
-   the element, and from the editor root for the ones they leave alone (pre, quote border). */
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown {
+   the element, and from the editor root for the ones they leave alone (pre, quote border). A
+   card inside a Markdown body has `not-prose` slots too, so the footer's `MarkdownBody` (an
+   option's description, a reply) loses `prose-sm` the same way there. */
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown {
   color: inherit;
 }
 
-.dispatch-doc
+:is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask
   [data-dispatch-ask-footer]
   .dispatch-markdown
@@ -505,48 +521,85 @@ a {
   margin-block: 1.1428571em;
 }
 
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown :is(ul, ol) {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  :is(ul, ol) {
   padding-inline-start: 1.5714286em;
 }
 
 /* `prose-sm` tightens a list nested in a list; a reply's body sits inside the thread's `<ul>`,
    so a list in a reply is spaced this way in the Inbox. */
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] li .dispatch-markdown :is(ul, ol) {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  li
+  .dispatch-markdown
+  :is(ul, ol) {
   margin-block: 0.5714286em;
 }
 
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown ul {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  ul {
   list-style-type: disc;
 }
 
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown ol {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  ol {
   list-style-type: decimal;
 }
 
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown li {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  li {
   margin-block: 0.2857143em;
   padding-inline-start: 0.4285714em;
 }
 
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown li::marker {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  li::marker {
   color: var(--tw-prose-bullets);
 }
 
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown > :first-child {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  > :first-child {
   margin-top: 0;
 }
 
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown > :last-child {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  > :last-child {
   margin-bottom: 0;
 }
 
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown a {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  a {
   color: var(--tw-prose-links);
   font-weight: 500;
   text-decoration: underline;
 }
 
-.dispatch-doc
+:is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask
   [data-dispatch-ask-footer]
   .dispatch-markdown
@@ -554,11 +607,19 @@ a {
   font-weight: 600;
 }
 
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown code {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  code {
   font-size: 0.8571429em;
 }
 
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown pre {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  pre {
   background-color: var(--tw-prose-pre-bg);
   border-radius: 0.25rem;
   color: var(--tw-prose-pre-code);
@@ -569,14 +630,23 @@ a {
   padding: 0.6666667em 1em;
 }
 
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown pre code {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  pre
+  code {
   background: none;
   color: inherit;
   font-weight: inherit;
   padding: 0;
 }
 
-.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown blockquote {
+:is(.dispatch-doc, .dispatch-markdown)
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  blockquote {
   border-inline-start: 0.25rem solid var(--tw-prose-quote-borders);
   font-style: italic;
   font-weight: 500;
@@ -585,7 +655,7 @@ a {
   quotes: "\201C" "\201D" "\2018" "\2019";
 }
 
-.dispatch-doc
+:is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask
   [data-dispatch-ask-footer]
   .dispatch-markdown
@@ -594,7 +664,7 @@ a {
   content: open-quote;
 }
 
-.dispatch-doc
+:is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask
   [data-dispatch-ask-footer]
   .dispatch-markdown
