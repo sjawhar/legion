@@ -2,51 +2,37 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-528",
-  "completed": "2026-10-27T04:30:00Z",
+  "completed": "2026-10-27T05:50:00Z",
   "proof": [
     {
-      "criterion": "Review PRRT_kwDORFy7ds6wiXhE: drawing cost is bounded and never holds the reader's main thread",
-      "surface": "Dispatch Conversation against the real Go Dispatch server and Postgres 17 + pgvector, in Desktop Chrome, iPhone 13 (Chromium), Desktop Safari (WebKit) and Desktop Firefox",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox",
-      "observed": "At head d9ff6c61: 32 passed (2.9m). The new row 'a diagram too large to draw in time shows the reason, and the page keeps responding' (an 800-node flowchart, 2 edges per node) passes in all four projects: five 100 ms page timers each arrive within 1 s while the worker draws, then 'Unable to render Mermaid diagram: it did not finish within 5 seconds' shows with the source open and no image.",
-      "headSha": "d9ff6c6169634f601b8a041414a4bbfd5ae45d60",
-      "negativeControl": "The same row run against the round-1 code head 9607c1b9 (spec copied onto it in an unpushed scratch commit, SPA built there, chromium): failed with a 100 ms page timer arriving after 11014.8 ms, because the layout ran on the page's thread."
+      "criterion": "Tester failure at d9ff6c61 (the architect narrowed this round to it): a cancelled draw leaves the worker's queue, so the diagrams of a page the reader has left are never drawn and never delay the page they are on",
+      "surface": "Dispatch Conversation, chromium, real Go Dispatch server and Postgres 17 + pgvector (throwaway e2e, deleted after the run): issue A holds a message with two 450-node flowcharts, issue B a message with `graph TD Start --> Finish`; open A, wait 1 s, move in-app to B (history.pushState + popstate, same document confirmed)",
+      "command": "( source /legion/harness/env.sh && cd packages/dispatch && bunx playwright test --config e2e/playwright.config.ts e2e/zz-mermaid-leave.e2e.ts --project chromium --repeat-each 2 )",
+      "observed": "At head 95dd30e9: B's diagram visible 2,212 ms and 1,573 ms after the move (2 passed). The four-project e2e/mermaid.e2e.ts run at the same head: 32 passed (3.0m).",
+      "headSha": "95dd30e91781e66b183bedbdaa542bb2416eff5f",
+      "negativeControl": "The same scenario at the previous code d9ff6c61 (measured before the edit): B's diagram after 11,378 ms, because the worker drew A's two slow sources first, each up to the 5 s limit."
     },
     {
-      "criterion": "A1 and the spec Summary rows still hold: comment, Inbox ask, message, reply draw; refusal; markup label as text; other language stays code; open-fence rules",
-      "surface": "Same four browser projects; MarkdownBody unit suite (happy-dom, fake Worker answering through the worker module's handler)",
-      "command": "same browser command; `cd packages/dispatch && bun test --parallel web/src e2e/__tests__`",
-      "observed": "All 7 earlier rows pass in all four projects at d9ff6c61; unit suite 2433 pass / 0 fail, including the tester's two red tests (unmodified), the time-limit case (refused with source open, worker terminated, the next source drawn by a fresh worker, the refused source never reaching the renderer), the cached-draws-synchronously case and the worker-failure case (one console.error across four paints, retry after online).",
-      "headSha": "d9ff6c6169634f601b8a041414a4bbfd5ae45d60",
-      "negativeControl": "Red commit ecc18ff3 (no drawing code): 24 failed / 4 passed on the earlier rows (round 1); disabling the cancel makes the rewritten cancel case fail (reported by the worker that wrote it)."
+      "criterion": "The tester's red test `a source no body still waits for is never sent to the worker` (c9a6c465) passes under CI's command",
+      "surface": "Dispatch unit suite, CI's command `bun run test` = `bun test --parallel web/src e2e/__tests__`",
+      "command": "cd packages/dispatch && bun test --parallel web/src e2e/__tests__",
+      "observed": "At 95dd30e9: 2436 pass / 0 fail.",
+      "headSha": "95dd30e91781e66b183bedbdaa542bb2416eff5f",
+      "negativeControl": "With the one-minute limit, the test against the d9ff6c61 code fails (0 pass / 1 fail); with the original 100 ms limit and the fix, the parallel suite failed it 3 of 3 runs (2435 pass / 1 fail)."
     }
   ],
   "filesChanged": [
-    "biome.json",
-    "packages/proof-editor/package.json",
-    "packages/proof-editor/src/mermaid-render.ts (new)",
-    "packages/proof-editor/src/mermaid-svg.ts",
-    "packages/proof-editor/tests/mermaid-svg.test.ts",
-    "packages/proof-editor/AGENTS.md",
-    "packages/dispatch/web/src/features/refs/mermaid-render.worker.ts (new)",
     "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts",
-    "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx",
     "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx",
-    "packages/dispatch/web/vite.config.ts",
-    "packages/dispatch/e2e/mermaid.e2e.ts",
-    "packages/dispatch/AGENTS.md",
-    "packages/envoy/CHANGELOG.md"
+    "packages/dispatch/AGENTS.md"
   ],
   "trickyParts": [
-    "In a browser worker ELK's bundled engine sees `self` and no `document`, takes the worker for an ELK worker and claims its onmessage, so every flowchart was refused ('En is not a constructor') in all three engines; beautiful-mermaid's `delete globalThis.self` does not reach WorkerGlobalScope.prototype's accessor. mermaid-render.worker.ts shadows `self` with an undefined accessor on the global's own prototype for the duration of each draw.",
-    "The 5 s clock starts when the worker posts {ready: true} (its imports loaded), not while its chunk downloads, so a slow connection never gets a normal diagram refused and cached.",
-    "Vite builds the worker as its own bundle; the third-party-notices plugin now records each worker bundle's files and inputs, leaves those files out of the page bundle check and adds their packages to THIRD_PARTY_NOTICES.txt.",
-    "Bundle at d9ff6c61: org.eclipse.elk only in mermaid-render.worker-*.js (1,565,608 B) and the lazy editor chunk lib-*.js (1,748,554 B); the entry and the headless chunks carry neither. Chromium worker timings: 50-edge flowchart 226/144 ms (first/warm), 100 nodes x2 edges ~1.2 s, 200 nodes ~3 s (5.4-5.7 s in WebKit/Firefox).",
-    "Browser harness: /legion/harness/setup.sh and env.sh; lanes by LEGION_ROLE (tester 20777, db dispatch_tester_e2e). web/dist was last built from the scratch negative-control commit: rebuild before any run."
+    "The cancel takes this call's own draws off each source's waiter list, then queues `dropAbandoned` on a microtask: React runs a layout effect's cleanup and its next run in one commit, so a repaint (the live view, every frame) asks again before the microtask and keeps its place and its in-flight draw. A source left with no waiters is dropped; if the worker is drawing it, the worker is terminated, nothing is cached, and a fresh worker takes the queued sources.",
+    "Browser harness: /legion/harness/setup.sh and env.sh; lanes by LEGION_ROLE (tester 20777, db dispatch_tester_e2e)."
   ],
   "deviations": [
-    "Time limit instead of a size budget: a source is sent to the worker and refused after 5 s; no character cap beyond Dispatch's 32,000-character body cap.",
-    "resetMermaidDiagrams(limitMs) takes an optional time limit for the unit tests (documented test seam)."
+    "Test edit, approved by the INFRA-138 architect (envoy d7a2f76c, 05:26Z): in the tester's red test `a source no body still waits for is never sent to the worker` (c9a6c465) the one value `resetMermaidDiagrams(100)` became `resetMermaidDiagrams(60_000)` (commit 95dd30e9); nothing else in it changed. With 100 ms the limit raced the test's own unmount under CI's parallel command: 3 of 3 failures (2435 pass / 1 fail), the limit refusing `Stuck` 111-129 ms after its send and `Gone` then sent while its body was still mounted, before the unmount at 222-283 ms. With the change: 2436 pass / 0 fail, and the test still fails against the d9ff6c61 code, so it stays a real negative control and the limit no longer hides the defect.",
+    "main not merged: CI had no completed red check on the branch (every run queued or cancelled), and GitHub reports MERGEABLE."
   ],
   "openQuestions": []
 }
