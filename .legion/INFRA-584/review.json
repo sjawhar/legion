@@ -2,43 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-584",
-  "completed": "2026-10-27T06:42:00Z",
+  "completed": "2026-10-27T10:57:00Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedCodeHead": "d0c01b1bf5ae67987731cbe302ac322033615549",
-  "critical": 1,
-  "important": 2,
+  "reviewedCodeHead": "d317a9a5b79908b0615680e51c0eb621fc88d84e",
+  "critical": 0,
+  "important": 0,
   "minor": 2,
   "keyFindings": [
     {
-      "severity": "critical",
-      "file": "(CI) Tests run 40448807743, job test 122006382453",
-      "description": "The required check `test` is red at the code head d0c01b1b (TestApplyFact*/awaiting_* fail with `read a slotted issue ... got 20 and 31`). The cause is main's failure before #2317 (baadccdc, merged 04:19:29Z): this run's merge ref predates it, and a re-run keeps the old merge commit. A head whose required check is red is not approved. The next code push makes a new merge ref with #2317 and runs `test` again."
-    },
-    {
-      "severity": "important",
-      "file": ".github/scripts/check-bun-version.sh:374",
-      "description": "Half gate: the check pins the value of `no-cache` but `options.get(\"no-cache\", NO_CACHE_OFF_MAIN)` passes a wrapper with no `no-cache` line, which is the likely way to undo the main-only rule. Recommended: allow the `no-cache` key in rule 8 without pinning its value (delete NO_CACHE_OFF_MAIN, lines 374-381, the added rule-8 wording and the two failing-value tests), since the checker's job is the version pin and no check covers the six Go cache sites either. The alternative, requiring the line, is acceptable if the implementer prefers it."
-    },
-    {
-      "severity": "important",
-      "file": "PR body E2E (tester) / .legion/INFRA-584/test.json",
-      "description": "Proof overstated: envoy-infra-go's save step was skipped because attempt 1 of run 40448807666 cancelled the job at `Vet envoy-infra`, and envoy-e2e-local was cancelled before it ran. The go-envoy-infra and go-envoy restore/save pairs have not run to completion on a pull request. The next round's E2E lines must cite completed runs of those jobs, or say they did not run."
+      "severity": "minor",
+      "file": ".github/scripts/check-bun-version.sh:32",
+      "description": "Rule 8's new text says no-cache is an input 'which caches but cannot change the version'; no-cache turns setup-bun's cache off (setup-bun@0c5077e action.yml 'Disable caching of bun executable'). This is the only written statement of rule 8 and it is prose this pull request wrote (AC5)."
     },
     {
       "severity": "minor",
-      "file": ".github/workflows/worker-image.yaml:193",
-      "description": "Comment leftover from the cache-mode design: a pull-request token can write the gha cache, so 'BuildKit's gha exporter fails a build that cannot write, so the flag is left out rather than kept and refused' explains nothing that ships. Keep only 'Off main cache-to is empty, which passes no --cache-to at all.'"
-    },
-    {
-      "severity": "minor",
-      "file": ".github/actions/setup-bun/action.yml:13",
-      "description": "'that entry' has no referent, and 'so only a run on main saves' reads as setup-bun's own behaviour rather than the rule line 24 sets."
+      "file": ".github/scripts/check-bun-version.sh:339 and .github/scripts/check-bun-version.test.sh:165",
+      "description": "Round 2 made two lines contradict rule 8: the script comment guards against a wrapper 'given a second input' and the test label says 'any extra input on the wrapper fails', while the shipped wrapper passes no-cache as a second input and line 361 admits it."
     }
   ],
-  "notFindings": [
-    "Six hand-copied Go cache restore/save pairs (thermonuclear-code-quality important 1): no behaviour change; the spec limits this to small changes to the existing workflows, and the router (INFRA-520) replaces these files.",
-    "go-daemon key shared by typecheck, test and pi-legion (deep review minor 1): unchanged from setup-go's shared key before this change.",
-    "pull-requests: read comment on lint (code-quality minor 5): dorny/paths-filter reads this public repository's file list without that grant (docs.yaml:33, envoy-and-contracts.yaml changes job runs it under contents: read)."
-  ],
-  "thermonuclear": "deep-review APPROVE (0 critical, 0 important, 3 minor) and code-quality CHANGES (2 important, 3 minor) at d0c01b1b"
+  "round1Findings": {
+    "testRed": "fixed: lint, typecheck and test green at d317a9a5 in Tests 40463123255, on a merge ref with #2317",
+    "noCacheHalfGate": "fixed in d317a9a5 (value pin removed); thread PRRT_kwDORFy7ds6wk0MZ accepted",
+    "overstatedProof": "fixed: envoy-infra-go 122143396749, envoy-e2e-local 122143396501 and pi-legion 122143397168 completed with restore success and save skipped; the tester's corrections field records it",
+    "workerImageComment": "fixed in d317a9a5; thread PRRT_kwDORFy7ds6wk0Mc accepted",
+    "setupBunComment": "fixed in d317a9a5; thread PRRT_kwDORFy7ds6wk0Mf accepted"
+  },
+  "deferralNote": "The two findings are wording only, but the deployment's rules allow no deferral and no later work owns check-bun-version.sh, so they are fixed in this pull request rather than put on a Fast-follow line.",
+  "thermonuclear": "deep-review APPROVE (0 critical, 0 important, 2 minor: the rule-8 wording and stale PR-body risk bullets, which the reviewer owns and updated) and code-quality CHANGES (0 critical, 0 important, 2 minor) at d317a9a5"
 }
