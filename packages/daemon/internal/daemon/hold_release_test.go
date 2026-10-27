@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -210,12 +211,17 @@ func (d *pilotDispatch) ListIssues(context.Context, string, []string) ([]dispatc
 func (d *pilotDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
 	return dispatch.Issue{}, nil
 }
-func (d *pilotDispatch) SetStatus(context.Context, string, string) error   { return nil }
+func (d *pilotDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
+	return dispatch.Issue{}, nil
+}
 func (d *pilotDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *pilotDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return nil
 }
 func (d *pilotDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (d *pilotDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *pilotDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
@@ -252,12 +258,17 @@ func (d *filteringDispatch) ListIssues(_ context.Context, _ string, statuses []s
 func (d *filteringDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
 	return dispatch.Issue{}, nil
 }
-func (d *filteringDispatch) SetStatus(context.Context, string, string) error   { return nil }
+func (d *filteringDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
+	return dispatch.Issue{}, nil
+}
 func (d *filteringDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *filteringDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return nil
 }
 func (d *filteringDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (d *filteringDispatch) EventsAfter(context.Context, string, int64) ([]json.RawMessage, error) {
 	return nil, nil
 }
 func (d *filteringDispatch) Approval(context.Context, string) (dispatch.Approval, error) {

@@ -310,7 +310,7 @@ func (s *server) readDeliveryRows(ctx context.Context, settings delivery.Deliver
 	// (store.ForConcurrentRead): on the request's shared mark one read's open cursor would refuse
 	// the rest. The run jobs depend on the runs, so they follow the runs in the same goroutine.
 	//
-	// A timeline request therefore holds up to seven of the pool's 16 connections
+	// A timeline request therefore holds up to seven of the shared pool's connections
 	// (store.sharedPoolSize) for the length of its longest read, where it held one at a time. That
 	// is fine because none of them holds a lock or opens a transaction, so none waits on
 	// another caller or makes another caller wait on it: the deadlock the pool's guard exists to
@@ -752,7 +752,7 @@ func (s *server) productionApplies(ctx context.Context, runs []delivery.Delivery
 
 // firstToWarn reports whether this process is the one to log the warning key names, jobNames
 // being key's names as a list. This process's warnedUnmatchedRuns answers first, so each process
-// asks the database once per key; then the insert into delivery_run_warnings (migration 0124)
+// asks the database once per key; then the insert into delivery_run_warnings (migration 0132)
 // decides between processes: only the one whose insert wrote the row logs, and every other finds
 // the row and stays quiet.
 //

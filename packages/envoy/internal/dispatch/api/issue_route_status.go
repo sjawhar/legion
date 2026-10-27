@@ -21,7 +21,7 @@ import (
 // issue read carries route_status beside the route, judged against the listener's live-session
 // list (GET /v1/sessions, each row carrying the roles its session holds), never one lookup per
 // issue. Every process judges against one stored copy of that list, the route_roster row
-// (migration 0122): a read uses it while it is fresh by the database's clock, so a route_status
+// (migration 0130): a read uses it while it is fresh by the database's clock, so a route_status
 // can be up to routeRosterTTL (5 s) old, and inside that age every process reads a route the same
 // way, and a filtered listing paged across processes is cut from one answer. A process that finds
 // the row stale or missing asks the listener once however many of its reads are waiting

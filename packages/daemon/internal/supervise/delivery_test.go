@@ -453,7 +453,7 @@ func TestALateForeignTurnResendsTheTaskUnlessTheIssueLeftThePhase(t *testing.T) 
 			// The issue is in the task's phase while it is delivered; the late turn is that phase
 			// running, so by the time it ends the daemon may have advanced past it.
 			holds := true
-			h.deps.PhaseHolds = func(context.Context, string, phase.Phase) (bool, error) { return holds, nil }
+			h.deps.PhaseHolds = func(context.Context, string, phase.Phase, uint64) (bool, error) { return holds, nil }
 			c := queuedClaim()
 			if err := h.store.PutClaim(h.ctx, c); err != nil {
 				t.Fatal(err)
@@ -846,7 +846,7 @@ func TestDroppingATaskForItsPhaseAlsoDropsTheQuestionARestartLeft(t *testing.T) 
 		t.Fatalf("seed the restored delivery: %v", err)
 	}
 	h.conns.Register(testToken, h.conn)
-	h.deps.PhaseHolds = func(context.Context, string, phase.Phase) (bool, error) { return false, nil }
+	h.deps.PhaseHolds = func(context.Context, string, phase.Phase, uint64) (bool, error) { return false, nil }
 	h.start(restored)
 
 	// The issue has left the phase the restored task was queued for: it is dropped.
@@ -882,7 +882,7 @@ func TestDroppingATaskAsksWhetherTheAgentIsStillInATurn(t *testing.T) {
 	}
 	h.conns.Register(testToken, h.conn)
 	h.conn.SetStreaming(true) // the agent is in a turn an earlier daemon saw start
-	h.deps.PhaseHolds = func(context.Context, string, phase.Phase) (bool, error) { return false, nil }
+	h.deps.PhaseHolds = func(context.Context, string, phase.Phase, uint64) (bool, error) { return false, nil }
 	h.start(restored)
 
 	h.must(RequestReady{Claim: testToken, Generation: restored.Generation, Session: session})
@@ -902,6 +902,70 @@ func TestDroppingATaskAsksWhetherTheAgentIsStillInATurn(t *testing.T) {
 	if sent := h.wantPrompts(1)[0]; sent.Message != "look at the tree" {
 		t.Errorf("prompt after the turn = %+v, want the operator's task", sent)
 	}
+}
+
+// A restored working claim asks its agent whether the turn an earlier daemon saw start is still
+// running. An ask that fails (a get_state the agent did not answer in time) says nothing about the
+// turn: the claim stays working and its task stays the turn's, and the next sweep asks again. Taken
+// as "not streaming", it ended a turn still running and set the claim idle, and the sweep then sent
+// the task into that busy agent every interval.
+func TestAFailedGetStateLeavesARestoredTurnRunning(t *testing.T) {
+	restored := fixture(StateWorking)
+	h := newHarnessOf(t, restored)
+	if err := h.store.PutDelivery(h.ctx, testToken, *restored.Pending); err != nil {
+		t.Fatalf("seed the restored delivery: %v", err)
+	}
+	h.conns.Register(testToken, h.conn)
+	h.conn.FailGetState(context.DeadlineExceeded)
+	h.start(restored)
+
+	h.must(StreamHello{Claim: testToken, Generation: restored.Generation})
+	h.wantState(StateWorking)
+	if p := h.claim().Pending; p == nil || p.ID != restored.Pending.ID || p.ConfirmedAt.IsZero() {
+		t.Fatalf("after the failed ask pending = %+v, want the turn's confirmed task kept", p)
+	}
+	h.observe(runtime.Alive)
+	h.wantState(StateWorking)
+	// The hello's ask and this sweep's went unanswered: still under the limit, so no warning yet.
+	if warned := h.logs.lines("level=WARN", "unanswered"); len(warned) != 0 {
+		t.Fatalf("warned after two unanswered asks: %q", warned)
+	}
+	// The third unanswered ask warns, naming the claim, so an operator sees a turn the daemon
+	// cannot read.
+	h.observe(runtime.Alive)
+	h.wantState(StateWorking)
+	if warned := h.logs.lines("level=WARN", "unanswered", string(testToken)); len(warned) != 1 {
+		t.Fatalf("after three unanswered asks warned %q, want one warning naming the claim", warned)
+	}
+	h.wantPrompts(0)
+
+	// The agent answers on a later sweep: the turn is over, and it ends now.
+	h.conn.FailGetState(nil)
+	h.conn.SetStreaming(false)
+	h.observe(runtime.Alive)
+	h.wantState(StateIdle)
+	if p := h.claim().Pending; p != nil {
+		t.Fatalf("after the answered ask pending = %+v, want the turn's task retired", p)
+	}
+}
+
+// A sweep can reach a restored working claim before its shim dials back. With no connection it
+// asks nothing and leaves the question for the hello, which then ends a turn that is over.
+func TestASweepBeforeTheHelloLeavesTheRestartsQuestionForIt(t *testing.T) {
+	restored := fixture(StateWorking)
+	h := newHarnessOf(t, restored)
+	if err := h.store.PutDelivery(h.ctx, testToken, *restored.Pending); err != nil {
+		t.Fatalf("seed the restored delivery: %v", err)
+	}
+	h.start(restored)
+
+	h.observe(runtime.Alive)
+	h.wantState(StateWorking)
+
+	h.conns.Register(testToken, h.conn)
+	h.conn.SetStreaming(false)
+	h.must(StreamHello{Claim: testToken, Generation: restored.Generation})
+	h.wantState(StateIdle)
 }
 
 // A suspension ends the claim's phase, so the workflow task it leaves is the finished phase's and

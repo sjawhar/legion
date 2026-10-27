@@ -341,15 +341,16 @@ func main() {
 	// periodic maintenance loop below either runs once overall or is deliberately per-process.
 	// The ones that must run once overall take a named lease on this pool for the length of their
 	// pass (duty.Exclusive): a lease is a session-level advisory lock on a connection of its own,
-	// so it needs a pool the shared one's sixteen request connections are not spent on. A boot
-	// that cannot open it is a boot whose loops would each run everywhere, so it ends here. Under
-	// that lease each pass is also recorded with its loop's own period (duty_passes, migration
-	// 0115), which is what makes a loop run once per period rather than once per process: two
-	// tickers started minutes apart almost never meet inside a pass, so the lease alone would
-	// exclude nothing. The leased loops are the document compaction (the outbox's), the
+	// so it needs a pool the shared one's request connections are not spent on. A boot that
+	// cannot open it is a boot whose loops would each run everywhere, so it ends here. Under that
+	// lease each pass is also recorded with its loop's own period (duty_passes, migration 0115),
+	// which is what makes a loop run once per period rather than once per process: two tickers
+	// started minutes apart almost never meet inside a pass, so the lease alone would exclude
+	// nothing. The leased loops are the document compaction (the outbox's), the
 	// suggestion-outcome sweep, the delivery resume, the reference-excerpt reconciliation, the
-	// webhook redelivery sweep, the architecture import, the delivery reconcile and the delivery
-	// intakes' consumer reconciliation; store.leasePoolSize counts their callers.
+	// block-index reconciliation, the webhook redelivery sweep, the architecture import, the
+	// delivery reconcile and the delivery intakes' consumer reconciliation; store.leasePoolSize
+	// counts their callers.
 	//
 	// Deliberately NOT leased, in three classes:
 	//   - already claims its own work, so two processes never do one unit of it twice: the
@@ -373,8 +374,13 @@ func main() {
 	}
 
 	if natsClient != nil {
+		outboxPool, err := database.Pool.Outbox()
+		if err != nil {
+			slog.Error("dispatch: open the events outbox's pool", "error", err)
+			os.Exit(1)
+		}
 		go outbox.Run(ctx, outbox.Deps{
-			Store:     database,
+			Store:     &store.Store{Pool: outboxPool},
 			Publisher: natsClient,
 			Broker:    broker,
 			Docs:      documentService,
@@ -420,6 +426,11 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
+	// The block index: each document version no block-aware write indexed - every document at
+	// migration 0121, each version a build without the block index writes during a roll, and each
+	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such
+	// a build indexed without the block grammar.
+	go documentService.RunBlockIndexReconciliation(ctx, leases)
 
 	sweeper, err := webhookSweeper(natsClient, database, appCfg, boot.GitHubAPIBase)
 	if err != nil {

@@ -238,8 +238,7 @@ const legionWaitTimes = {
 
 /** `api.WaitingOnView` — what an `awaiting_person` root waits on from a person: `ask`, the oldest
  * question of its tree still with the person, or `gate`, a spec version (`gateVersion` of document
- * `artifactId`) a person has not reviewed. Contract 40 carries both shapes so the gate waits of a
- * later daemon need no plugin bump; a contract-40 daemon writes only `ask`. */
+ * `artifactId`) a person has not reviewed. Contract 40 carries both shapes, and a daemon writes either. */
 const legionWaitingOn = z
   .discriminatedUnion("kind", [
     z.strictObject({ kind: z.literal("ask"), ask: nonEmptyString, ...legionWaitTimes }),
@@ -627,10 +626,10 @@ export const LegionHandoffCompleteResponse = z.strictObject({
   note: nonEmptyString.optional(),
 });
 /** `api.WaveReleaseResponse`. A release is accepted whatever the children's links say, so
- * `released` is every issue the request named, unchanged, and the architect is never asked to
- * send the request again; `started` and `held` then say what the release did with each of them.
- * A child neither started nor held — one the daemon does not record, or one still admitted that
- * waits on nothing — is in neither list. */
+ * `released` is every issue the request named, each once, in the order the request first named it,
+ * and the architect is never asked to send the request again; `started` and `held` then say what
+ * the release did with each of them. A child neither started nor held — one the daemon does not
+ * record, or one still admitted that waits on nothing — is in neither list. */
 export const LegionWaveReleaseResponse = z.strictObject({
   released: z.array(nonEmptyString),
   started: z.array(issueKey),
@@ -719,9 +718,8 @@ export const LegionEscalateRequest = z.strictObject({
 });
 
 /** `api.SignOffRequest`, the owning architect's acceptance of an issue in `accepting`, which moves
- * it to `retro`; the daemon refuses it in every other phase (`SIGNOFF_OUTSIDE_ACCEPTING`), and
- * refuses it 409 `SIGNOFF_CHILD_IN_WORKFLOW` while any issue beneath this one — its children,
- * their children — is still in the workflow, naming each of them. */
+ * it to `retro`; the daemon refuses it in every other phase (`SIGNOFF_OUTSIDE_ACCEPTING`). Issues
+ * still in the workflow beneath it do not hold it: a root's close waits for them instead. */
 export const LegionSignOffRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,
