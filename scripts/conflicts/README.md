@@ -123,7 +123,10 @@ The raw records keep the Python run's layout and key names, so one format serves
 `[]` for a clean merge and `null` when undeterminable. A run of this script adds `measured_at` (RFC
 3339) and `selection` (`"updated-since"`); a file without them is read as the Python run. The Python
 run's records for 2026-10-20 to 2026-10-27 are
-`dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json`.
+`dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json`. They carry no
+`measured_at`, so a comparison gives their window as running to `2026-10-27T23:59:59Z` (8 days),
+though that run was made at about 11:21Z that day; the comparison's shares, not its raw counts, are
+what compares windows of different lengths.
 
 ## Examples
 
