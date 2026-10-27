@@ -2,51 +2,53 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-549",
-  "completed": "2026-10-27T08:59:26Z",
-  "round": 3,
-  "headSha": "d759eb1432536828997981b849a8c23bb9fec2f2",
-  "codeHeadSha": "22e1c3aef576556ee672cb14e2c97539495ca0f6",
+  "completed": "2026-10-27T09:53:18Z",
+  "round": 4,
+  "headSha": "c6a616fb7b934583229474ff0958af4bb95d9eff",
+  "codeHeadSha": "f589463471e3f9d0c9dca4a732c9a427c2cb4006",
   "evidence": [
+    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6438746050",
     "https://github.com/sjawhar/legion/pull/2371#issuecomment-6437726062",
     "https://github.com/sjawhar/legion/pull/2371#issuecomment-6436632084",
     "https://github.com/sjawhar/legion/pull/2371#issuecomment-6436052083"
   ],
-  "ci": "Read on GitHub at 22e1c3ae when this was written: build, changes, lint, test, typecheck queued (superseded pr-title runs cancelled). Read as queued, not as a pass. The PR is MERGEABLE/CLEAN.",
+  "ci": "Read on GitHub at f589463 when this was written: build, changes, lint, test, typecheck queued (superseded pr-title runs cancelled). Read as queued, not as a pass. The PR is MERGEABLE/CLEAN.",
+  "scope": "f589463 changes the README, docs/nats-hub.md, the CHANGELOG, a code comment in clusteredhub_kube.go and test assertions; Go behaviour does not change. This round drove the documented procedure and claims it changed.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command at 22e1c3ae: cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ -> ok 55.490s. Leader kill at 211/1000 acks with a new leader in 8.45 s, users reloaded with cid 31 and 0 reconnects, and the new (f): a lower max_file_store reload is refused with the users change beside it, and a restart applies it. Findings 1 and 2 were also driven independently: a separate later reload refused (section 2 of the evidence), the real-engine previews, and the advertiser under the real image's busybox as PID 1."
+    "how": "Re-ran the implementer's command at f589463: cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ -> ok 41.451s (leader kill at 212/1000 acks, a new leader in 4.8 s, users reloaded with cid 28 and 0 reconnects, (f) lower store reload refused). The README procedure the round changed was driven independently on a real control plane (proof[0])."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review finding 1: a change of the file store's limit must not leave the servers refusing every later reload (a users change included); the pods roll for what nats-server cannot reload.",
-      "surface": "The plugin built at 22e1c3ae run by the Pulumi CLI v3.268.0 on the README's YAML program against a real kube-apiserver v1.33.0 + etcd (envtest binaries, RBAC on), after a real pulumi up",
-      "command": "pulumi preview --json with: streamMaxBytes 40000000000 + diskSizeGb 53 + natsMemory 5Gi (store 47Gi -> 42Gi); maxFileStoreGb 48 + diskSizeGb 53 (raise); diskSizeGb 53 + natsMemory 5Gi (current values); one user added",
-      "observed": "The live StatefulSet carries the pod annotations envoy-infra.sjawhar.dev/max-file-store 47Gi and no-auth-user, and still depends-on the envoy-nats-config ConfigMap. Lower store -> update nats.conf, update the StatefulSet's max-file-store annotation (a roll), and update the tailnet Deployment's ENVOY_STREAM_MAX_BYTES. Raise to 48 -> nats.conf plus the annotation. Current values -> no change. User add -> only data[\"auth.conf\"].",
-      "headSha": "22e1c3aef576556ee672cb14e2c97539495ca0f6",
-      "negativeControl": "On nats-server v2.15.1 with the rendered config: max_file_store lowered from 47Gi to 40Gi and SIGHUP -> 'config reload not supported for decreasing jetstream max memory and store'. A later, separate SIGHUP after removing example-host-a from auth.conf -> the same refusal, and nats pub with that user's nkey still published. Only a restart gave Authorization Violation (max_storage 40 GiB). This is why the roll is required."
+      "criterion": "Review finding (round 3): the README's disk-growth steps keep the running pods when the file store's limit follows diskSizeGb, by pinning maxFileStoreGb in step 5, and raise the limit in a separate step 6 that rolls the pods.",
+      "surface": "The plugin built at f589463 run by the Pulumi CLI v3.268.0 on the README's program without streamMaxBytes (10Gi disk, 9Gi store), against a real kube-apiserver v1.33.0 + etcd + kube-controller-manager v1.33.0 (StatefulSet controller and garbage collector; no scheduler or kubelet, so pods stay Pending)",
+      "command": "README steps as written: kubectl -n envoy get pod envoy-nats-0 -o jsonpath='{.metadata.annotations.envoy-infra\\.sjawhar\\.dev/max-file-store}'; kubectl -n envoy delete statefulset envoy-nats --cascade=orphan; pulumi state unprotect/delete <StatefulSet URN>; diskSizeGb: 20 + maxFileStoreGb: 9, pulumi preview, pulumi up; then maxFileStoreGb removed, pulumi preview, pulumi up; kubectl get sts/pods -o json (revisions, uids, owners)",
+      "observed": "The annotation command prints 9Gi. Step 3 leaves the three pods without an owner. Step 5's preview plans only a protected create with a 20Gi template and annotation 9Gi. After up, the StatefulSet's revision is envoy-nats-5f66bfc646 (the running one) and all three pods are adopted with unchanged uids (6865b09a, 7e75d187, 795ee21e). Step 6 plans nats.conf plus the max-file-store annotation. The ConfigMap updated first (0.08 s, max_file_store 18Gi), then the controller replaced envoy-nats-2 (uid 75f4bed7, revision envoy-nats-7587c5ddb6, 18Gi); the others wait for it to become ready.",
+      "headSha": "f589463471e3f9d0c9dca4a732c9a427c2cb4006",
+      "negativeControl": "A second stack (namespace envoy-b) doing step 5 without the pin, as the old README said: preview plans nats.conf plus a create with annotation 18Gi. After up, the revision is envoy-nats-7587c5ddb6 and the controller deleted and recreated envoy-nats-2 (SuccessfulDelete / SuccessfulCreate events, uid e834976f -> 2d19f4bd)."
     },
     {
-      "criterion": "Review finding 2: the tailnet advertiser exits on SIGTERM, so a tailnet host pod does not wait out its 60 s grace period.",
-      "surface": "The advertiser script as rendered in the deployed Deployment (byte-identical to the golden test file) run as PID 1 of a new PID namespace with the real ghcr.io/tailscale/tailscale:v1.104.1 filesystem (sha256:87c55d6b..., busybox ash), with tailscale and wget stubbed as a logged-in, approved, healthy node",
-      "command": "unshare -Urpf /usr/sbin/chroot <image root> /usr/bin/env -i PATH=/stub:/usr/local/bin:/bin:/usr/bin TMPDIR=/tmp /bin/sh -c \"<advertiser script>\"; after 12 s (advertised, ready file written, inside a 5 s nap) kill -TERM <its pid>",
-      "observed": "echo $$ in the namespace prints 1. The advertiser advertised svc:envoy-hub once and wrote the ready file. SIGTERM -> exited 24 ms later with status 0 (the trap's exit 0, the background sleep's wait broken at once).",
-      "headSha": "22e1c3aef576556ee672cb14e2c97539495ca0f6",
-      "negativeControl": "The script before 8bf4bfe7 (no trap, foreground sleep) under the same run -> exited 69 ms later with status 143 (killed by the signal's default action). This gVisor kernel delivers it to PID 1, where Linux drops it (pid_namespaces(7)), so the PID-1 hang itself cannot be shown on this kernel. The status shows the head exits through its trap and the old script does not."
+      "criterion": "Review finding (round 3): the docs say that with an earlier listener build a second host waits 135 s for the durable and then exits, answering /healthz 200 'starting' and serving /v1 meanwhile (so it is advertised).",
+      "surface": "envoy-listener built from this branch, two processes with the tailnet Deployment's exact environment and one machine id, on three nats-server v2.15.1 that use the engine-rendered config",
+      "command": "run.sh servers; run.sh listener 3; second listener on PORT=9021; curl http://127.0.0.1:9021/healthz and -H 'Host: envoy-hub.example-tailnet.ts.net:9020' /v1/sessions at t+20/60/120 s",
+      "observed": "The second listener answered /healthz 200 'starting' and /v1/sessions 200 at t+20, t+60 and t+120 s. It logged 'consumer is already bound to a subscription' 61 times, then 'listener durable bind exhausted after 69 attempts in 2m15.004s', and exited with status 1.",
+      "headSha": "f589463471e3f9d0c9dca4a732c9a427c2cb4006",
+      "negativeControl": "The first listener, which holds the durable, stayed 'healthy' throughout. In round 1, killing the holder made the second bind the durable and go healthy, so the wait ends early only when the holder goes."
     },
     {
       "criterion": "The rendered NATS configuration is run by three local nats-server processes: they form a cluster, a stream created at three copies survives one server's kill with a leader and no lost publish, and a user added and removed through the rendered auth file reloads with no restart and no client reconnect.",
-      "surface": "Three local nats-server v2.15.1 processes with the real nats-server-config-reloader v0.24.0 and prometheus-nats-exporter v0.20.2, on the helm v3.20.2 render of the component's values (vendored chart nats-2.15.1.tgz)",
+      "surface": "Three local nats-server v2.15.1 processes with the real nats-server-config-reloader v0.24.0 and prometheus-nats-exporter v0.20.2, on the helm v3.20.2 render of the component's values",
       "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/",
-      "observed": "ok 55.490s. SIGKILL of R3 leader envoy-nats-1 after 211 of 1000 acks; envoy-nats-2 led 8.45 s later; every acknowledged message stored exactly once. Add/remove of a user: the client kept cid 31 with 0 reconnects and 0 disconnects, and the PIDs did not change.",
-      "headSha": "22e1c3aef576556ee672cb14e2c97539495ca0f6",
-      "negativeControl": "(e) and (f) of the same run: a no_auth_user change and a lower max_file_store are each refused by reload, and only a restart applies them."
+      "observed": "ok 41.451s. SIGKILL of R3 leader envoy-nats-2 after 212 of 1000 acks; envoy-nats-1 led 4.815 s later; every acknowledged message stored exactly once. Users reloaded with cid 28 and 0 reconnects, and the PIDs did not change.",
+      "headSha": "f589463471e3f9d0c9dca4a732c9a427c2cb4006",
+      "negativeControl": "(e) and (f) of the same run: a no_auth_user change and a lower max_file_store are each refused by reload."
     }
   ],
   "observations": [
-    "packages/envoy/infra/gcp/tailnet_service.go and its test now differ from legion/INFRA-560@origin (d186e1b4) by the trap and nap (+56/-8 lines), while the PR body's Chain line still says they are byte for byte legion/INFRA-560 commit b1c6c868. The thread reply says the change was sent to INFRA-560. Whichever of #2371 and #2368 merges second conflicts on that file until INFRA-560 takes the same change.",
-    "Round 1 saw, at this branch's listener, a second listener with the same machine id log 'subscribe failed, retrying' with /healthz 200 'starting' until the first was killed. The README now names INFRA-557's single-deliverer take-over as the image prerequisite, which is the reviewer's finding 3.",
-    "Not reachable on this surface, unchanged from rounds 1 and 2: the advertiser against a real tailscaled and the real Linux PID-1 signal drop, the README PromQL, and GKE-only behaviour (GMP collection, Dataplane V2 enforcement, Autopilot scheduling) belong to INFRA-551's live proof."
+    "Steps 1-2 of the disk growth (claim expansion) were not driven: the control plane has no storage provisioner, so the claims stay Pending.",
+    "Resolved since round 3: tailnet_service.go and its test at f589463 are identical to legion/INFRA-560@origin (e0889829) and to 6151bc54 (jj diff --stat: 0 files changed), and the PR body's Chain line now says so.",
+    "Not reachable on this surface: a real tailscaled and the Linux PID-1 signal drop, the README PromQL, and GKE-only behaviour (GMP, Dataplane V2, Autopilot) belong to INFRA-551's live proof."
   ]
 }
