@@ -2,22 +2,25 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-568",
-  "completed": "2026-10-27T12:52:00Z",
-  "testedHead": "9cc3cd95ecb22621a0e3476cf39bb22c29007164",
-  "codeHead": "cdfddb65c5d6d6b366db7f53df096e6581b53c58",
-  "round": "full round after the second forward merge of main (fingerprint changed: renumbered migrations 0130/0131)",
+  "completed": "2026-10-27T13:22:00Z",
+  "testedHead": "5f77669b159ec43244dec1b6272d623447d9737b",
+  "codeHead": "247b43fd729285f19cae2c206225d7bb4ec02c7d",
+  "round": "Round 2: the fix for round 1's one failure (247b43fd, envoy-client and the rebuilt claude-envoy dist only; no server change since round 1). Re-drove the fixed path and the create rendering around it on real servers; the server rows round 1 proved at 9cc3cd95 stand, since no server code changed.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove every row the implementer proved (1a, 1b, 2a, 2b, 2c, 2d, 3, 4, 5, records route) independently on my own instances and fixtures: bun run dispatch:local on database dispatch_tester (port 8777), main c892b97d's server built from git archive (port 8787), and the head binary with DISPATCH_EMBEDDER=azure pointed at a local fake Azure embeddings endpoint over TLS (port 8790), so 2c ran on a real server rather than only in Go tests. Re-ran packages/envoy/scripts/related-recall.sh INFRA (9 pairs, 634 issues) and TestRelatedRecallOnDuplicates: old 4 of 9, the check 5 of 9, the implementer's numbers."
+    "how": "Re-ran the implementer's new proof independently on a fresh dispatch:local (database dispatch_tester, port 8777) and a server built from main c892b97d (port 8787), with my own fixtures: an external issue filed twice and three times, plus the plain, --force, refused-duplicate and asks-locked create paths. Earlier proofs (1a-5, recall) were verified in round 1 at 9cc3cd95 and the server binary is unchanged."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "The check says what it did (issue title); plan task 7: an existing external issue answers not_made 'Dispatch already holds this issue; nothing was created'. The output of that write must not claim it created the issue.",
-      "evidence": "On dispatch:local, after mapping acme/widgets to CORE: `dispatch issue --project CORE --external acme/widgets#7 --title 'External widget seven armadillo'` run twice. The second run (server answers 200 with the existing CORE-54 and suggestions {outcome: not_made, missing: 'Dispatch already holds this issue; nothing was created'}) prints `Created CORE-54: External widget seven armadillo → …` and on the next line `No related-item check was made: Dispatch already holds this issue; nothing was created. …`: the two lines contradict each other. The `Created` wording is main's (main's server and the head client print `Created OLDB-4` twice too), but this change adds the line that says nothing was created, so the write's output now says both. Red test: `dispatch_issue naming an external issue Dispatch already holds does not say it created one` in packages/envoy-client/src/__tests__/dispatch-advice.test.ts (commit c1a975c1); its server body is the head server's exact answer (status 200, that suggestions object). Fails with `cd packages/envoy-client && bun test src/__tests__/dispatch-advice.test.ts -t 'already holds'`: Received \"Created DSP-42: External issue → … No related-item check was made: Dispatch already holds this issue; nothing was created. …\". A fix may key on the 200 status (a new issue is 201) or on that check result."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
+    {
+      "criterion": "Round 1 failure: dispatch issue --external on an issue Dispatch already holds says so and does not claim it created one",
+      "surface": "head dispatch CLI (packages/claude-envoy/dist/dispatch.js) against bun run dispatch:local, acme/widgets mapped to CORE; and against main c892b97d's server, acme/gadgets mapped to OLDB",
+      "command": "dispatch issue --project CORE --external acme/widgets#7 --title 'External armadillo porcupine widget' three times (the third with --title 'Totally different title'); the same against main's server with acme/gadgets#3",
+      "observed": "first: `Created CORE-9: …` then `Related items (searched by keywords only: …)` listing CORE-8; second and third: `Dispatch already holds CORE-9: External armadillo porcupine widget → http://127.0.0.1:8777/issues/CORE-9; nothing was created; unassigned (not subscribed …)` and no related-item line, exit 0, one CORE issue with that title; main's server: `Created OLDB-1` then `Dispatch already holds OLDB-1: … nothing was created`; red test `dispatch_issue naming an external issue Dispatch already holds does not say it created one` passes",
+      "headSha": "5f77669b159ec43244dec1b6272d623447d9737b",
+      "negativeControl": "a new issue filed with --force over an existing title (server 201) still prints `Created CORE-10: …`, the related items and `Title overlaps you forced past: CORE-8`; with asks locked it prints `Created CORE-11` and `No related-item check was made: the search behind it did not answer within 5s …`; without --force the duplicate is refused `Not created: … looks like a duplicate.`"
+    },
     {
       "criterion": "1a: with the search made to fail, dispatch issue --force with an existing title prints that key and the no-check-was-made form",
       "surface": "head dispatch CLI against bun run dispatch:local (8777)",
@@ -100,10 +103,18 @@
     }
   ],
   "observations": [
-    "CI at code head cdfddb65 was queued when read (build, typecheck, test, lint, changes); not waited for.",
+    "CI at head 5f77669b (build, changes, lint, test, typecheck) was queued when read; the runs at 247b43fd were cancelled when 5f77669b was pushed. Not waited for.",
+    "Round 1's proof entries below keep headSha 9cc3cd95: the server they exercised is unchanged at 5f77669b.",
     "Statistics are as fresh as the last 10-minute refresh: a word written since then is probed and counts as df = 1 (plan decision 2), so right after a burst of filings a now-common word can be picked as rare. Before the 12:31 refresh 'Telemetry' (then in 30 issues) was chosen; after it, it was not.",
     "A write whose write advice also times out takes the advice's ~1.5 s before the 5 s check (POST /api/v1/issues elapsed_ms 6518 with asks locked); the check itself stopped at 5000 ms.",
     "A timed-out check's record is retried for 30 s; with asks locked for 40 s the CORE-52 record was lost and the server logged `related-item check not recorded … context deadline exceeded`.",
     "Harness: Postgres 17 + pgvector already running on 127.0.0.1:5433 ($TMPDIR/pg); my databases dispatch_tester, dispatch_tester_base, dispatch_tester_meaning, dispatch_tester_go; scripts under $TMPDIR/tester568 (d.sh, p.sh, serve.sh, fake_embed.py)."
+  ],
+  "resolvedFailures": [
+    {
+      "round": 1,
+      "criterion": "The check says what it did (issue title); plan task 7: an existing external issue answers not_made 'Dispatch already holds this issue; nothing was created'. The output of that write must not claim it created the issue.",
+      "resolution": "Fixed in 247b43fd: the client reads Dispatch's status (201 created, 200 already held) and prints `Dispatch already holds <KEY>: … ; nothing was created` with no related-item line. The red test c1a975c1 is unchanged and passes."
+    }
   ]
 }
