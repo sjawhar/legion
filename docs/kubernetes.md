@@ -5688,12 +5688,20 @@ bind: <devbox VPC IP>
 worker_stream_port: <worker stream port>
 ```
 
+The reverse, a project moved from pods onto one tmux host, keeps its store: the Go tmux daemon takes
+over the Kubernetes daemon's claims once every pod of the project is gone and its `legion.yaml`
+sets `runtime.tmux.take_over: kubernetes` (docs/deployment.md, "Moving a project onto tmux").
+
 **`--resume` keeps the same-agent invariant, and the table is what keeps it.** The tmux runtime
-`stat`s the recorded session file on the daemon host and refuses to spawn when it is missing (a
-silent fresh agent would lose the session), and Oh My Pi itself does not refuse: verified against
+looks for the recorded session file on the daemon host, in the other folders of the same sessions
+directory and of the pane's own sessions directory too, and refuses to spawn when it is found
+nowhere (a silent fresh agent would lose the session), the launch charged and the session kept.
+The one exception is a claim this daemon takes over from a pod under `take_over`, whose session
+may never have been carried: it starts a fresh agent that registers its own, logged and charged
+nothing. Oh My Pi itself does not refuse: verified against
 the pinned build (`omp --resume=<missing path> --mode rpc`), it exits 0, answers `ready`, and runs
 as a fresh agent, with no error frame and no mention of the file. Under Kubernetes there is no
-file to `stat` and no init container that looks for one: every session is a row in the session
+file to look for and no init container that looks for one: every session is a row in the session
 database, and the pod's disk, which dies with the pod, never holds a transcript. The role's own
 launcher makes the check instead, inside the pod and before it starts the child: it looks the
 recorded session up in the table through the mounted URL file and refuses the start when the table
@@ -5873,9 +5881,10 @@ A 403 fails the spawn (or stop) naming the verb and resource, e.g. `create secre
 The controller is the one Legion session a person talks to. `controller` in `legion.yaml` says who
 launches it: `operator` (the default), a person running `legion controller start` on a machine of
 theirs ([Operator-launched controller](#operator-launched-controller)), or `daemon`, the daemon
-itself, as an Agent Sandbox pod it supervises ([Daemon-launched controller](#daemon-launched-controller)).
-`controller: daemon` needs `runtime: kubernetes`; the loader refuses it under tmux (`controller:
-daemon needs runtime: kubernetes, …`) and refuses any value but the two.
+itself, as an Agent Sandbox pod it supervises ([Daemon-launched controller](#daemon-launched-controller)),
+or under `runtime: tmux` as a pane in a window of its own (docs/deployment.md, "The `runtime.tmux`
+block"). `controller: daemon` needs `dispatch_url` (`controller: daemon needs dispatch_url: …`), and
+the loader refuses any value but the two.
 
 Under either mode a controller reads its daemon's resolved settings — `max_fix_attempts`,
 `worker_boot_timeout_seconds`, `admission_cap` and the rest of `legion.yaml`, with every credential,

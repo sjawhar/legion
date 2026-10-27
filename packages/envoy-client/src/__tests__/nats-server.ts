@@ -45,6 +45,12 @@ export async function startNatsServer(nkeyUser?: string): Promise<NatsServer> {
       "-d",
       "--name",
       name,
+      // Capped, as every container the repository's tests start is on a shared host: a test
+      // server holds a few small streams.
+      "--cpus",
+      "1",
+      "--memory",
+      "512m",
       "-p",
       "127.0.0.1::4222",
       "-v",

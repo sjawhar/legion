@@ -39,7 +39,7 @@ type coverageSource struct {
 // (nothingToEmbed: the empty string, or only white space) is not covered: it matches nothing by
 // meaning, so items leaves it out and the queue settles its row with no vector.
 //
-//   - issue: 0073's trigger, as 0122 replaced it, and 0122's trigger on a new version of the
+//   - issue: 0073's trigger, as 0130 replaced it, and 0130's trigger on a new version of the
 //     issue's primary document enqueue new.key and issue_embedding_text of the title and the
 //     latest version's markdown of the primary document (null when it has none).
 //   - document: 0074 enqueues new.artifact_id::text, new.markdown for every artifact_versions
