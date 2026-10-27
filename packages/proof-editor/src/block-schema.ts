@@ -228,12 +228,23 @@ export function blockSchemaPlugins(schema: BlockSchema, renderBlock?: HostBlockR
   return schema.types.map((type) => $nodeSchema(type.name, () => typedBlockSpec(type, renderBlock)));
 }
 
+/** Why the schema refuses the container directive `node`, as `visit` throws it, or undefined when it is accepted. */
+export function typedBlockRefusal(schema: BlockSchema, node: { name?: string; attributes?: Record<string, string> }): string | undefined {
+  const name = node.name ?? '';
+  const type = schema.types.find((candidate) => candidate.name === name);
+  if (!type) return `unknown typed block ${JSON.stringify(name)} (known types: ${knownNames(schema)})`;
+  try {
+    directiveAttrs(type, node.attributes);
+  } catch (error) {
+    return (error as Error).message;
+  }
+  return undefined;
+}
+
 function visit(node: MarkdownNode, schema: BlockSchema): void {
   if (node.type === 'containerDirective') {
-    const name = node.name ?? '';
-    const type = schema.types.find((candidate) => candidate.name === name);
-    if (!type) throw new Error(`unknown typed block ${JSON.stringify(name)} (known types: ${knownNames(schema)})`);
-    directiveAttrs(type, node.attributes);
+    const refusal = typedBlockRefusal(schema, node);
+    if (refusal !== undefined) throw new Error(refusal);
   }
   for (const child of node.children ?? []) visit(child, schema);
 }

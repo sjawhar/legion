@@ -40,6 +40,7 @@ import { dispatchMarkPlugins, remarkDispatchMarks, dispatchMarkHandler } from '.
 import remarkInlineLinks from 'remark-inline-links';
 import { remarkSoftBreakAsLine, remarkSoftBreakAsSpace } from './dispatch-soft-breaks.js';
 import { remarkContainerDirectives } from './lib-remark-directive-plugin.js';
+import { remarkReadOnlyDirectives } from './read-only-directives.js';
 
 /**
  * What a single newline inside a paragraph (a CommonMark soft break) becomes. `'space'`, the
@@ -59,7 +60,9 @@ export interface HeadlessProofEditor {
    *
    * Throws for a source the schema has no node for: a raw-HTML block or span (a bare
    * tag-shaped substring outside a code span or fence, e.g. `<img src=x>`) and a mark span of
-   * a kind this schema does not carry. A throw leaves the parser's own stack mid-document,
+   * a kind this schema does not carry. Outside read-only mode it also throws for a directive
+   * the block schema refuses; in read-only mode such a directive is drawn as text instead.
+   * A throw leaves the parser's own stack mid-document,
    * which would make the next parses of unrelated text throw too, so the parser of that
    * policy is dropped and the next parse through it starts on a fresh one.
    */
@@ -73,6 +76,12 @@ export interface HeadlessProofOptions {
   blockId?: BlockIdGenerator;
   /** Typed block schema fetched from the document service before construction. */
   blockSchema?: BlockSchema;
+  /** Read-only parse, for display: a container directive the block schema refuses is drawn as
+   *  its literal fence lines around its formatted content, and the paragraph-line directive
+   *  refusals are not applied. The default, false, keeps every refusal the document service
+   *  applies, which the pmdoc fixture generators rely on. A general read-only mode, so later
+   *  read-only rules hang on it too. */
+  readOnly?: boolean;
 }
 
 export async function createHeadlessProof(options: HeadlessProofOptions = {}): Promise<HeadlessProofEditor> {
@@ -145,7 +154,8 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
     // lines with a space or splits them around a `break` node, which the commonmark preset's
     // hardbreak parser takes.
     parseProcessor.use(softBreaks === 'line' ? remarkSoftBreakAsLine : remarkSoftBreakAsSpace);
-    if (options.blockSchema) parseProcessor.use(remarkTypedBlocks, options.blockSchema);
+    if (options.readOnly) parseProcessor.use(remarkReadOnlyDirectives, options.blockSchema);
+    else if (options.blockSchema) parseProcessor.use(remarkTypedBlocks, options.blockSchema);
     return ParserState.create(schema as never, parseProcessor as never) as unknown as (
       markdown: string,
     ) => ProseMirrorNode;
