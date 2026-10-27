@@ -875,6 +875,8 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		"Plain &#126;a&#126;&#126; text.\n",
 		"~~approx &#126;5~~\n",
 		"![\\~b\\~\\~](u)\n",
+		// Main's own rendering of a struck `**` inside emphasis, which the engine reads back as written.
+		"*[~~**é~~*\n",
 		"| a | b |\n| :--- | :--- |\n| ::1 | --- |\n",
 		"<br is an element.\n",
 		"<span class is not closed.\n",
