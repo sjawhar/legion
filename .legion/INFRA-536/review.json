@@ -2,39 +2,34 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-536",
-  "completed": "2026-10-27T09:50:16Z",
-  "round": 1,
-  "codeHead": "738dbe90b13bb47cf622f6b2e38e9a4fc677faf2",
+  "completed": "2026-10-27T11:13:18Z",
+  "round": 2,
+  "codeHead": "6328064ef4ec1b1468bf9628ac820747b8c85714",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 3,
-  "ci": "CI head 738dbe90 (newest pull_request run); required lint, typecheck, test, pr-title all completed success; compare 738dbe90...c6d965e8 handoffsOnly true (2 files). Non-required envoy-go, dispatch and the other heavy jobs still queued.",
+  "important": 1,
+  "minor": 2,
+  "ci": "CI head 6328064e (newest pull_request run, created 10:12Z); required lint, typecheck, test and pr-title all queued, none completed; compare 6328064e...370ae78d handoffsOnly true. GitHub reports the pull request CONFLICTING (mergeStateStatus DIRTY) after main moved to 2e8c68cd at 10:38Z; git merge-tree names one conflict, packages/envoy/CHANGELOG.md.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 738dbe90. Decoder matches micromark's numeric and named rules (2,125 names diffed against Go's table: only nLt/nGt differ, special-cased); 6,000 random writer round trips and 3,000 decode comparisons find no defect in this diff; linear time measured; two Minors (stale test comment, two reference-shape rules).",
-    "codeQuality": "Verdict: CHANGES at 738dbe90. Two reference-shape definitions (characterReferenceAt scanner and the characterReference regex); escape loop copied in titleSuffix and escapeImageSource; named lookup via html.UnescapeString; copied render/read-back test loops."
+    "deepReview": "Verdict: APPROVE at 6328064e. A throwaway differential over 3,052,537 strings found characterReferenceLength equal to the deleted regex, characterReferenceAt equal to 738dbe90's, and escapes() and escapeFootnoteLabel unchanged; the test refactor keeps every assertion; pmdoc package ok (210s, Linear skipped).",
+    "codeQuality": "Verdict: CHANGES at 6328064e. Two leftovers of the cleanup: readingDiff has one caller left; the escapes() comment says it counts what the parser decodes, while characterReferenceLength is shape only."
   },
+  "threads": "My four round-1 threads (PRRT_kwDORFy7ds6woSXi, PRRT_kwDORFy7ds6woSXp, PRRT_kwDORFy7ds6woSXt, PRRT_kwDORFy7ds6woSX0) are fixed in ee91e91f and 6328064e. I replied on each and accept each resolution.",
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/references.go",
-      "description": "The reference shape is defined twice: characterReferenceAt's scanner (references.go:48-82) and the regex characterReference (render.go:907), which escapes() (elements.go:200) and escapeFootnoteLabel (render.go:894) still use. Keep one shape scanner in references.go, used by all three, and delete the regex; bytes stay the same."
+      "severity": "important",
+      "file": "packages/envoy/CHANGELOG.md",
+      "description": "The head conflicts with main 2e8c68cd in packages/envoy/CHANGELOG.md. GitHub builds no merge ref for a conflicting head, so the code cannot merge and its required checks cannot be read as passing. Merge main forward as the conflict procedure says."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/pmdoc/render_readback_test.go",
-      "description": "render_readback_test.go:697-702 describes the fixed bug as current behaviour (escapeImageSource writes the address as it stands, the write is refused); the test asserts the opposite."
+      "description": "readingDiff (render_readback_test.go:420-425) has one caller left (line 442) after 6328064e. Put its message into parseAsTheEngine and delete it."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/render_readback_test.go",
-      "description": "The render-then-read-back-in-both-parsers loop is copied at 657-679 and 712-744 (and exists at 200-221); TestEveryEscapeAndReferenceReadsAsTheEngineReadsIt (489-505) re-inlines parseAsTheEngine and checks the `Plain \\&amp; end.` row inside the loop. One helper, parseAsTheEngine in the escape test, the A1 assertion once."
+      "file": "packages/envoy/internal/dispatch/pmdoc/elements.go",
+      "description": "The escapes() comment (elements.go:188-190) says it counts the spellings the parser reads as one character. characterReferenceLength is shape only, so `&foo;` is counted too. Say runs shaped as character references, decoded or not, as escapeFootnoteLabel's comment now does."
     }
-  ],
-  "declined": [
-    "One escape helper for titleSuffix and escapeImageSource (quality finding 2): the sites reserve different bytes and treat a backslash differently (a title escapes every backslash, an address only before punctuation or at its end); a predicate-driven helper is abstraction over distinct rules.",
-    "Named lookup through goldmark's table (quality finding 3): the plan's recorded decision; goldmark lacks Abreve, so one special case stays either way; the deep review diffed Go's html table against the engine's 2,125 names.",
-    "doc-read's exact bytes before the trailer (doc.e2e.ts:752): the plan's T4 asks for those exact bytes."
-  ],
-  "deferrals": "None: the operator's instructions allow no follow-up, so the three cleanups are requested in this round."
+  ]
 }
