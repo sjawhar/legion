@@ -367,7 +367,8 @@ deployed (its `issue.deployed` event); when the project names the repository's d
 (`projects.<KEY>.deploys` in `legion.yaml`: the repository, the workflow file and a step such as
 `Apply`), at each completed run of that workflow on the repository's default branch whose step
 succeeded after the pull request merged, once per such job; or, for Legion's own repository, when
-a Legion daemon boots or Dispatch starts on a build that contains the merge. A run of another
+a Legion daemon boots on a build that contains the merge, or Dispatch announces that every one of
+its server processes serves such a build. A run of another
 workflow or branch, a run a pull request triggered, a step that was skipped or failed, and a step
 that finished before the merge wake nothing. A wake while a look is open is kept for the next look.
 A look is bounded at two hours, and the whole check at `production_check_hours` (336, fourteen

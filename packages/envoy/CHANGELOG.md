@@ -4,6 +4,40 @@
 
 ### Added
 
+- `DISPATCH_SIGNING_KEY` takes one key or several separated by whitespace, parsed as
+  `DISPATCH_AGENT_TOKEN` is (startup refuses an empty or repeated entry, naming its position and
+  never its value; a value of nothing but whitespace counts as unset). The first key signs every
+  new session cookie and the sign-in's state cookie and seals every refresh token Dispatch stores;
+  every key verifies a cookie and opens a seal. The seal's `v1:` format is unchanged byte for byte.
+  So the key rotates without signing anyone out, in three steps each rolled to every server
+  process: add the new key second, move it first, then remove the old key no sooner than 30 days
+  later, the cookie's lifetime; a refresh token sealed under the old key is sealed again under the
+  new one at its person's next hourly confirmation (INFRA-555).
+- A registry of live Dispatch server processes (migration `0121`, tables `server_processes` and
+  `server_build_announcements`, both new). A process registers once its port is bound and before
+  it serves, stamps its row every 5 s on a one-connection pool of its own, counts as live while
+  that stamp is within 15 s of the database's `now()`, and deletes its row once its HTTP drain has
+  ended; rows a process left behind are pruned 10 minutes after their last stamp, under the lease
+  `server-processes`. Operator subcommands never register. A process whose signing key set a live
+  process does not share both ways (its current key among the other's keys, and the other's
+  current key among its own) logs `dispatch: register this server process` at ERROR, naming the
+  other process and the rotation steps, and exits 1 before it serves: a process that minted a key
+  in its data dir refuses beside any live process, and so does a pod rolled with a changed secret
+  beside pods that hold only the old key, which stalls the roll while the old pods serve. The
+  registry's pool is one more Postgres connection per process (INFRA-555).
+- Dispatch's `/healthz` reports `fleet_commit`, the commit of the latest announcement that every
+  live server process serves one build (`null` when there is none, or before this process's
+  announcer has first read it; up to one five-second pass behind), and `signin` and
+  `service_tokens`, whether the sign-in issuer's and the service-account token issuer's discovery
+  documents have been read (`null` where that issuer is not configured). None of the three
+  decides the status (INFRA-555).
+- `dev-oidc-issuer --code-flow <client id>=<client secret file>` serves the authorization code flow
+  for that one client, so a browser signs in to a local Dispatch with no Google: each
+  authorization signs in the next person queued at the loopback-only `POST <issuer
+  URL>/_dev/sign-in-as` (a JSON object of ID token claims), or `--sign-in-as <email>`'s person when
+  none is queued, a member of `--sign-in-group <group>`'s group when that is given. Dispatch takes
+  `DISPATCH_SIGNIN_DOMAIN` only under Google's issuer, so a local Dispatch signs in through this
+  issuer with `DISPATCH_SIGNIN_GROUP` (INFRA-555).
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -796,6 +830,50 @@
 
 ### Changed
 
+- **Breaking (a hand-written signing key holding whitespace):** a `DISPATCH_SIGNING_KEY` with a
+  space, tab or line break inside it is now several keys, the first of which signs, so the first
+  start of this release signs everyone out once and leaves the refresh tokens sealed under the old
+  value unopenable, where the release before read it as one key. A generated key (the
+  `envoy-infra:gcp:Dispatch` component's 64-character alphanumeric value, or the data dir's
+  base64url file, which is read whole) is unchanged. This release is never the release of a first
+  rotation: an earlier build reads `"K1 K0"` as one key, so no build older than this one is rolled
+  back to while the setting holds two values (INFRA-555).
+- **Breaking (`server.started` consumers):** Dispatch publishes `server.started` once each time the
+  commit every live server process serves changes, not once per process start: a rolling update
+  announces once its last process of the earlier build has gone, a restart of every process on the
+  announced commit announces nothing, and a rollback announces the earlier commit again. Whichever
+  process finds the fleet agreeing records the announcement in `server_build_announcements`, under
+  an advisory lock, and any process whose bus is connected publishes it, so one whose NATS is down
+  leaves it to another. Subject and payload
+  are unchanged; `started_at` is the database's time of the announcement, and the event id, source
+  event id and dedupe key are `dispatch-server-started-<commit>-<seq>`, `seq` the announcement's
+  own, where they ended in the start's Unix time. Builds before this one do not register: the
+  first release that carries it announces as soon as its own processes agree, and a process of an
+  earlier release started meanwhile still publishes its own start, so that release is deployed with
+  no earlier process serving beside it (INFRA-555).
+- Dispatch's `/healthz` is `200` while the database answers whatever NATS does: `ok` says this
+  process can serve requests, and `nats` still reports the connection (`null` when disabled)
+  without deciding the status. Every NATS client of the server pings every second and declares
+  the connection lost at two pings outstanding, so `nats` reads `false` within two to three
+  seconds of a silent cut, where it took minutes. The probe is a readiness probe and never a
+  liveness probe: it fails while the database is unreachable, so a liveness probe on it would
+  restart every server process during a database failover (INFRA-555).
+- Dispatch starts and serves while NATS is unreachable or refuses its credential. Each of its NATS
+  clients connects in the background and retries forever, a refused credential logged at ERROR at
+  most once a minute; only a configuration error (an unusable seed or SOCKS5 setting, a server
+  that is not this machine's) still refuses the boot. The stream is reconciled on the first
+  connection, the outbox publishes what was written meanwhile, the webhook redelivery sweep opens
+  its KV bucket on its first pass with NATS connected, and the agent conversation route answers
+  `503 STREAM_UNAVAILABLE` until the relay connects (INFRA-555).
+- Dispatch starts without its sign-in issuer or service-account token issuer. Each discovery
+  document is read in the background from boot (retrying after one second, doubling to thirty,
+  each attempt bounded at ten seconds and at least five seconds after a failed one, a failure
+  logged at ERROR at most once a minute) or by the first request that needs it. Until then
+  `/auth/start` and the callback answer `503 SIGNIN_UNAVAILABLE`, a JWT-shaped bearer
+  `503 OIDC_ISSUER_UNAVAILABLE` rather than `401`, and agent tokens are served; a plain-text
+  refresh token the boot cannot revoke yet stays for the next boot (INFRA-555).
+- `/auth/start` no longer answers `429` "too many pending sign-in attempts": no process holds a
+  sign-in in flight, so there is nothing to cap (INFRA-555).
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
@@ -1429,6 +1507,25 @@
 
 ### Fixed
 
+- A sign-in started on one Dispatch server process completes on another. The sign-in in flight
+  (state, nonce, the page it returns to, its expiry ten minutes on) rides the browser's
+  `dispatch_oauth_state` cookie as `s1.<payload>.<signature>`, signed under a key derived from
+  the current signing key for that purpose alone and verified under every key, where it was kept
+  in the memory of the process that started it, so a callback reaching another process answered
+  `400` "invalid or expired state". The processes need one `DISPATCH_SERVER_URL`, since the
+  callback URL is built from it. A sign-in started on the release before this one and completed
+  on this one fails once, and the person starts again (INFRA-555).
+- An outage of the sign-in issuer no longer signs people out. Only a refresh the issuer refuses
+  (`400` or `401` with the OAuth error `invalid_grant`), or one whose ID token no longer passes
+  the sign-in rule, ends a person's sessions; any other failure (no answer, a timeout, a `5xx` or
+  `429`, another OAuth error, an answer without an ID token that verifies, an issuer not yet
+  discovered) refuses the request `503 SIGNIN_UNAVAILABLE` and keeps the sign-in, so the first
+  request after the issuer answers refreshes and is served. Before, any failed refresh ended every
+  session of the person as their hour lapsed (INFRA-555).
+- Dispatch's time-gated writes use the database's clock rather than the serving process's: a
+  sign-in's confirmation (`people.confirmed_at`, and the hour it is measured against), a delivery
+  pull request's `last_event_at`, `deployed_event_at`, and the cutoff of the delivery changes
+  prune, so server processes whose clocks differ agree on them (INFRA-555).
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a
   map value), naming the component and the input's path and never quoting a secret value, before

@@ -265,9 +265,9 @@ func TestAWakeDuringAnOpenLookIsKeptForTheNextLook(t *testing.T) {
 	}
 }
 
-// Dispatch's start on a build queues a compare for each open check of the repository the daemon is
-// built from and no other, each naming the check it is of, and none with no commit or with no
-// repository configured.
+// Dispatch's announcement of the build every server process serves queues a compare for each open
+// check of the repository the daemon is built from and no other, each naming the check it is of,
+// and none with no commit or with no repository configured.
 func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 	rig := childCheckRig(t, "sjawhar/legion")
 	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-300", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-300", Project: "LEGION", Title: "widgets", Phase: phase.AwaitingMerge, Generation: 2, Status: "retro", Rank: "W"})
