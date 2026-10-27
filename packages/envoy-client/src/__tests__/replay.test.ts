@@ -18,6 +18,7 @@ import {
   type ReplayNoticeOutcome,
   type ReplaySnapshot,
   replayNoticeFields,
+  routeReplayNotice,
 } from "../replay";
 import { createEnvoyClient, type ReplayInput, type ReplayResult } from "../transport";
 
@@ -609,6 +610,156 @@ describe("replay sweep", () => {
     expect(engine.state().subjects).toEqual({ [AGENT]: { since: 0, after: 2 } });
   });
 
+  test("a stream that keeps its id but stands behind a cursor (restored from an older backup) shows what is stored after the restore", async () => {
+    const { stream, host, engine } = setup();
+    stream.identify("stream-1");
+    await engine.sweep();
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+    await engine.sweep();
+    expect(engine.state().subjects).toEqual({ [AGENT]: { since: 0, after: 3 } });
+
+    // The hub moves: a backup taken at seq 1 is restored, keeping the stream's id (its config
+    // metadata), and one message is published to it while the session is away. The stream now
+    // ends at seq 2, behind the session's cursor at 3.
+    stream.recreate("2026-10-26T00:00:00Z");
+    stream.publish(AGENT, envelope());
+    const lost = envelope();
+    stream.publish(AGENT, lost);
+
+    await engine.sweep();
+
+    // A cursor past the stream's end cannot name this stream's messages: the session must see
+    // what was published after the restore, or be told the stream changed under it; it must not
+    // pass it over in silence.
+    const told = host.notices.length > 0;
+    expect(told || ids(host.shown).includes(lost.event_id)).toBe(true);
+  });
+
+  test("a stream moved back behind the cursor is read again from its oldest message: what the session was shown is passed over, what was published after the restore is shown once, told once", async () => {
+    const { stream, host, engine, make } = setup();
+    stream.identify("stream-1");
+    await engine.sweep();
+    const sent = [envelope(), envelope(), envelope()];
+    for (const frame of sent) stream.publish(AGENT, frame);
+    await engine.sweep();
+    // A backup taken at seq 1 is restored, keeping the stream's id and its message's event id,
+    // and one message is published to it: the stream ends at seq 2, behind the cursor at 3.
+    stream.recreate("2026-10-26T00:00:00Z");
+    stream.publish(AGENT, sent[0] as Envelope);
+    const published = envelope();
+    stream.publish(AGENT, published);
+
+    await engine.sweep();
+
+    expect(ids(host.shown)).toEqual([...sent.map((frame) => frame.event_id), published.event_id]);
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["stream_moved_back"]);
+    expect(engine.state()).toEqual({
+      stream_id: "stream-1",
+      stream_created: "2026-10-26T00:00:00Z",
+      subjects: { [AGENT]: { since: 0, after: 2 } },
+    });
+
+    // The notice is a card for the session, named for what happened to the stream.
+    const [notice] = host.notices;
+    if (notice === undefined) throw new Error("no notice was told");
+    const cards: unknown[] = [];
+    routeReplayNotice(notice, {
+      warn: () => {
+        throw new Error("a moved-back stream is no warning");
+      },
+      card: (text) => cards.push(decode(text)),
+    });
+    expect(cards).toEqual([{ envoy: { notice: "stream moved back", detail: notice.message } }]);
+    expect(notice.message).toContain("restored to an earlier point");
+
+    // A restart from the last write tells nothing more and shows nothing again.
+    const restarted = make();
+    restarted.restore(host.writes.at(-1)?.snapshot() ?? { ledger: [] });
+    await restarted.sweep();
+
+    expect(host.shown).toHaveLength(4);
+    expect(host.notices).toHaveLength(1);
+  });
+
+  test("a session that ends while a moved-back stream's cursor rewind is written is told once, after the restart", async () => {
+    const { stream, host, engine, make } = setup();
+    stream.identify("stream-1");
+    await engine.sweep();
+    const sent = [envelope(), envelope(), envelope()];
+    for (const frame of sent) stream.publish(AGENT, frame);
+    await engine.sweep();
+    stream.recreate("2026-10-26T00:00:00Z");
+    stream.publish(AGENT, sent[0] as Envelope);
+    const published = envelope();
+    stream.publish(AGENT, published);
+
+    await endSessionDuringNextWrite(host, () => engine.sweep());
+
+    expect(host.notices).toEqual([]);
+    expect(host.shown).toHaveLength(3);
+
+    host.session = SESSION;
+    const restarted = make();
+    restarted.restore(host.writes.at(-1)?.snapshot() ?? { ledger: [] });
+    await restarted.sweep();
+
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["stream_moved_back"]);
+    expect(ids(host.shown)).toEqual([...sent.map((frame) => frame.event_id), published.event_id]);
+    expect(restarted.state().subjects).toEqual({ [AGENT]: { since: 0, after: 2 } });
+
+    // The notice told is written as told: a later restart does not tell it again.
+    const again = make();
+    again.restore(host.writes.at(-1)?.snapshot() ?? { ledger: [] });
+    await again.sweep();
+
+    expect(host.notices).toHaveLength(1);
+    expect(host.shown).toHaveLength(4);
+  });
+
+  test("a stream moved back to a backup whose older messages retention dropped is read again from its oldest message, with no gap notice", async () => {
+    const { stream, host, engine } = setup();
+    stream.identify("stream-1");
+    await engine.sweep();
+    const sent = [1, 2, 3, 4, 5].map(() => envelope());
+    for (const frame of sent) stream.publish(AGENT, frame);
+    await engine.sweep();
+    // The backup holds seq 3 alone, retention having dropped what came before it; one message is
+    // published to it, so the stream ends at seq 4, behind the cursor at 5.
+    stream.recreate("2026-10-26T00:00:00Z");
+    for (const frame of sent.slice(0, 3)) stream.publish(AGENT, frame);
+    stream.expireBelow(3);
+    const published = envelope();
+    stream.publish(AGENT, published);
+
+    await engine.sweep();
+
+    expect(ids(host.shown)).toEqual([...sent.map((frame) => frame.event_id), published.event_id]);
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["stream_moved_back"]);
+    expect(engine.state().subjects).toEqual({ [AGENT]: { since: 0, after: 4 } });
+  });
+
+  test("an answer without an id whose creation time did not change, standing behind the cursor, is a stream moved back", async () => {
+    const { stream, host, engine } = setup();
+    await engine.sweep();
+    const sent = [envelope(), envelope(), envelope()];
+    for (const frame of sent) stream.publish(AGENT, frame);
+    await engine.sweep();
+    stream.recreate("2026-10-01T00:00:00Z");
+    const published = envelope();
+    stream.publish(AGENT, published);
+
+    await engine.sweep();
+
+    expect(ids(host.shown)).toEqual([...sent.map((frame) => frame.event_id), published.event_id]);
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["stream_moved_back"]);
+    expect(engine.state()).toEqual({
+      stream_created: "2026-10-01T00:00:00Z",
+      subjects: { [AGENT]: { since: 0, after: 1 } },
+    });
+  });
+
   test("a stream whose id changed was recreated: every cursor restarts at its end, with one notice", async () => {
     const { stream, host, engine } = setup();
     stream.identify("stream-1");
@@ -670,26 +821,33 @@ describe("replay sweep", () => {
     expect(host.notices).toEqual([]);
   });
 
-  test("a state stored before stream ids whose cursor stands past the stream's end restarts at its end, with one notice", async () => {
-    const { stream, host, engine } = setup();
-    stream.publish(AGENT, envelope());
-    stream.publish(AGENT, envelope());
+  test("a state stored before stream ids takes the answer's id, and a cursor past the stream's end has every subject read again from its oldest message, told once", async () => {
+    const { stream, host, engine } = setup([AGENT, ISSUE]);
+    const comment = envelope();
+    stream.publish("notifications.dispatch.issue.INFRA-1.comment", comment);
+    const old = envelope();
+    stream.publish(AGENT, old);
+    // The stream moved back behind the agent cursor before this build wrote ids; the issue
+    // cursor stands inside the stream, yet names a sequence of the stream before it moved back.
     engine.restore({
       state: {
         stream_created: "2026-10-01T00:00:00Z",
-        subjects: { [AGENT]: { since: 0, after: 5 } },
+        subjects: { [AGENT]: { since: 0, after: 5 }, [ISSUE]: { since: 0, after: 1 } },
       },
-      ledger: [],
+      ledger: [{ event_id: old.event_id, at: T0 }],
     });
     stream.identify("stream-1");
+    const fresh = envelope();
+    stream.publish(AGENT, fresh);
 
     await engine.sweep();
 
-    expect(host.notices.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["stream_moved_back"]);
+    expect(ids(host.shown)).toEqual([comment.event_id, fresh.event_id]);
     expect(engine.state()).toEqual({
       stream_id: "stream-1",
       stream_created: "2026-10-01T00:00:00Z",
-      subjects: { [AGENT]: { since: 2, after: 2 } },
+      subjects: { [AGENT]: { since: 0, after: 3 }, [ISSUE]: { since: 0, after: 3 } },
     });
   });
 

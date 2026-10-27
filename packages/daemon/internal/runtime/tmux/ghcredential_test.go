@@ -63,16 +63,26 @@ type fakeServerRuntime struct {
 
 func newFakeServerRuntime(t *testing.T, credential runtime.GitHubCredential, log *slog.Logger) *fakeServerRuntime {
 	t.Helper()
+	return newFakeServerRuntimeWith(t, credential, log, nil)
+}
+
+// newFakeServerRuntimeWith is newFakeServerRuntime over the Options change makes, when not nil.
+func newFakeServerRuntimeWith(t *testing.T, credential runtime.GitHubCredential, log *slog.Logger, change func(*Options)) *fakeServerRuntime {
+	t.Helper()
 	bin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	rt, err := New(Options{
+	opts := Options{
 		Project: "omp", StateDir: t.TempDir(), StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
 		EnvoyURL: "http://127.0.0.1:2", Launchers: ompOnly("omp"), StopGrace: time.Second, ProbeInterval: time.Second,
 		AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=" + bin},
 		Executable: func() (string, error) { return "/opt/legion", nil }, GitHubCredential: credential, GH: fakeGH, RepositoryOwner: acmeOwner, Log: log,
-	})
+	}
+	if change != nil {
+		change(&opts)
+	}
+	rt, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}

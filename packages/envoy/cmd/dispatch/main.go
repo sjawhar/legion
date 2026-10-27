@@ -339,7 +339,7 @@ func main() {
 	// maintenance loop below either runs once overall or is deliberately per-process. The ones
 	// that must run once overall take a named lease on this pool for the length of their pass
 	// (duty.Exclusive): a lease is a session-level advisory lock on a connection of its own, so
-	// it needs a pool the shared one's sixteen request connections are not spent on. A boot that
+	// it needs a pool the shared one's request connections are not spent on. A boot that
 	// cannot open it is a boot whose loops would each run everywhere, so it ends here. Under that
 	// lease each pass is also recorded with its loop's own period (duty_passes, migration 0115),
 	// which is what makes a loop run once per period rather than once per process: two tickers
@@ -368,8 +368,13 @@ func main() {
 	}
 
 	if natsClient != nil {
+		outboxPool, err := database.Pool.Outbox()
+		if err != nil {
+			slog.Error("dispatch: open the events outbox's pool", "error", err)
+			os.Exit(1)
+		}
 		go outbox.Run(ctx, outbox.Deps{
-			Store:     database,
+			Store:     &store.Store{Pool: outboxPool},
 			Publisher: natsClient,
 			Broker:    broker,
 			Docs:      documentService,

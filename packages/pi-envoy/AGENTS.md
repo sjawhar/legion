@@ -343,12 +343,19 @@ stream's end, which can be past a frame the live path still held. A frame is sta
 subscription yielded it (`readArrivals`, which reads each subscription as its messages arrive),
 not when the frames queued before it finished delivering. One card that starts no turn
 (`routeReplayNotice` sends this kind to a card, through `UnwrittenFrames.sendNotice`) says that
-the stream was recreated, so messages from before it may be lost, or that a cursor fell behind the
-stream's oldest message, so messages past the stream's 72-hour age or its size limit may be missing. The stream is recreated
+the stream was recreated, so messages from before it may be lost, that it moved back, so messages
+may be shown again and any published between the backup and the restore are missing, or that a
+cursor fell behind the stream's oldest message, so messages past the stream's 72-hour age or its
+size limit may be missing. The stream is recreated
 when the listener's `stream.id` differs from the stored `stream_id`; a `created` that moved under
 the same id (a restore, or a leader election after a clustered restore) is the same stream, and
 an answer without an id is
-judged by `created`. It is a steer with
+judged by `created`. The same stream has moved back when any cursor stands past its end (restored
+from a backup older than the cursor, or re-added empty from its exported configuration): every
+followed subject is read again from the stream's oldest message, so the sweep shows what was
+published after the restore and the ledger passes over what the session was already shown, with
+the moved-back card.
+The card is a steer with
 `triggerTurn: false`, so like an inert card it is handed only while the host is settled: raised
 while a turn streams, it is held, and the first settled heartbeat hands it, so no extra model turn
 runs for it; a notice held for a session the host has left is dropped. A held notice is recorded in

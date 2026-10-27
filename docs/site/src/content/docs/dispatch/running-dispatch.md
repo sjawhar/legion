@@ -275,13 +275,19 @@ one. Three things have to be true first, and Dispatch can check none of them for
 - **Every migration leaves the version before it able to read and write the database**
   ([Migrations](#migrations)), because a rolling update runs both versions against the one
   database while it lasts.
+- **Expect an issue's notifications out of order while two servers publish.** Each server's
+  events outbox claims a batch of events at a time, and nothing yet keeps two servers from
+  publishing adjacent batches at once, so a later event of an issue can reach NATS before an
+  earlier one, and the Legion daemon drops the earlier one as stale. Run one server, and replace it
+  rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
-to 16 connections for requests, up to 8 for the periodic work it runs once across the servers, up
-to 4 for loading documents, and one for the health check, and it holds three more open for as long
-as it runs: one each for the three things that wait on Postgres notifications, which are delivery,
-the live event stream, and closing a document session another server has written to. That is 32
-connections for one server at its ceiling, and twice that for two. Check the database's connection
+to 64 connections for requests, up to 8 for the periodic work it runs once across the servers, up
+to 4 for loading documents, one for the health check, and one for the events outbox, and it holds
+three more open for as long as it runs: one each for the three things that wait on Postgres
+notifications, which are delivery, the live event stream, and closing a document session another
+server has written to. That is 81 connections for one server at its ceiling, and twice that for
+two, past a default Postgres's limit of 100. Check the database's connection
 limit before you start the second server: a limit sized for one server, with whatever else uses
 that database counted in, is the thing that runs out.
 
