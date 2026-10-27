@@ -2,56 +2,56 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-497",
-  "completed": "2026-10-26T22:41:05Z",
+  "completed": "2026-10-27T00:47:02Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2278",
   "proof": [
     {
-      "criterion": "A1: cards queued while a turn runs, then a Send: the Send reaches the model at the first step after it was sent, ahead of the cards, however many came first.",
-      "surface": "Pinned Oh My Pi v18.12.2-sami.20261026-135627 (release asset linux-x64) in RPC mode with only packages/pi-envoy/extensions/envoy.ts loaded, real nats-server 2.10.29 on 127.0.0.1:14222, stand-ins of packages/pi-shared/test/omp-harness.ts",
-      "command": "cd packages/pi-envoy && LEGION_TEST_OMP=$TMPDIR/omp-pin/omp-v18.12.2-sami.20261026-135627-linux-x64/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test extensions/card-delivery-omp.test.ts (case 'a person's Send sent after five cards reaches the model at the next step, ahead of all five')",
-      "observed": "pass: the Send (queued per get_state queuedMessages.steering) is the first message of model request k+1, before all 5 cards, which are all in k+1; the probe prompt is the next request (no spurious wake). Run posted: https://github.com/sjawhar/legion/pull/2278#issuecomment-6428964199",
-      "headSha": "2bdf4b027a77adc70c8c10215812642cb1c36e55",
-      "negativeControl": "envoy.ts swapped for main's 6cdb9995 copy (every card a steer): expect(firstWithSend?.index).toBe(held.index + 1) failed, Expected: 1, Received: undefined; file restored byte for byte (cmp)."
+      "criterion": "A1: cards queued while a turn runs, then a Send: the Send reaches the model at the first step after it was sent, ahead of the cards.",
+      "surface": "Pinned Oh My Pi v18.12.2-sami.20261026-135627 (linux-x64 release asset) in RPC mode with only packages/pi-envoy/extensions/envoy.ts loaded, real nats-server 2.10.29 on 127.0.0.1:14222, stand-ins of packages/pi-shared/test/omp-harness.ts",
+      "command": "cd packages/pi-envoy && LEGION_TEST_OMP=$TMPDIR/omp-pin/omp-v18.12.2-sami.20261026-135627-linux-x64/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun run test (card-delivery-omp.test.ts in its own process), case 'a person's Send sent after five cards ...'",
+      "observed": "pass: the Send is the first message of request k+1, ahead of all 5 cards; the probe is next. Run posted: https://github.com/sjawhar/legion/pull/2278#issuecomment-6430890740",
+      "headSha": "149e44bbf1d9bebc758f5a15b323794d67b9b834",
+      "negativeControl": "main's 6cdb9995 envoy.ts swapped in: Expected: 1, Received: undefined; restored by cmp."
     },
     {
-      "criterion": "A3: an interrupt (RPC abort; abort_and_restore_queue, the Esc path) keeps queued cards: folded, no turn, read at the next turn.",
-      "surface": "Same pinned omp RPC + pi-envoy + nats-server surface",
-      "command": "same command; the four 'an RPC abort[...] during a held model request|tool call keeps the three queued cards, folded with no turn' cases (tool variant: a real blocking bash call)",
-      "observed": "4 pass: aborted assistant stopReason aborted / 'Interrupted by user', agent_end terminal, the 3 cards' message_end with no agent_start, no model request after the interrupt, each card once in the session file, all 3 in the probe prompt's request, no wake text.",
-      "headSha": "2bdf4b027a77adc70c8c10215812642cb1c36e55",
-      "negativeControl": "envoy.ts swapped for main's 6cdb9995 copy (every card a steer), all 4 cases fail: RPC abort (held request and held tool) 'timed out waiting for the session to settle' (the run resumed on the queued steers); abort_and_restore_queue during a held request 'Expected length: 1, Received length: 0' (the cards dropped); during a held tool 'timed out waiting for the session to settle'; file restored byte for byte (cmp)."
+      "criterion": "A3 / review finding 1: an interrupt keeps queued cards folded with no turn, including an interrupt while a prompt is set up (before agent_start).",
+      "surface": "Pinned Oh My Pi v18.12.2-sami.20261026-135627 (linux-x64 release asset) in RPC mode with only packages/pi-envoy/extensions/envoy.ts loaded, real nats-server 2.10.29 on 127.0.0.1:14222, stand-ins of packages/pi-shared/test/omp-harness.ts; the stand-in holds pi-envoy's before_agent_start open-asks read",
+      "command": "cd packages/pi-envoy && LEGION_TEST_OMP=$TMPDIR/omp-pin/omp-v18.12.2-sami.20261026-135627-linux-x64/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun run test (card-delivery-omp.test.ts in its own process), the four abort/abort_and_restore_queue cases and 'an interrupt while a prompt is set up keeps a card sent then folded, with no turn'",
+      "observed": "5 pass: no model request after the interrupt, cards in the session file once, the probe's request carries them and no wake text. abort_and_restore_queue held-request case passed 3 package runs and 5 runs under a concurrent envoy.test.ts loop.",
+      "headSha": "149e44bbf1d9bebc758f5a15b323794d67b9b834",
+      "negativeControl": "card-wake.ts setup rule disabled (messageEnd keeps setup cards): 'Messages request 0 came before the probe', the request being the wake; restored, jj diff empty."
     },
     {
-      "criterion": "A4: a card that lands as a turn ends, in a session interrupted earlier, gets a turn (and A7 plan mode shares this path).",
-      "surface": "Same pinned omp RPC + pi-envoy + nats-server surface, compaction.thresholdTokens 100000, asyncEnabled false, autoContinue false, keepRecentTokens 1, methodOrder [soft], midTurnEnabled false",
-      "command": "same command; case 'a card that lands during a run's automatic compaction, in a session interrupted earlier, gets a turn'",
-      "observed": "pass: RPC abort sets the latch, the idle card's run reports 150000 input tokens, auto-compaction's summary request is held while card c2 is published, RPC agent_end isTerminal false, then a model request containing c2 whose last message is the wake ('... arrived with no turn to read it ...'), then a terminal settle. Plan mode: '/plan' over RPC goes to the model as a prompt on this build (asserted), so plan mode is proven by the unit tests and this shared fold path.",
-      "headSha": "2bdf4b027a77adc70c8c10215812642cb1c36e55",
-      "negativeControl": "Regular fold candidates dropped in checkFoldedCards (temporary edit, restored by cmp): 'timed out waiting for the turn the folded card's wake started'."
+      "criterion": "A4: a card that lands as a turn ends, in a session interrupted earlier, gets a turn.",
+      "surface": "Pinned Oh My Pi v18.12.2-sami.20261026-135627 (linux-x64 release asset) in RPC mode with only packages/pi-envoy/extensions/envoy.ts loaded, real nats-server 2.10.29 on 127.0.0.1:14222, stand-ins of packages/pi-shared/test/omp-harness.ts; compaction thresholdTokens 100000, asyncEnabled false, autoContinue false, keepRecentTokens 1, methodOrder [soft], midTurnEnabled false",
+      "command": "cd packages/pi-envoy && LEGION_TEST_OMP=$TMPDIR/omp-pin/omp-v18.12.2-sami.20261026-135627-linux-x64/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun run test (card-delivery-omp.test.ts in its own process), case 'a card that lands during a run's automatic compaction ...'",
+      "observed": "pass: agent_end isTerminal false, then a request carrying the late card whose last message is the wake, then a terminal settle.",
+      "headSha": "149e44bbf1d9bebc758f5a15b323794d67b9b834",
+      "negativeControl": "card-wake.ts pending filter reduced to startup cards only: 'timed out waiting for the turn the folded card's wake started'; restored by cmp."
     },
     {
-      "criterion": "A2: a card that reaches an idle session starts a turn.",
-      "surface": "Same pinned omp RPC + pi-envoy + nats-server surface",
-      "command": "same command; case 'a card that reaches an idle session starts a turn'",
-      "observed": "pass: the first idle card (startup phase) gets a turn through the wake with the card in its request; a second idle card is a steer whose turn's last message is that card; the probe is next.",
-      "headSha": "2bdf4b027a77adc70c8c10215812642cb1c36e55",
-      "negativeControl": "The wake's send disabled in checkFoldedCards (temporary edit, restored by cmp): 'timed out waiting for the turn the first idle card's wake started'."
+      "criterion": "Architect addition: a card that arrives while an RPC session starts does not run its turn inside the startup drain; get_state answers.",
+      "surface": "Pinned Oh My Pi v18.12.2-sami.20261026-135627 (linux-x64 release asset) in RPC mode with only packages/pi-envoy/extensions/envoy.ts loaded, real nats-server 2.10.29 on 127.0.0.1:14222, stand-ins of packages/pi-shared/test/omp-harness.ts",
+      "command": "cd packages/pi-envoy && LEGION_TEST_OMP=$TMPDIR/omp-pin/omp-v18.12.2-sami.20261026-135627-linux-x64/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun run test (card-delivery-omp.test.ts in its own process), case 'a card that arrives while the session starts holds no RPC input'",
+      "observed": "pass: get_state answered while the startup cards' wake request is held; the request carries both cards and the wake.",
+      "headSha": "149e44bbf1d9bebc758f5a15b323794d67b9b834",
+      "negativeControl": "main's 6cdb9995 envoy.ts swapped in: 'get_state written during startup: no answer within 5000 ms'; restored by cmp."
     },
     {
-      "criterion": "Architect addition: a card that arrives while the session starts does not run its turn inside the host's startup drain; RPC get_state answers at once and the card gets a turn after startup.",
-      "surface": "Same pinned omp RPC + pi-envoy + nats-server surface; the stand-in holds the listener registration session_start awaits after the agent subject is open",
-      "command": "same command; case 'a card that arrives while the session starts holds no RPC input'",
-      "observed": "pass: a get_state written during startup stays unanswered while session_start is held (stdin not yet read), 2 cards are receipted, the hold is released, the wake's model request is held and get_state answers while it is held; the request carries both cards and the wake; the probe is next.",
-      "headSha": "2bdf4b027a77adc70c8c10215812642cb1c36e55",
-      "negativeControl": "envoy.ts swapped for #2266's head 67bc2ad9 copy: 'get_state written during startup: no answer within 5000 ms'; file restored byte for byte."
+      "criterion": "Review finding 2: the startup phase applies only in RPC mode; print, json, tui and no-mode sessions keep the idle steer.",
+      "surface": "src/card-wake.ts unit tests (CardWake with an injected sendMessage and clock; no RPC surface runs print mode with a live NATS card in the harness)",
+      "command": "cd packages/pi-envoy && bun test src/card-wake.test.ts",
+      "observed": "41 pass, including 'sends a card that finds the host idle as a steer in print|json|tui mode|a context with no mode' and the rpc follow-up case.",
+      "headSha": "149e44bbf1d9bebc758f5a15b323794d67b9b834",
+      "negativeControl": "The same tests against the extracted module before the mode check: 4 fail (each mode got a followUp startup card); also the 3 setup-card tests failed before the setup rule."
     },
     {
-      "criterion": "A10: suites green.",
-      "surface": "packages/pi-envoy, packages/pi-shared, packages/pi-legion",
-      "command": "bun test in each (LEGION_TEST_OMP and LEGION_TEST_NATS_URL set); bunx biome check packages/pi-envoy/ packages/pi-shared/ packages/pi-legion/ .github/; bunx tsc --noEmit in each; .github/scripts check-private-names, check-action-pins and check-image-trigger-paths",
-      "observed": "pi-envoy 973 pass 0 fail; pi-shared 72 pass 0 fail; pi-legion 617 pass, 9 fail: 8 judge-omp tests need docker (absent in the pod, untouched code in scripts/skill-scenarios/rig.test.ts) and 'cleanDetail stays linear ... under 1 s' (capability-report.test.ts, timing under parallel load; 11 pass when run alone); biome no errors; tsc exit 0 in all three; the three repository checks pass.",
-      "headSha": "2bdf4b027a77adc70c8c10215812642cb1c36e55",
-      "negativeControl": "The new real-binary file refuses to skip on GitHub Actions without LEGION_TEST_OMP or LEGION_TEST_NATS_URL (setup() throws), so CI cannot pass it vacuously."
+      "criterion": "Review finding 3 / A10: the package test command is independent of Bun's file order; suites green.",
+      "surface": "packages/pi-envoy, pi-shared, pi-legion",
+      "command": "cd packages/pi-envoy && LEGION_TEST_OMP=$TMPDIR/omp-pin/omp-v18.12.2-sami.20261026-135627-linux-x64/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun run test (card-delivery-omp.test.ts in its own process); bun test in pi-shared and pi-legion (LEGION_TEST_OMP set); bunx biome check packages/pi-envoy/ packages/pi-shared/ packages/pi-legion/ .github/; bunx tsc --noEmit in each; .github/scripts/check-private-names.sh",
+      "observed": "pi-envoy 979 pass then 9 pass (card-delivery ran, none skipped); pi-shared 72 pass; pi-legion 618 pass, 8 fail all docker-dependent judge-omp; biome no errors; tsc exit 0 x3; private-names pass.",
+      "headSha": "149e44bbf1d9bebc758f5a15b323794d67b9b834",
+      "negativeControl": "Before the script change: bun test ./extensions/envoy.test.ts ./extensions/card-delivery-omp.test.ts gave 867 pass 8 fail, 'connection.request is not a function'."
     }
   ],
   "filesChanged": [
@@ -66,25 +66,36 @@
     "packages/pi-shared/test/omp-harness.ts",
     "packages/pi-legion/src/phase-stall.ts (comment)",
     ".github/workflows/envoy-and-contracts.yaml",
-    ".legion/INFRA-497/plan.json (architect addition recorded)"
+    ".legion/INFRA-497/plan.json (architect addition recorded)",
+    "packages/pi-envoy/src/card-wake.ts (new, round 1)",
+    "packages/pi-envoy/src/card-wake.test.ts (new, round 1)",
+    "packages/pi-envoy/package.json (round 1: test script)",
+    "packages/pi-envoy/extensions/dispatch-first-omp.test.ts (round 1: shared helper)",
+    "packages/pi-legion/extensions/legion-role-tools-omp.test.ts (round 1: shared helper)"
   ],
   "trickyParts": [
     "The wake decides by branch order (no assistant entry after the card), ctx.isIdle() and runSeq, never by event order: the host emits the extension agent_end unawaited and a fold's message_end may come before or after it. A card not yet in the branch counts as unread, since the host persists message_end in one FIFO chain (agent-session.ts #queueMessageEndPersistence).",
     "Startup phase: the host has no event after its startup send drain, so an idle card in the phase goes followUp with no triggerTurn; its own message_end (only possible after the hold settles) arms the check on the host timer, and a host idle at that macrotask has no tracked send pending. Unseen startup cards hold the check up to 30 s (STARTUP_CARD_CAP_MS).",
-    "Interrupt flag: aborted assistant 'Interrupted by user', auto_compaction_end aborted, auto_retry_end 'Retry cancelled'; cleared at agent_start. Startup cards ignore it, as the steer they replace did."
+    "Interrupt flag: aborted assistant 'Interrupted by user', auto_compaction_end aborted, auto_retry_end 'Retry cancelled'; cleared at agent_start. Startup cards ignore it, as the steer they replace did.",
+    "Round 1: a card sent while the host is busy and pi-envoy has seen no agent_start since the last agent_end is a setup card and never woken; the extension agent_end is emitted at the end of the host's agent_end maintenance (agent-session.ts #settleAgentEnd ~5336-5362), after compaction and retry backoff, so A4's compaction case stays inside the run bracket. A card sent after that agent_end while the host still settles is also a setup card: the host's own resume or a later turn reads it."
   ],
   "deviations": [
     "Plan said comment on and close #2266 myself; the architect asked instead that session 01a16962 close it, so I sent it the PR number (Envoy e18734ab5d7a4d852f433185ea8cec55).",
     "Plan's (c) negative control was 'red at #2266 head 67bc2ad9'; with the startup phase, that run fails earlier, at the first card's wake expectation, so the meaningful control is the late-fold wake disabled at head (timed out); the 67bc2ad9 swap is quoted for the startup case instead.",
     "Wake text is 'N Envoy message(s) above arrived with no turn to read it/them: read and act ...', true for a session with no turn yet.",
     "A session that receives no card while it starts stays in the startup phase until its first idle card, which gets its turn through the wake rather than a direct steer (documented limit; the architect accepted the followUp design, Envoy bee6c3e7b60c503b1c26c93ebdddcacf).",
-    "Simplify pass skipped two findings: exporting isSummarization from the harness would edit dispatch-first-omp.test.ts outside this diff; a shared call() helper is low value."
+    "Simplify pass skipped two findings: exporting isSummarization from the harness would edit dispatch-first-omp.test.ts outside this diff; a shared call() helper is low value.",
+    "Round 1, finding 6: kept the generation counter and corrected its comment rather than typing clearTimer, since cancel() is handed no context.",
+    "Round 1, finding 2's test is a unit test of CardWake per mode; the real-binary harness runs RPC mode only."
   ],
   "openQuestions": [
     "Finding outside this issue: the operator controller's start message runs inside the host's startup drain (pi-legion controller-session.ts:183); ask dispatch://INFRA-49/ask/039641af-d62c-420b-a43d-8fbb668af6da, published to the controller."
   ],
   "discoveredComplexity": [
     "No extension-visible signal exists after Oh My Pi's startup send drain at the pinned tag (oracle-checked); the host-side fix (an event after drain, or reading stdin before it) belongs to the Oh My Pi owner per the architect.",
-    "/reload-plugins runs the same hold and drain; the startup phase covers process startup only (documented limit)."
-  ]
+    "/reload-plugins runs the same hold and drain; the startup phase covers process startup only (documented limit).",
+    "Round 1: remaining invisible interrupt window: an interrupt during the run's post-run steps other than compaction and retry backoff (goal onAgentEnd ~4475, handleEmptyAssistantStop ~4610, recordUsageLimitOutcome ~4626, todo check ~4810, session_stop hooks ~4827) gets the folded cards one wake; a setup card the host folds with no interrupt (plan mode, a prompt refused before its run) gets none. Both in AGENTS.md."
+  ],
+  "round": 1,
+  "reviewAnswered": "Review round 1 at 2bdf4b02 (review.json): 10 threads answered and resolved at 149e44bb."
 }
