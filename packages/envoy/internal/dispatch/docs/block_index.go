@@ -168,8 +168,8 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 				"artifact", document.id, "error", err)
 		case ahead:
 			tick.LiveAhead++
-			// Only a document the listing read open is remembered: the lock can have seen a reopen
-			// the listing missed, and stillLiveAhead reuses no entry listed closed.
+			// Every entry is a document its listing read open: the lock can have seen a reopen the
+			// listing missed, and a listing that reads the issue closed must read the document again.
 			if cold && document.open && !document.markedAt.IsZero() && s.srv.GetDoc(document.id) == nil {
 				liveAhead[document.id] = document
 			}
@@ -209,11 +209,12 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 }
 
 // stillLiveAhead reports whether document, as listed now with its issue open, is one liveAhead
-// holds at the same version and settlement mark, listed open then too, with no room of this
-// server resident for it. A listing that reads the issue closed always reads the document again.
+// holds at the same version and settlement mark, with no room of this server resident for it.
+// liveAhead holds only documents listed open (ReconcileBlockIndex); a listing that reads the issue
+// closed always reads the document again.
 func (s *Service) stillLiveAhead(liveAhead liveAheadDocuments, document owedDocument) bool {
 	found, ok := liveAhead[document.id]
-	return ok && document.open && found.open && found.version == document.version &&
+	return ok && document.open && found.version == document.version &&
 		found.markedAt.Equal(document.markedAt) && s.srv.GetDoc(document.id) == nil
 }
 
