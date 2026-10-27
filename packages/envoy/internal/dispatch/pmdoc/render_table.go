@@ -70,10 +70,10 @@ func (r *renderer) tableRow(row *Node, cells []*Node, header bool, prefix string
 // codePipesOutOfCode is nodes, a table cell's inline content, with each `|` its code holds after an
 // odd run of backslashes taken out of the code: the code before it ends there, and the `|` is text
 // under the code's other marks, so every character stays and that one loses its code mark. It also
-// returns the text of the first code span that held one, or "" when none does and nodes are
-// returned as they are. A code span is the code-marked text nodes written in one: one after
-// another under the same written marks (writtenMarks), as writeInlineRun keeps a span open across
-// them, so the backslashes before a `|` can end the node before it.
+// returns the text of each code span that held one, once a span and in order, or none when none
+// does and nodes are returned as they are. A code span is the code-marked text nodes written in
+// one: one after another under the same written marks (writtenMarks), as writeInlineRun keeps a
+// span open across them, so the backslashes before a `|` can end the node before it.
 //
 // A table row is split into cells before inline parsing, so in a cell a `|` is written `\|`, in
 // code too, where both parsers take the backslash out; one after an even run of backslashes ends
@@ -81,7 +81,7 @@ func (r *renderer) tableRow(row *Node, cells []*Node, header bool, prefix string
 // has no spelling in a cell: written `\\|`, the cell ends between the backslashes and the `|`.
 // Text outside code takes the escapes it needs (needsInlineEscape), so the `|` taken out is
 // written `\|` after the code's closing backtick, which both parsers read back as the `|`.
-func codePipesOutOfCode(nodes []*Node) ([]*Node, string) {
+func codePipesOutOfCode(nodes []*Node) ([]*Node, []string) {
 	if !slices.ContainsFunc(nodes, func(node *Node) bool {
 		if strings.IndexByte(node.Text, '|') < 0 {
 			return false
@@ -89,13 +89,14 @@ func codePipesOutOfCode(nodes []*Node) ([]*Node, string) {
 		_, code := codeSpanMarks(node)
 		return code
 	}) {
-		return nodes, ""
+		return nodes, nil
 	}
 	var out []*Node
-	var held string
+	var held []string
 	// run is how many backslashes the code span written so far ends with, from opens, the index of
-	// its first node, under marks; opens is -1 outside code.
-	run, opens := 0, -1
+	// its first node, under marks; opens is -1 outside code. heldOpens is opens of the last span
+	// held reports.
+	run, opens, heldOpens := 0, -1, -1
 	var marks []Mark
 	for index, node := range nodes {
 		written, code := codeSpanMarks(node)
@@ -116,8 +117,8 @@ func codePipesOutOfCode(nodes []*Node) ([]*Node, string) {
 				if out == nil {
 					out = append(make([]*Node, 0, len(nodes)+2), nodes[:index]...)
 				}
-				if held == "" {
-					held = codeSpanText(nodes, opens, marks)
+				if heldOpens != opens {
+					held, heldOpens = append(held, codeSpanText(nodes, opens, marks)), opens
 				}
 				if at > from {
 					out = append(out, &Node{Type: "text", Text: node.Text[from:at], Marks: node.Marks})
@@ -140,7 +141,7 @@ func codePipesOutOfCode(nodes []*Node) ([]*Node, string) {
 		}
 	}
 	if out == nil {
-		return nodes, ""
+		return nodes, nil
 	}
 	return out, held
 }
@@ -167,16 +168,14 @@ func codeSpanText(nodes []*Node, opens int, marks []Mark) string {
 	return text.String()
 }
 
-// TableCodePipeError is the refusal (ErrSchema) of a table in block, a document-level block, whose
-// cell holds code with a `|` after an odd run of backslashes, which no markdown of a cell writes
-// (codePipesOutOfCode), or nil when no cell does. It names the first such cell as GET /blocks
-// places one: the table's block id, the row's index among the table's rows (0 the header row), the
-// cell's index in its row (the indexes delete_row and delete_column take), and the header cell
-// drawn above it (tableLayout), and says what to write instead. A write a caller makes is refused
-// so; a browser edit holding the shape is stored with the `|` written after the code, as tableRow
-// writes it.
-func TableCodePipeError(block *Node) error {
-	var refusal error
+// TableCodePipes is each code span, in a cell of a table in block, a document-level block, whose
+// text holds a `|` after an odd run of backslashes, which no markdown of a cell writes
+// (codePipesOutOfCode), in document order: a cell holding two such spans is in it twice. A write a
+// caller makes that adds one is refused with it (TableCodePipe.Error); a browser edit holding one
+// is stored with the `|` written after the code, as tableRow writes it. The error is a panic
+// (ErrPanic) walking the tree, this package's bug.
+func TableCodePipes(block *Node) (cells []TableCodePipe, err error) {
+	defer recoverPanic(&cells, &err, "finding code a table cell cannot write")
 	Walk(block, func(node *Node) bool {
 		if node.Type != "table" {
 			return true
@@ -186,43 +185,49 @@ func TableCodePipeError(block *Node) error {
 				if len(cell.Children) != 1 {
 					continue
 				}
-				if _, code := codePipesOutOfCode(cell.Children[0].Children); code != "" {
-					refusal = tableCodePipe{table: node, row: rowIndex, column: column, code: code}
-					return false
+				_, held := codePipesOutOfCode(cell.Children[0].Children)
+				for _, code := range held {
+					cells = append(cells, TableCodePipe{Table: node, Row: rowIndex, Column: column, Code: code})
 				}
 			}
 		}
 		return true
 	})
-	return refusal
+	return cells, nil
 }
 
-// tableCodePipe is a table cell holding code with a `|` after an odd run of backslashes
-// (TableCodePipeError): the table, the cell's row and column, and the code span's text.
-type tableCodePipe struct {
-	table       *Node
-	row, column int
-	code        string
+// TableCodePipe is a code span in a table cell whose text holds a `|` after an odd run of
+// backslashes (TableCodePipes): the table, the cell's row and column, and the code span's text.
+// It is also the refusal (ErrSchema) of a write that adds it, naming the cell: the table's block
+// id, the row's index among the table's rows (0 the header row), the cell's index in its row (the
+// indexes delete_row and delete_column take), and the header cell drawn above it, and saying what
+// to write instead. The header is found with the table laid out on its own (headerAbove on a full
+// span budget), so it can differ from the one GET /blocks names only once earlier tables in the
+// document have spent the span budget (spansBefore).
+type TableCodePipe struct {
+	Table       *Node
+	Row, Column int
+	Code        string
 }
 
-func (cell tableCodePipe) Error() string {
+func (cell TableCodePipe) Error() string {
 	table := "a table"
-	if id := blockIDOf(cell.table); id != "" {
+	if id := blockIDOf(cell.Table); id != "" {
 		table = fmt.Sprintf("table %q", id)
 	}
-	where := fmt.Sprintf("row %d, column %d", cell.row, cell.column)
-	if cell.row == 0 {
+	where := fmt.Sprintf("row %d, column %d", cell.Row, cell.Column)
+	if cell.Row == 0 {
 		where += " (the header row)"
-	} else if header, found := headerAbove(&renderer{spanBudget: maxSpanCells}, cell.table, cell.row, cell.column); found {
+	} else if header, found := headerAbove(&renderer{spanBudget: maxSpanCells}, cell.Table, cell.Row, cell.Column); found {
 		where += fmt.Sprintf(" (under the header \"%s\")", header)
 	}
 	// The code is quoted as written, so its backslashes are not doubled.
 	return fmt.Sprintf("%s holds code in %s whose text has a | right after a backslash, \"%s\", which a table cell's markdown cannot write: "+
 		"in a cell a | is written \\|, in code too, \\\\| ends the cell, and a backslash escapes nothing in code; "+
-		"drop the backslash before the |, or end the code before the | and write the | as text", table, where, cell.code)
+		"drop the backslash before the |, or end the code before the | and write the | as text", table, where, cell.Code)
 }
 
-func (tableCodePipe) Unwrap() error { return ErrSchema }
+func (TableCodePipe) Unwrap() error { return ErrSchema }
 
 // tableGrid is each of table's rows as its markdown writes them, cell by cell. GFM carries no span,
 // so a cell spanning columns or rows (colspan, rowspan: a pasted HTML table can hold them) is

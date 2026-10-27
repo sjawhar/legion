@@ -1337,8 +1337,9 @@
   and the command line and another in the past-version view. A `|` after an odd run (`\|`) is
   still the cell's text. Code in a cell cannot hold a `|` right after an odd run of backslashes,
   since no markdown of a cell writes it: an API replace, delete by quote or accepted suggestion
-  that leaves one is refused, naming the table, the cell and the header above it, and a browser
-  edit that holds one is stored with that `|` written as text after the code (INFRA-172).
+  that adds such code is refused, naming the table, the cell and the header above it, also beside
+  such code a browser edit left, and a browser edit that holds one is stored with that `|` written
+  as text after the code (INFRA-172).
 
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.

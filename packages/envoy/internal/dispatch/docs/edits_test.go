@@ -1534,11 +1534,11 @@ func TestApplyOperationReplaceRefusesAHardBreakInAHeadingOrTableCell(t *testing.
 
 // A replace's `with` is read as a paragraph's text, where `\|` in code is the code's own text, and a
 // delete can cut code down to a backslash before a `|`; in a table cell no markdown writes such code
-// (pmdoc.TableCodePipeError), so the write is refused, naming the operation's field, the table, the
+// (pmdoc.TableCodePipes), so the write is refused, naming the operation's field, the table, the
 // cell's row and column, the header above it, and what to write instead. Code holding a `|` with no
 // backslash or two before it, and text holding a backslash before a `|`, are stored as written. A
 // table a browser edit already left such code in still takes writes, the one that rewrites that
-// code among them.
+// code among them, but not one that adds such code beside it, the same code included.
 func TestApplyOperationRefusesCodeWithAPipeAfterABackslashInATableCell(t *testing.T) {
 	const table = "| Cmd | Note |\n| --- | --- |\n| run | x |\n"
 	replace := func(find, with string) model.EditOp { return model.EditOp{Op: "replace", Find: find, With: with} }
@@ -1562,6 +1562,10 @@ func TestApplyOperationRefusesCodeWithAPipeAfterABackslashInATableCell(t *testin
 		{name: "text holding a backslash before a pipe", document: table, op: replace("x", "a\\\\\\|b"), stored: "| run | a\\\\\\|b |"},
 		{name: "a replace beside code a browser edit left", document: table, browser: true, op: replace("x", "y"), stored: "| `a\\`\\|`b` | y |"},
 		{name: "the rewrite of code a browser edit left", document: table, browser: true, op: replace("a\\|b", "`a|b`"), stored: "| `a\\|b` | x |"},
+		{name: "a code pipe replaced in beside code a browser edit left", document: table, browser: true, op: replace("x", "`a\\|b`"),
+			field: "with", says: `holds code in row 1, column 1 (under the header "Note") whose text has a | right after a backslash, "a\|b"`},
+		{name: "a delete that leaves a code pipe beside code a browser edit left", document: "| Cmd | Note |\n| --- | --- |\n| run | `c\\\\\\|d` |\n", browser: true,
+			op: model.EditOp{Op: "delete", Find: "c\\"}, field: "find", says: `holds code in row 1, column 1 (under the header "Note") whose text has a | right after a backslash, "\|d"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput(test.document)

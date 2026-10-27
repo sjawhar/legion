@@ -506,6 +506,17 @@ func TestUnescapeTablePipesLeavesTheTreeGoldmarksTransformerDoes(t *testing.T) {
 	t.Logf("%d inputs compared, %d read a table, %d had a pipe unescaped; %d split a cell and were not compared", compared, tables, unescaped, skipped)
 }
 
+// pipeAfterEvenBackslashes reports whether value holds a `|` the browser editor's parser ends a
+// table cell at (escapedByBackslashes).
+func pipeAfterEvenBackslashes(value string) bool {
+	for index := range len(value) {
+		if value[index] == '|' && !escapedByBackslashes(value, index) {
+			return true
+		}
+	}
+	return false
+}
+
 // goldmarkTree is root's nodes, one a line, indented by depth: each node's kind, and a text's bytes
 // in source with its segment's bounds.
 func goldmarkTree(root ast.Node, source []byte) string {

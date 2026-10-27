@@ -1231,25 +1231,55 @@ func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, wit
 	)}
 }
 
-// refuseCodePipeInTableCell refuses a write that leaves a table cell, in a document-level block it
-// changed, holding code with a `|` after an odd run of backslashes (pmdoc.TableCodePipeError): no
-// markdown of a cell writes that code, so what the document stored would read back otherwise. A
-// replace's `with` is read as a paragraph's text, where `\|` in code is the code's text, and a
-// delete can cut code down to it. A block that held such a cell before the write is no reason to
-// refuse it (replacementBroke), so a document a browser edit left one in still takes writes. field
-// is the field the refusal names, opening the words it opens with and value what the caller sent,
-// which the refusal quotes after them, and advice what the caller can do beside what pmdoc's
-// refusal says, or "".
+// refuseCodePipeInTableCell refuses a write that adds, to the document-level blocks it changed
+// (changedBlocks), code in a table cell whose text holds a `|` after an odd run of backslashes
+// (pmdoc.TableCodePipes): no markdown of a cell writes that code, so what the document stored would
+// read back otherwise. A replace's `with` is read as a paragraph's text, where `\|` in code is the
+// code's text, and a delete can cut code down to it. Such code a browser edit already left in those
+// blocks is no reason to refuse the write, so a document holding it still takes writes, the one
+// that rewrites that code to hold no such `|` among them; code the write adds beside it is. What
+// the blocks held before and hold after are compared by the code's text, counted, since a write can
+// move a cell to another row, and the refusal names the first code after that the blocks did not
+// hold before. field is the field the refusal names, opening the words it opens with and value
+// what the caller sent, which the refusal quotes after them, and advice what the caller can do
+// beside what pmdoc's refusal says, or "". An error from pmdoc, a panic (pmdoc.ErrPanic), is
+// pmdoc's bug, and is the error.
 func refuseCodePipeInTableCell(before, after *pmdoc.Node, match pmdoc.Range, field, opening, value, advice string) error {
-	_, unwritable, err := replacementBroke(before, after, match, pmdoc.TableCodePipeError)
-	if err != nil || unwritable == nil {
+	first, last, lastAfter, err := changedBlocks(before, after, match)
+	if err != nil {
 		return err
 	}
-	reason := fmt.Sprintf("%s %q leaves code the document cannot store where it lands: %v", opening, value, unwritable)
-	if advice != "" {
-		reason += "; " + advice
+	var held map[string]int
+	for index := first; index <= last; index++ {
+		cells, err := pmdoc.TableCodePipes(before.Children[index])
+		if err != nil {
+			return err
+		}
+		for _, cell := range cells {
+			if held == nil {
+				held = map[string]int{}
+			}
+			held[cell.Code]++
+		}
 	}
-	return &ErrInvalidOp{Field: field, Reason: reason}
+	for index := first; index <= lastAfter; index++ {
+		cells, err := pmdoc.TableCodePipes(after.Children[index])
+		if err != nil {
+			return err
+		}
+		for _, cell := range cells {
+			if held[cell.Code] > 0 {
+				held[cell.Code]--
+				continue
+			}
+			reason := fmt.Sprintf("%s %q leaves code the document cannot store where it lands: %v", opening, value, cell)
+			if advice != "" {
+				reason += "; " + advice
+			}
+			return &ErrInvalidOp{Field: field, Reason: reason}
+		}
+	}
+	return nil
 }
 
 // unreadableReason says why a replace left its block unreadable and what to do instead, by cause.

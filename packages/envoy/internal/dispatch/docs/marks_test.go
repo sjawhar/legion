@@ -1178,12 +1178,15 @@ func TestAcceptSuggestionLeavesASiblingItemsSpread(t *testing.T) {
 }
 
 // An accepted suggestion's text is read as a paragraph's, where `\|` in code is the code's own text;
-// in a table cell no markdown writes such code (pmdoc.TableCodePipeError), so the accept is refused
+// in a table cell no markdown writes such code (pmdoc.TableCodePipes), so the accept is refused
 // naming the cell and what the person accepting can do, nothing is written, and the suggestion
-// stays open. Code holding a `|` with no backslash before it is accepted.
+// stays open. Code holding a `|` with no backslash before it is accepted. Beside such code a browser
+// edit left, an accept that adds none is taken, and one that adds the same code again is refused.
 func TestAcceptSuggestionRefusesCodeWithAPipeAfterABackslashInATableCell(t *testing.T) {
 	for _, test := range []struct {
 		name, with string
+		// browser puts code holding `a\|b` in the body row's first cell first, as a browser edit can.
+		browser bool
 		// says is what the refusal says, or "" when the accept is taken; stored is then the body
 		// row the document is stored with.
 		says, stored string
@@ -1191,11 +1194,20 @@ func TestAcceptSuggestionRefusesCodeWithAPipeAfterABackslashInATableCell(t *test
 		{name: "code holding a backslash before a pipe", with: "`git log \\| wc -l`",
 			says: `holds code in row 1, column 1 (under the header "Note") whose text has a | right after a backslash, "git log \| wc -l"`},
 		{name: "code holding a pipe", with: "`git log | wc -l`", stored: "| run | `git log \\| wc -l` |"},
+		{name: "text beside code a browser edit left", with: "y", browser: true, stored: "| `a\\`\\|`b` | y |"},
+		{name: "a code pipe beside code a browser edit left", with: "`a\\|b`", browser: true,
+			says: `holds code in row 1, column 1 (under the header "Note") whose text has a | right after a backslash, "a\|b"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, artifactID := newTestService(t)
 			service.settle = time.Hour
 			seedServiceText(t, service, artifactID, "| Cmd | Note |\n| --- | --- |\n| run | Body. |\n")
+			if test.browser {
+				editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+					tree.Children[0].Children[1].Children[0].Children[0].Children = []*pmdoc.Node{{Type: "text", Text: "a\\|b", Marks: []pmdoc.Mark{{Type: "inlineCode"}}}}
+					return tree
+				})
+			}
 			spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
 			if _, err := joinedMarkQuote(service, artifactID, spec, "Body.", nil); err != nil {
 				t.Fatal(err)

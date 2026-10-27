@@ -390,13 +390,12 @@ func TestRenderWritesACodePipeAfterAnOddRunOfBackslashesAsTextAfterTheCode(t *te
 	}
 }
 
-// A write a caller makes that leaves a table cell's code holding a `|` after an odd run of
-// backslashes is refused (TableCodePipeError), naming the cell as GET /blocks places it - the
-// table's block id, the row (0 the header row), the column, the header cell drawn above it, a
-// colspan before it counted - and what to write instead. A table inside a quote is found too. Code
-// whose `|` an even run of backslashes stands before, none included, and text holding a backslash
-// before a `|`, are no refusal.
-func TestTableCodePipeErrorNamesTheCellAndWhatToWriteInstead(t *testing.T) {
+// Code a write leaves in a table cell holding a `|` after an odd run of backslashes is found
+// (TableCodePipes) and refused with it, naming the cell - the table's block id, the row (0 the
+// header row), the column, the header cell drawn above it, a colspan before it counted - and what to
+// write instead. A table inside a quote is found too. Code whose `|` an even run of backslashes
+// stands before, none included, and text holding a backslash before a `|`, are not found.
+func TestTableCodePipesNamesTheCellAndWhatToWriteInstead(t *testing.T) {
 	code := Mark{Type: "inlineCode"}
 	text := func(value string, marks ...Mark) []*Node { return []*Node{{Type: "text", Text: value, Marks: marks}} }
 	for _, test := range []struct {
@@ -438,21 +437,61 @@ func TestTableCodePipeErrorNamesTheCellAndWhatToWriteInstead(t *testing.T) {
 				header.Children = header.Children[:1]
 			}
 			table.Children[test.row].Children[test.column].Children[0].Children = test.cell
-			err = TableCodePipeError(doc.Children[0])
+			cells, err := TableCodePipes(doc.Children[0])
+			if err != nil {
+				t.Fatal(err)
+			}
 			if test.says == nil {
-				if err != nil {
-					t.Fatalf("TableCodePipeError() = %v, want none", err)
+				if len(cells) != 0 {
+					t.Fatalf("TableCodePipes() = %v, want none", cells)
 				}
 				return
 			}
-			if !errors.Is(err, ErrSchema) {
-				t.Fatalf("TableCodePipeError() = %v, want a schema refusal", err)
+			if len(cells) != 1 {
+				t.Fatalf("TableCodePipes() = %v, want one", cells)
+			}
+			if !errors.Is(cells[0], ErrSchema) {
+				t.Fatalf("TableCodePipes() = %v, want a schema refusal", cells[0])
 			}
 			for _, says := range test.says {
-				if !strings.Contains(err.Error(), says) {
-					t.Errorf("TableCodePipeError() = %q, want it to say %q", err, says)
+				if !strings.Contains(cells[0].Error(), says) {
+					t.Errorf("TableCodePipes() = %q, want it to say %q", cells[0], says)
 				}
 			}
 		})
+	}
+}
+
+// TableCodePipes finds every such code span of a document-level block, in document order: each
+// table of a quote, and a cell holding two spans twice, each with its own text.
+func TestTableCodePipesFindsEverySpanInDocumentOrder(t *testing.T) {
+	doc, err := Parse("> | Cmd | Note |\n> | --- | --- |\n> | run | x |\n>\n> text\n>\n> | Key |\n> | --- |\n> | y |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote := doc.Children[0]
+	first, second := quote.Children[0], quote.Children[2]
+	code := []Mark{{Type: "inlineCode"}}
+	first.Children[1].Children[1].Children[0].Children = []*Node{
+		{Type: "text", Text: "a\\|b", Marks: code}, {Type: "text", Text: " or "}, {Type: "text", Text: "a\\|b", Marks: code},
+	}
+	first.Children[1].Children[0].Children[0].Children = []*Node{{Type: "text", Text: "a|b", Marks: code}}
+	second.Children[0].Children[0].Children[0].Children = []*Node{{Type: "text", Text: "c\\\\\\|d", Marks: code}}
+	cells, err := TableCodePipes(quote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []TableCodePipe{
+		{Table: first, Row: 1, Column: 1, Code: "a\\|b"},
+		{Table: first, Row: 1, Column: 1, Code: "a\\|b"},
+		{Table: second, Row: 0, Column: 0, Code: "c\\\\\\|d"},
+	}
+	if len(cells) != len(want) {
+		t.Fatalf("TableCodePipes() = %v, want %v", cells, want)
+	}
+	for index := range want {
+		if cells[index] != want[index] {
+			t.Errorf("TableCodePipes()[%d] = %+v, want %+v", index, cells[index], want[index])
+		}
 	}
 }
