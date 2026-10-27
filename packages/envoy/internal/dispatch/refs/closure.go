@@ -14,23 +14,33 @@ type Member struct {
 	Via    model.ReferenceVia
 }
 
-// Closure follows artifact references from an issue's own content to eight hops.
+// documentTarget is true of a refs row r whose target is a document, or a block a current
+// version of its document holds; documentOfTarget is that document's ref_key, which never holds
+// a '#'.
+const (
+	documentTarget   = `(r.to_kind = 'artifact' or (r.to_kind = 'block' and exists (select 1 from document_blocks d where d.node_id = r.to_id)))`
+	documentOfTarget = `case when r.to_kind = 'block' then split_part(r.to_id, '#', 1) else r.to_id end`
+)
+
+// Closure follows artifact references from an issue's own content to eight hops. A reference to
+// a block reaches the block's document, while a current version of the document holds that
+// block: a deleted block's links drop out of the closure until a version holds its id again.
 func Closure(ctx context.Context, q Queryer, issueKey string) ([]Member, bool, error) {
 	rows, err := q.Query(ctx, `
 		with recursive closure as (
-			select r.to_id as ref_key, 1 as depth, r.from_kind as via_kind, r.from_id as via_id
+			select `+documentOfTarget+` as ref_key, 1 as depth, r.from_kind as via_kind, r.from_id as via_id
 			from refs r
-			where r.to_kind = 'artifact' and (
+			where `+documentTarget+` and (
 				  (r.from_kind = 'ask'      and r.from_id in (select id::text from asks      where issue_key = $1))
 				or (r.from_kind = 'comment'  and r.from_id in (select id::text from comments  where issue_key = $1))
 				or (r.from_kind = 'message'  and r.from_id in (select id::text from messages  where issue_key = $1))
 				or (r.from_kind = 'artifact' and r.from_id in (select id::text from artifacts where issue_key = $1))
 			)
 			union
-			select r.to_id, c.depth + 1, 'artifact', a.id::text
+			select `+documentOfTarget+`, c.depth + 1, 'artifact', a.id::text
 			from closure c
 			join artifacts a on a.ref_key = c.ref_key
-			join refs r on r.from_kind = 'artifact' and r.from_id = a.id::text and r.to_kind = 'artifact'
+			join refs r on r.from_kind = 'artifact' and r.from_id = a.id::text and `+documentTarget+`
 			where c.depth < 9
 		)
 		select distinct on (c.ref_key) c.ref_key, c.depth, c.via_kind, c.via_id

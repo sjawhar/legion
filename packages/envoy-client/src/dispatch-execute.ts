@@ -22,6 +22,7 @@ import type {
   EditPrecondition,
   Event,
   GraphEdge,
+  GraphNode,
   Issue,
   IssueClaim,
   IssueComponents,
@@ -48,8 +49,10 @@ import {
   claimHolds,
   DEFAULT_ISSUE_PAGE_LIMIT,
   DISPATCH_BODY_MAX,
+  decodeBlockId,
   dispatchToolSchema,
   dispatchToolSpecs,
+  encodeBlockId,
   itemFromSearch,
   overCapMessage,
   PROJECT_KEY_PATTERN,
@@ -1006,8 +1009,9 @@ function readWithoutEvents(args: ToolArguments): string | undefined {
 /**
  * The dispatch:// form of a dashboard URL on the configured server, or undefined when the
  * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, log and activity
- * pages, project document pages (with their ?ask= / ?comment= deep links), and the page of an
- * upload an agent's conversation owns (`/agents/<session id>/artifacts/<slug>`).
+ * pages, project document pages (with their ?ask= / ?comment= deep links), a live document
+ * page's `#b-<block id>`, which names that block, and the page of an upload an agent's
+ * conversation owns (`/agents/<session id>/artifacts/<slug>`).
  */
 export function dispatchRefFromUrl(value: string, serverUrl: string): string | undefined {
   let url: URL;
@@ -1024,11 +1028,18 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
     const value = url.searchParams.get(name);
     return value !== null && /^[1-9][0-9]*$/.test(value) ? `@v${value}` : "";
   };
+  // The block a live document page lands on (`#b-<block id>`), written as `encodeBlockId` writes
+  // it. A version page names the document whatever its fragment: a version's stored markdown
+  // carries no block ids to land on, and a pin is written only as a dispatch:// reference.
+  const blockOf = (versionName: string): string => {
+    const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
+    return id === undefined || url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
+  };
   const issuePage = url.pathname.match(
     /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
   );
   if (issuePage) {
-    const [, key, page, artifact, ask, comment, message] = issuePage;
+    const [, key = "", page, artifact, ask, comment, message] = issuePage;
     const version = versionOf("v");
     // A document page carrying `?comment=`/`?ask=` names that item, not the document: that is
     // the href `dispatch_search` returns for an anchored comment or ask on an issue's document.
@@ -1038,11 +1049,13 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
       if (item !== undefined) return `dispatch://${key}/${item.kind}/${item.id}`;
     }
     if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
+    if (page === "spec") return `dispatch://${key}/spec${blockOf("v")}`;
     // `/conversation` keeps resolving to the reference it always had, `KEY/log`; `/activity`,
     // the tab that now holds the event list, is spelled as its own path is.
     if (page !== undefined) return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
     if (artifact !== undefined) {
-      return `dispatch://${key}/artifact/${decodeURIComponent(artifact)}${version}`;
+      const slug = decodeURIComponent(artifact);
+      return `dispatch://${key}/artifact/${slug}${version}${blockOf("v")}`;
     }
     if (ask !== undefined) return `dispatch://${key}/ask/${ask}`;
     if (comment !== undefined) return `dispatch://${key}/comment/${comment}`;
@@ -1063,12 +1076,13 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
   );
   if (!documentPage) return undefined;
   const [, project, slug] = documentPage;
-  const document = `dispatch://${project}/artifact/${decodeURIComponent(slug ?? "")}`;
+  const decodedSlug = decodeURIComponent(slug ?? "");
+  const document = `dispatch://${project}/artifact/${decodedSlug}`;
   const item = itemFromSearch(url.search);
   if (item === null) return undefined;
   // An ask or comment has no version; the page's version selector names the document's.
   return item === undefined
-    ? `${document}${versionOf("version")}`
+    ? `${document}${versionOf("version")}${blockOf("version")}`
     : `${document}/${item.kind}/${item.id}`;
 }
 
@@ -1076,18 +1090,23 @@ const refGrammarProblem =
   "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
   "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
   "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " +
-  "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " +
+  "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " +
+  "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " +
+  "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " +
+  "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " +
+  "dispatch read), or " +
   "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " +
   "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 
 const ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 
 /**
- * An ask, comment or message link names an item inside its issue or document, and a log or
- * children link names one of its issue's lists. `dispatch read` reads each of them and
- * `dispatch ask` cites the link in its question; the other tools that take `ref` (comment,
- * suggest, doc-edit, doc-read) take it as the owner they act on, so they would act on the owner
- * and drop the item without a word. Such a ref is refused, naming what acts on it.
+ * An ask, comment or message link names an item inside its issue or document, a log or
+ * children link names one of its issue's lists, and a block link names one block of a document.
+ * `dispatch read` reads each of them and `dispatch ask` cites the link in its question; the
+ * other tools that take `ref` (comment, suggest, doc-edit, doc-read) take it as the owner they
+ * act on, so they would act on the owner and drop the item without a word. Such a ref is
+ * refused, naming what acts on it.
  */
 function innerRefProblem(
   tool: string,
@@ -1099,18 +1118,26 @@ function innerRefProblem(
     ref.kind !== "comment" &&
     ref.kind !== "message" &&
     ref.kind !== "log" &&
-    ref.kind !== "children"
+    ref.kind !== "children" &&
+    ref.kind !== "block"
   ) {
     return undefined;
   }
   if (tool === "dispatch_read" || tool === "dispatch_ask") return undefined;
   const owner = refOwnerName(ref);
   // suggest acts on a document and still requires an artifact, so an issue-owned link's hint
-  // names one; doc-edit takes an issue alone and edits its primary document.
-  const suggestTool = tool === "dispatch_suggest";
+  // names one (a block's, its own document); doc-edit and doc-read take an issue alone and act
+  // on its primary document, so a block's hint names its document for them too. A comment on an
+  // issue takes the issue alone.
+  const documentArgument =
+    ref.kind === "block" && tool !== "dispatch_comment"
+      ? ` and artifact ${ref.id}`
+      : tool === "dispatch_suggest"
+        ? " and artifact <the document's slug>"
+        : "";
   const ownerArguments =
     ref.owner.kind === "issue"
-      ? `issue ${ref.owner.issue}${suggestTool ? " and artifact <the document's slug>" : ""}`
+      ? `issue ${ref.owner.issue}${documentArgument}`
       : `project ${ref.owner.project} and artifact ${ref.artifact}`;
   const fix =
     tool === "dispatch_comment" && ref.kind === "ask"
@@ -1125,7 +1152,9 @@ function innerRefProblem(
         ? "the event log"
         : ref.kind === "children"
           ? "the children"
-          : `a ${ref.kind}`;
+          : ref.kind === "block"
+            ? `block ${ref.block}`
+            : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
 }
 
@@ -1177,13 +1206,14 @@ function ownerConflictProblems(
   // the ref may name any other issue or document.
   const ref =
     tool === "dispatch_ask" && (issue !== undefined || project !== undefined) ? null : parsedRef;
-  // The document a ref names: an issue's spec or artifact, or the project document it is on.
+  // The document a ref names: an issue's spec or artifact, the one a block is in, or the project
+  // document it is on.
   const refDocument =
     ref === null
       ? undefined
       : ref.owner.kind === "project"
         ? (ref.artifact ?? ref.id)
-        : ref.kind === "spec" || ref.kind === "artifact"
+        : ref.kind === "spec" || ref.kind === "artifact" || ref.kind === "block"
           ? ref.id
           : undefined;
   if (ref !== null && refText !== undefined) {
@@ -1253,10 +1283,11 @@ function ownerConflictProblems(
     }
   }
   // A comment or an ask on an issue lands on one of its documents only when it quotes it; the
-  // document a call names without a quote would be dropped.
+  // document a call names without a quote would be dropped. A block ref is refused whole
+  // (`innerRefProblem`), so its document is not named again here.
   const projectOwned = project !== undefined || ref?.owner.kind === "project";
   if (tool === "dispatch_comment" && !projectOwned && optionalString(args, "quote") === undefined) {
-    const document = artifact ?? refDocument;
+    const document = artifact ?? (ref?.kind === "block" ? undefined : refDocument);
     if (document !== undefined) {
       problems.push(
         `${command} posts on the issue unless quote anchors it in a document, so document ${document} would be dropped: add --quote to comment on a passage of it, or name only the issue`
@@ -1889,13 +1920,15 @@ function issueSummary(
   ].join("\n");
 }
 
-/** One graph edge as a read shows it: edge type, the other node and its address, excerpt, when. */
+/** One graph edge as a read shows it: edge type, the other node and its address, excerpt, when,
+ *  and on a document's read the document's block at the queried end. */
 function referenceLines(edges: readonly GraphEdge[] | string): string[] {
   if (typeof edges === "string") return [`- ${edges}`];
   if (edges.length === 0) return ["- none"];
   return edges.map((edge) => {
     const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} · `;
-    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})`;
+    const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
+    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})${block}`;
   });
 }
 
@@ -1940,7 +1973,43 @@ async function graphSections(client: DispatchClient, ref: string): Promise<strin
     graphEdges(client, { to: ref }),
     graphEdges(client, { from: ref }),
   ]);
+  return graphSectionLines(incoming, outgoing);
+}
+
+function graphSectionLines(
+  incoming: readonly GraphEdge[] | string,
+  outgoing: readonly GraphEdge[] | string
+): string[] {
   return ["Referenced by:", ...referenceLines(incoming), "Links:", ...referenceLines(outgoing)];
+}
+
+/**
+ * A block read's head, from the node its reference names: the block, its document, the version
+ * its text last changed in and that text (a block no current version holds has neither), then
+ * for a ref pinned to a version how the block stands against it and its text at that version.
+ */
+function blockLines(node: GraphNode, ref: ParsedDispatchRef): string[] {
+  const head = [
+    `Block: ${node.block_id ?? ref.block}`,
+    `Document: ${node.document ?? ref.document}`,
+    ...(node.changed_version === undefined ? [] : [`Changed in version: ${node.changed_version}`]),
+    ...(node.text === undefined ? [] : ["Text:", node.text]),
+  ];
+  const { pin } = node;
+  if (pin === undefined) return head;
+  const state =
+    pin.state === "unchanged"
+      ? `Unchanged since version ${pin.version}.`
+      : pin.state === "changed"
+        ? `Changed since version ${pin.version}; last changed in version ${node.changed_version}.`
+        : `Removed in version ${pin.removed_version}.`;
+  return [
+    ...head,
+    `Pinned to version: ${pin.version}`,
+    state,
+    `Text at version ${pin.version}:`,
+    pin.text,
+  ];
 }
 
 function logSummary(issue: IssueDetails, events: readonly Event[]): string {
@@ -4034,6 +4103,34 @@ export async function executeDispatchTool(
           text: messageSummary(messageRead, [...pictures.lines, ...graph]),
           details: { issue: messageRead.message.issue_key },
           ...showImages(pictures),
+        };
+      }
+      if (ownerArguments.ref?.kind === "block") {
+        const ref = ownerArguments.ref;
+        const blockRef = stringArg(args, "ref");
+        // The read names the block's node, so a 404 is the block's own answer: an unpinned ref
+        // names a block no current version holds, and a pinned one's answer says which of its
+        // version, that version's record or the block the server could not find.
+        const [incoming, outgoing] = await Promise.all([
+          client.getReferences({ to: blockRef }).catch((error: unknown) => {
+            if (ref.pin === undefined && dispatchAnswered(error, 404)) {
+              throw new Error(`No block ${ref.block} in ${ref.document}.`);
+            }
+            throw error;
+          }),
+          graphEdges(client, { from: blockRef }),
+        ]);
+        return {
+          text: [
+            ...blockLines(incoming.node, ref),
+            ...graphSectionLines(incoming.edges, outgoing),
+          ].join("\n"),
+          details: {
+            ...(ref.owner.kind === "project"
+              ? { project: ref.owner.project }
+              : { issue: ref.owner.issue }),
+            block: incoming.node.block_id ?? ref.block,
+          },
         };
       }
       // A document's summary. An issue's document reads as a project's does, with the issue it

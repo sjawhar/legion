@@ -18,28 +18,37 @@ type Execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// MentionExcerpts is, for each target markdown mentions, the block holding its first mention that
-// lies inside a block - blocks index markdown by byte, in document order - as the references route
-// shows it: the block's id and its markdown cut to BlockExcerptRunes. A target none of whose
-// mentions lies inside a block has none.
-func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL string) map[Target]model.GraphExcerpt {
+// MentionExcerpts is, for each target the mentions located in markdown name, the innermost of
+// blocks holding its first mention that lies inside a block - the block with the tightest byte
+// range - as the references route shows it: the block's id and its markdown cut to
+// BlockExcerptRunes. A target none of whose mentions lies inside a block has none. The block is
+// any of blocks, not only a graph node: IndexBlocks makes no node of a block whose id is past
+// text.MaxBlockIDBytes, empty or unstorable, nor of a later holder of a repeated id
+// (uniqueBlocks), and writes the mention from the innermost node holding it, if any. Such a block
+// still gives the excerpt, so its excerpt_block_id can name a block the graph does not hold.
+// located is text.ExtractAt(markdown, …), the one extraction a version's index reads.
+func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, located []text.Located) map[Target]model.GraphExcerpt {
+	starts := make([]int, len(located))
+	for i, mention := range located {
+		starts[i] = mention.Offset
+	}
+	holders := innermostBlocks(blocks, starts)
 	excerpts := make(map[Target]model.GraphExcerpt)
-	for _, located := range text.ExtractAt(markdown, serverURL) {
-		if located.Kind == "url" {
+	for i, mention := range located {
+		if holders[i] < 0 {
 			continue
 		}
-		target := Target{Kind: located.Kind, ID: ToID(located.Ref)}
+		target, ok := targetOf(mention.Ref)
+		if !ok {
+			continue
+		}
 		if _, found := excerpts[target]; found {
 			continue
 		}
-		for _, block := range blocks {
-			if block.From <= located.Offset && located.Offset < block.To {
-				excerpts[target] = model.GraphExcerpt{
-					BlockID: block.ID,
-					Text:    text.HeadRunes(markdown[block.From:block.To], BlockExcerptRunes),
-				}
-				break
-			}
+		block := blocks[holders[i]]
+		excerpts[target] = model.GraphExcerpt{
+			BlockID: block.ID,
+			Text:    text.HeadRunes(markdown[block.From:block.To], BlockExcerptRunes),
 		}
 	}
 	return excerpts
@@ -57,8 +66,9 @@ func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL st
 // marks its mentions owed only when its transaction recorded no rendering of the tree it wrote,
 // which is an upload whose replacement left the document as it was (ReplaceText returns before
 // applyLive records one). Every other version write cuts its excerpts from the render its
-// markdown came from (recordTreeExcerpts), so IndexDocumentReferences' check that the recorded
-// rendering is the version's markdown never clears. That unchanged upload's markdown is the
+// markdown came from (docs' indexDocument, which indexes the version's references, excerpts and
+// blocks from one extraction), so IndexDocumentReferences' check that the recorded rendering is
+// the version's markdown never clears. That unchanged upload's markdown is the
 // document the reconciliation read, so the excerpt stored under the older number is the one the
 // version would have stored. StoredExcerpts hides an owed row, and the reconciliation's non-null
 // version makes that same excerpt current again.

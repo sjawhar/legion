@@ -175,6 +175,12 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"events",
 		"user_issue_state",
 		"user_agent_state",
+		"document_blocks",
+		"block_refs",
+		"document_block_versions",
+		"document_block_texts",
+		"document_indexed_versions",
+		"block_grammar_owed",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select tablename
@@ -203,6 +209,11 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"ask_followers_ask_id_text",
 		"events_ask_answered_by_user",
 		"comments_ask_replies_by_user",
+		"document_blocks_node_id",
+		"block_refs_to",
+		"block_refs_from_node",
+		"document_block_versions_owed",
+		"block_grammar_owed_enqueued",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname
