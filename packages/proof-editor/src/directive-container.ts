@@ -23,7 +23,9 @@
  *
  * A document reads as it did under the flow construct: `resolveDirectiveContainers` puts back the
  * line endings and container exits the flow construct emitted differently, `lazyContentEnd` ends a
- * block at a lazy line as it did, and a closing fence over an open block quote marks its line lazy.
+ * block at a lazy line as it did and a closed block at the line after its fence, and a closing
+ * fence over an open block quote, or an opener on a line some container did not reach, marks its
+ * line lazy.
  * Two readings differ, both of them micromark's order of work rather than the block's grammar: a
  * document construct cannot open after an unclosed front matter opener, which micromark tries to
  * the end of the document while it opens no container, and a footnote definition inside a block
@@ -129,6 +131,11 @@ interface ParseRecord {
   depth: number;
   /** The depth of the innermost directive container that is open and not closed. */
   open: number;
+  /**
+   * The line on which the continuation of a closed directive container, still on the container
+   * stack, last ran: every container around it went on there. It is 0 once that block exits.
+   */
+  reachedClosed: number;
 }
 
 const parses = new WeakMap<ParseContext, ParseRecord>();
@@ -136,7 +143,7 @@ const parses = new WeakMap<ParseContext, ParseRecord>();
 function parseRecord(context: TokenizeContext): ParseRecord {
   let record = parses.get(context.parser);
   if (record === undefined) {
-    record = { line: 0, depth: 0, open: 0 };
+    record = { line: 0, depth: 0, open: 0, reachedClosed: 0 };
     parses.set(context.parser, record);
   }
   return record;
@@ -175,6 +182,12 @@ const directiveContainer: Construct = {
  * before the last line ending, and `resolveContentExits` puts the exits where a lazy line's go. A
  * blank line cannot be taken lazily, so it is left to micromark, which also keeps this from
  * matching the end of a line on which a directive container just opened.
+ *
+ * A closed directive container stays on the container stack until the next line, whose
+ * continuation fails on it. When every container around it went on there, the line is no lazy
+ * line: the flow construct's block had ended with its fence, so this succeeds without marking it,
+ * and the document tokenizer exits the closed block before it reads the line, as the line after a
+ * block that has ended.
  */
 const lazyContentEnd: Construct = {
   name: "directiveLazyContentEnd",
@@ -201,6 +214,7 @@ function tokenizeLazyContentEnd(
   function start(code: Code): State | undefined {
     const record = parses.get(self.parser);
     if (record === undefined || markdownLineEnding(code)) return nok(code);
+    if (record.reachedClosed === self.now().line) return ok(code);
     if (record.open <= openAround(self)) return nok(code);
     self.parser.lazy[self.now().line] = true;
     return ok(code);
@@ -364,14 +378,17 @@ function resolveContentExits(events: Event[], context: TokenizeContext): void {
         // line after was lazy for it, the flow construct left the last line ending out of its
         // content, so a last line that held nothing else (past the prefixes of the containers
         // around it) was no line of it at all; else its own exit goes before that line ending, where
-        // `subtokenize` moves it.
+        // `subtokenize` moves it. That line was no line of it either when a flow token, such as a
+        // fenced code block that took the line ending before it, ends in it, but an exit before it
+        // would fall inside that token, so the exits go where they go after a line of content.
         gap = contentEnd(events, block, index);
         const lazy = lazyLine && block.contentStarts[nextLine - block.line] === undefined;
         const bare =
           lazy &&
           bareChunk &&
           gap === lastChunk + 1 &&
-          block.contentStarts[chunk.start.line - block.line] === chunk.start.offset;
+          block.contentStarts[chunk.start.line - block.line] === chunk.start.offset &&
+          !flowTokenEndsIn(chunk);
         if (bare)
           gap = own !== undefined ? lastChunk - 1 : contentEnd(events, block, lastChunk - 1);
         if (own !== undefined && (bare || !lazy)) settled.push(exiting);
@@ -464,6 +481,24 @@ function contentEnd(events: Event[], block: DirectiveBlock, from: number): numbe
   return gap;
 }
 
+/**
+ * Whether a flow token that opens before `chunk`, the last chunk of its flow, closes in it.
+ * `subtokenize` gives a chunk the flow's events after the line ending that ends the chunk before
+ * it, so such a token's exit falls in `chunk`, whatever offset it ends at. A directive container
+ * ends where micromark closes the flow, so the last chunk of its content is the last of its flow,
+ * and only that chunk's events and the line ending before it are read.
+ */
+function flowTokenEndsIn(chunk: Token): boolean {
+  const flowEvents = chunk._tokenizer?.events ?? [];
+  for (let index = flowEvents.length - 1; index >= 0; index--) {
+    const [kind, token] = flowEvents[index];
+    if (token.end.offset < chunk.start.offset) return false;
+    if (kind === "exit" && token.start.offset < chunk.start.offset)
+      return token.type !== "lineEnding" && token.type !== "lineEndingBlank";
+  }
+  return false;
+}
+
 const label: Construct = { tokenize: tokenizeLabel, partial: true };
 const attributes: Construct = { tokenize: tokenizeAttributes, partial: true };
 const closingFence: Construct = { tokenize: tokenizeClosingFence, partial: true };
@@ -532,10 +567,36 @@ function tokenizeDirectiveContainerStart(
     };
     if (self.containerState !== undefined) self.containerState.directive = block;
     if (opener !== undefined) opener._directive = block;
+    if (someContainerEnded(self, opener)) self.parser.lazy[block.line] = true;
     // A start that micromark ran inside `effects.check` runs again at once, after any exits.
     parseRecord(self).open = depth;
     return ok(code);
   }
+}
+
+/**
+ * Whether the line a directive container opens on is one where some open container did not go on
+ * and no other container opened first: a lazy line for the flow construct, which opened no
+ * container there. Marked lazy before micromark closes the flow, as it was then, so that the
+ * flow's last fenced code, HTML or indented code block ends before the last line ending rather
+ * than taking it.
+ *
+ * The document tokenizer tries containers on such a line from its check for new containers, and
+ * there leaves `interrupt` unset: where every container went on, it sets it first, or the line goes
+ * to the flow untried. A list item's continuation also unsets it when the line starts a new item
+ * of its list, which ends the item but is no lazy line. So a container entered, or a list item
+ * prefix, after the last line's content means the line is not one: a container opened on it first,
+ * or a list went on with a new item.
+ */
+function someContainerEnded(context: TokenizeContext, opener: Token | undefined): boolean {
+  if (context.interrupt !== undefined) return false;
+  for (let index = context.events.length - 1; index >= 0; index--) {
+    const [kind, token] = context.events[index];
+    if (kind === "exit" && token.type === "chunkFlow") return true;
+    if (kind !== "enter" || token === opener) continue;
+    if (token._container === true || token.type === "listItemPrefix") return false;
+  }
+  return false;
 }
 
 function tokenizeDirectiveContainerContinuation(
@@ -550,7 +611,11 @@ function tokenizeDirectiveContainerContinuation(
   return start;
 
   function start(code: Code): State | undefined {
-    if (state === undefined || block === undefined || block.closed) return nok(code);
+    if (state === undefined || block === undefined) return nok(code);
+    if (block.closed) {
+      parseRecord(self).reachedClosed = self.now().line;
+      return nok(code);
+    }
     recordOpenAround(self, block.depth);
     // Only a line that opens with a colon or a blank can hold a closing fence, and an attempt on
     // every line at every level is what nesting costs.
@@ -636,6 +701,7 @@ function exitDirectiveContainer(this: TokenizeContext, effects: Effects): undefi
   if (block !== undefined) {
     const record = parseRecord(this);
     record.open = Math.min(record.open, block.depth - 1);
+    if (block.closed) record.reachedClosed = 0;
   }
   effects.exit("directiveContainer");
 }
