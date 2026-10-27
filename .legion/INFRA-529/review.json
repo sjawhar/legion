@@ -2,32 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-529",
-  "completed": "2026-10-27T03:10:00Z",
-  "round": 2,
-  "reviewedCodeHead": "65158f49ef623a9dfe0077694f4984ce3dc084a8",
+  "completed": "2026-10-27T04:33:00Z",
+  "round": 3,
+  "reviewedCodeHead": "0d5fff64e7ad941b54c4a297937dda9c21092703",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 2,
-  "ci": "Required set (ruleset): lint, typecheck, test, pr-title; branch protection none. CI head 65158f49ef62 (newest pull_request run); lint, typecheck, test, pr-title, build, changes all queued at 03:08Z. Compare 65158f49ef62...b3378420: handoffsOnly true, 2 files. A REQUEST_CHANGES does not wait on CI.",
-  "threads": "Six round-1 threads, all resolved by the implementer; each answered by the reviewer at 65158f49ef62 as accepted (fix re-run and observed).",
-  "roundOneFixes": "Verified at 65158f49ef62 with the server schema: lone CR draws each line once (31,995-char body -> 24,885 chars, 772 ms, was 44,245,530); the mark-wrapped ask draws ':::ask', 'Heading words', ':::'; the '[x]: mailto:' and '[x]: https://e.x/a:::' tails draw no fence; tests/read-only-directives.test.ts 29 pass.",
-  "thermonuclear": "Both run at 65158f49ef62: deep-review CHANGES (leading U+FEFF shifts every offset), code-quality CHANGES (minor: floor read from a tree rewritten in place; dead guards; AGENTS.md wording). The code-quality reviewer's request to delete tests/read-only-directives.test.ts:185-202 is not taken: that row is the tester's round-1 red test.",
+  "minor": 0,
+  "scope": "Narrowed by the INFRA-138 architect: A1, the byte-order-mark fix, the copy-instead-of-in-place change, the AGENTS.md wording.",
+  "codeVerdict": "Clean. BOM fix verified at 0d5fff64e7ad with the server schema: '\\ufeff:::note\\nbody\\n:::\\n' draws ':::note', 'body', ':::'; '\\ufeffHello **b**\\n\\n:::note\\nbody\\n:::\\n' draws 'Hello b', ':::note', 'body', ':::' with nothing logged. A1 body draws 'Some bold text', ':::note', 'A note with inner words', ':::'. The mark-span example draws each line once. Thermonuclear pair at 0d5fff64e7ad: both APPROVE.",
+  "ci": "Required (ruleset): lint, typecheck, test, pr-title; branch protection none. CI head 0d5fff64e7ad (run 40444276086): lint success, typecheck success, pr-title success, test FAILURE. Compare 0d5fff64e7ad...99d086e5: handoffsOnly true, 2 files. Every failure is in 'Test the Go daemon' (packages internal/admit, internal/api, internal/daemon): 'read a slotted issue ... number of field descriptions must equal number of destinations, got 20 and 31' (306 lines), main's breakage from #2289 (47e85fdd), fixed on main by #2317 (baadccdc, 04:19Z). The run's merge ref predates baadccdc, so a rerun reuses it.",
+  "threads": "Nine threads, all resolved by the implementer; each carries the reviewer's reply (accepted). Round-2 threads PRRT_kwDORFy7ds6wiOiH, PRRT_kwDORFy7ds6wiOiN, PRRT_kwDORFy7ds6wiOiQ answered at 0d5fff64e7ad.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/proof-editor/src/read-only-directives.ts:185",
-      "description": "source is file.toString() raw, but micromark strips a leading U+FEFF before it counts offsets, so every position is one short of its index in source. Reproduced at 65158f49ef62: '\\ufeff:::note\\nbody\\n:::\\n' draws '\\ufeff:::note', 'body' (closing ':::' lost); '\\ufeffHello **b**\\n\\n:::note\\nbody\\n:::\\n' draws 'Hello b', '', 'body' and logs 'RangeError: Empty text nodes are not allowed' (both fence lines lost). Comment and message bodies are stored as sent; the default engine refused these bodies, so the base showed them whole as raw text."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/proof-editor/src/read-only-directives.ts:159",
-      "description": "readOnlyChildren rewrites a non-directive node's children in place, so drawDirective's floor (from node.children, :121-122) walks into paragraphs this file made when the last kept child is a position-less mark span; the result stays right only because the colon-run check rejects the shorter inner fence. Return a copy ({ ...node, children }) instead."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/proof-editor/AGENTS.md:46",
-      "description": "Says the content rule is checked 'the way NodeType.createAndFill checks it'; the code now calls createAndFill. Also dead guards at read-only-directives.ts:74 and :120."
+      "file": "(CI) test",
+      "description": "The required 'test' check is red at code head 0d5fff64e7ad (run 40444276086), only from main's daemon admission breakage, not from this change. The implementer merges main (now at baadccdc, with #2317) and changes nothing else, so CI runs on a merge ref that carries the fix."
     }
   ]
 }
