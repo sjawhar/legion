@@ -4,6 +4,21 @@
 
 ### Added
 
+- `GET /api/v1/dashboard/builds` says which dashboard builds Dispatch serves, to any
+  authenticated caller: `{serving, live}`, `serving` the entry chunk (`/assets/index-*.js`) of the
+  build the answering process serves (`""` when it serves none) and `live` the distinct entry
+  chunks of the builds every live server process serves, sorted. The dashboard's update notice
+  reads it (Changed, below).
+- `DISPATCH_DEV_SIGNIN_SHARED_KEY`, only beside `DISPATCH_DEV_SIGNIN=1` (boot refuses it
+  otherwise), gives every dev-sign-in process set to one value one session-cookie key, so a person
+  signed in on one of them is signed in on the others. The key is HMAC-SHA256 of the value under
+  the fixed label `dispatch dev sign-in`, never the value itself, so a production
+  `DISPATCH_SIGNING_KEY` placed there signs no cookie a production server accepts. Unset, each
+  dev-sign-in process still generates a key of its own. The Dispatch browser suite's two-process
+  mode relies on it: `DISPATCH_E2E_PROCESSES=2` (`bun run e2e:multiprocess` in
+  `packages/dispatch`) runs two servers on one database, serving two builds of the dashboard,
+  behind a round-robin proxy, and runs the `*.multiprocess.e2e.ts` specs in Chromium; CI runs it
+  as the `dispatch-browser-multiprocess` job.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -796,6 +811,45 @@
 
 ### Changed
 
+- Every Dispatch server process now stores its dashboard build's assets in Postgres at boot,
+  before it listens (migration `0122_dashboard_assets`: `dashboard_builds`, `dashboard_assets` and
+  `dashboard_build_assets`), and answers a file under `/assets/` that its own image lacks from
+  there, through a cache of at most 64 MiB its requests share, with one database read per file
+  however many requests ask for it at once. While a rolling update or a rollback runs two builds
+  behind one load balancer, a page of either build is served its chunks by whichever process
+  answers, so a tab no longer gets a failed chunk or a blank page from the process that did not
+  build it. A restart on a build already stored writes no bytes, and each boot then prunes every
+  build no live server process serves that is not among the 20 started most recently. A publish
+  that fails, a build holding a file over 8 MiB among them, refuses the boot, so a rolling update
+  keeps the processes it would have replaced; `bun run check:asset-sizes` in `packages/dispatch`,
+  run in CI after the build, refuses such a build first. A release before `0122` neither reads
+  nor writes the new tables, so it serves beside this one unchanged, its pages' chunks from its
+  own image alone as before, and rolling back past `0122` is an image rollback.
+- **Breaking:** `DISPATCH_ASSET_STORE_BUCKET` and its S3 reader of earlier builds' assets are
+  removed: a Dispatch that still sets the variable refuses to start, naming it and saying that
+  every server process now keeps its build's dashboard assets in Dispatch's database. Unset it
+  before deploying this release.
+- A dashboard tab now recovers from a failed script, module preload or stylesheet of its build,
+  the main stylesheet included, by reloading while fewer than 3 of its recovery reloads fall in
+  the last 5 minutes, where it reloaded once per tab: a tab open across many deployments recovers
+  from each, and a page whose assets fail on every load still stops after three reloads. The
+  inline script in `index.html` and the lazy-chunk recovery keep the reloads' times on one
+  sessionStorage key, `dispatch.chunk-reloads`, and share the budget; the once-only
+  `dispatch.reloaded-for-chunk` key is neither read nor written.
+- The dashboard's "A new version is available" notice now asks `GET /api/v1/dashboard/builds`
+  once, on focus at most once a minute, where it compared `/healthz` and a fresh `/`, and offers
+  itself only when `live` names exactly one build and it is not the tab's own: while a rolling
+  update or a rollback still runs two builds, no tab is told to reload. A `404` from a process
+  older than the route, a `401`, a `5xx` or a network failure offers nothing.
+- After a dropped connection, the dashboard's first reconnect of the workspace event stream, an
+  agent's live stream, the Delivery and Pipeline socket and a document's socket waits a random
+  time under 2 s, so the tabs one restart or roll dropped reconnect, and refresh their reads,
+  spread over two seconds rather than in one burst. Later attempts back off exponentially with
+  equal jitter, half of `min(1 s × 2^n, 30 s)` plus a random share of the other half, where the
+  streams waited that whole delay and the Delivery socket ±25 % of it. Dispatch's restart close
+  (1012) no longer reopens the Delivery socket at once but waits that first spread, and a
+  document's socket that had opened reconnects after the spread too; its first connect is still
+  immediate, and `online` or a tab turning visible still reconnects the event stream at once.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
