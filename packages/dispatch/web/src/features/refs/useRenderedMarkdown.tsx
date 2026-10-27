@@ -9,7 +9,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
-import type { AskBlockHost } from "../doc/typed-block-drawing";
+import { type AskBlockHost, askBlockFacts, askBlockShell } from "../doc/typed-block-drawing";
 import { collectPictureAnchors, DispatchPicture, type PictureAnchor } from "./DispatchPicture";
 import { TextAskCard } from "./markdown-cards";
 import { renderWithEngine, type SoftBreaks } from "./markdown-engine";
@@ -28,18 +28,23 @@ const NO_PICTURES: readonly PictureAnchor[] = [];
 /** The same, for a body with no decision card to mount. */
 const NO_ASK_HOSTS: readonly AskBlockHost[] = [];
 
+/** An `ask` shell a body drew and the host its card mounts into. */
+interface AskShellHost {
+  readonly shell: HTMLElement;
+  readonly host: AskBlockHost;
+}
+
 /**
  * A host for each `ask` shell `paint` drew under `element` (`renderAskBlockShell`), paired in
- * document order with the parsed document's `ask` nodes. A surface that drew no shell for them
- * (`MarkdownPreview` paints one line of inline content) gets none: the shells must match the
- * nodes one for one, every one with both slots, or no card is mounted. Each shell that is not
- * malformed then folds its source option list (`data-dispatch-ask-options="rows"`), since the
- * card's rows render the options; a malformed one keeps the list, as `AskBlockView` does.
+ * document order with the parsed document's `ask` nodes, each with the shell it came from. A
+ * surface that drew no shell for them (`MarkdownPreview` paints one line of inline content) gets
+ * none: the shells must match the nodes one for one, every one with both slots, or no card is
+ * mounted. It writes nothing; the caller folds each shell's source option list.
  */
-function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonly AskBlockHost[] {
+function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonly AskShellHost[] {
   const shells = element.querySelectorAll<HTMLElement>('section[data-proof-block-type="ask"]');
   if (shells.length === 0) {
-    return NO_ASK_HOSTS;
+    return [];
   }
   const nodes: ProseMirrorNode[] = [];
   parsed.descendants((node) => {
@@ -49,24 +54,19 @@ function collectAskHosts(element: HTMLElement, parsed: ProseMirrorNode): readonl
     return !node.isTextblock;
   });
   if (nodes.length !== shells.length) {
-    return NO_ASK_HOSTS;
+    return [];
   }
-  const hosts: AskBlockHost[] = [];
+  const collected: AskShellHost[] = [];
   for (const [index, node] of nodes.entries()) {
     const shell = shells[index];
     const header = shell?.querySelector<HTMLElement>(":scope > [data-dispatch-ask-header]");
     const footer = shell?.querySelector<HTMLElement>(":scope > [data-dispatch-ask-footer]");
     if (header === null || header === undefined || footer === null || footer === undefined) {
-      return NO_ASK_HOSTS;
+      return [];
     }
-    hosts.push({ footer, header, key: index, node });
+    collected.push({ host: { footer, header, key: index, node }, shell });
   }
-  for (const shell of shells) {
-    if (shell.dataset.dispatchAskMalformed !== "true") {
-      shell.dataset.dispatchAskOptions = "rows";
-    }
-  }
-  return hosts;
+  return collected;
 }
 
 /** How a surface fills its element from the parsed document: `MarkdownBody` serializes the whole
@@ -160,7 +160,17 @@ export function useRenderedMarkdown(
       } else {
         paint(element, parsed, engine.serializer);
         if (Card !== undefined) {
-          hosts = collectAskHosts(element, parsed);
+          const collected = collectAskHosts(element, parsed);
+          // A mounted card renders the options as rows, so the shell folds its source option
+          // list where `askBlockShell` says so (not while malformed), as `AskBlockView` does.
+          for (const { host, shell } of collected) {
+            if (askBlockShell(askBlockFacts(host.node)).foldsOptions) {
+              shell.dataset.dispatchAskOptions = "rows";
+            }
+          }
+          if (collected.length > 0) {
+            hosts = collected.map(({ host }) => host);
+          }
         }
       }
       setAskHosts(hosts);

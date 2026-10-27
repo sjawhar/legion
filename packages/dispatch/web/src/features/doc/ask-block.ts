@@ -73,16 +73,18 @@ class AskBlockView implements NodeView {
     this.dom.className = shell.frameClass;
     this.dom.dataset.blockId = facts.blockId;
     this.dom.dataset.dispatchAskBlock = facts.blockId;
-    this.dom.dataset.dispatchAskUrgency = facts.urgency;
-    this.dom.dataset.dispatchAskState = facts.state;
-    if (shell.malformed) {
-      this.dom.dataset.dispatchAskMalformed = "true";
-      delete this.dom.dataset.dispatchAskOptions;
-    } else {
-      delete this.dom.dataset.dispatchAskMalformed;
+    for (const [name, value] of Object.entries(shell.stamps)) {
+      this.dom.setAttribute(name, value);
+    }
+    if (shell.stamps["data-dispatch-ask-malformed"] === undefined) {
+      this.dom.removeAttribute("data-dispatch-ask-malformed");
+    }
+    if (shell.foldsOptions) {
       // The card renders the options as rows; the source list shows while malformed, or while
       // the caret is inside the block (`askBlockEditingPlugin`).
       this.dom.dataset.dispatchAskOptions = "rows";
+    } else {
+      delete this.dom.dataset.dispatchAskOptions;
     }
     this.contentDOM.className = shell.contentClass;
   }

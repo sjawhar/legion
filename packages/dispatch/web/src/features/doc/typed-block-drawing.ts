@@ -186,12 +186,26 @@ export interface AskBlockHost {
   readonly footer: HTMLElement;
 }
 
+/** The attributes every decision shell stamps on its frame, wherever it is drawn: its urgency,
+ * its state, and `data-dispatch-ask-malformed="true"` only while the block is malformed (the key
+ * is absent otherwise). */
+export type AskBlockStamps = {
+  readonly "data-dispatch-ask-urgency": AskUrgency;
+  readonly "data-dispatch-ask-state": string;
+  readonly "data-dispatch-ask-malformed"?: "true";
+};
+
 /** How a decision block's shell presents itself: the frame's classes (the card frame with its
- * urgency accent and tint), the content hole's classes, and whether the block is malformed. */
+ * urgency accent and tint), the content hole's classes, the attributes the frame stamps, and
+ * whether a mounted card folds the source option list. */
 export interface AskBlockShell {
   readonly frameClass: string;
   readonly contentClass: string;
-  readonly malformed: boolean;
+  readonly stamps: AskBlockStamps;
+  /** Whether the frame takes `data-dispatch-ask-options="rows"` where a card is mounted into it:
+   * the card's rows render the options, so the source list folds, except while the block is
+   * malformed, when the list is what the reader fixes. */
+  readonly foldsOptions: boolean;
 }
 
 export function askBlockShell(facts: AskBlockFacts): AskBlockShell {
@@ -200,8 +214,13 @@ export function askBlockShell(facts: AskBlockFacts): AskBlockShell {
     contentClass: malformed
       ? `${textMutedOnSurfaceMuted} [&_li:has(>p:empty)]:hidden [&_li:has(>p>br:only-child)]:hidden`
       : textPrimaryOnSurface,
+    foldsOptions: !malformed,
     frameClass: `proof-typed-block proof-typed-block-ask my-5 rounded-xl border border-l-4 px-4 pt-3 pb-4 shadow-sm ${borderDefault} ${askUrgencyAccent[facts.urgency]} ${askBlockTint[facts.urgency]}`,
-    malformed,
+    stamps: {
+      "data-dispatch-ask-urgency": facts.urgency,
+      "data-dispatch-ask-state": facts.state,
+      ...(malformed ? { "data-dispatch-ask-malformed": "true" } : {}),
+    },
   };
 }
 
@@ -211,26 +230,20 @@ export function askBlockShell(facts: AskBlockFacts): AskBlockShell {
  * message body) both draw this one spec, so the two shells cannot drift apart. The slots hold the
  * app's own card, not document text: `not-prose` keeps the surrounding Typography (`prose`, from
  * the editor's library theme or a body's `markdownClassName`) off everything React renders into
- * them, in every state of the card. Three of the node view's attributes are absent on purpose;
- * `AskBlockView` adds them over this drawing. `data-dispatch-ask-block` marks a live decision
- * under the editor root, and a body rendered inside a document's decision footer (a reply, an
- * answer note) would otherwise add a second decision id there. `data-block-id` is the schema's
- * own wrapper's to add. And `data-dispatch-ask-options` folds the source option list, so it is set
- * only where the body mounts a card whose rows render the options; without it the list stays
- * visible.
+ * them, in every state of the card. The frame carries the shell's `stamps`. Three of the node
+ * view's attributes are absent on purpose; `AskBlockView` adds them over this drawing.
+ * `data-dispatch-ask-block` marks a live decision under the editor root, and a body
+ * rendered inside a document's decision footer (a reply, an answer note) would otherwise add a
+ * second decision id there. `data-block-id` is the schema's own wrapper's to add. And
+ * `data-dispatch-ask-options` folds the source option list, so it is set, as the shell's
+ * `foldsOptions` says, only where a card whose rows render the options is mounted; without it the
+ * list stays visible.
  */
 export function renderAskBlockShell(node: ProseMirrorNode): DOMOutputSpec {
-  const facts = askBlockFacts(node);
-  const shell = askBlockShell(facts);
+  const shell = askBlockShell(askBlockFacts(node));
   return [
     "section",
-    {
-      class: shell.frameClass,
-      "data-proof-block-type": "ask",
-      "data-dispatch-ask-urgency": facts.urgency,
-      "data-dispatch-ask-state": facts.state,
-      ...(shell.malformed ? { "data-dispatch-ask-malformed": "true" } : {}),
-    },
+    { class: shell.frameClass, "data-proof-block-type": "ask", ...shell.stamps },
     ["div", { class: "not-prose", contenteditable: "false", "data-dispatch-ask-header": "" }],
     ["div", { class: shell.contentClass, "data-proof-block-content": "" }, 0],
     ["div", { class: "not-prose", contenteditable: "false", "data-dispatch-ask-footer": "" }],
