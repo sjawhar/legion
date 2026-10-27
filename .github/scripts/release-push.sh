@@ -787,7 +787,7 @@ case "$command" in
     for dir in legion/skills legion/agents; do
       found=false
       for member in "${!regular[@]}"; do
-        if [[ $member == "$dir"/* ]]; then found=true; fi
+        if [[ $member == "$dir"/* ]]; then found=true; break; fi
       done
       if ! "$found"; then
         fail_error "$shown_tar holds no file under $dir/, which every build of the plugin fills"
@@ -797,11 +797,11 @@ case "$command" in
     rm -rf packages/claude-envoy/dist packages/claude-envoy/legion
     tar -xf "$tar_file" -C packages/claude-envoy --no-same-owner || fail_error "extracting $shown_tar into packages/claude-envoy failed"
     git add -A -- packages/claude-envoy/dist packages/claude-envoy/legion
-    if git diff --cached --quiet; then
+    staged=$(git diff --cached --name-only) || fail_error "reading the staged paths failed"
+    if [ -z "$staged" ]; then
       echo "::notice title=Nothing to push::main's packages/claude-envoy/dist and packages/claude-envoy/legion at $base already match this build" >&2
       exit 0
     fi
-    staged=$(git diff --cached --name-only) || fail_error "reading the staged paths failed"
     while IFS= read -r path; do
       case $path in
         packages/claude-envoy/dist/* | packages/claude-envoy/legion/*) ;;

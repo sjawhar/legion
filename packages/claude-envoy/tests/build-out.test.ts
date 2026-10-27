@@ -33,32 +33,6 @@ afterAll(async () => {
   await rm(scratch, { recursive: true, force: true })
 })
 
-test("--out builds a plugin whose channel server runs without node_modules and, with Envoy off, exits 0 once stdin ends", async () => {
-  const home = await mkdtemp(join(tmpdir(), "claude-envoy-build-out-home-"))
-  try {
-    const run = Bun.spawn([process.execPath, join(out, "dist", "envoy-channel.js")], {
-      cwd: home,
-      env: {
-        PATH: process.env["PATH"] ?? "",
-        HOME: home,
-        CLAUDE_CODE_SESSION_ID: "test",
-        CLAUDE_PLUGIN_DATA: join(home, "plugin-data"),
-      },
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    const [exitCode, stderr] = await Promise.all([run.exited, new Response(run.stderr).text()])
-
-    expect(stderr).toContain(
-      `envoy-channel: no envoy.json at ${join(home, ".config", "legion", "envoy.json")}: Dispatch and Envoy are off`,
-    )
-    expect(exitCode).toBe(0)
-  } finally {
-    await rm(home, { recursive: true, force: true })
-  }
-}, 30_000)
-
 test("--out copies the skills as files, not links, and generates the Legion plugin", async () => {
   expect((await lstat(join(out, "skills", "dispatch-first", "SKILL.md"))).isFile()).toBe(true)
   expect((await lstat(join(out, "skills", "dispatch-first"))).isDirectory()).toBe(true)

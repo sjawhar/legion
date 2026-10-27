@@ -289,10 +289,7 @@ async function resolvedPath(path: string): Promise<string> {
 async function outRefusal(out: string): Promise<string | null> {
   const [target, root] = await Promise.all([resolvedPath(out), realpath(repoRoot)])
   const fromRoot = relative(root, target)
-  if (
-    fromRoot === "" ||
-    (fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot))
-  ) {
+  if (fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot)) {
     return `${out} is inside the repository (${root}); a pull request never commits a build`
   }
   try {
