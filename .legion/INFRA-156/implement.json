@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-156",
+  "completed": "2026-10-27T10:14:00Z",
+  "proof": [
+    {
+      "criterion": "A3 (server): a test block type declaring a block-pointer attribute accepts a valid block reference and refuses a malformed one",
+      "surface": "the real Dispatch server process (packages/dispatch/e2e/run-server.sh, go build of the working copy) on a local Postgres 17 with pgvector and real migrations, built with a scratch blocks.json adding requirement and claim{serves: block[], targets [requirement]}; driven over HTTP",
+      "command": "bash $TMPDIR/infra156/a3-e2e.sh (script posted on the pull request), steps 2 and 4",
+      "observed": "upload of checks.md holding :::claim{#c1 serves=\"dispatch://CORE-1/spec#b-r1\"} -> 201; serves=\"dispatch://CORE-1/spec#x\", \"...#b-r%311\" (over-encoded), \"dispatch://CORE-1/artifact/spec#b-r1\" (non-canonical spec spelling), a doubled space and a leading space -> each 400 INVALID_MARKDOWN naming typed block \"claim\" attribute \"serves\" and the bad value",
+      "headSha": "3fc86bea41acc3d8234ac413a2d580ff121b9569",
+      "negativeControl": "the malformed values above, each refused 400 INVALID_MARKDOWN with no version written"
+    },
+    {
+      "criterion": "A3 (server): a block of a type the attribute does not allow is refused",
+      "surface": "same real server process over HTTP (upload route and POST /api/v1/artifacts/{id}/edits)",
+      "command": "bash $TMPDIR/infra156/a3-e2e.sh, step 4",
+      "observed": "serves naming the spec's paragraph -> 400 INVALID_MARKDOWN 'block pointer refused: typed block \"claim\" #c1 attribute \"serves\" points at dispatch://CORE-1/spec#b-<paragraph id>, a \"paragraph\" block; it points only at requirement'; naming callout k1 -> 400 INVALID_MARKDOWN naming \"callout\"; an edit op inserting a claim pointing at k1 -> 400 INVALID_OP field \"attributes\" with the same message",
+      "headSha": "3fc86bea41acc3d8234ac413a2d580ff121b9569",
+      "negativeControl": "the same pointer at requirement r1 -> 201 (the allowed type is accepted)"
+    },
+    {
+      "criterion": "A3: a saved block of that type makes a link named by the attribute",
+      "surface": "same real server process, read over HTTP and with the real dispatch CLI (bun packages/envoy-client/bin/dispatch.ts read)",
+      "command": "bash $TMPDIR/infra156/a3-e2e.sh, step 3",
+      "observed": "dispatch read --ref dispatch://CORE-1/spec#b-r1 prints 'Referenced by: - serves block dispatch://CORE-1/artifact/checks-md#b-c1'; GET /api/v1/references?to=...#b-r1&kind=serves -> [{kind: serves, node: dispatch://CORE-1/artifact/checks-md#b-c1}]; &kind=mentions -> []; GET /api/v1/block-links?from=checks.md&to=spec -> [{kind: serves, from: c1, to: r1}]",
+      "headSha": "3fc86bea41acc3d8234ac413a2d580ff121b9569",
+      "negativeControl": "?kind=nope -> 400 INVALID_KIND naming the structural kinds and the declared block[] names (serves); checks.md re-uploaded with serves=\"\" -> 201 and ?to=...#b-r1 lists no edge"
+    },
+    {
+      "criterion": "R3: the attribute's type limit holds continuously on reads (D3 rule 3)",
+      "surface": "same real server process over HTTP",
+      "command": "bash $TMPDIR/infra156/a3-e2e.sh, retype steps",
+      "observed": "edit op retype r1 -> callout on the spec -> 200, then ?to=...#b-r1 lists no edge; retype back to requirement -> 200, the serves edge from c1 is listed again",
+      "headSha": "3fc86bea41acc3d8234ac413a2d580ff121b9569",
+      "negativeControl": "while r1 is a callout the serves edge is absent from ?to= (a target of a disallowed type is not listed)"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/text/refs.go (+ refs_test.go): FormatBlockRef, CanonicalBlockRef",
+    "packages/envoy/internal/dispatch/model/model.go: GraphEdgeKinds (moved from refs.Kinds/KnownKind, removed from refs/graph.go)",
+    "packages/envoy/internal/dispatch/pmdoc/schema.go, schema_testhooks.go, pointers.go (+ pointers_test.go, typed_blocks_test.go), pmdoctest/pmdoctest.go, testdata/block-pointer-values.json: block[] kind, targets, ParseBlockPointerValue, LinkKinds/HasLinkKinds, BlockPointers, CheckBlockPointers/ErrBlockPointer, SetBlockSchemaForTest + pmdoctest.UseBlockSchema",
+    "packages/envoy/internal/dispatch/docs/mutation.go, rebuild.go, edits.go, reference_excerpts.go, block_index.go (+ block_pointer_links_test.go): write refusal in applyLive/SeedText/RebuildDocument; pointer derivation for the block index",
+    "packages/envoy/internal/dispatch/refs/blocks.go, graph.go, refs.go (+ refs_test.go): pointer pairs with to_types, D5 subtraction, block_ref_listed on reads, heldByABlock any kind",
+    "packages/envoy/internal/dispatch/api/references.go, server.go (+ block_pointers_test.go, block_pointer_links_test.go): ?kind= accepts block[] names; ErrBlockPointer -> 400",
+    "packages/envoy/internal/dispatch/store/migrations/0129_block_pointer_links.{up,census}.sql (+ store/graph_edges_test.go)",
+    "packages/contracts/src/dispatch-block-ref.ts (+ test), dispatch-api.ts",
+    "packages/proof-editor/src/block-pointers.ts (new), block-schema.ts, typed-block-commands.ts, lib.ts, tests/block-schema.test.ts, package.json, AGENTS.md; bun.lock; biome.json",
+    "packages/dispatch/web/src/features/doc/ProofDocument.tsx: documentRef",
+    "packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md and AGENTS.md, packages/contracts/AGENTS.md, packages/envoy/CHANGELOG.md, packages/contracts/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "The migration is 0129. The sibling INFRA-367 pull request also starts at 0129 (0129-0133); store's TestMigrationSetIsNumberedOneToN refuses a gap, so whichever merges second renumbers its own migrations (agreed with INFRA-367's implementer on Envoy).",
+    "Same-document pointer targets are resolved from the rendered block offsets of the tree the write leaves (exactly what document_blocks will hold), other documents from document_blocks by node_id, any row of a disallowed type refusing (node_id is not unique).",
+    "The graph_edges block arm and the two direct block_refs reads filter `to_types is null or block_ref_listed(...)`, so mention rows (to_types null) never pay the function call, which Postgres cannot inline.",
+    "on conflict ... do update set to_types (instead of do nothing) requires the pair list to be unique per key: pointer pairs are deduplicated per (block, kind, target) and a block[] name can never be `mentions`."
+  ],
+  "deviations": [
+    "Plan names mapped to the merged INFRA-366 code: indexVersion -> indexRenderedVersion (gains a tree parameter, nil from the reconciliation); refs.ToID -> text.TargetID; parseInput lives in docs/tree.go; migration 0123 -> 0129; the refs.go comment moved to refs/refs.go:182.",
+    "CheckBlockPointers' resolver is func(ref) ([]string, error), not (type, found): node_id is not unique, so every current type is checked, and the database lookup returns its error.",
+    "UseBlockSchemaForTest(t, schema) became pmdoc.SetBlockSchemaForTest (no testing import in the server) plus pmdoctest.UseBlockSchema(t, schema), following the docs/docstest and store/storetest pattern (simplify pass).",
+    "Task 4 step 1 (contracts table) was built with Task 1, since Task 1's corpus test reads the generated Go copy."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "The plan named no test for RebuildDocument's refusal of supplied markdown; TestARebuildFromMarkdownRefusesABlockPointerToADisallowedType (api) was added, and fails with the check disabled (status 200 where 400 is wanted)."
+  ]
+}
