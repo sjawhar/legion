@@ -2,47 +2,53 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-521",
-  "completed": "2026-10-27T06:31:00Z",
-  "round": 2,
-  "headSha": "2cd0e10371bf1669d84617e671347a581a156221",
-  "branchHead": "4cbd4a8d7a5f74bcb347197f8110397f887d86ef (adds only .legion/INFRA-521/implement.json over 2cd0e103)",
+  "completed": "2026-10-27T06:35:56Z",
+  "round": 3,
+  "headSha": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1",
+  "branchHead": "08660e74f00eeee32657985cb3f76960f59d7481 (adds only .legion/INFRA-521/implement.json over 0fc4e40a)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its round-2 --list check against table v2 (my cmp.ts/keep.ts over --list --reporter=json: iphone 223 = the 223 keep rows of dispatch://INFRA-521/artifact/iphone-selection-md v2, 0 extra, 0 missing; every other project's set unchanged from base) and drove its changed tests in the pod: the whole iphone project (223 passed, issue.e2e.ts:697 among them) and issue.e2e.ts:697, the whole margin-thread-reply.e2e.ts (:216 included), agents-search.e2e.ts and inbox.e2e.ts:355 under chromium (12 passed). Its runtime claims hold; the failure below is in the rule text it added."
+    "how": "Applied the round-3 rule text to every test at 0fc4e40a with my own syntax-tree checker ($TMPDIR/infra521-test/rule3.ts), not the implementer's viewport-scan scripts: 0 mismatches with the tags. Its --list claim (iphone 223 = table v2) is the one I re-ran at 2cd0e103; jj diff --from 2cd0e103 --to 0fc4e40a touches only packages/dispatch/AGENTS.md and .legion/, so the specs and config are byte-identical."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "2. the selection is something a future test author can follow (review round 1: the documented rule must give the selection the PR made)",
-      "evidence": "packages/dispatch/AGENTS.md:1314-1319 (round 2's precondition) says a test 'stays untagged, whatever its title says, when it ... sets a desktop viewport for every project before it checks anything'. e2e/issue.e2e.ts:1226 'the details rail fades its trailing edge only while it has somewhere to scroll @phone' (table v2 keep row issue.e2e.ts:1238, R3/R5/R6) matches that clause as written: :1229 test.skip(testInfo.project.name !== \"iphone\"), then :1241 page.setViewportSize({ height: 900, width: 1920 }) unconditionally, then expect(rail).toBeVisible() and the overflow/mask checks at 1920, and only then 390. So an author who applies the rule untags it, and it then runs nowhere: in a scratch copy of 2cd0e103 with ' @phone' removed from its title, `bunx playwright test --config e2e/playwright.config.ts --list -g \"the details rail fades\"` lists '[chromium] › issue.e2e.ts:1226:1 › …' and 'Total: 1 test in 1 file', no [iphone] row, and its own skip at :1229 stops it under chromium. R5 ('runs only on the phone') tags it, but the precondition is read first and says the R rules do not apply. My scan (bun $TMPDIR/infra521-test/precond.ts over the head e2e tree, tagged tests with a non-chromium skip or a first setViewportSize of 768 px or wider, each hit read by hand) finds this the only tagged test the precondition reaches as written: every other hit sets the desktop viewport only under `project.name === \"chromium\"` or `!isPhone` (R1), or sets a phone width first. No red test is possible: the defect is in AGENTS.md prose, and a test that reads that text is a source-text test, which the repository's test rules forbid. Fix belongs to the implementer, e.g. the precondition excludes a test that runs only on `iphone` (R5), or clause two reads 'on chromium and iphone alike'."
-    }
-  ],
-  "failed": 1,
-  "checked": [
+      "criterion": "2. the selection is something a future test author can follow: the documented rule gives the selection (round-2 tester failure on issue.e2e.ts:1226)",
+      "surface": "packages/dispatch/AGENTS.md \"Phone acceptance\" (lines 1314-1329 at 0fc4e40a) applied to the specs in packages/dispatch/e2e",
+      "command": "git archive 0fc4e40a721c packages/dispatch/e2e | tar -x -C $TMPDIR/infra521-test/r3 && bun $TMPDIR/infra521-test/rule3.ts r3/packages/dispatch/e2e (per test: skips all but chromium/webkit-iphone -> untag; skips all but iphone -> tag; a desktop width (>= 768) set by an unconditional setViewportSize before the first expect, with no width < 768 in a setViewportSize or viewport tuple anywhere -> untag; compared with the test's tag or its describe's)",
+      "observed": "663 test calls; the desktop-width exception reaches 27, all untagged (keyboard-issue.e2e.ts x10, keyboard-palette.e2e.ts x5 including :1030, board.e2e.ts x3, layout.e2e.ts x2, keyboard.e2e.ts x2, margin-composer-hold.e2e.ts x2, margin-thread-reply.e2e.ts:216, references.e2e.ts:174, ask-blocks.e2e.ts:381); every test that skips all but iphone is tagged, issue.e2e.ts:1226 (1920 then 390) among them. The checker's one MISMATCH line, shell.e2e.ts:492, is a false positive: its `const compact = testInfo.project.name !== \"chromium\"` (shell.e2e.ts:498) is a layout switch, not a skip, and R1 tags it.",
+      "headSha": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1",
+      "negativeControl": "Same checker over a scratch copy with ' @phone' removed from issue.e2e.ts:1226 and added to keyboard-issue.e2e.ts:46 (1280 for every project, never a phone width): it prints 'MISMATCH issue.e2e.ts:1226 tagged=false rule=tag (skips all but iphone)' and 'MISMATCH keyboard-issue.e2e.ts:46 tagged=true rule=untag (desktop width for every project, never phone)'."
+    },
     {
       "criterion": "1. iphone runs every test that takes a phone-only path; kept phone tests pass under iphone",
       "surface": "Real browser in an issue pod (harness /legion/scratch/harness, lane tester; nothing else running)",
-      "command": "cd packages/dispatch && LANE=tester source /legion/scratch/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts --project iphone --reporter=list (log $TMPDIR/infra521-test/r2-iphone.log)",
-      "observed": "223 passed (21.2m), 0 skipped, 0 failed, exit 0; '[iphone] › e2e/issue.e2e.ts:697:1 › issue header keeps every control in a shared row on a phone … @phone (4.5s)' passed",
-      "headSha": "2cd0e10371bf1669d84617e671347a581a156221"
+      "command": "cd packages/dispatch && LANE=tester source /legion/scratch/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts --project iphone --reporter=list (log $TMPDIR/infra521-test/r2-iphone.log), run at 2cd0e103, whose specs and config equal 0fc4e40a's (jj diff --from 2cd0e103 --to 0fc4e40a: packages/dispatch/AGENTS.md and .legion/ only)",
+      "observed": "223 passed (21.2m), 0 skipped, 0 failed, exit 0",
+      "headSha": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1",
+      "negativeControl": "A scratch copy with ' @phone' removed from issue.e2e.ts:1226: --list -g \"the details rail fades\" lists it under [chromium] only, so the grep is what selects it for iphone."
     },
     {
-      "criterion": "round-2 code changes break nothing on chromium",
-      "surface": "Real browser in an issue pod (same harness)",
-      "command": "bunx playwright test --config e2e/playwright.config.ts --project chromium issue.e2e.ts:697 margin-thread-reply.e2e.ts agents-search.e2e.ts inbox.e2e.ts:355 (log $TMPDIR/infra521-test/r2-chromium.log)",
-      "observed": "12 passed (56.7s): agents-search.e2e.ts:61/119/171, inbox.e2e.ts:355, issue.e2e.ts:697, margin-thread-reply.e2e.ts:71/100/138/175/216/251/297",
-      "headSha": "2cd0e10371bf1669d84617e671347a581a156221"
+      "criterion": "1/2. the selection drops only tests with no phone-only path, and changes no other project",
+      "surface": "Playwright CLI --list --reporter=json at base 1357b95c and at 2cd0e103 (specs and config identical to 0fc4e40a)",
+      "command": "bun $TMPDIR/infra521-test/cmp.ts base-list.json r2-list.json r2-sets.json; bun keep.ts selection-v2.md r2-sets.json; chromium run: bunx playwright test --config e2e/playwright.config.ts --project chromium issue.e2e.ts:697 margin-thread-reply.e2e.ts agents-search.e2e.ts inbox.e2e.ts:355",
+      "observed": "chromium 786/786, webkit 53/53, firefox 53/53, webkit-iphone 11/11, firefox-download-navigation 1/1, chromium-plain-http 4/4, 0 added 0 removed each; iphone 786 -> 223 = the 223 keep rows of dispatch://INFRA-521/artifact/iphone-selection-md v2 (0 extra, 0 missing); the round-2 code changes under chromium: 12 passed",
+      "headSha": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1",
+      "negativeControl": "' @phones on iphone phone.e2e.ts x@phone' appended to an untagged title leaves iphone's list count unchanged (round 1); ' @phone' removed from a tagged test drops it by one."
     },
     {
-      "criterion": "selection and other projects",
-      "surface": "Playwright CLI --list --reporter=json at base 1357b95c and head",
-      "command": "bun $TMPDIR/infra521-test/cmp.ts base-list.json r2-list.json r2-sets.json; bun keep.ts selection-v2.md r2-sets.json",
-      "observed": "chromium 786/786, webkit 53/53, firefox 53/53, webkit-iphone 11/11, firefox-download-navigation 1/1, chromium-plain-http 4/4, each 0 added 0 removed; iphone 786 -> 223, 0 added; head iphone == table v2's 223 keep rows (0 extra, 0 missing); 223 chromium rows tagged, none untagged under iphone. Untagged-test scans (scan.ts, scan2.ts, r6.ts) at head: no new hit beyond round 1's, each read; r6.ts's title/comment hits are tests that skip all but chromium or webkit-iphone, narrow from a desktop start (mention-composer.e2e.ts:443), or comments saying the phone is covered elsewhere (deep-links.e2e.ts:788, margin.e2e.ts:175, held-sends.e2e.ts:101).",
-      "headSha": "2cd0e10371bf1669d84617e671347a581a156221"
+      "criterion": "3. browser step time before and after; phone tests still pass under iphone",
+      "surface": "GitHub Actions, Legion Envoy and Contracts, job dispatch",
+      "command": "gh api repos/sjawhar/legion/actions/runs/<id>/attempts/1/jobs; gh run view 40441476622 --job 121995880276 --log",
+      "observed": "This PR's one dispatch run (40441476622 at 357138e7): browser step 35.8 min, [iphone] 222 passed, every line @phone; base median 45.3 min over the 10 runs (re-read by API in round 1). The after median is the production check's (spec v5).",
+      "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+      "negativeControl": "Base run 40400116211's dispatch job, read with the same count: iphone 654 passed + 132 skipped, so the 222 at head comes from the grep."
     }
   ],
   "ci": {
-    "readAt": "2026-10-27T06:30Z",
-    "head4cbd4a8d": "Tests 40458830255 pending, Legion Envoy and Contracts 40458830269 queued, Docs 40458830270 queued, PR Title queued.",
-    "head357138e7Reopen": "Tests 40452900509 failed in test only (lint and typecheck green): the Go daemon's 'number of field descriptions must equal number of destinations, got 20 and 31'. Its checkout was 'Merge 357138e7 into a286ebe480ae', an older main whose own test check is red; main at 448a4100 has Tests 40451059126 green, so the run at 4cbd4a8d merges onto a main without that failure. Superseded by the run at 4cbd4a8d."
+    "readAt": "2026-10-27T06:35Z",
+    "head08660e74": "Tests 40461815373, Legion Envoy and Contracts 40461815372, Docs 40461815408 and PR Title 40461850596 queued; read as queued, not waited on.",
+    "head4cbd4a8d": "its runs were cancelled when 08660e74 was pushed."
   }
 }
