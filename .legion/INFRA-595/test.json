@@ -2,54 +2,54 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-595",
-  "completed": "2026-10-27T07:01:40Z",
-  "round": 1,
+  "completed": "2026-10-27T07:30:00Z",
+  "round": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2367",
-  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6435822321",
+  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6436244777",
+  "evidenceRound1": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6435822321",
   "evidenceRound0": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6435228788",
-  "testedHead": "46034eb294162ace30db3912aa7a5c460f105f9c",
+  "testedHead": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I drove the same surface myself at 46034eb2: my own git-archive build of envoy-listener, my own seeder and harness. 30,000 records gave 0.0003 cores idle, against the implementer's 0.0002. A signed check_run settled 5.65 s after the post, against their 5,578 ms. e2e-local PASS. Benchmarks: 0 allocs/op idle and 3 allocs/op per change at both sizes. With the reset branch removed, the new TestARecreatedBucketForgetsTheOldBucketsRecords fails with 'held back 3 records, want 1', which matches the implementer's negative control."
+    "how": "Round 2 changes only summary_helpers_test.go and summary_loop_test.go. diff -rq --exclude='*_test.go' of the git-archive trees of 46034eb2 and b1ce6a9 shows nothing, so the production code is the code I drove in round 1. At b1ce6a9 I built the listener myself and repeated the implementer's surface: 30,000 seeded records idled at 0 ticks in 60 s (the implementer saw 2), and a signed check_run settled in 5.7 s (the implementer saw 5,559 ms). I re-ran their two mutants independently, each failing with the message they report."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
       "criterion": "The summary is recomputed only when an entry changes or falls due (event-driven, due entries in order); no step copies or sorts the whole cache.",
-      "surface": "the real envoy-listener binary built from 46034eb2, on a testnats natsd with 30,000 CI records in envoy_ci_state (1 in 100 waiting), ENVOY_WEBHOOKS=github, ENVOY_CI_DEBOUNCE=5s",
-      "command": "bash $TMPDIR/infra595-test/scenario.sh $TMPDIR/infra595-test/listener-head2 $TMPDIR/infra595-test/out-head2 (throwaway: utime+stime from /proc/<pid>/stat over 60 s, three times: after the seed, after six probe records put into the bucket, after a natsd restart; a NATS subscriber on notifications.github.>)",
-      "observed": "2 / 2 / 3 ticks in 60 s = 0.0003 / 0.0003 / 0.0005 cores; the 300 waiting records settled. With no other change: a fresh claim stale at 883077 settled at 884759 (reclaim at the 883.76 tick, then claim; no earlier reclaim after the claimFresh check left settle); a claim stale at 874052 settled at 875759; a claim of an older generation settled 2 ticks after its put; last_event_at 20 s ahead (due 898025) settled at 898762; a schema-0 record whose grace ended at 881127 reached the held gauge at the 881.76 tick (0 at 881591, 1 at 882646) and was not published",
-      "headSha": "46034eb294162ace30db3912aa7a5c460f105f9c",
-      "negativeControl": "base c3d09eec on the same seed (round 0, same harness and machine): 0.3743 / 0.3640 / 0.3618 cores idle"
+      "surface": "the real envoy-listener binary built from b1ce6a9 on a testnats natsd with 30,000 CI records in envoy_ci_state (1 in 100 waiting), ENVOY_CI_DEBOUNCE=5s",
+      "command": "bash $TMPDIR/infra595-test/smoke.sh $TMPDIR/infra595-test/listener-head3 $TMPDIR/infra595-test/out-smoke-head3 (throwaway: seed, 30 s warm-up, utime+stime from /proc/<pid>/stat over 60 s); the round-1 scenario.sh run at 46034eb2 covers the deadline probes for the same production code",
+      "observed": "0 ticks in 60 s (0.0000 cores); the 300 waiting records settled. At 46034eb2, with identical non-test files: 0.0003 / 0.0003 / 0.0005 cores, and every claim, deadline and grace probe acted at the first tick after its deadline",
+      "headSha": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
+      "negativeControl": "base c3d09eec on the same seed and harness (round 0): 0.3743 / 0.3640 / 0.3618 cores idle"
     },
     {
       "criterion": "Benchmark at 12,000 and 30,000 records: idle near zero, per-change cost independent of size; before and after in the PR.",
       "surface": "internal/cistore BenchmarkSummaryIdle / BenchmarkSummaryChange",
-      "command": "GOWORK=off go test -run '^$' -bench 'BenchmarkSummary(Idle|Change)' -benchmem -count 2 ./internal/cistore/ in a git-archive tree of 46034eb2",
-      "observed": "idle 227-243 ns/op (12,000) and 226-229 ns/op (30,000), 0 B/op, 0 allocs/op; change 1536-1799 ns/op (12,000) and 1357-1414 ns/op (30,000), 280 B/op, 3 allocs/op at both sizes",
-      "headSha": "46034eb294162ace30db3912aa7a5c460f105f9c",
-      "negativeControl": "base c3d09eec (round 0): idle 124-217 ms/op at 12,000 and 338-368 ms/op at 30,000, 494k and 1.36M allocs/op"
+      "command": "GOWORK=off go test -run '^$' -bench 'BenchmarkSummary(Idle|Change)' -benchmem -count 2 ./internal/cistore/ at 46034eb2 (round 1). The bench file and every production file are unchanged in round 2",
+      "observed": "idle 226-243 ns/op and 0 allocs/op at both sizes; change 1357-1799 ns/op, 280 B/op and 3 allocs/op at both sizes",
+      "headSha": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
+      "negativeControl": "base c3d09eec: idle 124-217 ms/op at 12,000 and 338-368 ms/op at 30,000"
     },
     {
       "criterion": "Behaviour visible to callers unchanged; existing cistore tests pass; a test covers an entry falling due with no other change.",
-      "surface": "the real envoy-listener at 46034eb2: the signed GitHub webhook route, two replicas on one NATS, a recreated envoy_ci_state bucket, a natsd restart; packages/envoy/scripts/e2e-local.sh; the new TestARecreatedBucketForgetsTheOldBucketsRecords",
-      "command": "scenario.sh (post_check_run with the right and with a wrong secret; natsd restart); replicas.sh listener-head2 listener-head2 (150 records due in 5 s + 50 with a stale claim, then rmbucket/mkbucket); reset-held.sh listener-head2; E2E_NATS_PORT=14522 E2E_PORT=19320 E2E_SESSION_PORT=19321 bash packages/envoy/scripts/e2e-local.sh; GOWORK=off go test -count=1 -run TestARecreatedBucketForgetsTheOldBucketsRecords ./internal/cistore/ at head and with the 'if reset' branch of summarizer.pass removed",
-      "observed": "check_run: HTTP 200, settled 5.65 s after the post; after the natsd restart, 5.16 s. Two replicas: 200 settlements on 200 distinct subjects, 0 duplicates. Recreated bucket: the old queued record did not settle, a new record settled once, both held gauges read 0. Held gauge across a recreation: 2 -> 0 -> 1. e2e-local PASS with its four pr.42.checks settlements. New test: ok at head; FAIL on the mutant ('summary_loop_test.go:484: the pass over the recreated bucket held back 3 records, want 1, the new bucket's'). CI at 46034eb2 was still queued when read",
-      "headSha": "46034eb294162ace30db3912aa7a5c460f105f9c",
+      "surface": "the real envoy-listener at b1ce6a9: the signed GitHub webhook route and a recreated envoy_ci_state bucket; TestARecreatedBucketForgetsTheOldBucketsRecords",
+      "command": "smoke.sh (post_check_run with the right and with a wrong secret); reset-held.sh listener-head3; GOWORK=off go test -count=10 and CGO_ENABLED=1 go test -race -count=5 -run TestARecreatedBucketForgetsTheOldBucketsRecords ./internal/cistore/; the same test with only the queue reset and then only the held reset removed from summarizer.pass",
+      "observed": "check_run: HTTP 200, pr.42.checks settled once, 5.7 s after the post. Held gauge across a recreation: 2 -> 0 -> 1. The test is ok at -count=10 and -race -count=5. Queue-reset mutant: FAIL 'summary_loop_test.go:487: the pass over the recreated bucket left a deadline queued at 1793089557741, want an empty queue'. Held-reset mutant: FAIL 'summary_loop_test.go:484: … held back 3 records, want 1, the new bucket's'. Round 1, same production code: two replicas 200/200 with 0 duplicates, e2e-local PASS. CI at b1ce6a9 was still queued when read",
+      "headSha": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
       "negativeControl": "the same check_run signed with a wrong secret: HTTP 401 and no settlement"
     },
     {
       "criterion": ".dispatch/architecture/envoy-listener.md says what is now true.",
       "surface": ".dispatch/architecture/envoy-listener.md",
-      "command": "jj diff --from e55604e4f5c4 --to 46034eb29416 --stat (the file is unchanged in round 1); grep -c 'event-driven' .dispatch/architecture/envoy-listener.md",
-      "observed": "1, and the file is unchanged since round 0, where I checked the sentence against loop.go and cistore.go. Round 1 changes no behaviour that the sentence describes",
-      "headSha": "46034eb294162ace30db3912aa7a5c460f105f9c",
+      "command": "jj diff --name-only --from 46034eb29416 --to 94234292cf86 (round 2 touches only two _test.go files and handoffs); grep -c 'event-driven' .dispatch/architecture/envoy-listener.md",
+      "observed": "1. The file and the code it describes are unchanged since round 0, where I checked the sentence against loop.go and cistore.go",
+      "headSha": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
       "negativeControl": "at base c3d09eec the grep prints 0"
     }
   ],
   "observations": [
-    "The round-0 test gap is closed: TestARecreatedBucketForgetsTheOldBucketsRecords kills the mutant that removes the reset branch.",
-    "The one production change in round 1 (settle no longer checks claimFresh) is dead-code removal. settle runs only on records that schedule judged verdictAttempt at the same now. ReclaimSettlement also re-checks freshness against the durable record. On the real binary, the fresh-claim probe was reclaimed only once it went stale."
+    "Both halves of the reset branch now have a test: the queue reset and the held-set reset. The test reads the pass's next deadline and uses a 1 h debounce, so it no longer has the wall-time guard and sleep that the reviewer flagged."
   ]
 }
