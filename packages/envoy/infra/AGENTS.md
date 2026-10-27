@@ -348,6 +348,10 @@ go test ./...
 go test -tags natslive ./core/ ./seed/
 ```
 
+The `envoy-infra-go` job runs only when a file its `envoy_infra_go` filter in that workflow names
+changes, so a test that comes to import a package or read a file outside that list adds it to that
+filter.
+
 The release workflow's `build` job runs vet and the unit tests again before it builds. The required
 `lint` job of `.github/workflows/pr-and-main.yaml` compiles the module's commands for every release
 target. Run those steps from those jobs after changing what they cover.

@@ -598,7 +598,10 @@ in the same collection, and the listing goes once the document is collected (`ke
 instance's replica or none, never its successor's. `TestReadsOfALiveDocumentRunBesideItsPeers` runs
 each of these reads while a websocket peer types, until 50 of its runs have overlapped one of the
 peer's updates, and CI's `envoy-go-race` job runs the `docs` and `api` packages under `-race`, which
-reports a walk of the live tree beside a write; the unit tests' own step runs without it.
+reports a walk of the live tree beside a write; the unit tests' own step runs without it. The race
+job runs only when a file its `envoy_go_race` filter in `.github/workflows/envoy-and-contracts.yaml`
+names changes, so a test that comes to import a package or read a file outside that list adds it
+to that filter.
 
 Writes to one room never meet each other unlocked. A browser's update reaches the room as ygo
 applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`,
@@ -3846,7 +3849,9 @@ on the pod it reaches, and a signalled process failing readiness while it serves
 past the old ten-second shutdown budget. CI's `broker-multiprocess` job runs them —
 `go test -tags multiprocess -count=1 -timeout 20m ./cmd/broker` in `packages/envoy` — in a job of
 its own, since each row waits out tens of seconds and `envoy-go`'s unit step runs under go test's
-default ten-minute package deadline. Every client-facing
+default ten-minute package deadline. The job runs only when a file its `broker_multiprocess` filter
+in `.github/workflows/envoy-and-contracts.yaml` names changes, so a test that comes to import a
+package or read a file outside that list adds it to that filter. Every client-facing
 lane's own test mounts the real broker handlers (`api.Register` with real, Postgres-backed services)
 rather than a hand-rolled fake standing in for broker behavior — `internal/broker/api/api_test.go`,
 `internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devrelay/main_test.go` all wire real
