@@ -327,9 +327,10 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 			Anchor: Judgement{HeadSHA: "a0b1c2", FixAttempts: 1, HeadCounted: "a0b1c2", CheckedHead: "a0b1c2", Failing: []string{"unit"},
 				CheckRuns: []AttemptRun{{Name: "unit", ID: 90}}, Generation: 3, Snapshot: "snapshot-3", Workflows: []RequiredWorkflow{}},
 			Pushes: pushes[:1],
-			Steps: []RunStep{{Head: "b1c2d3"}, {Settlement: &Settlement{Head: "b1c2d3", CheckRuns: []AttemptRun{{Name: "unit", ID: 91}}, Generation: 4,
+			Steps: []RunStep{{Head: "b1c2d3", At: time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)}, {Settlement: &Settlement{Head: "b1c2d3", CheckRuns: []AttemptRun{{Name: "unit", ID: 91}}, Generation: 4,
 				Snapshot: "snapshot-4", Failing: []string{"unit"}, Cancelled: []string{"e2e"}}},
 				{Required: &RequiredRead{Names: []string{}, Workflows: []RequiredWorkflow{}}}, {WorkflowsCleared: true}, {Reopened: true}},
+			Decided: "b1c2d3",
 		},
 		// A base that requires no check reads back as such, never as a set that was not read.
 		Required:  []string{},
