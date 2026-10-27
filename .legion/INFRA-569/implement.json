@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-569",
+  "completed": "2026-10-27T05:10:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2363",
+  "codeHead": "284986e6a9d1d882334752d2c25937c4d153d471",
+  "proof": [
+    {
+      "criterion": "A dispatch search hit for an ask whose answer replaced an earlier one prints the latest answer, who gave it, when, and the options chosen; one with no option chosen says so; an ask closed with no answer says so; an open ask says it is open.",
+      "surface": "the head's dispatch command against a real Dispatch server and Postgres 17 + pgvector: bun run dispatch:local on the issue pod's rootless harness (/legion/harness)",
+      "command": "bash /legion/scratch/tmp/i569/cli-proof.sh (creates issue CORE-9 and four asks with the head's dispatch ask, answers one as alice with [Brass] then replaces it with expected_answer_at by selected [] and a two-line text, answers one with [Clear] and no text, resolves one with dispatch resolve-ask --kind resolved, then dispatch search --query armillary); plus curl GET /api/v1/search?q=armillary",
+      "observed": "Under the changed ask: `  Answered by alice at 2026-10-27T04:41:03.22804663Z · options chosen: none` and `  Answer text: Neither metal after all.` / `    Use the original bronze.`; the at equals the newest answers[].at of GET /api/v1/asks/27b28e87-7b63-4820-ab1c-36dfba6d4f3a; no line holds the first answer's text. `  Answered by alice at … · options chosen: Clear` + `  Answer text: none`; `  Closed with no answer: resolved by session cli-proof at …: The motor stays; decided in the spec.`; `  Open: no answer yet.`. The API hit carries {\"state\":\"answered\",\"answer\":{\"user\":\"alice\",\"selected\":[],\"text\":\"Neither metal after all.\\nUse the original bronze.\",\"at\":\"2026-10-27T04:41:03.22804663Z\"}}. Logs: /legion/scratch/tmp/i569/cli-proof-head.log, api-proof.log.",
+      "headSha": "284986e6a9d1d882334752d2c25937c4d153d471",
+      "negativeControl": "The base commit's (94ab028a) envoy-client and contracts restored in the working copy, same server, SEED=0 bash cli-proof.sh: the same hit lines print and none of the Answered by / Closed with no answer / Open: lines (/legion/scratch/tmp/i569/cli-proof-base.log). Unit case 'an ask hit with no ask' prints `Answer state not reported by this Dispatch; open the link to read the ask.`"
+    },
+    {
+      "criterion": "A test in Dispatch's browser suite shows the search panel marking an answered ask with its answer; it fails at the commit before the change and passes at its head.",
+      "surface": "Dispatch's browser suite (packages/dispatch/e2e, Playwright chromium + iphone projects) against the real Go server, production SPA bundle and Postgres on the pod harness",
+      "command": "( source /legion/harness/env.sh && cd packages/contracts && bun run build && cd ../dispatch && bun run e2e -- search.e2e.ts )",
+      "observed": "20 passed, 6 skipped (the spec's own project skips), including `✓ [chromium] › e2e/search.e2e.ts:169:1 › an ask hit says whether it is answered, and an answered one shows its latest answer, who gave it and the options chosen (6.3s)` and `✓ [iphone] › e2e/search.e2e.ts:328:1 › phone search rows are at least 44px, do not overflow, …` with an answered ask of a 69-word answer in its fixture. Log: /legion/scratch/tmp/i569/e2e-head-final.log",
+      "headSha": "284986e6a9d1d882334752d2c25937c4d153d471",
+      "negativeControl": "packages/dispatch/web, packages/envoy/internal/dispatch and packages/contracts restored from the base commit 94ab028a with the head's search.e2e.ts, `bun run e2e -- search.e2e.ts -g 'an ask hit says whether it is answered'`: `✘ [chromium] … (17.9s)` Expected substring \"Answered\", Received \"Ask resultaskWhich orrery frame do we keep? [{\\\"label\\\": \\\"Brass\\\"}, {\\\"label\\\": \\\"Steel\\\"}] Keep the steel one after\" at search.e2e.ts:218 (/legion/scratch/tmp/i569/e2e-base.log)."
+    },
+    {
+      "criterion": ".dispatch/architecture/<id>.md updated for each component whose code changes.",
+      "surface": "the pull request diff (sjawhar/legion#2363)",
+      "command": "jj diff --stat --from 94ab028a --to 284986e6",
+      "observed": "dispatch-api.md, dispatch-model.md, contracts.md, envoy-client.md, dispatch-web.md and claude-envoy-bridge.md each changed, the longest-prefix owners of every changed code/test file (internal/dispatch/api, internal/dispatch/model, packages/contracts, packages/envoy-client, packages/dispatch, packages/claude-envoy).",
+      "headSha": "284986e6a9d1d882334752d2c25937c4d153d471",
+      "negativeControl": "envoy.md and dispatch-server.md own only this change's CHANGELOG/README edits and are unchanged; dropping any of the six from the diff leaves a changed code file whose owner doc is absent."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/model/model.go",
+    "packages/envoy/internal/dispatch/api/search_ask.go",
+    "packages/envoy/internal/dispatch/api/search.go",
+    "packages/envoy/internal/dispatch/api/search_ask_test.go",
+    "packages/envoy/internal/dispatch/api/search_meaning_test.go",
+    "packages/contracts/src/dispatch-api.ts",
+    "packages/contracts/src/dispatch-tools.ts",
+    "packages/envoy-client/src/actor-text.ts",
+    "packages/envoy-client/src/dispatch-execute.ts",
+    "packages/envoy-client/src/search-answer.ts",
+    "packages/envoy-client/src/__tests__/search-answer.test.ts",
+    "packages/claude-envoy/dist/dispatch.js",
+    "packages/claude-envoy/dist/envoy-channel.js",
+    "packages/claude-envoy/dist/session-hook.js",
+    "packages/dispatch/web/src/api/types.ts",
+    "packages/dispatch/web/src/features/search/SearchPalette.tsx",
+    "packages/dispatch/web/src/features/search/SearchPalette.test.tsx",
+    "packages/dispatch/web/src/features/refs/AgentName.tsx",
+    "packages/dispatch/e2e/search.e2e.ts",
+    ".dispatch/architecture/{dispatch-api,dispatch-model,contracts,envoy-client,dispatch-web,claude-envoy-bridge}.md",
+    "packages/contracts/AGENTS.md",
+    "packages/dispatch/AGENTS.md",
+    "packages/envoy/cmd/dispatch/README.md",
+    "packages/{contracts,envoy,envoy-client,claude-envoy,pi-envoy}/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "A resolved ask's answer survives only in ask.answered events for rows document settlement retracted while answered (constraint 0007 forces answer null on resolved rows); attachAskStates reads them with loadAskAnswersByAsk only when a resolved ask hit is on the page, and the Go test seeds such a row as ask_answer_change_test.go does.",
+    "A changed answer sent with no selected stores selected null; attachAskStates normalises it to [] so the wire never carries null.",
+    "The browser suite reads packages/contracts/dist: rebuild it (bun run build) before every Playwright run, and after any base-restore run, or the run tests a stale contracts build.",
+    "The Go api suite's TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses to run on the pod harness's C-collation database (rank_test.go:317); that is the environment, per docs/solutions/testing/…-LEGION-752.md."
+  ],
+  "deviations": [
+    "The ask state is attached in the search handler (api/search.go `search`) rather than inside runFusedSearchQuery/runMeaningSearch: the write-time suggestions share runFusedSearchQuery but never use Ask (suggestionFromResult drops it), so the plan's placement cost them extra queries and could drop a write's suggestions on a failed read. TookMS still counts the read. The plan's TestSuggestionsSearchCarriesAskStates went with it; dispatch://INFRA-568 calls attachAskStates from its own related-item check (its implementer's Envoy message, 2026-10-27T04:10Z).",
+    "attachAskStates decodes rows through docs.ScanAsk (docs.AskColumns) rather than a hand-written copy of its answer/resolution decoding.",
+    "AskResolutionLine (web/src/features/refs/AgentName.tsx) gained an optional agent=\"static\" prop so the palette names the closer without a link inside a listbox option; existing callers are unchanged."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "dispatch://INFRA-568 adds the same SearchAsk/attachAskStates names on its branch; whichever pull request merges second resolves the overlap in model.go, search_ask.go and search.go."
+  ]
+}
