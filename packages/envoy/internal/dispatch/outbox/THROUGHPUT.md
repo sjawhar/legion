@@ -29,6 +29,40 @@ Treat the numbers as order-of-magnitude figures.
 
 The test requires 25 ev/s. The old design fails it in every case.
 
+## Comment replies to the claimant and the thread (2026-10-27, INFRA-596)
+
+INFRA-596 sends a person's comment to the session that claimed an unrouted issue. It also sends
+a reply to every session in its thread and to every session that wrote the thread's document.
+The outbox reads the claimant in its scan, and reads the thread's sessions for the whole batch in
+one query.
+
+Method: the test has a second load, `comment replies` (`seedCommentReplyBacklog`). It has 200
+events across 20 issues. Half are a person's replies in a comment thread, on 10 claimed issues
+with no route. Each thread is on a passage of the issue's document and holds the person's root
+comment and a reply from the session that wrote the document. The other half are messages on 10
+issues routed to `role:reviewer`, as in the `messages` load.
+
+- Main: `origin/main` at 448a41003 (the outbox package is the same as at the merge base
+  c3d09eec9). Head: 4c3eb5caf. Main ran this head's `throughput_test.go` in an exported copy of
+  its tree.
+- Postgres 17, 2 CPUs. Three runs of each tree, main and head in turn, back to back.
+- Each cell is the range of the three runs, in events per second.
+
+| Load | Tree | 50 ms idle | 50 ms busy | 150 ms idle | 150 ms busy | Destinations per event |
+|---|---|---|---|---|---|---|
+| `messages` | main | 646-741 | 442-562 | 379-424 | 339-402 | 2.5 |
+| `messages` | head | 626-723 | 483-549 | 375-428 | 320-373 | 2.5 |
+| `comment replies` | main | 454-561 | 255-412 | 189-374 | 172-327 | 1.75 (comment 1, message 2.5) |
+| `comment replies` | head | 674-689 | 500-636 | 423-440 | 333-386 | 2.75 (comment 3, message 2.5) |
+
+On main, a comment reply reaches only its issue topic. It does not reach the claimant or the
+document's writer, so main fails the test's count of stream messages (250 of 450). Main passes the
+25 ev/s requirement in every case.
+
+Judgement: the change costs no measurable throughput. The `messages` load is the same within the
+spread of the runs. The `comment replies` load is faster on head, although each reply reaches
+three destinations in place of one.
+
 ## Order and crash safety
 
 | Test | Old design | New design |
