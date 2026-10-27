@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-521",
-  "completed": "2026-10-27T05:03:00Z",
+  "completed": "2026-10-27T06:01:51Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2313",
-  "headSha": "357138e78c6017644331c97328e101b2a291c14a",
+  "headSha": "6d04381cecd504fd575653a6eb415985f02f00fe",
   "proof": [
+    {
+      "criterion": "Review round 1 (PR #2313 review 5662777061): the documented rule gives the selection; iphone runs the 223 kept tests",
+      "surface": "Playwright CLI in packages/dispatch and a real browser in the issue pod (harness /legion/scratch/harness, lane implementer)",
+      "command": "bunx playwright test --config e2e/playwright.config.ts --list (per project) and --list --project iphone --reporter=json | bun $TMPDIR/infra521/check-iphone.ts; bunx playwright test --config e2e/playwright.config.ts --project iphone --project chromium issue.e2e.ts:697 margin-thread-reply.e2e.ts:216 agents-search.e2e.ts inbox.e2e.ts:355",
+      "observed": "iphone lists 223 = the keep rows of dispatch://INFRA-521/artifact/iphone-selection-md v2 (0 extra, 0 missing); chromium 786, webkit 53, webkit-iphone 11, firefox 53, firefox-download-navigation 1, chromium-plain-http 4 unchanged; the changed tests: 7 passed (issue.e2e.ts:697 under iphone and chromium; margin-thread-reply.e2e.ts:216, the three agents-search tests and inbox.e2e.ts:355 under chromium). Under the new precondition, each of the reviewer`s nine named tests is untagged by it (agents.e2e.ts:759/847/953/1001 and delivery-live.e2e.ts:454 skip all but chromium or webkit-iphone; keyboard-palette.e2e.ts:1030 and margin-thread-reply.e2e.ts:216 set a desktop viewport; mention-composer.e2e.ts:443 starts on a wider screen and narrows) except issue.e2e.ts:697, which sets a phone width from no desktop start: it is now tagged and passes under iphone.",
+      "headSha": "6d04381cecd504fd575653a6eb415985f02f00fe",
+      "negativeControl": "In a scratch copy of 357138e7, margin-thread-reply.e2e.ts:216 tagged @phone with its old openThread(page, testInfo.project.name, …) failed under iphone (30.0 s timeout, as the reviewer predicted); the same copy with openThread(page, \"chromium\", …) passed under iphone (6.7 s)."
+    },
     {
       "criterion": "1. iphone runs every test that takes a phone-only path",
       "surface": "Playwright CLI in packages/dispatch (the projects CI's dispatch job runs)",
@@ -104,7 +112,8 @@
     "packages/dispatch/e2e/*.e2e.ts (61 files: ' @phone' at the end of 195 test titles and one describe title in 53 files; 75 iphone-only test.skip calls deleted in untagged tests across 17 files; 4 comments corrected)",
     "packages/dispatch/AGENTS.md (Phone acceptance: what iphone runs, R1-R6, tag syntax, silent-drop caveat and --list check; the grep-exception sentence)",
     "packages/dispatch/README.md (the seven projects as the config defines them)",
-    "docs/solutions/testing/a-layout-change-is-proven-by-the-whole-project-...-INFRA-92.md (dated INFRA-521 note)"
+    "docs/solutions/testing/a-layout-change-is-proven-by-the-whole-project-...-INFRA-92.md (dated INFRA-521 note)",
+    "Round 2: packages/dispatch/AGENTS.md (precondition before R1-R6; skip sentence narrowed to === \"iphone\" skips, !== \"chromium\" skips stay), e2e/issue.e2e.ts (:697 tagged), e2e/margin-thread-reply.e2e.ts (:226 passes \"chromium\"), e2e/agents-search.e2e.ts and e2e/inbox.e2e.ts (dead iphone width ternaries inlined to 1280), e2e/playwright.config.ts (anchor comment)"
   ],
   "trickyParts": [
     "Playwright's project grep text also holds the project name 'iphone' and file paths like phone.e2e.ts, so the grep is anchored on whitespace: /(^|\\s)@phone(\\s|$)/.",
@@ -114,10 +123,12 @@
   "deviations": [
     "Tag syntax: the plan named the details argument test(title, { tag: '@phone' }, fn). That form made Biome re-indent every tagged test body (62 files, +9255/-8963). The tag is written in the title instead (test('... @phone', fn)), which Playwright 1.63 reads as a tag (TestCase.tags, lib/common/index.js:2752-2760) and which the anchored grep matches; the diff is 65 files, +362/-415. AGENTS.md documents the title form and why.",
     "T7: per the architect (spec v4 and v5), no re-runs. Base = the 10 newest successful dispatch jobs already run on main; head = this pull request's one CI run; the after median is the production check's (first 5 successful main dispatch jobs after the merge).",
-    "AGENTS.md's old Phone acceptance list named 'recipient-picker bottom sheets', which no test at base covered; the new text names only what tagged tests cover."
+    "AGENTS.md's old Phone acceptance list named 'recipient-picker bottom sheets', which no test at base covered; the new text names only what tagged tests cover.",
+    "Round 2: the reviewer offered deleting the 50 !== \"chromium\" skips; they stay, and the rule says why: each states the test is desktop-only by design and keeps it off any other project whose testMatch names its file. issue.e2e.ts:697 is added to the selection (223, was 222) because the precondition that removes the reviewer`s other eight would otherwise exclude it only by a rule (any fixed viewport) that would also drop two tests iphone ran at base (margin-composer-hold.e2e.ts on a phone, agent-view.e2e.ts on a phone live view)."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "The first version of the PR description carried the private Dispatch host in a link; it was replaced within 21 minutes. The person the work is for chose to leave the old revision in GitHub's edit history (dispatch://INFRA-521/ask/ec8e50ba-8f28-4c80-bacc-12f751bdec25)."
-  ]
+  ],
+  "round": 2
 }
