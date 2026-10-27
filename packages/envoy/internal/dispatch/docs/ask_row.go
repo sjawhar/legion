@@ -41,19 +41,12 @@ func ScanAsk(row pgx.Row, extra ...any) (model.Ask, error) {
 		}
 		ask.Anchor = &value
 	}
-	if len(answer) > 0 {
-		var value model.AskAnswer
-		if err := json.Unmarshal(answer, &value); err != nil {
-			return model.Ask{}, fmt.Errorf("decode ask answer: %w", err)
-		}
-		ask.Answer = &value
+	var err error
+	if ask.Answer, err = DecodeAskAnswer(answer); err != nil {
+		return model.Ask{}, err
 	}
-	if len(resolution) > 0 {
-		var value model.AskResolution
-		if err := json.Unmarshal(resolution, &value); err != nil {
-			return model.Ask{}, fmt.Errorf("decode ask resolution: %w", err)
-		}
-		ask.Resolution = &value
+	if ask.Resolution, err = DecodeAskResolution(resolution); err != nil {
+		return model.Ask{}, err
 	}
 	if len(approval) > 0 {
 		var value model.AskApproval
@@ -64,6 +57,30 @@ func ScanAsk(row pgx.Row, extra ...any) (model.Ask, error) {
 	}
 	ask.EditedAt = askTimestamp(editedAt)
 	return ask, nil
+}
+
+// DecodeAskAnswer decodes an asks.answer column: nil for an ask with no answer on its row.
+func DecodeAskAnswer(raw []byte) (*model.AskAnswer, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var value model.AskAnswer
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, fmt.Errorf("decode ask answer: %w", err)
+	}
+	return &value, nil
+}
+
+// DecodeAskResolution decodes an asks.resolution column: nil for an ask no one has closed.
+func DecodeAskResolution(raw []byte) (*model.AskResolution, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var value model.AskResolution
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, fmt.Errorf("decode ask resolution: %w", err)
+	}
+	return &value, nil
 }
 
 // WriteAskResolution closes an open ask the caller has locked as retracted or resolved: it

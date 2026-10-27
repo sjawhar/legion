@@ -374,3 +374,39 @@ func TestRelatedTermsSayATextHoldsNoLexeme(t *testing.T) {
 		}
 	}
 }
+
+// The picker tokenizes a text in the order a document version's vector is built: search_text,
+// then the ask blocks stripped. Underscore runs either side of an ask block written inline join
+// once the block is stripped; search_text applied before leaves the joined run whole, a host name
+// the stored vector holds as one lexeme, while applied after it breaks the run into words no
+// stored vector holds.
+func TestRelatedTermsTokenizeATextAsADocumentVersionsVectorIsBuilt(t *testing.T) {
+	handler, database, srv := relatedTermsServer(t)
+	createSuggestionProject(t, handler, "ORDER")
+	// The block splits a segment, so no underscore meets it, which the stored markdown would
+	// escape: stripped, "al" and "pha_" join into the run's ninth segment.
+	document := createProjectDocument(t, handler, "ORDER", "run-notes.md",
+		strings.Repeat("alpha_", 8)+"al:::ask{#x} Which? :::pha_"+strings.Repeat("alpha_", 7)+"beta.example.com\n")
+	refreshTermStats(t, database, "ORDER")
+	var markdown string
+	var stored []string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select markdown, tsvector_to_array(search) from artifact_versions
+		 where artifact_id = $1 order by number desc limit 1`, document.ID).Scan(&markdown, &stored); err != nil {
+		t.Fatalf("read the document's version: %v", err)
+	}
+	host := strings.Repeat("alpha_", 16) + "beta.example.com"
+	if !slices.Contains(stored, host) {
+		t.Fatalf("stored vector %v of %q holds no %q: the version does not keep the inline block inside the run", stored, markdown, host)
+	}
+
+	picked := pickTerms(t, srv, "ORDER", markdown, relatedExclusion{})
+	if term, ok := pickedTerm(picked, host); !ok || term.DF != 1 {
+		t.Fatalf("picked %+v, want %q at df 1, the lexeme the stored vector holds", picked.Terms, host)
+	}
+	for _, lexeme := range termLexemes(picked) {
+		if !slices.Contains(stored, lexeme) {
+			t.Fatalf("picked %q, which the stored vector %v does not hold", lexeme, stored)
+		}
+	}
+}

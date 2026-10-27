@@ -307,3 +307,80 @@ func TestDecisionBlockCheckOnAProjectDocumentLeavesTheDocumentOut(t *testing.T) 
 		t.Fatalf("decision block rows = %+v, want one found check of rounding on the document %s", rows, document)
 	}
 }
+
+// The checks of one edit's blocks run at once, and each reads its items' ask states and writes
+// its record on a connection of its own: every block whose question restates an answered ask is
+// answered with that decision, its ask state on the item, and every block's check is recorded.
+// On the request's one connection mark, one check's open cursor had the pool refuse another's
+// ask-state read and record (store.ErrNestedAcquire), which dropped the state and the row. Every
+// ask shares a word with every block and carries a long answer, so each check reads every ask's
+// state and its cursor stays open over several network reads, which is when the others collided.
+func TestDecisionBlockChecksEachReadTheirAskStatesAndRecord(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{})
+	createSuggestionProject(t, handler, "RACE")
+	const shared = " For the aerostat programme."
+	blocks := []struct{ id, title, asked, restated string }{
+		{"hangar", "Storage planning", "Which zeppelin hangar should store the blimps?", "Which zeppelin hangar stores the blimps?"},
+		{"lacquer", "Paint planning", "Which lacquer coats the dirigible gondolas?", "Which lacquer should coat dirigible gondolas?"},
+		{"pilot", "Crew planning", "Who pilots the airship on weekends?", "Who should pilot the airship at weekends?"},
+		{"fjord", "Route planning", "Should the balloon cross the fjord at dawn?", "Does the balloon cross the fjord at dawn?"},
+		{"harbour", "Dock planning", "Which harbour moors the hovercraft?", "Which harbour should moor the hovercraft?"},
+	}
+	asks := map[string]string{}
+	for _, block := range blocks {
+		owner := createSearchIssue(t, handler, "RACE", block.title, "")
+		opened := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+owner+"/asks", map[string]any{
+			"question": block.asked + shared,
+			"options":  []map[string]string{{"label": "Brass"}, {"label": "Steel"}},
+		}, "alice")
+		if opened.Code != http.StatusCreated {
+			t.Fatalf("open the %s ask: status=%d body=%s", block.id, opened.Code, opened.Body.String())
+		}
+		asks[block.id] = decodeBody[testAskWithSuggestions](t, opened).ID
+		answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+asks[block.id]+"/answer",
+			map[string]any{"selected": []string{"Brass"}, "text": strings.Repeat("ballast ", 40_000)}, "alice")
+		if answered.Code != http.StatusOK {
+			t.Fatalf("answer the %s ask: status=%d body=%s", block.id, answered.Code, answered.Body.String())
+		}
+	}
+	spec := "# Spec\n\nPlanning notes.\n"
+	issue := createAdviceIssue(t, handler, "RACE", "Fleet decisions", &spec)
+	refreshTermStats(t, database, "RACE")
+
+	var markdown []string
+	for _, block := range blocks {
+		markdown = append(markdown, ":::ask{#"+block.id+"}\n"+block.restated+shared+"\n:::")
+	}
+	checks, present := decisionBlockChecksOf(t, editDocument(t, handler, issue.PrimaryArtifactID, insertAtEnd(strings.Join(markdown, "\n\n"))))
+	if !present || len(checks) != len(blocks) {
+		t.Fatalf("decision_block_checks = %+v (present %t), want %d", checks, present, len(blocks))
+	}
+	for index, check := range checks {
+		block := blocks[index]
+		if check.BlockID != block.id || check.Suggestions == nil {
+			t.Fatalf("check %d = %+v, want block %s checked", index, check, block.id)
+		}
+		decision := check.Suggestions.Decision
+		if decision == nil || decision.ID != asks[block.id] || decision.Ask == nil || decision.Ask.State != "answered" {
+			t.Fatalf("block %s: decision = %+v (suggestions %+v), want the answered ask %s with its state",
+				block.id, decision, check.Suggestions, asks[block.id])
+		}
+		listed := false
+		for _, item := range check.Suggestions.Related {
+			if item.Kind == "ask" && item.ID == asks[block.id] {
+				listed = item.Ask != nil && item.Ask.State == "answered"
+			}
+		}
+		if !listed {
+			t.Fatalf("block %s: related = %+v, want the ask %s listed with its answered state", block.id, check.Suggestions.Related, asks[block.id])
+		}
+	}
+	var recorded []string
+	for _, row := range readDecisionBlockRows(t, database) {
+		recorded = append(recorded, row.BlockID)
+	}
+	slices.Sort(recorded)
+	if want := []string{"fjord", "hangar", "harbour", "lacquer", "pilot"}; !slices.Equal(recorded, want) {
+		t.Fatalf("recorded decision blocks = %v, want %v", recorded, want)
+	}
+}

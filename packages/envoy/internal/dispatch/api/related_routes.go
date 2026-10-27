@@ -39,9 +39,7 @@ func (s *server) getRelated(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
-	request := relatedRequest{
-		Title: query.Get("title"), Text: query.Get("text"), ExcludeIssue: strings.TrimSpace(query.Get("exclude_issue")),
-	}
+	request := relatedRequest{Title: query.Get("title"), Text: query.Get("text"), ExcludeIssue: query.Get("exclude_issue")}
 	switch query.Get("keywords_only") {
 	case "", "false":
 	case "true":
@@ -74,7 +72,6 @@ func (s *server) postRelated(w http.ResponseWriter, r *http.Request) {
 		capExceeded(w, "title", length, contracts.IssueTitleMax)
 		return
 	}
-	request.ExcludeIssue = strings.TrimSpace(request.ExcludeIssue)
 	s.answerRelated(w, r, request)
 }
 
@@ -90,6 +87,7 @@ func (s *server) answerRelated(w http.ResponseWriter, r *http.Request, request r
 		s.writeHandlerError(w, err)
 		return
 	}
+	request.ExcludeIssue = strings.TrimSpace(request.ExcludeIssue)
 	if request.ExcludeIssue != "" {
 		if err := s.requireProjectIssue(r, project, request.ExcludeIssue); err != nil {
 			s.writeHandlerError(w, err)

@@ -16,10 +16,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
@@ -273,11 +275,14 @@ type server struct {
 	// restarts.
 	warnedUnmatchedRuns sync.Map
 	// termStats is the per-project term-statistics refreshes a related-item check started
-	// (ensureSearchTermStats), so a project's many checks start one.
-	termStats searchTermRefreshes
+	// (ensureSearchTermStats), keyed by project, so a project's many checks start one.
+	termStats singleflight.Group
 	// relatedRecordRetries is the related_checks rows being retried in the background
-	// (recordRelatedCheck), which waitBackground waits out before the pool closes under them.
-	relatedRecordRetries sync.WaitGroup
+	// (recordRelatedChecks), which waitBackground waits out before the pool closes under them, and
+	// relatedRecordRetrying how many of them hold or wait on a pool connection right now, at most
+	// relatedRecordRetryLimit.
+	relatedRecordRetries  sync.WaitGroup
+	relatedRecordRetrying atomic.Int32
 }
 
 // warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured set of
@@ -314,7 +319,7 @@ type queryer interface {
 // nothing outlives the test. Every server holds the event stream relay (INFRA-66), which every
 // open SSE connection reads and which starts its own listening connection on the first of them,
 // also on Lifetime. The returned wait blocks until the hub, every delivery socket, the relay and
-// every related-item check record still being retried (recordRelatedCheck, bounded by Lifetime)
+// every related-item check record still being retried (recordRelatedChecks, bounded by Lifetime)
 // have ended. Call it only after Lifetime has been cancelled and before the database pool closes.
 //
 // That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,

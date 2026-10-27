@@ -8,10 +8,10 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -178,30 +178,14 @@ func RunSearchTermStatsRefresh(ctx context.Context, pool *store.Pool, interval t
 }
 
 // ensureSearchTermStats starts a refresh of project's statistics in the background, unless one
-// this process started is still running, and returns at once with a channel closed when that
-// refresh ends. A check that finds a project with no totals row (one created since the last pass,
-// or a server whose first pass has not reached it) calls it and picks in probe mode meanwhile;
-// many checks of that project then cost one refresh, not one each. The refresh runs on the
-// server's lifetime, bounded by one interval, by which the leased pass would have refreshed the
-// project anyway.
-func (s *server) ensureSearchTermStats(project string) <-chan struct{} {
-	s.termStats.mu.Lock()
-	defer s.termStats.mu.Unlock()
-	if done, running := s.termStats.running[project]; running {
-		return done
-	}
-	if s.termStats.running == nil {
-		s.termStats.running = map[string]chan struct{}{}
-	}
-	done := make(chan struct{})
-	s.termStats.running[project] = done
-	go func() {
-		defer func() {
-			s.termStats.mu.Lock()
-			delete(s.termStats.running, project)
-			s.termStats.mu.Unlock()
-			close(done)
-		}()
+// this process started is still running, and returns at once with a channel that receives once
+// that refresh ends. A check that finds a project with no totals row (one created since the last
+// pass, or a server whose first pass has not reached it) calls it and picks in probe mode
+// meanwhile; many checks of that project then cost one refresh, not one each. The refresh runs on
+// the server's lifetime, bounded by one interval, by which the leased pass would have refreshed
+// the project anyway.
+func (s *server) ensureSearchTermStats(project string) <-chan singleflight.Result {
+	return s.termStats.DoChan(project, func() (any, error) {
 		ctx, cancel := context.WithTimeout(s.lifetime(), SearchTermStatsInterval)
 		defer cancel()
 		started := time.Now()
@@ -209,19 +193,12 @@ func (s *server) ensureSearchTermStats(project string) <-chan struct{} {
 		if err != nil {
 			slog.Warn("dispatch: refresh the search term statistics of a project the related-item check found without them",
 				"project", project, "error", err)
-			return
+			return nil, err
 		}
 		slog.Info("dispatch: search term statistics refreshed for a project the related-item check found without them",
 			"project", project, "items", items, "duration", time.Since(started).Round(time.Millisecond))
-	}()
-	return done
-}
-
-// searchTermRefreshes is the projects whose refresh ensureSearchTermStats has running, each with
-// the channel closed when it ends. The zero value is ready.
-type searchTermRefreshes struct {
-	mu      sync.Mutex
-	running map[string]chan struct{}
+		return items, nil
+	})
 }
 
 // relatedExclusion names the check's source owner, whose items are left out of df and out of the
@@ -264,9 +241,11 @@ type relatedTerms struct {
 // relatedTermsSQL reads, for every lexeme of the text, its frequency there (tf), its df from the
 // project's statistics, and its surface word in the title, in one statement.
 //
-// The text is tokenized as a document version's vector is built (0087_search_vector_bound): ask
-// blocks stripped, search_text, then search_vector, so its lexemes are the ones stored vectors
-// hold. Each lexeme's tf is its position count.
+// The text is tokenized as a document version's vector is built (0087_search_vector_bound):
+// search_text, then ask blocks stripped, then search_vector, in that order, so its lexemes are the
+// ones stored vectors hold: stripping a block first can join the underscore runs either side of it
+// into one search_text breaks, which the stored vector holds unbroken. Each lexeme's tf is its
+// position count.
 //
 // df is null for a lexeme the statistics do not hold, and for every lexeme when the project has
 // no totals row; the caller probes those. Otherwise it is ndoc less the excluded owner's items
@@ -287,7 +266,7 @@ type relatedTerms struct {
 // artifact id (null for none), $5 the title.
 const relatedTermsSQL = `
 with body as (
-  select search_text(regexp_replace($2::text, '(?s):::ask\{.*?:::', '', 'g')) as text
+  select regexp_replace(search_text($2::text), '(?s):::ask\{.*?:::', '', 'g') as text
 ),
 text_lexemes as (
   select u.lexeme, coalesce(array_length(u.positions, 1), 1) as tf
@@ -325,6 +304,7 @@ own_items as (
 own_counts as (
   select u.lexeme, count(*) as n
     from own_items o cross join lateral unnest(o.search) u
+   where u.lexeme in (select lexeme from text_lexemes)
    group by u.lexeme
 ),
 words as (

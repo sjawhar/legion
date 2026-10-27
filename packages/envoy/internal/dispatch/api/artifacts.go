@@ -990,7 +990,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	// operation's markdown makes a block depends on where it lands and on the parser's reading of
 	// code and containers, which a caller's own reading of that markdown would only approximate.
 	blocks := &editBlocks{
-		DecisionBlocksAdded: edit.AskBlocksAdded,
+		DecisionBlocksAdded: len(edit.AddedAskBlocks),
 		DecisionBlockChecks: s.decisionBlockChecks(r.Context(), artifact, edit.AddedAskBlocks, actor),
 	}
 	if artifact.IssueKey == nil || advice == nil {

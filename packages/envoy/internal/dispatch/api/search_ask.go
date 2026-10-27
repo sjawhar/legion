@@ -2,9 +2,9 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -43,19 +43,11 @@ func (s *server) attachAskStates(ctx context.Context, q queryer, results []model
 		if err := rows.Scan(&id, &state.State, &answer, &resolution); err != nil {
 			return fmt.Errorf("scan ask state: %w", err)
 		}
-		if len(answer) > 0 {
-			var value model.AskAnswer
-			if err := json.Unmarshal(answer, &value); err != nil {
-				return fmt.Errorf("decode ask answer: %w", err)
-			}
-			state.Answer = &value
+		if state.Answer, err = docs.DecodeAskAnswer(answer); err != nil {
+			return err
 		}
-		if len(resolution) > 0 {
-			var value model.AskResolution
-			if err := json.Unmarshal(resolution, &value); err != nil {
-				return fmt.Errorf("decode ask resolution: %w", err)
-			}
-			state.Resolution = &value
+		if state.Resolution, err = docs.DecodeAskResolution(resolution); err != nil {
+			return err
 		}
 		if state.State == "resolved" {
 			resolved = append(resolved, id)

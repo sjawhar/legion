@@ -192,29 +192,30 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// must not refuse a create its caller already insisted on, so it is bounded on its own and its
 	// failure only logged.
 	var titleMatches []model.DuplicateCandidate
-	if input.External == "" && input.Force {
-		matchCtx, cancel := context.WithTimeout(r.Context(), forcedTitleMatchTimeout)
-		candidates, err := s.duplicateCandidates(matchCtx, s.deps.Store.Pool, input.Project, input.Title, parentKey)
-		cancel()
-		if err != nil {
-			slog.Warn("dispatch: forced issue create names no title overlaps", "project", input.Project, "error", err)
+	if input.External == "" {
+		if input.Force {
+			matchCtx, cancel := context.WithTimeout(r.Context(), forcedTitleMatchTimeout)
+			candidates, err := s.duplicateCandidates(matchCtx, s.deps.Store.Pool, input.Project, input.Title, parentKey)
+			cancel()
+			if err != nil {
+				slog.Warn("dispatch: forced issue create names no title overlaps", "project", input.Project, "error", err)
+			} else {
+				titleMatches = candidates
+			}
 		} else {
-			titleMatches = candidates
-		}
-	}
-	if input.External == "" && !input.Force {
-		candidates, err := s.duplicateCandidates(r.Context(), s.deps.Store.Pool, input.Project, input.Title, parentKey)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if len(candidates) > 0 {
-			WriteJSON(w, http.StatusConflict, map[string]any{
-				"error":      fmt.Sprintf("possible duplicate of %s: %s", candidates[0].Key, candidates[0].Title),
-				"code":       "POSSIBLE_DUPLICATE",
-				"candidates": candidates,
-			})
-			return
+			candidates, err := s.duplicateCandidates(r.Context(), s.deps.Store.Pool, input.Project, input.Title, parentKey)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			if len(candidates) > 0 {
+				WriteJSON(w, http.StatusConflict, map[string]any{
+					"error":      fmt.Sprintf("possible duplicate of %s: %s", candidates[0].Key, candidates[0].Title),
+					"code":       "POSSIBLE_DUPLICATE",
+					"candidates": candidates,
+				})
+				return
+			}
 		}
 	}
 

@@ -254,7 +254,7 @@ type unparsedOpeners struct {
 
 // editBlocks is what a document edit's advice reports about the typed blocks it wrote: how many ask
 // blocks the edited document holds that the document before the edit did not
-// (docs.EditOutcome.AskBlocksAdded), as the server's parser reads them, and the related-item check
+// (docs.EditOutcome.AddedAskBlocks), as the server's parser reads them, and the related-item check
 // each of them got (decisionBlockChecks), omitted when the edit added none.
 type editBlocks struct {
 	DecisionBlocksAdded int                  `json:"decision_blocks_added"`
@@ -394,9 +394,10 @@ func withAdvice(payload any, advice *writeAdvice) any {
 
 // withRawAdvice wraps payload with whatever advice shape the caller already decided is worth
 // sending, with no nil-check (contrast withAdvice, which treats a nil *writeAdvice as "send
-// nothing"). Three shapes ride it: a document write's block report (*documentBlocks/*editBlocks,
+// nothing). Two kinds of shape ride it: a document write's block report (*documentBlocks/*editBlocks,
 // when a project document has no issue state to report, or an issue document's bounded
-// issue-advice query failed), and an ask on an unlinked project document's suggestionsOnlyAdvice.
+// issue-advice query failed), and suggestionsOnlyAdvice (withSuggestions): an ask on an unlinked
+// project document, or an issue or ask write whose write advice failed.
 func withRawAdvice(payload any, advice any) any {
 	return advisedResponse{payload: payload, advice: advice}
 }

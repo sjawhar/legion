@@ -223,11 +223,7 @@ function absoluteHref(href: string, configUrl: string): string {
  * the server chose the words, else the first three words of four or more letters in the text the
  * check read. With no such word the command names what to put in `--query` instead of guessing.
  */
-export function notMadeLine(
-  reason: string,
-  context: RelatedCheckContext,
-  searchQuery?: string
-): string {
+function notMadeLine(reason: string, context: RelatedCheckContext, searchQuery?: string): string {
   const words = searchQuery?.trim() || searchWords(context.text);
   const query =
     words === ""

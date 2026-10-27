@@ -46,6 +46,11 @@ const (
 	// records exist to count. Thirty seconds is well past the five a migration waits for a lock
 	// (pgmigrate.LockTimeout), and the retry runs in the background, so no write waits on it.
 	relatedRecordRetryTimeout = 30 * time.Second
+	// relatedRecordRetryLimit is the most related_checks retries that run at once. Each holds, or
+	// waits for, a connection of the shared pool for up to relatedRecordRetryTimeout, and a lock
+	// that holds up the first attempts holds up every check's: without a bound, those retries
+	// alone could take every connection the requests need.
+	relatedRecordRetryLimit = 4
 	// suggestionRelatedCount is "the three items most like what was just filed" (LEGION-550's spec).
 	suggestionRelatedCount = 3
 	// suggestionSearchDepth widens the search past suggestionRelatedCount so an answered ask a few
@@ -159,13 +164,19 @@ func (s *server) relatedAllowance() time.Duration {
 // relatedCheckNotRun answers, and records unless input.record is false, a check its route decided
 // not to make (reason and text say why), so that write's result still says no check was made.
 func (s *server) relatedCheckNotRun(ctx context.Context, input relatedInput, reason, text string) *model.Suggestions {
-	suggestions := &model.Suggestions{Outcome: relatedNotMade, Related: []model.WriteSuggestion{}, Missing: text}
+	suggestions := notMadeSuggestions(text)
 	if input.record {
-		s.recordRelatedCheck(ctx, input, suggestions, relatedRecord{
-			project: input.project, outcome: relatedNotMade, reason: reason, terms: []string{},
+		s.recordRelatedChecks(ctx, relatedCheckRecord{
+			source: input.source, suggestions: suggestions,
+			record: relatedRecord{project: input.project, reason: reason, terms: []string{}},
 		})
 	}
 	return suggestions
+}
+
+// notMadeSuggestions is the answer of a check that was not made; text says why.
+func notMadeSuggestions(text string) *model.Suggestions {
+	return &model.Suggestions{Outcome: relatedNotMade, Related: []model.WriteSuggestion{}, Missing: text}
 }
 
 // withSuggestions wraps a write's payload with its advice carrying the check's result, or, when
@@ -184,9 +195,13 @@ func withSuggestions(payload any, advice *writeAdvice, suggestions *model.Sugges
 // already filed is answered with it while the writer is still at the document. The first
 // decisionBlockCheckLimit blocks are checked at once, all under one relatedAllowance, so an edit
 // waits on its checks no longer than an issue create waits on its one; each block past them
-// answers, and is recorded, as not made. A block's source is the document's issue, or the project
-// document itself when it has no issue, left out of its results as an ask's owner is. Nil when the
-// edit added no block.
+// answers as not made, and all of those are recorded in one round trip. A block's source is the
+// document's issue, or the project document itself when it has no issue, left out of its results
+// as an ask's owner is. Nil when the edit added no block.
+//
+// Each check reads and records under a connection mark of its own (store.ForConcurrentRead): on
+// the request's one mark, one check's open cursor would have the pool refuse the others' reads
+// and records (store.ErrNestedAcquire).
 func (s *server) decisionBlockChecks(
 	ctx context.Context, artifact model.Artifact, blocks []docs.AddedAskBlock, actor model.Actor,
 ) []decisionBlockCheck {
@@ -196,6 +211,7 @@ func (s *server) decisionBlockChecks(
 	bounded, cancel := context.WithTimeout(ctx, s.relatedAllowance())
 	defer cancel()
 	checks := make([]decisionBlockCheck, len(blocks))
+	var overflow []relatedCheckRecord
 	var running sync.WaitGroup
 	for index, block := range blocks {
 		source := suggestionSource{kind: "decision_block", blockID: block.ID, actor: actor}
@@ -207,12 +223,24 @@ func (s *server) decisionBlockChecks(
 		input := relatedInput{project: artifact.Project, text: block.Question, title: block.Question, source: source, record: true}
 		checks[index] = decisionBlockCheck{BlockID: block.ID, Question: block.Question}
 		if index >= decisionBlockCheckLimit {
-			checks[index].Suggestions = s.relatedCheckNotRun(
-				ctx, input, relatedReasonTooManyBlocks, "more than five new decision blocks in one edit",
-			)
+			suggestions := notMadeSuggestions("more than five new decision blocks in one edit")
+			checks[index].Suggestions = suggestions
+			overflow = append(overflow, relatedCheckRecord{
+				source: source, suggestions: suggestions,
+				record: relatedRecord{project: artifact.Project, reason: relatedReasonTooManyBlocks, terms: []string{}},
+			})
 			continue
 		}
-		running.Go(func() { checks[index].Suggestions = s.relatedCheck(bounded, input) })
+		checkCtx, err := store.ForConcurrentRead(bounded)
+		if err != nil {
+			slog.Warn("dispatch: related-item check not made", "error", err)
+			checks[index].Suggestions = s.relatedCheckNotRun(ctx, input, relatedReasonSearchFailed, relatedSearchFailedMissing)
+			continue
+		}
+		running.Go(func() { checks[index].Suggestions = s.relatedCheck(checkCtx, input) })
+	}
+	if len(overflow) > 0 {
+		s.recordRelatedChecks(ctx, overflow...)
 	}
 	running.Wait()
 	return checks
@@ -283,17 +311,15 @@ func (input relatedInput) excludes(result model.SearchResult) bool {
 	return input.source.owns(result) || (input.excludeIssue != "" && ownedByIssue(result, input.excludeIssue))
 }
 
-// relatedRecord is what the related_checks row of one check holds besides its source.
+// relatedRecord is what the related_checks row of one check holds besides its source and what
+// the check answered (its outcome, search mode and how many items it listed).
 type relatedRecord struct {
 	project   string
-	outcome   string
-	search    string
 	reason    string
 	terms     []string
 	keywordMS *int
 	meaningMS *int
 	totalMS   int
-	related   int
 }
 
 // relatedStage is one search stage's answer and how long it took from the stages' start (stage 1
@@ -328,13 +354,13 @@ type relatedPick struct {
 // The source's own items are left out, each owner keeps its best-ranked item, open owners come
 // before done issues, and the best three are Related; the decision is the first answered ask in
 // the search's own order. Unless record is false it then records what it offered and how it went
-// (recordRelatedCheck).
+// (recordRelatedChecks).
 func (s *server) relatedCheck(ctx context.Context, input relatedInput) *model.Suggestions {
 	started := time.Now()
 	suggestions, record := s.runRelatedCheck(ctx, input, started)
 	record.totalMS = int(time.Since(started).Milliseconds())
 	if input.record {
-		s.recordRelatedCheck(ctx, input, suggestions, record)
+		s.recordRelatedChecks(ctx, relatedCheckRecord{source: input.source, suggestions: suggestions, record: record})
 	}
 	return suggestions
 }
@@ -351,10 +377,19 @@ func (s *server) runRelatedCheck(
 	suggestions := &model.Suggestions{Related: []model.WriteSuggestion{}}
 	notMade := func(reason, text string) (*model.Suggestions, relatedRecord) {
 		suggestions.Outcome, suggestions.Missing = relatedNotMade, text
-		record.outcome, record.reason = relatedNotMade, reason
+		record.reason = reason
 		return suggestions, record
 	}
 	timedOut := "the search behind it did not answer within " + allowance.String()
+	// searchFailed answers a stage 1 read that failed: timed out when the allowance had ended by
+	// then, failed otherwise.
+	searchFailed := func(err error) (*model.Suggestions, relatedRecord) {
+		slog.Warn("dispatch: related-item check not made", "error", err)
+		if bounded.Err() != nil {
+			return notMade(relatedReasonTimeout, timedOut)
+		}
+		return notMade(relatedReasonSearchFailed, relatedSearchFailedMissing)
+	}
 
 	if record.project == "" {
 		project, err := s.resolveSuggestionProject(bounded, input.source)
@@ -441,11 +476,7 @@ func (s *server) runRelatedCheck(
 		return notMade(relatedReasonTimeout, timedOut)
 	}
 	if pick.err != nil {
-		slog.Warn("dispatch: related-item check not made", "error", pick.err)
-		if bounded.Err() != nil {
-			return notMade(relatedReasonTimeout, timedOut)
-		}
-		return notMade(relatedReasonSearchFailed, relatedSearchFailedMissing)
+		return searchFailed(pick.err)
 	}
 	if pick.terms.NoLexemes {
 		return notMade(relatedReasonBlankText, relatedBlankTextMissing)
@@ -484,11 +515,7 @@ func (s *server) runRelatedCheck(
 		case stage := <-keyword:
 			record.keywordMS = milliseconds(stage.took)
 			if stage.err != nil {
-				slog.Warn("dispatch: related-item check not made", "error", stage.err)
-				if bounded.Err() != nil {
-					return notMade(relatedReasonTimeout, timedOut)
-				}
-				return notMade(relatedReasonSearchFailed, relatedSearchFailedMissing)
+				return searchFailed(stage.err)
 			}
 			answer = stage
 		case <-bounded.Done():
@@ -498,15 +525,12 @@ func (s *server) runRelatedCheck(
 		suggestions.SearchNote = relatedKeywordsOnlyNote(reason, meaningAllowance)
 		record.reason = reason
 	}
-	record.search = suggestions.Search
 
 	s.fillRelatedItems(bounded, input, answer.response.Results, suggestions)
-	record.related = len(suggestions.Related)
-	record.outcome = relatedNone
+	suggestions.Outcome = relatedNone
 	if len(suggestions.Related) > 0 {
-		record.outcome = relatedFound
+		suggestions.Outcome = relatedFound
 	}
-	suggestions.Outcome = record.outcome
 	return suggestions, record
 }
 
@@ -521,7 +545,7 @@ func (s *server) relatedMeaningStage(ctx context.Context, project, text string, 
 		if err != nil {
 			slog.Warn("dispatch: related-item check searches by keywords only", "reason", reason, "error", err)
 		}
-		return relatedStage{reason: reason, err: err}
+		return relatedStage{reason: reason}
 	}
 	vector, err := s.embedQuery(ctx, text)
 	if err != nil {
@@ -734,66 +758,99 @@ func nullableText(value string) any {
 	return value
 }
 
-// recordRelatedCheck writes what a check offered and how it went, on a context of its own taken
-// from context.WithoutCancel(ctx) and bounded by relatedRecordTimeout: a check that ran out of its
-// allowance is recorded too, and a write that already succeeded is never failed by its records,
-// so a row that cannot be written is only logged.
+// relatedCheckRecord is one check's records: its source, what it answered, and the rest of its
+// related_checks row.
+type relatedCheckRecord struct {
+	source      suggestionSource
+	suggestions *model.Suggestions
+	record      relatedRecord
+}
+
+// relatedCheckInsert writes one related_checks row; a row whose id exists is left as it is.
+const relatedCheckInsert = `
+	insert into related_checks
+		(id, project_key, source_kind, source_issue_key, source_artifact_id, source_ask_id, source_block_id,
+		 actor_kind, actor_id, outcome, search, reason, terms, keyword_ms, meaning_ms, total_ms, related_count)
+	values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+	on conflict (id) do nothing
+`
+
+// recordRelatedChecks writes what each check offered and how it went, on a context of its own
+// taken from context.WithoutCancel(ctx) and bounded by relatedRecordTimeout: a check that ran out
+// of its allowance is recorded too, and a write that already succeeded is never failed by its
+// records, so a row that cannot be written is only logged.
 //
 // An issue or ask source gets its write_suggestions rows, which the outcome sweep resolves
 // (persistSuggestions). Every source with a project and an owner gets one related_checks row: its
 // outcome, search mode, reason, the lexemes it searched for, the stages' and the whole check's
 // times and how many items it listed. A check whose project could not be resolved has no row to
-// write, since the row belongs to a project. A related_checks row the first attempt could not
-// write for a reason a retry can cure (relatedRecordRetryable) is tried once more in the
-// background, on the server's lifetime bounded by relatedRecordRetryTimeout, and waitBackground
-// waits it out. The row's id is chosen here and the insert does nothing where it exists, since
-// the first attempt's statement may still land after its context gave up on it: pgx cancels a
-// statement whose context ends only by a cancel request it sends afterwards, and a lock released
-// before that request arrives lets the statement run.
-func (s *server) recordRelatedCheck(
-	ctx context.Context, input relatedInput, suggestions *model.Suggestions, record relatedRecord,
-) {
+// write, since the row belongs to a project. The rows go in one round trip (store.Pool.SendBatch),
+// so an edit's decision blocks past decisionBlockCheckLimit, however many, cost one.
+//
+// related_checks rows the first attempt could not write for a reason a retry can cure
+// (relatedRecordRetryable) are tried once more in the background, on the server's lifetime
+// bounded by relatedRecordRetryTimeout, and waitBackground waits them out. At most
+// relatedRecordRetryLimit retries run at once, each holding or waiting on a connection of the
+// shared pool; past them the rows are dropped and logged, so a lock that holds up every check's
+// records cannot take the pool from the requests. Each row's id is chosen here and the insert does
+// nothing where it exists, since the first attempt's statement may still land after its context
+// gave up on it: pgx cancels a statement whose context ends only by a cancel request it sends
+// afterwards, and a lock released before that request arrives lets the statement run.
+func (s *server) recordRelatedChecks(ctx context.Context, rows ...relatedCheckRecord) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), relatedRecordTimeout)
 	defer cancel()
-	source := input.source
-	if source.kind == "issue" || source.kind == "ask" {
-		s.persistSuggestions(ctx, source, suggestions)
+	var inserts [][]any
+	for _, row := range rows {
+		source, record, suggestions := row.source, row.record, row.suggestions
+		if source.kind == "issue" || source.kind == "ask" {
+			s.persistSuggestions(ctx, source, suggestions)
+		}
+		if record.project == "" || (source.issueKey == "" && source.artifactID == "") {
+			continue
+		}
+		artifactID := source.artifactID
+		if source.issueKey != "" {
+			artifactID = ""
+		}
+		inserts = append(inserts, []any{
+			uuid.New(), record.project, source.kind, nullableText(source.issueKey), nullableText(artifactID),
+			nullableText(source.askID), nullableText(source.blockID), source.actor.Kind, source.actor.ID,
+			suggestions.Outcome, nullableText(suggestions.Search), nullableText(record.reason), record.terms,
+			record.keywordMS, record.meaningMS, record.totalMS, len(suggestions.Related),
+		})
 	}
-	if record.project == "" || (source.issueKey == "" && source.artifactID == "") {
+	if len(inserts) == 0 {
 		return
 	}
-	artifactID := source.artifactID
-	if source.issueKey != "" {
-		artifactID = ""
-	}
-	id := uuid.New()
+	// A batch is built for each attempt: pgx keeps what it learned of a statement on the batch's
+	// queued queries, which belongs to the connection that sent it.
 	insert := func(ctx context.Context) error {
-		_, err := s.deps.Store.Pool.Exec(ctx, `
-			insert into related_checks
-				(id, project_key, source_kind, source_issue_key, source_artifact_id, source_ask_id, source_block_id,
-				 actor_kind, actor_id, outcome, search, reason, terms, keyword_ms, meaning_ms, total_ms, related_count)
-			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-			on conflict (id) do nothing
-		`,
-			id, record.project, source.kind, nullableText(source.issueKey), nullableText(artifactID), nullableText(source.askID),
-			nullableText(source.blockID), source.actor.Kind, source.actor.ID, record.outcome, nullableText(record.search),
-			nullableText(record.reason), record.terms, record.keywordMS, record.meaningMS, record.totalMS, record.related,
-		)
-		return err
+		batch := &pgx.Batch{}
+		for _, args := range inserts {
+			batch.Queue(relatedCheckInsert, args...)
+		}
+		return s.deps.Store.Pool.SendBatch(ctx, batch).Close()
 	}
 	err := insert(ctx)
 	if err == nil {
 		return
 	}
 	if !relatedRecordRetryable(err) {
-		slog.Warn("dispatch: related-item check not recorded", "error", err)
+		slog.Warn("dispatch: related-item check not recorded", "rows", len(inserts), "error", err)
+		return
+	}
+	if s.relatedRecordRetrying.Add(1) > relatedRecordRetryLimit {
+		s.relatedRecordRetrying.Add(-1)
+		slog.Warn("dispatch: related-item check not recorded: too many records are already being retried",
+			"rows", len(inserts), "error", err)
 		return
 	}
 	s.relatedRecordRetries.Go(func() {
+		defer s.relatedRecordRetrying.Add(-1)
 		ctx, cancel := context.WithTimeout(s.lifetime(), relatedRecordRetryTimeout)
 		defer cancel()
 		if err := insert(ctx); err != nil {
-			slog.Warn("dispatch: related-item check not recorded", "error", err)
+			slog.Warn("dispatch: related-item check not recorded", "rows", len(inserts), "error", err)
 		}
 	})
 }

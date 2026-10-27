@@ -73,8 +73,8 @@ func TestRepairingAnUnreadableAskBlockCountsTheAskItOpens(t *testing.T) {
 		`select count(*) from asks where block_artifact_id = $1 and state = 'open'`, artifactID).Scan(&open); err != nil {
 		t.Fatal(err)
 	}
-	if open != 1 || outcome.AskBlocksAdded != open {
-		t.Fatalf("repair opened %d ask(s), reported %d", open, outcome.AskBlocksAdded)
+	if open != 1 || len(outcome.AddedAskBlocks) != open {
+		t.Fatalf("repair opened %d ask(s), reported %d", open, len(outcome.AddedAskBlocks))
 	}
 	if !slices.Equal(outcome.AddedAskBlocks, []AddedAskBlock{{ID: "ttl", Question: "Which cache TTL?"}}) {
 		t.Fatalf("repair named added blocks %+v, want ttl and its question", outcome.AddedAskBlocks)
@@ -95,8 +95,8 @@ func TestEditNamesTheAddedAskBlocksInDocumentOrder(t *testing.T) {
 		t.Fatalf("insert ask blocks: %v", err)
 	}
 	want := []AddedAskBlock{{ID: "zeta", Question: "Which deployment window?"}, {ID: "alpha", Question: "Which cache TTL?"}}
-	if outcome.AskBlocksAdded != 2 || !slices.Equal(outcome.AddedAskBlocks, want) {
-		t.Fatalf("edit reported %d added, named %+v, want %+v", outcome.AskBlocksAdded, outcome.AddedAskBlocks, want)
+	if !slices.Equal(outcome.AddedAskBlocks, want) {
+		t.Fatalf("edit named %+v, want %+v", outcome.AddedAskBlocks, want)
 	}
 }
 func TestEditingBesideAnUnreadableAskBlockAddsNoAsk(t *testing.T) {
@@ -120,8 +120,8 @@ func TestEditingBesideAnUnreadableAskBlockAddsNoAsk(t *testing.T) {
 		`select count(*) from asks where block_artifact_id = $1 and state = 'open'`, artifactID).Scan(&open); err != nil {
 		t.Fatal(err)
 	}
-	if open != 0 || outcome.AskBlocksAdded != open {
-		t.Fatalf("edit beside unreadable ask opened %d ask(s), reported %d", open, outcome.AskBlocksAdded)
+	if open != 0 || len(outcome.AddedAskBlocks) != open {
+		t.Fatalf("edit beside unreadable ask opened %d ask(s), reported %d", open, len(outcome.AddedAskBlocks))
 	}
 }
 
