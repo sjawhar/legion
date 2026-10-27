@@ -2,21 +2,21 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T00:08:00Z",
+  "completed": "2026-10-27T00:57:42Z",
   "pinnedCommit": "ad909178a0cbc43e0deef1a528051bc499ce1fb0",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2272",
   "documents": [
-    "dispatch://INFRA-172/artifact/architecture-assessment-md (v2)",
-    "dispatch://INFRA-172/artifact/refactor-order-md (v3)",
-    "dispatch://INFRA-172/artifact/escaped-pipe-census-ts (v1, the script as run; the --projects and --latest-only flags added during the run are documented in the copy under $TMPDIR/infra172 and in refactor-order-md's method)"
+    "dispatch://INFRA-172/artifact/architecture-assessment-md (v4)",
+    "dispatch://INFRA-172/artifact/refactor-order-md (v5)",
+    "dispatch://INFRA-172/artifact/escaped-pipe-census-ts (v2, the script as run, with the blockquote and list-item matcher)"
   ],
   "proof": [
     {
       "criterion": "R4 settled in code: Go and the browser read a mid-row escaped pipe in a table row the same way",
       "surface": "Dispatch's browser suite (packages/dispatch/e2e) against the real server and SPA with a rootless Postgres in the issue pod",
       "command": "cd packages/dispatch && PLAYWRIGHT_BROWSERS_PATH=$TMPDIR/ms-playwright DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra172_head?sslmode=disable bun run e2e editor-paste -g \"two backslashes|row is empty, pasted into\"",
-      "observed": "'a pipe after two backslashes ends a table cell in Go as in the editor' passes in chromium and iphone; 18 passed (output $TMPDIR/infra172/e2e-head-a6ecbc12.txt)",
-      "headSha": "a6ecbc12b4dceda916933a07b35407da7cc30b64",
+      "observed": "'a pipe after two backslashes ends a table cell in Go as in the editor' passes in chromium and iphone; 18 passed ($TMPDIR/infra172/e2e-head-2e326959.txt)",
+      "headSha": "2e326959bbb3d205223a0816d4d513b9e48b1b0e",
       "negativeControl": "The same test against a server and SPA built from ad909178 fails both projects on the cell assertion: the editor shows [\"a \\\\| b\", \"\"] where [\"a \\\\\", \"b\"] is expected; 16 passed, 2 failed ($TMPDIR/infra172/e2e-C.txt)"
     },
     {
@@ -31,17 +31,25 @@
       "criterion": "A4: the plan states the escaped-pipe rule and the count",
       "surface": "the census script through production Dispatch's HTTP API, and refactor-order-md",
       "command": "bun escaped-pipe-census.ts --out census-out (AHXV6, BET, EVALS, GTM, INFRA, every version, 20:17-21:14Z) and --projects LINUX,OSSV,ROADMAP,SMOKE,XV6SSH,ZLIB --latest-only (22:59-23:52Z)",
-      "observed": "8 documents with a mid-row hit in their latest version, 0 closing hits, 0 approved versions with a hit; 671 hit versions across every version of the five finished projects; 0 failed requests. All 8 rewritten by guarded doc-edits; the matcher finds 0 hits in each new version",
-      "headSha": "a6ecbc12b4dceda916933a07b35407da7cc30b64",
-      "negativeControl": "bun escaped-pipe-census.ts --file matcher-fixture.md over one mid-row \\\\|, one closing \\\\|, one \\| and one \\\\| in a code fence reports exactly mid=1 closing=1"
+      "observed": "8 documents with a mid-row hit in their latest version, 0 closing hits, 0 approved versions with a hit; every version: 671 hit versions in AHXV6/BET/EVALS/GTM/INFRA (12,721 versions) and 55 in LINUX/OSSV/ROADMAP/SMOKE/XV6SSH/ZLIB (13,898 versions, all LINUX); 0 failed requests. The corrected matcher (tables in blockquotes and list items) re-run over the three stored corpora (8,015 latest versions) finds the same 8 documents. All 8 rewritten by guarded doc-edits; the matcher finds 0 hits in each new version",
+      "headSha": "2e326959bbb3d205223a0816d4d513b9e48b1b0e",
+      "negativeControl": "bun escaped-pipe-census.ts --file matcher-fixture.md reports exactly mid=1 closing=1; over the tester's fixture with a blockquoted, a list-item and a plain table row it reports mid=3 (the first matcher reported mid=2)"
     },
     {
       "criterion": "A1: every cited permalink exists at the pinned commit",
       "surface": "architecture-assessment-md and refactor-order-md against the repository at ad909178",
       "command": "bash $TMPDIR/infra172/check-links.sh $TMPDIR/infra172/architecture-assessment.md $TMPDIR/infra172/refactor-order.md",
-      "observed": "checked=450 bad=0 for the assessment, checked=51 bad=0 for the refactor order",
-      "headSha": "a6ecbc12b4dceda916933a07b35407da7cc30b64",
+      "observed": "checked=453 bad=0 for the assessment v3, checked=51 bad=0 for the refactor order",
+      "headSha": "2e326959bbb3d205223a0816d4d513b9e48b1b0e",
       "negativeControl": "a made-up packages/envoy/go.mod#L99999 citation is flagged PAST-END(148)"
+    },
+    {
+      "criterion": "A2: each visible render difference links an INFRA issue, the tester's three included",
+      "surface": "architecture-assessment-md v4 and Dispatch",
+      "command": "dispatch read --ref dispatch://INFRA-534, -535, -536 and -531; the throwaway inline differential (20,000 generated paragraphs, Go pmdoc.Parse against the headless engine at ad909178, $TMPDIR/infra172/inlinefuzz/cmp.py)",
+      "observed": "20 rows, each with a link; 4,447 of 20,000 paragraphs differ, in classes now covered by INFRA-530, INFRA-531, INFRA-534, INFRA-535 and INFRA-536",
+      "headSha": "2e326959bbb3d205223a0816d4d513b9e48b1b0e",
+      "negativeControl": "Plain ~~a~~ text. reads the same in Go and the engine (struck 'a'), as do the 15,553 paragraphs the differential found equal"
     }
   ],
   "filesChanged": [
@@ -83,5 +91,11 @@
     "dispatch-production-check.sh --commit <merged sha> --page /issues/INFRA-172 --route /api/v1/schema/blocks",
     "Upload a scratch document on INFRA-138 with a table holding a mid-row \\\\| and a code-span shape, read it back with dispatch doc-read and the version route, then delete it (architect decision 6).",
     "Run the census again (latest versions) and rewrite anything the old build stored in between; record the every-version count of the six projects."
+  ],
+  "round2": [
+    "Tester failure A2: reproduced the three classes, ran a 20,000-paragraph inline differential, sent drafts; the architect filed INFRA-534, INFRA-535, INFRA-536 and widened INFRA-531; the assessment (v3, v4) adds three rows, corrects the count to 20 and names INFRA-531 for both scope notes.",
+    "Tester failure A4: the census matcher now reads tables in blockquotes and list items (and nested); the count stands (same 8 documents over 8,015 stored latest versions); the script as run is uploaded as escaped-pipe-census-ts v2, and refactor-order (v4, v5) states the flags and the matcher change.",
+    "Tester observation: the test cases that held a git command taken from a stored document now use a made-up grep command (commit 2e326959).",
+    "Tester observation: the every-version count of the six other projects is complete and is on the pull request and in refactor-order v4."
   ]
 }
