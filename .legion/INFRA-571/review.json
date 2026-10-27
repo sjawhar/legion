@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-571",
+  "completed": "2026-10-27T06:25:01Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "95693430d97d (branch head before this handoff: 5fc06c94, which adds only .legion/)",
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/workflows/envoy-and-contracts.yaml:944 (and .github/workflows/pr-and-main.yaml:199, envoy-and-contracts.yaml:792,1137)",
+      "description": "The production Cloud SQL instance that stays on POSTGRES_16 until INFRA-572 also holds the secrets broker's database and the five Legion daemon databases (dispatch://INFRA-572/spec). This PR moves the broker's CI (envoy-go, broker-multiprocess) and the daemon's whole Go suite (pr-and-main test) to the 18 image, and dispatch-go-postgres-16 runs only cmd/dispatch, internal/dispatch and internal/pgmigrate. A broker or daemon change that needs Postgres 17+ now passes every CI job and fails on production. Fix: run the broker packages (./cmd/broker/... ./internal/broker/...) and the daemon's Postgres-backed suite on the 16 digest until INFRA-572 too (INFRA-573 deletes them with the Dispatch lane), and make the PR body's 'fails CI before it reaches production' claim true for all of them."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/scripts/dev-postgres.sh:86,92",
+      "description": "The printed sequence removes the old container with `docker rm` and the put-back removes the new one with `docker rm -f`, both without -v, so the old 16 data directory (an anonymous volume) stays on the host; docs/testing.md:45 requires `docker rm -f -v` for the Postgres images. Print -v in both places (named volumes are untouched by -v)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/scripts/dev-postgres.sh:71,83-84",
+      "description": "For a stopped container the sequence prints `docker start` then pg_dumpall at once; a server still starting refuses, the redirect leaves an empty dump, the restore of nothing prints no errors, the two checks still print 1 and 18xxxx, and the next steps remove the backup container and the dump. Print the pg_isready wait after the start too, and make one check read the restored data (e.g. list pg_database) before the removal steps."
+    }
+  ],
+  "ci": "At 06:11Z every pull_request run at 95693430 (Tests, Legion Envoy and Contracts, Docs, Worker Image, PR Title) was still queued; a request for changes does not wait on it. Required set on main: lint, typecheck, test, pr-title (rulesets; no branch protection). Spec acceptance 2 (CI service >= 180000 with vector, full Go suite green) is still to be read on GitHub at the next round's head.",
+  "thermonuclear": "deep-review and code-quality ran once at 95693430: deep-review 1 Medium (the 16-lane coverage above), 3 Minor (docker rm -v, stopped-container race, dump umask); code-quality 4 Minor cleanup-only. Dump umask judged not a defect: the same data is readable over the loopback server's fixed password (dev-postgres.sh:21-22).",
+  "contractCensus": "Not owed: the gcp:Dispatch change moves a default, announced as Breaking in README and CHANGELOG, and changes no field or signature; dev-postgres.sh's refusal rule (any image but the pin) is unchanged, only the pin moves.",
+  "fastFollow": "Test and message wording: dev-postgres.test.sh pins prose ('until it reports accepting connections', 'over TCP', 'print 1 and 18xxxx …') and re-extracts lines in_order already matched exactly (printed()); dev-broker.test.sh:450-451 repeats dev-postgres's refusal text; dev-postgres.sh:8-9 and packages/dispatch/README.md:124-125 say Dispatch runs on PostgreSQL 18 while production runs 16 until INFRA-572."
+}
