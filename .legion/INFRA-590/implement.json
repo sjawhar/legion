@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-590",
+  "completed": "2026-10-27T16:20:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
+  "head": "63e0500890c1f641c2b553fde67655176271bf27",
+  "proof": [
+    {
+      "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
+      "surface": "two real envoy-dispatch binaries on one Postgres and one NATS (packages/envoy/cmd/dispatch multiprocess harness), GET /healthz sampled every 100 ms",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -tags multiprocess -count=1 -timeout 25m -v ./cmd/dispatch (TestOneProcessPublishesTheOutboxAtATime, TestAFrozenPublisherSendsNothingWhenItResumes); go test -count=1 -run TestHold ./internal/dispatch/duty/",
+      "observed": "PASS: outbox_publisher true on at most one process at every sample and on exactly one after 10 s; the two instances' publishing periods never overlap; a SIGSTOPped holder was replaced in 5.357 s and sent nothing after it resumed; TestHold* ok. Whole tagged package ok in 514.369 s (https://github.com/sjawhar/legion/pull/2395#issuecomment-6447146746)",
+      "headSha": "63e0500890c1f641c2b553fde67655176271bf27",
+      "negativeControl": "Same row on main's code (harness commit bed0fdc4): FAIL, 'no one process of the pair reported outbox_publisher true within 10s; A: no outbox_publisher field; B: no outbox_publisher field'"
+    },
+    {
+      "criterion": "A killed publisher is replaced within 10 s; a publisher that cannot reach NATS releases and another takes over within 10 s",
+      "surface": "multiprocess harness: SIGKILL of the holder; per-process testnats.Proxy Cut() and Freeze() (silent cut)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -tags multiprocess -count=1 -timeout 25m -run 'TestAKilledPublisher|TestAPublisherCutFromNATS|TestAPublisherKilledMidBatch' -v ./cmd/dispatch",
+      "observed": "kill: the other process took the hold in 4.514 s and logged its first batch in 4.572 s; cut: 3.004 s / 3.045 s; silent cut: 7.004 s / 7.034 s; killed mid-batch and restarted: comment 1 then comment 2 on the stream, both published 1 ms after the restarted process was healthy (5.723 s after the kill)",
+      "headSha": "63e0500890c1f641c2b553fde67655176271bf27",
+      "negativeControl": "TestAPublisherKilledMidBatchAndRestarted... on main's code (bed0fdc4): FAIL, 'the stream holds comment 2 at sequence 3 and comment 1 at 4 ... comment 1 (dispatch-3) was marked published 59.861s after the restarted process was healthy, past the 10s bound'"
+    },
+    {
+      "criterion": "Each addressed session takes each event once and one issue's events in order, with two processes, across a killed publisher and through a failed publish and its retry; a role route forwards with a receipt and stays unpublished until it arrives or the role has no holder",
+      "surface": "multiprocess harness with a test session that answers role forwards with an empty receipt (pi-envoy's rule) and dedupes by event id then dedupe key",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -tags multiprocess -count=1 -timeout 25m -run 'TestEachSessionTakesEachEvent|TestARoleHolderWhoseConnectionMoves|TestAKilledPublisher' -v ./cmd/dispatch; DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=1 -v ./internal/dispatch/outbox/ ./internal/roles/",
+      "observed": "200 comments on 10 issues written through both processes: the watcher took 200, the role's holder 80, the thread's author 60, each once and each issue's in seq order; role event N forwarded with no receipt was taken 6.0 s later and marked published 3.5 ms after the receipt, N+1 after N, for a dropped holder connection and for a role moved to another session; outbox and roles packages ok (194 s)",
+      "headSha": "63e0500890c1f641c2b553fde67655176271bf27",
+      "negativeControl": "TestEachSessionTakesEachEventOnceAndInOrderAcrossTwoProcesses and TestARoleHolderWhoseConnectionMoves... on main's code (bed0fdc4): FAIL, the role holder never gets a forward (main publishes notifications.role.<id> and counts it published on the flush)"
+    },
+    {
+      "criterion": "No periodic poll; a timer only for a due retry; next_attempt_at from the database clock; never-acknowledged events backed off and recorded; EP-9, EP-10, R1-3, R1-5, EP-19 each with a test",
+      "surface": "outbox, duty and bus packages on real Postgres and an in-process JetStream server",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=1 -v ./internal/dispatch/outbox/ && go test -count=1 ./internal/bus/",
+      "observed": "ok: TestTheOutboxDoesNotScanWhileIdle (0 claims in 12 s idle; another connection's event claimed 1 ms after commit; a 3 s back-off published at 3.012 s), TestAnEventNATSNeverAcknowledgesIsBackedOffAndRecorded, TestTheBatchResolvesFollowersAndAuthorsInAtMostFourStatements, TestOneRefusedSubjectFailsOnlyItsOwnEvent, TestAPublishedEventIsWrittenOnce, TestTheClaimSkipsPendingCommandsAndBackedOffRows (rows removed by filter 0, under 0.5 ms), TestAPublishWaitingForAReconnectWakesOnTheReconnect",
+      "headSha": "63e0500890c1f641c2b553fde67655176271bf27",
+      "negativeControl": "Each run on the code before its fix fails: idle outbox ran 2 claims in 12 s; 125 lookups for the batch; 6 row updates for 3 events; Seq Scan of 10,020 rows removing 10,000 by filter in 11.3 ms; reconnect wait looped 192 times over a 2 s outage (files under the implementer's before/ evidence, quoted in the PR's proof comment)"
+    },
+    {
+      "criterion": "Before and after numbers: publish rate and delivery latency at 4 and 40 events/s, one and two processes",
+      "surface": "committed black-box harness TestTheOutboxLoadSteps (real envoy-dispatch processes, HTTP writes, NATS reads) and TestOutboxThroughputUnderRemoteLatency",
+      "command": "cd packages/envoy && DISPATCH_OUTBOX_LOAD_STEPS=1 DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -tags multiprocess -count=1 -timeout 60m -run TestTheOutboxLoadSteps -v ./cmd/dispatch at bed0fdc4 and at 891e854b; go test -count=1 -run TestOutboxThroughputUnderRemoteLatency -v ./internal/dispatch/outbox/ at both",
+      "observed": "40 events/s, one process: 40.00 -> 39.99 published/s, p99 from commit 1,063 -> 530 ms; two processes: p99 1,271 -> 1,054 ms; every event delivered before and after. Remote latency 50/150 ms: backlog 749/444 -> 176/71 events/s, one-issue burst of 100: 0.14/0.40 s -> 6.0/16.2 s (one round trip per event per destination). Recorded in THROUGHPUT.md",
+      "headSha": "891e854b63b7",
+      "negativeControl": "n/a for a measurement; the harness fails the step when any written event is not delivered within 60 s after it (none failed before or after)"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/duty/hold.go (+ hold_test.go): duty.Hold",
+    "packages/envoy/internal/dispatch/store/migrations/0135_duty_holds.*, 0136_outbox_claim.*",
+    "packages/envoy/internal/dispatch/outbox/lease.go, batch.go, lookups.go, role.go, publisher.go (+ lease_test, order_test, role_test, claim_test, window_test, throughput_test, core_denied_test, refused_test, publisher_test, attempt_test, publisher_document_authors_test)",
+    "packages/envoy/internal/roles/roles.go, buckets.go (+ tests): one role-holder resolution for the listener and the outbox",
+    "packages/envoy/internal/bus/async.go, nats.go, connect.go, recovery.go (+ connection_changed_test, window_request_test, async_test, core_permission_test): Request, Probe, ErrNotAcknowledged, ErrNotCaptured, ConnectionChanged, ForwardMsgID; window core path deleted",
+    "packages/envoy/internal/testnats/proxy.go (+ test): cuttable per-process NATS proxy",
+    "packages/envoy/cmd/listener/delivery.go, role_holder.go, api.go, main.go: resolution through roles.ResolveHolder",
+    "packages/envoy/cmd/dispatch/main.go, main_test.go, multiprocess_test.go, outbox_load_steps_test.go, shutdown_test.go",
+    "packages/envoy/internal/dispatch/store/pool.go, store/kv.go (DecodeRoleClaim exported), contracts/dedupe.go, pglisten/listener.go",
+    ".dispatch/architecture/dispatch-outbox.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, packages/envoy/cmd/dispatch/AGENTS.md, docs/site/src/content/docs/dispatch/running-dispatch.md, packages/envoy/infra/README.md, packages/envoy/internal/dispatch/outbox/THROUGHPUT.md, packages/envoy/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "Blocked events take their blocker's next_attempt_at (no attempt), so they are not re-read on every wake while the blocker waits out a back-off; an owner whose first 100 events all wait has its later due event deferred to the earliest of them (deferPastWindow).",
+    "A standby that gave the hold up for NATS loss probes its connection before it takes the hold again; without it a silently cut holder re-took the hold at once and take-over ran past 16 s (found by the silent-cut row).",
+    "A reached role destination is recorded as its role topic, so a retry skips the forward even if the holder changed; the chain key of a role forward is the holder's agent subject.",
+    "The readBatch final read of events is a lateral pkey lookup with limit 1: a plain join made the planner walk events_pkey (5.19 ms) and failed the 0.5 ms claim bound.",
+    "The record writes published marks unconditionally but back-off and release only while duty_holds still names this holder, in the same statement."
+  ],
+  "deviations": [
+    "Plan departures 1-3 accepted by the INFRA-514 architect (outbox forwards role routes itself; a serving-port holder's stream ack is the receipt, which needs dispatch://INFRA-594; 'claim window' reads as the batch under the hold).",
+    "A stale role holder (heartbeat older than session.ClaimStaleAfter) keeps its claim and the event is backed off (decision 10), where the listener's role lane releases the claim.",
+    "Migrations renumbered to 0135/0136 after main took 0121-0134; INFRA-558 told.",
+    "The simplify pass skipped 7 findings that would edit lines other open trees rewrite (store/kv.go decode, the listener's roleForwardDedupePrefix alias, RequestCoreTo's receipt check kept identical to INFRA-547's, connect.go callbacks, batching lookup round trips).",
+    "TestTheClaimSkipsPendingCommandsAndBackedOffRows keeps the plan's 0.5 ms bound by the fastest of 20 EXPLAIN ANALYZE runs; it measured 0.41-0.45 ms on the 2-core pod."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Ordering per (owner, destination) costs one NATS round trip per event per destination of one owner: with NATS behind 150 ms, a burst of 100 events on one issue drains in 16 s (THROUGHPUT.md)."
+  ]
+}
