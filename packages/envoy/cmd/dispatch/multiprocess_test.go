@@ -1153,15 +1153,19 @@ func lockTables(t *testing.T, database *store.Store, tables ...string) pgx.Tx {
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Three of the six leases are observable inside a window a test can wait out:
-// reference-excerpts and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other three
-// are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
-// architecture-import's and delivery-reconcile's first pass is jittered uniformly over
-// SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether their passes
-// ever overlap is a coin toss no test should turn into a flake.
+// Four of the six leases are observable inside a window a test can wait out:
+// reference-excerpts and webhook-redelivery, whose first pass is immediate, document-compaction,
+// whose first is jittered over its first 30 s, and suggestion-outcomes, whose first is one
+// SuggestionSweepInterval (a minute) in. document-compaction is not held inside its pass: its
+// period is the aligned hour, so the process whose tick comes second skips because the lease is
+// held or because the hour is served, and either way the pass runs once - provided both first
+// ticks fall in one hour, which waitOutABucketBoundary sees to. The other two are not, and this
+// row says so rather than pretending: architecture-import's and delivery-reconcile's first pass
+// is jittered uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its
+// own, so whether their passes ever overlap is a coin toss no test should turn into a flake.
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
+	waitOutABucketBoundary(t, pair, time.Hour)
 	fake := startGitHubFake(t)
 	// refs is where the reference-excerpt reconciliation's first statement writes
 	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does.
@@ -1194,8 +1198,11 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	waitForLease(t, pair, leaseRan, "suggestion-outcomes", 60*time.Second)
 	requireLeasedOnce(t, pair, "reference-excerpts")
 	requireLeasedOnce(t, pair, "suggestion-outcomes")
+	// Both processes' first compaction-sweep ticks are long past by now: each came within 30 s of
+	// its process's start, and the suggestion-outcome sweep's first came a minute in.
+	waitForLease(t, pair, leaseRan, "document-compaction", 60*time.Second)
+	requireLeasedOnce(t, pair, "document-compaction")
 	for _, unobserved := range []struct{ lease, why string }{
-		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
 	} {

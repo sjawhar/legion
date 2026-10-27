@@ -731,25 +731,9 @@ func (p *PgVersioned) pool() *store.Pool {
 	return p.store.Pool
 }
 
-// CompactAll compacts every document under the tail rule (compactRoom), waiting for each
-// document's lock.
-func (s *Service) CompactAll(ctx context.Context) error {
-	ctx = store.WithTransactionTracking(ctx)
-	rooms, err := s.documentRooms(ctx, "document rooms", `select id::text from artifacts where kind = 'doc'`)
-	if err != nil {
-		return err
-	}
-	for _, artifactID := range rooms {
-		if _, err := s.persistence.compactRoom(ctx, artifactID, tailRule, true); err != nil {
-			return fmt.Errorf("compact document %s: %w", artifactID, err)
-		}
-	}
-	return nil
-}
-
 // documentRooms drains the id list before its caller does anything with it: the work each id
-// leads to - a compaction, a room close - takes a pooled connection of its own, and holding
-// the rows open across that would be a second connection for work the first is waiting on.
+// leads to - a room close - takes a pooled connection of its own, and holding the rows open
+// across that would be a second connection for work the first is waiting on.
 // The what argument names the list in the errors the caller reads.
 func (s *Service) documentRooms(ctx context.Context, what, sql string, args ...any) ([]string, error) {
 	rows, err := s.store.Pool.Query(ctx, sql, args...)

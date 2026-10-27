@@ -350,9 +350,12 @@ func main() {
 	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
 	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
 	//     delivery live hub and its listener (migration 0107_events_notify.up.sql states that
-	//     purpose), the event stream relay, the document rooms' timers, and the stale-room
-	//     evictor (it closes the rooms resident in this process that the other process's writes
-	//     left behind the durable head, so it has to run wherever a room is resident).
+	//     purpose), the event stream relay, the document rooms' timers, the document compaction
+	//     queue (docs.New starts it; it compacts the documents this process's own appends and
+	//     loads noted, and the hourly compaction sweep below is the leased pass over every
+	//     document), and the stale-room evictor (it closes the rooms resident in this process
+	//     that the other process's writes left behind the durable head, so it has to run
+	//     wherever a room is resident).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
 	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above.
 	leases, err := database.Pool.Leases()
@@ -371,8 +374,6 @@ func main() {
 			Store:     &store.Store{Pool: outboxPool},
 			Publisher: natsClient,
 			Broker:    broker,
-			Docs:      documentService,
-			Leases:    leases,
 		})
 	}
 	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: the server's
@@ -409,6 +410,10 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
+	// Documents the compaction queues let go - every room a restart, a Shutdown or a Quiesce
+	// dropped from one - fold within an hour of coming due, whether or not NATS is configured
+	// (INFRA-593).
+	go documentService.RunCompactionSweep(ctx, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {

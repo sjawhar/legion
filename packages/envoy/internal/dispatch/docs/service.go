@@ -75,9 +75,9 @@ type Deps struct {
 // DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
 // state decoded once with the stamp it was read under, which a read of a document no room holds
 // caches its rendering by (coldRead). compactRoom is the compaction every path Dispatch compacts a
-// document on runs (a room's close, the compaction queue, CompactAll), under the tail rule; Compact,
-// ygo's, is the keep-N rule only. pgVersioned is the PgVersioned the store is or wraps, which New
-// hands the Service's note of each append and load (noteStoredUpdates).
+// document on runs (a room's close, the compaction queue, the compaction sweep), under the tail
+// rule; Compact, ygo's, is the keep-N rule only. pgVersioned is the PgVersioned the store is or
+// wraps, which New hands the Service's note of each append and load (noteStoredUpdates).
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)

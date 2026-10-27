@@ -15,8 +15,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
@@ -27,7 +25,6 @@ import (
 const (
 	batchSize           = 100
 	retryInterval       = 5 * time.Second
-	compactInterval     = 24 * time.Hour
 	documentTopicPrefix = "notifications.dispatch.document."
 	// claimWindow is how long scanPendingEvents' claim keeps an event out of every other
 	// process's batch. Two envoy-dispatch processes serve one Postgres and one NATS, and a
@@ -79,11 +76,6 @@ type Publisher interface {
 	Window() bus.Sender
 }
 
-// documentCompactionLease names the lease the daily document compaction runs under. It walks
-// every document, so two envoy-dispatch processes compacting at the same moment is twice the work
-// for one result.
-const documentCompactionLease = "document-compaction"
-
 // Deps are the durable state and delivery dependencies for the outbox.
 type Deps struct {
 	// Store is what the outbox reads and records events through. cmd/dispatch gives it a store on
@@ -92,20 +84,12 @@ type Deps struct {
 	Store     *store.Store
 	Publisher Publisher
 	Broker    *events.Broker
-	Docs      docs.API
-	// Leases is where the compaction tick takes documentCompactionLease (compactDocuments). It
-	// is required of a Run that ticks: there is no nil-means-unleased path, and cmd/dispatch
-	// exits at boot if the lease pool cannot be opened.
-	Leases duty.Leases
 }
 
 // Run drains unpublished events at startup, after committed local events, and
 // periodically so a dropped in-process notification cannot strand an event. It
 // returns when ctx is cancelled.
 func Run(ctx context.Context, deps Deps) {
-	// Started before the publisher marks its context, so the compaction carries a marker of its
-	// own: a connection it holds must never count as one the publisher holds.
-	go compactDaily(ctx, deps)
 	// The publisher is one of the process's transaction openers, so its context carries the
 	// pool's marker: a read it ever makes while one of its transactions is open is refused
 	// rather than left to deadlock the pool (store.ErrNestedAcquire).
@@ -132,35 +116,6 @@ func Run(ctx context.Context, deps Deps) {
 			scan(ctx, deps)
 		}
 	}
-}
-
-// compactDaily runs compactDocuments once per compactInterval until ctx ends, on a goroutine of its
-// own: a compaction walks every document for minutes, and on the outbox's loop nothing would
-// publish meanwhile. It goes through the document service's store, not the outbox's pool.
-func compactDaily(ctx context.Context, deps Deps) {
-	ctx = store.WithTransactionTracking(ctx)
-	compact := time.NewTicker(compactInterval)
-	defer compact.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-compact.C:
-			compactDocuments(ctx, deps)
-		}
-	}
-}
-
-// compactDocuments runs the daily compaction of every document under documentCompactionLease, so
-// that one process does that walk however many serve the database, once per compactInterval and
-// not once per process: the period is this loop's own tick, so a process whose ticker fires hours
-// after the other's finds the day's compaction already done and skips it.
-func compactDocuments(ctx context.Context, deps Deps) {
-	duty.Exclusive(ctx, deps.Leases, documentCompactionLease, compactInterval, func(ctx context.Context) {
-		if err := deps.Docs.CompactAll(ctx); err != nil {
-			slog.Error("dispatch outbox: compact documents", "error", err)
-		}
-	})
 }
 
 func scan(ctx context.Context, deps Deps) {
