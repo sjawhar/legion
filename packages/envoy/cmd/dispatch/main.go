@@ -499,37 +499,15 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	// INFRA-555: the process enters the registry of live server processes once its port is bound
-	// and before it serves its first request, after one probe that the database answers. The
-	// registration refuses a key set a live peer does not share (processes.Register): a cookie this
-	// process minted would not verify there, or the reverse, and the people it signed in would be
-	// signed out on the next request the load balancer sends to the other. That refusal ends the
-	// process with 1 here, before anything is served, so a roll stalls on the new pod while the old
-	// ones keep serving. The registration's heartbeat runs until shutdown deregisters it, after the
-	// HTTP drain (shutdown), so a draining process counts as live until its last request is
-	// answered. A heartbeat that lapsed (the process frozen, or cut from the database) or whose
-	// row was pruned checks the keys again before the process counts as live once more; beside a
-	// live process whose keys it does not share it refuses (registration.Lost), and serving stops
-	// as at a signal and ends the process with 1 once drained (serveUntilStopped). The prune loop
-	// deletes what processes that died without deregistering left behind, once overall under its
-	// lease. The announcer starts only now, so its first pass counts this process among the live
-	// ones and never announces a build the fleet is rolling away from.
-	if _, err := database.Pool.Healthy(ctx); err != nil {
-		slog.Error("dispatch: probe the database", "error", err)
-		os.Exit(1)
-	}
-	registration, err := processes.Register(ctx, database.Pool, processes.Instance{
+	registration, err := joinRegistry(ctx, database, processes.Instance{
 		Commit:         buildCommit,
 		DashboardBuild: processes.DashboardBuild(webDistDir),
 		SigningKeys:    signingKey.Fingerprints(),
-	})
+	}, leases, announcer)
 	if err != nil {
 		slog.Error("dispatch: register this server process", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("dispatch: registered this server process", "instance", registration.ID)
-	go processes.RunPrune(ctx, database.Pool, leases)
-	go announcer.Run(ctx)
 	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery,
 		deregisterAfterDrain(registration), registration.Lost()); err != nil {
 		os.Exit(1)
@@ -889,7 +867,9 @@ func explainMigrateError(err error) error {
 // process under dev sign-in, otherwise DISPATCH_SIGNING_KEY's keys when it is set (a deployment's,
 // from its secrets manager), otherwise the data dir's signing-key file, created on first start (a
 // local run's). Outside dev sign-in the keys must stay the same across deploys, or every dsession
-// cookie is invalidated whenever a container rolls; a rotation adds the new key second first.
+// cookie is invalidated whenever a container rolls; a rotation adds the new key second first. An
+// empty signing-key file is refused by name: the empty set signs nothing, and the people store
+// would refuse it only by panicking.
 func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error) {
 	if boot.DevSignIn {
 		key, err := auth.NewSigningKey()
@@ -901,7 +881,15 @@ func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error
 	if !boot.SigningKey.Empty() {
 		return boot.SigningKey, nil
 	}
-	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))
+	path := filepath.Join(dataDir, "signing-key")
+	keys, err := auth.LoadOrCreateSigningKey(path)
+	if err != nil {
+		return auth.SigningKeys{}, err
+	}
+	if keys.Empty() {
+		return auth.SigningKeys{}, fmt.Errorf("the session signing key file %s is empty: put its key back, delete it to have a new key written (which signs out everyone signed in under the old one), or set DISPATCH_SIGNING_KEY", path)
+	}
+	return keys, nil
 }
 
 // newDocumentService is the document service main serves the document websocket and the API's

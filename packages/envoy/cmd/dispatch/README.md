@@ -428,12 +428,17 @@ migration `0130`): once a process has bound its port, and before it serves, it r
 fingerprint of each of its keys (none reveals its key), and it refuses to start, logging
 `msg="dispatch: register this server process"` at ERROR with an error that names the other process
 and the rotation steps, and exiting 1, when a live process's key set does not share its own both
-ways: the other's current key among its keys, and its current key among the other's. So a process
-with a minted key refuses beside any live process, and a process refuses beside it; processes
-that share one data directory share its key and start. A pod rolled with a changed secret beside
-pods that hold only the old key refuses the same way, so the roll stalls on the new pod while the
-old ones keep serving. Each step of a rotation (Identity, above) passes the check beside processes
-still on the step before. A process whose heartbeat lapsed (frozen, or cut from the database, for
+ways: the other's current key among its keys, and its current key among the other's. The refusal
+stands only beside a process that stays live: refused, a process logs at WARN which live process
+refuses it and waits up to one live window (15 seconds) and a heartbeat for that process to stop
+heartbeating, trying again every heartbeat, before it exits 1, serving nothing meanwhile. So a
+restart after a kill, whose dead process's row still counts as live, starts once that row lapses,
+while a live process, heartbeating every 5 seconds, keeps refusing. A process with a minted key
+therefore refuses beside any live process, and a process refuses beside it; processes that share
+one data directory share its key and start. A pod rolled with a changed secret beside pods that
+hold only the old key refuses the same way, so the roll stalls on the new pod while the old ones
+keep serving. Each step of a rotation (Identity, above) passes the check beside processes still on
+the step before. A process whose heartbeat lapsed (frozen, or cut from the database, for
 longer than the live window) or whose row was pruned drops out of the registry while it runs, so a
 process started meanwhile is checked without it; the first one checks its keys again before it
 counts as live once more, and beside a live process whose keys it does not share it logs
@@ -474,12 +479,14 @@ What the two processes share, and what each keeps to itself:
   every 5 seconds, on a one-connection pool of its own, and counts as live while that heartbeat is
   within 15 seconds of the database's `now()`; it deletes its row once its HTTP drain has ended, so
   a draining process counts as live until its last request is answered. A row a process left
-  behind (killed, its node lost) is deleted 10 minutes after its last heartbeat by the prune loop,
-  under the lease `server-processes`. A process whose heartbeat lapsed (frozen, cut from the
-  database) or whose row was pruned checks its keys again, under the registry's lock, before it
-  counts as live once more: it writes its row again, logging that it rejoined at WARN, when every
-  live process shares its key set, and otherwise stops, after draining, and exits 1 (the signing
-  key precondition, above). Operator subcommands never register.
+  behind (killed, its node lost) counts as live until 15 seconds after its last heartbeat, so a
+  process refused beside it at boot waits up to that window and a heartbeat for it to lapse
+  before it exits 1 (the signing key precondition, above); the prune loop deletes such a row 10
+  minutes after its last heartbeat, under the lease `server-processes`. A process whose heartbeat
+  lapsed (frozen, cut from the database) or whose row was pruned checks its keys again, under the
+  registry's lock, before it counts as live once more: it writes its row again, logging that it
+  rejoined at WARN, when every live process shares its key set, and otherwise stops, after
+  draining, and exits 1 (the signing key precondition, above). Operator subcommands never register.
 - A sign-in started on one process completes on the other: its state travels in the browser's
   signed `dispatch_oauth_state` cookie, not in a process (Identity, above), given one
   `DISPATCH_SERVER_URL` on every process.

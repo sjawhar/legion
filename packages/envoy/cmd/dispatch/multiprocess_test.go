@@ -1324,8 +1324,10 @@ func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *
 // not share both ways (processes.Register): with a pair live under one key, a process carrying a
 // key of its own - a task rolled with a changed secret - and one with no DISPATCH_SIGNING_KEY,
 // which signs with a key it minted in its own data dir, each exit 1 with the refusal and never
-// answer /healthz, since each would sign people out of the pair or be signed out by it. A process
-// given the pair's key first and another second, the first step of a rotation, starts beside them.
+// answer /healthz, since each would sign people out of the pair or be signed out by it. Each
+// exits once it has waited a live window and a heartbeat for the pair to stop heartbeating, which
+// the pair never does. A process given the pair's key first and another second, the first step of
+// a rotation, starts beside them.
 func TestAProcessWhoseKeySetALivePeerDoesNotShareRefusesToStart(t *testing.T) {
 	pair := startPair(t, nil)
 	for _, refused := range []struct{ name, key string }{
@@ -1404,7 +1406,9 @@ func TestAProcessThatResumesBesideAPeerWhoseKeySetItDoesNotShareDoesNotServeBesi
 
 // requireRefusedToStart waits up to a minute for the process to exit, asking its /healthz all the
 // while, and requires that it exited 1 with the registry's refusal, never having answered /healthz
-// nor logged that it serves.
+// nor logged that it serves. A refused process waits processes.LiveWindow and one
+// processes.HeartbeatInterval (20 s) for its refusers to lapse before it exits, well inside the
+// minute.
 func requireRefusedToStart(t *testing.T, p *dispatchProcess, name string) {
 	t.Helper()
 	client := &http.Client{Timeout: time.Second}

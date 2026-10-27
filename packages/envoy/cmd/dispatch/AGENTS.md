@@ -16,7 +16,10 @@ every migration's lock waits at `pgmigrate.LockTimeout`; README "Database
 migrations"), then binds its port, registers the process in the registry of
 live server processes (`internal/dispatch/processes`, migration `0130`: a key
 set a live process does not share both ways refuses the start, exiting 1
-before anything is served), and starts HTTP serving; shutdown deregisters it
+before anything is served, once the process has waited up to one live window
+(15 s) and a heartbeat for the refusing process to stop heartbeating, so a
+restart after a kill starts once the dead process's row lapses;
+`joinRegistry`), and starts HTTP serving; shutdown deregisters it
 once HTTP has drained. A process whose heartbeat lapsed (frozen, cut from the
 database) or whose row was pruned checks its keys again before it counts as
 live once more; beside a live process whose keys it does not share, its

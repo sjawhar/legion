@@ -41,6 +41,15 @@ func setInterval(t *testing.T, interval *time.Duration, value time.Duration) {
 	t.Cleanup(func() { *interval = previous })
 }
 
+// quickRegistry shortens the heartbeat to 100ms and the live window to a second for the test, so
+// Register's wait beside a refusing peer (LiveWindow and one HeartbeatInterval) takes about a
+// second, and a peer registered in the test heartbeats ten times a window.
+func quickRegistry(t *testing.T) {
+	t.Helper()
+	setInterval(t, &HeartbeatInterval, 100*time.Millisecond)
+	setInterval(t, &LiveWindow, time.Second)
+}
+
 // register registers a process holding setting and deregisters it when the test ends, unless the
 // test has.
 func register(t *testing.T, database *store.Store, commit, setting string) (*Registration, error) {
@@ -217,9 +226,9 @@ func TestPruneRemovesRowsOlderThanTenMinutesAndKeepsNewerOnes(t *testing.T) {
 // A live process refuses a newcomer whose key set does not share its own both ways, each way on
 // its own, and the refusal records nothing and says what to do. Key sets that overlap with the
 // current keys swapped, which is the middle of a rotation, are accepted, and so is a key set no
-// live process shares when the only other row is a process gone.
+// live process shares when the only other row is a process gone. A peer that refuses heartbeats
+// throughout, so its refusal stands through Register's wait for it to lapse.
 func TestRegisterRefusesAKeySetALivePeerDoesNotShare(t *testing.T) {
-	setInterval(t, &HeartbeatInterval, time.Hour)
 	for _, c := range []struct {
 		name, peer, mine string
 		stale            bool
@@ -237,10 +246,16 @@ func TestRegisterRefusesAKeySetALivePeerDoesNotShare(t *testing.T) {
 		{name: "another key, but the peer is gone", peer: "K0", mine: "K9", stale: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			if c.stale {
+				// A gone process does not heartbeat back into Live.
+				setInterval(t, &HeartbeatInterval, time.Hour)
+			} else {
+				quickRegistry(t)
+			}
 			database := storetest.Open(t)
 			peer := mustRegister(t, database, "c1", c.peer)
 			if c.stale {
-				ageHeartbeat(t, database, peer.ID, 16*time.Second)
+				ageHeartbeat(t, database, peer.ID, LiveWindow+time.Second)
 			}
 			registration, err := register(t, database, "c2", c.mine)
 			if !c.refused {
@@ -272,11 +287,12 @@ func TestRegisterRefusesAKeySetALivePeerDoesNotShare(t *testing.T) {
 }
 
 // Two processes with keys of their own booting at once are serialised: the second reads the
-// first's row and is refused, so exactly one of them registers. Both are held at their first
-// read of the registry by a lock this test takes on the table, and released together, which is
-// the moment two reads without the registry's own lock would both find the registry empty.
+// first's row and is refused, so exactly one of them registers; the first's heartbeat keeps it
+// live through the second's wait. Both are held at their first read of the registry by a lock
+// this test takes on the table, and released together, which is the moment two reads without the
+// registry's own lock would both find the registry empty.
 func TestTwoRegistrationsAtOnceWithKeysOfTheirOwnAreSerialised(t *testing.T) {
-	setInterval(t, &HeartbeatInterval, time.Hour)
+	quickRegistry(t)
 	database := storetest.Open(t)
 	gate, err := database.Pool.Begin(context.Background())
 	if err != nil {
@@ -319,6 +335,68 @@ func TestTwoRegistrationsAtOnceWithKeysOfTheirOwnAreSerialised(t *testing.T) {
 	}
 	if got := liveIDs(t, database); len(got) != 1 {
 		t.Errorf("live = %v, want the one registration accepted", got)
+	}
+}
+
+// A process killed without deregistering leaves a row that counts as live until LiveWindow after
+// its last heartbeat, and a newcomer whose key set it does not share - a dev sign-in server
+// restarted after a kill, whose key is minted per process - is refused beside it at first.
+// Register waits for the row to lapse instead of refusing at once, and admits the newcomer then.
+func TestARefusalBesideARowThatStopsHeartbeatingIsAdmittedOnceTheRowLapses(t *testing.T) {
+	quickRegistry(t)
+	database := storetest.Open(t)
+	var dead string
+	underRegistryLock(t, database, func(tx pgx.Tx) { dead = livePeer(t, tx, "K9") })
+
+	registration, err := register(t, database, "c2", "K0")
+	if err != nil {
+		t.Fatalf("a process beside a row that stopped heartbeating was refused: %v", err)
+	}
+	if got := liveIDs(t, database); !slices.Equal(got, []string{registration.ID}) {
+		t.Errorf("live = %v, want the admitted process %s alone, the dead row %s lapsed", got, registration.ID, dead)
+	}
+}
+
+// Beside a peer that keeps heartbeating, Register's wait ends in the refusal: the peer's row stays
+// live past LiveWindow and one HeartbeatInterval after the first refusal, and nothing is recorded.
+func TestARefusalBesideAPeerThatKeepsHeartbeatingStandsAfterTheWait(t *testing.T) {
+	quickRegistry(t)
+	database := storetest.Open(t)
+	peer := mustRegister(t, database, "c1", "K9")
+
+	started := time.Now()
+	_, err := register(t, database, "c2", "K0")
+	waited := time.Since(started)
+	if !errors.Is(err, ErrKeySetMismatch) || !strings.Contains(err.Error(), peer.ID) {
+		t.Fatalf("a process beside a heartbeating peer with another key registered with %v, want ErrKeySetMismatch naming %s", err, peer.ID)
+	}
+	if bound := LiveWindow + HeartbeatInterval; waited < bound {
+		t.Errorf("refused %v after Register began, want once it waited %v for the peer to lapse", waited, bound)
+	}
+	if got := liveIDs(t, database); !slices.Equal(got, []string{peer.ID}) {
+		t.Errorf("live = %v after the refusal, want the peer %s alone", got, peer.ID)
+	}
+}
+
+// Register's wait ends with its context: a process stopped (SIGTERM) while it waits for a refusing
+// peer to lapse stops then, registered nowhere, not once the wait is over.
+func TestRegistersWaitEndsWithItsContext(t *testing.T) {
+	setInterval(t, &HeartbeatInterval, 100*time.Millisecond)
+	database := storetest.Open(t)
+	peer := mustRegister(t, database, "c1", "K9")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := Register(ctx, database.Pool, Instance{Commit: "c2", SigningKeys: fingerprints(t, "K0")})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Register beside a refusing peer, its context ended, returned %v; want the context's error", err)
+	}
+	if waited := time.Since(started); waited > LiveWindow/2 {
+		t.Errorf("Register returned %v after it began, want soon after its context ended at 300ms", waited)
+	}
+	if got := liveIDs(t, database); !slices.Equal(got, []string{peer.ID}) {
+		t.Errorf("live = %v, want the peer %s alone", got, peer.ID)
 	}
 }
 

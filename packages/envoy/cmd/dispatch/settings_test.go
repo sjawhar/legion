@@ -1142,6 +1142,31 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					t.Errorf("the people store main builds read %#v, %v; want the token sealed under the earlier key", membership, err)
 				}
 			})
+			// Unset, with an empty signing-key file in the data dir, the boot exits 1 naming the
+			// file, before the people store would panic on the empty key set.
+			t.Run("an empty signing-key file", func(t *testing.T) {
+				database := storetest.Open(t)
+				home := t.TempDir()
+				keyFile := filepath.Join(home, ".local", "share", "dispatch", "signing-key")
+				if err := os.MkdirAll(filepath.Dir(keyFile), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(keyFile, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				process := startDispatchProcessWith(t, database.Pool.Config().ConnString(), dispatchOptions{Env: map[string]string{"HOME": home}})
+				process.WaitExit(t, "its start with an empty signing-key file")
+				output := process.Output.String()
+				if code := process.Cmd.ProcessState.ExitCode(); code != 1 {
+					t.Errorf("the boot with an empty signing-key file exited %d, want 1:\n%s", code, output)
+				}
+				if !strings.Contains(output, `msg="dispatch: load signing key"`) || !strings.Contains(output, keyFile) || !strings.Contains(output, "is empty") {
+					t.Errorf("the boot with an empty signing-key file did not refuse it by name (%s):\n%s", keyFile, output)
+				}
+				if strings.Contains(output, "panic") {
+					t.Errorf("the boot with an empty signing-key file panicked:\n%s", output)
+				}
+			})
 			// The key the router's sign-in seals the pool's refresh token under (main hands it to the
 			// people store): the row holds the sealed form, and past the hour the membership check
 			// opens it and renews the sign-in with the pool. A people store under another key, which
