@@ -263,8 +263,9 @@ type server struct {
 	deliveryHub *deliveryHub
 	// deliverySockets is every open GET /ws/delivery socket, which the test hook drops.
 	deliverySockets deliverySocketSet
-	// eventRelay is the live feed every open SSE connection reads (INFRA-66), on every server
-	// register mounts: it starts its listening connection on the first connection to subscribe.
+	// eventRelay is the live feed every open SSE connection and the delivery hub read (INFRA-66),
+	// on every server register mounts: it starts its listening connection on the first of them to
+	// subscribe and stops it with the last.
 	eventRelay *eventStreamRelay
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
 	// warned holds no production job or no configured apply step, so a read that judges a run again
@@ -302,20 +303,20 @@ type queryer interface {
 // its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
 // document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 //
-// With a Lifetime, the server holds the delivery hub (LEGION-690), which starts its goroutines on
-// the first subscription and runs them until Lifetime ends, and mounts GET /ws/delivery beside the
-// document websocket, under the same wrappers; a server without one (a test's) has neither, so
-// nothing outlives the test. Every server holds the event stream relay (INFRA-66), which every
-// open SSE connection reads and which starts its own listening connection on the first of them,
-// also on Lifetime. The returned wait blocks until the hub, every delivery socket and the relay
-// have ended. Call it only after Lifetime has been cancelled and before the database pool closes.
+// With a Lifetime, the server holds the delivery hub (LEGION-690), which runs while a Delivery page
+// holds a view and stops with the last, and mounts GET /ws/delivery beside the document websocket,
+// under the same wrappers; a server without one (a test's) has neither, so nothing outlives the
+// test. Every server holds the event stream relay (INFRA-66), which every open SSE connection and
+// the hub read, and which runs its own listening connection while any of them subscribes, also on
+// Lifetime. The returned wait blocks until the hub, every delivery socket and the relay have ended.
+// Call it only after Lifetime has been cancelled and before the database pool closes.
 //
 // That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
 // which is what ends the relay's goroutines and the hub's. A server built without a Deps.Lifetime
-// runs its relay on context.Background() instead, so nothing ever ends that relay, and the wait
-// this returns blocks for ever once an SSE connection has started it. The delivery hub sets no
-// such trap, since it is built only with a Deps.Lifetime. Give the server a Deps.Lifetime where
-// it is built, or do not call the wait.
+// runs its relay on context.Background() instead, so only its subscribers end it: the wait blocks
+// until every SSE connection open on it has ended, the relay stopping with the last, and returns
+// at once when none is open. The delivery hub sets no such condition, since it is built only with
+// a Deps.Lifetime.
 func Register(mux *http.ServeMux, deps Deps) func() {
 	s := register(mux, deps)
 	return s.waitBackground

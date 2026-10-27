@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"log/slog"
 	"slices"
@@ -13,93 +12,134 @@ import (
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
 
-// intake moves the hub's two cursors. It subscribes to the broker before it reads where the event
-// log stands, so an event committed between the two reaches it either way, and the listener's
-// connection (onConnected) catches both logs up after its LISTEN, for the same reason
-// (api/events.go's subscribe-before-catch-up order).
-func (h *deliveryHub) intake(ctx context.Context) {
-	broker := h.server.deps.Events
-	events, unsubscribe := broker.Subscribe()
-	defer func() { unsubscribe() }()
-	for attempt := 1; !h.readCursors(); attempt++ {
-		if !waitFor(ctx, pglisten.RedialBackoff(attempt)) {
+// intake moves g's change-log cursor and applies the relay's events, until g ends.
+//
+// It subscribes to the relay before it reads anything, so no event falls between the two: an event
+// at or below the subscription's head was committed before the subscription returned, so the
+// reads that follow it (the open P0 issues here, each view's first recompute after ready) see it,
+// and every event above the head arrives on the feed. An event both read and delivered is applied
+// twice, which marks a view dirty once more and leaves p0 as the newest payload says. The
+// listener's connection (onConnected) catches the change log up after its LISTEN for the same
+// reason.
+func (h *deliveryHub) intake(g *hubGeneration) {
+	feed, ok := h.follow(g)
+	if !ok {
+		return
+	}
+	defer func() { feed.cancel() }()
+	for attempt := 1; !h.readStart(g); attempt++ {
+		if !waitFor(g.ctx, pglisten.RedialBackoff(attempt)) {
 			return
 		}
 	}
-	close(h.ready)
+	close(g.ready)
 	for {
 		select {
-		case <-ctx.Done():
+		case <-g.ctx.Done():
 			return
-		case <-h.wakeChanges:
-			h.catchUp(true, false)
-		case <-h.wakeEvents:
-			h.catchUp(false, true)
-		case <-h.connected:
-			h.catchUp(true, true)
+		case <-g.wakeChanges:
+			h.catchUp(g)
+		case <-g.connected:
+			h.catchUp(g)
 			h.note(deliveryHubNote{what: "connected"})
-		case done := <-h.barrier:
-			h.catchUp(true, true)
+		case done := <-g.barrier:
+			h.catchUp(g)
 			close(done)
-		case event, open := <-events:
+		case relayed, open := <-feed.events:
 			if !open {
-				// A full buffer (broker.go's Publish) or CloseAll dropped the subscription: take a new
-				// one, then read whatever the old one missed from the store.
-				h.note(deliveryHubNote{what: "broker dropped"})
-				events, unsubscribe = broker.Subscribe()
-				h.catchUp(false, true)
+				// The feed fell its buffer behind, or the relay's generation ended (a reset of the event
+				// log, the test hook): events may have gone by unapplied. Subscribe again first, as at
+				// the start, then read the open P0 issues afresh and recompute every view, which reads
+				// what the missed events changed. The overflowed subscription is cancelled only once the
+				// new one stands, so the relay's generation runs on between the two.
+				h.note(deliveryHubNote{what: "feed closed"})
+				next, ok := h.follow(g)
+				if !ok {
+					return
+				}
+				feed.cancel()
+				feed = next
+				if !h.reload(g) {
+					return
+				}
 				continue
 			}
-			h.receive(event)
+			h.receive(g, relayed.Event)
 		}
 	}
 }
 
-// readCursors reads where both logs stand and the open P0 issues.
-func (h *deliveryHub) readCursors() bool {
-	ctx, pool := h.readContext(), h.server.deps.Store.Pool
+// follow subscribes g to the relay's feed, trying again while the relay cannot start (its cursor
+// read failed); false once g has ended.
+func (h *deliveryHub) follow(g *hubGeneration) (relaySubscription, bool) {
+	for attempt := 1; ; attempt++ {
+		feed, err := h.feed(g.readContext(), deliveryHubFeedBuffer)
+		if err == nil {
+			return feed, true
+		}
+		if g.ctx.Err() == nil {
+			slog.Warn("dispatch: delivery live hub could not subscribe to the live event stream; retrying", "error", err)
+		}
+		if !waitFor(g.ctx, pglisten.RedialBackoff(attempt)) {
+			return relaySubscription{}, false
+		}
+	}
+}
+
+// readStart reads where the change log stands and the open P0 issues.
+func (h *deliveryHub) readStart(g *hubGeneration) bool {
+	ctx, pool := g.readContext(), h.server.deps.Store.Pool
 	seq, err := delivery.LatestChangeSeq(ctx, pool)
 	var at *time.Time
 	if err == nil && seq > 0 {
 		at, err = delivery.ChangeAt(ctx, pool, seq)
-	}
-	var eventID int64
-	var eventAt time.Time
-	if err == nil {
-		eventID, eventAt, _, err = eventCursorCheck(ctx, pool, 0)
 	}
 	var p0 map[string]struct{}
 	if err == nil {
 		p0, err = delivery.OpenP0Keys(ctx, pool)
 	}
 	if err != nil {
-		if h.lifetime.Err() == nil {
-			slog.Warn("dispatch: delivery live hub could not read where the logs stand; retrying", "error", err)
+		if g.ctx.Err() == nil {
+			slog.Warn("dispatch: delivery live hub could not read where the change log stands; retrying", "error", err)
 		}
 		return false
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.changeSeq, h.changeAt = seq, timeOrZero(at)
-	h.eventCursor, h.eventAt = eventID, eventAt
-	h.p0 = p0
+	g.changeSeq, g.changeAt = seq, timeOrZero(at)
+	g.p0 = p0
 	return true
 }
 
-// catchUp catches up the change log, the event log, or both; a read that fails is tried again a
-// second later.
-func (h *deliveryHub) catchUp(changes, events bool) {
-	if changes {
-		if err := h.catchUpChanges(); err != nil && h.lifetime.Err() == nil {
-			slog.Warn("dispatch: delivery live hub could not read the delivery changes; retrying", "error", err)
-			time.AfterFunc(time.Second, func() { signal(h.wakeChanges) })
+// reload reads the open P0 issues afresh and marks every view dirty, trying the read again while
+// it fails; false once g has ended.
+func (h *deliveryHub) reload(g *hubGeneration) bool {
+	for attempt := 1; ; attempt++ {
+		p0, err := delivery.OpenP0Keys(g.readContext(), h.server.deps.Store.Pool)
+		if err == nil {
+			now := h.clock.Now()
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if h.generation == g {
+				g.p0 = p0
+				h.dirtyAllLocked(g, now)
+			}
+			return true
+		}
+		if g.ctx.Err() == nil {
+			slog.Warn("dispatch: delivery live hub could not read the open P0 issues; retrying", "error", err)
+		}
+		if !waitFor(g.ctx, pglisten.RedialBackoff(attempt)) {
+			return false
 		}
 	}
-	if events {
-		if err := h.catchUpEvents(); err != nil && h.lifetime.Err() == nil {
-			slog.Warn("dispatch: delivery live hub could not read the events; retrying", "error", err)
-			time.AfterFunc(time.Second, func() { signal(h.wakeEvents) })
-		}
+}
+
+// catchUp catches the change log up; a read that fails is tried again a second later.
+func (h *deliveryHub) catchUp(g *hubGeneration) {
+	if err := h.catchUpChanges(g); err != nil && g.ctx.Err() == nil {
+		slog.Warn("dispatch: delivery live hub could not read the delivery changes; retrying", "error", err)
+		time.AfterFunc(time.Second, func() { signal(g.wakeChanges) })
 	}
 }
 
@@ -108,11 +148,11 @@ func (h *deliveryHub) catchUp(changes, events bool) {
 // row at the cursor was recorded at another time than the hub read (a TRUNCATE ... RESTART IDENTITY
 // refilled past it, e2e/seed.ts:150). A reset moves the cursor to the newest row and marks every
 // view dirty.
-func (h *deliveryHub) catchUpChanges() error {
-	ctx, pool := h.readContext(), h.server.deps.Store.Pool
+func (h *deliveryHub) catchUpChanges(g *hubGeneration) error {
+	ctx, pool := g.readContext(), h.server.deps.Store.Pool
 	for {
 		h.mu.Lock()
-		seq, at := h.changeSeq, h.changeAt
+		seq, at := g.changeSeq, g.changeAt
 		h.mu.Unlock()
 		latest, err := delivery.LatestChangeSeq(ctx, pool)
 		if err != nil {
@@ -135,10 +175,12 @@ func (h *deliveryHub) catchUpChanges() error {
 			}
 			now := h.clock.Now()
 			h.mu.Lock()
-			h.changeSeq, h.changeAt = latest, timeOrZero(latestAt)
-			h.epoch++
-			h.dirtyAllLocked(now)
-			h.mu.Unlock()
+			defer h.mu.Unlock()
+			if h.generation == g {
+				g.changeSeq, g.changeAt = latest, timeOrZero(latestAt)
+				g.epoch++
+				h.dirtyAllLocked(g, now)
+			}
 			return nil
 		}
 		changes, err := delivery.ChangesSince(ctx, pool, seq, deliveryLivePage)
@@ -147,13 +189,17 @@ func (h *deliveryHub) catchUpChanges() error {
 		}
 		now := h.clock.Now()
 		h.mu.Lock()
+		if h.generation != g {
+			h.mu.Unlock()
+			return nil
+		}
 		for _, change := range changes {
 			for _, view := range h.views {
 				if change.Seq > max(view.seq, view.readingSeq) && view.touchedBy(change, now) {
-					h.markDirtyLocked(view, now, deliveryCauseChange)
+					h.markDirtyLocked(g, view, now, deliveryCauseChange)
 				}
 			}
-			h.changeSeq, h.changeAt = change.Seq, change.At
+			g.changeSeq, g.changeAt = change.Seq, change.At
 		}
 		h.mu.Unlock()
 		if len(changes) < deliveryLivePage {
@@ -162,157 +208,96 @@ func (h *deliveryHub) catchUpChanges() error {
 	}
 }
 
-// catchUpEvents reads every event after the cursor, acting on those the hub reads. It first checks
-// for a reset log: one whose newest id is below the cursor, or whose row at the cursor is gone or
-// was created at another time than the hub read (e2e/seed.ts:20 and :150 truncate events with
-// RESTART IDENTITY). A reset moves the cursor to the newest event, reloads the open P0 issues and
-// marks every view dirty; a cursor row some other path deleted costs only that.
-func (h *deliveryHub) catchUpEvents() error {
-	ctx, pool := h.readContext(), h.server.deps.Store.Pool
-	h.mu.Lock()
-	cursor, at := h.eventCursor, h.eventAt
-	h.mu.Unlock()
-	from := cursor
-	maxID, maxAt, cursorAt, err := eventCursorCheck(ctx, pool, cursor)
-	if err != nil {
-		return err
-	}
-	if maxID < cursor || (cursor > 0 && (cursorAt == nil || !cursorAt.Equal(at))) {
-		p0, err := delivery.OpenP0Keys(ctx, pool)
-		if err != nil {
-			return err
-		}
-		now := h.clock.Now()
-		h.mu.Lock()
-		h.eventCursor, h.eventAt, h.p0 = maxID, maxAt, p0
-		h.dirtyAllLocked(now)
-		h.mu.Unlock()
-		h.note(deliveryHubNote{what: "events caught up", from: from, through: maxID})
-		return nil
-	}
-	for {
-		events, through, throughAt, err := liveEventsSince(ctx, pool, cursor, deliveryLivePage)
-		if err != nil {
-			return err
-		}
-		if through == cursor {
-			break
-		}
-		now := h.clock.Now()
-		h.mu.Lock()
-		for _, event := range events {
-			h.applyEventLocked(event, now)
-		}
-		h.eventCursor, h.eventAt = through, throughAt
-		h.mu.Unlock()
-		scanned := through - cursor
-		cursor = through
-		// Ids leave gaps, so a page that spans fewer ids than its limit scanned fewer rows: the log
-		// ran dry.
-		if scanned < deliveryLivePage {
-			break
-		}
-	}
-	h.note(deliveryHubNote{what: "events caught up", from: from, through: cursor})
-	return nil
-}
-
-// receive acts on one event the broker published. Ids are allocated in commit order, so the event
-// right after the cursor is acted on at once; any other leaves a gap the store fills, or follows
-// a reset, which the catch-up's check tells.
-func (h *deliveryHub) receive(event model.Event) {
-	h.mu.Lock()
-	next := event.ID == h.eventCursor+1
-	h.mu.Unlock()
-	if !next {
-		h.catchUp(false, true)
-		return
-	}
-	live := liveEvent{id: event.ID, at: event.CreatedAt, kind: event.Type, actor: event.Actor}
-	if event.IssueKey != nil {
-		live.issueKey = *event.IssueKey
-	}
-	if slices.Contains(deliveryLiveEventTypes, event.Type) {
-		payload, err := json.Marshal(event.Payload)
-		if err != nil {
-			h.catchUp(false, true)
-			return
-		}
-		live.payload = payload
-	}
+// receive applies one event of the relay's feed. The relay publishes every committed event once,
+// in id order, so the hub keeps no cursor of the event log: a gap in what it receives is a feed
+// that closed, which intake answers.
+func (h *deliveryHub) receive(g *hubGeneration, event model.Event) {
 	now := h.clock.Now()
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.applyEventLocked(live, now)
-	h.eventCursor, h.eventAt = event.ID, event.CreatedAt
+	if h.generation == g {
+		h.applyEventLocked(g, event, now)
+	}
+	h.mu.Unlock()
+	h.note(deliveryHubNote{what: "event", through: event.ID})
 }
 
 // applyEventLocked marks the views one event can touch: an issue write or claim the views whose
 // issues or their ancestors hold the issue, and every timeline and measures view when the issue is
 // a P0 before or after it (the measures' unowned P0 list); an architecture import every view; and
 // a session's write every view that shows the session under another title than the one it wrote
-// under.
-func (h *deliveryHub) applyEventLocked(event liveEvent, now time.Time) {
-	switch event.kind {
+// under. Those are every writer of a field the Delivery page shows (Task 0 Step 18: route has one
+// writer, PATCH /api/v1/issues/{key}, whose event is issue.updated or issue.closed). The event is
+// the relay's, shared with every other subscriber, and is only read.
+func (h *deliveryHub) applyEventLocked(g *hubGeneration, event model.Event, now time.Time) {
+	var issueKey string
+	if event.IssueKey != nil {
+		issueKey = *event.IssueKey
+	}
+	switch event.Type {
 	case "issue.created", "issue.updated", "issue.closed":
 		var issue struct {
 			Key      string `json:"key"`
 			Status   string `json:"status"`
 			Priority *int   `json:"priority"`
 		}
-		key := event.issueKey
-		if err := json.Unmarshal(event.payload, &issue); err == nil && issue.Key != "" {
+		// An issue event's payload is the JSON the log holds (readEventRows).
+		payload, ok := event.Payload.(json.RawMessage)
+		if !ok {
+			payload, _ = json.Marshal(event.Payload)
+		}
+		key := issueKey
+		if err := json.Unmarshal(payload, &issue); err == nil && issue.Key != "" {
 			key = issue.Key
 		}
-		_, before := h.p0[key]
+		_, before := g.p0[key]
 		after := issue.Priority != nil && *issue.Priority == 0 && issue.Status != "done"
 		if after {
-			h.p0[key] = struct{}{}
+			g.p0[key] = struct{}{}
 		} else {
-			delete(h.p0, key)
+			delete(g.p0, key)
 		}
-		h.dirtyIssueLocked(key, before || after, now)
+		h.dirtyIssueLocked(g, key, before || after, now)
 	case "issue.claimed", "issue.released":
 		// A claim carries no priority (IssueClaimEventPayload), so p0 answers for it.
-		_, p0 := h.p0[event.issueKey]
-		h.dirtyIssueLocked(event.issueKey, p0, now)
+		_, p0 := g.p0[issueKey]
+		h.dirtyIssueLocked(g, issueKey, p0, now)
 	case "architecture.synced":
-		h.dirtyAllLocked(now)
+		h.dirtyAllLocked(g, now)
 	}
-	if event.actor.Kind == "session" && event.actor.ID != "" {
+	if event.Actor.Kind == "session" && event.Actor.ID != "" {
 		// The title delivery.ResolveSessionTitles reads: the newest event's, or the id when it
 		// carries none.
-		title := event.actor.ID
-		if origin := event.actor.Origin; origin != nil && origin.SessionTitle != "" {
+		title := event.Actor.ID
+		if origin := event.Actor.Origin; origin != nil && origin.SessionTitle != "" {
 			title = origin.SessionTitle
 		}
 		for _, view := range h.views {
-			if shown, ok := view.sessions[event.actor.ID]; ok && shown != title {
-				h.markDirtyLocked(view, now, deliveryCauseChange)
+			if shown, ok := view.sessions[event.Actor.ID]; ok && shown != title {
+				h.markDirtyLocked(g, view, now, deliveryCauseChange)
 			}
 		}
 	}
 }
 
-func (h *deliveryHub) dirtyIssueLocked(key string, p0 bool, now time.Time) {
+func (h *deliveryHub) dirtyIssueLocked(g *hubGeneration, key string, p0 bool, now time.Time) {
 	for _, view := range h.views {
 		_, named := view.issues[key]
 		_, ancestor := view.ancestors[key]
 		if named || ancestor || (p0 && view.spec.kind != deliveryLivePipeline) {
-			h.markDirtyLocked(view, now, deliveryCauseChange)
+			h.markDirtyLocked(g, view, now, deliveryCauseChange)
 		}
 	}
 }
 
-func (h *deliveryHub) dirtyAllLocked(now time.Time) {
+func (h *deliveryHub) dirtyAllLocked(g *hubGeneration, now time.Time) {
 	for _, view := range h.views {
-		h.markDirtyLocked(view, now, deliveryCauseChange)
+		h.markDirtyLocked(g, view, now, deliveryCauseChange)
 	}
 }
 
-// markDirtyLocked marks view for a recompute and wakes the worker. A subscribe's mark waits for no
+// markDirtyLocked marks view for a recompute and wakes g's worker. A subscribe's mark waits for no
 // quiet.
-func (h *deliveryHub) markDirtyLocked(view *deliveryView, now time.Time, cause string) {
+func (h *deliveryHub) markDirtyLocked(g *hubGeneration, view *deliveryView, now time.Time, cause string) {
 	if !view.dirty {
 		view.dirty, view.firstDirty, view.cause = true, now, cause
 	}
@@ -320,7 +305,7 @@ func (h *deliveryHub) markDirtyLocked(view *deliveryView, now time.Time, cause s
 	if cause == deliveryCauseSubscribe {
 		view.immediate, view.cause = true, cause
 	}
-	signal(h.wakeWork)
+	signal(g.wakeWork)
 }
 
 // touchedBy is whether a delivery change can move the view's answer (plan v4 Task 7 Step 7's

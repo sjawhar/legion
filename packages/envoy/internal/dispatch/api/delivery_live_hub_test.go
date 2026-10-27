@@ -24,12 +24,16 @@ import (
 )
 
 // hubRig is a delivery hub on the API test server: the handler a test writes through, the store
-// behind it, and the hub, run on its own lifetime, which the test's cleanup ends and waits out.
+// behind it, and the hub with the event stream relay it reads its events from, both run on one
+// lifetime of their own, which the test's cleanup ends and waits out.
 type hubRig struct {
 	handler  http.Handler
 	database *store.Store
 	deps     Deps
 	hub      *deliveryHub
+	relay    *eventStreamRelay
+	// relayReads counts the relay's page reads of the event log, each counted once it returns.
+	relayReads atomic.Int64
 
 	mu    sync.Mutex
 	notes []deliveryHubNote
@@ -42,15 +46,6 @@ func newHubRig(t *testing.T, configure func(*deliveryHub)) *hubRig {
 	t.Helper()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	return hubOn(t, handler, database, deps, deliveryHubClock{}, configure)
-}
-
-// notifyChannel sends one notification on channel, as a trigger's commit does: the hub hears it
-// on the connection its listener holds (pglisten.Listener).
-func notifyChannel(t *testing.T, database *store.Store, channel, payload string) {
-	t.Helper()
-	if _, err := database.Pool.Exec(context.Background(), `select pg_notify($1, $2)`, channel, payload); err != nil {
-		t.Fatalf("pg_notify(%q, %q): %v", channel, payload, err)
-	}
 }
 
 // newClockedHubRig is newHubRig on a clock the test moves.
@@ -162,12 +157,20 @@ func (c *fakeHubClock) Advance(d time.Duration) {
 	}
 }
 
-// hubOn starts a hub on an existing test server, as a second Dispatch task's hub would.
+// hubOn starts a hub and its relay on an existing test server, as a second Dispatch task's would be.
 func hubOn(t *testing.T, handler http.Handler, database *store.Store, deps Deps, clock hubClock, configure func(*deliveryHub)) *hubRig {
 	t.Helper()
 	rig := &hubRig{handler: handler, database: database, deps: deps}
 	lifetime, cancel := context.WithCancel(context.Background())
-	rig.hub = newDeliveryHub(directServer(deps), lifetime, clock)
+	served := directServer(deps)
+	rig.relay = newEventStreamRelay(served, lifetime)
+	rig.relay.readAfter = func(ctx context.Context, after int64) ([]model.Event, error) {
+		page, err := served.readEventsAfterID(ctx, after)
+		rig.relayReads.Add(1)
+		return page, err
+	}
+	served.eventRelay = rig.relay
+	rig.hub = newDeliveryHub(served, lifetime, clock)
 	rig.hub.observe = func(note deliveryHubNote) {
 		rig.mu.Lock()
 		rig.notes = append(rig.notes, note)
@@ -179,16 +182,17 @@ func hubOn(t *testing.T, handler http.Handler, database *store.Store, deps Deps,
 	rig.stop = sync.OnceFunc(func() {
 		cancel()
 		rig.hub.wait()
+		rig.relay.wait()
 	})
 	t.Cleanup(rig.stop)
 	return rig
 }
 
-// cursors is where the hub stands in the delivery change log and the event log.
-func (r *hubRig) cursors() (changeSeq, eventCursor int64) {
+// changeCursor is where the running generation stands in the delivery change log.
+func (r *hubRig) changeCursor() int64 {
 	r.hub.mu.Lock()
 	defer r.hub.mu.Unlock()
-	return r.hub.changeSeq, r.hub.eventCursor
+	return r.hub.generation.changeSeq
 }
 
 // mark is how many notes the hub has made, for counting the ones after it.
@@ -617,7 +621,7 @@ func TestAResetChangeLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 	rig.waitFor(t, start, 3*time.Second, "the measures view's recompute", func(note deliveryHubNote) bool {
 		return note.what == "recompute begin" && strings.HasPrefix(note.view, deliveryLiveMeasures)
 	})
-	if seq, _ := rig.cursors(); seq != 1 {
+	if seq := rig.changeCursor(); seq != 1 {
 		t.Fatalf("the hub's change cursor after the reset = %d, want 1", seq)
 	}
 
@@ -626,7 +630,7 @@ func TestAResetChangeLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 	// the hub read for it, so that is a reset too.
 	upsertPR(t, rig.database, hubPR(42, time.Now().UTC().Add(-50*time.Minute)))
 	timeline = requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, timeline, conn.delta(t, 3*time.Second, "t"), "")
-	if seq, _ := rig.cursors(); seq != 2 {
+	if seq := rig.changeCursor(); seq != 2 {
 		t.Fatalf("the hub's change cursor = %d, want 2", seq)
 	}
 	truncateChanges(t, rig.database)
@@ -647,7 +651,7 @@ func TestAResetChangeLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 	rig.waitFor(t, start, 3*time.Second, "the measures view's recompute after the second reset", func(note deliveryHubNote) bool {
 		return note.what == "recompute begin" && strings.HasPrefix(note.view, deliveryLiveMeasures)
 	})
-	if seq, _ := rig.cursors(); seq != 3 {
+	if seq := rig.changeCursor(); seq != 3 {
 		t.Fatalf("the hub's change cursor after the second reset = %d, want 3", seq)
 	}
 }
@@ -968,7 +972,8 @@ func TestAnArchitectureSyncReachesEveryView(t *testing.T) {
 	}
 }
 
-// appendHubEvent commits event as a route does, and publishes it to the server's broker.
+// appendHubEvent commits event through the server's broker, as a route does. The hub hears of it
+// from the relay, which reads it back out of the log.
 func appendHubEvent(t *testing.T, rig *hubRig, event model.Event) model.Event {
 	t.Helper()
 	ctx := store.WithTransactionTracking(context.Background())
@@ -984,10 +989,12 @@ func appendHubEvent(t *testing.T, rig *hubRig, event model.Event) model.Event {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit %s: %v", event.Type, err)
 	}
-	rig.deps.Events.Publish(appended)
 	return appended
 }
 
+// TestAResetEventLogIsCaughtAndEveryViewRecomputed: the relay ends its feed when the event log is
+// reset under its cursor, and the hub answers the closed feed by recomputing every view, which
+// reads what the new log's events changed.
 func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 	rig := newHubRig(t, nil)
 	seedHubSettings(t, rig.database)
@@ -999,13 +1006,9 @@ func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 	conn := newFakeLiveConn()
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	held := conn.snapshot(t, 5*time.Second, "t").Body
-	rig.hub.catchUpNow()
-	if _, cursor := rig.cursors(); cursor < 300 {
-		t.Fatalf("the hub's event cursor = %d, want at least 300", cursor)
-	}
 
 	// The event log restarts at id 1, as e2e/seed.ts:20 and :150 reset it; then a title the view
-	// names changes, its event (id 1) below the hub's cursor.
+	// names changes, its event (id 1) below the relay's cursor.
 	if _, err := rig.database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
 		t.Fatalf("truncate events: %v", err)
 	}
@@ -1015,31 +1018,20 @@ func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 		t.Fatalf("after the event log's reset the delta's issue_titles = %v, want %s retitled", got, key)
 	}
 	held = requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
-	if _, cursor := rig.cursors(); cursor != 1 {
-		t.Fatalf("the hub's event cursor after the reset = %d, want 1", cursor)
-	}
 
-	// Again, with the log refilled past the old cursor before the hub reads: the row at its cursor
-	// was created at another time than the hub read, so that is a reset too.
-	if _, err := rig.database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
-		t.Fatalf("truncate events: %v", err)
-	}
-	// The retitle commits before the refill: the refill's insert fires 0107's events_notify trigger
-	// itself, so the hub can read the reset and recompute before the test's own notification.
-	if _, err := rig.database.Pool.Exec(t.Context(), `update issues set title = 'Ship every widget' where key = $1`, key); err != nil {
-		t.Fatalf("retitle the issue without an event: %v", err)
-	}
+	// Again, with the log refilled past the relay's cursor in the commit that resets it: the row at
+	// its cursor was created at another time than the relay read, so that is a reset too. The title
+	// changes in that commit with no event of its own, so only the recompute can show it.
 	if _, err := rig.database.Pool.Exec(t.Context(), `
+		truncate events restart identity cascade;
+		update issues set title = 'Ship every widget' where key = '`+key+`';
 		insert into events (project_key, seq, type, actor, payload, notify, created_at)
 		select 'HUB', n, 'user_state.updated', '{"kind":"user","id":"alice"}', '{}', false, now() - interval '1 hour'
-		from generate_series(1, 5) n
+		from generate_series(1, 5) n;
+		update projects set last_seq = 5 where key = 'HUB';
 	`); err != nil {
-		t.Fatalf("refill the event log: %v", err)
+		t.Fatalf("reset and refill the event log: %v", err)
 	}
-	if _, err := rig.database.Pool.Exec(t.Context(), `update projects set last_seq = 5 where key = 'HUB'`); err != nil {
-		t.Fatalf("move the project's sequence: %v", err)
-	}
-	notifyChannel(t, rig.database, dispatchEventsChannel, "")
 	delta = conn.delta(t, 3*time.Second, "t")
 	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship every widget" {
 		t.Fatalf("after the second reset the delta's issue_titles = %v, want %s retitled", got, key)
@@ -1047,19 +1039,16 @@ func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
 }
 
-func TestACatchUpPastIgnoredEventsAdvancesTheCursor(t *testing.T) {
+// TestEventsNoViewReadsRecomputeNothing: 500 events of a type no view reads, written without the
+// broker as another task's would be, reach the hub on the relay's feed and mark no view.
+func TestEventsNoViewReadsRecomputeNothing(t *testing.T) {
 	rig := newHubRig(t, nil)
 	seedHubSettings(t, rig.database)
 	createHubIssue(t, rig.handler, map[string]any{"title": "Anything"})
 	conn := newFakeLiveConn()
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	conn.snapshot(t, 5*time.Second, "t")
-	rig.hub.catchUpNow()
-	_, before := rig.cursors()
 
-	// 500 events no view reads, written without the broker, as another task's would be. The insert
-	// fires 0107's events_notify trigger itself, so the hub can catch up past them before the test's
-	// own notification; the mark is taken first so that catch-up counts.
 	start := rig.mark()
 	if _, err := rig.database.Pool.Exec(t.Context(), `
 		insert into events (project_key, seq, type, actor, payload, notify)
@@ -1072,37 +1061,34 @@ func TestACatchUpPastIgnoredEventsAdvancesTheCursor(t *testing.T) {
 	if err := rig.database.Pool.QueryRow(t.Context(), `select max(id) from events`).Scan(&newest); err != nil {
 		t.Fatalf("read the newest event: %v", err)
 	}
-	notifyChannel(t, rig.database, dispatchEventsChannel, "")
-	rig.waitFor(t, start, 3*time.Second, "the catch-up", func(note deliveryHubNote) bool {
-		return note.what == "events caught up" && note.through == newest
+	rig.waitFor(t, start, 3*time.Second, "the newest event on the hub's feed", func(note deliveryHubNote) bool {
+		return note.what == "event" && note.through == newest
 	})
-	if n := rig.count(start, func(note deliveryHubNote) bool {
-		return note.what == "events caught up" && note.from == before && note.through == newest
-	}); n != 1 {
-		t.Fatalf("catch-ups from the cursor before the 500 events = %d, want 1", n)
-	}
-	second := rig.mark()
-	notifyChannel(t, rig.database, dispatchEventsChannel, "")
-	rig.waitFor(t, second, 3*time.Second, "the second catch-up", func(note deliveryHubNote) bool { return note.what == "events caught up" })
-	if n := rig.count(second, func(note deliveryHubNote) bool { return note.what == "events caught up" && note.from != newest }); n != 0 {
-		t.Fatalf("the second notification scanned from below %d again", newest)
+	if n := rig.count(start, func(note deliveryHubNote) bool { return note.what == "event" }); n != 500 {
+		t.Fatalf("the hub received %d events, want each of the 500 once", n)
 	}
 	conn.none(t, time.Second, "500 events no view reads")
+	if n := rig.count(start, recomputeBegin("")); n != 0 {
+		t.Fatalf("500 events no view reads recomputed %d views, want none", n)
+	}
 }
 
-func TestADroppedBrokerSubscriptionIsRestoredWithoutMissingAnEvent(t *testing.T) {
+// TestAClosedFeedReloadsTheOpenP0sAndRecomputesEveryView: when the relay's feed closes (here the
+// test hook's disconnect, as a reset or an overflow does), events may have gone by that the hub
+// never received. It subscribes again, reads the open P0 issues afresh and recomputes every view.
+// An issue raised to P0 while the hub had no feed reaches every timeline and measures view, though
+// no view names it, and lowering it again does too, which only the reloaded P0s can tell the hub:
+// the lowering's payload says P1, so without the reload the issue was never a P0 to it.
+func TestAClosedFeedReloadsTheOpenP0sAndRecomputesEveryView(t *testing.T) {
 	release := make(chan struct{})
 	releaseOnce := sync.OnceFunc(func() { close(release) })
 	rig := newHubRig(t, func(hub *deliveryHub) {
-		// The listener never connects, so only the broker or the store can tell the hub of an event.
-		hub.dial = func(context.Context) (*pgx.Conn, error) { return nil, context.DeadlineExceeded }
-		hub.backoff = func(int) time.Duration { return time.Hour }
 		observe := hub.observe
 		hub.observe = func(note deliveryHubNote) {
 			observe(note)
-			if note.what == "broker dropped" {
-				// Hold the hub between losing its subscription and taking a new one, while the test
-				// commits an event.
+			if note.what == "feed closed" {
+				// Hold the hub between losing its feed and subscribing again, while the test commits
+				// an event no feed carries to it.
 				<-release
 			}
 		}
@@ -1110,22 +1096,138 @@ func TestADroppedBrokerSubscriptionIsRestoredWithoutMissingAnEvent(t *testing.T)
 	// Registered after the rig's, so it runs first: a failed test never leaves the hub held.
 	t.Cleanup(releaseOnce)
 	seedHubSettings(t, rig.database)
-	key := createHubIssue(t, rig.handler, map[string]any{"title": "Ship widgets"})
-	upsertPR(t, rig.database, prNaming(1, time.Now().UTC().Add(-3*time.Hour), key))
+	upsertPR(t, rig.database, hubPR(1, time.Now().UTC().Add(-3*time.Hour)))
+	raised := createHubIssue(t, rig.handler, map[string]any{"title": "Raised while unheard", "priority": 1})
 	conn := newFakeLiveConn()
+	held := map[string]json.RawMessage{}
+	kinds := map[string]string{"t": deliveryLiveTimeline, "m": deliveryLiveMeasures}
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
-	snapshot := conn.snapshot(t, 5*time.Second, "t")
+	rig.hub.Subscribe(conn, subscribeFrame("m", presetView(deliveryLiveMeasures, 28, "")))
+	for range 2 {
+		snapshot, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot)
+		if !ok {
+			t.Fatal("want a snapshot for each view")
+		}
+		held[snapshot.Sub] = snapshot.Body
+	}
+	requireEveryViewShowsTheUnownedP0s := func(after string) {
+		t.Helper()
+		for range 2 {
+			delta, ok := conn.next(t, 3*time.Second, "each view's delta after "+after).(DeliveryLiveDelta)
+			if !ok {
+				t.Fatalf("after %s: want a delta for each view", after)
+			}
+			kind := kinds[delta.Sub]
+			applied := applyLiveDelta(t, kind, held[delta.Sub], delta)
+			want := unownedP0Fields(t, getBody(t, rig.handler, windowTarget(t, deliveryLiveMeasures, applied, "")), deliveryLiveMeasures)
+			if got := unownedP0Fields(t, applied, kind); !reflect.DeepEqual(got, want) {
+				t.Fatalf("after %s, %s's measures hold %v; GET /measures answers %v", after, delta.Sub, got, want)
+			}
+			held[delta.Sub] = applied
+		}
+	}
 
 	start := rig.mark()
-	rig.deps.Events.CloseAll()
-	rig.waitFor(t, start, 3*time.Second, "the hub losing its subscription", func(note deliveryHubNote) bool { return note.what == "broker dropped" })
-	patchHubIssue(t, rig.handler, key, map[string]any{"title": "Ship the widgets"})
+	rig.relay.disconnect()
+	rig.waitFor(t, start, 3*time.Second, "the hub losing its feed", func(note deliveryHubNote) bool { return note.what == "feed closed" })
+	patchHubIssue(t, rig.handler, raised, map[string]any{"priority": 0})
 	releaseOnce()
-	delta := conn.delta(t, 3*time.Second, "t")
-	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {
-		t.Fatalf("the delta's issue_titles = %v, want %s retitled", got, key)
+	requireEveryViewShowsTheUnownedP0s("a P1 raised to P0 while the hub had no feed")
+
+	patchHubIssue(t, rig.handler, raised, map[string]any{"priority": 1})
+	requireEveryViewShowsTheUnownedP0s("the reloaded P0 lowered to P1")
+}
+
+// listenBackends counts this test database's backends that hold a LISTEN: those whose last
+// statement was a listener's LISTEN or its idle ping (pglisten.Listener).
+func listenBackends(t *testing.T, database *store.Store) int {
+	t.Helper()
+	var count int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from pg_stat_activity
+		where datname = current_database() and (query like 'listen %' or query = '-- ping') and pid <> pg_backend_pid()
+	`).Scan(&count); err != nil {
+		t.Fatalf("count the LISTEN backends: %v", err)
 	}
-	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
+	return count
+}
+
+// waitForListenBackends waits for the count of LISTEN backends to reach want: a listener dials
+// from its own goroutine, and a closed one's backend leaves pg_stat_activity once it has exited.
+func waitForListenBackends(t *testing.T, database *store.Store, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := listenBackends(t, database)
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d LISTEN backends after 5s, want %d", got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestAHubWithNoViewReadsNothingAndHoldsNoListener: the hub runs only while a page holds a view.
+// Before the first subscribe and after the last view's drop, commits to the event log and the
+// change log cost the hub and its relay no read, and neither holds a LISTEN connection; while a
+// view is open both do, and the subscribe after the drop starts a generation that follows both logs
+// again.
+func TestAHubWithNoViewReadsNothingAndHoldsNoListener(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	// The hub and its relay read through a pool of their own, so its acquires are theirs alone.
+	deps.Store = storetest.SecondProcess(t, database)
+	rig := hubOn(t, handler, database, deps, deliveryHubClock{}, nil)
+	seedHubSettings(t, database)
+	key := createHubIssue(t, handler, map[string]any{"title": "Ship widgets"})
+	upsertPR(t, database, prNaming(1, time.Now().UTC().Add(-3*time.Hour), key))
+	merges := 1
+	idle := func(when string) {
+		t.Helper()
+		waitForListenBackends(t, database, 0)
+		before := acquires(deps.Store)
+		patchHubIssue(t, handler, key, map[string]any{"title": "Retitled " + when})
+		merges++
+		upsertPR(t, database, hubPR(merges, time.Now().UTC().Add(-2*time.Hour)))
+		// Longer than the relay's coalescing window and the hub's quiet, either of which a reader
+		// that heard the commits would have waited out before its read.
+		time.Sleep(time.Second)
+		if got := acquires(deps.Store); got != before {
+			t.Fatalf("the hub and its relay took %d connections %s, want none", got-before, when)
+		}
+		if n := listenBackends(t, database); n != 0 {
+			t.Fatalf("%d LISTEN backends %s, want none", n, when)
+		}
+	}
+
+	idle("before any page subscribed")
+
+	first := newFakeLiveConn()
+	rig.hub.Subscribe(first, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	first.snapshot(t, 5*time.Second, "t")
+	// The hub's listener and the relay's.
+	waitForListenBackends(t, database, 2)
+	rig.hub.Close(first)
+
+	idle("after the last view's drop")
+
+	second := newFakeLiveConn()
+	rig.hub.Subscribe(second, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	held := second.snapshot(t, 5*time.Second, "t").Body
+	merges++
+	upsertPR(t, database, prNaming(merges, time.Now().UTC().Add(-time.Hour), key))
+	delta := second.delta(t, 3*time.Second, "t")
+	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#" + strconv.Itoa(merges)}) {
+		t.Fatalf("the new generation's merge delta upserts %v, want acme/widgets#%d", got, merges)
+	}
+	held = requireLandsOnGET(t, handler, deliveryLiveTimeline, held, delta, "")
+	patchHubIssue(t, handler, key, map[string]any{"title": "Ship every widget"})
+	delta = second.delta(t, 3*time.Second, "t")
+	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship every widget" {
+		t.Fatalf("the new generation's retitle delta has issue_titles %v, want %s retitled", got, key)
+	}
+	requireLandsOnGET(t, handler, deliveryLiveTimeline, held, delta, "")
 }
 
 func TestAnEventAnotherTaskCommittedReachesThisHub(t *testing.T) {
@@ -1161,11 +1263,19 @@ func TestAnEventAnotherTaskCommittedReachesThisHub(t *testing.T) {
 // acquires is how many connections the shared pool has handed out so far.
 func acquires(database *store.Store) int64 { return database.Pool.Stat().AcquireCount() }
 
-// waitConnected waits for the hub's listener to have connected and caught both logs up, after
-// which the hub reads nothing until something changes.
+// waitConnected waits for the hub's listener to have connected and caught the change log up, and
+// for the relay's first read of the event log after its own LISTEN, after which neither reads
+// anything until something changes.
 func (r *hubRig) waitConnected(t *testing.T) {
 	t.Helper()
 	r.waitFor(t, 0, 5*time.Second, "the listener's connection", func(note deliveryHubNote) bool { return note.what == "connected" })
+	deadline := time.Now().Add(5 * time.Second)
+	for r.relayReads.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the relay read nothing within 5s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // freshness is the next frame conn is sent, which must be a freshness frame.
@@ -1246,7 +1356,8 @@ func TestAHubClockMovedBetweenTheWorkersReadAndItsArmStillFiresItsTimer(t *testi
 	seedHubSettings(t, rig.database)
 	clock.onArm(func() bool {
 		rig.hub.mu.Lock()
-		ready := len(rig.hub.views) == 1 && len(rig.hub.wakeWork) == 0
+		g := rig.hub.generation
+		ready := g != nil && len(rig.hub.views) == 1 && len(g.wakeWork) == 0
 		for _, view := range rig.hub.views {
 			ready = ready && view.body != nil && !view.dirty && !view.computing && !view.expiry.IsZero()
 		}
