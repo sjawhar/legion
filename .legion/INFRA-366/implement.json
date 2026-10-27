@@ -1,0 +1,215 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-366",
+  "completed": "2026-10-27T01:40:00Z",
+  "proof": [
+    {
+      "criterion": "READY refused READY_HEAD_CONFLICTS at 5923a0d4: forward merge of main bc98d3e7 with nothing else changed, migrations still after main's 0120",
+      "surface": "the merged tree's builds and suites, and the unchanged-diff fingerprint",
+      "command": "claude-envoy check-dist; contracts bun test; envoy-client bun test; tsc in contracts, dispatch, envoy-client, claude-envoy, pi-envoy; go build ./... and go vet of the Dispatch server; root biome check .; check-private-names.sh; pi-envoy skills-guard; fingerprint of 5923a0d4 and the merge",
+      "observed": "Only packages/contracts/CHANGELOG.md and packages/pi-envoy/CHANGELOG.md conflicted (both entries kept). Fingerprint e806d335e9d0… -> e806d335e9d0…, unchanged. check-dist matches; contracts 293 pass; envoy-client 904 pass; tsc ok in five packages; go ok; biome no errors; names ok. skills-guard: 9 pass, 1 fail — the three Dispatch skills total 2057 words; skills/ is byte-identical to main bc98d3e7, whose #2273 grew skills/dispatch/SKILL.md from 738 to 796 words (1999 -> 2057), so main fails it too.",
+      "headSha": "737a099b47a7a5da8fc34ac7b50bbcac198382d4",
+      "negativeControl": "At 5923a0d4 GitHub reported CONFLICTING and READY was refused; `jj diff --from main@origin --to <merge> skills/` is empty, so the skills-guard failure is main's and not this branch's"
+    },
+    {
+      "criterion": "Forward merge of main 1357b95c after retro: the head stops conflicting, both sides are kept, the branch's own change is unchanged, and migrations 0121-0128 still follow main's 0120",
+      "surface": "the merged tree's builds and suites: claude-envoy check-dist, contracts tests, skills guard, tsc for dispatch and envoy-client, go build/vet of the Dispatch server, root biome, private-names check; and the unchanged-diff fingerprint",
+      "command": "cd packages/claude-envoy && bun run check-dist; cd packages/contracts && bun test; cd packages/pi-envoy && bun test src/skills-guard.test.ts; bunx tsc --noEmit (dispatch, envoy-client, contracts); cd packages/envoy && go build ./... && go vet ./internal/dispatch/... ./cmd/dispatch/; bunx biome check .; bash .github/scripts/check-private-names.sh; fingerprint diff of 899c9f94 vs the merge",
+      "observed": "Only packages/envoy/CHANGELOG.md conflicted (both Added entries kept). check-dist: dist/ and legion/ match a fresh build; contracts 292 pass 0 fail; skills guard 10 pass; tsc ok; go ok; biome no errors; names ok. Fingerprint 7a0565518da4… -> e806d335e9d0…: the only delta is 66 removed lines, the actorAttribution block in each of the three claude-envoy dist files, which main's own dist now carries.",
+      "headSha": "47506f1a95a9b53f3892d3e2bb4e9e3a1e64a3c8",
+      "negativeControl": "At 899c9f94 GitHub reported the pull request CONFLICTING on packages/envoy/CHANGELOG.md and ran no checks; the fingerprinted diffs differ in nothing but the dist block main now holds"
+    },
+    {
+      "criterion": "Review round 7 (Minor batch) and the forward merge of main 16e4bb0f: wording and test robustness edits change no behaviour; the merge keeps both sides (#2237's AgentName owner in the shared documentOwner) and migrations 0121-0128 follow main's 0120; upper-case DISPATCH:// matches the server (not a reference on either side)",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server, the dashboard unit suite, and a Go probe of text.Extract/text.ParseRef",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_r13?sslmode=disable DISPATCH_E2E_PORT=8787 FAKE_ENVOY_PORT=9031 FAKE_GITHUB_PORT=9032 FAKE_BROKER_PORT=9034 bun run e2e -- e2e/pictures.e2e.ts -g 'bare page URL stays a plain link'; after the merge: bun test web/src; bun run e2e -- e2e/pictures.e2e.ts e2e/block-references.e2e.ts e2e/references.e2e.ts plus main's #2237 e2e files",
+      "observed": "Before the merge, pictures test 2 passed and MarkdownBody 23 pass. After the merge, web/src 2456 pass / 0 fail; browser 222 passed, 46 skipped, 5 failed — all five [webkit-iphone] agent-view.e2e.ts (main's file), which fail at browserType.launch because WebKit is not installed in this harness. Probe: Extract('See DISPATCH://CORE-1/spec here.') = [], ParseRef('DISPATCH://CORE-1/spec') not ok, ParseRef('dispatch://CORE-1/spec') ok.",
+      "headSha": "f586da9d4b2db7d30791bd21a6863d5f2d6e969e",
+      "negativeControl": "The round-7 behaviour's controls stand unchanged (e3d09251: link count 1 and a tooltip on hover); the case probe's control is lower-case dispatch://, which the same calls read as a reference"
+    },
+    {
+      "criterion": "Review round 6: a dispatch:// URL left as text (<dispatch://…>, [X](X), or a #b- id over 256 bytes) that cites nothing past the bounds is its words as plain text: no <a>, no href=\"\", no data-dispatch-href, so no click target and no hover card; https:// forms and author links unchanged",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server, plus MarkdownBody's component test",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_r12?sslmode=disable DISPATCH_E2E_PORT=8787 FAKE_ENVOY_PORT=9031 FAKE_GITHUB_PORT=9032 FAKE_BROKER_PORT=9034 bun run e2e -- e2e/pictures.e2e.ts e2e/block-references.e2e.ts e2e/references.e2e.ts; bun test web/src/features/refs/MarkdownBody.test.tsx",
+      "observed": "40 passed: for Angle, Self and Block the paragraph reads '<label> <words>', getByRole('link') count 0, [data-dispatch-href],[data-dispatch-ref] count 0, and hovering (chromium) shows no tooltip; the bare https:// URL keeps its raw link and the author's [design](dispatch://…) link still opens. MarkdownBody 23 pass.",
+      "headSha": "b4e4a2d2a362034c872bbbb099566a765991f63e",
+      "negativeControl": "On a git archive of e3d09251 the browser test fails 2/2 (link count 1); with the DOM assertions removed it fails on hover (tooltip count 1); with e3d09251's RefLink.tsx the unit test receives '<a data-dispatch-href=\"dispatch://CORE-1/artifact/aaa…\">'"
+    },
+    {
+      "criterion": "Review round 5: a dispatch:// URL left as text — an angle autolink <dispatch://…> or a link whose words are its target [dispatch://X](dispatch://X) — past the index's bounds stays a plain link, as the server records no reference; a dispatch:// link with words of its own still opens the long-named document. Plus the forward merge: migrations renumbered 0120-0127 after main's 0118-0119; a database main wrote migrates under the head.",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server; MarkdownBody component test; main df396380 and the head build serving one local Postgres database (throwaway r6-accept.sh)",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_r11?sslmode=disable DISPATCH_E2E_PORT=8787 FAKE_ENVOY_PORT=9031 FAKE_GITHUB_PORT=9032 FAKE_BROKER_PORT=9034 bun run e2e -- e2e/pictures.e2e.ts -g 'bare page URL stays a plain link'; bun test web/src/features/refs/MarkdownBody.test.tsx; OLD=dispatch-main-df39 NEW=dispatch-head-r11 bash $TMPDIR/infra366/r6-accept.sh",
+      "observed": "Browser: 2 passed; `Angle: <dispatch://CORE-1/artifact/<2613-byte-key slug>>` and `Self: [dispatch://…](dispatch://…)` keep their dispatch:// text with no data-dispatch-ref, while [design](dispatch://…) opens /issues/CORE-1/artifacts/<slug>. MarkdownBody: 23 pass (angle and self forms past the bounds plain, within the bounds titled, author link opens). Migration roll: main df396380 wrote the database, the head migrated it to version 127, read and edited both long-id documents, owed nothing, the five long-id cases passed and the server log had 0 '54000'.",
+      "headSha": "44f6cfa2ff509e5bbf4e3224ad94416995c92785",
+      "negativeControl": "On a git archive of ea0496c2 with the test copied, the browser test fails 2/2 ('Expected dispatch://CORE-1/artifact/… Received design design …': the angle autolink was titled); with ea0496c2's RefLink.tsx the unit test finds 3 design.md links instead of 1"
+    },
+    {
+      "criterion": "Review round 4: a dashboard URL that GFM autolinked from plain text is read as text cites it (bounded), so one past the index's bounds stays a raw link where the server records no reference; a link its author wrote to the same long-named document still opens it",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server, plus MarkdownBody's component test",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_r10?sslmode=disable DISPATCH_E2E_PORT=8787 FAKE_ENVOY_PORT=9031 FAKE_GITHUB_PORT=9032 FAKE_BROKER_PORT=9034 bun run e2e -- e2e/pictures.e2e.ts e2e/block-references.e2e.ts e2e/references.e2e.ts; bun test web/src/features/refs/MarkdownBody.test.tsx -t 'bare dashboard URL past the bounds'",
+      "observed": "40 passed, including 'a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link' on both projects: the bare URL (reference key 2613 bytes) keeps href and text equal to the URL with no data-dispatch-ref, while the author's [design](dispatch://…) link has href /issues/CORE-1/artifacts/<slug> and opens it. The unit test passes: a bare 2683-character-slug URL stays a plain link, two author links open the document, and a bare page URL with a 257-byte #b- fragment names its document.",
+      "headSha": "ea0496c2f4928f8656406069ee8a91fb0ed0cf9f",
+      "negativeControl": "With RefLink.tsx from 811b7261 the unit test finds 3 design.md links instead of 2; the browser test on a git archive of 811b7261 (test file copied) fails 2/2: the bare link's href is /issues/CORE-1/artifacts/<slug>, not the URL"
+    },
+    {
+      "criterion": "Review round 3, finding 1: `dispatch read` of the href `dispatch search` prints for an ask hit never fails where main printed the document; the hit links its typed block only while the block is a graph node, otherwise `?ask=<id>`",
+      "surface": "Real Go server builds on fresh local Postgres databases (head, previous head e26a6648, main 8298fc71) and the real dispatch CLI; throwaway script $TMPDIR/infra366/r9-search.sh",
+      "command": "NAME=<build> BIN=<binary> bash $TMPDIR/infra366/r9-search.sh (a spec with ask blocks `kept`, a 3200-byte id and `gone` (deleted by doc-edit); then `dispatch search --query <word>` and `dispatch read --ref <href>` for each)",
+      "observed": "Head: `kept` → …/spec#b-kept, read 'Block: kept' exit 0; the 3200-byte-id ask → …/spec?ask=<id>, read 'Question: Ship the sextant?' exit 0; server log 0 '54000'. (An API doc-edit that deletes an ask block also deletes its ask on the head, so the removed-block case is covered by TestSearchLinksAnAskBlockOnlyWhileTheBlockIsANode in keyword, meaning and keyword-only search.) Main 8298fc71 cannot store the 3200-byte ask: the spec write logs SQLSTATE 54000.",
+      "headSha": "811b7261e713704103edf175108f563859eeac32",
+      "negativeControl": "The previous head e26a6648 gives the 3200-byte ask the href …/spec#b-<3200 bytes>, and `dispatch read` of it exits 1 with 'No block <id> in …'"
+    },
+    {
+      "criterion": "Review round 3, finding 2: the dashboard draws a picture and opens a link an author names whatever the length of its target's key (2049-2692 bytes); only bare text it links stays bounded (deployment instructions: a browser test that fails before and passes at the change)",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_ln?sslmode=disable DISPATCH_E2E_PORT=8797 FAKE_ENVOY_PORT=9051 FAKE_GITHUB_PORT=9052 FAKE_BROKER_PORT=9054 bun run e2e -- e2e/pictures.e2e.ts -g 'a long-named picture in a comment draws'",
+      "observed": "2 passed (chromium, iphone): the 2611-byte-key picture's img src is /api/v1/issues/CORE-1/artifacts/<slug>/versions/1 and it draws; the 2613-byte-key document link's href is /issues/CORE-1/artifacts/<slug> and a click opens it in-app showing 'The long-named design.'",
+      "headSha": "2ece5e055e11d4c3468be36043bda50bd08f8f70",
+      "negativeControl": "The same test file in a git archive of e26a6648: 2 failed on the new behaviour, img src 'dispatch://CORE-1/artifact/aaaa…' instead of the bytes route (and, in a probe without the picture assertions, link href '' instead of the document path)"
+    },
+    {
+      "criterion": "Review round 2 and the architect's rule (2026-10-26): a length bound only decides which keys go into an index; it never makes a read fail and never refuses a write main accepts. References read of a document whose key is 2049-2692 bytes; a rebuild with a long block id; a suggestion's create and accept with a long block id; a read of a block id over 256 bytes.",
+      "surface": "Real Go server builds on fresh local Postgres databases (one per build): the head, the previous head 05ea3ef4 and main 9ed0397b; the real dispatch CLI and dev-signed-in human calls; throwaway script $TMPDIR/infra366/r7-cases.sh (corrupts doc_updates to make a document unloadable for the rebuild)",
+      "command": "NAME=<build> BIN=<binary> bash $TMPDIR/infra366/r7-cases.sh, for the head (e26a6648), 05ea3ef4 and main 9ed0397b; then OLD=main-9ed0397b NEW=head bash $TMPDIR/infra366/r6-accept.sh; block-graph.sh, block-coverage.sh and `bun run e2e -- e2e/block-references.e2e.ts e2e/references.e2e.ts` at the head",
+      "observed": "Head: a 2610-byte document key uploads; ?to= 200, ?from= 200 (attached_to), block-links 200, `dispatch read --ref` exit 0 with no 'unavailable'; corrupted document 409 DOCUMENT_UNLOADABLE then rebuild from markdown with a 3200-byte id 200 (source_version 2); suggestion with a 3200-byte id created and accepted 200, spec holds the id; ?to=<spec>#b-<3200 bytes> 404; server log 0 '54000' and 0 'level=ERROR'. Main 9ed0397b: same reads 200, rebuild 200, accept 200 (block read 400). The five architect cases on a main-written database rolled onto the head all pass with 0 '54000'; driver 37 PASS; coverage not_indexed=0; browser 28 passed.",
+      "headSha": "e26a664800117741870bf39724aa94cb3809c382",
+      "negativeControl": "The previous head 05ea3ef4 on the same script: ?to=/?from=/block-links of the 2610-byte key 400 INVALID_REFERENCE and `dispatch read` prints 2 'unavailable' lines; the rebuild 400 and the suggestion accept 400 'block id too long'; the long block read 400"
+    },
+    {
+      "criterion": "Tester round 5 and the architect's acceptance (2026-10-26, dispatch://INFRA-459 scope folded into this PR): no write main accepts fails at the head; no id or slug the reference grammar reads reaches a B-tree key past 2704 bytes; a new artifact name over a bound is refused 4xx; an ask or anchor under a block id of any length is written and settlement never fails; a database main wrote is read, edited and indexed by the head. Red test TestTextCitingABlockOfALongNamedDocumentIsStillWritten.",
+      "surface": "Two real server builds on one local Postgres database (infra366_r6): main 81a3b5ef writes, then the head is rolled onto it; the real dispatch CLI; throwaway script $TMPDIR/infra366/r6-accept.sh",
+      "command": "OLD=dispatch-base-81a3b5ef NEW=dispatch-05ea3ef4 bash $TMPDIR/infra366/r6-accept.sh",
+      "observed": "On main: a spec with a 3200-byte callout id, a document named with 2683 bytes, and a comment citing '…#b-x' of it are written. On the head over that database: the issue and long-named document read; both documents edited ('Applied 1 ops (version 2)'); 0 documents and 0 items owed a block index. Head cases: comment citing a 3200-char artifact slug → 'Posted comment'; comment citing a 3200-char comment id → 'Posted comment'; comment and document citing a block of the 2683-byte-named document → posted and 'Uploaded citer.md'; ask and comment anchored across the 3200-byte-id callout → 'Asked …' and 'Posted comment', both anchors storing the 3200-byte id; upload with a 3003-byte name → exit 1 'artifact name is 3003 bytes, past the 2692 bytes a new artifact's name may hold'; head log: 0 'SQLSTATE 54000' lines and 0 'level=ERROR' lines. The red test passes unmodified.",
+      "headSha": "05ea3ef49e56d989513ee01465ec337ce472af74",
+      "negativeControl": "main 81a3b5ef answers the comment anchored across the 3200-byte-id callout with 500 'internal server error' (same run); the previous head 384ff72f answered the comment citing '…#b-x' of the long-named document with 500 (refs_pkey row size 2760, the tester's run); main answers comments citing a 3200-char slug or comment id with 500 (refs_pkey row size 3280, checked 2026-10-26T03:28Z)"
+    },
+    {
+      "criterion": "Tester round 4 (review round 1's finding as proven): a version write succeeds whatever its keys are - a document whose own reference key is long (a name of 2680 random characters, which main stores) is uploaded, edited and indexed; red test TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten",
+      "surface": "Local Dispatch harness: the real Go server built from the head (packages/dispatch/e2e/run-server.sh on port 8777, database infra366_r4) and the real dispatch CLI; throwaway script $TMPDIR/infra366/r4-proof.sh",
+      "command": "PORT=8777 bash $TMPDIR/infra366/r4-proof.sh (dispatch artifact --name <2680 random hex>.md, dispatch doc-edit insert on it, ?to=<it>&kind=part_of, ?to=<its issue>)",
+      "observed": "upload exit 0 'Uploaded …'; doc-edit 'Applied 1 ops (version 2)'; part_of lists 2 blocks; the issue's ?to= lists the document's mention from its block, whose node id is 2749 bytes. The red test passes unmodified (go test -run TestADocumentWhoseReferenceKeyLeavesNoRoomForABlockIDIsStillWritten ./internal/dispatch/api/), with the migration and graph_edges tests in ./internal/dispatch/store/.",
+      "headSha": "384ff72f9f4a942caa1ee0395913b70f10aa6ea9",
+      "negativeControl": "The previous build (9d4fb04e, port 8779, fresh database infra366_r4prev): the same upload answers 500 'internal server error'; before the change the red test fails 'index row size 2744 exceeds btree version 4 maximum 2704 for index \"document_blocks_node_id_key\"'"
+    },
+    {
+      "criterion": "Review round 1, Important (refs/blocks.go): a version write succeeds whatever its block ids are; a block id past the bound is refused where it is written (400 naming the bound), is no reference and no graph node, and a document already holding one is still written and indexed",
+      "surface": "Local Dispatch harness: the real Go server built from the head (packages/dispatch/e2e/run-server.sh on port 8777, database infra366_r3) and the real dispatch CLI; throwaway script $TMPDIR/infra366/r3-proof.sh",
+      "command": "PORT=8777 bash $TMPDIR/infra366/r3-proof.sh (a spec and an insert edit naming a 3200-character random-hex callout id, a spec naming a 256-byte id, ?to= of the 256- and 257-byte ids, a comment citing #b-<3200 chars>, pins @v9223372036854775807 and @v9223372036854775808); then block-graph.sh on the same server",
+      "observed": "spec: exit 1 'block id too long: the id starting \"c2a048ec…\" is 3200 bytes, past the 256 bytes a block id may hold'; insert edit: the same refusal as 'invalid document operation field \"markdown\"'; 256-byte id: ?to= 200 kind block, block_id 256 bytes; 257 bytes: 400 INVALID_REFERENCE; comment citing the long id: 'Posted comment …' exit 0; @v9223372036854775807: 404 'no version 9223372036854775807 of dispatch://CORE-2/spec'; @v9223372036854775808: 400 INVALID_REFERENCE; driver: exit 0, 37 PASS. The existing-document and long-id-inside-a-block cases are in Go tests TestAVersionHoldingABlockIDPastTheBoundIsWrittenAndIndexed and TestADocumentAlreadyHoldingABlockIDPastTheBoundIsIndexedAndLeavesOwed (both pass).",
+      "headSha": "9d4fb04e99cd68d25477e60ace050f7cc9c5983c",
+      "negativeControl": "The same script against the previous build (042c0195 code, port 8779, fresh database infra366_r3prev): the 3200-character spec, the insert and the comment each answer 500 'internal server error', and @v9223372036854775807 answers 500"
+    },
+    {
+      "criterion": "Review round 1, Important (ReferencedBy.tsx): one source citing two blocks of the shown document is two Referenced by rows, each keyed by and linked to its block (deployment instructions: a browser test that fails before the change)",
+      "surface": "Dispatch's browser suite (Playwright, chromium and iphone) against the real server built from the head",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_r3?sslmode=disable DISPATCH_E2E_PORT=8787 FAKE_ENVOY_PORT=9031 FAKE_GITHUB_PORT=9032 FAKE_BROKER_PORT=9034 bun run e2e -- e2e/block-references.e2e.ts",
+      "observed": "8 passed (44.0s), including 'a comment citing two blocks of the shown document is two rows, each linked to the block it cites' on both projects",
+      "headSha": "9d4fb04e99cd68d25477e60ace050f7cc9c5983c",
+      "negativeControl": "The new test against the panel as committed before the change (ReferencedBy.tsx from 13430a18): 2 failed, 'expect(locator).toHaveCount(1) … Received: 0' for the row linked to block ship_it; the unit test with the old key logs 'Encountered two children with the same key, comment:c1:mentions:in' and the expanded state moves to the wrong row"
+    },
+    {
+      "criterion": "Pin reading (plan design 1, 'Reading a pin'; A15, R1): a pin to a version the document lacks, including one past the largest version number Postgres stores, answers 404 NOT_FOUND 'no version N of <doc ref>' (the tester's round-1 failure and its red test TestAPinPastEveryVersionNumberAnswers404)",
+      "surface": "Local Dispatch harness: the real Go server built from the head (packages/dispatch/e2e/run-server.sh on port 8777, database infra366_pin) and the real dispatch CLI",
+      "command": "for v in 1 2147483647 2147483648 9223372036854775807 92233720368547758070; do for d in to from; do curl -H 'Authorization: Bearer e2e-token' \"http://127.0.0.1:8777/api/v1/references?$d=<uri-encoded dispatch://CORE-1/spec#b-ship%5Fit@v$v>\"; done; done; bun packages/envoy-client/bin/dispatch.ts read --ref 'dispatch://CORE-1/spec#b-ship%5Fit@v2147483648'; then block-graph.sh re-run at this head on database infra366_driver2",
+      "observed": "@v1: 200 pin.state unchanged (to and from); @v2147483647, @v2147483648 and @v9223372036854775807: 404 NOT_FOUND 'no version N of dispatch://CORE-1/spec' (to and from); @v92233720368547758070: 400 INVALID_REFERENCE; dispatch read --ref …@v2147483648 exits 1 printing 'no version 2147483648 of dispatch://CORE-1/spec'; the red test passes unmodified (go test -run TestAPinPastEveryVersionNumberAnswers404 ./internal/dispatch/api/); the driver at this head: exit 0, 37 PASS",
+      "headSha": "73e2394d99bbf7fd476692e7c94fd8abbb9ba29c",
+      "negativeControl": "The previous build (042c0195, server code of acdf007b) on the same database, port 8779: ?to=dispatch://CORE-1/spec#b-ship%5Fit@v2147483648 answers 500 {\"code\":\"INTERNAL\",\"error\":\"internal server error\"}"
+    },
+    {
+      "criterion": "A1, A2 (with the pinned clause), A4, A5, R6, R7, A10 and A15 (document halves) and the older document references route",
+      "surface": "Local Dispatch harness: the real Go server built from the head (packages/dispatch/e2e/run-server.sh on port 8777, Postgres 17 + pgvector on the issue volume, database infra366_driver) and the real dispatch CLI (packages/envoy-client/bin/dispatch.ts)",
+      "command": "DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE bash packages/dispatch/e2e/acceptance/block-graph.sh",
+      "observed": "exit 0 and 37 PASS lines, from 'setup created CORE-1 in CORE' to 'close CORE-1 is done' (output in https://github.com/sjawhar/legion/pull/2210#issuecomment-6405581703)",
+      "headSha": "042c0195551087bb6ccbdb578fb9c5396062df9d",
+      "negativeControl": "The same driver against a server built at main 81a3b5ef (fresh database infra366_neg, port 8778): exit 1, 'FAIL: A1 ?to=X answers: HTTP 400, want 200: {\"code\":\"INVALID_REFERENCE\",...}'"
+    },
+    {
+      "criterion": "The Referenced by panel keeps its shape, two citing blocks show two rows, a block of another document shows as that document's row linked to the citing block, and a pinned link keeps its version's text, says how the block stands since and opens that version (deployment instructions: a browser test that fails before the change and passes at its head)",
+      "surface": "Dispatch's own browser suite (Playwright, chromium and iphone) against the real server and a signed-in dashboard",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/infra366_e2e_head?sslmode=disable DISPATCH_E2E_PORT=8787 FAKE_ENVOY_PORT=9031 FAKE_GITHUB_PORT=9032 FAKE_BROKER_PORT=9034 bun run e2e -- e2e/block-references.e2e.ts",
+      "observed": "6 passed (1.5m): the three tests on chromium and on iphone",
+      "headSha": "042c0195551087bb6ccbdb578fb9c5396062df9d",
+      "negativeControl": "The same test file copied alone into a git archive of main 81a3b5ef (bun install --frozen-lockfile, database infra366_e2e_base, port 8788): 6 failed, each on a new-behaviour assertion (no 'Artifact · KEY' link at line 89, no row toggle at line 115, no pinned link 'P ships on Monday.' at line 162), none on setup"
+    },
+    {
+      "criterion": "A12: every build answers on one database, an older build skips the block kind it does not know, and the new build indexes older text and what an older build writes during the roll with no command run",
+      "surface": "Two real server builds on one Postgres database (infra366_a12): main 81a3b5ef (carries INFRA-364's registry) and the head, serving one public origin side by side, then the pre-registry build 371d6c87 as the negative witness; throwaway driver $TMPDIR/infra366/a12.sh",
+      "command": "OLD=dispatch-base-81a3b5ef NEW=dispatch-head NEG=<371d6c87 build> WORKSPACE=$LEGION_WORKSPACE bash $TMPDIR/infra366/a12.sh",
+      "observed": "Before the switch main answers ?to=<block X> with 400 and lists no block edge; head lists main's older comment and dashboard-URL message under ?to=X 2 s after its start; main beside head answers 200 on every read with no block node and referenced_by_count 3 equal to its list of 3; head lists the spec's citing block in place of the document row; main's edit of Q citing X and its #b- comment list under ?to=X on head 18 s later; with main stopped, head's ?to=X, block-links (cites.md -> spec and spec -> spec: [\"x_block\"]) and 'dispatch read --ref X' pass (output in https://github.com/sjawhar/legion/pull/2210#issuecomment-6405581703)",
+      "headSha": "042c0195551087bb6ccbdb578fb9c5396062df9d",
+      "negativeControl": "The pre-registry build 371d6c87 on the same database: ?to=dispatch://ACME-1 answers HTTP 500, its log 'dispatch: API handler failed error=\"graph node kind \\\"block\\\" is not addressable\"'"
+    },
+    {
+      "criterion": "Coverage count (architect, 2026-10-25): every document's blocks are graph nodes, and a document left unindexed is named and then healed by the block-index loop",
+      "surface": "The head server on the A12 database (port 8792) read by packages/dispatch/e2e/acceptance/block-coverage.sh",
+      "command": "DISPATCH_URL=http://127.0.0.1:8792 DISPATCH_TOKEN=e2e-token PROJECT=ACME bash packages/dispatch/e2e/acceptance/block-coverage.sh",
+      "observed": "documents=3 indexed=3 not_indexed=0",
+      "headSha": "042c0195551087bb6ccbdb578fb9c5396062df9d",
+      "negativeControl": "Deleting cites-md's document_blocks rows and marking it owed (document_block_versions.version = null): documents=3 indexed=2 not_indexed=1 naming dispatch://ACME-2/artifact/cites-md; 25 s later, with no command run, not_indexed=0"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/text: block references and pins in the reference grammar (#b-<id>, @v<N>), EncodeBlockID, shared test tables",
+    "packages/envoy/internal/dispatch/store/migrations 0117-0122: document_blocks, block_refs, document_block_texts, document_block_versions, the owed triggers and the block-grammar seed",
+    "packages/envoy/internal/dispatch/refs: IndexBlocks, block texts and pins, graph readers for block nodes, BlockLinks, the older-text rebuild",
+    "packages/envoy/internal/dispatch/docs: block indexing in every version write, the block-index reconciliation loop",
+    "packages/envoy/internal/dispatch/api: block nodes in /references, GET /api/v1/block-links, routes table",
+    "packages/envoy/cmd/dispatch: the block-index loop, the lease pool, README and AGENTS",
+    "packages/contracts: GraphNode kind block, BlockPin, BlockLink(s), encodeBlockId, decodeBlockId, parseBlockFragment, reference tables",
+    "packages/envoy-client: dispatch read of a block reference, other tools refuse one",
+    "packages/dispatch: dashboard block links, pinned-version view, one Referenced by row per citing block; e2e/block-references.e2e.ts; e2e/acceptance/block-graph.sh and block-coverage.sh",
+    "packages/claude-envoy/dist: regenerated",
+    "docs, skills/dispatch, CHANGELOGs",
+    "packages/contracts/CHANGELOG.md and skills/dispatch/references/reading.md: forward-merge resolution against main 81a3b5ef (042c0195)",
+    "packages/envoy/internal/dispatch/refs/block_texts.go (round 2): BlockTextAt answers a version past math.MaxInt32 as one the document lacks, without querying (73e2394d)",
+    "Round 3 (review round 1): packages/envoy/internal/dispatch/api/block_references_test.go (block tests moved out of references_test.go, 787ca603)",
+    "Round 3: text/refs.go MaxBlockIDBytes, refs/blocks.go uniqueBlocks skip + warning, pmdoc/block_ids.go LongBlockID, pmdoc/parse.go, docs/tree.go, api and docs block_id_bound_test.go, contracts MAX_BLOCK_ID_BYTES and shared table rows (1436d0f6)",
+    "Round 3: contracts parseBlockFragment pin as digits bounded at 2^63-1; envoy-client ParsedDispatchRef.pin string; dashboard routes (383ffe51)",
+    "Round 3: packages/dispatch/web/src/features/refs/block-reference.ts (moved out of routes.ts, 13430a18)",
+    "Round 3: ReferencedBy.tsx row key and cited-block link, ReferencedBy.test.tsx, e2e/block-references.e2e.ts (446d1f3b)",
+    "Round 3: AGENTS.md, CHANGELOGs, skills/dispatch, docs/site, claude-envoy dist; shared text table's long-id rows written as literals so bundles leave the table out (9d4fb04e)",
+    "Round 4: migration 0117 (document_blocks.node_id hash index, no unique; block_refs_from_node hash), store_test.go index list, text/refs.go MaxBlockIDBytes comment, packages/envoy/AGENTS.md (384ff72f)",
+    "Round 6: text/refs.go MaxTargetBytes and targetFits over every reference kind; contracts dispatch-text-rules.ts MAX_REFERENCE_TARGET_BYTES/referenceTargetFits; dashboard routes.ts routeTarget; envoy-client dispatch-owner.ts and dispatch-execute.ts; shared text table rows (5276279b, f77a7a19, 20863d49)",
+    "Round 6: api/artifacts.go maxNewArtifactKeyBytes (2692), refusal of new names and reference keys past it, route descriptions (a7eaf1c3)",
+    "Round 6: migrations 0123 (block_id_key, asks_block_id_unique, asks_anchor_block_id_idx) and 0124 (comments_anchor_block_id_idx); docs/copied_asks.go lookups (28bb6e9a)",
+    "Round 6: docs, README migrations 0123-0124, CHANGELOGs, skills/dispatch, claude-envoy dist (3415df86); forward merge of main 9ed0397b (05ea3ef4)",
+    "Round 8: pmdoc LongBlockID removed, docs/tree.go (53505a76)",
+    "Round 8: text.TargetID and text.ParseRef, refs.ToID removed, API reads unbounded, envoy-client parsers unbounded (98206c03)",
+    "Round 8: dashboard target-id.ts and reference-spans.ts out of routes.ts (922 lines), parseNodeReference/nodeRouteFromHref for server data, versioned spec page, BlockTarget.block = {id, pin?}, contracts utf8Bytes and encodeBlockId per code point, shared href rows (aee29df2)",
+    "Round 8: MentionExcerpts comment, indexRenderedVersion/indexUnrenderedVersion, acceptance lib.sh (4fb3569c); docs (c00e53a6)",
+    "Round 8: forward merge of main 8298fc71, migrations renumbered 0118-0125 after main's 0117, envoy-client dispatch-command.ts args['issue'] for claude-envoy's typecheck (e26a6648)",
+    "Round 9: api/search.go askBlockNodeSQL and search_ask_block_href_test.go (394e2fb9); dashboard routes.ts, DispatchPicture.tsx, RefLink.tsx, RefPreview.tsx, ProofDocument.tsx and their tests (573dd319); e2e/pictures.e2e.ts, e2e/sends.ts (2ece5e05); forward merges of main a5aeddf1 and 3f34ba12 (6fdbd78e, 811b7261)",
+    "Round 10: RefLink.tsx isTextUrl and bounded read of text URLs, routes.ts comments, MarkdownBody.test.tsx, e2e/pictures.e2e.ts, packages/dispatch/AGENTS.md (ea0496c2)",
+    "Round 11: RefLink.tsx isTextUrl compares words with the anchor's own target; MarkdownBody.test.tsx; e2e/pictures.e2e.ts; packages/dispatch/AGENTS.md (4ff4dc39)",
+    "Round 11: forward merges of main df396380 and ad909178; migrations renumbered 0120-0127, every reference updated; routes_table_test.go pin 139; search_ask_block_href_test.go vectors carry the embedder's model (56d31191, 44f6cfa2)",
+    "Round 12 (after the drain): forward merge of main 6cdb9995 (e3d09251), with packages/envoy/CHANGELOG.md keeping both entries; main added no migration, so this branch keeps 0120-0127; the diff fingerprint is unchanged (2e83582a…), https://github.com/sjawhar/legion/pull/2210#issuecomment-6424826991",
+    "Round 12: RefLink.tsx text node for an uncited dispatch:// text URL; MarkdownBody.test.tsx; e2e/pictures.e2e.ts (b4e4a2d2)",
+    "Round 12: forward merge of main b4bea385: migrations renumbered 0121-0128 after main's 0120; skills/dispatch/references deletions kept and the block guidance moved into dispatch read/ask/doc-edit help in contracts dispatch-tools.ts with test rows (1d4f991e)",
+    "Round 13: RefLink.tsx doc comment, packages/dispatch/AGENTS.md, e2e/pictures.e2e.ts (REF_PREVIEW_OPEN_DELAY_MS, leftover comment), claude-envoy CHANGELOG (87a81d62); forward merge of main 16e4bb0f with RefPreview documentOwner returning AgentName (f586da9d)",
+    "Round 14: forward merge of main 1357b95c, packages/envoy/CHANGELOG.md resolved keeping both entries (47506f1a)",
+    "Round 15: forward merge of main bc98d3e7, the contracts and pi-envoy CHANGELOGs resolved keeping both entries (737a099b)"
+  ],
+  "trickyParts": [
+    "Every document version write now also indexes its blocks (about eight more statements in the version's transaction). TestAHealthyRoomUnderWritesIsNeverRefused passes on an idle pod at the head (27-41 writes against its floor of 20, main 36-54), but failed twice under CPU contention while other Go packages ran in parallel (11-15 writes); main passed the same contended run (24 writes). CI's runners are the judge.",
+    "A12 needs every build on one public origin (text.Extract keeps a link outside DISPATCH_SERVER_URL a plain URL); the throwaway driver fronts the second build with a Host-rewriting proxy, as one load balancer does in production.",
+    "Bun keeps an exported array in a bundle when any element is a non-literal expression (a template with a computed value), so the long-id fixture rows of DISPATCH_TEXT_REFERENCES are written out as literals; otherwise the test table ships in claude-envoy's dist.",
+    "A block node id is <ref_key>#<block id>, and ref_key (artifact slug) is unbounded, so node_id and from_node are hash indexed: their reads are all equalities (= and = any, bitmap scan), and uniqueness already follows from (artifact_id, block_id) and the unique ref_key. Migration 0117 is this PR's own and unreleased, so it was edited in place.",
+    "Migrations 0123 and 0124 drop and rebuild the ask-block and anchor indexes on asks and comments in one transaction each, holding that table ACCESS EXCLUSIVE while the index builds; the census for each answers 0.",
+    "The artifact-name bound is 2692 bytes for the name and for the new reference key <owner>/<slug>, the largest a B-tree entry holds (12-byte overhead), so the tester's 2683-byte name on TEST-1 (key 2690) is still accepted as main accepts it; such a document can be written but not cited, since its references exceed the 2048-byte target bound.",
+    "Main's 0117_architecture_sources_per_repo is a stop-the-world migration; this branch's migrations follow it as 0118-0125."
+  ],
+  "deviations": [
+    "Local checks that failed for environmental reasons: api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (the harness database's collation is C, which the test refuses), pi-envoy prepack's 'bin/dispatch' mode (the workspace checkout is 0775), and four load-sensitive tests in the parallel suite runs (envoy-client's 10 s command timeout, claude-envoy's tmux SIGTERM bound, dispatch's AgentsPage and ConversationTab O(1) scroll test), each passing when re-run alone at this head (envoy-client's three times by name; main's copy also passes).",
+    "Round 2: the earlier proof entries ran at 042c0195; this round changes only refs.BlockTextAt, so I re-ran the block-graph driver (37 PASS) at 73e2394d and did not repeat the browser and A12 runs.",
+    "Round 3: the Referenced by row now also shows a 'block <id>' link to the block of the shown document it cites. Without it, a source's two rows are identical. The reviewer's row-key finding asked only for the key; the link is what makes the two rows tell apart, and the browser test covers it.",
+    "Round 3: pmdoc's three timing tests (TestUpdateIsLinearInTheBlockCount, TestBareURLShapesParseAndRenderLinearly, TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText) fail on this pod on main 81a3b5ef too (10 ms clock granularity); claude-envoy's tmux SIGTERM timing test failed once in the full suite as before.",
+    "Round 8: components have Go-only bound rows; the dashboard's text reader parses no component reference (on main either), so a shared-table row would fail its TS reader.",
+    "Round 9: the merges after 2ece5e05 change no Dispatch server or dashboard file (only daemon, agent-secrets, contracts' daemon-api fixtures and envoy-client slack-post, plus main's own copy of dispatch-command.ts's args['issue'] line), so the round-9 proofs ran at 2ece5e05's Dispatch code. The Firefox project of picture-link-click.e2e.ts cannot launch in this harness (no Firefox binary); its Chromium run passes.",
+    "Round 11: the shared local test database `postgres` had been migrated under the old numbering (version 125), so the renumbered store tests ran on fresh databases; any existing scratch database migrated by this branch before the renumber is stale and must be recreated (no deployed database ever ran this branch's migrations).",
+    "Round 12: the code is unchanged from 44f6cfa2 (fingerprint unchanged), so no proof was re-run; the PR body's CI and E2E (tester) lines were updated from round 9 of test.json and the runs GitHub shows.",
+    "Round 13: the five [webkit-iphone] runs of main's agent-view.e2e.ts cannot launch in this harness (only Chromium is installed); they are main's tests and fail before any page loads.",
+    "Round 15: the pi-envoy skills-guard word test fails at the merge because main's #2273 put the three Dispatch skills at 2057 words; skills/ equals main, and the task said to change nothing else, so it is reported to the architect, not fixed here."
+  ],
+  "openQuestions": []
+}
