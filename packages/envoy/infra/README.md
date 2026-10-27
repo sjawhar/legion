@@ -10,6 +10,7 @@ Pulumi language needs only the Pulumi CLI:
 | `envoy-infra:aws:NatsService` | A NATS server with JetStream on ECS Fargate, reachable in the VPC through Cloud Map and on a tailnet through a Tailscale sidecar: see [The AWS components](#the-aws-components). |
 | `envoy-infra:aws:WebhookListener` | Envoy's webhook listener on ECS Fargate, behind your load balancer's target group, with an alarm on each log line that says a delivery or a start went wrong. |
 | `envoy-infra:gcp:NatsHub` | A NATS server with JetStream on one Google Cloud VM that joins a tailnet, where its clients reach it: see [docs/nats-hub.md](docs/nats-hub.md), which says what it deploys, its inputs and how it is updated, with an example. |
+| `envoy-infra:gcp:ClusteredNatsHub` | NATS with JetStream as three servers on a GKE cluster, one per zone, through the `nats` Helm chart, with an optional tailnet entry whose hosts also run Envoy's session listener: see [gcp:ClusteredNatsHub](#gcpclusterednatshub). |
 | `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster: see [gcp:Dispatch](#gcpdispatch). |
 
 The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
@@ -118,6 +119,368 @@ above, or GitHub's digest for it, which
 `gh api repos/sjawhar/legion/releases/tags/envoy-infra-v<version> --jq '.assets[] | .name, .digest'`
 lists. mise strips the archive's one directory, so `envoy-infra` lands at the top of the install
 and on `PATH`.
+
+## gcp:ClusteredNatsHub
+
+`envoy-infra:gcp:ClusteredNatsHub` runs NATS with JetStream as a cluster of three nats-server pods
+on a GKE cluster you already have, one pod per zone, through the NATS project's `nats` Helm chart,
+version 2.15.1. With `tailnet` it also serves the hub on a tailnet as the Tailscale Service
+`svc:<tailnet.serviceName>`, whose hosts forward the Service's port 4222 to NATS and run Envoy's
+session listener behind its port 9020. It holds the users `gcp:NatsHub` holds, rendered by the same
+function, so a hub moves from the VM to the cluster with its users and their grants unchanged;
+[The clustered hub](docs/nats-hub.md#the-clustered-hub-gcpclusterednatshub) in `docs/nats-hub.md`
+says how running and updating it differ from the VM, and what its metrics are. The cluster, the
+namespace, the priority class, the Tailscale Service and the listener's seed are the consumer's;
+the component creates none of them (see [Before the first deployment](#before-the-first-deployment)).
+
+A hub whose `name` is `<n>` registers these resources in `namespace`, each a child of the hub and
+named after `<n>` rather than after the hub's own name:
+
+| Resource | Purpose |
+| --- | --- |
+| Kubernetes provider `<n>-kubernetes` | The hub's own provider, built from `kubeconfig` with server-side apply and mutable ConfigMaps (see [Its own Kubernetes provider](#its-own-kubernetes-provider)). Every resource below runs on it. |
+| PriorityClass read `<n>-priority-class` (only with `priorityClassName`) | Reads the class. The chart and the tailnet hosts wait on the read, so a missing class fails the preview rather than the rollout. |
+| Helm chart `<n>` (`kubernetes:helm.sh/v4:Chart`) | The chart `nats` 2.15.1 from `https://nats-io.github.io/k8s/helm/charts/`, release `<n>`. It renders the StatefulSet `<n>`, which the hub protects (see [The protected StatefulSet](#the-protected-statefulset)); the client Service `serviceName`, on the client port 4222 alone; the headless Service `<n>-headless`; the ConfigMap `<n>-config`, holding `nats.conf` and the users' `auth.conf`; and the PodDisruptionBudget `<n>`, `maxUnavailable: 1`. It renders no nats-box Deployment and no test Pod. |
+| NetworkPolicy `<n>` | An Ingress policy on the hub pods: TCP 4222 from every pod of each `clientNamespaces` namespace and, with `tailnet`, from the tailnet hosts, which forward the tailnet's 4222; TCP 6222, the route port, from the hub pods alone; TCP 8222, monitoring, from each `monitorNamespaces` namespace, and from none without one; TCP 7777, the exporter, from each `metricsNamespaces` namespace. |
+| PodMonitoring `<n>` (`monitoring.googleapis.com/v1`) | Google Managed Prometheus scrapes each hub pod's exporter on its port `prom-metrics` every 30 seconds. |
+| Secret `<n>-tailnet-authkey` (only with `tailnet`) | `tailnetAuthKey`, under the key `TS_AUTHKEY`. |
+| ConfigMap `<n>-tailnet` (only with `tailnet`) | The tailnet hosts' serve config, `serve.json`: the Service's port 4222 forwarded as TCP to `<serviceName>.<namespace>.svc.cluster.local:4222`, and its port 9020 to the host pod's own listener at `127.0.0.1:9020`. |
+| ServiceAccount `<n>-tailnet` (only with `tailnet`) | The tailnet hosts' account, which mounts no token: no container of theirs calls the Kubernetes API. |
+| Deployment `<n>-tailnet` (only with `tailnet`) | `tailnet.replicas` tailnet hosts (see [The tailnet hosts](#the-tailnet-hosts)), rolled with `maxUnavailable: 0` and `maxSurge: 1`. It waits on the Secret, the ConfigMap, the ServiceAccount and the priority class read. |
+| PodDisruptionBudget `<n>-tailnet` (only with `tailnet`) | `maxUnavailable: 1` over the tailnet hosts. |
+
+Each hub pod runs nats-server at `natsCpu` and `natsMemory`, each its request and its limit, under
+a `GOMEMLIMIT` (see [Sizing](#sizing)), beside the chart's config reloader at `50m` and `64Mi` and
+its Prometheus exporter at `50m` and `128Mi`. The three servers form one cluster that advertises no
+pod address to its clients (`no_advertise`), since every client reaches the hub through a Service.
+JetStream keeps its file store on the pod's own claim, `<n>-js-<n>-<ordinal>`, of `diskSizeGb`, up
+to `maxFileStoreGb`, with no memory store, and monitoring listens on 8222. The pods spread one per
+zone, held hard (`topology.kubernetes.io/zone`, `maxSkew: 1`, `DoNotSchedule`, `minDomains: 3`), so
+on a cluster with nodes in fewer than three zones a pod stays Pending rather than share a zone. A
+change of `users` rewrites `auth.conf` alone, which the reloader applies without restarting a
+server; a change of `sessionUser` restarts the hub pods one at a time, since nats-server refuses to
+reload a changed `no_auth_user`.
+
+### Inputs
+
+| Input | Default | What it is |
+| --- | --- | --- |
+| `kubeconfig` | required | A secret: the kubeconfig of the cluster the hub runs on, from which the hub builds its Kubernetes provider. May come from another resource or stack. |
+| `namespace` | required | The existing namespace every child is created in, a DNS label. The component never creates it. |
+| `name` | required | The chart's release name and `fullnameOverride`, so the StatefulSet's name and every child's: a DNS-1123 label of at most 44 bytes, so `<n>-tailnet` stays within the 52 bytes a StatefulSet's or Deployment's name may have. |
+| `serviceName` | required | The in-cluster client Service's name, a DNS-1035 label (a letter first, at most 63 characters). Clients in `clientNamespaces` reach the hub at `nats://<serviceName>.<namespace>.svc.cluster.local:4222`. |
+| `natsImage`, `reloaderImage`, `exporterImage` | required | nats-server, the chart's config reloader and its Prometheus exporter, each pinned by digest: `<name>@sha256:<64 lowercase hex digits>`. Chart 2.15.1 runs `nats:2.15.1-alpine`, `natsio/nats-server-config-reloader:0.24.0` and `natsio/prometheus-nats-exporter:0.20.2` by default, the versions the `natslive` tests run; pin those versions' digests. |
+| `natsReplicas` | unset | Only with `tailnet`: the session listener's `ENVOY_NATS_REPLICAS`, the copies JetStream keeps of every stream and bucket the listener creates, 1 to 3, since the hub runs three servers and JetStream keeps no more copies of a stream than it has servers. Unset, the variable is unset and the listener keeps one copy. |
+| `streamMaxBytes` | unset | The byte limit of the listener's notification stream, at least 1, rendered as the tailnet listener's `ENVOY_STREAM_MAX_BYTES`. With or without `tailnet` it sizes `maxFileStoreGb`, `diskSizeGb` and `natsMemory` (see [Sizing](#sizing)). Unset, the variable is unset and the listener keeps its own default. |
+| `maxFileStoreGb` | see [Sizing](#sizing) | JetStream's `max_file_store`, in whole GiB, below `diskSizeGb`. |
+| `diskSizeGb` | see [Sizing](#sizing) | Each hub pod's claim, in whole GiB, above `maxFileStoreGb`. It is the StatefulSet's claim template: [The protected StatefulSet](#the-protected-statefulset) says how to grow it. |
+| `storageClassName` | the cluster's default class | The claims' StorageClass, a DNS subdomain. |
+| `natsCpu`, `natsMemory` | `1` and `2Gi`; with `streamMaxBytes`, `natsMemory` is larger (see [Sizing](#sizing)) | nats-server's container size, Kubernetes quantities, each rendered as both its request and its limit. |
+| `priorityClassName` | none | The name, a DNS subdomain, of an existing PriorityClass that every pod of the component names, hub pods and tailnet hosts alike. The component reads the class and never creates it. |
+| `clientNamespaces` | required | The namespaces admitted to NATS's client port, 4222: at least one, each a DNS label, none repeated. |
+| `monitorNamespaces` | none | The namespaces admitted to NATS's monitoring port, 8222, with the same rules. Without one, no namespace is. |
+| `metricsNamespaces` | `gmp-system`, `gke-gmp-system` | The namespaces admitted to the exporter's port, 7777, with the same rules: by default Google Managed Prometheus's, whose collectors run in `gmp-system` on a Standard cluster and in `gke-gmp-system` on Autopilot. |
+| `users` | none | The NATS server's nkey users, as `gcp:NatsHub`'s are (see [The hub's users](docs/nats-hub.md#the-hubs-users)). At least one is required unless the hub has `tailnet`, whose listener is a user of its own. |
+| `sessionUser` | unset | `name` and `nkey`, the user a client presenting no credential becomes, granted `SessionPermissions()`, as for `gcp:NatsHub`. |
+| `tailnet` | unset | The tailnet entry: `serviceName`, the Tailscale Service's name without `svc:`, under `gcp:NatsHub`'s `hostname` rule (2 to 26 lowercase letters, digits and hyphens, starting with a letter and not ending with a hyphen); `tailnetDnsName`, the tailnet's DNS name, such as `example-tailnet.ts.net`; `tags`, at least one `tag:<name>`, which every host joins with; `replicas`, the number of hosts, 2 by default and at least 2, so a drained host leaves another serving; `tailscaleImage`, pinned by digest; and `listener`. |
+| `tailnet.listener` | required with `tailnet` | The session listener every host runs: `image`, pinned by digest; `machineId`, `tailnet.serviceName` by default; `nkey`, the public key of the listener user's seed; `seedSecretName` and `seedSecretKey`, an existing Kubernetes Secret in `namespace` and its key, which hold that seed and which the component mounts by reference and never reads; `allowedHosts`, any further address a client dials the listener by, beyond `<tailnet.serviceName>.<tailnetDnsName>`, which it always serves; and `cpu` and `memory`, the listener container's size, each its request and its limit, `500m` and `1Gi` by default. |
+| `tailnetAuthKey` | required with `tailnet` | A secret: the Tailscale auth key the tailnet hosts join with, which [Before the first deployment](#before-the-first-deployment) says how to make. Refused without `tailnet`. May come from another resource or stack. |
+
+Only `kubeconfig` and `tailnetAuthKey` may come from another resource's output. Every other input
+takes a value the program knows when it runs, and the plugin refuses an output there, naming the
+input, so the chart's values, the users' `auth.conf` and the listener's environment are known at
+preview.
+
+The component refuses these before it registers anything, each a `core.InputError` naming the
+input:
+
+- an nkey seed (`bus.HoldsSeed`) in the hub's own name, first, then in any plain string input:
+  `namespace`, `name`, `serviceName`, the images, `storageClassName`, `natsCpu`, `natsMemory`,
+  `priorityClassName`, an entry of any of the three namespace lists, a user's `machineId` or
+  `dispatchMachineId`, and, of `tailnet`, `serviceName`, `tailnetDnsName`, `tailscaleImage`, a tag,
+  and the listener's `image`, `seedSecretName`, `seedSecretKey`, `machineId`, `cpu`, `memory` and
+  `allowedHosts` entries. The refusal names the input by its path and never its value. A seed in
+  a user's name, a rule entry or an `nkey` is refused by the authorization, as for `gcp:NatsHub`;
+- no `kubeconfig`;
+- a `name` that is not a DNS-1123 label or is over 44 bytes, a `namespace` that is not a DNS
+  label, and a `serviceName` that is not a DNS-1035 label;
+- an image that is not pinned by digest, the listener's and `tailscaleImage` included;
+- a `natsReplicas` outside 1 to 3, and a `natsReplicas` without `tailnet`, whose listener alone
+  takes it;
+- a `streamMaxBytes` below 1;
+- a `maxFileStoreGb` below 1, at or above `diskSizeGb`, or, with `streamMaxBytes`, below the store
+  that limit needs (see [Sizing](#sizing)), naming both inputs; a `diskSizeGb` at or below the
+  `maxFileStoreGb` it gives by default;
+- a `natsCpu` or `natsMemory` that is empty or not a quantity, and a size at which Autopilot would
+  not run the hub pod as rendered, and, with `streamMaxBytes`, a `natsMemory` below the memory that
+  limit needs, naming both inputs (see [Sizing](#sizing));
+- a `storageClassName` that is not a DNS subdomain, the empty string included;
+- a `priorityClassName` that is empty, not a DNS subdomain, or in the `system-` prefix Kubernetes
+  reserves for its own `system-cluster-critical` and `system-node-critical`;
+- no `clientNamespaces`, and an entry of any namespace list that is not a DNS label or repeats an
+  earlier one, named by its index;
+- a `tailnetAuthKey` without `tailnet`, and no `tailnetAuthKey` with it;
+- of `tailnet`: a `serviceName` or `tailnetDnsName` outside its rule, no `tags` or a tag outside
+  Tailscale's rule, `replicas` below 2, and no `listener`; of the listener: a `machineId` the
+  shared machine-id rule refuses, an empty `nkey`, a `seedSecretName` that is not a DNS subdomain,
+  a `seedSecretKey` outside `[-._a-zA-Z0-9]+`, an `allowedHosts` entry refused as `gcp:NatsHub`'s
+  `listener.allowedHosts` entries are, and a `cpu` or `memory` at which Autopilot would not run the
+  tailnet host pod as rendered (see [Sizing](#sizing));
+- no `users` without `tailnet`, and a user refused as
+  [The hub's users](docs/nats-hub.md#the-hubs-users) lists, a user whose machine id gives the
+  tailnet listener's durable among them; the listener's user is named after its machine id.
+
+Once each Pulumi input resolves, before any child takes it, it refuses a blank or
+whitespace-only `kubeconfig` or `tailnetAuthKey`, or one holding an nkey seed, naming the input and
+never echoing it.
+
+### Its own Kubernetes provider
+
+pulumi-kubernetes replaces a ConfigMap whose `data` changes unless its provider sets
+`enableConfigMapMutable`, and it replaces a named object by deleting it before it creates the new
+one. A users change rewrites the chart's ConfigMap, so under a provider without that setting it
+would delete the ConfigMap under three running servers, and a hub pod scheduled in that window
+could not mount its configuration. Only a provider the component builds can promise the setting,
+so the hub takes `kubeconfig` and builds `<n>-kubernetes` from it, with `enableConfigMapMutable`
+and `enableServerSideApply` both on, as `gcp:Dispatch` builds its own. Pass the hub no provider:
+it requires none, and it creates every resource, the chart's included, through the one it builds.
+
+The kubeconfig's identity is the one the deployment acts as in the cluster, so it needs the grants
+[Before the first deployment](#before-the-first-deployment) lists. A kubeconfig that runs an exec
+plugin, as GKE's `gke-gcloud-auth-plugin` does, needs that plugin on the machine that runs Pulumi,
+and that machine fetches the chart from `https://nats-io.github.io/k8s/helm/charts/` when the
+provider renders it.
+
+### The tailnet hosts
+
+Each host pod of the Deployment `<n>-tailnet` runs every container as uid 999, the listener
+image's own user, with no privilege escalation and every Linux capability dropped:
+
+- `tailscale-state`, an init container that creates tailscaled's state directory on the pod's
+  `emptyDir`;
+- `tailscale`, Tailscale's containerboot in userspace, which logs in with `tailnetAuthKey` once,
+  as a node named after the pod with the `tags`, keeps its state on the `emptyDir`, so every new
+  pod is a new node, and serves `serve.json`. It never advertises the Service by itself
+  (`TS_EXPERIMENTAL_SERVICE_AUTO_ADVERTISEMENT=false`). Its readiness probe passes only while the
+  advertiser's ready file exists, so the rollout and the budget count only hosts that serve the
+  tailnet. Its preStop hook drains the Service from the node (bounded at 5 seconds), waits 20
+  seconds for clients to move to another host, and logs the node out (bounded at 5 seconds);
+- `advertiser`, a script on the Tailscale image, which every 5 seconds asks the pod's own listener
+  for `http://127.0.0.1:9020/healthz`, giving it 6 seconds. After two answers of HTTP 200 in a row
+  it advertises `svc:<tailnet.serviceName>`, and it writes the ready file once the node's
+  `service-host` capability lists the Service, which is the tailnet's approval. After three
+  failures in a row it drains the Service and removes the ready file. A node advertised and not
+  approved for 120 seconds is drained and, 15 seconds later, advertised again, the bound doubling
+  up to 960 seconds: a node that advertised before the Service existed is never approved until it
+  advertises anew;
+- `listener`, Envoy's session listener from `tailnet.listener.image`, as machine
+  `tailnet.listener.machineId`, on `127.0.0.1:9020`, reaching NATS at `serviceUrl` with
+  `ENVOY_ALLOW_REMOTE_NATS=1`. `ENVOY_ALLOWED_HOSTS` is `<tailnet.serviceName>.<tailnetDnsName>`
+  and `allowedHosts`; `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES` are set exactly when
+  `natsReplicas` and `streamMaxBytes` are; `NATS_NKEY_SEED_FILE` names the seed, mounted read-only
+  from the consumer's Secret at `/var/run/secrets/envoy/nats-seed`. It takes no
+  `ENVOY_API_TOKEN`: its `/v1` is on loopback, where it needs no bearer, so the tailnet's policy
+  for port 9020 is the only thing that decides who may call it, as for `gcp:NatsHub`'s listener
+  ([The hub's listener](docs/nats-hub.md#the-hubs-listener)). Any HTTP answer to its startup
+  probe (two minutes) and its liveness probe (one minute of no answer at all restarts it) keeps it
+  running, a 503 included: whether the host serves is the advertiser's to judge. Its preStop waits
+  25 seconds, the tailscale hook's drain and wait, so it keeps answering while the node leaves the
+  Service.
+
+The pod's termination grace period, 60 seconds, holds both shutdowns, which run side by side: the
+tailscale hook's 30 seconds and containerboot's own 25, and the listener's 25-second wait and its
+own 26. The hosts spread one per node and one per zone, held hard, with `minDomains` the lesser of
+`replicas` and 3. With `priorityClassName`, every host names the class.
+
+### The protected StatefulSet
+
+A change to a StatefulSet's `volumeClaimTemplates`, `selector`, `serviceName` or
+`podManagementPolicy` makes pulumi-kubernetes replace it, which stops all three servers at once. The
+chart's one transform therefore protects the StatefulSet `<n>` with Pulumi's own `protect`, and
+protects nothing else. A change of `diskSizeGb` or `storageClassName`, or a chart version that
+changes one of those fields, makes the preview plan to replace the StatefulSet and fail, because it
+is protected; nothing is applied. Pod-template changes (an image, a size, the session user, the
+priority class) are updates, which roll the pods one at a time, and are not affected.
+
+The StatefulSet's claim template is fixed once Kubernetes has created the StatefulSet, and the
+running claims, `<n>-js-<n>-0`, `-1` and `-2`, never follow a template change, so `diskSizeGb`
+alone grows no disk. Grow the disks first, then bring the program's StatefulSet to the new size
+without replacing the running pods:
+
+1. Check that the claims' StorageClass allows expansion:
+   `kubectl get storageclass <class> -o jsonpath='{.allowVolumeExpansion}'` prints `true`
+   (`kubectl -n <namespace> get pvc <n>-js-<n>-0 -o jsonpath='{.spec.storageClassName}'` names the
+   class). Kubernetes never shrinks a claim, so a smaller `diskSizeGb` cannot be applied.
+2. Expand each claim to the new size:
+
+   ```sh
+   for i in 0 1 2; do
+     kubectl -n <namespace> patch pvc <n>-js-<n>-$i --type merge \
+       -p '{"spec":{"resources":{"requests":{"storage":"<new>Gi"}}}}'
+   done
+   ```
+
+   and wait until `kubectl -n <namespace> get pvc` shows `<new>Gi` as the capacity of all three.
+   The pods keep running.
+3. Delete the StatefulSet object alone, leaving its pods and claims running:
+   `kubectl -n <namespace> delete statefulset <n> --cascade=orphan`. Until step 5, a hub pod that
+   stops is not recreated, so run steps 3 to 5 together.
+4. Take the deleted StatefulSet out of the stack's state. Its URN is the line of
+   `pulumi stack --show-urns` whose type is `kubernetes:apps/v1:StatefulSet` and whose name ends in
+   `<namespace>/<n>`; then `pulumi state unprotect '<urn>'` and `pulumi state delete '<urn>'`.
+5. Set `diskSizeGb` to the new size and run `pulumi preview`. It plans to create the StatefulSet
+   `<n>`, and nothing else beyond an update of the chart's ConfigMap when `maxFileStoreGb` follows
+   `diskSizeGb` by default (`max_file_store` in `nats.conf`, which the reloader applies: nats-server
+   v2.15.1 reloads a larger `max_file_store` and refuses a smaller one, `server/reload.go`). Change
+   nothing else in the same update. `pulumi up` creates the StatefulSet, protected again, and
+   Kubernetes' StatefulSet controller adopts the three running pods, which its selector matches,
+   with their claims, whose names its claim template gives.
+
+A `storageClassName` change cannot be made this way, since a claim keeps its class: it takes new
+claims, and so a new hub that the streams are moved to.
+
+To delete the hub, a `pulumi destroy` or a program without it, first unprotect the StatefulSet:
+`pulumi state unprotect '<urn>'`, with the URN found as in step 4; otherwise the destroy fails on
+it. The claims outlive the StatefulSet (the chart sets no claim retention policy, so Kubernetes
+keeps them), and with them the JetStream store, until
+`kubectl -n <namespace> delete pvc <n>-js-<n>-0 <n>-js-<n>-1 <n>-js-<n>-2` deletes them.
+
+### Before the first deployment
+
+The component creates nothing outside `namespace` and reads only the PriorityClass. Before the
+first `pulumi up`:
+
+- The cluster has nodes in three zones and enforces NetworkPolicy, as GKE Autopilot does with GKE
+  Dataplane V2: the policy is all that keeps a pod other than the hub's from joining the cluster on
+  6222, since the routes carry no credential. Google Managed Prometheus's managed collection is on,
+  so the `PodMonitoring` kind exists.
+- `namespace` exists, and so does the PriorityClass `priorityClassName` names, if any.
+- The kubeconfig's identity may create, read (get, list, watch), update, patch and delete, in
+  `namespace`: Deployments and StatefulSets (`apps`); Services, ConfigMaps, Secrets and
+  ServiceAccounts; NetworkPolicies (`networking.k8s.io`); PodDisruptionBudgets (`policy`); and
+  PodMonitorings (`monitoring.googleapis.com`). With `priorityClassName`, it may also get that
+  PriorityClass (`scheduling.k8s.io`, a cluster-scoped grant). The disk-growth steps above also
+  take patching the hub's PersistentVolumeClaims and deleting its StatefulSet with `kubectl`.
+
+With `tailnet`, also:
+
+- `tailnetAuthKey` is a reusable, ephemeral, pre-authorized key for the `tags`: reusable, since
+  every new host pod is a new node that logs in with it; pre-authorized, since no one approves each
+  pod's node; and ephemeral, so the tailnet removes the node of a pod that stops without its
+  preStop logout.
+- The Tailscale Service `svc:<tailnet.serviceName>` exists, with TCP ports 4222 and 9020, and the
+  tailnet policy auto-approves the `tags` as its hosts, before `tailnet` is set. A host is ready
+  only once approved. The same policy decides which devices reach the Service's 4222 and 9020:
+  `gcp:NatsHub`'s [listener](docs/nats-hub.md#the-hubs-listener) and
+  [session user](docs/nats-hub.md#the-hubs-users) cautions hold for them as written.
+- The Secret `tailnet.listener.seedSecretName`, in `namespace`, holds the listener user's seed under
+  `tailnet.listener.seedSecretKey`, its public key being `tailnet.listener.nkey`. A host pod starts
+  only once the Secret exists; the component never reads, creates or waits on it.
+
+A hub may run without `tailnet` first and take it in a later update.
+
+### Sizing
+
+Without `streamMaxBytes`, each claim is 10 GiB (`diskSizeGb`), JetStream's file store
+`⌊0.9 × diskSizeGb⌋` GiB and at least 1 (`maxFileStoreGb`, so 9 by default), and nats-server's
+memory `2Gi`.
+
+With `streamMaxBytes` L, the sizes follow the measurements of the listener's notification stream
+in sjawhar/legion#2362 ("Sizing of ENVOY_STREAM_MAX_BYTES"): a stored message's mean size,
+1,682,300 / 809 bytes (16,823 bytes per second over 8.09 messages per second); 172.9 bytes of heap
+per retained message id in the stream's duplicate map; 1 GiB for the KV buckets; and 10% of the
+limit for the Raft log. nats-server's idle memory is 38,486,016 bytes, its resident memory once a
+three-server JetStream cluster of nats-server 2.15.1 formed.
+
+- `maxFileStoreGb` holds S = 1.1 × L + 1 GiB, in GiB: ⌈S⌉ by default, and a value below S is
+  refused, since JetStream refuses to create a stream past `max_file_store`.
+- `diskSizeGb` is ⌈`maxFileStoreGb` / 0.9⌉ by default, and at least `maxFileStoreGb` + 1, so the
+  filesystem's own overhead never fills the claim before JetStream's limit holds.
+- `natsMemory` holds F = (L / the mean message size × 172.9 bytes + the idle memory) / 0.8: ⌈F⌉
+  in whole Gi by default, never below `2Gi`, and a value below F is refused.
+
+For `streamMaxBytes: 44023414784` (41 GiB), S = 1.1 × 41 + 1 = 46.1 GiB, so `maxFileStoreGb` 47
+and `diskSizeGb` ⌈47 / 0.9⌉ = 53; the stream holds about 21.17 million messages at that limit,
+whose ids take about 3.41 GiB, and with the idle memory over 0.8 F is about 4.31 GiB, so
+`natsMemory` is `5Gi`.
+
+nats-server runs with `GOMEMLIMIT` at ⌊80%⌋ of `natsMemory`, in whole MiB, as the chart's README
+recommends: `4096MiB` for `5Gi`, `1638MiB` for `2Gi`, `3686MiB` for `4.5Gi`. Without it the Go
+runtime lets the heap grow to about twice its live size before it collects, so a live duplicate
+map of 3.4 GiB could reach the container's limit and have it OOM-killed; with it the runtime
+collects before the heap reaches the limit, which is why F divides by 0.8.
+
+Autopilot sizes a pod by its containers' sum, so the component holds each pod to the bounds
+`gcp:Dispatch` holds its app pod to: at least `500m` and `512Mi`, between 1 and 6.5 GiB of memory
+per CPU, and at most 30 CPU and `110Gi`. The hub pod counts nats-server with the reloader's `50m`
+and `64Mi` and the exporter's `50m` and `128Mi`, so `5Gi` at the default `natsCpu` of 1 makes a
+pod of `1100m` and `5312Mi`, about 4.7 GiB per CPU, and a larger `natsMemory` may need `natsCpu`
+raised with it: the refusal names `natsCpu` then. The tailnet host pod counts the listener with the
+tailscale container's `250m` and `512Mi` and the advertiser's `50m` and `64Mi`, its refusals naming
+`tailnet.listener.cpu` or `tailnet.listener.memory`.
+
+### Metrics and alerts
+
+Each hub pod's exporter runs with the chart's arguments (`-jsz=all -prefix=nats` among them) and
+serves one series per stream for each server holding a copy of it, labelled with the server's and
+the stream's names; it has no metric of whether a copy is current. An alert on a stream with fewer
+than three current copies therefore counts the servers whose copy's `nats_stream_last_seq` equals
+the stream's highest; a KV bucket is the stream `KV_<bucket>`, so the same query covers it.
+[Metrics and alerts](docs/nats-hub.md#metrics-and-alerts) in `docs/nats-hub.md` gives the metric
+names, their labels and the PromQL. A pod that is down, a hub pod or a tailnet host, is read from
+Cloud Monitoring's `kubernetes.io/container/*` metrics, which GKE reports whether or not the pod's
+exporter runs.
+
+### Outputs
+
+`serviceUrl` is `nats://<serviceName>.<namespace>.svc.cluster.local:4222`; `podSelector` the hub
+pods' selector labels, `app.kubernetes.io/name: nats`, `app.kubernetes.io/instance: <n>` and
+`app.kubernetes.io/component: nats`, so a Service the consumer owns can select them;
+`statefulSetName` is `<n>`. With `tailnet`, `tailnetNatsUrl` is
+`nats://<tailnet.serviceName>.<tailnetDnsName>:4222` and `tailnetEnvoyUrl`
+`http://<tailnet.serviceName>.<tailnetDnsName>:9020`; without it, both are null.
+
+### YAML example
+
+```yaml
+resources:
+  hub:
+    type: envoy-infra:gcp:ClusteredNatsHub
+    properties:
+      kubeconfig: ${kubeconfig}
+      namespace: envoy
+      name: envoy-nats
+      serviceName: envoy-nats
+      natsImage: example/nats@sha256:<digest>
+      reloaderImage: example/nats-server-config-reloader@sha256:<digest>
+      exporterImage: example/prometheus-nats-exporter@sha256:<digest>
+      natsReplicas: 3
+      streamMaxBytes: 44023414784
+      priorityClassName: example-critical
+      clientNamespaces: [envoy, dispatch]
+      users:
+        - name: example-host-a
+          nkey: <public key>
+          machineId: example-host-a
+      sessionUser:
+        name: example-sessions
+        nkey: <public key whose seed nobody keeps>
+      tailnet:
+        serviceName: envoy-hub
+        tailnetDnsName: example-tailnet.ts.net
+        tags: [tag:example-hub-host]
+        tailscaleImage: example/tailscale@sha256:<digest>
+        listener:
+          image: example/envoy@sha256:<digest>
+          nkey: <public key>
+          seedSecretName: envoy-hub-listener-seed
+          seedSecretKey: nats-seed
+      tailnetAuthKey: ${tailnetAuthKey}
+```
+
+The hub takes no `providers` option. Its listener runs as machine `envoy-hub`, the default from
+`tailnet.serviceName`, and clients on the tailnet reach `nats://envoy-hub.example-tailnet.ts.net:4222`
+and `http://envoy-hub.example-tailnet.ts.net:9020`.
 
 ## gcp:Dispatch
 

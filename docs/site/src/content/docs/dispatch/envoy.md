@@ -210,10 +210,11 @@ Keep the API private: only `/webhook/...` needs to be reachable from GitHub and 
 
 The `envoy-infra` Pulumi plugin runs the listener on a Docker host from a Pulumi program in any
 language, as the component `envoy-infra:host:Listener`, and a NATS server for it on Google Cloud,
-as `envoy-infra:gcp:NatsHub`. It also deploys Dispatch on Google Cloud as
-`envoy-infra:gcp:Dispatch`, which creates an Autopilot cluster, private Cloud SQL, and the
-tailnet-served Dispatch workloads. A hub user with `dispatchMachineId` renders the NATS user
-`envoy-dispatch` shares with its listener. Its
+as `envoy-infra:gcp:NatsHub` on one VM or as `envoy-infra:gcp:ClusteredNatsHub`, three NATS
+servers on a GKE cluster whose optional tailnet hosts also run the listener. It also deploys
+Dispatch on Google Cloud as `envoy-infra:gcp:Dispatch`, which creates an Autopilot cluster, private
+Cloud SQL, and the tailnet-served Dispatch workloads. A hub user with `dispatchMachineId` renders
+the NATS user `envoy-dispatch` shares with its listener. Its
 [README](https://github.com/sjawhar/legion/blob/main/packages/envoy/infra/README.md) says how to
 install it, what each component deploys and which settings it sets.
 

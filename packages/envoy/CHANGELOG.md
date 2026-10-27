@@ -4,6 +4,31 @@
 
 ### Added
 
+- `envoy-infra:gcp:ClusteredNatsHub` runs NATS with JetStream as three nats-server pods on a GKE
+  cluster the consumer already has, one per zone, through the NATS project's `nats` Helm chart
+  2.15.1, on a Kubernetes provider it builds from the cluster's `kubeconfig` with mutable
+  ConfigMaps. It renders the same users as `envoy-infra:gcp:NatsHub`, through the same function, so
+  a hub moves from the VM with its users, and with its listener's durable when the listener's
+  machine id stays the VM's hostname. A users change rewrites the chart's `auth.conf` in place and
+  the chart's config reloader applies it with no server restart and no client reconnect; a
+  session-user change, which nats-server refuses to reload, restarts the pods one at a time. The
+  chart's StatefulSet is protected, so a change that would replace it, a disk size or a storage
+  class among them, fails the preview rather than stopping all three servers; the module's README
+  gives the steps that grow the disks and the step before a teardown. A NetworkPolicy admits the
+  client port from the namespaces the consumer names, the route port, whose routes carry no
+  credential, from the hub pods alone, and the exporter's port from Google Managed Prometheus,
+  which a PodMonitoring points at each pod's exporter. With `tailnet`, a Deployment of at least two
+  tailnet hosts serves the hub as a Tailscale Service on TCP 4222 and 9020, each host running
+  Envoy's session listener on its loopback and advertising the Service only while that listener
+  answers `/healthz` with 200. `streamMaxBytes` sizes JetStream's file store, each pod's disk and
+  nats-server's memory from the measured sizes of the listener's notification stream, and
+  nats-server runs with `GOMEMLIMIT` at 80% of its memory. The component refuses each invalid input
+  by name before it registers anything, as `packages/envoy/infra/README.md` lists.
+- `envoy-infra`'s `core.ListenerConfig` takes `NATSReplicas` and `StreamMaxBytes`, rendered as
+  `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES` after every other variable, each only when it
+  is above 0, so every rendering made before them (`host:Listener`'s, `gcp:NatsHub`'s cloud-config,
+  `gcp:Dispatch`'s containers) stays byte for byte. `Check` refuses either below 0, and a
+  `NATSReplicas` above 5, the most copies NATS keeps of a stream.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -796,6 +821,10 @@
 
 ### Changed
 
+- `envoy-infra:gcp:Dispatch`'s refusals of `appCpu`, `appMemory` and `appPriorityClassName` are now
+  each a `core.InputError` naming the input, with the same text; the memory-per-CPU refusal names
+  whichever of `appCpu` and `appMemory` Autopilot would raise. `gcp:ClusteredNatsHub` runs the same
+  two rules for its own pods.
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a
