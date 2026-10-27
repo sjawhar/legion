@@ -62,8 +62,10 @@ const drainPollInterval = 250 * time.Millisecond
 const deregisterTimeout = 5 * time.Second
 
 // joinRegistry enters this process into the registry of live server processes (INFRA-555) as
-// instance, once its port is bound and before it serves its first request, after one probe that
-// the database answers, and starts the loops that run once it is registered. The registration
+// instance, once it holds its listener (bound, or inherited as DISPATCH_LISTEN_FD) and before it
+// serves its first request, after one probe that the database answers, and starts the loops that
+// run once it is registered. The kernel queues the connections that arrive meanwhile on the
+// listener, and none is served until the registration admits this process. The registration
 // refuses a key set a live peer does not share (processes.Register): a cookie this process minted
 // would not verify there, or the reverse, and the people it signed in would be signed out on the
 // next request the load balancer sends to the other. A refusal stands only once the refusing
@@ -109,17 +111,19 @@ func deregisterAfterDrain(registration *processes.Registration) func() {
 }
 
 // serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown), deregistering
-// it once HTTP has drained. Two things end serving before the signal does, each logged at ERROR and
-// returned once shutdown has run, so main exits 1 and a supervisor never reads either as a clean
-// stop: serving failed, or the registry refused to count this process as live again beside a live
-// process whose signing keys it does not share (lost, processes.Registration.Lost). Either cancels
-// ctx, so the stop is the one a signal makes: the listener closes at once, the requests in flight
-// are answered, and the registry's row is deleted.
+// it once HTTP has drained. It logs the address listener is bound to, whether main bound it or
+// inherited it (DISPATCH_LISTEN_FD), so the line names the port a kernel chose. Two things end
+// serving before the signal does, each logged at ERROR and returned once shutdown has run, so main
+// exits 1 and a supervisor never reads either as a clean stop: serving failed, or the registry
+// refused to count this process as live again beside a live process whose signing keys it does not
+// share (lost, processes.Registration.Lost). Either cancels ctx, so the stop is the one a signal
+// makes: the listener closes at once, the requests in flight are answered, and the registry's row
+// is deleted.
 func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener,
-	addr string, documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func(), lost <-chan error) error {
+	documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func(), lost <-chan error) error {
 	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("dispatch: listening", "addr", addr)
+		slog.Info("dispatch: listening", "addr", listener.Addr().String())
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("dispatch: serve", "error", err)
 			serveErr <- err
