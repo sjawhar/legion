@@ -6,20 +6,11 @@
  */
 
 import { expect, spyOn, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
-import type { EditorView } from "@milkdown/kit/prose/view";
-import type { BlockSchema } from "../src/block-schema.js";
 import { BLOCK_ID_ATTR, createHeadlessProof } from "../src/lib-headless.js";
+import { serverBlockSchema as blockSchema, blocks, runs } from "./block-schema-fixture";
 import { withMarksEditor } from "./marks-editor";
-
-/** The document service's own block schema, the one Dispatch parses its bodies with. */
-const blockSchema: BlockSchema = JSON.parse(
-  readFileSync(
-    new URL("../../envoy/internal/dispatch/pmdoc/schema/blocks.json", import.meta.url),
-    "utf8"
-  )
-);
+import { pastePlainText, withHTMLElementGlobal } from "./paste";
 
 /** An ask holding a heading, which its `paragraph+ bullet_list?` rule refuses. */
 const HEADING_ASK = ":::ask{#a1}\n# Heading words\n:::\n";
@@ -35,15 +26,6 @@ const MARK_SPAN_VALID_ASK =
 async function defaultParse(markdown: string): Promise<ProseMirrorNode> {
   const proof = await createHeadlessProof({ blockSchema });
   return proof.parseMarkdown(markdown);
-}
-
-/** Each child block of `node` as its type name and its text. */
-function blocks(node: ProseMirrorNode): [string, string][] {
-  const out: [string, string][] = [];
-  node.forEach((child) => {
-    out.push([child.type.name, child.textContent]);
-  });
-  return out;
 }
 
 /** The names of every node type in `doc`, at any depth. */
@@ -72,21 +54,6 @@ function withoutMintedIds(doc: ProseMirrorNode): NodeJson {
   return strip(doc.toJSON() as NodeJson);
 }
 
-/** `@milkdown/preset-commonmark`'s heading `parseDOM` checks `dom instanceof HTMLElement`, which
- *  a plain paste's DOM round trip reaches, and `withDomWindow` does not expose happy-dom's
- *  `HTMLElement` on `globalThis` (see clipboard-paste-recovery.test.ts). */
-function withHTMLElementGlobal<T>(run: () => T): T {
-  const scope = globalThis as { HTMLElement?: unknown; window: { HTMLElement: unknown } };
-  const previous = scope.HTMLElement;
-  scope.HTMLElement = scope.window.HTMLElement;
-  try {
-    return run();
-  } finally {
-    if (previous === undefined) delete scope.HTMLElement;
-    else scope.HTMLElement = previous;
-  }
-}
-
 /** Runs `run` with `console.error` stubbed, and asserts Milkdown logged no parser failure. */
 async function withoutParserErrors(run: () => void | Promise<void>): Promise<void> {
   const consoleError = spyOn(console, "error").mockImplementation(() => {});
@@ -96,22 +63,6 @@ async function withoutParserErrors(run: () => void | Promise<void>): Promise<voi
   } finally {
     consoleError.mockRestore();
   }
-}
-
-/** The clipboard event a plain-text paste delivers: no `text/html`, so the markdown is parsed. */
-function plainTextPasteEvent(text: string): ClipboardEvent {
-  return {
-    clipboardData: { getData: (type: string) => (type === "text/plain" ? text : "") },
-  } as unknown as ClipboardEvent;
-}
-
-/** What a browser paste reaches (see clipboard-paste-recovery.test.ts). */
-function pastePlainText(view: EditorView, text: string): void {
-  withHTMLElementGlobal(() =>
-    view.someProp("handlePaste", (handlePaste) =>
-      handlePaste(view, plainTextPasteEvent(text), undefined as never)
-    )
-  );
 }
 
 /** Asserts `doc` holds an `ask` whose only block is `Q?`, under the `dispatchAsk` mark. */
@@ -124,11 +75,7 @@ function expectMarkSpanAsk(doc: ProseMirrorNode): void {
   expect(ask).toBeDefined();
   if (ask === undefined) return;
   expect(blocks(ask)).toEqual([["paragraph", "Q?"]]);
-  const runs: { text: string; marks: string[] }[] = [];
-  ask.child(0).forEach((child) => {
-    runs.push({ text: child.text ?? "", marks: child.marks.map((mark) => mark.type.name) });
-  });
-  expect(runs).toEqual([{ text: "Q?", marks: ["dispatchAsk"] }]);
+  expect(runs(ask.child(0))).toEqual([{ text: "Q?", marks: ["dispatchAsk"] }]);
 }
 
 test("default mode draws an ask holding a heading as its lines", async () => {
@@ -233,7 +180,7 @@ test("the live editor keeps every word of a pasted ask holding a heading", async
     await withMarksEditor(
       "",
       ({ view }) => {
-        pastePlainText(view, HEADING_ASK);
+        withHTMLElementGlobal(() => pastePlainText(view, HEADING_ASK));
         const { doc } = view.state;
         expect(nodeTypes(doc)).not.toContain("ask");
         expect(doc.textContent).toContain(":::ask{#a1}");
@@ -251,7 +198,7 @@ test("the live editor draws a pasted ask whose heading sits in a block-level mar
     await withMarksEditor(
       "",
       ({ view }) => {
-        pastePlainText(view, MARK_SPAN_HEADING_ASK);
+        withHTMLElementGlobal(() => pastePlainText(view, MARK_SPAN_HEADING_ASK));
         const { doc } = view.state;
         expect(nodeTypes(doc)).not.toContain("ask");
         expect(doc.textContent).toContain(":::ask{#a1}");
@@ -269,7 +216,7 @@ test("the live editor checks an ask's content after the mark plugins have run", 
   await withMarksEditor(
     "",
     ({ handle, view }) => {
-      pastePlainText(view, MARK_SPAN_VALID_ASK);
+      withHTMLElementGlobal(() => pastePlainText(view, MARK_SPAN_VALID_ASK));
       expectMarkSpanAsk(view.state.doc);
       handle.setMarkdown(MARK_SPAN_VALID_ASK);
       expectMarkSpanAsk(view.state.doc);
