@@ -2,9 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-565",
-  "completed": "2026-10-27T08:59:25Z",
+  "completed": "2026-10-27T09:48:13Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2388",
+  "round": 2,
+  "reviewFixes": [
+    "Stale docs/solutions/integration-patterns/cut-source-text-by-mdast-offsets-from-the-text-micromark-counted-INFRA-529.md evidence now cites typed-block-drawing.ts (:46-49 markdownSource, :129-139 line scan, :40 and :142-156 closing fence) and says INFRA-565 moved both callers onto markdownSource (d4771a07).",
+    "lib-headless.ts readOnly doc names remarkReadOnlyDirectives and remarkUnfitTypedBlocks and the blockSchema condition; parseMarkdown doc names the blockSchema condition (d4771a07; thread PRRT_kwDORFy7ds6woAf_ resolved).",
+    "Duplicated test helpers moved into tests/paste.ts and tests/block-schema-fixture.ts, imported by typed-block-drawing, clipboard-paste-recovery and read-only-directives suites (80a5c2f2; thread PRRT_kwDORFy7ds6woAgC resolved). The sibling INFRA-529 solutions doc's test line citations updated to match."
+  ],
   "proof": [
+    {
+      "criterion": "A1 at the round-2 head (review fixes touch tests, doc comments and docs only)",
+      "surface": "Dispatch document editor in Chromium against the real Go Dispatch server and Postgres 17 + pgvector (issue-pod harness /legion/harness, implementer lane)",
+      "command": "cd packages/dispatch && (export LEGION_ROLE=implementer && source /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts typed-block-content-rule.e2e.ts --project chromium); cd packages/proof-editor && bun run test && bun run typecheck && bun run lint",
+      "observed": "2 passed (19.8s); proof-editor 144 pass, 0 fail, typecheck and lint clean (Checked 38 files, no fixes).",
+      "headSha": "d4771a0735f22a21bc3829f37c99997138ef6187",
+      "negativeControl": "Same spec on the b08a56bc tree (round 1, unchanged runtime code since): 2 failed, the editor holds only 'Intro text.' and an empty paragraph."
+    },
     {
       "criterion": "A1: pasting :::ask holding a heading into a document in the live editor keeps every word of it",
       "surface": "Dispatch document editor in Chromium against the real Go Dispatch server and Postgres 17 + pgvector (issue-pod harness /legion/harness, implementer lane)",
