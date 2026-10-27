@@ -26,7 +26,7 @@ The problem and why it matters. Recommendation: the option and its reason.
 ```
 
 - A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`. A Legion phase worker sends its decision to its architect.
-- In a Legion session, a finding outside your own issue is an ask as `skill://legion-worker/references/findings.md` says, never an issue you file.
+- In Legion, file no issue for an outside finding. Fix a clear defect in code your tree uses. Hand others to the controller. Ask about decisions (`skill://legion-worker/references/findings.md`).
 - An open ask is the request. Do not raise it again in each message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
 - Answer a person's reply to an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note that needs nothing from them.
@@ -43,7 +43,7 @@ The problem and why it matters. Recommendation: the option and its reason.
 
 ## Issue status is yours to move
 
-Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, and `done` with `--reason` once you drove it in production. Never write the status of an issue with the `legion` label, or under one.
+Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, and `done` with `--reason` once you drove it in production. Never write the status of an issue with the `legion` label, or under one, and never claim one unless you are a Legion role of its tree, even when its claim reads `· not running`: the Legion daemon suspends a root's architect while the root waits on a person, so that claim reads `not running` for hours while its tree is live, and taking it takes the tree out of the workflow.
 
 A claim delivers no comments: in the same turn, `dispatch issue-update --route session:<your id>` (clear with `--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`. Never route such an issue.
 

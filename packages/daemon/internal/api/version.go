@@ -362,7 +362,18 @@ package api
 // main's, every site that names either included, among them the rollback's
 // `delete from schema_version where version = 54` in docs/kubernetes.md.)
 //
-// 40: INFRA-220 -- a worker's environment gains the four LEGION_STALL_* numbers under both
+// 40: a root whose architect asked a person a question and handed the turn back gives its
+// admission slot up in the new phase `awaiting_person`, and its strict state issue view gains
+// `waitingOn`: `kind` `ask` with the question's `ask`, or `gate` with `gateVersion` and
+// `artifactId` (in the contract now, so the next release's gate waits need no plugin bump; no
+// daemon of this contract writes one), `since`, the hand-back the wait began at, and, once the
+// wait was answered, `answeredAt` and `answeredBy` (`answeredBy` names how, not always by a
+// person). A 39 plugin's strict reader refuses the phase
+// and the field, so the boot gate and `legion probe-image` refuse the mixed pair. (39 is INFRA-208,
+// on main before this change, so this change takes the number above it, as the collision note
+// says.)
+//
+// 41: INFRA-220 -- a worker's environment gains the four LEGION_STALL_* numbers under both
 // runtimes (`internal/daemon/specs.go` merges each one the daemon holds into `spec.Env`, which a
 // pane's `-e` pairs and a pod launcher's start command carry verbatim), and a Claude Code role
 // gains CLAUDE_CONFIG_DIR, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and CLAUDE_CODE_DISABLE_CRON in
@@ -376,12 +387,12 @@ package api
 // phase-reminder record as rows of `omp_session_files` keyed by their paths, restoring both before
 // a resume's child starts, and writes `<transcript>.legion-saved` once its first save of a fresh
 // transcript has committed, which the image's `@sjawhar/claude-envoy` waits for before it
-// registers the transcript. A launcher before 40 ignores the variable and keeps nothing, so the
-// next pod's resume of that transcript is refused, and a claude-envoy before 40 registers a
-// transcript the table may not hold yet; an image at 40 under a daemon before 40 is told no
+// registers the transcript. A launcher before 41 ignores the variable and keeps nothing, so the
+// next pod's resume of that transcript is refused, and a claude-envoy before 41 registers a
+// transcript the table may not hold yet; an image at 41 under a daemon before 41 is told no
 // session, so its claude-envoy waits for no marker and its launcher keeps nothing. The image probe
 // refuses either pair. This change adds no store migration. (This branch took 36, then 37, then
-// 38, then 39; main then landed INFRA-229 at 36, sjawhar/legion INFRA-80 at 37, INFRA-225 at 38
-// and INFRA-208 at 39 before it merged, so this branch takes the number above them, as the
-// collision note says.)
-const DaemonAPIVersion = 40
+// 38, then 39, then 40; main then landed INFRA-229 at 36, sjawhar/legion INFRA-80 at 37,
+// INFRA-225 at 38, INFRA-208 at 39 and the awaiting_person phase at 40 before it merged, so this
+// branch takes the number above them, as the collision note says.)
+const DaemonAPIVersion = 41

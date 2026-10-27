@@ -26,6 +26,18 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
+  `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
+  while its architect waits on a person's answer, and the issue field `waitingOn`, naming the
+  question (`kind: "ask"`) or, for the gate waits of a later release, the spec version
+  (`kind: "gate"`), when the wait began, and when and by what act the wait was answered (not always
+  a person's). The MCP server's strict state reader admits both, and nothing this plugin reads or
+  writes moved; `dist/` was rebuilt and a session of it registers with a daemon at 40. The
+  generated `legion-architect` skill opens a question on the root and ends its turn after handing
+  it back, takes a resume task that says "this resume is your design-approved wake" as its
+  `design-approved` wake, and has a waiting root's resume task, not a notice, name a changes
+  request; the generated `legion-controller` skill reads the `awaiting-person` wake and a waiting
+  root as no reason to label or admit anything.
 - The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is
   waiting to start behind an unfinished Dispatch issue, each `{issue, blockedBy}`, and
@@ -146,6 +158,17 @@
 
 ### Changed
 
+- The `legion/` plugin's skills fix a clear defect outside a role's issue in its own tree's pull
+  request when the tree touches or depends on that code, and send any other to the controller,
+  which hands it to the tree that owns the code and files it for Legion only when none does. A
+  `dispatch ask` stays for a finding that needs a decision.
+
+- The `legion/` plugin's `plan-reviewer` reviews a spec as well as a plan, checking each factual
+  claim, and it and `plan-gap-analyst` get `Bash` for read-only commands. Its
+  `legion-architect` runs both on a root spec before every approval request, and ends the
+  request's `--summary` with their results. The bundled `dispatch request-approval` help names
+  both reviewers.
+
 - The plugin ships `claude-envoy:dispatch-writing-specs` in place of
   `claude-envoy:dispatch-brainstorming`: `skills/dispatch-writing-specs` links the
   repository's new skill, and the old link is gone. The three Dispatch skills are under 2,000 words
@@ -209,7 +232,7 @@
   `claude` process; a file the Go bridge wrote reads as an open phase with no reminder yet. The
   four `LEGION_STALL_*` numbers come from the worker's environment. The hook entries are the Legion
   plugin's alone: a plain `@sjawhar/claude-envoy` install registers no `legion` server, so
-  `hooks/hooks.json` carries none of them. `package.json`'s `legion.daemonApiVersion` is 40.
+  `hooks/hooks.json` carries none of them. `package.json`'s `legion.daemonApiVersion` is 41.
 - A Claude Code phase worker whose launcher recreated its workspace is told so, once per launch,
   over the same inbox the reminders use, as an Oh My Pi worker is
   (`LEGION_WORKSPACE_RECREATED`): it reconciles against its committed handoff before new work

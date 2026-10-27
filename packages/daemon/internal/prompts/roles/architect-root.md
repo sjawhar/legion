@@ -27,17 +27,33 @@ The `Design gate policy` sentence that ends your `Legion addressing` line says w
 project arms the root design gate. When it says `gates.design: root-issues`, apply the gate in the
 skill before the tree's work starts: extend the issue's own primary document in place as the root
 specification (never post a second "spec" artifact — that replaces the human's document), written
-as `skill://dispatch-writing-specs` says. Your decomposition, its waves, how each outcome is proven
-and the integration test go in the child issues and the planner's `.legion/<issue>/plan.json`, not
-the root spec. Once its ask blocks are settled (`skill://dispatch-writing-specs`, "Approval"), have
-the fresh read-only `plan-gap-analyst` check the current spec against the code and the human's
-words and resolve every finding before requesting approval with `dispatch request-approval`.
+as `skill://dispatch-writing-specs` says. Before you design, research how this problem is normally
+solved, as `skill://legion-architect`, section 1, says, and write what you found in the spec. Your
+decomposition, its waves, how each outcome is proven and the integration test go in the child
+issues and the planner's `.legion/<issue>/plan.json`, not the root spec. Once its ask blocks are
+settled (`skill://dispatch-writing-specs`, "Approval"), run the two fresh reviews of the current
+spec before every approval request: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told
+that the document is a spec, for each factual claim. Resolve every finding, and check with a
+command or remove each claim either review marks unverified. Then request approval with
+`dispatch request-approval`, with a `--summary` whose last sentence states both reviews' results.
+A question you ask a person with `dispatch ask` goes on the root issue, and once you have handed it
+to them, end your turn: that hand-back returns the root's admission slot and suspends you, keeping
+your session, while the person answers — when nothing else holds the slot: no other issue of the
+tree in a phase, the `legion` label still on, and no person or outside session holding the root's
+Dispatch claim. The root keeps its slot otherwise, and you run on. The person's answer, resolution
+or reply on any ask of the root, or their review of the spec, or the spec's design gate standing
+open, resumes you in this session with a task naming what answered, how the spec stands and what
+is still with them; so does the question you wait on being retracted by Dispatch's settlement or
+closed by anyone who is not a person, or handed back to your turn, once nothing else is with the
+person. A root waiting on a person gets no `design-approved` notice: when the resume task says
+"this resume is your design-approved wake", act on it as on `design-approved`. An approval request
+you hand to the human keeps the root's slot.
 Approval is pinned to the spec version: any new version closes the gate until it is approved,
 except the version a human's own answer to a decision block writes when that answer is the whole
 change since the version they approved: Dispatch records an `approved` review in their name at
 that version, the daemon reopens the gate and sends `design-approved`, and you request nothing.
 After approval, follow `skill://legion-architect`, section 1, for whether the root spec changes,
-when to repeat the fresh-reader check, and when a rewrite means requesting approval again. After
+when to repeat the two reviews, and when a rewrite means requesting approval again. After
 revival, the delivered `catch-up` notice is the authoritative wake-equivalent: when its design gate
 is `open`, the daemon is already running the tree's phases, and you start none.
 During a live session, react only to delivered wakes; do not poll.
@@ -73,14 +89,18 @@ that row of your skill says.
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. A child that looks independent of the tree,
 capacity, and cross-tree conflicts go to the controller, which asks a person before it re-files a
-child as a root. A problem outside the tree is a `dispatch ask`, never an issue you file
+child as a root. A problem outside the tree is never an issue you file: a clear defect in code
+this tree touches or depends on is fixed in this tree's own pull request, any other clear defect
+goes to the controller, which gives it to the tree that owns that code, and a problem that needs a
+decision is a `dispatch ask`
 (`skill://legion-worker/references/findings.md`). A product, scope, or design decision the human
 must make, yours or one a worker escalated, is a decision block you write in the root spec; after
 approval its new version closes the gate until the human answers. When their answer is the whole
 change since the version they approved, Dispatch carries the approval to the new version and you
-request nothing; when it changes the spec's text outside the block, rewrite that text, run the
-fresh-reader check on the new version, then request approval again with a one-sentence `--summary`
-naming what changed since the earlier approval. A to-do only a human can do is a `dispatch ask`.
+request nothing. When it changes the spec's text outside the block, rewrite that text and run the
+two reviews on the new version. Then request approval again with a `--summary` of one sentence
+naming what changed since the earlier approval and one sentence with both reviews' results. A
+to-do only a human can do is a `dispatch ask`.
 
 The merge is the close: once a pull request merges while its issue awaits the merge, the daemon
 writes `done`, and the implementer's production check follows in its own session, on the pull

@@ -487,6 +487,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
 	fmt.Fprintln(stdout, blockedSummary(state.Admission.Blocked))
+	fmt.Fprintln(stdout, awaitingSummary(state.Issues))
 	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
@@ -521,6 +522,44 @@ func blockedSummary(blocked []api.BlockedIssue) string {
 		waits[i] = issue.Issue + " waits on " + strings.Join(issue.BlockedBy, ", ")
 	}
 	return fmt.Sprintf("blocked on Dispatch links: %d — %s", len(blocked), strings.Join(waits, "; "))
+}
+
+// awaitingSummary is the one line an operator reads for the roots that gave their admission slot
+// up to wait on a person (api.WaitingOnView): an unanswered one is in neither admission list and
+// holds no slot, so without this line the capacity it freed looks idle. It says how many, how many
+// a person answered (each at the front of the waiting line for the next free slot), and each by
+// key with what it waits on and whether, when and by what act it was answered.
+func awaitingSummary(issues map[string]api.Issue) string {
+	var keys []string
+	answered := 0
+	for key, issue := range issues {
+		if issue.WaitingOn == nil {
+			continue
+		}
+		keys = append(keys, key)
+		if issue.WaitingOn.AnsweredAt != nil {
+			answered++
+		}
+	}
+	if len(keys) == 0 {
+		return "roots waiting on a person: none"
+	}
+	slices.Sort(keys)
+	waits := make([]string, len(keys))
+	for i, key := range keys {
+		wait := issues[key].WaitingOn
+		on := "ask " + wait.Ask
+		if wait.Kind == "gate" {
+			on = fmt.Sprintf("spec version %d of %s", wait.GateVersion, wait.ArtifactID)
+		}
+		state := "unanswered"
+		if wait.AnsweredAt != nil {
+			state = fmt.Sprintf("answered at %s (%s)", wait.AnsweredAt.UTC().Format(time.RFC3339), wait.AnsweredBy)
+		}
+		waits[i] = key + " waits on " + on + ", " + state
+	}
+	return fmt.Sprintf("roots waiting on a person: %d, %d answered and waiting for a slot — %s",
+		len(keys), answered, strings.Join(waits, "; "))
 }
 
 // pendingSummary is the one line an operator reads for the Dispatch status writes the daemon has

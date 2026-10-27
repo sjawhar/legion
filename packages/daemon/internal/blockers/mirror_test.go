@@ -120,7 +120,8 @@ func TestMirrorWritesNothingForATickThatObservedNothing(t *testing.T) {
 }
 
 // Reconcile is the boot listing's own write of every summary, through the same fenced write: a
-// listing older than an event already applied leaves that event's row alone.
+// listing older than an event already applied leaves that event's row alone. A listing shows each
+// issue's claim, nobody here, which lands behind the claim's own fence: the event wrote no claim.
 func TestReconcileMirrorsEverySummaryUnderTheFence(t *testing.T) {
 	pool := migratedPool(t)
 	records := record.NewStore()
@@ -137,8 +138,8 @@ func TestReconcileMirrorsEverySummaryUnderTheFence(t *testing.T) {
 		}
 	})
 	want := []record.DispatchIssueRow{
-		{Key: "LEGION-900", Project: testProject, Status: "in_progress", Blockers: []string{}, Seq: 9},
-		{Key: "LEGION-901", Project: testProject, Status: "done", Blockers: []string{"LEGION-902"}, Seq: 6},
+		{Key: "LEGION-900", Project: testProject, Status: "in_progress", Blockers: []string{}, Seq: 9, ClaimSeq: 4},
+		{Key: "LEGION-901", Project: testProject, Status: "done", Blockers: []string{"LEGION-902"}, Seq: 6, ClaimSeq: 6},
 	}
 	if got := mirrored(t, pool, records); !reflect.DeepEqual(got, want) {
 		t.Fatalf("the mirror holds %#v, want %#v", got, want)

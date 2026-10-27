@@ -248,15 +248,49 @@ Check, in order:
    person or another session already holds the claim, the architect starts nothing and asks the
    holder, on the issue, to release it or take the issue back; the tree keeps its slot meanwhile.
 
-## A tree waits at the design gate
+## A tree waits on a person
 
-The root's phase stays `admitted` until a person approves the spec at its current version:
+When a root's architect asked a person a question on the root and nothing else of its tree runs,
+its phase is `awaiting_person`: it returned its admission slot and its architect's session is
+suspended until the answer. Read the wait:
 
 ```sh
-legion state --config legion.yaml --json | jq '.issues["<KEY>"] | {phase, designGate}'
+legion state --config legion.yaml --json |
+  jq '.issues["<KEY>"] | {phase, waitingOn, designGate}'
 ```
 
-`designGate.approvedVersion` is `null`, or lower than `currentVersion`, until someone approves the
+`waitingOn.ask` is the question it waits on, and `since` Dispatch's time of the hand-back the wait
+began at. `answeredAt` means the wait was answered, and `answeredBy` names how — not always by a
+person: `closed` (a session or anyone else who is not a person closed the question), `turn` (a
+session handed it back to the agent's turn), `retracted` (Dispatch's settlement), and `approved`
+also when the spec's gate stands open with nobody's approval under `gates.design: off`. The root is
+at the front of `admission.waiting` and resumes itself at the next free slot. Do not park it or
+start it by hand. Without `answeredAt`, check, in order:
+
+1. **The question is still with the person.** `dispatch read <KEY>` shows the root's asks. A
+   person's answer, resolution or reply on any ask of the root wakes it, whichever ask the wait
+   names, and so does their approval or changes request of the spec, or the spec's gate standing
+   open (`designGate.approvedVersion` equal to `currentVersion`) on the next admission pass. A
+   question Dispatch retracted or a session closed, or one a session handed back to the agent's
+   turn, wakes it once nothing else is with the person. An agent's answer or resolution of another
+   ask never wakes it, nor does a person's act from before the wait began.
+2. **The hand-over label.** A root whose `legion` label was taken off is not resumed: the daemon
+   takes it out of the workflow (`phase: done`) and tells the controller `unslotted`. Put the label
+   back and set the root to `todo` to queue it again.
+3. **The Dispatch claim.** `dispatch read <KEY>` shows `Claimed by:`. A claim held by a person or a
+   session outside the tree stops the resume and takes the root out of the workflow the same way,
+   with an `unslotted` notice: Legion never resumes work another owner took. Release the claim,
+   then `todo` with the label queues the root again.
+4. **An answer the daemon never saw.** When `dispatch read <KEY>` shows the person already
+   answered after `since` and none of the above holds, the answer's event never reached the
+   daemon, and nothing re-reads a waiting root's asks before the next boot. Have the person (or
+   anyone acting as them) add a reply in the thread of any ask of the root, one that leaves the
+   turn with the agent: that new act wakes the root on its own event. Restarting the daemon does
+   not replay the root's asks in this release.
+
+A root still `admitted` while its architect waits on the design gate's approval request keeps its
+slot and is not in `awaiting_person`. The root's phase stays `admitted` until a person approves the
+spec at its current version; `designGate.approvedVersion` is `null`, or lower than `currentVersion`, until someone approves the
 latest version from the document's header or the Inbox. An approval of an earlier version does not
 count: the spec changed since. The merger's `READY` waits on the same approval.
 
@@ -407,11 +441,12 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
 
 The list names only claims of trees that hold an admission slot, and leaves out claims that
 something will still start: a worker whose phase is not its own is started again when its phase
-comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
-while every slot was taken waits for admission to start it once one frees. Never resume or retry by
-hand a claim of a lingering tree or of an issue parked out of the workflow, nor that waiting
-architect: it would run outside the admission cap, and re-admission or the issue's return to `todo`
-starts it.
+comes, a parked tree's claims wait for its re-admission, the architect of a tree re-admitted
+while every slot was taken waits for admission to start it once one frees, and the architect of a
+root in `awaiting_person` waits for the person's answer, after which admission resumes it at the
+next free slot. Never resume or retry by hand a claim of a lingering tree or of an issue parked out
+of the workflow, nor those waiting architects: they would run outside the admission cap, and
+re-admission, the answer, or the issue's return to `todo` starts it.
 A claim an operator suspended is listed even when a workflow start is queued for it: that start
 waits for the operator's resume. One whose `suspendedBy` is `unknown` is listed only while no start
 is queued for it, since the next phase start or re-admission resumes it as before.

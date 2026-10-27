@@ -37002,12 +37002,12 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
-    description: "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch doc-read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes outside its decision blocks after it: " + "request approval again once that revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", with a one-sentence summary naming what changed since the earlier approval: the card " + "names that approval (version, date, reviewer) and its Show diff control carries the detail. " + "A human's own answer to a decision block carries the approval to the version it writes when " + "that answer is the whole change since the approved version, so nothing is requested for " + "it. A new version of a Legion root spec closes its armed design gate until a human " + "approves it; the carried approval reopens it too. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
+    description: "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect runs `plan-gap-analyst` and `plan-reviewer`. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch doc-read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes outside its decision blocks after it: " + "request approval again once that revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", with a one-sentence summary naming what changed since the earlier approval: the card " + "names that approval (version, date, reviewer) and its Show diff control carries the detail. " + "A human's own answer to a decision block carries the approval to the version it writes when " + "that answer is the whole change since the approved version, so nothing is requested for " + "it. A new version of a Legion root spec closes its armed design gate until a human " + "approves it; the carried approval reopens it too. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Project document artifact id, slug, or filename; primary document by default for an issue.").optional(),
-      summary: z2.string({ min: 1 }).describe(`What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question; after an earlier approval, one sentence naming what changed since it, since the card shows that approval and a diff. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`)
+      summary: z2.string({ min: 1 }).describe(`What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question; after an earlier approval, one sentence naming what changed since it, since the card shows that approval and a diff. A Legion architect adds one last sentence with its two spec reviews' results. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`)
     }),
     validation: documentOwnerValidation(true)
   },
@@ -37072,7 +37072,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_issues",
     example: { project: "PROJ", limit: 250, offset: 250 },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " + "its direct children, each done of total, as `tasks 3/7 \xB7 children 2/5`, each only when it has " + "any), and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never. " + "all takes the whole filtered list in one read instead, for a caller that must not miss or " + "repeat a row while other writers change the list, and especially for one whose own writes " + "move issues out of what it filtered on.",
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " + "its direct children, each done of total, as `tasks 3/7 \xB7 children 2/5`, each only when it has " + "any), and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running, as of the server's copy of the listener's session list, at " + "most 5 s old, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never. " + "all takes the whole filtered list in one read instead, for a caller that must not miss or " + "repeat a row while other writers change the list, and especially for one whose own writes " + "move issues out of what it filtered on.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -44365,6 +44365,7 @@ var issueKey = exports_external.string().regex(DISPATCH_KEY_PATTERN);
 var timestamp = exports_external.iso.datetime({ offset: true });
 var LEGION_WORKFLOW_PHASES = [
   "admitted",
+  "awaiting_person",
   "planning",
   "implementing",
   "testing",
@@ -44477,6 +44478,32 @@ var legionCheckView = exports_external.strictObject({
   nextWakeAt: timestamp,
   last: exports_external.boolean()
 });
+var LEGION_WAIT_ANSWERS = [
+  "ask",
+  "retracted",
+  "closed",
+  "reply",
+  "turn",
+  "approved",
+  "changes_requested",
+  "version"
+];
+var legionWaitTimes = {
+  since: timestamp.optional(),
+  answeredAt: timestamp.optional(),
+  answeredBy: exports_external.enum(LEGION_WAIT_ANSWERS).optional()
+};
+var legionWaitingOn = exports_external.discriminatedUnion("kind", [
+  exports_external.strictObject({ kind: exports_external.literal("ask"), ask: nonEmptyString, ...legionWaitTimes }),
+  exports_external.strictObject({
+    kind: exports_external.literal("gate"),
+    gateVersion: exports_external.number().int().positive(),
+    artifactId: nonEmptyString,
+    ...legionWaitTimes
+  })
+]).refine((wait) => wait.answeredAt === undefined === (wait.answeredBy === undefined), {
+  message: "answeredAt and answeredBy appear together"
+});
 var legionPendingStatusWrite = exports_external.strictObject({
   issue: nonEmptyString,
   payload: exports_external.record(exports_external.string(), exports_external.unknown()),
@@ -44509,6 +44536,7 @@ var legionIssue = exports_external.strictObject({
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
   slot: legionSlotView.optional(),
+  waitingOn: legionWaitingOn.optional(),
   check: legionCheckView.optional()
 });
 var daemonInfo = exports_external.strictObject({
@@ -47352,7 +47380,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 40
+  daemonApiVersion: 41
 };
 
 // src/channel-forwarder.ts
