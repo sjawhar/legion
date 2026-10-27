@@ -26,6 +26,7 @@ below add only what a setting's one line cannot say.
 | `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
 | `DISPATCH_FILE_STORE_BUCKET` | Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres. The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure. The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused. An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version. The version route serves a row still holding bytes from the row and any other from the bucket: it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes; a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole. `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`; it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down. `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below). |
 | `DISPATCH_EMBEDDER`, `DISPATCH_AZURE_EMBED_*`, `DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` | Where meaning search embeds, and with what credential. Every process of one deployment takes the same values, and a model change on Azure takes a new deployment name, since each vector records an identity that names the deployment and not the model behind it (Search, below). A model service or Entra that is down refuses no boot: search answers by keyword and says so, and the queue retries. |
+| `DISPATCH_METRICS_ADDR` | `host:port` the Prometheus metrics endpoint listens on, on a listener of its own apart from the server's routes and the loopback-only profiler, so a scraper in another pod can reach it. It has no authentication: every series carries counts and durations, never a name, a key or a person. Unset or empty, nothing listens; a value that is not `host:port` with a port 1-65535, or an address already taken, refuses startup naming the variable. The series are listed under Metrics, below. |
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries. Existing dashboard mappings take
@@ -358,9 +359,41 @@ kubectl port-forward <pod> <port>:<port>
 go tool pprof -seconds 30 http://127.0.0.1:<port>/debug/pprof/profile
 ```
 
-`/debug/pprof/` lists the other profiles (`heap`, `goroutine`, `allocs`, `threadcreate`, `trace`).
-`mutex` and `block` are listed too but record nothing: Dispatch sets no mutex or block sampling
-rate.
+`/debug/pprof/` lists the other profiles (`heap`, `goroutine`, `allocs`, `threadcreate`, `trace`,
+`mutex`, `block`). With `DISPATCH_PPROF_PORT` set, the mutex and block profiles record from boot,
+at rates low enough to leave on (`runtime.SetMutexProfileFraction(100)`: one contended unlock in
+a hundred; `runtime.SetBlockProfileRate(1_000_000)`: every block of a millisecond or more, a
+shorter one in proportion to its length), so a load test can see which lock or channel the
+goroutines queue on. Unset, neither records, and the process pays nothing for them. To see where
+goroutines wait on locks:
+
+```sh
+go tool pprof http://127.0.0.1:<port>/debug/pprof/mutex
+```
+
+### Metrics
+
+Set `DISPATCH_METRICS_ADDR` to `host:port` (`:9090` for every interface) to serve
+`GET /metrics`, Prometheus's text format, on a listener of its own, which closes with the
+process like the profiler's. Every series is read when the scrape comes, but the outbox lag,
+which one query on the background pool samples every 5 seconds whatever the scrape rate.
+
+| Series | What it counts |
+| --- | --- |
+| `dispatch_db_pool_max_conns`, `dispatch_db_pool_total_conns`, `dispatch_db_pool_in_use_conns`, `dispatch_db_pool_idle_conns` | Each database pool's connections: its size, open, held by callers, open and idle. Label `pool`: the pool's `application_name` less `dispatch-` (`requests`, `rooms`, `health`, `listen`, `leases`, `outbox`, `background`, `live`, `settlements`). A pool opened on first use (rooms, settlements, the listener's, the outbox's) has no series until it opens. |
+| `dispatch_db_pool_waiting` | Acquires of the pool in progress: callers waiting for a connection. Label `pool`. |
+| `dispatch_db_pool_acquire_seconds` | Histogram of how long each acquire waited for a connection, 1 ms to 30 s; its `_count` is the pool's checkouts. Label `pool`. |
+| `dispatch_db_pool_acquire_timeouts_total` | Acquires that ran out the pool's acquire bound (`store.ErrPoolBusy`, which a request answers `503 DATABASE_BUSY`). Label `pool`. |
+| `dispatch_go_gc_pause_seconds` | Histogram of the garbage collector's stop-the-world pauses (`/gc/pauses:seconds`), 10 µs to 1 s; its `_sum` is estimated from the runtime's buckets, which carry no sum. |
+| `dispatch_go_heap_live_bytes`, `dispatch_go_heap_objects_bytes`, `dispatch_go_goroutines` | The heap the last collection marked live, the heap objects hold now, and the goroutines. |
+| `dispatch_outbox_lag_seconds` | Age of the oldest event the outbox has not published, a pending subscription command aside, counting events backed off or held behind their owner; 0 when none. With NATS off nothing publishes, so it grows from the first event. |
+| `dispatch_outbox_published_total` | Events this process's outbox has marked published. |
+| `dispatch_events_committed_total` | Events this process has committed to the event log: every write that appends counts each event once it commits, so summed over the processes it grows as the `events` table does. |
+| `dispatch_http_in_flight`, `dispatch_http_queued` | Admission units held by admitted requests (a route that reads side by side holds two), and requests waiting for admission. Label `class`: `read` or `write`. |
+| `dispatch_http_refused_total` | Requests refused `429 OVERLOADED`. Labels `class` and `reason`: `queue_full` or `wait_exceeded`. |
+| `dispatch_doc_writer_queued` | Writers waiting for a document's writer gate. |
+| `dispatch_settlements_running`, `dispatch_settlements_waiting` | Document settlements holding one of the settlement slots, and waiting for one. |
+| `dispatch_log_dropped_total` | Log records dropped because the log writer fell behind. Label `level`: `debug`, `info`, `warn` or `error`. |
 
 ## Running more than one process
 

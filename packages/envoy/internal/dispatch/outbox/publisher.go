@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -320,7 +321,9 @@ func backOff(result outcome, item pendingEvent, what string, cause error) outcom
 // claimed and unmarked, which is what a process that dies between NATS's acknowledgements and this
 // write leaves too: the batch is published again once claimWindow lapses. JetStream drops each
 // repeat inside its duplicate window by its MsgId; a role lane, over core NATS, carries the repeat,
-// and its receivers drop it by its dedupe key (internal/contracts/dedupe.go).
+// and its receivers drop it by its dedupe key (internal/contracts/dedupe.go). The rows the write
+// marked published, and only those - a row the guard skipped was marked by another write - are
+// counted in Published.
 func recordBatch(ctx context.Context, deps Deps, outcomes []outcome) error {
 	if len(outcomes) == 0 {
 		return nil
@@ -346,7 +349,8 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome) error {
 			reachedTopics = append(reachedTopics, topic)
 		}
 	}
-	if _, err := deps.Store.Pool.Exec(ctx, `
+	var marked int64
+	if err := deps.Store.Pool.QueryRow(ctx, `
 		with outcome as (
 			select * from unnest($1::bigint[], $2::text[], $3::int[], $4::timestamptz[])
 				as o(id, state, attempts, retry_at)
@@ -354,23 +358,53 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome) error {
 			select id, array_agg(topic order by position) as topics
 			from unnest($5::bigint[], $6::text[]) with ordinality as r(id, topic, position)
 			group by id
+		), recorded as (
+			update events e set
+				published_destinations = e.published_destinations || array(
+					select t.topic from unnest(r.topics) with ordinality as t(topic, position)
+					where t.topic <> all(e.published_destinations)
+					order by t.position
+				),
+				published_at = case when o.state = 'published' then now() end,
+				attempt_count = coalesce(o.attempts, e.attempt_count),
+				next_attempt_at = o.retry_at
+			from outcome o
+			left join reached r on r.id = o.id
+			where e.id = o.id and e.published_at is null
+			returning e.published_at
 		)
-		update events e set
-			published_destinations = e.published_destinations || array(
-				select t.topic from unnest(r.topics) with ordinality as t(topic, position)
-				where t.topic <> all(e.published_destinations)
-				order by t.position
-			),
-			published_at = case when o.state = 'published' then now() end,
-			attempt_count = coalesce(o.attempts, e.attempt_count),
-			next_attempt_at = o.retry_at
-		from outcome o
-		left join reached r on r.id = o.id
-		where e.id = o.id and e.published_at is null
-	`, ids, states, attempts, retryAt, reachedIDs, reachedTopics); err != nil {
+		select count(published_at) from recorded
+	`, ids, states, attempts, retryAt, reachedIDs, reachedTopics).Scan(&marked); err != nil {
 		return fmt.Errorf("record the batch's outcome: %w", err)
 	}
+	publishedEvents.Add(uint64(marked))
 	return nil
+}
+
+// publishedEvents counts the events this process's outbox has marked published (recordBatch).
+var publishedEvents atomic.Uint64
+
+// Published is how many events this process's outbox has marked published since it started: the
+// dispatch_outbox_published_total counter of the metrics endpoint. One outbox runs per process
+// (cmd/dispatch), so the count is the process's.
+func Published() uint64 { return publishedEvents.Load() }
+
+// Lag is how long the oldest event the outbox still owes a publish has waited: the age of the
+// oldest event with no published_at that is not a pending subscription command, which the outbox
+// never publishes (claimPendingEvents), and zero when there is none. An event backed off after a
+// failed publish, or claimed by a batch still running, counts: an agent waits for it all the same.
+// One statement, on the events_unpublished index's rows.
+func Lag(ctx context.Context, pool *store.Pool) (time.Duration, error) {
+	var seconds float64
+	if err := pool.QueryRow(ctx, `
+		select coalesce(greatest(extract(epoch from now() - min(created_at)), 0), 0)::float8
+		from events
+		where published_at is null
+		  and coalesce(payload ->> 'pending', 'false') <> 'true'
+	`).Scan(&seconds); err != nil {
+		return 0, fmt.Errorf("read the outbox's lag: %w", err)
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
 }
 
 // claimPendingEvents claims at most batchSize eligible events, lowest id first, and returns their

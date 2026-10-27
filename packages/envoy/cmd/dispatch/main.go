@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/admission"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
@@ -106,6 +107,9 @@ type bootConfig struct {
 	// PprofAddr is where the profiling listener binds, 127.0.0.1 and DISPATCH_PPROF_PORT
 	// (pprofAddress); empty, nothing listens.
 	PprofAddr string
+	// MetricsAddr is where the metrics listener binds, DISPATCH_METRICS_ADDR (metricsAddress);
+	// empty, nothing listens.
+	MetricsAddr string
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
 	// fence; the signing key is then per process.
 	DevSignIn bool
@@ -311,7 +315,9 @@ func main() {
 	if err != nil {
 		fatal("dispatch: build the embedder", "error", err)
 	}
-
+	// The one admission limiter the API admits through, made here so the metrics endpoint reads the
+	// same counts.
+	limiter := admission.New(admission.DefaultLimits())
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
 		SigningKey:  signingKey,
 		WebDistDir:  webDistDir,
@@ -330,6 +336,7 @@ func main() {
 		AgentStream: agentStream,
 		Files:       fileStore,
 		Lifetime:    ctx,
+		Admission:   limiter,
 	}))
 
 	if err != nil {
@@ -484,6 +491,18 @@ func main() {
 	if err != nil {
 		fatal("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 	}
+	// The metrics endpoint binds once everything its series read exists, and like the server's
+	// own address a port it cannot take ends the boot.
+	if _, err := startMetrics(ctx, boot.MetricsAddr, metricsSources{
+		Pool:       database.Pool,
+		Background: background,
+		Events:     broker,
+		Admission:  limiter,
+		Docs:       documentService,
+		Logs:       logs,
+	}); err != nil {
+		fatal("dispatch: metrics", "error", err)
+	}
 	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery); err != nil {
 		fatal("dispatch: serve", "error", err)
 	}
@@ -625,6 +644,11 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.PprofAddr = pprofAddr
+	metricsAddr, err := metricsAddress(env)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	boot.MetricsAddr = metricsAddr
 	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
 		if !boot.TestHooksEnabled {
 			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")
