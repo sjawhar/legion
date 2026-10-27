@@ -2,29 +2,86 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "completed": "2026-10-27T04:55:30Z",
-  "headTested": "1987f3e1ce586afad02fba406c3dffc96ae92e8e (code head bbdd897563bd1d9fd8f6988fcd895810676d498c)",
+  "completed": "2026-10-27T10:01:30Z",
+  "round": 2,
+  "headTested": "e230f79bcc30e09247acfe1cd722ccaedf068608 (code head df07d9e3b8cdee013b56b9c3941ed7d7ddc19009; e230f79b adds only .legion/INFRA-177/implement.json)",
+  "fingerprint": "changed by two forward merges with main (ddf24b93, df07d9e3) and the renumbering, so a full round, not bare gates",
+  "roundOneFailures": [
+    {"failure": "PR CONFLICTING with main, no CI at the head", "now": "gh pr view 2354 -> mergeable MERGEABLE (mergeStateStatus BLOCKED: required checks not yet reported); git merge-tree of main 719aae24 (main moved again since df07d9e3) with e230f79b -> no conflict"},
+    {"failure": "contract 40, daemon migration 0055, Dispatch migration 0120 taken on main", "now": "DaemonAPIVersion 41 (main 719aae24 is at 40), daemon migration 0059_handoff_records (main ends at 0058), Dispatch migration 0129_handoffs (main ends at 0128): all free on main 719aae24"}
+  ],
+  "ci": "Read at df07d9e3 on GitHub at 2026-10-27T10:00Z: every lane still queued (build x2, changes, lint, test, typecheck, pr-title; workflow runs Tests 40481559035, Legion Envoy and Contracts 40481559183, Docs 40481559261, Worker Image 40481559156, PR Title 40484106805), so no result yet; read as running, not waited for. The daemon's CI rule acts on it when it settles.",
+  "mergeResolution": "Main's #2287 (an approval stands across handoff-only commits) is gone from the head: no approval_reads.go, and no handoffPush, readApprovalCarry, uncarried, HandoffPath or HeadPushKnown anywhere in packages/daemon/internal. Main's #2277 retry wraps the new completeHandoff, which reads the record and runtime.handoffReport again on each attempt (legion-phase-ops.ts:254-337).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran P1 at the head: `source /legion/harness/env.sh && LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> all checks (a6, a6-control, a3, a3-control, a7, handoff-not-new, a10-control, a10, a10 restart) ok, `--- PASS: TestHandoffRecordsLive (28.37s)`, 44 s. Re-ran A1: `bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_tester?sslmode=disable' e2e/handoffs.e2e.ts` -> 2 passed (Conversation lists each version and expands to fields and both proof entries; Activity one line per version). Re-ran the A4 grep (P3's command with the plan's exclusions) at 1987f3e1: one hit, handoff_records_live_test.go:1286 (an assertion that the import commit carries no skip-checks); 115 files at main ad909178a. P7 (legion-smoke, implement App) and P4 (real omp tester) not re-run: they need the implement App and a model route; the implementer's run ids are recorded."
+    "how": "Re-ran P1 on a fresh database at e230f79b: `source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_t2?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> every check ok (a6, a6-control, a3, a3-control, a7, handoff-not-new, a10-control, a10, a10 restart), `--- PASS: TestHandoffRecordsLive (28.94s)`, PASS in 45s. Re-ran A1: `bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t2?sslmode=disable' e2e/handoffs.e2e.ts` -> SPA rebuilt from the head, 2 passed. A4 grep (plan's exclusions, plus #2287's names) at e230f79b: one file, handoff_records_live_test.go; main: 124 files. P7 (implement App on legion-smoke) and P4 (model route) not re-run; their run ids are in the implement handoff."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "The pull request can merge, and CI runs at its head: GitHub reports it mergeable and the required checks report at the head",
-      "evidence": "`gh pr view 2354 -R sjawhar/legion --json mergeable,statusCheckRollup` -> mergeable CONFLICTING, statusCheckRollup []. `gh api repos/sjawhar/legion/commits/bbdd897563bd1d9fd8f6988fcd895810676d498c/check-runs` -> total_count 0, and `actions/runs?head_sha=bbdd8975...` lists no run: GitHub builds no merge ref for a conflicting pull request, so no CI has ever run on this code head and there is no CI result to read. main moved 45 commits since the fork point ad909178a0cb (main now baadccdc6a9a). `git merge-tree --write-tree --name-only baadccdc6a9a 1987f3e1` lists 34 conflicting files, among them packages/daemon/internal/api/{handoff.go,handoff_test.go,version.go,architect_test.go}, packages/daemon/internal/workflow/effects.go, packages/daemon/internal/daemon/required_checks.go, packages/daemon/internal/record/store_test.go, packages/pi-shared/src/legion-phase-ops.ts, packages/pi-legion/src/tools.ts, packages/claude-envoy/src/legion-tool.ts and dist/envoy-channel.js, packages/dispatch/web/src/features/conversation/{ConversationTab.tsx,conversation-model.test.ts}, the role prompts tester.md/reviewer.md/architect-root.md and go/reviewer.md, skills/legion-worker/{SKILL.md,references/{merge-gate,pr-body,conflicts-and-rewrites}.md}, skills/legion-architect/references/wake-routing.md with their claude-envoy copies, AGENTS.md, and five CHANGELOGs. Remedy: bring main into the branch (a real conflict, so the forward merge the conflicts reference allows), then a full test round, since the diff will change."
+      "criterion": "A6: a 40 KB handoff writes and reads back; two writes give versions 1 and 2",
+      "surface": "the real dispatch CLI against the real Dispatch server, under the whole daemon (scripts/e2e/handoff-records.sh); plus a scratch Dispatch built from the head with raw HTTP",
+      "command": "LEGION_TEST_PG_DSN=…/legion_t2 LEGION_E2E_NATS_BIN=… bash scripts/e2e/handoff-records.sh; then curl against ./dispatch-srv (go build ./cmd/dispatch at the head)",
+      "observed": "check a6 ok: two 41,024-byte bodies are versions 1 and 2, read back byte-identical. On the scratch server: 30 concurrent POSTs to one phase -> 30 x 201, versions exactly 1..30; a 262,144-byte body accepted plain, \\u-escaped (786,479-byte request) and Go-escaped '<' (1,572,887-byte request); a body with odd whitespace, duplicate keys, a surrogate pair, raw emoji and a \\u0000 escape reads back cmp-identical",
+      "headSha": "e230f79bcc30e09247acfe1cd722ccaedf068608",
+      "negativeControl": "a 262,145-byte body -> 413 CAP_EXCEEDED 'body is 1 bytes over the 262144-byte limit'; a closed issue's write -> 409 ISSUE_CLOSED; a human caller -> 403 HANDOFF_FORBIDDEN"
     },
     {
-      "criterion": "Breaking-change numbers are free on main: daemon API contract, daemon store migration and Dispatch migration (version.go's collision note)",
-      "evidence": "Three numbers this branch takes are already taken on main baadccdc6a9a: (1) DaemonAPIVersion 40 is main's `awaiting_person` contract (main packages/daemon/internal/api/version.go:375, 'const DaemonAPIVersion = 40'), and this branch also declares 40 (version.go:384 at 1987f3e1); (2) daemon migration 0055 is main's 0055_design_gate_review_marks.up.sql, beside this branch's 0055_handoff_records.up.sql, and main runs to 0058_catch_up_cursor; (3) Dispatch migration 0120 is main's 0120_artifact_reviews_event_seq.{up,census}.sql, beside this branch's 0120_handoffs.{up,census}.sql. Per version.go's collision note the branch takes the next free numbers (contract 41, daemon migration 0059, Dispatch migration 0121 as main stands now) and renumbers every site naming them: the pins in packages/pi-legion/package.json and packages/claude-envoy/package.json, packages/contracts/fixtures/daemon-api/*.json, the store schema lists, docs/kubernetes.md's rollback (`delete from schema_version where version = ...`), packages/envoy/cmd/dispatch/README.md's migration catalogue, the PR body's 'Breaking:' line and the CHANGELOGs."
+      "criterion": "A3: a handoff under another session's name is refused at completion",
+      "surface": "POST /legion/v1/handoff/complete on the whole daemon, record read from the real Dispatch server",
+      "command": "bash scripts/e2e/handoff-records.sh (checks a3, a3-control)",
+      "observed": "403 HANDOFF_SESSION_MISMATCH naming both sessions; the issue stays in planning",
+      "headSha": "e230f79bcc30e09247acfe1cd722ccaedf068608",
+      "negativeControl": "the planner's own record -> 200 and the issue moves to implementing"
+    },
+    {
+      "criterion": "A10: while Dispatch refuses writes the write and completion fail; once it answers the retried write succeeds and shows in what Conversation lists",
+      "surface": "the real Dispatch process stopped and restarted under the whole daemon",
+      "command": "bash scripts/e2e/handoff-records.sh (checks a10-*)",
+      "observed": "Dispatch stopped: the write exits 1 and the completion gets '502 DISPATCH_READ_FAILED … connect: connection refused … this completion changed nothing'; restarted: the write (version 2) and completion land and the list route holds the record",
+      "headSha": "e230f79bcc30e09247acfe1cd722ccaedf068608",
+      "negativeControl": "with Dispatch up, the first write succeeds (a10-control)"
+    },
+    {
+      "criterion": "A7: an issue mid-phase at the cutover completes after the import",
+      "surface": "legion handoffs import (handoffimport.Run) against the running daemon and real Dispatch, then the tester's completion",
+      "command": "bash scripts/e2e/handoff-records.sh (check a7)",
+      "observed": "a7 ok: the import's record is refused HANDOFF_SESSION_MISMATCH, the tester writes it again and completes, and the reviewer's task names 'Handoff: test version 2'",
+      "headSha": "e230f79bcc30e09247acfe1cd722ccaedf068608",
+      "negativeControl": "handoff-not-new ok: the implementer's round-1 record named in round 2 is refused HANDOFF_NOT_NEW"
+    },
+    {
+      "criterion": "A1: a handoff shows in Conversation as one entry with its fields",
+      "surface": "the Dispatch dashboard in Chromium against the real Go server, SPA rebuilt from the head",
+      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t2?sslmode=disable' e2e/handoffs.e2e.ts",
+      "observed": "2 passed: Conversation lists each version and expanding one shows its fields and every proof entry; Activity has one line per version",
+      "headSha": "e230f79bcc30e09247acfe1cd722ccaedf068608",
+      "negativeControl": "the implementer's run against the build of 8a4d97bf (before the Conversation change): the Conversation test fails with 0 cards and the Activity test passes (not re-run by me)"
+    },
+    {
+      "criterion": "Workers write and read handoffs with dispatch handoff-write / handoff-read, and handoff_complete reports the newest record (and the implementer's pushed tip)",
+      "surface": "the real dispatch CLI (packages/envoy-client/bin/dispatch.ts) and pi-shared paneHandoffReport (what both harnesses' handoff_complete call) against the scratch Dispatch and a real jj clone with legion/TST-1 pushed to a bare origin",
+      "command": "dispatch handoff-write --issue TST-1 --phase implement --body-file h.json (and --body-file -); dispatch handoff-read … [--version n]; bun pane-drive.ts TST-1 implementing implementer | testing tester | reviewing reviewer",
+      "observed": "'Recorded the implement handoff of TST-1, version 1 (id …)', stdin write is version 2, handoff-read prints the metadata line and the body; the pane reports {commit: pushed tip 10b7217b, handoffId, handoffVersion 2} for the implementer and {handoffId, handoffVersion 1} for the tester",
+      "headSha": "e230f79bcc30e09247acfe1cd722ccaedf068608",
+      "negativeControl": "an array body -> 'body is not one JSON object', exit 1, nothing sent; --version 9 -> 'HANDOFF_NOT_FOUND … its newest implement handoff is version 2'; a reviewer with no record -> 'TST-1 has no review handoff in Dispatch: write it with dispatch handoff-write …'; an unpushed @- -> 'not on legion/TST-1@origin: push it …'"
+    },
+    {
+      "criterion": "Dispatch migration 0129 rolls onto a database main's Dispatch migrated, and the route is absent before it",
+      "surface": "Dispatch built from main 719aae24 and from the head, on one database",
+      "command": "./dispatch-main (DATABASE_URL …/dispatch_up), create UPG and UPG-1, POST …/handoffs/plan; stop; ./dispatch-srv on the same database, POST again; then ./dispatch-main again",
+      "observed": "main migrates to 128; the head migrates to 129, keeps UPG-1 ('pre-existing'), and records plan version 1 (201); main's binary then serves the 129 database (GET UPG-1 200)",
+      "headSha": "e230f79bcc30e09247acfe1cd722ccaedf068608",
+      "negativeControl": "main's Dispatch answers POST /api/v1/issues/UPG-1/handoffs/plan 404, the answer the import stops on ('it has no handoff routes')"
+    },
+    {
+      "criterion": "A4: the tree has no skip-checks rule, READY_HEAD_CARRIES_HANDOFFS or handoff-only classifier",
+      "surface": "the repository tree at the head",
+      "command": "git grep -lE 'skip-checks|READY_HEAD_CARRIES_HANDOFFS|HandoffOnly|handoffOnly|ClassifyPush|classifyPush|HandoffPath|readApprovalCarry' e230f79b -- packages/daemon packages/pi-shared packages/pi-legion packages/claude-envoy packages/contracts skills AGENTS.md README.md docs (plan's exclusions)",
+      "observed": "one file, handoff_records_live_test.go (the assertion that the import's commit carries no skip-checks)",
+      "headSha": "e230f79bcc30e09247acfe1cd722ccaedf068608",
+      "negativeControl": "the same grep at main: 124 files"
     }
-  ],
-  "failed": 2,
-  "observedOnTheRealSurface": [
-    "Scratch Dispatch server built from 1987f3e1 (`go build ./cmd/dispatch`, own database), raw API: phase PLAN/plan_x/-x/33 chars/'plan/../' -> 400 HANDOFF_INPUT; body [] / \"s\" / '{} {}' / '{\"a\":1} x' / '' / null / truncated -> 400 HANDOFF_INPUT, leading whitespace accepted; actor kind user / none / empty id -> 400 ACTOR_KIND; no bearer -> 401; human X-Dispatch-User caller -> 403 HANDOFF_FORBIDDEN; unknown issue -> 404; closed issue write -> 409 ISSUE_CLOSED while latest and list still read it; non-uuid id -> 400 HANDOFF_ID_INPUT.",
-    "30 concurrent POSTs to one issue's implement phase: 30 x 201, versions exactly 1..30, no gap or duplicate. 39 handoff.recorded events for 39 records, payload {phase, version, handoff_id}, never the body.",
-    "Cap: a body of exactly 262144 bytes -> 201 as plain ASCII, as 2-byte UTF-8 sent \\u-escaped (786479-byte request), as '<' sent Go-style \\u003c (1572887-byte request) and as escaped quotes; 262145 bytes -> 413 'body is 1 bytes over the 262144-byte limit'.",
-    "Byte exactness: a body with odd whitespace, \\u escapes, a surrogate pair, raw emoji, duplicate keys and 1.0e10 reads back from /latest cmp-identical; the CLI keeps a file's trailing newline.",
-    "Real `dispatch` CLI (packages/envoy-client/bin/dispatch.ts): handoff-write prints 'Recorded the implement handoff of TST-1, version N (id ...)', --body-file - and --body inline work; an array body and phase 'Implement' are refused before any call; handoff-read prints the metadata line then the body; --version 9 -> 'HANDOFF_NOT_FOUND: ... no implement handoff version 9; its newest implement handoff is version 2', exit 1; closed issue -> 'ISSUE_CLOSED', exit 1.",
-    "Pane report (pi-shared paneHandoffReport, the code both harnesses' handoff_complete call) driven against the scratch Dispatch and a real jj clone with a pushed legion/TST-1: implementer -> {commit: pushed tip, handoffId, handoffVersion} of the newest record; tester -> record only; a phase with no record -> 'TST-1 has no review handoff in Dispatch: write it with `dispatch handoff-write ...`'; @- unpushed -> refused 'not on legion/TST-1@origin: push it ...'; @- behind the pushed tip -> reports the tip; retro -> commit only; LEGION_ISSUE 'TST-1/x' -> refused."
   ]
 }
