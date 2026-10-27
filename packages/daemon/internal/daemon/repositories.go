@@ -573,33 +573,60 @@ func (w *workflowRuntime) requestMappingRead() uint64 {
 // and a daemon stopped before one applies reads the mapping at boot. A finished read covers every
 // request made before it started. While a failed installation read leaves a repository as it
 // stands (awaitingRead: left out for now, or served on its last answer), it reads the mapping again
-// of its own on installReadRetry's backoff, so the repository is served, or confirmed, once GitHub
-// answers, with no restart and no mapping change; each finished read then admits the issues held
-// for such a repository (admitHeldForRead). The backoff is reset once no repository waits on a
-// read; an issue still held then (its admission failed, or it was held after the read) is tried
-// again at the backoff's first wait.
+// of its own on installReadRetry's backoff, reset once no repository waits on a read, so the
+// repository is served, or confirmed, once GitHub answers, with no restart and no mapping change;
+// each finished read then admits the issues held for such a repository (admitHeldForRead). An
+// issue still held once no repository waits on a read (its Dispatch read or apply failed, or its
+// parent is not yet recorded) is tried again on a backoff of its own, installReadRetry's too, reset
+// once nothing is held or a new hold is made (holdWake): a hold that never drains reads the
+// mapping at most every installReadRetry.Max, and a new one is not left waiting on an idle loop.
 func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
-	recheckIn := installReadRetry.Initial
+	repoRecheck, holdRecheck := installReadRetry.Initial, installReadRetry.Initial
+	// due is when the loop's next read of its own falls, set from the wait when something first
+	// waits after a read: a wake never puts it off, so a stream of new holds starves no read.
+	var due time.Time
 	for {
 		var recheck <-chan time.Time
-		unread := w.repositories.awaitingRead()
-		waiting := append(unread, w.heldForReadReasons()...)
+		unread, held := w.repositories.awaitingRead(), w.heldForReadReasons()
 		if len(unread) == 0 {
-			recheckIn = installReadRetry.Initial
+			repoRecheck = installReadRetry.Initial
 		}
-		if len(waiting) != 0 {
-			recheck = time.After(recheckIn)
+		if len(held) == 0 {
+			holdRecheck = installReadRetry.Initial
+		}
+		wait := &holdRecheck
+		if len(unread) != 0 {
+			wait = &repoRecheck
+		}
+		if len(unread) != 0 || len(held) != 0 {
+			if due.IsZero() {
+				due = time.Now().Add(*wait)
+			}
+			recheck = time.After(time.Until(due))
+		} else {
+			due = time.Time{}
 		}
 		select {
 		case <-ctx.Done():
 			return
+		case <-w.holdWake:
+			// A new hold with no repository waiting on a read drains at the first wait at latest;
+			// one on a repository still unread drains with that repository's own read.
+			if len(unread) == 0 {
+				holdRecheck = installReadRetry.Initial
+				if first := time.Now().Add(holdRecheck); due.IsZero() || first.Before(due) {
+					due = first
+				}
+			}
+			continue
 		case <-w.mappingChanged:
 		case <-recheck:
 			w.log.Info("workflow: reading the repository mapping again for what a failed installation read left as it stands",
-				"waiting", waiting, "waited", recheckIn.String())
-			recheckIn = min(2*recheckIn, installReadRetry.Max)
+				"waiting", append(unread, held...), "waited", wait.String())
+			*wait = min(2**wait, installReadRetry.Max)
 		}
-		wait := appMintRetry.Initial
+		due = time.Time{}
+		retry := appMintRetry.Initial
 		for {
 			covers := w.mappingRequested.Load()
 			err := w.refreshMapping(ctx)
@@ -611,13 +638,13 @@ func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			w.log.Warn("workflow: the repository mapping read failed, so the daemon serves the mapping it last read; reading it again", "retryIn", wait.String(), "error", err)
+			w.log.Warn("workflow: the repository mapping read failed, so the daemon serves the mapping it last read; reading it again", "retryIn", retry.String(), "error", err)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(wait):
+			case <-time.After(retry):
 			}
-			wait = min(2*wait, appMintRetry.Max)
+			retry = min(2*retry, appMintRetry.Max)
 		}
 	}
 }
@@ -637,19 +664,24 @@ type heldIssue struct {
 // keep the Dispatch consumer below the position the boot's admission waits for, and the daemon
 // admits it itself once a read of the mapping serves repo (admitHeldForRead). Each call raises the
 // hold's version, the key held already or not, so a drain that read the issue before this hold
-// does not release it. The hold is in memory: a restart's boot listing, which shows the issue in
-// todo, holds it again.
+// does not release it, and wakes refreshOnMappingChange (holdWake), so a hold made after its last
+// drain is drained on the loop's next wait rather than left to the next mapping change. The hold
+// is in memory: a restart's boot listing, which shows the issue in todo, holds it again.
 func (w *workflowRuntime) holdForRead(key, repo string) {
 	w.awaitingMu.Lock()
-	defer w.awaitingMu.Unlock()
 	_, again := w.heldForRead[key]
 	if w.heldForRead == nil {
 		w.heldForRead = map[string]heldIssue{}
 	}
 	w.holdVersion++
 	w.heldForRead[key] = heldIssue{repo: repo, version: w.holdVersion}
+	w.awaitingMu.Unlock()
 	if !again {
 		w.log.Info("workflow: an issue is held until GitHub answers its repository's installation read", "issue", key, "repo", repo)
+	}
+	select {
+	case w.holdWake <- struct{}{}:
+	default:
 	}
 }
 
@@ -741,7 +773,12 @@ func (w *workflowRuntime) admitHeldForRead(ctx context.Context) {
 }
 
 // admitHeld is admitHeldForRead for one issue, as Dispatch shows it now (observed), and whether it
-// is no longer held.
+// is no longer held. A child whose apply records nothing while its Dispatch parent is unrecorded
+// or held stays held: the workflow records a child only under a recorded parent, and Dispatch,
+// already showing it todo, sends no event once the parent is recorded, so only a later drain
+// records it. Each apply is a fact of its own (its id names the boot and the attempt): an id an
+// earlier drain, of this boot or another, already applied would run no handler at all, and its
+// hold would go with nothing recorded.
 func (w *workflowRuntime) admitHeld(ctx context.Context, observed intake.DispatchIssue) (bool, error) {
 	recorded, err := w.recordOf(ctx, observed.Key)
 	if err != nil || recorded != nil {
@@ -761,10 +798,33 @@ func (w *workflowRuntime) admitHeld(ctx context.Context, observed intake.Dispatc
 	if err != nil {
 		return false, err
 	}
-	if _, err := intake.ApplyFact(ctx, w.pool, "daemon", fmt.Sprintf("held-for-read:%s:%d", observed.Key, prepared.Seq), prepared, w.handlers...); err != nil {
+	id := fmt.Sprintf("held-for-read:%s:%s:%s:%d:%d", w.dispatchProject, w.bootID, observed.Key, prepared.Seq, time.Now().UnixNano())
+	result, err := intake.ApplyFact(ctx, w.pool, "daemon", id, prepared, w.handlers...)
+	if err != nil {
 		return false, fmt.Errorf("apply %s: %w", observed.Key, err)
 	}
-	return true, nil
+	if result.Duplicate {
+		return false, fmt.Errorf("apply %s: its fact %s was applied before, so nothing ran", observed.Key, id)
+	}
+	if observed.Parent == "" {
+		return true, nil
+	}
+	if recorded, err = w.recordOf(ctx, observed.Key); err != nil || recorded != nil {
+		return recorded != nil, err
+	}
+	parent, err := w.recordOf(ctx, observed.Parent)
+	if err != nil {
+		return false, err
+	}
+	return parent != nil && !w.isHeld(observed.Parent), nil
+}
+
+// isHeld is whether holdForRead holds key, whatever its repository's state.
+func (w *workflowRuntime) isHeld(key string) bool {
+	w.awaitingMu.Lock()
+	defer w.awaitingMu.Unlock()
+	_, held := w.heldForRead[key]
+	return held
 }
 
 // awaitMappingRead holds back the admission event of issue delivered at seq, on a repository the

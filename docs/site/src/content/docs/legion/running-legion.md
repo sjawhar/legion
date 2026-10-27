@@ -50,10 +50,14 @@ again, 30 seconds doubling to 10 minutes between reads, until GitHub answers, th
 restart. An issue handed to Legion on it meanwhile, one the boot finds waiting in `todo`, or a
 child `release_children` releases is held by the daemon rather than refused: nothing is said on
 it, its event does not hold up any other issue's admission, and it is admitted, parents before
-children, once the repository is served, with no one moving it; `release_children` answers such a
-child released, with nothing for the architect to retry, for as long as the repository is still
-unread (once it is served, the release records the child itself). A held issue is held in memory,
-and a restart's boot listing holds it again.
+children, once the repository is served, with no one moving it; a child whose Dispatch parent is
+not recorded yet stays held until the parent is recorded, since Legion records a child only under
+a recorded parent. `release_children` answers such a child released, with nothing for the
+architect to retry, while the repository is still unread and the child's parent is recorded or
+held the same way (once the repository is served, the release records the child itself; under a
+parent neither recorded nor held it answers `CHILD_NOT_RECORDED`, as for a served repository). A
+held issue is held in memory, and a restart's boot listing holds it again. A hold that cannot be
+drained (its Dispatch read or apply keeps failing) is retried 30 seconds doubling to 10 minutes.
 A served repository whose read fails stays served on its last answer and is read again the same
 way. A project with no repository mapped does not boot; one whose every repository lacks an App
 boots serving none and admits nothing until an App is installed, and one whose every repository's

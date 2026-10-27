@@ -116,7 +116,9 @@ type workflowRuntime struct {
 	// issue whose admission found its repository left out by a failed installation read
 	// (holdForRead), by key, under awaitingMu: its event is acknowledged, and admitHeldForRead
 	// admits it once a read of the mapping serves the repository. holdVersion numbers the holds, so
-	// a hold made again while a drain reads the issue outlives that drain's stale read.
+	// a hold made again while a drain reads the issue outlives that drain's stale read; holdWake
+	// tells refreshOnMappingChange of a new hold, one waiting at most, so it times its next read for
+	// it.
 	repositories     *repositories
 	installs         appauth.Installations
 	mappingMu        sync.Mutex
@@ -127,6 +129,7 @@ type workflowRuntime struct {
 	awaiting         map[string]map[int64]uint64
 	heldForRead      map[string]heldIssue
 	holdVersion      uint64
+	holdWake         chan struct{}
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
@@ -268,7 +271,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	w := &workflowRuntime{
 		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos, build: build,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
-		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
+		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1), holdWake: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
 		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
 	}

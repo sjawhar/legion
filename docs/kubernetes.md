@@ -5358,7 +5358,8 @@ issue's pod (every role of it alike) and the image probe's.
   named under `repositories.refused` with the App, the repository and the failure; an issue
   handed to Legion on it, by a live event, in the boot's listing or by `release_children`, is
   held in the daemon rather than refused, its event acknowledged, nothing said on it, and
-  admitted, parents first, once the repository is served, and the mapping is read again, 30 s
+  admitted, parents first (a child whose Dispatch parent is unrecorded stays held until the
+  parent is recorded), once the repository is served, and the mapping is read again, 30 s
   doubling to 10 min, until GitHub answers, then the repository is served with no restart (a
   served repository whose read fails stays served on its last answer, with the name and default
   branch GitHub last gave it and no further read of GitHub, and is read again the same way); a project

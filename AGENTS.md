@@ -230,7 +230,8 @@ ancestor's, else the project's default) and keeps it: an issue whose repository
 resolves to none, or to one the daemon does not serve, is not admitted, and the daemon says why on
 the issue, except an issue on a repository left out for now because GitHub did not answer its
 installation read, which the daemon holds, says nothing on, and admits itself once GitHub answers
-(release_children answers such a child released, with nothing to retry); a later change of an
+(release_children answers such a child released, with nothing to retry, while its Dispatch parent
+is recorded or held, and CHILD_NOT_RECORDED otherwise); a later change of an
 admitted issue's repository is not applied, which the daemon says
 too. A root that stays `done` through its linger hands every child still in the
 workflow to Legion as a root of its own: the daemon sets it `todo` with the label in one Dispatch

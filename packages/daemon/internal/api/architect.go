@@ -411,7 +411,9 @@ const (
 // repository's GitHub App installation read failed is held by the daemon (Options.RepositoryHeld,
 // asked only after the apply, and only while that repository is still unread), which records it
 // once GitHub answers: the release answers it released, neither started nor held, with nothing to
-// retry.
+// retry, but only while its Dispatch parent is recorded or held the same way, since the daemon too
+// records a child only under a recorded parent. Under a parent neither recorded nor held it is
+// answered CHILD_NOT_RECORDED, as on a served repository.
 func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree string, child dispatch.Issue) bool {
 	recorded, err := s.recordedIssue(r.Context(), child.Key)
 	if err != nil {
@@ -451,13 +453,25 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 	if recorded != nil {
 		return s.clearChildReleaseRetry(w, r, child.Key)
 	}
+	parent := intake.ObservedIssue(child).Parent
 	if s.held != nil && s.held(child.Key) {
-		// Its repository's installation read failed: the daemon holds the child and records it
-		// under the tree once GitHub answers, so the release stands with nothing to retry.
-		s.log.Info("api: release_children's todo child is held until GitHub answers its repository's installation read", "issue", child.Key, "tree", tree)
-		return s.clearChildReleaseRetry(w, r, child.Key)
+		underParent := parent != "" && s.held(parent)
+		if !underParent && parent != "" {
+			above, err := s.recordedIssue(r.Context(), parent)
+			if err != nil {
+				writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", fmt.Sprintf("could not read the record of %s", parent))
+				return false
+			}
+			underParent = above != nil
+		}
+		if underParent {
+			// Its repository's installation read failed: the daemon holds the child and records it
+			// under the tree once GitHub answers, so the release stands with nothing to retry.
+			s.log.Info("api: release_children's todo child is held until GitHub answers its repository's installation read", "issue", child.Key, "tree", tree)
+			return s.clearChildReleaseRetry(w, r, child.Key)
+		}
 	}
-	return s.scheduleChildReleaseRetry(w, r, tree, child, intake.ObservedIssue(child).Parent)
+	return s.scheduleChildReleaseRetry(w, r, tree, child, parent)
 }
 
 func (s *server) clearChildReleaseRetry(w http.ResponseWriter, r *http.Request, issue string) bool {
