@@ -2,30 +2,16 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-595",
-  "completed": "2026-10-27T07:13:13Z",
-  "round": 2,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "46034eb294162ace30db3912aa7a5c460f105f9c",
+  "completed": "2026-10-27T10:45:09Z",
+  "round": 3,
+  "decision": "approved",
+  "reviewedCodeHead": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/cistore/summary_loop_test.go:433",
-      "description": "TestARecreatedBucketForgetsTheOldBucketsRecords locks only the held-set half of the reset branch. With only the queue reset (loop.go:256) removed it still passes (3/3 runs in the code-quality audit), because a kept queue entry for an uncached key is dropped by fileLocked when it pops and changes no count or publication; the doc's claim that a kept queue would count the old records is false. Its only support is a 1 s sleep and a wall-time guard (line 456) that fails the test (a required check) whenever the put, the cache wait and the first pass take a second. Fix: drop record 72, due, the guard and the sleep and reword the doc to the held count, or keep the queue claim and prove it from pass's returned ok right after the recreate, with no sleep."
-    }
-  ],
-  "roundOneFixesVerified": [
-    "PRRT_kwDORFy7ds6wkuMu: held half fixed; removing the held reset fails the new test ('held back 3 records, want 1'); the queue half is the finding above",
-    "PRRT_kwDORFy7ds6wkuMz: AGENTS.md:2257 now 'rather than being published again at every attempt'",
-    "PRRT_kwDORFy7ds6wkuM2: claimFresh check gone from settle; behaviour unchanged (only caller passes a verdictAttempt record; ReclaimSettlement re-checks durably)",
-    "PRRT_kwDORFy7ds6wkuM3: heldBack moved to summary_loop_test.go; loop.go comments name verdictHeld / legacyBacklog",
-    "PRRT_kwDORFy7ds6wkuM7: openStore's t.Cleanup runs forgetTestSummarizer"
-  ],
-  "notDefects": [
-    "Folding cacheReset into the change set (code-quality finding 1 again): same result; kept as a choice, as in round 1."
-  ],
-  "ci": "At code head 46034eb2 the required checks lint, typecheck, test and pr-title were queued when read; compare 46034eb2...3c0dc878 is handoffs only (2 files).",
-  "thermonuclear": "At 46034eb2: deep-review approve, 2 minor (queue half untested; first-pass guard fails rather than skips); code-quality 2 minor (fold cacheReset; queue half of the new test proves nothing)."
+  "keyFindings": [],
+  "roundTwoFixVerified": "PRRT_kwDORFy7ds6wlR7Q: TestARecreatedBucketForgetsTheOldBucketsRecords now uses a 1 h debounce and reads pass's (held, next, ok); removing the queue reset fails at summary_loop_test.go:487 and removing the held reset fails at :484 (both thermonuclear agents, 3/3 runs each); no sleep or wall-time guard remains.",
+  "ci": "CI head b1ce6a9d (newest pull_request run); required lint, typecheck, test, pr-title completed success; compare b1ce6a9d...8bd553be handoffs only (2 files). envoy-go (not required) failed: internal/dispatch/api hit the 10 min go test timeout (last running TestWriteAdviceKeepsItsFieldsWhenTheLegionWalkFails); internal/cistore and cmd/listener passed in that job. This PR does not touch internal/dispatch/api; the timeout is tracked by dispatch://INFRA-523 and dispatch://INFRA-520 (explicit go test -timeout for envoy-go).",
+  "mergeability": "GitHub reports the PR CONFLICTING against main at 10:45Z: main changed packages/envoy/AGENTS.md and packages/envoy/CHANGELOG.md since the fork point c3d09eec. The implementer's forward merge follows conflicts-and-rewrites.md; the reviewer then compares the unchanged-diff fingerprint at 8bd553be and the merged head.",
+  "thermonuclear": "At b1ce6a9d: deep-review approve, no finding; code-quality approve, no finding."
 }
