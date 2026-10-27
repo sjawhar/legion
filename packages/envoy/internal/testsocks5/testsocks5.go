@@ -205,3 +205,5 @@ func readConnect(conn net.Conn) (Request, error) {
 	}
 	return Request{AddressType: header[3], Address: net.JoinHostPort(host, strconv.Itoa(int(binary.BigEndian.Uint16(port))))}, nil
 }
+
+// scratch INFRA-520 dispatch-multiprocess
