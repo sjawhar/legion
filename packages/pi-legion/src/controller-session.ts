@@ -34,11 +34,15 @@ interface ClaimProgress {
 export interface ControllerSession {
   readonly claim: (context: CommandContext | SessionContext) => Promise<void>;
   readonly handleSessionStart: (context: SessionContext) => Promise<void>;
+  readonly handleAgentStart: (context: SessionContext) => void;
   readonly reclaimAfterSessionChange: (context: SessionContext) => Promise<void>;
   readonly startCommand: (context: CommandContext) => Promise<void>;
   readonly isClaimedSession: (sessionID: string) => boolean;
   readonly mintGrant: (sessionID: string) => Promise<LegionGrant>;
 }
+
+/** The host widget a session change's re-claim shows its outcome in (`reclaimAfterSessionChange`). */
+const CLAIM_WIDGET = "legion-controller-claim";
 
 /**
  * The controller `legion controller start` launched for the operator: the controller marker
@@ -84,6 +88,15 @@ export function createControllerSession(deps: {
   // its own turn (`reclaimAfterSessionChange`), and clears it. The stopped claim says nothing: its
   // notice would be shown while the `/new` is still under way, and the `/new` wipes the screen.
   let startHandedOver = false;
+  // The claim widget a session change's re-claim left up (`reclaimAfterSessionChange`): the session
+  // it was shown for, and how to take it down, which that session's next run (`handleAgentStart`)
+  // or a later claim that succeeds does.
+  let claimWidget: { readonly session: string; readonly clear: () => void } | undefined;
+  // The session whose start message (or, for the daemon's controller, start prompt) was sent while
+  // it was idle and whose run has not started: its next `agent_start` is that start's own run,
+  // which may begin before or after the re-claim that sent it shows its widget, so it takes no
+  // widget down.
+  let startTurnSession: string | undefined;
 
   const serialised = (task: () => Promise<void>): Promise<void> => {
     claimsQueued += 1;
@@ -296,8 +309,8 @@ export function createControllerSession(deps: {
       // claim for the replaced one. The session change starts a re-claim
       // (`reclaimAfterSessionChange`, which claims again as this claim stops unfinished), which
       // registers the new session and sends the start message there. That re-claim shows the notice
-      // that the claim moved on, after the session change has redrawn the screen; one shown from
-      // here would land while the `/new` is still under way and be wiped with its transcript.
+      // that the claim moved on where the session change's reset of the screen leaves it; one shown
+      // from here would land while the `/new` is still under way and be wiped with its transcript.
       if (context.sessionManager.getSessionId() !== sessionID) {
         startHandedOver = true;
         return;
@@ -306,6 +319,7 @@ export function createControllerSession(deps: {
         pi.sendUserMessage(startMessage, { deliverAs: "followUp" });
       } else {
         markStartupTurnSent(sessionID);
+        startTurnSession = sessionID;
         pi.sendUserMessage(startMessage);
       }
       startMessageSent = true;
@@ -331,6 +345,7 @@ export function createControllerSession(deps: {
     if (supervised) {
       // The daemon delivers its start prompt at this ready, so the start is sent from here on.
       markStartupTurnSent(sessionID);
+      startTurnSession = sessionID;
       await client.ready({
         claimToken: registration.claimToken,
         sessionId: sessionID,
@@ -339,6 +354,9 @@ export function createControllerSession(deps: {
       });
     }
     claimComplete = true;
+    // A re-claim's refusal or hand-over the widget still shows is out of date once a claim succeeds.
+    claimWidget?.clear();
+    claimWidget = undefined;
   };
 
   /**
@@ -415,19 +433,28 @@ export function createControllerSession(deps: {
    * claim did not finish. A re-claim queued behind a start claim that stopped for this session
    * change (`startHandedOver`) first says the claim moved to the new session.
    *
-   * Every notice the re-claim gives (the wait, that hand-over, its refusal) is shown only after
-   * the session_switch handler has returned. Oh My Pi's `/new` (command-controller.ts
-   * `#runNewSessionFlow` at the pinned tag) awaits `newSession`, which emits session_switch last
-   * and awaits every handler (agent-session.ts `newSession`), and only then resets the transcript
-   * and clears the scrollback: a notice shown while the handler runs is wiped before the operator
-   * can read it. The notices are collected instead and shown from the host's managed timer once
-   * the re-claim settles; that macrotask runs after the `/new` flow's reset, since nothing between
-   * the handler's return and the reset waits on anything but promises. The claim runs with a
-   * context whose `ui` collects the same way and that delegates everything else to the host's
-   * (`Object.create`, as the host scopes a handler's context, so its live accessors stay live): a
-   * notice from anywhere in the claim path is deferred too, and one shown through that context
-   * once the collected notices are out (the Envoy role claim keeps the context) goes to the screen
-   * at once.
+   * A re-claim that has to wait for the claim in flight says so at once, on the screen as the
+   * session change stands, so a `/new` held behind a hung start claim says what holds it. Its
+   * outcome (that hand-over, its refusal) is shown where the session change's reset leaves it. Oh
+   * My Pi's `/new` (command-controller.ts `#runNewSessionFlow` at the pinned tag) awaits
+   * `newSession`, which emits session_switch last and awaits every handler (agent-session.ts
+   * `newSession`), and only then resets the transcript and clears the scrollback: a notice, which
+   * goes to the transcript, shown while the handler runs is wiped before the operator can read it.
+   * With a subagent view focused, that flow first returns to the main session, and the replay that
+   * return runs can wait on file writes and on `setImmediate` before the reset (session-focus-
+   * controller.ts `#attach`, ui-helpers.ts `renderSessionContextIncrementally`), so a notice from
+   * a timer can still land before the reset. So the outcome goes to the host's extension widget
+   * (`ui.setWidget`, key `legion-controller-claim`), which neither that reset, the transient UI it
+   * clears, nor the return to the main session takes down; the session's next run
+   * (`handleAgentStart`) or a later claim that succeeds does. A host with no widget shows the
+   * outcome as notices from its managed timer once the re-claim settles, a macrotask that runs
+   * after an unfocused `/new`'s reset, which waits on nothing but promises.
+   *
+   * The claim runs with a context whose `ui` collects its notices for the same delivery and that
+   * delegates everything else to the host's (`Object.create`, as the host scopes a handler's
+   * context, so its live accessors stay live): a notice from anywhere in the claim path joins the
+   * outcome, and one shown through that context once the outcome is out (the Envoy role claim
+   * keeps the context) goes to the screen at once.
    */
   const reclaimAfterSessionChange = async (context: SessionContext): Promise<void> => {
     if (classifySession(process.env).kind !== "controller") return;
@@ -449,7 +476,7 @@ export function createControllerSession(deps: {
     // registered, so its grants mint; one refused before it registered nothing for it.
     const progress: ClaimProgress = { registered: false };
     try {
-      noteWait(deferred);
+      noteWait(context);
       await serialised(async () => {
         if (startHandedOver) {
           startHandedOver = false;
@@ -468,11 +495,43 @@ export function createControllerSession(deps: {
         "warning"
       );
     } finally {
-      context.setTimeout(() => {
+      const { ui } = context;
+      if (ui.setWidget === undefined) {
+        context.setTimeout(() => {
+          shown = true;
+          for (const { message, level } of notices.splice(0)) ui.notify(message, level);
+        }, 0);
+      } else {
         shown = true;
-        for (const { message, level } of notices.splice(0)) context.ui.notify(message, level);
-      }, 0);
+        if (notices.length > 0) {
+          ui.setWidget(
+            CLAIM_WIDGET,
+            notices.splice(0).map(({ message }) => message)
+          );
+          claimWidget = {
+            session: context.sessionManager.getSessionId(),
+            clear: () => ui.setWidget?.(CLAIM_WIDGET, undefined),
+          };
+        }
+      }
     }
+  };
+
+  /**
+   * The session's `agent_start`: a run of the session a re-claim's widget was shown for takes that
+   * widget down, as the operator has moved on, unless it is the run of the start that session's
+   * claim sent (`startTurnSession`), which can begin before or after the widget goes up. Another
+   * session's run (a `task` subagent's) takes down nothing.
+   */
+  const handleAgentStart = (context: SessionContext): void => {
+    const sessionID = context.sessionManager.getSessionId();
+    if (startTurnSession === sessionID) {
+      startTurnSession = undefined;
+      return;
+    }
+    if (claimWidget?.session !== sessionID) return;
+    claimWidget.clear();
+    claimWidget = undefined;
   };
 
   const isClaimedSession = (sessionID: string): boolean =>
@@ -488,6 +547,7 @@ export function createControllerSession(deps: {
   return {
     claim,
     handleSessionStart,
+    handleAgentStart,
     reclaimAfterSessionChange,
     startCommand,
     isClaimedSession,

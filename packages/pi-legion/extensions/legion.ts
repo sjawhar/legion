@@ -272,6 +272,8 @@ export default function legionExtension(pi: PiApi): void {
   pi.on("agent_start", async (_event, context) => {
     recreatedNotice = undefined;
     clearStartupTurn(context.sessionManager.getSessionId());
+    // The operator moved on: a session change's re-claim outcome left in its widget comes down.
+    controllerSession.handleAgentStart(context);
   });
   pi.on("session_shutdown", async (_event, context) => {
     clearStartupTurn(context.sessionManager.getSessionId());

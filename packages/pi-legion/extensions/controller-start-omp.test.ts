@@ -8,6 +8,7 @@ import {
   ROLE_TOPIC_PREFIX,
 } from "@legion/contracts";
 import {
+  type Block,
   type Cleanup,
   type Interactive,
   messageStream,
@@ -101,6 +102,8 @@ interface Turn {
   readonly request: Request;
   /** Answers it with one text block. */
   reply(text: string): void;
+  /** Answers it with `blocks` (a tool call among them). */
+  replyBlocks(blocks: readonly Block[]): void;
 }
 
 /** The fields of a transcript message entry the cases read; the rest is passed through. */
@@ -152,6 +155,8 @@ interface StandinHooks {
   readonly onNoticeInterest?: (sid: string) => void;
   /** Called with the session id each Envoy listener request names, as it arrives. */
   readonly onListener?: (sid: string) => void;
+  /** Oh My Pi's `keybindings.yml` for the session, written into its agent directory. */
+  readonly keybindings?: string;
 }
 
 /**
@@ -197,6 +202,7 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
       turns.push({
         request: { path: url.pathname, body },
         reply: (text) => answer.resolve(messageStream([{ type: "text", text }], `msg_${index}`)),
+        replyBlocks: (blocks) => answer.resolve(messageStream(blocks, `msg_${index}`)),
       });
       return new Response(await answer.promise, {
         headers: { "content-type": "text/event-stream" },
@@ -250,6 +256,9 @@ async function startController(hooks: StandinHooks = {}): Promise<ControllerSess
     for (const turn of turns) turn.reply("Case over.");
   });
   await writeStandinProfile(home, base);
+  if (hooks.keybindings !== undefined) {
+    await writeFile(path.join(home, ".omp", "agent", "keybindings.yml"), hooks.keybindings);
+  }
 
   const terminal = spawnInteractive(
     binary,
@@ -790,6 +799,76 @@ test.skipIf(skip)(
     expect(newUsers?.filter((entry) => entry.includes(START_MESSAGE_JSON))).toHaveLength(1);
     expect(replacedUsers).toEqual([]);
     expect(session.turns).toHaveLength(1);
+  },
+  120_000
+);
+
+// The same refused re-claim, with a `task` subagent's view focused when the `/new` starts. Oh My
+// Pi's `/new` then returns to the main session before it resets the transcript (command-
+// controller.ts `#runNewSessionFlow` in the pinned build), and that return's replay can yield to
+// the event loop (session-focus-controller.ts `#attach`), so a notice from a timer could land
+// before the reset. The re-claim's outcome goes to the extension widget, which neither the return
+// nor the reset takes down. A focused view refuses a typed `/new` (input-controller.ts: only
+// /btw, /export, /jobs and /usage run there), so the case binds the host's `app.session.new`,
+// which has no default key, to alt+n, whose handler runs the `/new` flow from any view. The
+// subagent's own request is held, so it is still running when its view is focused (alt+a opens
+// the agent hub, Enter focuses the selected agent).
+test.skipIf(skip)(
+  "the operator sees a refused re-claim after /new from a focused subagent view",
+  async () => {
+    const fixture: unknown = JSON.parse(
+      await readFile(
+        path.resolve(
+          import.meta.dir,
+          "../../contracts/fixtures/daemon-api/register-controller.json"
+        ),
+        "utf8"
+      )
+    );
+    let registrations = 0;
+    const session = await startController({
+      register: () => {
+        registrations += 1;
+        return registrations === 1
+          ? Response.json(fixture)
+          : Response.json({ error: "capability revoked" }, { status: 403 });
+      },
+      keybindings: "app.session.new: alt+n\n",
+    });
+    const start = await session.nextTurn("the start turn's model request");
+    start.replyBlocks([
+      {
+        type: "tool_use",
+        name: "task",
+        input: { agent: "task", task: "Reply with done.", solutionSpace: "Nothing to explore." },
+      },
+    ]);
+    // The start turn's request after the task tool's result carries the start message; the
+    // subagent's carries only its assignment, and stays unanswered.
+    for (;;) {
+      const turn = await session.nextTurn("the start turn's request after the task call");
+      if (JSON.stringify(turn.request.body.messages ?? []).includes(START_MESSAGE_JSON)) {
+        turn.reply("Start procedure done.");
+        break;
+      }
+    }
+    await session.shows("the start turn's reply", "Start procedure done.");
+
+    session.terminal.write("\x1ba");
+    await session.shows("the agent hub with the running subagent", "Agent Hub", "1 running");
+    session.terminal.write("\r");
+    await session.shows("the subagent's view focused", "Viewing agent", "Reply with done.");
+
+    session.terminal.write("\x1bn");
+    await session.until("the re-claim's registration", () =>
+      registrations >= 2 ? true : undefined
+    );
+    await session.shows(
+      "the re-claim's refusal on screen after /new from the focused view",
+      "New session started",
+      "re-claiming the controller for this session failed",
+      "capability revoked"
+    );
   },
   120_000
 );

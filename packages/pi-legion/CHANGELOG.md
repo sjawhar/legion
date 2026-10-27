@@ -887,8 +887,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   session change sends the start message the same way when it is still unsent, and the message
   still goes out once per process. A re-claim after a session change refused past its own
   registration warns that the session keeps that registration; one refused before it warns that
-  the session has no controller grant. A re-claim's notices are shown once Oh My Pi's `/new` has
-  reset the transcript, which it does after the session_switch handlers return, so the operator
+  the session has no controller grant. A re-claim that has to wait says so at once, while the
+  `/new` waits on it. Its refusal and that hand-over go to the host's extension widget
+  (`legion-controller-claim`), which Oh My Pi's `/new` leaves up when it resets the transcript
+  after the session_switch handlers return, a subagent view focused or not, until the session's
+  next run or a later claim that succeeds takes it down, so the operator
   sees them. The session's first `agent_start` and its `session_shutdown` clear the mark. The
   daemon-launched controller still claims at `session_start`, sends no start message of its own and
   sets the mark, with `sentAt` now, right before `claims/ready`, after which the daemon delivers its

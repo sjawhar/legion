@@ -73,6 +73,12 @@ export interface SessionContext {
   }) => Promise<{ readonly replyText: string }>;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
+    /**
+     * The host's extension widget (`ExtensionUIContext.setWidget`): `lines` shown above the editor
+     * under `key`, in place of what that key showed, until set again; `undefined` removes it.
+     * Oh My Pi keeps it across `/new`'s transcript reset. Absent where the host has none.
+     */
+    readonly setWidget?: (key: string, lines: string[] | undefined) => void;
   };
 }
 

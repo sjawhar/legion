@@ -61,6 +61,12 @@ const scheduledTimeouts: (() => void | Promise<void>)[] = [];
 async function runScheduledTimeouts(): Promise<void> {
   for (const callback of scheduledTimeouts.splice(0)) await callback();
 }
+/** Every `ui.setWidget` call a fixture context took, in order; cleared afterEach. */
+const widgetCalls: { readonly key: string; readonly lines: string[] | undefined }[] = [];
+/** A fixture context's `ui.setWidget`, which records each call in `widgetCalls`. */
+function recordWidget(key: string, lines: string[] | undefined): void {
+  widgetCalls.push({ key, lines });
+}
 // @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
 const { nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
@@ -255,6 +261,7 @@ afterEach(async () => {
   natsSubscribeObserver = undefined;
   natsConnectGates.clear();
   scheduledTimeouts.splice(0);
+  widgetCalls.splice(0);
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   delete (globalThis as Record<symbol, unknown>)[LEGACY_LEGION_LOADED_KEY];
   testAgentRoster().splice(0);
@@ -459,7 +466,7 @@ function sessionContext(
     setTimeout: (callback) => {
       scheduledTimeouts.push(callback);
     },
-    ui: { notify: () => undefined },
+    ui: { notify: () => undefined, setWidget: recordWidget },
   };
 }
 
@@ -2576,6 +2583,11 @@ const claimRefusedAfterSend = (error: string): CommandNotice => ({
   level: "warning",
 });
 
+/** The warning a session change's re-claim gives when the daemon refuses its registration with
+ * `403 capability revoked`: the session has no controller grant. */
+const REGISTRATION_REVOKED_WARNING =
+  "legion: re-claiming the controller for this session failed (POST /legion/v1/claims/register failed with 403: capability revoked). Until a re-claim succeeds, controller wakes and merges will not reach this session, and the `legion` tool's set_status and its other operations that call the daemon have no controller grant to mint and fail.";
+
 /** `logger.error` lines while `run` runs, kept off the test's output. */
 async function loggedErrors<T>(
   run: () => Promise<T>
@@ -3091,9 +3103,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // A re-claim after a session change registers the new session before it claims the role, so a
   // role claim refused there leaves that session registered: the warning says its `legion` tool
   // still mints, and the next navigation, though it changes nothing, claims again, since the last
-  // claim did not finish. The warning comes from the context's timer once the handler has
-  // returned: Oh My Pi's `/new` resets the transcript after its session_switch handlers return,
-  // which would wipe a notice shown while the handler ran.
+  // claim did not finish. The warning goes to the host's widget, which Oh My Pi's `/new` keeps
+  // when it resets the transcript after its session_switch handlers return (a notice shown while
+  // the handler ran would be wiped), and the next claim, which succeeds, takes it down.
   test("a re-claim after a session change refused at the role claim warns that the session keeps its registration, and the next navigation claims again", async () => {
     let refuseRole = false;
     const controller = await launchedController({
@@ -3107,7 +3119,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const notices: CommandNotice[] = [];
     const after: SessionContext = {
       ...controller.context("ses_controller_reclaim_after"),
-      ui: { notify: (message, level) => notices.push({ message, level }) },
+      ui: { notify: (message, level) => notices.push({ message, level }), setWidget: recordWidget },
     };
     const registrations = () =>
       controller.requests.filter((request) => request.path === "/legion/v1/claims/register");
@@ -3115,15 +3127,16 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     refuseRole = true;
     await controller.handlers.get("session_switch")?.({}, after);
 
-    expect(notices).toEqual([]);
-    await runScheduledTimeouts();
-    expect(notices).toEqual([
+    expect(widgetCalls).toEqual([
       {
-        message:
+        key: "legion-controller-claim",
+        lines: [
           "legion: re-claiming the controller for this session failed (role claims are closed). The session keeps its controller registration, so the `legion` tool's set_status still works, but until a re-claim succeeds controller wakes and merges will not reach this session.",
-        level: "warning",
+        ],
       },
     ]);
+    expect(notices).toEqual([]);
+    expect(scheduledTimeouts).toEqual([]);
     const legion = controller.tools.find((tool) => tool.name === "legion");
     if (legion === undefined) throw new Error("the controller's legion tool was not registered");
     await expect(
@@ -3133,11 +3146,11 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
     refuseRole = false;
     await controller.handlers.get("session_tree")?.({}, after);
-    await runScheduledTimeouts();
 
     expect(registrations()).toHaveLength(3);
     expect(controller.holder()).toBe("ses_controller_reclaim_after");
-    expect(notices).toHaveLength(1);
+    expect(notices).toEqual([]);
+    expect(widgetCalls.slice(1)).toEqual([{ key: "legion-controller-claim", lines: undefined }]);
     expect(controller.sentUserMessages).toEqual([
       "Legion controller start: follow skill://legion-controller",
     ]);
@@ -3146,7 +3159,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // A re-claim refused at its registration (a later `legion controller start` revoked the
   // capability) registered nothing, though the session id is still the one the last claim
   // registered: the warning says the session has no controller grant, not that it keeps a
-  // registration. It too comes from the context's timer once the handler has returned.
+  // registration. It too goes to the host's widget.
   test("a re-claim refused at its registration warns without saying the session keeps its registration, even for the session last registered", async () => {
     let refuseRegister = false;
     const controller = await launchedController({
@@ -3161,7 +3174,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     // The same session id on a moved transcript, so the navigation claims again.
     const moved: SessionContext = {
       ...controller.context("ses_controller_reclaim_revoked", "/tmp/moved/revoked.jsonl"),
-      ui: { notify: (message, level) => notices.push({ message, level }) },
+      ui: { notify: (message, level) => notices.push({ message, level }), setWidget: recordWidget },
     };
     const roleClaims = () =>
       controller.requests.filter((request) => request.path === "/v1/roles/set").length;
@@ -3170,16 +3183,77 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     refuseRegister = true;
     await controller.handlers.get("session_tree")?.({}, moved);
 
-    expect(notices).toEqual([]);
-    await runScheduledTimeouts();
-    expect(notices).toEqual([
+    expect(widgetCalls).toEqual([
       {
-        message:
-          "legion: re-claiming the controller for this session failed (POST /legion/v1/claims/register failed with 403: capability revoked). Until a re-claim succeeds, controller wakes and merges will not reach this session, and the `legion` tool's set_status and its other operations that call the daemon have no controller grant to mint and fail.",
-        level: "warning",
+        key: "legion-controller-claim",
+        lines: [REGISTRATION_REVOKED_WARNING],
       },
     ]);
+    expect(notices).toEqual([]);
+    expect(scheduledTimeouts).toEqual([]);
     expect(roleClaims()).toBe(roleClaimsBefore);
+  });
+
+  // The widget stays up until the operator moves on: the session's next run takes it down. The
+  // run of the start message that session's claim sent does not, since it may begin after the
+  // widget went up (here it does), and neither does a `task` subagent's run.
+  test("a re-claim's widget comes down at the session's next run, not at its start turn's run or a subagent's", async () => {
+    let refuseRegister = false;
+    const session = "ses_controller_widget_cleared";
+    const controller = await launchedController({
+      sessionId: session,
+      register: () =>
+        refuseRegister
+          ? Response.json({ error: "capability revoked" }, { status: 403 })
+          : undefined,
+    });
+    await startOperatorController(controller, controller.context(session));
+    refuseRegister = true;
+    await controller.handlers.get("session_tree")?.(
+      {},
+      controller.context(session, "/tmp/moved/widget-cleared.jsonl")
+    );
+    expect(widgetCalls).toEqual([
+      { key: "legion-controller-claim", lines: [REGISTRATION_REVOKED_WARNING] },
+    ]);
+
+    await controller.handlers.get("agent_start")?.({}, controller.context("ses_task_subagent"));
+    // The start message's own run, which the start command's claim sent before the widget went up.
+    await controller.handlers.get("agent_start")?.({}, controller.context(session));
+    expect(widgetCalls).toHaveLength(1);
+
+    await controller.handlers.get("agent_start")?.({}, controller.context(session));
+    expect(widgetCalls.slice(1)).toEqual([{ key: "legion-controller-claim", lines: undefined }]);
+    await controller.handlers.get("agent_start")?.({}, controller.context(session));
+    expect(widgetCalls).toHaveLength(2);
+  });
+
+  // A host whose context has no widget: the re-claim's outcome comes as a notice from the
+  // context's timer once the handler has returned, after an unfocused `/new`'s transcript reset.
+  test("a host with no widget shows the re-claim's refusal from its timer once the handler has returned", async () => {
+    let refuseRegister = false;
+    const session = "ses_controller_reclaim_no_widget";
+    const controller = await launchedController({
+      sessionId: session,
+      register: () =>
+        refuseRegister
+          ? Response.json({ error: "capability revoked" }, { status: 403 })
+          : undefined,
+    });
+    await startOperatorController(controller, controller.context(session));
+    const notices: CommandNotice[] = [];
+    const moved: SessionContext = {
+      ...controller.context(session, "/tmp/moved/no-widget.jsonl"),
+      ui: { notify: (message, level) => notices.push({ message, level }) },
+    };
+
+    refuseRegister = true;
+    await controller.handlers.get("session_tree")?.({}, moved);
+
+    expect(notices).toEqual([]);
+    await runScheduledTimeouts();
+    expect(notices).toEqual([{ message: REGISTRATION_REVOKED_WARNING, level: "warning" }]);
+    expect(widgetCalls).toEqual([]);
   });
 
   // The operator's own first turn started before the command ran: that run's one `agent_start` has
@@ -3200,15 +3274,79 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     expect(envoyPluginInterface().startupTurn).toBeUndefined();
   });
 
+  // A `/new` behind a start claim that hangs at its registration: Oh My Pi's `/new` waits on its
+  // session_switch handlers, so the re-claim queued behind that claim holds the `/new` until the
+  // claim ends. The re-claim says it is waiting at once, through the context's own `ui.notify`,
+  // while the registration is still held: nothing scheduled has run, nor need it.
+  test("a session switch behind a start claim held at its registration says at once that it waits for that claim", async () => {
+    const before = "ses_controller_before_hung";
+    const after = "ses_controller_after_hung";
+    let current = before;
+    const firstRegistration = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<void>();
+    let registrations = 0;
+    const controller = await launchedController({
+      sessionId: before,
+      register: async () => {
+        registrations += 1;
+        if (registrations === 1) {
+          firstRegistration.resolve();
+          await held.promise;
+        }
+        return undefined;
+      },
+    });
+    const base = controller.context(before);
+    const context: SessionContext = {
+      ...base,
+      sessionManager: { ...base.sessionManager, getSessionId: () => current },
+    };
+    await controller.handlers.get("session_start")?.({}, context);
+    const started = loggedErrors(() => runStartCommand(controller, context));
+    await firstRegistration.promise;
+
+    current = after;
+    const switchNotices: CommandNotice[] = [];
+    const waited = Promise.withResolvers<void>();
+    const switchContext: SessionContext = {
+      ...controller.context(after),
+      ui: {
+        notify: (message, level) => {
+          switchNotices.push({ message, level });
+          waited.resolve();
+        },
+        setWidget: recordWidget,
+      },
+    };
+    const switched = controller.handlers.get("session_switch")?.({}, switchContext);
+    await waited.promise;
+
+    expect(switchNotices).toEqual([
+      {
+        message: "legion: waiting for the controller claim already running to finish.",
+        level: "info",
+      },
+    ]);
+    expect(registrations).toBe(1);
+    expect(scheduledTimeouts).toEqual([]);
+    expect(widgetCalls).toEqual([]);
+
+    held.resolve();
+    await started;
+    await switched;
+    expect(registrations).toBe(2);
+  });
+
   // A `/new` while the command's claim runs: the claim registered the replaced session, and the
   // start message sent there would mark a session Envoy holds no role claim for, the role claim
   // for it would fail, and the warning would say the start message was sent. The claim stops at its
   // registration instead, sending nothing and saying nothing, and the session change's re-claim
   // registers the new session, sends the one start message there, marking it, and says the claim
-  // moved to the new session. It says so from the context's timer once its handler has returned:
-  // Oh My Pi's `/new` resets the transcript after its session_switch handlers return, which wipes
-  // a notice shown before (the start claim ends while the handler still waits behind it).
-  test("a /new during the start command's claim sends nothing from that claim, and the session change's re-claim registers the new session, sends the one start message there, and says so once its handler has returned", async () => {
+  // moved to the new session. It says so in the host's widget: Oh My Pi's `/new` resets the
+  // transcript after its session_switch handlers return, which wipes a notice shown before (the
+  // start claim ends while the handler still waits behind it), and keeps the widget. The start
+  // turn's own run leaves the widget up.
+  test("a /new during the start command's claim sends nothing from that claim, and the session change's re-claim registers the new session, sends the one start message there, and says so where the /new's reset leaves it", async () => {
     const before = "ses_controller_before_new";
     const after = "ses_controller_after_new";
     const message = "Legion controller start: follow skill://legion-controller";
@@ -3239,36 +3377,44 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
     const started = loggedErrors(() => runStartCommand(controller, context));
     await firstRegistration.promise;
-    // The `/new`: the session changes in place, and its session_switch re-claims.
+    // The `/new`: the session changes in place, and its session_switch re-claims. The start
+    // claim's registration is released only once the re-claim has said it waits behind it.
     current = after;
     const switchNotices: CommandNotice[] = [];
+    const waited = Promise.withResolvers<void>();
     const switchContext: SessionContext = {
       ...controller.context(after),
-      ui: { notify: (notice, level) => switchNotices.push({ message: notice, level }) },
+      ui: {
+        notify: (notice, level) => {
+          switchNotices.push({ message: notice, level });
+          waited.resolve();
+        },
+        setWidget: recordWidget,
+      },
     };
     const switched = controller.handlers.get("session_switch")?.({}, switchContext);
+    await waited.promise;
     held.resolve();
     const { value: notices, errors } = await started;
     await switched;
 
     expect(notices).toEqual([]);
     expect(errors).toEqual([]);
-    expect(switchNotices).toEqual([]);
-    await runScheduledTimeouts();
-    // The re-claim's wait notice is there only when the start claim was still in flight as the
-    // handler reached the re-claim, which the released registration races; the rest is fixed.
-    expect(
-      switchNotices.filter(
-        (notice) =>
-          notice.message !== "legion: waiting for the controller claim already running to finish."
-      )
-    ).toEqual([
+    expect(switchNotices).toEqual([
       {
-        message:
-          "legion: the session changed while the controller claim ran; the claim for the new session follows and sends the start message there.",
+        message: "legion: waiting for the controller claim already running to finish.",
         level: "info",
       },
     ]);
+    expect(widgetCalls).toEqual([
+      {
+        key: "legion-controller-claim",
+        lines: [
+          "legion: the session changed while the controller claim ran; the claim for the new session follows and sends the start message there.",
+        ],
+      },
+    ]);
+    expect(scheduledTimeouts).toEqual([]);
     // The start claim registered the replaced session and sent nothing; the re-claim registered
     // the new one, then sent the start message into it.
     expect(sentAtRegister).toEqual([
@@ -3284,6 +3430,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     expect(await runStartCommand(controller, controller.context(after))).toEqual([NOTHING_TO_DO]);
     await controller.handlers.get("agent_start")?.({}, controller.context(after));
     expect(envoyPluginInterface().startupTurn).toBeUndefined();
+    expect(widgetCalls).toHaveLength(1);
   });
 
   test("the session's first run clears the startup-turn mark; a run in another session (a task subagent) leaves it", async () => {
