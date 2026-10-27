@@ -2,64 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-367",
-  "completed": "2026-10-27T10:12:00Z",
+  "completed": "2026-10-27T10:58:00Z",
+  "round": "after review round 1 (implementer head 5ad3589f, code 69d138bb)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command on a fresh local harness built from head 129794f3 (code 4586fb1f): DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 bash packages/dispatch/e2e/acceptance/block-graph.sh gave exit 0, 67 PASS, 29 of them R12. Its negative control was reproduced independently: the head's driver against a server built at base b69f636f gave 36 PASS, then FAIL: R12 CORE-11 carries its facts ... Cannot iterate over null, exit 1."
+    "how": "Re-ran the implementer's commands on a fresh local harness built from head 5ad3589f. block-graph.sh with COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 exited 0 with 67 PASS (29 R12). With COMPONENT_SOURCE unset it exited 0 with 64 PASS and the one SKIP line. A comment author set to [1] read 500, and 200 once restored."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "R12/A11: each node kind's six facts, with changes by actors other than the maker; answers, resolutions and claims are no change; replies and ask-thread comments name their parent",
-      "surface": "Local Dispatch harness (bun run dispatch:local): the Go server built from this head on Postgres 17 + pgvector with every migration, the HTTP API as an agent session and as signed-in humans alice and bob",
-      "command": "bash /legion/scratch/tmp/t367/probe.sh (tester probe: issue, ask, comment, reply-to-reply, ask-thread comment, message reply, spec blocks, project document comment/ask, approval requests), output posted at https://github.com/sjawhar/legion/pull/2389#issuecomment-6439006979",
-      "observed": "18 OK, BAD count 0. Issue made by the session and changed by alice; a claim and an issue comment leave it. Ask reworded by alice: changed by alice; an answer and a resolution leave it. Comment edited by its author moves changed_at; bob's resolution leaves it. A reply to a reply has the thread head as parent. Edited block: made by the session at v1, changed by alice at v2. Unanchored project comment and ask at v1 stay at version 1 after v2, and a comment at v2 is at 2. An approval opened at v2 stays at 2 after v3 (row approval.version 3, written_version 2). Approval on an issue spec: version 2. Message reply: parent the message.",
-      "headSha": "129794f300ffaaafe46ee752acc3f551e5d8f9bc",
-      "negativeControl": "The same probe against a server built at base b69f636f (port 8787, database dispatch_base): BAD count 14 (no facts on any node); dispatch read --issue CORE-9 there printed 0 Node: lines"
+      "criterion": "Contract change census: block-graph.sh for every caller and every COMPONENT_SOURCE value (warn-first)",
+      "surface": "The driver packages/dispatch/e2e/acceptance/block-graph.sh, run as its callers run it, against the local harness built from this head",
+      "command": "DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE bash packages/dispatch/e2e/acceptance/block-graph.sh, run with: COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 | unset | empty | none (no source) | existing (source acme/t367-keep on OPS) | none (that source present) | bogus | fixture without FAKE_GITHUB_PORT",
+      "observed": "fixture: exit 0, 67 PASS. Unset: exit 0, 64 PASS and 'SKIP: R12 component: COMPONENT_SOURCE is unset, so no component node is read; …'. Empty: the same as unset. none with no source: exit 0, 65 PASS. existing: exit 0, 66 PASS, including 'component web carries its facts' and 'part of platform'. none with a source present: exit 1, 'FAIL: R12 component: this server has architecture sources, so run with COMPONENT_SOURCE=existing'; no open ask and no open issue from a block-graph-* session remained. Output: https://github.com/sjawhar/legion/pull/2389#issuecomment-6440018849",
+      "headSha": "5ad3589fb0fe10df4ea11792099670a5e58139ef",
+      "negativeControl": "COMPONENT_SOURCE=bogus: exit 2 with 'COMPONENT_SOURCE is bogus; want fixture, existing or none' and the usage. COMPONENT_SOURCE=fixture without FAKE_GITHUB_PORT: exit 2, 'required environment variable FAKE_GITHUB_PORT is unset'"
     },
     {
-      "criterion": "Component made_at/changed_at recorded across imports; made_by/changed_by empty; parent the parent component",
-      "surface": "Local harness with its fake GitHub as the architecture source (project OPS), HTTP API",
-      "command": "bash /legion/scratch/tmp/t367/components.sh",
-      "observed": "8 OK, BAD count 0. First import: made_at = changed_at. An unchanged re-import leaves both. A prose change moves changed_at and keeps made_at. A reparent moves changed_at again (parent OPS/api). A retired component reads 404 and its component_facts row is gone. A re-added component is made again (new made_at). Deleting the source removes every facts row of the project.",
-      "headSha": "129794f300ffaaafe46ee752acc3f551e5d8f9bc",
-      "negativeControl": "In a scratch copy, the importer's upsert was changed to replace made_at and changed_at on every import: TestComponentFactsRecordWhenAComponentWasMadeAndChanged fails ('component facts after A again' with fresh times)"
+      "criterion": "An actor column that does not decode fails the graph read; JSON null and SQL NULL read as nobody recorded",
+      "surface": "The harness HTTP API and the real dispatch CLI, with one row changed and then restored with psql",
+      "command": "K=CORE-21 bash /legion/scratch/tmp/t367/strict.sh",
+      "observed": "issues.created_by \"alice\", events.actor [] (latest issue.updated), comments.author [1] and artifact_versions.authors {object}: each read is 500, and 200 once the row is restored. A corrupt comment author also fails ?to=<spec>, where the comment is an anchored_to edge end. issues.created_by null: 200 with made_by [], and the CLI prints 'made by nobody recorded at …'. Each column decoded strictly here is already decoded strictly by an existing route (comments, events, artifacts and their versions, api/asks.go loadAskEdits), so production rows those routes read decode here too.",
+      "headSha": "5ad3589fb0fe10df4ea11792099670a5e58139ef",
+      "negativeControl": "In a scratch copy, storedActor and storedActors were changed to return [] on a decode error: TestAnActorThatDoesNotDecodeFailsTheRead fails ('a comment whose author is \"not an actor\": … status=200')"
     },
     {
-      "criterion": "Block facts: maker only when Dispatch knows the first version; a block ask belongs to the version that added its block, and an answer or resolution leaves it",
-      "surface": "Local harness HTTP API (decision blocks inserted with doc edits, answered by alice, resolved by the session)",
-      "command": "bash /legion/scratch/tmp/t367/blockask.sh",
-      "observed": "Block asks decide and second have parent_version 2 and 3 (the versions that added them). Their facts are identical before and after alice's answer and the session's resolution. Events: ask.opened, ask.answered, no ask.edited.",
-      "headSha": "129794f300ffaaafe46ee752acc3f551e5d8f9bc",
-      "negativeControl": "In a scratch copy, the F-1 rule was replaced by 'true as known' (F alone): TestABlockSeenFirstAtItsDocumentsFirstIndexingHasNoMaker fails (made_by [user:bob], want []). Separately, ask.answered was counted as a change: TestAChangeMovesOnlyTheChangedNode fails ('the answered ask' changed_by user:bob, want user:alice)"
+      "criterion": "A node with no recorded maker (made_at null) reads and prints as nobody recorded",
+      "surface": "The harness HTTP API and the real dispatch CLI (dispatch read --ref <block>)",
+      "command": "In strict.sh: dispatch doc-edit inserts a paragraph at v3; the document_indexed_versions row of v2 is deleted; ?to= and dispatch read --ref run; then the row is restored",
+      "observed": "With v2 unindexed: made_by [], made_at null, parent_version 3; CLI 'Node: block dispatch://CORE-21/spec#b-3473bcba-… · made by nobody recorded · changed by session tester-r2 at … · part of dispatch://CORE-21/spec (version 3)'. Restored: 'made by session tester-r2 at …'.",
+      "headSha": "5ad3589fb0fe10df4ea11792099670a5e58139ef",
+      "negativeControl": "The same read with the v2 row restored names the maker, so the empty maker comes from the missing index row and from nothing else"
     },
     {
-      "criterion": "written_version recorded at insert during the roll, and backfilled for older rows",
-      "surface": "Postgres 17: the harness database and a copy of the base build's database after base-build writes",
-      "command": "psql: insert a copied comment row without written_version and with written_version 1, inside a rolled-back transaction; createdb dispatch_roll template dispatch_base, then psql -1 -f 0129..0133 up.sql",
-      "observed": "The insert without written_version records 3 (the document's latest version). The insert naming 1 keeps 1. Backfill on the base build's data: comments at v1 and v2 give 1 and 2; the unanchored ask gives 1; an approval whose row says version 3 gives 2 (from its ask.opened event); a spec approval gives 2.",
-      "headSha": "129794f300ffaaafe46ee752acc3f551e5d8f9bc",
-      "negativeControl": "The base database before the migrations has no written_version column (0129 is absent at base: ls of its migrations shows no 0129 file)"
-    },
-    {
-      "criterion": "dispatch read prints the Node: line for the node it reads",
-      "surface": "The real dispatch CLI (packages/envoy-client/bin/dispatch.ts) against the head harness",
-      "command": "dispatch read --ref <message reply> | --ref <project document> | --project CORE --artifact <slug> | --issue CORE-22 | --issue CORE-23 --artifact spec | --ref <comment> | --ref <approval ask> | --ref <unanchored project ask> | --ref <spec>#b-<removed block>@v2",
-      "observed": "Each read printed one Node: line with the right maker, changer and part-of clause. Message reply: part of the root message. Project document: no part-of. Root issue: no part-of. Spec: part of dispatch://CORE-23. Edited comment: (version 1). Approval ask: (version 2). Project ask: (version 1). Removed pin: made by the v1 author, changed by the remover, (version 2).",
-      "headSha": "129794f300ffaaafe46ee752acc3f551e5d8f9bc",
-      "negativeControl": "dispatch read --issue CORE-9 against the base-build server printed no Node: line"
+      "criterion": "Round-1 behaviour unchanged after the loader changes (comment parent join, strict decoding, RemovedBlockFacts)",
+      "surface": "The harness HTTP API as a session and as alice and bob",
+      "command": "bash probe.sh; P=CORE bash components.sh; bash blockask.sh (in /legion/scratch/tmp/t367)",
+      "observed": "probe: 18 OK, BAD count 0 (reply to a reply, ask-thread comment, unanchored and approval versions, changes that must not count). Components: 8 OK, BAD count 0. Block asks: 2 OK, with parent_version 2 and 3.",
+      "headSha": "5ad3589fb0fe10df4ea11792099670a5e58139ef",
+      "negativeControl": "Round 1: the same probe against a server built at base b69f636f gave BAD count 14"
     }
   ],
-  "addedTests": [
-    {
-      "commit": "e39017e4",
-      "test": "TestALaterVersionMovesNoUnanchoredItemsVersion (packages/envoy/internal/dispatch/api/node_facts_version_test.go)",
-      "why": "A mutation made the ask and comment loaders read approval.version and the document's latest version in place of written_version. Every node-facts API test still passed under it, because each one writes its unanchored items and approval request at the document's latest version. The new test passes at this head. It fails under that mutation and under a mutation of the comment branch alone (cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test ./internal/dispatch/api/ -run TestALaterVersionMovesNoUnanchoredItemsVersion -count=1)."
-    }
-  ],
-  "ci": "At code head 4586fb1f, CI on GitHub showed build, changes, lint, test and typecheck queued (pr-title one cancelled, one queued) when this was written. It was read only, not rerun or waited for.",
-  "outsideFindings": [
-    "Not in this change, and also in main b69f636f: POST /api/v1/asks/{id}/answer without `selected` stores selected null (api/ask_transitions.go:97). After that, `dispatch read --ref <ask>` crashes on answer.selected.length (envoy-client dispatch-execute.ts:2161). Sent to the project controller over Envoy (message 4a4ee81a4e43822cd5938981ce3d2ffc)."
-  ]
+  "ci": "At code head 69d138bb, CI on GitHub showed build, changes, lint, test and typecheck queued (pr-title one cancelled, one queued) when this was written. It was read only, not rerun or waited for."
 }
