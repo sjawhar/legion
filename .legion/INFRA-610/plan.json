@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-610",
+  "completed": "2026-10-27T05:12:19Z",
+  "planDocument": "dispatch://INFRA-610/artifact/plan-md",
+  "summary": "Envoy's interest reaper deletes a dead session's interest row only when now - UpdatedAt > graceWindow + store.InterestRefreshAge (5 min); the listener passes store.InterestReapGrace (10 min), so 15 minutes since the row's last write. Heartbeat writes do not change. Design source: INFRA-514 plan, T4 step 1.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: handoff, proof objects and PR body rules (references/pr-body.md), push and identity checks, and the production check after the close (references/merge-gate.md, references/findings.md)",
+      "ce-simplify-code: the simplify pass pr-body.md requires before the final proofs",
+      "envoy: envoy_publish to INFRA-141's architect (T0) and, in the production check, to INFRA-514's architect and the controller",
+      "dispatch: attaching reap-probe.sh as an INFRA-610 artifact, and the dispatch ask a production-check fail needs",
+      "asd-ste100: every message to another agent or a teammate (deployment instructions)"
+    ],
+    "test": [
+      "legion-worker: test handoff, the six-field proof objects with a negative control, and re-running the implementer's named commands at the head",
+      "dispatch: reading the reap-probe-sh artifact the probe runs from (dispatch doc-read)"
+    ],
+    "review": [
+      "legion-worker: the reviewer's CI, Threads and E2E reads and the two thermonuclear reviews (references/merge-gate.md), and the PR body facts (references/pr-body.md)"
+    ]
+  },
+  "tasks": [
+    {"id": "T0", "do": "Before the first edit, one envoy_publish to notifications.role.legion-infra-infra-141-architect: PR #2167 (INFRA-141) also changes deleteInterest, the tests' Get calls and the cache-miss solutions document; name the Reap condition, the two new constants, TestReaperGraceWindow, TestReapKeepsRoleClaimsForSessionRecovery, TestE2E_InterestReaperCleanup and the grace sentence. Whichever merges second rebases. No reply awaited. PR #2228 touches no line this PR changes."},
+    {"id": "T1", "files": ["packages/envoy/internal/store/kv.go"], "do": "Add exported InterestReapGrace = 10*time.Minute and InterestRefreshAge = 5*time.Minute with doc comments (the refresh age: an unchanged row must be rewritten by this age; today every heartbeat rewrites it, INFRA-514's root PR will skip younger unchanged writes, so UpdatedAt may lag the last heartbeat by up to it). Reap deletes only when !isAlive(sid) && now-UpdatedAt > graceMs + InterestRefreshAge in ms (a row exactly 15:00 old is kept). Update Reap's and StartReaper's doc comments. Upsert, mergeForUpsert and locking unchanged."},
+    {"id": "T2", "files": ["packages/envoy/cmd/listener/main.go"], "do": "main.go:872 passes store.InterestReapGrace in place of 10*time.Minute."},
+    {"id": "T3", "files": ["packages/envoy/internal/store/kv_test.go", "packages/envoy/internal/integration/e2e_test.go"], "do": "Rewrite TestReaperGraceWindow (kv_test.go:1129, package store): fixed clock via reg.now; dead-session rows 14, 15 and 16 minutes old; Reap(dead, InterestReapGrace) returns 1; 14 and 15 stay, 16 is gone (ErrKeyNotFound). TestReapKeepsRoleClaimsForSessionRecovery (:963): row InterestRefreshAge+time.Minute old. TestE2E_InterestReaperCleanup (e2e_test.go:459): row store.InterestReapGrace+store.InterestRefreshAge+time.Minute old, grace store.InterestReapGrace. No other test changes (TestInterestReaper's 10 min and legacy_keys_test's 1 h rows still reap)."},
+    {"id": "T4", "files": ["docs/solutions/envoy/a-cache-miss-must-not-release-what-another-listener-wrote.md", "packages/envoy/AGENTS.md", ".dispatch/architecture/envoy-listener.md", "packages/envoy/CHANGELOG.md", "packages/pi-envoy/extensions/envoy.ts"], "do": "Solutions doc :47 '10 minutes' becomes '15 minutes (store.InterestReapGrace plus store.InterestRefreshAge)'. AGENTS.md: one bullet after :1964 with the rule, why the refresh allowance exists, and the release order (no build that skips unchanged interest writes while any listener on the bucket reaps at 10 minutes). Architecture doc: one sentence with the 15-minute rule naming store.InterestRefreshAge. CHANGELOG [Unreleased] ### Changed (:797): one entry naming store.InterestRefreshAge and what a person sees (dead sessions' subscriptions stay 5 more minutes: subscribers page and envoy_active_interests list them, matching messages log a failed delivery; a paused session still returns with them). envoy.ts:2091-2093 comment only: 15 minutes after the row's last write, and the role claim one session TTL after heartbeats stop."},
+    {"id": "T5", "do": "Throwaway reap-probe.sh under $TMPDIR (not committed): inputs listener URL and optional bearer token file; subscribes two portless sessions infra610-probe-<unix>-a and -b, 150 s apart, topic notifications.probe.infra-610 (no port, no self_subscribed, so only the interest row is written: cmd/listener/api.go:1083-1101); reads updated_at, measures clock skew from the subscribe response, polls GET /v1/interests/<id> every 5 s to the first 404 (503 or timeout is unknown); prints per id updated_at, skew, A = largest age answered 200, B = smallest age answered 404. Verdict per id: 'new rule' when A >= 14:50 and B <= 21:00 with no unknown gap over 10 s between them; 'old rule' when B <= 14:40; otherwise inconclusive, run once more. On interruption, DELETE /v1/interests/<id>. Attach it to INFRA-610 with dispatch artifact (reap-probe-sh) before the merge. Run it against a local head listener and a local base listener (NATS from internal/testnats/cmd/natsd, listener started as packages/envoy/scripts/e2e-local.sh starts it, ports other than 19020 and 14222)."},
+    {"id": "T6", "do": "Commit subject 'fix(envoy): the interest reaper keeps a dead session's subscriptions 15 minutes after their last write' (fix: cuts a legion-envoy patch tag; the envoy:<merge sha> image is built at the merge regardless). PR body has 'Dispatch: INFRA-610' and names the deployment repository only as 'the deployment repository' (check-private-names.sh, check-pr-text.sh). Simplify pass, then re-run the proofs at the resulting head."}
+  ],
+  "acceptance": [
+    {"id": "A1", "criterion": "A dead session's row 14 or 15 minutes old is kept and one 16 minutes old is deleted at the grace the listener passes.", "surface": "Go tests, packages/envoy", "command": "go test -race -count=1 -run 'Reap|Reaper' ./internal/store/ ./internal/integration/", "negativeControl": "At the head, remove '+ InterestRefreshAge' from Reap's condition uncommitted: TestReaperGraceWindow fails on the 14- and 15-minute rows; restore."},
+    {"id": "A2", "criterion": "The real listener binary applies the rule through its /v1 API.", "surface": "envoy-listener binary on a local NATS, driven by reap-probe.sh", "command": "reap-probe.sh <local head listener URL>; both ids 'new rule'", "negativeControl": "reap-probe.sh against the base binary's listener: both ids 'old rule'."},
+    {"id": "A3", "criterion": "Heartbeat writes are unchanged.", "surface": "diff and Go tests, packages/envoy", "command": "jj diff --from main@origin -- packages/envoy/internal/store/kv.go (only the constants, Reap and comments); go test -race -count=1 -run 'Upsert|Subscribe' ./internal/store/ ./cmd/listener/"},
+    {"id": "A4", "criterion": "Nothing else breaks.", "surface": "CI's envoy-go steps and lint", "command": "From packages/envoy: go list ./... | grep -v /integration | xargs go test; go test ./internal/integration/ -timeout 300s -count=1. From packages/contracts: bun run check:go. From the root: bunx biome check packages/pi-envoy/"},
+    {"id": "A5", "criterion": "The docs say what is now true.", "surface": "files", "command": "grep -n 'InterestRefreshAge' .dispatch/architecture/envoy-listener.md packages/envoy/AGENTS.md docs/solutions/envoy/a-cache-miss-must-not-release-what-another-listener-wrote.md packages/envoy/CHANGELOG.md finds each; grep -n 'ten-minute' packages/pi-envoy/extensions/envoy.ts finds nothing"},
+    {"id": "A6", "criterion": "After the merge the build carrying it runs on all three listeners, and the rule in force on the shared bucket is the new one.", "surface": "production listeners", "command": "the production check below"}
+  ],
+  "productionCheck": {
+    "listeners": "Three listeners reap the shared envoy_interests bucket: Dispatch's in-cluster listener (machine id dispatch), gke, and the NATS hub's own listener (envoy-hub). Evidence: the deployment repository's envoy/Pulumi.prod.yaml hosts list (dispatch, legion-daemon with no listener, gke; a person's device has no NATS user), and GET $ENVOY_URL/v1/interests/ machine ids on 2026-10-27: envoy-hub 367, gke 224.",
+    "carriesTheMerge": "The image's org.opencontainers.image.revision is the merge or a descendant: gh api repos/sjawhar/legion/compare/<merge>...<revision> --jq .status answers identical or ahead. Read a digest's revision with curl and jq: anonymous token from https://ghcr.io/token?scope=repository:sjawhar/legion/envoy:pull, the index at /v2/sjawhar/legion/envoy/manifests/<digest>, its amd64 manifest, that manifest's config blob, .config.Labels[\"org.opencontainers.image.revision\"] (run 2026-10-27: Dispatch listener sha256:033d1852... reads 35efd326).",
+    "steps": [
+      "Reach the deploy: in the first look, envoy_publish to notifications.role.legion-infra-infra-514-architect, expects_reply none (the spec says to route the pin moves through INFRA-514's architect to the controller): the merge commit, the envoy image digest built from it, the three pins in the deployment repository (dispatch/ envoyImage, envoy-cluster/ envoyImage, envoy/ listenerImage), and that moving the hub's listenerImage replaces the hub VM and stops NATS for the swap (packages/envoy/infra/docs/nats-hub.md:496-525).",
+      "Read each listener. Dispatch's: kubectl -n dispatch get pods (allowed), the dispatch-listener-* pod's envoy-listener imageID, then its revision; read the pod, not the pin (2026-10-27: pin built from 8f3d4237, running listener 35efd326). gke: kubectl -n envoy get pods -l app=envoy-listener the same way once INFRA-14's grant lands (forbidden today); meanwhile read the envoy-cluster pin on the deployment repository's main with gh api contents and record the running build as not readable. envoy-hub: a pod cannot read the VM; read the envoy/ listenerImage pin and record the running build as not readable.",
+      "Only once every listener reads as carrying the merge: run reap-probe.sh (from dispatch doc-read --issue INFRA-610 --artifact reap-probe-sh) against $ENVOY_URL with $ENVOY_TOKEN_FILE; about 25 minutes.",
+      "pass: every listener carries the merge and both probe ids read 'new rule'; write the PR's Production: line and one PR comment (each listener's digest and revision or 'pin only', the probe table, merge commit, wake). pending: a listener lacks the merge; Production: stays 'pending deploy of <merge sha>'. fail: all carry the merge but a probe id reads 'old rule'; dispatch ask on the controller's report issue per findings.md, its reference to the controller topic, named in the Production: line.",
+      "Then envoy_publish the verdict and the Production: line to INFRA-514's architect, expects_reply none: INFRA-514's tester gates its review on this record."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The spec names three listeners but the repository describes other listener runtimes (on-prem fleet, Fargate); the root's write-skip is safe only if every listener on the shared bucket reaps at 15 minutes.", "answer": "Measured: the hub's NATS hosts are dispatch, legion-daemon (no listener) and gke, a person's device has no NATS user, and the bucket's rows carry only envoy-hub and gke machine ids. Three listeners reap it. The production probe also measures the rule in force across every listener on the bucket."},
+      {"finding": "From a worker pod the envoy-hub build cannot be read, the gke build is forbidden until INFRA-14's grant, and a pin read is not a running-build read; nothing wakes the check after a pin move.", "answer": "Dispatch's listener is read from its running pod; gke and envoy-hub from their pins plus the probe, recorded as 'pin only'. Recorded as spec departure 2 for the architect to decide, and the missing wake is a named risk for whoever moves the pins."},
+      {"finding": "The draft probe (present at 14:45, absent at 21:00) cannot tell the old rule from the new one.", "answer": "Replaced by polling every 5 s to the first 404 with A >= 14:50 and B <= 21:00 for 'new rule', B <= 14:40 for 'old rule', two ids 150 s apart so no single old-rule tick can pass both, 503 counted as unknown, skew measured, cleanup on interruption."},
+      {"finding": "'Records it on this issue' is unreachable after the merge closes the issue (ISSUE_CLOSED).", "answer": "Record on the PR's Production: line and one comment, and send it to INFRA-514's architect; spec departure 1."},
+      {"finding": "Asking INFRA-514's architect after the merge conflicts with merge-gate.md's 'the architect is asked nothing after it'.", "answer": "The spec itself says to route the pin moves through INFRA-514's architect, and the deployment instructions say to do what the issue says; the message is a notice with expects_reply none, naming the digest that exists only after the merge."},
+      {"finding": "Moving the envoy-hub pin replaces the hub VM and stops NATS.", "answer": "The deploy notice names the outage and the drain window (nats-hub.md:496-525); the pin-to-listener mapping is written down (dispatch/ envoyImage, envoy-cluster/ envoyImage, envoy/ listenerImage)."},
+      {"finding": "Where the +5 minutes belongs, and the 10-minute grace at main.go:872 is reached by no test.", "answer": "Inside Reap, beside InterestRefreshAge, as INFRA-514's plan designs; plus exported store.InterestReapGrace that main.go and the test both use."},
+      {"finding": "TestReapKeepsRoleClaimsForSessionRecovery and TestE2E_InterestReaperCleanup fail under the new rule; PR #2167 edits the same lines.", "answer": "T3 changes both rows' ages; T0 tells INFRA-141's architect, and whichever merges second rebases."},
+      {"finding": "packages/pi-envoy/extensions/envoy.ts:2091-2093 comment names the ten-minute grace (and wrongly says the role claim is reaped with the row).", "answer": "T4 corrects the comment; A5 checks it."},
+      {"finding": "Acceptance lines no machine can check: 'carries', 'says what is now true', 'heartbeat writes unchanged'.", "answer": "'Carries' is the GitHub compare status identical or ahead; A5 and A3 name greps, a diff and tests."},
+      {"finding": "Five more minutes of retention changes the subscribers page, the envoy_active_interests gauge and failed-delivery logs for dead sessions; delete markers, role claims unchanged.", "answer": "The CHANGELOG entry says so (T4); no code change needed."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "The production check reads each listener's running build and records it on this issue.",
+      "plan": "The record goes on the pull request (its Production: line and one comment) and to INFRA-514's architect, because the merge closes INFRA-610 and Dispatch refuses writes on a closed issue.",
+      "evidence": "skill legion-worker references/merge-gate.md, 'The record lives on the pull request alone' (ISSUE_CLOSED).",
+      "outcome": {"kind": "changed", "acceptance": ["After merge: the production check records each listener's build on the pull request and sends it to INFRA-514's architect, not on this issue."]}
+    },
+    {
+      "spec": "The production check reads each listener's running build.",
+      "plan": "Dispatch's listener is read from its running pod. The gke listener (namespace envoy forbidden to the worker service account until INFRA-14's grant merges) and the envoy-hub listener (a container on the hub VM) are read from their pins on the deployment repository's main, recorded as 'pin only', and the probe shows the rule in force across every listener on the bucket. The architect decides whether pin plus probe meets INFRA-514's review gate.",
+      "evidence": "kubectl -n envoy get pods: Forbidden for system:serviceaccount:legion:legion-worker (2026-10-27); the deployment repository's Actions API answers 403 to the pod; the hub listener runs as docker on a VM (packages/envoy/infra/docs/nats-hub.md:288).",
+      "outcome": {"kind": "changed", "acceptance": ["After merge: the release that carries it runs on all three listeners, read from the running pod where a worker can (Dispatch's listener) and from the pin plus the probe elsewhere."]}
+    }
+  ],
+  "risks": [
+    "A pending production check may not wake after the gke and envoy-hub pins move: for sjawhar/legion it wakes on Dispatch's server.started naming a build with the merge, a Legion daemon boot on such a build, or the 336-hour bound, and Dispatch's app runs an image of its own today. INFRA-514's review waits on this check.",
+    "Mechanical merge conflict with PR #2167 in Reap and the tests' Get calls (T0).",
+    "Moving the hub's pin stops NATS for the VM swap; the deploy owner picks the window."
+  ]
+}
