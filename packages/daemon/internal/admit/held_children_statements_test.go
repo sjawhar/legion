@@ -96,11 +96,13 @@ func TestAFactJudgesHeldChildrenWithAsManyStatementsWhateverNumberOfTreesHoldOne
 
 // One judgement covers several trees, and each tree's own state decides its own children: the
 // child of a live tree whose design gate is open starts, and the child of a live tree whose gate
-// is closed waits for that gate, in the very same fact.
+// is closed waits for that gate, in the very same fact. The closed tree sorts first and holds the
+// first slot, so a judgement that stops at the first tree or child it does not start leaves the
+// open tree's child behind and fails here.
 func TestOneFactStartsTheChildOfTheTreeWhoseGateIsOpenAndLeavesTheOtherHeld(t *testing.T) {
 	pool := migratedPool(t)
-	open, closed := "LEGION-300", "LEGION-400"
-	for _, root := range []string{open, closed} {
+	closed, open := "LEGION-300", "LEGION-400"
+	for _, root := range []string{closed, open} {
 		seedSlotted(t, pool, root, root)
 		child := root + "-child"
 		putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
