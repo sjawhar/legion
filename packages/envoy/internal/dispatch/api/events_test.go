@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -186,21 +185,8 @@ func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
 	checkServed("HTTP", decodeBody[[]servedEvent](t, response))
 
 	server := httptest.NewServer(handler)
-	defer server.Close()
-	request, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/events?since=%d", server.URL, firstID-1), nil)
-	if err != nil {
-		t.Fatalf("construct SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open SSE stream: %v", err)
-	}
-	defer stream.Body.Close()
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
-	}
-	scanner := bufio.NewScanner(stream.Body)
+	t.Cleanup(server.Close)
+	scanner := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", server.URL, firstID-1))
 	frames := make([]servedEvent, 0, len(stored))
 	for read := 0; len(frames) < len(stored); read++ {
 		if read == len(stored)+20 {

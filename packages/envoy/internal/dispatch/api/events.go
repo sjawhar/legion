@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 const maxSSEReplay = 1000
@@ -119,14 +120,25 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// fetched a head through a separate request and then opened this connection with
 	// since=<that head> would lose an event committing between the two, or a lower id still open
 	// when it read the head, excluded from catch-up (id <= since) and dropped by the live loop.
-	subscription, cancel, published, err := s.eventRelay.subscribe(r.Context())
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	defer cancel()
-	// A cold client asked for no backlog and starts at published, the handover this connection
-	// holds. A resuming connection reads the log's newest id, which costs it one extra round trip.
+	//
+	// subscribe can wait a long time. The first subscription on a process starts the relay, whose
+	// first cursor waits for a horizon proven after the call (awaitEventCursor), and so for every
+	// transaction holding a transaction id anywhere on the Postgres instance, another database's
+	// included; every other connection waits for that start. So the subscription is taken on a
+	// goroutine (awaitEventSubscription), and until it arrives the handler still answers the
+	// request's end, the server's shutdown and its heartbeat, on which it resolves the caller
+	// again. A subscription that fails ends the stream and sends the client to its reconnect.
+	//
+	// The stream opens (its headers and ": open") before the subscription only for a connection
+	// that resumes from an id of the log as it stands: its start point is the since it brought,
+	// which needs nothing from the subscription, so it opens at once and heartbeats while the
+	// relay starts. A cold connection, or one whose since the clamp below replaces, starts at
+	// published instead, and the browser refreshes every query when a reconnect opens
+	// (web/src/api/sse.ts): opened before published is fixed, that refresh could read before an
+	// event that then lands at or below published, sent neither by the refresh nor by the stream.
+	// So such a connection opens once its subscription has arrived, which is at once whenever the
+	// relay is already running.
+	//
 	// The event log can be reset under a reader (`truncate events restart identity`, the browser
 	// suite's e2e/seed.ts): the ids restart at 1 and the relay, which notices, ends every open
 	// subscription and so sends the browser through its reconnect. The browser only ever raises
@@ -134,32 +146,119 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// the new log's newest id. Unclamped, the live loop below would then drop every event of the
 	// new log for ever, on a connection that stays open and heartbeats: a reader silent for good,
 	// with nothing logged and nothing failed. A since above the newest id can only be an id of a
-	// log this one replaced, so it starts at published too.
+	// log this one replaced, so it starts at published too. The newest id is read once here, to
+	// choose when the stream opens, and again once the subscription has arrived, which is the
+	// read the clamp goes by: a reset while the subscription waited (the refill's open writes
+	// hold back the relay's new cursor) leaves a since this first read did not see as stale.
+	startsAtPublished := !sinceProvided
 	if sinceProvided {
-		var head int64
-		if err := s.deps.Store.Pool.QueryRow(r.Context(), `select coalesce(max(id), 0) from events`).Scan(&head); err != nil {
+		head, err := s.eventLogHead(r.Context())
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if since > head {
-			since = published
-		}
-	} else {
-		since = published
+		startsAtPublished = since > head
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	// One comment line with the headers, so the stream opens in every browser now. Firefox (the
-	// browser suite's, e2e/keyboard-session-pickers.e2e.ts) resolved its fetch of this stream only
-	// once a body byte arrived, and a connection with no backlog and no new event sends none until
-	// the first heartbeat: until then the page held its "Reconnecting…" state and skipped the
-	// refresh a reconnect owes every query, so what committed while it was away stayed unshown.
-	if _, err := fmt.Fprint(w, ": open\n\n"); err != nil {
+	// The subscription's reads run beside this handler's heartbeat, which resolves the caller on
+	// the shared pool too, so they take a hold mark of their own (store.ForConcurrentRead). Its
+	// context ends with the handler, so a subscribe still waiting then returns, and one that
+	// arrives after the handler has gone is cancelled (awaitEventSubscription).
+	reads, err := store.ForConcurrentRead(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
 		return
 	}
-	flusher.Flush()
+	opened := false
+	openStream := func() bool {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+		opened = true
+		// One comment line with the headers, so the stream opens in every browser now. Firefox
+		// (the browser suite's, e2e/keyboard-session-pickers.e2e.ts) resolved its fetch of this
+		// stream only once a body byte arrived, and a connection with no backlog and no new event
+		// sends none until the first heartbeat: until then the page held its "Reconnecting…"
+		// state and skipped the refresh a reconnect owes every query, so what committed while it
+		// was away stayed unshown.
+		if _, err := fmt.Fprint(w, ": open\n\n"); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !startsAtPublished && !openStream() {
+		return
+	}
+	subscribing, stopSubscribing := context.WithCancel(reads)
+	defer stopSubscribing()
+	ready := s.awaitEventSubscription(subscribing)
+
+	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
+	defer heartbeat.Stop()
+	shutdown := s.lifetime().Done()
+	// beat answers one heartbeat: the caller is resolved again on every one, so a stream outlives
+	// its session (a logout, a membership the sign-in issuer no longer confirms) by one beat at
+	// most, and a connection that has not opened yet is refused rather than opened later. false
+	// ends the stream.
+	beat := func() bool {
+		if _, _, err := s.optionalActor(heartbeatRequest(r)); err != nil {
+			if !opened {
+				s.writeHandlerError(w, err)
+			}
+			return false
+		}
+		if !opened {
+			return true
+		}
+		if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	var subscribed eventSubscription
+	for waiting := true; waiting; {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-shutdown:
+			// The server is shutting down, and a stream never goes idle on its own, so
+			// http.Server.Shutdown would wait its whole budget for it. Ending it sends the client
+			// to its reconnect, which resumes from the last id it saw on whichever server is up.
+			return
+		case subscribed = <-ready:
+			waiting = false
+		case <-heartbeat.C:
+			if !beat() {
+				return
+			}
+		}
+	}
+	if subscribed.err != nil {
+		if !opened {
+			s.writeHandlerError(w, subscribed.err)
+		}
+		return
+	}
+	defer subscribed.cancel()
+	subscription, published := subscribed.events, subscribed.published
+	// A cold client asked for no backlog and starts at published, the handover this connection
+	// holds. A resuming one is clamped against the log's newest id as it stands now, after its
+	// subscription began, which costs it one more round trip.
+	if !startsAtPublished {
+		head, err := s.eventLogHead(r.Context())
+		if err != nil {
+			return
+		}
+		startsAtPublished = since > head
+	}
+	if startsAtPublished {
+		since = published
+	}
+	if !opened && !openStream() {
+		return
+	}
 	// Catch-up replays (since, published] from the log. Every event in it is final, since
 	// published is at or below the safe horizon, so a page read now holds the rows any later read
 	// would, and moving cursor to a page's last row skips nothing. It pages through the whole
@@ -199,17 +298,12 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// back on a new connection, which clamps its since against the log as it then stands.
 	floor := max(since, published)
 
-	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
-	defer heartbeat.Stop()
-	shutdown := s.lifetime().Done()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-shutdown:
-			// The server is shutting down, and a stream never goes idle on its own, so
-			// http.Server.Shutdown would wait its whole budget for it. Ending it sends the client
-			// to its reconnect, which resumes from the last id it saw on whichever server is up.
+			// As above: a shutdown ends the stream and sends the client to its reconnect.
 			return
 		case event, open := <-subscription:
 			if !open {
@@ -223,17 +317,51 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		case <-heartbeat.C:
-			// The caller is resolved again on every heartbeat, so a stream outlives its session
-			// (a logout, a membership the sign-in issuer no longer confirms) by one beat at most.
-			if _, _, err := s.optionalActor(heartbeatRequest(r)); err != nil {
+			if !beat() {
 				return
 			}
-			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
-				return
-			}
-			flusher.Flush()
 		}
 	}
+}
+
+// eventSubscription is what subscribe answered, delivered by awaitEventSubscription: the live
+// feed, the cancel that ends it, the relay's published cursor when it began, or the error that
+// left the connection without one.
+type eventSubscription struct {
+	events    <-chan model.Event
+	cancel    func()
+	published int64
+	err       error
+}
+
+// awaitEventSubscription subscribes to the relay on a goroutine of its own and delivers the
+// result on the returned channel, so a handler can wait for it beside its heartbeat, its
+// request's end and the server's shutdown. ctx bounds the subscribe and is the receiver's to end
+// once it stops waiting: a subscribe still running returns with ctx's error, and a subscription
+// nobody receives is cancelled, so no stream is left subscribed with no reader.
+func (s *server) awaitEventSubscription(ctx context.Context) <-chan eventSubscription {
+	ready := make(chan eventSubscription)
+	go func() {
+		var subscribed eventSubscription
+		subscribed.events, subscribed.cancel, subscribed.published, subscribed.err = s.eventRelay.subscribe(ctx)
+		select {
+		case ready <- subscribed:
+		case <-ctx.Done():
+			if subscribed.err == nil {
+				subscribed.cancel()
+			}
+		}
+	}()
+	return ready
+}
+
+// eventLogHead is the event log's newest committed id, 0 for an empty log. It is no cursor: ids
+// are not commit order, so a lower id can still be open below it. streamEvents only compares a
+// client's since against it, to tell an id of this log from one of a log it replaced.
+func (s *server) eventLogHead(ctx context.Context) (int64, error) {
+	var head int64
+	err := s.deps.Store.Pool.QueryRow(ctx, `select coalesce(max(id), 0) from events`).Scan(&head)
+	return head, err
 }
 
 // disconnectAllStreams closes every currently open SSE connection, forcing each

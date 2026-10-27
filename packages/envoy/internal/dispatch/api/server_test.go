@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1264,34 +1265,8 @@ func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
 	}
 
 	httpServer := httptest.NewServer(handler)
-	defer httpServer.Close()
-	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=0", nil)
-	if err != nil {
-		t.Fatalf("construct SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	responseChannel := make(chan *http.Response, 1)
-	errorChannel := make(chan error, 1)
-	go func() {
-		response, err := http.DefaultClient.Do(request)
-		if err != nil {
-			errorChannel <- err
-			return
-		}
-		responseChannel <- response
-	}()
-	var stream *http.Response
-	select {
-	case err := <-errorChannel:
-		t.Fatalf("connect SSE: %v", err)
-	case stream = <-responseChannel:
-	case <-time.After(2 * time.Second):
-		t.Fatal("SSE endpoint did not establish a stream")
-	}
-	defer stream.Body.Close()
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("SSE status: got %d, want 200", stream.StatusCode)
-	}
+	t.Cleanup(httpServer.Close)
+	stream := openSSEResponse(t, sseRequest(t, httpServer.URL+"/api/v1/events?since=0", func(*http.Request) {}), 2*time.Second)
 	scanner := bufio.NewScanner(stream.Body)
 	projectReplay := readSSEFrame(t, scanner)
 	if projectReplay[1] != "event: project.created" {
@@ -1313,32 +1288,16 @@ func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
 		t.Fatalf("live SSE frame: %#v", live)
 	}
 	stream.Body.Close()
-	resumeRequest, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events", nil)
-	if err != nil {
-		t.Fatalf("construct resumed SSE request: %v", err)
-	}
-	resumeRequest.Header.Set("Authorization", "Bearer agent-token")
-	resumeRequest.Header.Set("Last-Event-ID", "2")
-	resumed, err := http.DefaultClient.Do(resumeRequest)
-	if err != nil {
-		t.Fatalf("resume SSE: %v", err)
-	}
-	defer resumed.Body.Close()
+	resumed := openSSEResponse(t, sseRequest(t, httpServer.URL+"/api/v1/events", func(request *http.Request) {
+		request.Header.Set("Last-Event-ID", "2")
+	}), sseStreamDeadline)
 	resumedFrame := readSSEFrame(t, bufio.NewScanner(resumed.Body))
 	if resumedFrame[0] != "id: 3" || resumedFrame[1] != "event: issue.updated" {
 		t.Fatalf("Last-Event-ID replay: %#v", resumedFrame)
 	}
-	staleQueryRequest, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=0", nil)
-	if err != nil {
-		t.Fatalf("construct stale-query SSE request: %v", err)
-	}
-	staleQueryRequest.Header.Set("Authorization", "Bearer agent-token")
-	staleQueryRequest.Header.Set("Last-Event-ID", "2")
-	staleQuery, err := http.DefaultClient.Do(staleQueryRequest)
-	if err != nil {
-		t.Fatalf("resume stale-query SSE: %v", err)
-	}
-	defer staleQuery.Body.Close()
+	staleQuery := openSSEResponse(t, sseRequest(t, httpServer.URL+"/api/v1/events?since=0", func(request *http.Request) {
+		request.Header.Set("Last-Event-ID", "2")
+	}), sseStreamDeadline)
 	staleQueryFrame := readSSEFrame(t, bufio.NewScanner(staleQuery.Body))
 	if staleQueryFrame[0] != "id: 3" || staleQueryFrame[1] != "event: issue.updated" {
 		t.Fatalf("Last-Event-ID with stale since query replay: %#v", staleQueryFrame)
@@ -2023,18 +1982,8 @@ func TestSSEPagesThroughCappedBacklogWithoutDisconnecting(t *testing.T) {
 	}
 
 	httpServer := httptest.NewServer(handler)
-	defer httpServer.Close()
-	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=1", nil)
-	if err != nil {
-		t.Fatalf("construct capped SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open capped SSE stream: %v", err)
-	}
-	defer stream.Body.Close()
-	scanner := bufio.NewScanner(stream.Body)
+	t.Cleanup(httpServer.Close)
+	scanner := openSSEStream(t, httpServer.URL+"/api/v1/events?since=1")
 	// The 1005 seeded events plus the issue creation exceed one capped page
 	// (maxSSEReplay=1000); a single connection pages through all of them without
 	// ever disconnecting: a capped page that ended the stream and forced a client
@@ -2095,21 +2044,8 @@ func TestDisconnectAllStreamsClosesOpenConnections(t *testing.T) {
 	}](t, created)
 
 	httpServer := httptest.NewServer(handler)
-	defer httpServer.Close()
-	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=0", nil)
-	if err != nil {
-		t.Fatalf("construct SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open SSE stream: %v", err)
-	}
-	defer stream.Body.Close()
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("SSE status: got %d, want 200", stream.StatusCode)
-	}
-	scanner := bufio.NewScanner(stream.Body)
+	t.Cleanup(httpServer.Close)
+	scanner := openSSEStream(t, httpServer.URL+"/api/v1/events?since=0")
 	projectReplay := readSSEFrame(t, scanner)
 	if projectReplay[1] != "event: project.created" {
 		t.Fatalf("project replayed SSE frame: %#v", projectReplay)
@@ -2140,24 +2076,16 @@ func TestDisconnectAllStreamsClosesOpenConnections(t *testing.T) {
 
 	// A client reconnecting with Last-Event-ID after this forced close (exactly what
 	// useEventStream's watchdog/error path does) resumes from lastId, not from 0.
-	resumeRequest, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events", nil)
-	if err != nil {
-		t.Fatalf("construct resumed SSE request: %v", err)
-	}
-	resumeRequest.Header.Set("Authorization", "Bearer agent-token")
-	resumeRequest.Header.Set("Last-Event-ID", "2")
 	updated := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
 		"title": "Renamed after disconnect",
 	}, "alice")
 	if updated.Code != http.StatusOK {
 		t.Fatalf("update issue after disconnect: status=%d body=%s", updated.Code, updated.Body.String())
 	}
-	resumed, err := http.DefaultClient.Do(resumeRequest)
-	if err != nil {
-		t.Fatalf("resume SSE: %v", err)
-	}
-	defer resumed.Body.Close()
-	resumedFrame := readSSEFrame(t, bufio.NewScanner(resumed.Body))
+	resumed := openSSEStreamWith(t, httpServer.URL+"/api/v1/events", func(request *http.Request) {
+		request.Header.Set("Last-Event-ID", "2")
+	})
+	resumedFrame := readSSEFrame(t, resumed)
 	if resumedFrame[0] != "id: 3" || resumedFrame[1] != "event: issue.updated" {
 		t.Fatalf("resumed replay after disconnect-all: %#v", resumedFrame)
 	}
@@ -2236,7 +2164,7 @@ func TestSSEResumeCursorOrdersConcurrentEventCommits(t *testing.T) {
 	t.Cleanup(httpServer.Close)
 	// This connection starts the relay before A opens. A relay starting while A is open takes its
 	// first cursor under a horizon proven after the call, which waits for A to end, and the
-	// resuming connection below would not open until A committed.
+	// resuming connection below would be sent nothing while A is open for that reason alone.
 	openSSEStream(t, httpServer.URL+"/api/v1/events")
 
 	low, high, commitLow := appendOutOfOrder(t, database, broker, issue.Key, other.Key)
@@ -2318,10 +2246,12 @@ func eventHead(t *testing.T, database *store.Store) int64 {
 const sseStreamDeadline = 30 * time.Second
 
 // openSSEStream opens one event stream as an agent bearer, closed when the test ends, and answers
-// a scanner over its frames. It returns once the handler has answered 200, which it does only
-// after it has subscribed and resolved its since. Its caller closes the httptest server with
-// t.Cleanup rather than defer: Close waits for the handlers still running, and this body closes
-// with the cleanups, after every defer.
+// a scanner over its frames. It returns once the handler has answered 200: at once for a
+// connection that resumes from an id of the log as it stands, and only after the handler has
+// subscribed for a cold one (or one whose since its handler clamps), whose start point the
+// subscription fixes. Its caller closes the httptest server with t.Cleanup rather than defer:
+// Close waits for the handlers still running, and this body closes with the cleanups, after every
+// defer.
 func openSSEStream(t *testing.T, url string) *bufio.Scanner {
 	t.Helper()
 	return openSSEStreamWith(t, url, func(*http.Request) {})
@@ -2330,20 +2260,52 @@ func openSSEStream(t *testing.T, url string) *bufio.Scanner {
 // openSSEStreamWith is openSSEStream for a request prepare finishes, with a Last-Event-ID say.
 func openSSEStreamWith(t *testing.T, url string, prepare func(*http.Request)) *bufio.Scanner {
 	t.Helper()
-	request := sseRequest(t, url, prepare)
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open SSE stream: %v", err)
-	}
-	t.Cleanup(func() { stream.Body.Close() })
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
-	}
-	return bufio.NewScanner(stream.Body)
+	return bufio.NewScanner(openSSEResponse(t, sseRequest(t, url, prepare), sseStreamDeadline).Body)
 }
 
-// sseRequest is the request openSSEStreamWith sends, under the sseStreamDeadline, for a test that
-// has to send it from a goroutine of its own.
+// openSSEResponse sends request and answers its 200 response, whose body closes when the test
+// ends. It fails the test when no response arrives within within, or one that is not 200 does, and
+// it cancels the request and closes the body before it fails: a handler left serving a request
+// nobody reads holds httptest.Server.Close, and with it the whole package, until that request's
+// own deadline or the package's timeout.
+func openSSEResponse(t *testing.T, request *http.Request, within time.Duration) *http.Response {
+	t.Helper()
+	ctx, cancel := context.WithCancel(request.Context())
+	request = request.WithContext(ctx)
+	answered := make(chan *http.Response, 1)
+	failed := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			failed <- err
+			return
+		}
+		answered <- response
+	}()
+	var response *http.Response
+	select {
+	case response = <-answered:
+	case err := <-failed:
+		cancel()
+		t.Fatalf("open SSE stream: %v", err)
+	case <-time.After(within):
+		cancel()
+		t.Fatalf("the SSE endpoint did not establish a stream within %s", within)
+	}
+	t.Cleanup(func() {
+		response.Body.Close()
+		cancel()
+	})
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		cancel()
+		t.Fatalf("SSE status = %d, want 200", response.StatusCode)
+	}
+	return response
+}
+
+// sseRequest is the request openSSEStreamWith sends, as an agent bearer and under the
+// sseStreamDeadline, for a test that has to send it from a goroutine of its own.
 func sseRequest(t *testing.T, url string, prepare func(*http.Request)) *http.Request {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), sseStreamDeadline)
@@ -2355,6 +2317,45 @@ func sseRequest(t *testing.T, url string, prepare func(*http.Request)) *http.Req
 	request.Header.Set("Authorization", "Bearer agent-token")
 	prepare(request)
 	return request
+}
+
+// sseLines reads body's lines, comments included, on a goroutine of its own, so a test can wait
+// for an ": open" or a heartbeat with a deadline. The channel closes when the stream ends.
+func sseLines(t *testing.T, body io.Reader) <-chan string {
+	lines := make(chan string)
+	ended := t.Context().Done()
+	go func() {
+		defer close(lines)
+		scanner := bufio.NewScanner(body)
+		for scanner.Scan() {
+			select {
+			case lines <- scanner.Text():
+			case <-ended:
+				return
+			}
+		}
+	}()
+	return lines
+}
+
+// awaitSSELine reads lines until one equal to want arrives, and fails the test when the stream
+// ends first or within passes; what names the line for the failure.
+func awaitSSELine(t *testing.T, lines <-chan string, want string, within time.Duration, what string) {
+	t.Helper()
+	deadline := time.After(within)
+	for {
+		select {
+		case line, open := <-lines:
+			if !open {
+				t.Fatalf("the stream ended before %s (%q)", what, want)
+			}
+			if line == want {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("the stream sent no %s (%q) within %s", what, want, within)
+		}
+	}
 }
 
 // sseFrames reads scanner's event frames (nextSSEFrame) on a goroutine of its own, so a test can
@@ -2770,6 +2771,135 @@ func TestSSEStreamOpensAtOnceForABrowserWaitingOnItsFirstByte(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSSEStreamOpensAndHeartbeatsWhileTheHorizonIsHeld: the first connection on a fresh process
+// starts the relay, whose first cursor waits for a horizon proven after the call, and so for
+// every transaction that holds a transaction id anywhere on the Postgres instance: another
+// database's job, another package's test. A resuming connection's start point is the since it
+// brings, which needs nothing from that wait, so it opens at once and heartbeats while the wait
+// lasts, and so does every connection opened meanwhile; once the holder ends, it is sent the event
+// committed during the hold. A handler that subscribed before it wrote its headers sent nothing at
+// all until the holder ended (CI's envoy-go: a connect deadline missed, then httptest.Server.Close
+// blocked on the handler until the package timed out).
+func TestSSEStreamOpensAndHeartbeatsWhileTheHorizonIsHeld(t *testing.T) {
+	const heartbeat = 100 * time.Millisecond
+	handler, database, _ := newTestServer(t, testServerOptions{streamHeartbeat: heartbeat})
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	since := eventHead(t, database)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	open := func() <-chan string {
+		t.Helper()
+		request := sseRequest(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since), func(*http.Request) {})
+		return sseLines(t, openSSEResponse(t, request, time.Second).Body)
+	}
+
+	release := holdClusterTransactionID(t, 3*time.Second)
+	first := open()
+	awaitSSELine(t, first, ": open", time.Second, "the first connection's open comment while the horizon is held")
+	awaitSSELine(t, first, ": heartbeat", time.Second, "a heartbeat while the horizon is held")
+	second := open()
+	awaitSSELine(t, second, ": open", time.Second, "the open comment of a connection opened while the first waits")
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed while the horizon is held",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	committed := fmt.Sprintf("id: %d", eventHead(t, database))
+	release()
+
+	awaitSSELine(t, first, committed, sseFrameWait, "the event committed during the hold, on the first connection")
+	awaitSSELine(t, second, committed, sseFrameWait, "the event committed during the hold, on the second connection")
+}
+
+// TestShutdownEndsAStreamWaitingOnTheHorizon: http.Server.Shutdown waits for every handler, and an
+// event stream never ends on its own, so a stream ends when the server's lifetime does. A stream
+// whose subscription is still waiting for the first horizon, held back by a transaction open
+// elsewhere on the instance, ends then too, instead of holding the shutdown until that
+// transaction ends.
+func TestShutdownEndsAStreamWaitingOnTheHorizon(t *testing.T) {
+	const hold = 3 * time.Second
+	lifetime, shutdown := context.WithCancel(t.Context())
+	handler, database, _ := newTestServer(t, testServerOptions{lifetime: lifetime})
+	createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	since := eventHead(t, database)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	holdClusterTransactionID(t, hold)
+	request := sseRequest(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since), func(*http.Request) {})
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, response.Body)
+			response.Body.Close()
+		}
+	}()
+	// Time for the request to reach its handler and the handler to wait on the horizon.
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-ended:
+		t.Fatal("the stream ended before the server shut down")
+	default:
+	}
+
+	shutdown()
+	select {
+	case <-ended:
+	case <-time.After(time.Second):
+		t.Fatalf("the stream was still open a second after the server's lifetime ended, waiting on a horizon held for %s", hold)
+	}
+}
+
+// holdClusterTransactionID opens a transaction in the test cluster's postgres database and takes
+// a transaction id, as a job in another database or another package's test does. Snapshots are
+// instance-wide, so until it ends no horizon on the cluster proves an observation taken after it
+// began. It commits when release runs or after hold, whichever comes first, and by the time the
+// test ends; release returns once it has.
+func holdClusterTransactionID(t *testing.T, hold time.Duration) (release func()) {
+	t.Helper()
+	config, err := pgx.ParseConfig(os.Getenv(storetest.DatabaseURLEnv))
+	if err != nil {
+		t.Fatalf("parse %s: %v", storetest.DatabaseURLEnv, err)
+	}
+	config.Database = "postgres"
+	conn, err := pgx.ConnectConfig(t.Context(), config)
+	if err != nil {
+		t.Fatalf("connect to the cluster's postgres database: %v", err)
+	}
+	tx, err := conn.Begin(t.Context())
+	if err != nil {
+		_ = conn.Close(context.Background())
+		t.Fatalf("begin the transaction that holds the horizon: %v", err)
+	}
+	var xid string
+	if err := tx.QueryRow(t.Context(), `select pg_current_xact_id()::text`).Scan(&xid); err != nil {
+		_ = conn.Close(context.Background())
+		t.Fatalf("take a transaction id: %v", err)
+	}
+	released := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		timer := time.NewTimer(hold)
+		defer timer.Stop()
+		select {
+		case <-released:
+		case <-timer.C:
+		}
+		_ = tx.Commit(context.Background())
+		_ = conn.Close(context.Background())
+	}()
+	var once sync.Once
+	release = func() {
+		once.Do(func() { close(released) })
+		<-done
+	}
+	t.Cleanup(release)
+	return release
 }
 
 func TestJSONMutationsRequireApplicationJSON(t *testing.T) {
