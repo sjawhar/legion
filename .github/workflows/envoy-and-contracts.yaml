@@ -1217,10 +1217,10 @@ jobs:
         working-directory: packages/envoy
       # The listener is where the role claim watcher, the session and interest watchers and the
       # request handlers meet; the role claim view, its lock and its epoch live in the store, and
-      # the watchers' completeness, rescans and resume point in kvwatch (INFRA-141, INFRA-514). The
-      # session cache's reads run under its shared lock beside watcher writes and the expiry
-      # timer's callback (INFRA-514). A step of its own, so its time and any race it finds are read
-      # apart from the packages above.
+      # the watchers' completeness and rescans in kvwatch (INFRA-141). A step of its own, so its
+      # time and any race it finds are read apart from the packages above. The session cache runs
+      # here too: its reads take its shared lock beside watcher writes and the expiry timer's
+      # callback, as kvwatch's resume point is read while a replaced watcher still applies.
       - name: Race-test the listener, the registry store, the session cache and kvwatch
         run: go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
         working-directory: packages/envoy
