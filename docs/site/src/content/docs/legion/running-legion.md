@@ -44,7 +44,10 @@ mapped repository both the implement and the review App are installed on, and le
 App is missing from: the boot logs it, `legion state --json` lists it under `repositories.refused`
 with the App it lacks, and an issue on it is not admitted until the App is installed, when moving
 the issue to `todo` again admits it. A project with no repository mapped does not boot; one whose
-every repository lacks an App boots serving none and admits nothing until an App is installed.
+every repository lacks an App boots serving none and admits nothing until an App is installed. A
+Dispatch that does not answer the boot's read of the mapping delays the boot rather than ending it:
+the daemon reads it again, one second doubling to one minute between reads, for as long as Dispatch
+stays unreachable, logs each wait, and serves nothing until the read passes.
 
 ## The GitHub Apps
 
@@ -62,7 +65,9 @@ The implement App cannot create a check run, and a review never comes from the A
 change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
 GitHub with the implement App too: every two minutes it reads each open pull request's base branch
 and the checks that branch requires (its rulesets and its branch protection), since only those
-decide whether CI is red at a head, and so where Legion sends the issue. Whether the merge happens
+decide whether CI is red at a head, and so where Legion sends the issue. The same read follows a
+pull request's head when its push webhook is lost or late, and the daemon looks up the open pull
+request of an issue whose implementer completed with none recorded. Whether the merge happens
 is GitHub's to decide, under those same rules.
 
 `scripts/github-apps/create.ts` registers all three from the manifests beside it:
@@ -442,7 +447,9 @@ pod the daemon launches and keeps running (`controller: daemon`).
 
 ### In the cluster
 
-Set `controller: daemon` in `legion.yaml` (it needs `runtime: kubernetes`) and restart the daemon.
+Set `controller: daemon` in `legion.yaml` (it needs `dispatch_url`) and restart the daemon. Under
+`runtime: tmux` the daemon launches the controller as a pane in a window of its own, `controller`,
+and supervises it the same way; the rest of this section is the Kubernetes runtime's.
 It launches the controller at boot as an Agent Sandbox pod, `legion-<project>-controller`, with the
 same model access as the workers and a volume of its own, which its Sandbox owns, relaunches it when it
 dies, and resumes the same session. You start nothing, and `legion controller start` against this
@@ -597,8 +604,9 @@ Closing the terminal leaves the project without one, and the daemon logs
    the new daemon is up: that records the suspension as yours. Act only on the claims the state
    names as nothing will wake (`legion state`'s `claims nothing will wake` line, or
    `strandedClaims` in `--json`), and skip those you drained on purpose: resume a suspended
-   architect, retry a failed one (`legion claims retry`, which relaunches its session with fresh
-   budgets), and bring a suspended phase worker back as
+   architect, retry a failed one (`legion claims retry --claim <token>`, which relaunches its
+   session with fresh budgets; `legion claims retry --failed` retries every failed claim, and a
+   failed phase worker whose issue is held for its own role retries that phase), and bring a suspended phase worker back as
    [A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)
    shows for its `suspendedBy`. Never resume or retry by hand a claim of a lingering tree or of an
    issue parked out of the workflow: re-admission or the issue's return to `todo` starts it.

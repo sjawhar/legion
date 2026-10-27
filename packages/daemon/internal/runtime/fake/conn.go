@@ -3,7 +3,6 @@ package fake
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -187,11 +186,20 @@ func (c *Conn) SetStreaming(streaming bool) {
 // FailPrompt(nil) clears it, and clears a scripted refusal too.
 func (c *Conn) FailPrompt(err error) { c.fail("Prompt", err) }
 
-// RefusePrompt makes every later Prompt the agent refusing the frame: an error wrapping
-// runtime.ErrPromptRefused, as the stream's connection answers `success: false`.
+// RefusePrompt makes every later Prompt the agent refusing the frame with reason: an error that is
+// runtime.ErrPromptRefused and carries reason (runtime.RefusalReason), as the stream's connection
+// answers `success: false`.
 func (c *Conn) RefusePrompt(reason string) {
-	c.fail("Prompt", fmt.Errorf("%s: %w", reason, runtime.ErrPromptRefused))
+	c.fail("Prompt", promptRefusal{reason: reason})
 }
+
+// promptRefusal is the fake agent's `success: false` answer to a prompt, as stream.RefusedError is
+// the real one's.
+type promptRefusal struct{ reason string }
+
+func (r promptRefusal) Error() string         { return r.reason + ": " + runtime.ErrPromptRefused.Error() }
+func (r promptRefusal) Is(target error) bool  { return target == runtime.ErrPromptRefused }
+func (r promptRefusal) RefusalReason() string { return r.reason }
 
 // FailGetState makes every later GetState return err.
 func (c *Conn) FailGetState(err error) { c.fail("GetState", err) }
