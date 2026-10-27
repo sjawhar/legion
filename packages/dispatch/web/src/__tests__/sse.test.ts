@@ -15,10 +15,14 @@ import type { Event, EventType } from "../api/types";
  * The pre-#1248 reference implementation, copied verbatim from `main`'s
  * `packages/dispatch/web/src/api/sse.ts`. It is the oracle this PR's behaviour is compared
  * against: every event must invalidate exactly what main invalidated, except the single
- * documented subtraction (the Inbox query for plain messages and non-ask comments).
+ * documented subtraction (the Inbox query for plain messages and non-ask comments). One type is
+ * newer than the copy: `artifact.human_edited`, a person's edits of a document, which
+ * refreshes what that document's `artifact.version` refreshes, so the copy maps it beside it.
  */
 function mainArtifactId(event: Event): string | undefined {
-  return event.type === "artifact.version" ? event.payload.artifact_id : undefined;
+  return event.type === "artifact.version" || event.type === "artifact.human_edited"
+    ? event.payload.artifact_id
+    : undefined;
 }
 
 function mainAppendDocumentKey(keys: (readonly unknown[])[], event: Event): void {
@@ -240,7 +244,11 @@ function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unk
     return keys;
   }
 
-  if (event.type === "artifact.created" || event.type === "artifact.version") {
+  if (
+    event.type === "artifact.created" ||
+    event.type === "artifact.version" ||
+    event.type === "artifact.human_edited"
+  ) {
     keys.push(["artifacts", event.issue_key]);
     const id = mainArtifactId(event);
     if (id !== undefined) {
@@ -429,6 +437,9 @@ const eventsByType: Record<EventType, readonly Event[]> = {
       },
       documentOwner
     ),
+  ],
+  "artifact.human_edited": [
+    event("artifact.human_edited", { artifact_id: "artifact-1", from_version: 4, to_version: 7 }),
   ],
   "artifact.approved": [
     event("artifact.approved", { artifact_id: "artifact-1", ask_id: "ask-1" }),
