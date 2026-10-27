@@ -125,6 +125,16 @@ function isJson(response: Response): boolean {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
 
+/** `text`, the body of `response`, as JSON when it says it is and parses; otherwise the text. */
+function answerPayload(response: Response, text: string): unknown {
+  if (!text || !isJson(response)) return text;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
 /** Whether `error` is a server's answer that it has no route for the request (`404 NOT_FOUND`,
  *  "no route for …"), as a server older than a route answers it; a `404 NOT_FOUND` for a
  *  resource the server does not know says "not found" instead. */
@@ -183,6 +193,97 @@ export const DISPATCH_TOOL_DEADLINE_MS = 60_000;
 function requestSignal(signal: AbortSignal | undefined): AbortSignal {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+}
+
+/**
+ * How many times a client asks again after Dispatch said to wait (`waitsOut`), on top of the first
+ * attempt. Two keeps an agent's call within a few seconds of `Retry-After` while a short burst of
+ * load passes, without turning a server that stays overloaded into three times the requests.
+ */
+const RETRIES = 2;
+
+/** The wait when an answer to wait out carries no `Retry-After` in seconds, as Dispatch sends. */
+const DEFAULT_RETRY_AFTER_SECONDS = 1;
+
+/**
+ * The most a retry waits past `Retry-After`, a random share of it per wait, so the agents one
+ * overload refused together do not all come back in the same instant.
+ */
+const RETRY_JITTER_MS = 250;
+
+/** The clock a `DispatchClient` reads its deadline from and waits out `Retry-After` on. */
+export interface RetryClock {
+  /** Milliseconds on a clock that only moves forward. */
+  now(): number;
+  /** Resolves after `ms`, or rejects with the signal's reason once `signal` aborts. */
+  sleep(ms: number, signal: AbortSignal): Promise<void>;
+}
+
+const systemClock: RetryClock = {
+  now: () => performance.now(),
+  sleep: (ms, signal) => {
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    if (signal.aborted) {
+      reject(signal.reason);
+      return promise;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+    return promise;
+  },
+};
+
+/** Dispatch's own refusal: the JSON `{error, code}` its `writeError` sends. */
+type DispatchRefusal = DispatchServiceErrorShape & { readonly error: string };
+
+function isDispatchRefusal(value: DispatchServiceErrorShape): value is DispatchRefusal {
+  return typeof value.error === "string";
+}
+
+/** The error a refusal of Dispatch's own throws, its message `message` (its `error` unless told). */
+function refusalError(
+  status: number,
+  refusal: DispatchRefusal,
+  message = refusal.error
+): DispatchServiceError {
+  return new DispatchServiceError(
+    refusal.code ?? `HTTP_${status}`,
+    status,
+    message,
+    refusal.candidates,
+    refusal.current,
+    refusal.mismatches
+  );
+}
+
+/**
+ * Whether Dispatch's refusal `code`, answered with `status` to `method`, is one the client waits
+ * out (`Retry-After`) and asks again. A `429 OVERLOADED` (admission) or `429 EDIT_QUEUE_FULL` (the
+ * document writer queue) was sent before the request ran, so any method may repeat it. A `503
+ * DATABASE_BUSY` (no database connection in time) or `503 REQUEST_TIMEOUT` (the read deadline)
+ * can come after a write committed, so only a read (GET, HEAD) repeats it; a write's retry is
+ * left to idempotency keys (INFRA-258). Every other answer is the caller's at once.
+ */
+function waitsOut(method: string, status: number, code: string | undefined): boolean {
+  if (status === 429) return code === "OVERLOADED" || code === "EDIT_QUEUE_FULL";
+  return (
+    status === 503 &&
+    (method === "GET" || method === "HEAD") &&
+    (code === "DATABASE_BUSY" || code === "REQUEST_TIMEOUT")
+  );
+}
+
+/** `Retry-After` in whole seconds; `DEFAULT_RETRY_AFTER_SECONDS` when it is missing or not that. */
+function retryAfterSeconds(response: Response): number {
+  const value = response.headers.get("Retry-After")?.trim();
+  return value !== undefined && /^\d+$/.test(value) ? Number(value) : DEFAULT_RETRY_AFTER_SECONDS;
 }
 
 /**
@@ -354,20 +455,31 @@ function excerpt(text: string, token: string): string {
   );
 }
 
-/** JSON HTTP client for Dispatch's native-tool API. */
+/**
+ * JSON HTTP client for Dispatch's native-tool API. Every request it sends shares one deadline,
+ * `DISPATCH_TOOL_DEADLINE_MS` from its construction (sooner when `signal` aborts first), and an
+ * answer Dispatch asks it to wait out (`waitsOut`) is asked again after `Retry-After`, read on
+ * `clock`, while that deadline allows the wait.
+ */
 export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
   readonly #signal: AbortSignal;
+  readonly #clock: RetryClock;
+  /** When `#signal`'s own deadline passes, on `#clock`. */
+  readonly #deadline: number;
 
   constructor(
     baseUrl: string,
     readonly token: string,
     readonly fetchImpl: typeof fetch = fetch,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    clock: RetryClock = systemClock
   ) {
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
+    this.#clock = clock;
+    this.#deadline = clock.now() + DISPATCH_TOOL_DEADLINE_MS;
   }
 
   async issue(input: CreateIssueInput): Promise<Advised<Issue>> {
@@ -877,10 +989,8 @@ export class DispatchClient {
    * answers a file with its bytes under its own MIME type, never a JSON envelope. */
   async fileVersion(id: string, version: number): Promise<ArtifactFileVersion> {
     const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
-    const response = await this.fetchImpl(url, {
-      method: "GET",
+    const response = await this.#fetch("GET", url, {
       headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
-      signal: this.#signal,
     });
     if (!response.ok) return this.#response<never>("GET", url, response);
     return {
@@ -998,10 +1108,8 @@ export class DispatchClient {
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const url = this.#url(path, query);
-    const response = await this.fetchImpl(url, {
-      method,
+    const response = await this.#fetch(method, url, {
       headers,
-      signal: this.#signal,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     return { status: response.status, payload: await this.#response<T>(method, url, response) };
@@ -1020,13 +1128,58 @@ export class DispatchClient {
 
   async #form<T>(method: string, path: readonly string[], body: FormData): Promise<T> {
     const url = this.#url(path);
-    const response = await this.fetchImpl(url, {
-      method,
+    const response = await this.#fetch(method, url, {
       headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
       body,
-      signal: this.#signal,
     });
     return this.#response<T>(method, url, response);
+  }
+
+  /**
+   * Sends `method` to `url` under the client's deadline, and asks again while Dispatch's answer is
+   * one it says to wait out (`waitsOut`): after its `Retry-After` (whole seconds, else
+   * `DEFAULT_RETRY_AFTER_SECONDS`) plus up to `RETRY_JITTER_MS`, at most `RETRIES` times, and only
+   * when that wait ends before the deadline, so no retry starts past it. Giving up throws that
+   * refusal with advice naming the attempts and the wait; any other answer comes back as it is.
+   * `init`'s body is a string or `FormData`, both of which a retry sends again whole.
+   */
+  async #fetch(method: string, url: string, init: RequestInit): Promise<Response> {
+    for (let attempt = 1; ; attempt++) {
+      const response = await this.fetchImpl(url, { ...init, method, signal: this.#signal });
+      if (response.status !== 429 && response.status !== 503) return response;
+      const text = await response.text();
+      const answered = new Response(text, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+      const refusal = asErrorShape(answerPayload(answered, text));
+      if (!isDispatchRefusal(refusal) || !waitsOut(method, response.status, refusal.code)) {
+        return answered;
+      }
+      const seconds = retryAfterSeconds(response);
+      const wait = seconds * 1000 + Math.random() * RETRY_JITTER_MS;
+      const refused =
+        `${refusal.error}; Dispatch refused ${attempt === 1 ? "1 attempt" : `${attempt} attempts`} ` +
+        `with ${response.status} ${refusal.code}`;
+      if (attempt > RETRIES) {
+        throw refusalError(
+          response.status,
+          refusal,
+          `${refused}, waiting out its Retry-After between them, so wait ${seconds} s ` +
+            "(Retry-After) and try again"
+        );
+      }
+      if (this.#clock.now() + wait >= this.#deadline) {
+        throw refusalError(
+          response.status,
+          refusal,
+          `${refused}, and waiting the ${seconds} s it asks for (Retry-After) would pass this ` +
+            `call's ${DISPATCH_TOOL_DEADLINE_MS / 1000} s deadline, so wait ${seconds} s and try again`
+        );
+      }
+      await this.#clock.sleep(wait, this.#signal);
+    }
   }
 
   #url(path: readonly string[], query?: object): string {
@@ -1057,26 +1210,10 @@ export class DispatchClient {
    */
   async #response<T>(method: string, url: string, response: Response): Promise<T> {
     const text = await response.text();
-    let payload: unknown = text;
-    if (text && isJson(response)) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = text;
-      }
-    }
+    const payload = answerPayload(response, text);
     if (!response.ok) {
       const error = asErrorShape(payload);
-      if (typeof error.error === "string") {
-        throw new DispatchServiceError(
-          error.code ?? `HTTP_${response.status}`,
-          response.status,
-          error.error,
-          error.candidates,
-          error.current,
-          error.mismatches
-        );
-      }
+      if (isDispatchRefusal(error)) throw refusalError(response.status, error);
       const quoted = excerpt(text, this.token);
       let body: string;
       if (quoted !== "") {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ArchitectureSource, IssueSummary } from "@legion/contracts";
-import { DispatchClient, DispatchGatewayError } from "../dispatch-http";
+import { DispatchClient, DispatchGatewayError, type RetryClock } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
 interface RecordedRequest {
@@ -1173,5 +1173,217 @@ describe("syncArchitectureSources against a server older than the every-source s
       message: "not found",
     });
     expect(requests).toHaveLength(1);
+  });
+});
+
+// Dispatch answers 429 OVERLOADED or EDIT_QUEUE_FULL before a request runs, and 503 DATABASE_BUSY
+// or REQUEST_TIMEOUT when a read could not get a connection or passed its deadline, each with
+// Retry-After. The client waits that out (plus jitter) and asks again, at most twice and never past
+// its 60 s deadline; a write's 503 may have committed, so it is never repeated. The clock is the
+// test's: a wait moves it instead of sleeping.
+describe("DispatchClient waits out Retry-After", () => {
+  function fakeClock() {
+    const state = { at: 0, waits: [] as number[] };
+    const clock: RetryClock = {
+      now: () => state.at,
+      sleep: async (ms) => {
+        state.waits.push(ms);
+        state.at += ms;
+      },
+    };
+    return { state, clock };
+  }
+
+  function refusal(status: number, code: string, retryAfter?: string): Response {
+    return new Response(JSON.stringify({ error: "busy", code }), {
+      status,
+      headers: {
+        "Content-Type": "application/json",
+        ...(retryAfter === undefined ? {} : { "Retry-After": retryAfter }),
+      },
+    });
+  }
+
+  test.each([
+    "DATABASE_BUSY",
+    "REQUEST_TIMEOUT",
+  ])("a GET answered 503 %s succeeds after the Retry-After wait", async (code) => {
+    const issue = { key: "DSP-1", title: "Issue" };
+    const { fetchImpl, requests } = fakeFetch([refusal(503, code, "2"), jsonResponse(issue)]);
+    const { state, clock } = fakeClock();
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      clock
+    );
+
+    await expect(client.getIssue("DSP-1")).resolves.toMatchObject(issue);
+
+    expect(requests.map((request) => request.init.method)).toEqual(["GET", "GET"]);
+    expect(state.waits).toHaveLength(1);
+    expect(state.waits[0]).toBeGreaterThanOrEqual(2_000);
+    expect(state.waits[0]).toBeLessThanOrEqual(2_250);
+  });
+
+  test.each([
+    "OVERLOADED",
+    "EDIT_QUEUE_FULL",
+  ])("a POST answered 429 %s is sent again after its Retry-After", async (code) => {
+    const posted = { id: "message-1", issue_key: "DSP-1" };
+    const { fetchImpl, requests } = fakeFetch([refusal(429, code, "3"), jsonResponse(posted)]);
+    const { state, clock } = fakeClock();
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      clock
+    );
+
+    await expect(client.message("DSP-1", { body: "Shipped.", actor })).resolves.toMatchObject(
+      posted
+    );
+
+    expect(requests.map((request) => request.init.method)).toEqual(["POST", "POST"]);
+    expect(requests.map(requestBody)).toEqual([
+      { body: "Shipped.", actor },
+      { body: "Shipped.", actor },
+    ]);
+    expect(state.waits).toHaveLength(1);
+    expect(state.waits[0]).toBeGreaterThanOrEqual(3_000);
+    expect(state.waits[0]).toBeLessThanOrEqual(3_250);
+  });
+
+  test.each([
+    "DATABASE_BUSY",
+    "REQUEST_TIMEOUT",
+  ])("a POST answered 503 %s is not sent again, since it may have committed", async (code) => {
+    const { fetchImpl, requests } = fakeFetch([refusal(503, code, "1")]);
+    const { state, clock } = fakeClock();
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      clock
+    );
+
+    await expect(client.message("DSP-1", { body: "Shipped.", actor })).rejects.toMatchObject({
+      name: "DispatchServiceError",
+      code,
+      status: 503,
+      message: "busy",
+    });
+    expect(requests).toHaveLength(1);
+    expect(state.waits).toEqual([]);
+  });
+
+  test("answers any other refusal at once, as before", async () => {
+    const page = new Response("<html><body>429 Too Many Requests</body></html>", {
+      status: 429,
+      headers: { "Content-Type": "text/html", "Retry-After": "1" },
+    });
+    for (const answer of [
+      refusal(429, "RATE_LIMITED", "1"),
+      refusal(503, "SERVICE_UNAVAILABLE", "1"),
+      page,
+    ]) {
+      const { fetchImpl, requests } = fakeFetch([answer]);
+      const { state, clock } = fakeClock();
+      const client = new DispatchClient(
+        "http://dispatch.test",
+        "secret",
+        fetchImpl,
+        undefined,
+        clock
+      );
+
+      await expect(client.getIssue("DSP-1")).rejects.toMatchObject({ status: answer.status });
+      expect(requests).toHaveLength(1);
+      expect(state.waits).toEqual([]);
+    }
+  });
+
+  test("starts no retry whose wait would pass the deadline", async () => {
+    const late = fakeFetch([refusal(503, "DATABASE_BUSY", "1")]);
+    const lateClock = fakeClock();
+    const lateClient = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      late.fetchImpl,
+      undefined,
+      lateClock.clock
+    );
+    lateClock.state.at = 59_500;
+
+    await expect(lateClient.getIssue("DSP-1")).rejects.toMatchObject({
+      code: "DATABASE_BUSY",
+      status: 503,
+      message:
+        "busy; Dispatch refused 1 attempt with 503 DATABASE_BUSY, and waiting the 1 s it asks " +
+        "for (Retry-After) would pass this call's 60 s deadline, so wait 1 s and try again",
+    });
+    expect(late.requests).toHaveLength(1);
+    expect(lateClock.state.waits).toEqual([]);
+
+    // The first 30 s wait fits; the second would end past the 60 s deadline, so it never starts.
+    const { fetchImpl, requests } = fakeFetch([
+      refusal(429, "OVERLOADED", "30"),
+      refusal(429, "OVERLOADED", "30"),
+    ]);
+    const { state, clock } = fakeClock();
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      clock
+    );
+
+    await expect(client.message("DSP-1", { body: "Shipped.", actor })).rejects.toMatchObject({
+      code: "OVERLOADED",
+      status: 429,
+      message:
+        "busy; Dispatch refused 2 attempts with 429 OVERLOADED, and waiting the 30 s it asks " +
+        "for (Retry-After) would pass this call's 60 s deadline, so wait 30 s and try again",
+    });
+    expect(requests).toHaveLength(2);
+    expect(state.waits).toHaveLength(1);
+  });
+
+  test("gives up after two retries, its advice naming the wait and the attempts", async () => {
+    // No Retry-After, and one that is not whole seconds, both wait the default 1 s.
+    const { fetchImpl, requests } = fakeFetch([
+      refusal(429, "EDIT_QUEUE_FULL"),
+      refusal(429, "EDIT_QUEUE_FULL", "soon"),
+      refusal(429, "EDIT_QUEUE_FULL"),
+    ]);
+    const { state, clock } = fakeClock();
+    const client = new DispatchClient(
+      "http://dispatch.test",
+      "secret",
+      fetchImpl,
+      undefined,
+      clock
+    );
+
+    await expect(
+      client.docEdit("artifact-1", { ops: [{ op: "delete", find: "same" }], actor })
+    ).rejects.toMatchObject({
+      name: "DispatchServiceError",
+      code: "EDIT_QUEUE_FULL",
+      status: 429,
+      message:
+        "busy; Dispatch refused 3 attempts with 429 EDIT_QUEUE_FULL, waiting out its Retry-After " +
+        "between them, so wait 1 s (Retry-After) and try again",
+    });
+    expect(requests).toHaveLength(3);
+    expect(state.waits).toHaveLength(2);
+    for (const wait of state.waits) {
+      expect(wait).toBeGreaterThanOrEqual(1_000);
+      expect(wait).toBeLessThanOrEqual(1_250);
+    }
   });
 });

@@ -15248,6 +15248,15 @@ function asErrorShape(value) {
 function isJson(response) {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
+function answerPayload(response, text) {
+  if (!text || !isJson(response))
+    return text;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
 function isNoRoute(error48) {
   return error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "NOT_FOUND" && error48.message.startsWith("no route for ");
 }
@@ -15256,6 +15265,44 @@ var DISPATCH_TOOL_DEADLINE_MS = 60000;
 function requestSignal(signal) {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+}
+var RETRIES = 2;
+var DEFAULT_RETRY_AFTER_SECONDS = 1;
+var RETRY_JITTER_MS = 250;
+var systemClock = {
+  now: () => performance.now(),
+  sleep: (ms, signal) => {
+    const { promise: promise2, resolve, reject } = Promise.withResolvers();
+    if (signal.aborted) {
+      reject(signal.reason);
+      return promise2;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+    return promise2;
+  }
+};
+function isDispatchRefusal(value) {
+  return typeof value.error === "string";
+}
+function refusalError(status, refusal, message = refusal.error) {
+  return new DispatchServiceError(refusal.code ?? `HTTP_${status}`, status, message, refusal.candidates, refusal.current, refusal.mismatches);
+}
+function waitsOut(method, status, code) {
+  if (status === 429)
+    return code === "OVERLOADED" || code === "EDIT_QUEUE_FULL";
+  return status === 503 && (method === "GET" || method === "HEAD") && (code === "DATABASE_BUSY" || code === "REQUEST_TIMEOUT");
+}
+function retryAfterSeconds(response) {
+  const value = response.headers.get("Retry-After")?.trim();
+  return value !== undefined && /^\d+$/.test(value) ? Number(value) : DEFAULT_RETRY_AFTER_SECONDS;
 }
 function whyNotAPage(answer) {
   if (typeof answer === "string") {
@@ -15344,11 +15391,15 @@ class DispatchClient {
   #baseUrl;
   #resolvedIssues = new Map;
   #signal;
-  constructor(baseUrl, token, fetchImpl = fetch, signal) {
+  #clock;
+  #deadline;
+  constructor(baseUrl, token, fetchImpl = fetch, signal, clock = systemClock) {
     this.token = token;
     this.fetchImpl = fetchImpl;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
+    this.#clock = clock;
+    this.#deadline = clock.now() + DISPATCH_TOOL_DEADLINE_MS;
   }
   async issue(input) {
     return this.#json("POST", ["api", "v1", "issues"], input);
@@ -15599,10 +15650,8 @@ class DispatchClient {
   }
   async fileVersion(id, version2) {
     const url2 = this.#url(["api", "v1", "artifacts", id, "versions", String(version2)]);
-    const response = await this.fetchImpl(url2, {
-      method: "GET",
-      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
-      signal: this.#signal
+    const response = await this.#fetch("GET", url2, {
+      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` }
     });
     if (!response.ok)
       return this.#response("GET", url2, response);
@@ -15688,10 +15737,8 @@ class DispatchClient {
     if (body !== undefined)
       headers["Content-Type"] = "application/json";
     const url2 = this.#url(path, query);
-    const response = await this.fetchImpl(url2, {
-      method,
+    const response = await this.#fetch(method, url2, {
       headers,
-      signal: this.#signal,
       ...body === undefined ? {} : { body: JSON.stringify(body) }
     });
     return { status: response.status, payload: await this.#response(method, url2, response) };
@@ -15710,13 +15757,38 @@ class DispatchClient {
   }
   async#form(method, path, body) {
     const url2 = this.#url(path);
-    const response = await this.fetchImpl(url2, {
-      method,
+    const response = await this.#fetch(method, url2, {
       headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
-      body,
-      signal: this.#signal
+      body
     });
     return this.#response(method, url2, response);
+  }
+  async#fetch(method, url2, init) {
+    for (let attempt = 1;; attempt++) {
+      const response = await this.fetchImpl(url2, { ...init, method, signal: this.#signal });
+      if (response.status !== 429 && response.status !== 503)
+        return response;
+      const text = await response.text();
+      const answered = new Response(text, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers
+      });
+      const refusal = asErrorShape(answerPayload(answered, text));
+      if (!isDispatchRefusal(refusal) || !waitsOut(method, response.status, refusal.code)) {
+        return answered;
+      }
+      const seconds = retryAfterSeconds(response);
+      const wait = seconds * 1000 + Math.random() * RETRY_JITTER_MS;
+      const refused = `${refusal.error}; Dispatch refused ${attempt === 1 ? "1 attempt" : `${attempt} attempts`} ` + `with ${response.status} ${refusal.code}`;
+      if (attempt > RETRIES) {
+        throw refusalError(response.status, refusal, `${refused}, waiting out its Retry-After between them, so wait ${seconds} s ` + "(Retry-After) and try again");
+      }
+      if (this.#clock.now() + wait >= this.#deadline) {
+        throw refusalError(response.status, refusal, `${refused}, and waiting the ${seconds} s it asks for (Retry-After) would pass this ` + `call's ${DISPATCH_TOOL_DEADLINE_MS / 1000} s deadline, so wait ${seconds} s and try again`);
+      }
+      await this.#clock.sleep(wait, this.#signal);
+    }
   }
   #url(path, query) {
     const url2 = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
@@ -15734,19 +15806,11 @@ class DispatchClient {
   }
   async#response(method, url2, response) {
     const text = await response.text();
-    let payload = text;
-    if (text && isJson(response)) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = text;
-      }
-    }
+    const payload = answerPayload(response, text);
     if (!response.ok) {
       const error48 = asErrorShape(payload);
-      if (typeof error48.error === "string") {
-        throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error, error48.candidates, error48.current, error48.mismatches);
-      }
+      if (isDispatchRefusal(error48))
+        throw refusalError(response.status, error48);
       const quoted = excerpt(text, this.token);
       let body;
       if (quoted !== "") {
