@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
+	"github.com/sjawhar/envoy/internal/ghnotify"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -42,6 +43,10 @@ type listenerDeps struct {
 	// live is the live topics lane's own client (openLiveTopics), nil when ENVOY_SUBSCRIBE_ALL_TOPICS
 	// leaves the lane off.
 	live *bus.Client
+	// notifications is the GitHub notifications poller (internal/ghnotify), nil on a listener
+	// without ENVOY_GITHUB_NOTIFICATIONS_TOKEN. Only /healthz reads it, for its own field; the
+	// listener's status never depends on it.
+	notifications *ghnotify.Poller
 	// caches lists the stores above that are open, for the sites that treat every cache alike.
 	caches []listenerCache
 	// consumer names the durable whose lag /healthz reports.
@@ -349,6 +354,9 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // lane is "subscribed" or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a
 // live client that is not connected or holds no valid subscription is 503 "live subscription
 // inactive", since every topic the stream does not store then reaches no session.
+// A listener running the GitHub notifications poller carries "github_notifications" as well
+// (githubNotificationsHealth); one without its token carries no such field, and a degraded poller
+// leaves the listener's own status healthy.
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -395,6 +403,9 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		response["live_topics"] = "not_applicable"
 		if d.live != nil {
 			response["live_topics"] = "subscribed"
+		}
+		if d.notifications != nil {
+			response["github_notifications"] = githubNotificationsHealth(d.notifications.Health())
 		}
 		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer)
 		if err != nil {
@@ -676,6 +687,15 @@ func main() {
 	openWebhooks(webhookGate, hooks, client, ciStore)
 	logger.Info("envoy-listener webhooks open (NATS connected)")
 
+	// The GitHub notifications poller opens here, beside the webhook handlers and on the same bus
+	// client, so it publishes through a live connection from its first poll. It is optional: only
+	// a listener given ENVOY_GITHUB_NOTIFICATIONS_TOKEN starts one, and that one covers the owners
+	// whose repositories send no webhook because Envoy's GitHub App is not installed on them
+	// (ENVOY_GITHUB_NOTIFICATIONS_SKIP_OWNERS names the owners it does cover). stopNotifications
+	// is joined to the background loops' stop below, so every end of a start that gets this far --
+	// a signal, a fatal error, or a durable bind that did not complete -- stops the poller.
+	notifications, stopNotifications := startNotificationsPoller(client, met, logger, os.Getenv)
+
 	// The registry and its cache watcher log through the listener's own handler, so its role-restore
 	// count, its warm-up and its reaper cycles are JSON records with this machine's id. Never
 	// slog.SetDefault instead: see store.WithLogger for the CloudWatch filters that breaks.
@@ -817,14 +837,15 @@ func main() {
 	defer stop()
 
 	ready := &listenerDeps{
-		client:     client,
-		live:       live,
-		registry:   registry,
-		sessions:   sessions,
-		ciStore:    ciStore,
-		caches:     caches,
-		consumer:   consumer,
-		streamName: bus.Stream,
+		client:        client,
+		live:          live,
+		notifications: notifications,
+		registry:      registry,
+		sessions:      sessions,
+		ciStore:       ciStore,
+		caches:        caches,
+		consumer:      consumer,
+		streamName:    bus.Stream,
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 
@@ -857,7 +878,7 @@ func main() {
 				slog.Int64("waited_ms", bind.waited.Milliseconds()),
 			)
 		}
-		shutdownListener(logger, server, client, live, caches, listenerLoops{})
+		shutdownListener(logger, server, client, live, caches, listenerLoops{stop: stopNotifications})
 	}
 	deps.Store(ready)
 	logger.Info("envoy-listener ready (NATS connected)")
@@ -947,16 +968,19 @@ func main() {
 			monitorCancel()
 			summaryCancel()
 			kvLoopsCancel()
+			stopNotifications()
 		},
 		monitorDone: monitorDone,
 		kvLoopsDone: kvLoopsDone,
 	})
 }
 
-// listenerLoops are the background loops main starts once the durable binds: stop ends them,
-// monitorDone is closed once the self-health monitor has returned, and each of kvLoopsDone once
-// one of the loops that list a KV bucket (the reapers and the interest marker collector) has. A
-// start that ends before the bind has started none, and passes the zero value.
+// listenerLoops are the background work main stops at shutdown: stop ends it, monitorDone is
+// closed once the self-health monitor has returned, and each of kvLoopsDone once one of the loops
+// that list a KV bucket (the reapers and the interest marker collector) has. A start that ends
+// before the durable binds has started none of those loops, and passes a listenerLoops whose stop
+// is the GitHub notifications poller's alone: the poller opens with the webhooks, well before the
+// bind.
 type listenerLoops struct {
 	stop        func()
 	monitorDone <-chan struct{}
