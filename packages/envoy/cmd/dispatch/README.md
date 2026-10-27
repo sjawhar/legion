@@ -424,7 +424,7 @@ and every stored refresh token is sealed under a key derived from the current ke
 above). Unset, each process mints a key of its own in its own data directory
 (`cmd/dispatch/main.go`, `auth.LoadOrCreateSigningKey`), which no other process holds. The server
 refuses that through the registry of live server processes (`internal/dispatch/processes`,
-migration `0129`): once a process has bound its port, and before it serves, it registers the
+migration `0130`): once a process has bound its port, and before it serves, it registers the
 fingerprint of each of its keys (none reveals its key), and it refuses to start, logging
 `msg="dispatch: register this server process"` at ERROR with an error that names the other process
 and the rotation steps, and exiting 1, when a live process's key set does not share its own both
@@ -457,7 +457,7 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Eight periodic maintenance loops run once per period across the processes, not once per process.
+- Nine periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -964,7 +964,7 @@ is written. Its own migration, so its transaction holds `comments` alone: the dr
 `ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds. It
 refuses and rewrites no row; its census answers `0`.
 
-Migration `0129_server_processes` creates two tables: `server_processes`, the registry of live
+Migration `0130_server_processes` creates two tables: `server_processes`, the registry of live
 server processes, and `server_build_announcements`, each build the fleet has announced as
 `server.started` (Running more than one process, above). It reads, locks and rewrites nothing that
 exists, and the release before it neither reads nor writes either table, so that release runs

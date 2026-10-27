@@ -14,7 +14,7 @@ applies embedded migrations from `internal/dispatch/store/migrations` (refusing
 the whole set, applying nothing, when `pgmigrate.Load` refuses it, and bounding
 every migration's lock waits at `pgmigrate.LockTimeout`; README "Database
 migrations"), then binds its port, registers the process in the registry of
-live server processes (`internal/dispatch/processes`, migration `0129`: a key
+live server processes (`internal/dispatch/processes`, migration `0130`: a key
 set a live process does not share both ways refuses the start, exiting 1
 before anything is served), and starts HTTP serving; shutdown deregisters it
 once HTTP has drained. A process whose heartbeat lapsed (frozen, cut from the
