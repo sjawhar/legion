@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-439",
+  "completed": "2026-10-27T14:21:29Z",
+  "pr": 2228,
+  "round": "forward merge of main on a reported conflict while READY waited for queued CI; nothing else changed",
+  "proof": [
+    {
+      "criterion": "The forward merge leaves this branch's diff unchanged and makes the PR mergeable again",
+      "surface": "the unchanged-diff fingerprint (jj diff from the fork point, .legion and docs/solutions excluded) and GitHub's mergeable state",
+      "command": "fingerprint at f100b911 vs at merge 833fd5245204 (https://github.com/sjawhar/legion/pull/2228#issuecomment-6444474317); gh pr view 2228 --json mergeable",
+      "observed": "fingerprint 50792ce80e87eb6f6db826aef7702385aed83eccbe5604bb857faf0f9df2c620 before and after, unchanged; the only conflict was packages/envoy/CHANGELOG.md, both sides kept, nothing removed from either parent; GitHub reports MERGEABLE; go vet (envoy), go build (daemon), tsc in six packages, check-dist and biome green",
+      "headSha": "833fd5245204035929697f889201a9d0743b8354",
+      "negativeControl": "GitHub reported the PR CONFLICTING at f100b911 and ran no checks on it"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/CHANGELOG.md (merge resolution)"
+  ]
+}
