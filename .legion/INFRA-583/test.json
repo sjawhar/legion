@@ -2,43 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-583",
-  "completed": "2026-10-27T08:45:00Z",
-  "round": "review round 1: tests the implementer's answer at code head c53d0f10 (handoff 808b7012) to the changes requested at b77feab1",
+  "completed": "2026-10-27T08:59:30Z",
+  "round": "review round 2: tests the implementer's answer at 44308a09 (handoff 8420dcc9) to the changes requested at 73b32603",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently: the pinned dorny/paths-filter@ceb8a2b8 dist/index.js under node 24, base HEAD, on throwaway git repos, with the filters block of this head. internal/pglisten/listener.go -> all five (dispatch_memory and dispatch_multiprocess through dispatch_command_tests -> *dispatch_server); listenfd/listenfd.go -> dispatch_memory, dispatch_multiprocess, envoy_go_race, envoy_infra_go, not broker; contracts/src + skills/dispatch -> none of the five; .bun-version -> envoy_go_race only; internal/pgmigrate -> all five: the same as the implementer's table. My own picomatch comparison of round-1 (8072b2b5) and round-2 filters over all 5,397 tracked paths plus two listenfd probes: only the listenfd probe differs, in dispatch_server, listener_command, dispatch_command_tests, dispatch_memory, dispatch_multiprocess and envoy_infra_go, as the implementer reports. The AC2 GitHub runs (#2326, #2327) and my round-1 run 40462631071 (#2372) stay valid for every other path."
+    "how": "This round changes only text: one comment line inside the filters block and three AGENTS.md guides. I extracted the filters block at 8420dcc9 and compared it with c53d0f10's using dorny's parser and matcher (js-yaml, picomatch {dot:true}) over all 5,397 tracked paths plus two listenfd probes: 0 differences in any of the 22 keys. So the round before's proofs carry to this head unchanged: the pinned action's probes, the coverage check at the head and on #2229's tree, and the GitHub runs of scratch #2326, #2327 and #2372."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review finding 2: once #2229 lands, packages/envoy/listenfd is in the filter of every job whose command compiles it",
-      "surface": "#2229's head tree (45c64807, exported with git archive under $TMPDIR) with this head's filters, go list of each job's command on that tree",
-      "command": "CGO_ENABLED=1 REPO=$TMPDIR/i583t/t2229 WF=<this head's workflow> bun $TMPDIR/i583t/check.ts",
-      "observed": "dispatch_memory 1037 files 0 unmatched; dispatch_multiprocess 1042/0; broker_multiprocess 214/0 (cmdtest does not import listenfd at 45c64807, so broker is right to leave it out); envoy_go_race 1260/0; envoy_infra_go 1242/5, the same five compile-only testdata files as before (internal/dispatch/text, internal/webhook; envoy-infra-go does not run those packages' tests)",
-      "headSha": "c53d0f10bc79282bd46bd005b8a41675a4793b18",
-      "negativeControl": "the same tree with round 1's filters (8072b2b5): dispatch_memory and dispatch_multiprocess 5 unmatched each and envoy_infra_go 10 (the five listenfd files added), which is the silent skip the reviewer found"
+      "criterion": "Review finding (round 2): the guide's claim about envoy-go is true, and it says that nothing else backs up envoy-infra-go",
+      "surface": "packages/envoy/AGENTS.md:2114 against what envoy-go's unit step runs: `go list ./... | grep -v /integration | xargs go test` in packages/envoy (envoy-and-contracts.yaml:1046), run here as `go list ./...`",
+      "command": "cd packages/envoy && go list ./... ; ls packages/envoy/infra/go.mod packages/envoy/infra/go.work",
+      "observed": "109 packages, 0 under packages/envoy/infra (a module of its own with its own go.mod and go.work); cmd/dispatch, cmd/broker and internal/dispatch/pmdoc are among them; internal/integration is listed and the grep removes it, and line 1072 runs it in its own step. This matches the new sentence: envoy-go runs the untagged tests of the packages/envoy module and does not reach envoy-infra, whose unit tests run only in envoy-infra-go.",
+      "headSha": "8420dcc9cf37175d5573196d545de5b3dbd7424a",
+      "negativeControl": "the round-1 sentence ('envoy-go ... still runs every untagged unit test on every Envoy change') is false against the same list: 0 of envoy-infra's packages are in it"
     },
     {
-      "criterion": "The anchor de-duplication (bun_install -> *bun_toolchain; dispatch_command_tests -> *dispatch_server) changes no job's result except for listenfd, and the nested anchors flatten in the pinned action",
-      "surface": "dorny/paths-filter@ceb8a2b8 dist/index.js (the pinned action) under node 24, base HEAD, on throwaway git repos whose only changes are the probe paths; filters block of .github/workflows/envoy-and-contracts.yaml at c53d0f10",
-      "command": "$TMPDIR/i583t/probe.sh <name> <paths...> for 14 probes; then `git ls-tree -r --name-only 808b7012 | bun $TMPDIR/i583t/equiv.ts` (round-1 vs round-2 filters, every key)",
-      "observed": "pglisten -> all five; listenfd -> memory, multiprocess, race, infra; internal/bus and store/migrations -> memory, multiprocess, race, infra; .bun-version and .github/actions/setup-bun -> race only; broker/api -> broker, race; testnats -> multiprocess, race, infra; proof-editor -> race only; internal/config -> race, infra; pgmigrate and the workflow file -> all five; contracts/src + skills/dispatch and packages/daemon/internal/api -> none of the five. equiv.ts: 5,399 paths, 22 keys; the only differences are +packages/envoy/listenfd/listenfd.go in dispatch_server, listener_command, dispatch_command_tests, envoy_infra_go, dispatch_memory and dispatch_multiprocess.",
-      "headSha": "c53d0f10bc79282bd46bd005b8a41675a4793b18",
-      "negativeControl": "round 1 had the `&go_workspace` anchor removed -> the pinned action fails with `unidentified alias` and sets no output; this round the round-1 filters on #2229's tree report the listenfd files missing (proof above)"
-    },
-    {
-      "criterion": "AC1 at this head: each filter names every file its job reads",
-      "surface": "this head's filters with picomatch 2.3.1 {dot:true} (dorny's matcher and options) against go list of each job's command in the issue pod",
-      "command": "CGO_ENABLED=1 REPO=$LEGION_WORKSPACE bun $TMPDIR/i583t/check.ts (packages/envoy/infra/go.work.sum restored after the infra go list)",
-      "observed": "dispatch_memory 1032 files 0 unmatched; dispatch_multiprocess 1037/0; broker_multiprocess 214/0; envoy_go_race 1258/0; envoy_infra_go 1231/5 (the same compile-only testdata files). main moved to b08a56bc since the branch's merge base: its changes are under packages/proof-editor, packages/contracts/fixtures/classification (no envoy Go code reads it), cmd/dispatch/settings_test.go and pr-and-main.yaml, all covered by existing patterns or read by none of the five.",
-      "headSha": "c53d0f10bc79282bd46bd005b8a41675a4793b18",
-      "negativeControl": "round 1's control still holds at this head's patterns: the workflow without the internal/testnats/* lines leaves the six testnats files unmatched in dispatch_multiprocess (exit 1)"
+      "criterion": "The filters behave as before (this round adds only a comment): no job's result changes for any path",
+      "surface": "the filters block of .github/workflows/envoy-and-contracts.yaml at 8420dcc9 versus c53d0f10, parsed with js-yaml 4 and matched with picomatch 2.3.1 {dot:true}, as dorny/paths-filter@ceb8a2b8 does",
+      "command": "git ls-tree -r --name-only 8420dcc9 | bun $TMPDIR/i583t/equiv.ts",
+      "observed": "compared 5,399 paths over 22 keys: no differences; the text diff of the two filters blocks is one comment (listenfd's importers now name infra/host/heldportwrapper, which imports listenfd at #2229's head 45c64807, main.go:31)",
+      "headSha": "8420dcc9cf37175d5573196d545de5b3dbd7424a",
+      "negativeControl": "the same script on the round-0 vs round-1 filters (8072b2b5 vs c53d0f10) reported the listenfd differences in six keys, so it reports a real change"
     }
   ],
-  "docsChecked": "The keep-current rule now names production imports and binaries that tests build in the workflow comment (154-164), packages/envoy/AGENTS.md (624, 2114 under '## Critical conventions' at 2059, 4001), packages/envoy/cmd/dispatch/AGENTS.md (593-597, 611-614) and packages/envoy/infra/AGENTS.md (351-355). The broker comment no longer gives the Postgres variable as a reason.",
-  "ciAtHead": "read at c53d0f10 at 08:44Z, not waited for: changes, lint, typecheck, test, Docs and Worker Image builds all queued (over 200 runs queued in the repository); pr-title runs cancelled by later body edits, two queued.",
+  "docsChecked": "packages/envoy/cmd/dispatch/AGENTS.md:593-596 and 610-612 and packages/envoy/infra/AGENTS.md:351-354 now point to packages/envoy/AGENTS.md's '## Critical conventions' (line 2059), whose bullet at 2114 holds the one rule.",
+  "ciAtHead": "read at 8420dcc9 at 08:58Z, not waited for: changes, lint, typecheck, test queued, Docs build pending, Worker Image build queued (180 runs queued in the repository); c53d0f10's runs were cancelled by the next push before they started.",
   "notes": [
-    "Drift stays unguarded by design (review's notAsked); the rule now covers production imports. The listenfd lines match nothing until #2229 merges; #2229's conflict resolution must keep them."
+    "The five jobs have not yet completed on this PR's own head in any round: each run was cancelled by the next push while still queued. Scratch #2327 (run 40447830920) is the last run where all five ran and passed on these filters, before main's merge."
   ]
 }
