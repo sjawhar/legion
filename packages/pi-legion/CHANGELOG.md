@@ -214,8 +214,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 - `legion-architect/references/decomposition.md`: a child issue's spec is written as
   `dispatch-writing-specs` says, scaled to the child (its outline, a proposed answer to each point,
-  terms explained, no item number from another document), in place of the bare
-  `<acceptance criteria, scope, and context>` placeholder, which never pointed to that skill.
+  terms explained, no item number from another document, no root text that does not apply to the
+  child), in place of the bare `<acceptance criteria, scope, and context>` placeholder, which never
+  pointed to that skill. Before `dispatch issue` creates each child, the architect has a fresh
+  `plan-gap-analyst` check its spec against `dispatch-writing-specs` and fixes what it flags.
 
 - A finding outside a role's own issue takes the first of three steps that fits. A
   defect with a clear fix in code the role's own tree touches or depends on is fixed in that
