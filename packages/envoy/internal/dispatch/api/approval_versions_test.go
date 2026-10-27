@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -957,6 +958,8 @@ func eventDeliveries(t *testing.T, database *store.Store, documentService docs.A
 // acceptingPublisher takes every envelope the outbox publishes; the outbox records each topic on
 // its event.
 type acceptingPublisher struct{}
+
+func (p acceptingPublisher) Window() bus.Sender { return p }
 
 func (acceptingPublisher) PublishAsync(contracts.Envelope) <-chan error {
 	accepted := make(chan error, 1)

@@ -44,14 +44,45 @@ func startLatencyProxy(t *testing.T, target string, rtt time.Duration) string {
 		t.Fatalf("listen for the latency proxy: %v", err)
 	}
 	proxy := &latencyProxy{listener: listener, target: target, delay: rtt / 2}
-	go proxy.serve()
+	go proxy.serve(listener)
 	t.Cleanup(proxy.close)
 	return "nats://" + listener.Addr().String()
 }
 
-func (p *latencyProxy) serve() {
+// startOutageProxy relays to target (host:port) with rtt added to every round trip, until down
+// cuts every connection through it and refuses new ones; up listens on the same address again. It
+// returns the proxy and the NATS URL of its address, and closes when t ends.
+func startOutageProxy(t *testing.T, target string, rtt time.Duration) (*latencyProxy, string) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for the outage proxy: %v", err)
+	}
+	proxy := &latencyProxy{listener: listener, target: target, delay: rtt / 2}
+	go proxy.serve(listener)
+	t.Cleanup(proxy.close)
+	return proxy, "nats://" + listener.Addr().String()
+}
+
+// down cuts every connection through the proxy and stops listening.
+func (p *latencyProxy) down() { p.close() }
+
+// up listens on the proxy's address again.
+func (p *latencyProxy) up(t *testing.T) {
+	t.Helper()
+	listener, err := net.Listen("tcp", p.listener.Addr().String())
+	if err != nil {
+		t.Fatalf("listen again: %v", err)
+	}
+	p.mu.Lock()
+	p.listener = listener
+	p.mu.Unlock()
+	go p.serve(listener)
+}
+
+func (p *latencyProxy) serve(listener net.Listener) {
 	for {
-		client, err := p.listener.Accept()
+		client, err := listener.Accept()
 		if err != nil {
 			return
 		}
@@ -99,12 +130,13 @@ func (p *latencyProxy) relay(dst, src net.Conn) {
 }
 
 func (p *latencyProxy) close() {
-	_ = p.listener.Close()
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	_ = p.listener.Close()
 	for _, conn := range p.conns {
 		_ = conn.Close()
 	}
+	p.conns = nil
 }
 
 // loadSharedPool keeps every connection of database's shared pool busy until t ends, with more

@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,6 +26,8 @@ type heldPublisher struct {
 	topics  []string
 	answers []chan error
 }
+
+func (p *heldPublisher) Window() bus.Sender { return p }
 
 func (p *heldPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	p.mu.Lock()
@@ -168,8 +171,9 @@ func lapseClaims(t *testing.T, database *store.Store) {
 // events on its subject in the order the Legion daemon's sequence fence needs.
 func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 	const issues, count = 2, 20
-	server, url := testnats.Start(t)
-	client, err := bus.ConnectOwningStream([]string{url})
+	_, url := testnats.Start(t)
+	proxy, proxied := startOutageProxy(t, strings.TrimPrefix(url, "nats://"), 0)
+	client, err := bus.ConnectOwningStream([]string{proxied})
 	if err != nil {
 		t.Fatalf("connect the outbox's client: %v", err)
 	}
@@ -178,7 +182,7 @@ func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 	broker := events.NewBroker()
 	seedThroughputBacklog(t, database, broker, issues, count)
 
-	server.Stop(t)
+	proxy.down()
 	stop := runOutbox(t, database, client, broker)
 	defer stop()
 	// Long enough for the outbox to have tried, and failed, more than one send.
@@ -186,13 +190,69 @@ func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 	if left := unpublishedCount(t, database); left != count {
 		t.Fatalf("%d events were marked published while NATS was down", count-left)
 	}
-	server.Start(t)
+	proxy.up(t)
 	restarted := time.Now()
 
 	waitFor(t, 30*time.Second, "the backlog published once NATS is back", func() bool {
 		return unpublishedCount(t, database) == 0
 	})
 	t.Logf("the backlog of %d events was published %s after NATS came back", count, time.Since(restarted).Round(time.Millisecond))
+	assertStreamInIDOrder(t, url, count+count/2)
+}
+
+// A connection cut while a batch is in flight - sent, its acknowledgements still on their way back
+// across a remote hub's round trip - keeps the backlog's order. The window sends nothing on the
+// connection that comes back, and every event that met the cut is released, not backed off, so
+// the next scan sends them again in id order and the stream's MsgId drops the copies of those that
+// had landed: once the backlog is published, the stream holds every destination once, each
+// issue's events in id order, and no event counted an attempt.
+func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
+	const issues, count = 4, 2 * batchSize
+	_, url := testnats.Start(t)
+	proxy, proxied := startOutageProxy(t, strings.TrimPrefix(url, "nats://"), 150*time.Millisecond)
+	client, err := bus.ConnectOwningStream([]string{proxied})
+	if err != nil {
+		t.Fatalf("connect the outbox's client: %v", err)
+	}
+	t.Cleanup(client.Close)
+	reader, err := natsgo.Connect(url)
+	if err != nil {
+		t.Fatalf("connect the reader: %v", err)
+	}
+	defer reader.Close()
+	js, err := reader.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedThroughputBacklog(t, database, broker, issues, count)
+
+	stop := runOutbox(t, database, client, broker)
+	defer stop()
+	// Cut once the first envelopes reached the stream and before any acknowledgement made it back.
+	waitFor(t, 10*time.Second, "the first batch reaching the stream", func() bool {
+		info, err := js.StreamInfo(bus.Stream)
+		return err == nil && info.State.Msgs > 0
+	})
+	proxy.down()
+	if left := unpublishedCount(t, database); left != count {
+		t.Fatalf("%d events were marked published before the cut; the cut came too late to test anything", count-left)
+	}
+	time.Sleep(2 * time.Second)
+	proxy.up(t)
+
+	waitFor(t, 60*time.Second, "the backlog published after the cut", func() bool {
+		return unpublishedCount(t, database) == 0
+	})
+	var attempted int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select count(*) from events where attempt_count <> 0`).Scan(&attempted); err != nil {
+		t.Fatalf("count attempted events: %v", err)
+	}
+	if attempted != 0 {
+		t.Fatalf("%d events were backed off for the cut, want every one released", attempted)
+	}
 	assertStreamInIDOrder(t, url, count+count/2)
 }
 
