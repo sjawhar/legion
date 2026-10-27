@@ -10,19 +10,21 @@ name: Fold Changelog Fragments
 # of their own, so their fragments land under main@<the first 12 hex digits of main's tip>
 # (`release-push.sh fold-plan`'s header paragraph).
 #
-# It is a workflow of its own, serialized by the concurrency group below, and the release
-# workflows are untouched: it runs after each run of either release workflow on main (a new tag is
-# what makes a fragment foldable), once a day, and by hand. Every run folds everything foldable on
-# main's tip from the tags as they are then, so a lost push, a skipped run or a pending run GitHub
-# dropped for a newer one is redone by the next run. When main moves between the build and the
-# push, push-fold pushes nothing and starts a new run on main's new tip instead (land_on_main in
-# release-push.sh), which is the retry.
+# It is a workflow of its own, and the release workflows are untouched: it runs after each run of
+# either release workflow on main (a new tag is what makes a fragment foldable), once a day, and by
+# hand. Every run folds everything foldable on main's tip from the tags as they are then, so a
+# lost push, a skipped run or a pending run GitHub dropped for a newer one is redone by the next
+# run. When main moves between the build and the push, push-fold pushes nothing and starts a new
+# run on main's new tip instead (land_on_main in release-push.sh), which is the retry.
 #
 # The fold is split as the releases are (release.yaml's header says why). fold_build renders the
 # fragments with changie, which is dependency code, and so holds no write scope and no secret and
 # ends in the tripwire. fold_publish holds the deploy key and runs no dependency code: only
 # release-push.sh push-fold, which writes the build's notes into the CHANGELOG.md files and lands
-# the commit with git, jq and gh. check-release-credentials.sh pins this shape.
+# the commit with git, jq and gh. check-release-credentials.sh pins this shape. A pull request
+# that changes the fold runs fold_build on its own merge commit, so changie, the plan and the
+# notes run on GitHub before the merge; fold_publish runs on main alone, so nothing lands from a
+# pull request.
 on:
   workflow_run:
     workflows: ["Release Packages", "Release Envoy Listener"]
@@ -31,16 +33,25 @@ on:
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
+  # The fold's own files only: a fragment under .changes/ gets no pull-request check.
+  pull_request:
+    paths:
+      - .github/workflows/changelog-fold.yaml
+      - .github/scripts/release-push.sh
+      - .github/actions/install-changie/**
+      - packages/*/.changie.yaml
 
 # Each job declares its own permissions (fold_build, fold_publish below); nothing runs under this
 # workflow-level default.
 permissions: {}
 
-# One run at a time: each run folds main's tip, and two runs at once would fold the same fragments
-# twice. A pending run GitHub drops for a newer one loses nothing, since the newer one folds
-# everything the dropped one would have. check-release-credentials.sh rule 7 pins this group.
+# One run at a time per ref: runs on main queue one behind another, and a pull request's runs queue
+# on their own, never in main's queue. The group only saves wasted runs. A fold lands only while
+# main is still the base its build checked out (land_on_main in release-push.sh), so two runs never
+# fold the same fragments, and a pending run GitHub drops for a newer one in its group loses
+# nothing: the newer one folds everything the dropped one would have.
 concurrency:
-  group: changelog-fold
+  group: changelog-fold-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -65,10 +76,11 @@ jobs:
       base: ${{ steps.base.outputs.base }}
       fold: ${{ steps.plan.outputs.fold }}
     steps:
-      # main's tip with every tag, which the plan's labels are read from.
+      # main's tip with every tag, which the plan's labels are read from; on a pull request, the
+      # event's own merge commit (github.sha) with every tag instead, which nothing lands from.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ github.event_name == 'pull_request' && github.sha || 'main' }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -114,8 +126,9 @@ jobs:
   # changie, no bun and no go, only release-push.sh push-fold (git, jq and gh) and the pinned
   # actions below, so the deploy key never meets the code fold_build runs. push-fold computes the
   # plan again from git and takes from the notes only their text. Only main lands a fold: a
-  # workflow_dispatch from another branch builds and stops there. fold_build has no if: of its own,
-  # so this condition needs no always().
+  # workflow_dispatch from another branch builds and stops there, and so does a pull request,
+  # whose github.ref is refs/pull/<number>/merge. fold_build has no if: of its own, so this
+  # condition needs no always().
   fold_publish:
     needs: fold_build
     if: github.ref == 'refs/heads/main' && needs.fold_build.outputs.fold == 'true'

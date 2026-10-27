@@ -53,9 +53,6 @@
 #    `needs.x.outputs`. This is what skipped legion_publish in the first run on the build/publish
 #    split: its `if:` read legion_build's outputs behind an implicit `success()` that
 #    envoy_plugin_publish, four jobs upstream, had already made false.
-# 7. changelog-fold.yaml runs in the workflow-level concurrency group `changelog-fold` with
-#    `cancel-in-progress: false` (the boolean): each run folds main's tip, and two runs at once
-#    would fold the same fragments twice.
 #
 # "Runs dependency code" is a tripwire over named patterns, not a proof that no other code runs: a
 # step runs dependency code when its `uses:` starts with one of DEPENDENCY_USES, when the shell its
@@ -101,8 +98,8 @@
 # Scope: exactly the four workflows named in WORKFLOWS, the three release workflows and
 # changelog-fold.yaml. Rules 1-3 read every job that has `steps:`; a job that calls a reusable
 # workflow (`uses:` and no steps, release.yaml's worker_image) is out of their scope, since what it
-# runs is that workflow's own jobs. Rules 4-5 read the jobs they name, rule 7 the fold workflow's
-# own `concurrency`. Rule 6 reads every job's `if:`, steps or not.
+# runs is that workflow's own jobs. Rules 4-5 read the jobs they name. Rule 6 reads every job's
+# `if:`, steps or not.
 #
 # Run from anywhere: .github/scripts/check-release-credentials.sh
 # CI runs it in the lint job of pr-and-main.yaml, and its tests in that workflow's test job.
@@ -823,22 +820,6 @@ if LISTENER in loaded:
                 path, job.lines.get("concurrency", job_line),
                 f"job 'release_publish' {must} (found concurrency: {json.dumps(concurrency)})",
             )
-
-# 7. The fold workflow folds main's tip one run at a time, so no two runs fold the same fragments.
-if FOLD in loaded:
-    path = FOLD
-    doc, _ = loaded[path]
-    concurrency = doc.get("concurrency")
-    group = concurrency.get("group") if isinstance(concurrency, Mapping) else None
-    cancel = concurrency.get("cancel-in-progress") if isinstance(concurrency, Mapping) else None
-    if group != "changelog-fold" or cancel is not False:
-        problem(
-            path, doc.lines.get("concurrency", 1),
-            f"the workflow must run in the workflow-level concurrency group 'changelog-fold' with "
-            f"'cancel-in-progress: false', the boolean: each run folds main's tip, and two runs at "
-            f"once would fold the same fragments twice (found concurrency: "
-            f"{json.dumps(concurrency)})",
-        )
 
 # 6. Every job-level `if:` either calls always() and tests the result of each job it reads, or
 # belongs to a job with no skippable ancestor, where GitHub's implicit success() can decide.

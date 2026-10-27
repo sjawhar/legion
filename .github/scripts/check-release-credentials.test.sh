@@ -4,11 +4,10 @@
 # actions, restores no cache and holds the deploy key only in the env of a step that pushes; a job
 # that runs dependency code holds no credential and ends in the no-credential tripwire; every
 # checkout persists no credential; the two release orderings (pi_legion_publish after
-# pi_envoy_publish, release_publish in its concurrency group) and the fold's concurrency group
-# stay; and a job condition downstream of a skippable job calls `always()` and tests the result of
-# every job whose outputs it reads. The check is a tripwire over named patterns (the commands,
-# actions and paths its lists hold), not a proof that no other code runs, and these cases exercise
-# those patterns, on each side of each line.
+# pi_envoy_publish, release_publish in its concurrency group) stay; and a job condition downstream
+# of a skippable job calls `always()` and tests the result of every job whose outputs it reads. The
+# check is a tripwire over named patterns (the commands, actions and paths its lists hold), not a
+# proof that no other code runs, and these cases exercise those patterns, on each side of each line.
 #
 # Each case builds a miniature repository under a temporary directory, with the real script
 # symlinked into it and the four workflows written green, and mutates one file.
@@ -87,10 +86,10 @@ FOLD=.github/workflows/changelog-fold.yaml
 # whose outputs it reads, a plain job that runs no dependency code and a reusable-workflow call
 # with no steps and no `if:`. The listener: a docker build job (`packages: write`, a build-push)
 # and release_publish in its concurrency group, with `docker buildx imagetools create`. Infra: a
-# build job (install-pulumi, `pulumi package get-schema`, tripwire) and a publish job. The fold:
-# its workflow-level concurrency group, a build job (install-changie, fold-plan, fold-notes,
-# upload, tripwire) with no `if:`, and fold_publish (`actions: write`, the deploy key in the env of
-# its push-fold step) whose `if:` reads the build's outputs without `always()`.
+# build job (install-pulumi, `pulumi package get-schema`, tripwire) and a publish job. The fold: a
+# build job (install-changie, fold-plan, fold-notes, upload, tripwire) with no `if:`, and
+# fold_publish (`actions: write`, the deploy key in the env of its push-fold step) whose `if:` reads
+# the build's outputs without `always()`.
 write_green() {
   local dir=$1
   cat > "$dir/release.yaml" <<'YAML'
@@ -359,9 +358,6 @@ name: Fold Changelog Fragments
 on:
   workflow_dispatch:
 permissions: {}
-concurrency:
-  group: changelog-fold
-  cancel-in-progress: false
 env:
   CHANGELOG_PACKAGES: packages/pi-legion=pi-legion-v packages/contracts
 jobs:
@@ -1216,37 +1212,5 @@ check "names the key in a job that runs dependency code, at its line" \
   "$(contains "$out" "^::error::$FOLD:$(line_of "$root/$FOLD" '^          DEPLOY_KEY:'): job 'fold_build' runs dependency code (step './.github/actions/install-changie' uses './.github/actions/install-changie'), but its text names secrets.DEPLOY_KEY; a build job holds no secret but GITHUB_TOKEN$")"
 check "names the key outside a step that pushes" \
   "$(contains "$out" "^::error::$FOLD:$(line_of "$root/$FOLD" '^          DEPLOY_KEY:'): job 'fold_build' names secrets.DEPLOY_KEY at step 'Render the fragments with changie' env.DEPLOY_KEY; ")"
-
-echo "case: the fold workflow without its concurrency group"
-root=$(fixture fold-no-concurrency)
-mutate "$root/$FOLD" $'concurrency:\n  group: changelog-fold\n  cancel-in-progress: false\n' ''
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the file and what it must carry" \
-  "$(contains "$out" "^::error::$FOLD:1: the workflow must run in the workflow-level concurrency group 'changelog-fold' with 'cancel-in-progress: false', the boolean: each run folds main's tip, and two runs at once would fold the same fragments twice (found concurrency: null)$")"
-check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
-
-echo "case: the fold workflow with cancel-in-progress: true"
-root=$(fixture fold-cancel-true)
-mutate "$root/$FOLD" $'  cancel-in-progress: false\n' $'  cancel-in-progress: true\n'
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the concurrency at its line" \
-  "$(contains "$out" "^::error::$FOLD:$(line_of "$root/$FOLD" '^concurrency:$'): the workflow must run in the workflow-level concurrency group 'changelog-fold' .*(found concurrency: {\"group\": \"changelog-fold\", \"cancel-in-progress\": true})$")"
-
-echo "case: the fold workflow with cancel-in-progress: \"false\", a string"
-root=$(fixture fold-cancel-string)
-mutate "$root/$FOLD" $'  cancel-in-progress: false\n' $'  cancel-in-progress: "false"\n'
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names what it found" "$(contains "$out" "(found concurrency: {\"group\": \"changelog-fold\", \"cancel-in-progress\": \"false\"})$")"
-
-echo "case: the fold workflow in another group"
-root=$(fixture fold-other-group)
-mutate "$root/$FOLD" $'  group: changelog-fold\n' $'  group: changelog-fold-${{ github.ref }}\n'
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the group at the concurrency's line" \
-  "$(contains "$out" "^::error::$FOLD:$(line_of "$root/$FOLD" '^concurrency:$'): the workflow must run in the workflow-level concurrency group 'changelog-fold' .*(found concurrency: {\"group\": \"changelog-fold-\${{ github.ref }}\", \"cancel-in-progress\": false})$")"
 
 summary "check-release-credentials.sh"
