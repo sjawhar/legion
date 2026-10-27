@@ -334,41 +334,62 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	return moved
 }
 
-// movedRoleOverlays is the first of role's own overlays (Options.RoleConfigFiles) whose holder in a
-// pod created now — the deepest operator mount at or above the file (runtime.kubernetes.pod
-// volume_mounts), with its volume — pod's role container lacks: no mount of that volume with that
-// sub_path at that mount path, or a volume of that name filled from another ConfigMap or Secret, or projecting other
-// items. Every generation of role is started with the file in its PI_CONFIG_FILES
-// (roleOperatorEnv), and Oh My Pi refuses to start on an overlay it cannot read, so a pod created
-// before the operator added the mount is replaced by the relaunch rather than start a role there
-// that cannot run. Only what decides whether the file is there is compared, so the fields the API
+// movedRoleOverlays is the first overlay of any role role_config_files names (Options.RoleConfigFiles)
+// that runs in role's container of pod — every issue role shares an issue pod's one container, the
+// controller has its own pod — whose holder in a pod created now, the deepest operator mount at or
+// above the file (runtime.kubernetes.pod volume_mounts) with its volume, is not the deepest mount
+// at or above the file in pod's container as a role sees it (an issue pod's HomeMountsDir view
+// mapped back to the image's home): another volume, sub_path or mount path, a mount that hides it
+// there or none at all, or a volume of that name filled from another ConfigMap or Secret, or
+// projecting other items. Every role of the pod reports the same move, as for the secrets broker's
+// enrollment, so the whole pod is replaced at the boot's re-adoption of any role running in it, or,
+// with none running, at the first launch into it; a named role's next generation is started with
+// the file in its PI_CONFIG_FILES (roleOperatorEnv), on which its Oh My Pi would refuse to start
+// in the old pod. Only what decides whether the file is there is compared, so the fields the API
 // server defaults on a stored volume never read as a move.
 func (r *Runtime) movedRoleOverlays(pod *corev1.Pod, role claim.Role) (movedAddress, bool) {
 	container := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == podContainer(role) })
 	if container < 0 {
 		return movedAddress{}, false
 	}
-	for _, file := range r.roleConfigFiles[role] {
-		holder := holderMount(r.pod.VolumeMounts, file)
-		if holder == nil {
+	seen := make([]corev1.VolumeMount, len(pod.Spec.Containers[container].VolumeMounts))
+	for i, m := range pod.Spec.Containers[container].VolumeMounts {
+		m.MountPath = roleViewPath(m.MountPath)
+		seen[i] = m
+	}
+	for _, named := range roleConfigRoles {
+		if podContainer(named) != podContainer(role) {
 			continue
 		}
-		want := volumeFillName(r.pod.Volumes, holder.Name)
-		mounted := slices.ContainsFunc(pod.Spec.Containers[container].VolumeMounts, func(m corev1.VolumeMount) bool {
-			// An issue pod's roles container mounts what lies under the image's home at its
-			// HomeMountsDir view (homeMountsView); the controller's pod mounts it as configured.
-			atPath := m.MountPath == holder.MountPath || m.MountPath == containerHomePath(holder.MountPath)
-			return m.Name == holder.Name && m.SubPath == holder.SubPath && atPath
-		})
-		held := "(unset)"
-		if mounted {
-			held = volumeFillName(pod.Spec.Volumes, holder.Name)
-		}
-		if held != want {
-			return movedAddress{where: "role_config_files." + string(role) + " " + file, held: held, handed: want}, true
+		for _, file := range r.roleConfigFiles[named] {
+			holder := holderMount(r.pod.VolumeMounts, file)
+			if holder == nil {
+				continue
+			}
+			want := volumeFillName(r.pod.Volumes, holder.Name)
+			held := "(unset)"
+			if in := holderMount(seen, file); in != nil && in.Name == holder.Name && in.SubPath == holder.SubPath && in.MountPath == holder.MountPath {
+				held = volumeFillName(pod.Spec.Volumes, holder.Name)
+			}
+			if held != want {
+				return movedAddress{where: "role_config_files." + string(named) + " " + file, held: held, handed: want}, true
+			}
 		}
 	}
 	return movedAddress{}, false
+}
+
+// roleViewPath is path, a mount path of a pod's container, as a role sees it: an issue pod's
+// HomeMountsDir view of the image's home (containerHomePath) mapped back to the home, any other
+// path as it is.
+func roleViewPath(path string) string {
+	if path == HomeMountsDir {
+		return podHome
+	}
+	if rest, ok := strings.CutPrefix(path, HomeMountsDir+"/"); ok {
+		return podHome + "/" + rest
+	}
+	return path
 }
 
 // holderMount is the deepest of mounts at or above file, as the kernel resolves the path, nil for

@@ -3600,7 +3600,7 @@ The supervisor relaunches each reported claim at once, through the launch path a
 `Resume` of its recorded session, or a `Spawn` when it has not registered yet. What the relaunch
 replaces follows from what moved. A pod whose launcher dials a stale stream, which lacks the
 broker enrollment its roles are started against now, or which lacks the operator mount holding a
-file `role_config_files` names for one of its roles, cannot run them as a pod created now would,
+file `role_config_files` names for any of its roles, cannot run them as a pod created now would,
 and every role of it is reported at once, from the boot that re-adopts them: the first of them
 relaunched replaces the pod, under the pod's launch turn, and the others, whose relaunches wait on
 that turn, resume into the new pod, whose launcher dials the current stream for every role and mounts the
@@ -5484,14 +5484,17 @@ issue's pod (every role of it alike) and the image probe's.
   it is at boot, and a pod reads it when it starts; a file mounted by `sub_path` is never refreshed
   in a running pod, so a changed file reaches a role once its pod is replaced.
   **Rolling it out:** a pod created before the operator added the overlay's volume and mount (or
-  moved its mount path, or changed that volume's ConfigMap, Secret or `items`) cannot run a role
-  whose `PI_CONFIG_FILES` names the file, so it is replaced at once, as a change of the secrets
-  broker's enrollment is: at the boot's re-adoption the role is reported `StaleAddress`, its detail
-  `role_config_files.<role> <file> (unset), now volume <name> from ConfigMap <name> items [...]`,
-  and the supervisor relaunches it at once. The running turn is lost, and the issue pod is replaced
-  with its disk, which takes the unpushed work of every role in that pod ([The disk dies with its
-  pod](#the-disk-dies-with-its-pod)). So add the mount and the key when no named role is mid-turn,
-  or after the roles have pushed.
+  moved or dropped a mount around it, or changed that volume's ConfigMap, Secret or `items`) cannot
+  run a role whose `PI_CONFIG_FILES` names the file, so the whole pod is replaced, as for a change
+  of the secrets broker's enrollment. At the restart, every role of an affected pod that is running
+  is reported `StaleAddress` at the boot's re-adoption, whether or not `role_config_files` names
+  it, its detail `role_config_files.<role> <file> (unset), now volume <name> from ConfigMap <name>
+  items [...]`; the supervisor relaunches each at once, uncharged, so each running turn is lost and
+  each role resumes its session in the new pod, and the issue pod is replaced with its disk, which
+  takes the unpushed work of every role in it ([The disk dies with its
+  pod](#the-disk-dies-with-its-pod)). A pod with no role running at the restart is replaced at the
+  first launch into it, which ends no turn, since none is running. So add the mount and the key
+  when no role of an affected issue is mid-turn and every role has pushed.
   **Who can read the files:** only loading is per role. Every role of a pod mounts every operator
   volume, so each role can read every role's overlay file; never put a secret in one (a credential
   travels in `provider_keys` or a mounted Secret the operator means every role to hold).

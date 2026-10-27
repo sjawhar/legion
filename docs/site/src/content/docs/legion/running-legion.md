@@ -359,9 +359,11 @@ What each part is for:
   the overlays every role names, so a deployment that turns fallback on for some roles alone
   records `capabilities.decided.model-fallback`. Only loading is per role: every role of a pod, and every pane
   under tmux, can read every role's overlay file, so never put a secret in one. Adding the mount
-  to a running deployment replaces each issue pod at once, at the boot's re-adoption: the running
-  turn is lost and the pod's disk goes with it, unpushed work included, so add it when no named role
-  is mid-turn or after the roles have pushed. The repository's `docs/kubernetes.md` ("Operator
+  to a running deployment replaces every affected issue pod at the restart: each of its running
+  roles, named or not, loses its turn and resumes its session uncharged in a new pod, and the old
+  pod's disk goes with it, unpushed work included (a pod with no role running is replaced at the
+  first launch into it). Add it when no role of an affected issue is mid-turn and every role has
+  pushed. The repository's `docs/kubernetes.md` ("Operator
   configuration") shows the overlay and its mount.
 
 The loader refuses any key it does not know, naming it, and refuses `omp_invocation` and

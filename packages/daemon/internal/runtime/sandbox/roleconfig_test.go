@@ -273,3 +273,69 @@ func runtimeWithOptions(t *testing.T, change func(*Options)) *Runtime {
 	}
 	return r
 }
+
+// A pod that lacks the mount of any named role's file is a move for every role of it, as a broker
+// enrollment is: the tester whose own file the pod holds, and the architect the key does not name,
+// read the implementer's missing mount too, so the pod is replaced at the boot's re-adoption of
+// whichever role runs, not at the implementer's later launch. The controller's pod is its own: an
+// issue role's missing mount is no move for it.
+func TestAMissingRoleOverlayMountMovesEveryRoleOfThePod(t *testing.T) {
+	vol := func(name string) corev1.Volume {
+		return corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}
+	}
+	before := runtimeWithOptions(t, func(o *Options) {
+		o.Pod.Volumes = append(o.Pod.Volumes, vol("roles-x"))
+		o.Pod.VolumeMounts = append(o.Pod.VolumeMounts, corev1.VolumeMount{Name: "roles-x", MountPath: "/etc/x", ReadOnly: true})
+		o.RoleConfigFiles = map[claim.Role][]string{claim.RoleTester: {"/etc/x/tester.yml"}}
+	})
+	after := runtimeWithOptions(t, func(o *Options) {
+		o.Pod.Volumes = append(o.Pod.Volumes, vol("roles-x"), vol("roles-y"))
+		o.Pod.VolumeMounts = append(o.Pod.VolumeMounts,
+			corev1.VolumeMount{Name: "roles-x", MountPath: "/etc/x", ReadOnly: true}, corev1.VolumeMount{Name: "roles-y", MountPath: "/etc/y", ReadOnly: true})
+		o.RoleConfigFiles = map[claim.Role][]string{claim.RoleTester: {"/etc/x/tester.yml"}, claim.RoleImplementer: {"/etc/y/implementer.yml"}}
+	})
+	pod := &corev1.Pod{Spec: podOf(t, before, workerSpec(t))}
+	want := (movedAddress{"role_config_files.implementer /etc/y/implementer.yml", "(unset)", "volume roles-y from ConfigMap roles-y items []"}).String()
+	for _, role := range []claim.Role{claim.RoleTester, claim.RoleArchitect, claim.RoleImplementer} {
+		moved := after.movedInPod(pod, role)
+		if !slices.ContainsFunc(moved, func(m movedAddress) bool { return m.String() == want }) {
+			t.Errorf("the %s's pod holds %+v, want %s among it", role, moved, want)
+		}
+	}
+	controller := &corev1.Pod{Spec: podOf(t, before, controllerSpec(t))}
+	if got, moved := after.movedRoleOverlays(controller, claim.RoleController); moved {
+		t.Errorf("the controller's pod moved for an issue role's mount: %+v", got)
+	}
+}
+
+// A mount that hid the file in the old pod is a move once the configuration drops it: the old pod
+// mounts volume Y at /etc/a/roles over volume X at /etc/a, and the configuration now serves
+// /etc/a/roles/fallback.yml from X alone, so the old pod's deepest mount at the file is Y, not the
+// configured holder X — for an issue pod and the controller's pod alike.
+func TestADroppedMountThatHidTheFileIsAMove(t *testing.T) {
+	vol := func(name string) corev1.Volume {
+		return corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}
+	}
+	const file = "/etc/a/roles/fallback.yml"
+	files := map[claim.Role][]string{claim.RoleTester: {file}, claim.RoleController: {file}}
+	before := runtimeWithOptions(t, func(o *Options) {
+		o.Pod.Volumes = append(o.Pod.Volumes, vol("x"), vol("y"))
+		o.Pod.VolumeMounts = append(o.Pod.VolumeMounts,
+			corev1.VolumeMount{Name: "x", MountPath: "/etc/a", ReadOnly: true}, corev1.VolumeMount{Name: "y", MountPath: "/etc/a/roles", ReadOnly: true})
+		o.RoleConfigFiles = files
+	})
+	after := runtimeWithOptions(t, func(o *Options) {
+		o.Pod.Volumes = append(o.Pod.Volumes, vol("x"))
+		o.Pod.VolumeMounts = append(o.Pod.VolumeMounts, corev1.VolumeMount{Name: "x", MountPath: "/etc/a", ReadOnly: true})
+		o.RoleConfigFiles = files
+	})
+	for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
+		pod := &corev1.Pod{Spec: podOf(t, before, spec)}
+		if got, moved := after.movedRoleOverlays(pod, spec.Role); !moved || got.where != "role_config_files."+string(spec.Role)+" "+file {
+			t.Errorf("%s: moved %v %+v, want a move of its file under the dropped mount", spec.Role, moved, got)
+		}
+		if got, moved := before.movedRoleOverlays(pod, spec.Role); moved {
+			t.Errorf("%s: the same configuration moved %+v", spec.Role, got)
+		}
+	}
+}
