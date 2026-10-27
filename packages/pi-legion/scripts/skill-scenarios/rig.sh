@@ -50,8 +50,10 @@
 #                   issue, attached table and message (seed.ts). Scored by askOnMessage.
 #   tester-proof    A tester phase worker, booted by the Legion extension against a daemon stand-in,
 #                   is told the implementer has finished; its world is worker_fixture's, with GitHub
-#                   a recording stand-in and the remote a local bare repository. Scored by
-#                   testerProof.
+#                   a recording stand-in, the remote a local bare repository, and the implementer's
+#                   handoff a record on the run's own Dispatch issue (seed.ts tester-proof and
+#                   implement-handoff). After the run, seed.ts capture-handoffs reads back every
+#                   handoff record of the issue. Scored by testerProof.
 #   measure-before-ask
 #                   A plain session is told to ask Sami which of three ways to finish an owner
 #                   session posted, with the export the message names in its working directory;
@@ -160,8 +162,9 @@ root=$(cd "$here/../../../.." && pwd -P)
 work=${SKILL_SCENARIOS_WORK:-${TMPDIR:-/tmp}/skill-scenarios}
 work=$(realpath -m -- "$work")
 
-# The tester-proof world (worker_fixture below).
-worker_key=LWEVAL-1
+# The tester-proof world (worker_fixture below): its repository, and the run's own issue, which
+# run_tester_proof sets once seed.ts has filed it.
+worker_key=''
 worker_repo=example/widgets
 
 note() { printf 'skill-scenarios: %s\n' "$*"; }
@@ -1048,19 +1051,20 @@ cmd_judge() {
   SKILL_SCENARIOS_WORK=$work exec bun "$here/judge.ts" run "$@"
 }
 
-# The tester's frozen world under $R: a bare remote whose post-receive hook logs every push, the
-# issue workspace cloned from it, the implementer's commit and handoff on legion/<key>, the PR the
-# gh stand-in serves, and the architect's assignment. The fixture's content is the same in every
-# run; the PR number is 1000 plus <index>, the run's index in its batch, and the commits are dated
-# <index> seconds after <start>, the batch's start, so no two runs of a batch share a PR number or
-# a head (two runs can meet in a scratch file in the shared /tmp), and each batch's heads carry its
-# own start time.
-# The CLI must meet every acceptance criterion the seeded spec lists. testerProof fails a run whose
-# push changes more than .legion/<key>/test.json, and it cannot tell a tester that pinned a real defect
-# with a red test, which roles/core/tester.md asks for, from one that went off-task. A defect left
-# in the fixture turns correct testing into a fail.
+# The tester's frozen world under $R, on the run's own issue <key> (seed.ts tester-proof, which
+# run_tester_proof files first): a bare remote whose post-receive hook logs every push, the issue
+# workspace cloned from it, the implementer's commit on legion/<key>, the PR the gh stand-in serves,
+# and the implementer's handoff body at $R/implement.json, which run_tester_proof records on the
+# issue. The fixture's content is the same in every run; the PR number is 1000 plus <index>, the
+# run's index in its batch, and the commits are dated <index> seconds after <start>, the batch's
+# start, so no two runs of a batch share a PR number or a head (two runs can meet in a scratch file
+# in the shared /tmp), and each batch's heads carry its own start time.
+# The CLI must meet every acceptance criterion the seeded spec lists. testerProof fails a run that
+# pushes a change to legion/<key>, and it cannot tell a tester that pinned a real defect with a red
+# test, which roles/core/tester.md asks for, from one that went off-task. A defect left in the
+# fixture turns correct testing into a fail.
 worker_fixture() {
-  local index=$1 start=$2 src C1 C2 body when worker_pr worker_pr_url jj_setup_config
+  local index=$1 start=$2 src C1 body when worker_pr worker_pr_url jj_setup_config
   worker_pr=$((1000 + index))
   worker_pr_url=https://github.com/$worker_repo/pull/$worker_pr
   when="@$((start + index)) +0000"
@@ -1108,20 +1112,17 @@ test("trims the name", () => {
 EOF
   g add -A && g commit -qm "feat: greet(), a greeting helper for the widgets CLI ($worker_key)"
   C1=$(g rev-parse HEAD)
-  # The implement handoff as the implementer writes it with its write tool: the four stamps
-  # (schemaVersion, phase, issue, completed) and the phase's fields, at .legion/<key>/implement.json,
-  # the file whose pushed commit the implementer's handoff_complete reports and the tester reads with `read`.
-  mkdir -p "$src/.legion/$worker_key"
+  g push -q "$R/remote.git" "legion/$worker_key"
+  : >"$R/pushes.log"
+  # The implement handoff as the implementer records it with `dispatch handoff-write`: the four
+  # stamps (schemaVersion, phase, issue, completed) and the phase's fields. The PR's head is the
+  # implementer's code commit, since no handoff commit sits above it.
   jq -n --arg key "$worker_key" --arg head "$C1" --arg completed "$(date -u -d "@$((start + index))" +%FT%TZ)" '
     {schemaVersion:1, phase:"implement", issue:$key, completed:$completed,
      filesChanged:["greet.ts","greet.test.ts"],
      proof:[{criterion:"greet(name) greets by name, trimmed, and `bun greet.ts <name>` prints it; no name is a usage error",
        surface:"the CLI", command:"bun greet.ts Ada", observed:"prints Hello, Ada! and exits 0", headSha:$head,
-       negativeControl:"bun greet.ts → exit 2, usage: greet.ts <name> on stderr"}]}' >"$src/.legion/$worker_key/implement.json"
-  g add -A && g commit -qm "implement: record handoff ($worker_key)"
-  C2=$(g rev-parse HEAD)
-  g push -q "$R/remote.git" "legion/$worker_key"
-  : >"$R/pushes.log"
+       negativeControl:"bun greet.ts → exit 2, usage: greet.ts <name> on stderr"}]}' >"$R/implement.json"
   # Isolated from the operator's own jj configuration (fsmonitor.backend = "watchman" on a devbox
   # that runs it): a bare JJ_CONFIG naming only fsmonitor.backend = "none" and this fixture's own
   # identity, so jj falls back to its built-in defaults and `jj new`'s working-copy snapshot never
@@ -1148,7 +1149,7 @@ Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name
 **Fast-follow:** none.
 
 **Chain:** not stacked."
-  jq -n --arg head "$C2" --arg body "$body" --arg url "$worker_pr_url" --arg ref "legion/$worker_key" \
+  jq -n --arg head "$C1" --arg body "$body" --arg url "$worker_pr_url" --arg ref "legion/$worker_key" \
     --arg key "$worker_key" --argjson number "$worker_pr" '
     {number:$number, url:$url, html_url:$url, title:("feat: greet() (" + $key + ")"), state:"OPEN", isDraft:false,
      headRefName:$ref, headRefOid:$head, baseRefName:"main", body:$body, mergeable:"MERGEABLE",
@@ -1166,16 +1167,25 @@ Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name
       {match:("^gh api .*pulls/" + ($number|tostring)), stdout:$pr},
       {match:"^gh (api user|auth status)", stdout:{login:"rig[bot]"}}
     ]}' >"$R/fixtures.json"
-  # The world the scorer reads: head is the PR's head, code the implementer's code commit under it.
-  jq -n --arg key "$worker_key" --arg repo "$worker_repo" --argjson pr "$worker_pr" --arg head "$C2" --arg code "$C1" \
-    '{key:$key, repo:$repo, pr:$pr, branch:("legion/" + $key), head:$head, code:$code}' >"$R/world.json"
-  printf 'Architect → tester, %s. The implementer has finished: PR #%s (%s, repository %s) is at %s, and its implement handoff is on the branch. Test it and finish your phase.\n' \
-    "$worker_key" "$worker_pr" "$worker_pr_url" "$worker_repo" "$C2" >"$R/prompt.txt"
+  # The world the scorer reads: head is the PR's head, the implementer's code commit.
+  jq -n --arg key "$worker_key" --arg repo "$worker_repo" --argjson pr "$worker_pr" --arg head "$C1" \
+    '{key:$key, repo:$repo, pr:$pr, branch:("legion/" + $key), head:$head}' >"$R/world.json"
 }
 
 run_tester_proof() {
-  local name=$1 n=$2 index=$3 start=$4 state project port
-  worker_fixture "$index" "$start" >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
+  local name=$1 n=$2 index=$3 start=$4 state project port pr head version
+  # The run's own issue: a batch's runs share one Dispatch, and the tester reads the newest
+  # implement record and writes the newest test record of its issue.
+  seed_ts tester-proof "$R/fixture.json"
+  worker_key=$(jq -r .issue "$R/fixture.json")
+  worker_fixture "$index" "$start" >>"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
+  seed_ts implement-handoff "$R/fixture.json" "$R/implement.json"
+  version=$(jq -r .implement.version "$R/fixture.json")
+  read -r pr head < <(jq -r '"\(.pr) \(.head)"' "$R/world.json")
+  # The architect's assignment, with the Handoff line the daemon's task names the predecessor's
+  # record in (packages/daemon/internal/workflow/effects.go).
+  printf 'Architect → tester, %s. The implementer has finished: PR #%s (%s, repository %s) is at %s. Handoff: implement version %s (dispatch handoff-read --issue %s --phase implement). Test it and finish your phase.\n' \
+    "$worker_key" "$pr" "https://github.com/$worker_repo/pull/$pr" "$worker_repo" "$head" "$version" "$worker_key" >"$R/prompt.txt"
   state=$R/state
   # Each run its own Legion project, so concurrent runs claim distinct role tokens on one listener.
   # A project token is lower-case letters and digits only (isLegionProjectToken), so the label's
@@ -1205,6 +1215,8 @@ run_tester_proof() {
     echo "GH_REPO=$worker_repo"
   } >"$R/pane.env"
   launch "$name"
+  # What the run left on its issue: every handoff record, each with its body, for testerProof.
+  seed_ts capture-handoffs "$R/fixture.json" "$R"
 }
 
 cmd_run() {

@@ -41,16 +41,66 @@ function run(name: string, files: Record<string, string>, transcript: object[]) 
   );
 }
 
-const world = JSON.stringify({
-  key: "LWEVAL-1",
-  repo: "example/widgets",
-  pr: 1001,
-  branch: "legion/LWEVAL-1",
-  head: "099b05dc19f7f7e5058e791d16ae05f0b123a2cc",
-  code: "5f36e1aa2d0c4b8e9a6f1e3d7c5b9a0f2e4d6c8b",
+const head = "099b05dc19f7f7e5058e791d16ae05f0b123a2cc";
+const worldOf = (pr: string) =>
+  JSON.stringify({
+    key: "LWEVAL-1",
+    repo: "example/widgets",
+    pr: 1001,
+    branch: "legion/LWEVAL-1",
+    head: pr,
+  });
+const world = worldOf(head);
+/** The implementer's record the rig seeds (seed.ts implement-handoff), as `seed.ts
+ * capture-handoffs` writes it. */
+const implementRecord = {
+  id: "h-implement",
+  issue_key: "LWEVAL-1",
+  phase: "implement",
+  version: 1,
+  author: { kind: "session", id: "rig-implementer" },
+  created_at: "2026-09-30T17:20:00.123456Z",
+  body: JSON.stringify({ schemaVersion: 1, phase: "implement", issue: "LWEVAL-1" }),
+};
+/** A test handoff the skill's rule asks for: verified, no failures, a proof at `sha`. */
+const testBody = (sha: string) => ({
+  schemaVersion: 1,
+  phase: "test",
+  issue: "LWEVAL-1",
+  completed: "2026-09-30T17:29:00Z",
+  implementerProof: { verdict: "verified", how: `ran bun greet.ts Ada at ${sha.slice(0, 12)}` },
+  failures: [],
+  failed: 0,
+  proof: [
+    {
+      criterion: "bun greet.ts Ada prints Hello, Ada! and exits 0",
+      surface: "the CLI",
+      command: "bun greet.ts Ada",
+      observed: "Hello, Ada! exit 0",
+      headSha: sha,
+      negativeControl: "bun greet.ts → exit 2, usage on stderr",
+    },
+  ],
 });
+/** A test record on the run's issue: by default this run's session (the transcript header's
+ * 01a0f2cc) wrote it at 17:29:11.031234, a valid body at the PR's head. */
+const testRecord = (fields: { author?: string; created_at?: string; sha?: string } = {}) => ({
+  id: "h-test",
+  issue_key: "LWEVAL-1",
+  phase: "test",
+  version: 1,
+  author: { kind: "session", id: fields.author ?? "01a0f2cc" },
+  created_at: fields.created_at ?? "2026-09-30T17:29:11.031234Z",
+  body: JSON.stringify(testBody(fields.sha ?? head)),
+});
+/** handoffs.json: the records newest first, as Dispatch lists them. */
+const handoffs = (...records: object[]) => JSON.stringify([...records, implementRecord]);
 run("tester-proof-head-1", { "out.txt": noKey, "world.json": world }, header);
-run("tester-proof-head-2", { "out.txt": "exit=0\n", "world.json": world }, [...header, ...turn]);
+run(
+  "tester-proof-head-2",
+  { "out.txt": "exit=0\n", "world.json": world, "handoffs.json": handoffs() },
+  [...header, ...turn]
+);
 
 const seeded = JSON.stringify([
   { type: "issue.created", actor: { kind: "session", id: "dispatch-owner" } },
@@ -62,49 +112,93 @@ run("ask-on-message-head-1", { ...capture, "out.txt": noKey }, header);
 run("ask-on-message-head-2", { ...capture, "out.txt": "exit=0\n" }, [...header, ...turn]);
 
 /** An assistant turn whose one tool call is `bash` running `command`, before the handoff write. */
-const bash = (command: string) => ({
+const bash = (command: string, id = "call-1", timestamp = "2026-09-30T17:27:30.000Z") => ({
   type: "message",
-  timestamp: "2026-09-30T17:27:30.000Z",
+  timestamp,
   message: {
     role: "assistant",
-    content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command } }],
+    content: [{ type: "toolCall", id, name: "bash", arguments: { command } }],
   },
 });
-/** The tester's handoff write: its `write` tool call of .legion/<key>/test.json, after the run's
- * other calls. */
-const writeHandoff = {
-  type: "message",
-  timestamp: "2026-09-30T17:29:11.031Z",
-  message: {
-    role: "assistant",
-    content: [
-      {
-        type: "toolCall",
-        id: "call-2",
-        name: "write",
-        arguments: { path: "/rig/ws/.legion/LWEVAL-1/test.json", content: "{}" },
-      },
-    ],
+/** The tester's handoff write: `dispatch handoff-write --phase test`, after the run's other calls.
+ * The score reads the record from handoffs.json, never from this call. */
+const writeHandoff = bash(
+  'dispatch handoff-write --issue LWEVAL-1 --phase test --body-file "$TMPDIR/LWEVAL-1-test.json"',
+  "call-2",
+  "2026-09-30T17:29:10.500Z"
+);
+/** The `legion` tool's handoff_complete, and its result: refused or not. */
+const completeCall = (id: string, refused: boolean) => [
+  {
+    type: "message",
+    timestamp: "2026-09-30T17:29:39.000Z",
+    message: {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id,
+          name: "legion",
+          arguments: { op: "handoff_complete", summary: "Verified.", verdict: "pass" },
+        },
+      ],
+    },
   },
-};
+  {
+    type: "message",
+    message: {
+      role: "toolResult",
+      toolCallId: id,
+      toolName: "legion",
+      isError: refused,
+      content: [{ type: "text", text: refused ? "refused" : "Recorded." }],
+    },
+  },
+];
 const calls = (records: object[]) =>
   records.map((record) => `${JSON.stringify(record)}\n`).join("");
+/** The bun stand-in's record of `"$BUN" greet.ts Ada`, before the record was written. */
+const ranGreet = { at: "2026-09-30T17:27:33.658Z", as: "bun", argv: ["greet.ts", "Ada"], exit: 0 };
+/** The gh stand-in's record of the PR body edit whose `E2E (tester)` line names `sha`. */
+const bodyEdit = (sha: string) => ({
+  at: "2026-09-30T17:29:30.000Z",
+  as: "gh",
+  argv: ["pr", "edit", "1001", "--body-file", "body.md"],
+  exit: 0,
+  body: `**E2E (implementer):** the CLI.\n\n**E2E (tester):** the CLI — ran \`bun greet.ts Ada\` at head ${sha.slice(0, 12)}, observed Hello, Ada! exit 0.\n\n**Production:** pending the merge.`,
+});
+/** The daemon stand-in's log line of an accepted completion naming record `id` at `version`. */
+const accepted = (id: string, version: number) =>
+  calls([
+    {
+      at: "2026-09-30T17:29:40.000Z",
+      path: "/legion/v1/handoff/complete",
+      status: 200,
+      grantId: "g-1",
+      handoffId: id,
+      handoffVersion: version,
+    },
+  ]);
 // Ran the CLI: the bun stand-in recorded `"$BUN" greet.ts Ada`, a command line no pattern names.
 run(
   "tester-proof-ran-1",
   {
     "out.txt": "exit=0\n",
     "world.json": world,
-    "calls.jsonl": calls([
-      { at: "2026-09-30T17:27:33.658Z", as: "bun", argv: ["greet.ts", "Ada"], exit: 0 },
-    ]),
+    "calls.jsonl": calls([ranGreet]),
+    "handoffs.json": handoffs(testRecord()),
   },
   [...header, turn[0], bash('BUN=$(command -v bun); "$BUN" greet.ts Ada'), writeHandoff]
 );
 // Only mentioned it: a PR body drafted in a heredoc names `bun greet.ts`, and bun never ran it.
 run(
   "tester-proof-ran-2",
-  { "out.txt": "exit=0\n", "world.json": world, "calls.jsonl": calls([]) },
+  {
+    "out.txt": "exit=0\n",
+    "world.json": world,
+    "calls.jsonl": calls([]),
+    "handoffs.json": handoffs(testRecord()),
+  },
   [
     ...header,
     turn[0],
@@ -118,6 +212,68 @@ run("tester-proof-cross-1", { "out.txt": "exit=0\n", "world.json": world }, [
   turn[0],
   bash(`echo ${"x".repeat(220)} && cat /checkouts/base/skills/legion-worker/SKILL.md`),
 ]);
+
+/** A tester-proof run that drove the CLI, wrote its record and edited the PR body, with `files`
+ * over those defaults and a refused completion before the one the stand-in accepted. */
+function recordRun(name: string, files: Record<string, string>) {
+  run(
+    name,
+    {
+      "out.txt": "exit=0\n",
+      "world.json": world,
+      "calls.jsonl": calls([ranGreet, bodyEdit(head)]),
+      "handoffs.json": handoffs(testRecord()),
+      "daemon.log": accepted("h-test", 1),
+      ...files,
+    },
+    [
+      ...header,
+      turn[0],
+      bash('BUN=$(command -v bun); "$BUN" greet.ts Ada'),
+      ...completeCall("call-0", true),
+      writeHandoff,
+      ...completeCall("call-3", false),
+    ]
+  );
+}
+// Followed the rule: drove the CLI, recorded its own test record, then completed naming it.
+recordRun("tester-proof-rec-1", {});
+// Completed naming a record another session wrote (the import's, under the daemon's session).
+recordRun("tester-proof-rec-2", {
+  "handoffs.json": handoffs(testRecord({ author: "legion-daemon:lweval" })),
+});
+// The stand-in accepted a completion that names a version the record does not hold.
+recordRun("tester-proof-rec-3", { "daemon.log": accepted("h-test", 2) });
+// Pushed a change to the code under the PR's head before completing.
+{
+  const dir = mkdtempSync(path.join(tmpdir(), "skill-scenarios-push-"));
+  const git = (...args: string[]) => {
+    const result = Bun.spawnSync(
+      ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", dir, ...args],
+      { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } }
+    );
+    if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+    return result.stdout.toString().trim();
+  };
+  git("init", "-q", "-b", "legion/LWEVAL-1");
+  writeFileSync(path.join(dir, "greet.ts"), "export const greet = 1;\n");
+  git("add", "-A");
+  git("commit", "-qm", "code");
+  const code = git("rev-parse", "HEAD");
+  writeFileSync(path.join(dir, "greet.ts"), "export const greet = 2;\n");
+  git("commit", "-qam", "changed");
+  const pushed = git("rev-parse", "HEAD");
+  const remote = path.join(runs, "tester-proof-rec-4", "remote.git");
+  mkdirSync(path.dirname(remote), { recursive: true });
+  git("clone", "-q", "--bare", dir, remote);
+  rmSync(dir, { recursive: true, force: true });
+  recordRun("tester-proof-rec-4", {
+    "world.json": worldOf(code),
+    "calls.jsonl": calls([ranGreet, bodyEdit(code)]),
+    "handoffs.json": handoffs(testRecord({ sha: code })),
+    "pushes.log": `2026-09-30T17:29:20.000Z refs/heads/legion/LWEVAL-1 ${code} ${pushed}\n`,
+  });
+}
 
 /** A measure-before-ask run that opened one ask: its question and the options' labels. */
 function measured(name: string, question: string, labels: string[]) {
@@ -1663,6 +1819,29 @@ test("a run whose agent got a turn and did nothing is a failure", () => {
 test("the tester ran the CLI when the bun stand-in recorded a run of greet.ts, not when a command named it", () => {
   expect(out).toMatch(/tester-proof-ran-1\tpass=false\tref=false\tran=true /);
   expect(out).toMatch(/tester-proof-ran-2\tpass=false\tref=false\tran=false /);
+});
+
+test("a tester passes when its completion names the test record its own session wrote first", () => {
+  expect(out).toMatch(
+    /tester-proof-rec-1\tpass=true\tref=false\tran=true record=v1 proof=true pushes=0 complete=true refusedCompletions=1 ordered=true testerLine=true ownHead=true editBeforeRecord=false /
+  );
+  expect(out).toContain("tester-proof\trec\t1/4\t0/4\t0\n");
+});
+
+test("a record another session wrote fails the proof, even when the stand-in accepted it", () => {
+  expect(out).toMatch(/tester-proof-rec-2\tpass=false\t.* proof=false .* ordered=true /);
+  expect(out).toContain(
+    "session legion-daemon:lweval wrote the record, not this run's session 01a0f2cc"
+  );
+});
+
+test("a completion naming another version than the record's is out of order", () => {
+  expect(out).toMatch(/tester-proof-rec-3\tpass=false\t.* proof=true .* ordered=false /);
+});
+
+test("a push that changes the code under the PR's head fails the proof", () => {
+  expect(out).toMatch(/tester-proof-rec-4\tpass=false\t.* proof=false pushes=1 .* ordered=true /);
+  expect(out).toContain("the push changed [greet.ts]");
 });
 
 test("a tool call naming the other label's checkout is a rig error wherever the name falls in it", () => {

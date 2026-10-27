@@ -13,13 +13,18 @@
  * tool's grant request, its completion, and the state document. The grant rule mirrors the real
  * daemon's: a grant lives for 60 seconds and redeems any number of times while it lives; an
  * unknown or expired grant id answers 403 `{"error":"Invalid or expired grant"}`. Nothing is
- * single-use. A completion answers `{}`: the `legion` tool found the pushed commit carrying the
- * handoff in the pane's workspace before posting, the real daemon reads no handoff file, and the
- * handoff's content is what the rig's scorer reads from the run's own remote (score.ts
- * testerProof).
+ * single-use. A completion of a phase that ends with a handoff record (daemon-pane.go's handoff
+ * word for the role's phase) must name one, `handoffId` and a positive `handoffVersion`, and is
+ * refused 400 `HANDOFF_RECORD_REQUIRED` otherwise; a completion of a phase that ends with none
+ * and names one is refused 409 `HANDOFF_RECORD_MISMATCH`; both as the real daemon refuses them
+ * (`L/api/handoff.go`). Any other completion answers `{}`. The stand-in reads no record from
+ * Dispatch: the `legion` tool found the newest record of the phase on Dispatch before posting, and
+ * the rig's scorer reads that record back from Dispatch and holds it to the run's session
+ * (score.ts testerProof).
  *
  * Every request appends one JSON line to the log file: `{at, path, status, grantId?, sessionId?,
- * mintedGrantId?}`, the run's record of what reached the daemon.
+ * mintedGrantId?, handoffId?, handoffVersion?}`, the run's record of what reached the daemon; a
+ * completion's line carries the record it named.
  *
  * Usage: `bun daemon-standin.ts <port> <log file> <boot token file> <project> <issue> <role>`
  * The state document holds that one issue, in the phase its role works. Prints
@@ -60,6 +65,8 @@ const ROLE_TOKEN = roleToken(project, issue, role);
 const SESSION_SECRET = "rig-secret";
 
 const startedAt = new Date().toISOString();
+/** The phase the role works and the word of the handoff record it ends with, empty when none. */
+const [PHASE = "", HANDOFF_WORD = ""] = runDaemonPane(DAEMON_MODULE, ["phase", role]).split("\n");
 /** `GET /legion/v1/state`: the one issue the worker holds, admitted in the phase its role works
  * (`workflow.RoleFor`, through daemon-pane.go), on the rig's one repository. `capabilities` is the
  * deployment's capability report, `strandedClaims` the claims nothing will wake, `heldOutboxRows`
@@ -76,7 +83,7 @@ const STATE = LegionStateResponse.parse({
     [issue]: {
       key: issue,
       generation: 1,
-      phase: runDaemonPane(DAEMON_MODULE, ["phase", role]).trim(),
+      phase: PHASE,
       status: "in_progress",
       repo: "sjawhar/legion-smoke",
       defaultBranch: "main",
@@ -103,6 +110,8 @@ interface LogLine {
   readonly grantId?: string;
   readonly sessionId?: string;
   readonly mintedGrantId?: string;
+  readonly handoffId?: string;
+  readonly handoffVersion?: number;
 }
 
 const expectedBootToken = (await Bun.file(bootTokenFile).text()).trim();
@@ -121,10 +130,21 @@ function forbidden(message: string): Response {
   return json(403, { error: message });
 }
 
+/** A workflow refusal in the daemon's `Failure` shape, `{code, error}` (`writeFailure`). */
+function failure(status: number, code: string, message: string): Response {
+  return json(status, { code, error: message });
+}
+
 function stringField(body: unknown, key: string): string | undefined {
   if (typeof body !== "object" || body === null) return undefined;
   const value = (body as Record<string, unknown>)[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function numberField(body: unknown, key: string): number | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const value = (body as Record<string, unknown>)[key];
+  return typeof value === "number" ? value : undefined;
 }
 
 /** Mirrors the real daemon's rule: present and not yet expired, nothing else. Each route parses
@@ -179,6 +199,26 @@ function handle(path: string, body: unknown): { response: Response; mintedGrantI
       if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
       const refused = resolveGrant(parsed.data.grantId);
       if (refused) return { response: refused };
+      const { handoffId, handoffVersion } = parsed.data;
+      if (HANDOFF_WORD !== "" && (handoffId === undefined || handoffVersion === undefined)) {
+        const write = `\`dispatch handoff-write --issue ${issue} --phase ${HANDOFF_WORD} --body-file <file>\``;
+        return {
+          response: failure(
+            400,
+            "HANDOFF_RECORD_REQUIRED",
+            `phase ${PHASE} of ${issue} ends with its ${HANDOFF_WORD} handoff recorded on the Dispatch issue, and this completion names no record (handoffId and a positive handoffVersion): write it with ${write}, then complete again; this completion changed nothing`
+          ),
+        };
+      }
+      if (HANDOFF_WORD === "" && (handoffId !== undefined || handoffVersion !== undefined)) {
+        return {
+          response: failure(
+            409,
+            "HANDOFF_RECORD_MISMATCH",
+            `phase ${PHASE} of ${issue} ends with no handoff record, and this completion names one: complete without handoffId and handoffVersion; this completion changed nothing`
+          ),
+        };
+      }
       return { response: json(200, {}) };
     }
     default:
@@ -216,6 +256,12 @@ const server = Bun.serve({
         ? {}
         : { sessionId: stringField(body, "sessionId") }),
       ...(mintedGrantId === undefined ? {} : { mintedGrantId }),
+      ...(stringField(body, "handoffId") === undefined
+        ? {}
+        : { handoffId: stringField(body, "handoffId") }),
+      ...(numberField(body, "handoffVersion") === undefined
+        ? {}
+        : { handoffVersion: numberField(body, "handoffVersion") }),
     };
     await appendFile(logFile, `${JSON.stringify(line)}\n`);
     return response;

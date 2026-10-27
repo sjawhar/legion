@@ -4,8 +4,10 @@
 // daemon-pane.ts runs it with `go run -overlay` as a main inside a checkout's packages/daemon, the
 // one place the daemon's internal packages can be imported from.
 //
-//	phase <role>             prints the phase the role's worker runs in: the first phase
-//	                         workflow.RoleFor gives to the role
+//	phase <role>             prints the phase the role's worker runs in, the first phase
+//	                         workflow.RoleFor gives to the role, then on a second line the word of
+//	                         the handoff record that phase ends with (phase.HandoffFile), empty
+//	                         for a phase that ends with none
 //	pane                     reads a paneRequest (JSON) on stdin, writes the claim's gh bundle
 //	                         under its LEGION_GH_OWNERS_DIR, and prints its paneResponse (JSON)
 package main
@@ -58,7 +60,9 @@ func main() {
 func printPhase(role claim.Role) error {
 	for _, p := range phase.All {
 		if workflow.RoleFor(p) == role {
+			word, _ := phase.HandoffFile(p)
 			fmt.Println(p)
+			fmt.Println(word)
 			return nil
 		}
 	}
