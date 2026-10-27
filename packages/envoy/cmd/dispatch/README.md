@@ -108,23 +108,35 @@ reach the stream adds nothing to the stream.
   request itself, and the same bytes would fail the same way.
 - A delivery GitHub has recorded an `OK` attempt for is never asked for again, even when a request
   for it was recorded as refused (an accepted request whose answer was lost).
+- A process killed between claiming a delivery and recording GitHub's answer (a SIGKILL, an OOM
+  kill, a lost node) leaves a claim that stands for one minute, three GitHub request timeouts.
+  Until then every other sweep counts the delivery `claimed_elsewhere` (`claimed-elsewhere` in the
+  command's table, `--dry-run` included); after it the delivery is asked for again (`--dry-run`
+  reports `would-redeliver`), even once its failed attempt is older than the sweep's hour. If
+  GitHub had already taken the dead process's request, its log shows the redelivery by then: an
+  `OK` attempt closes the delivery with no second request, and a failed one is redelivered like
+  any other. A claim whose answer could not be written logs `level=ERROR msg="webhook redelivery
+  outcome not recorded; the delivery is decided again once its claim expires"` with
+  `claim_expires_at`.
 - Giving up logs `level=ERROR msg="webhook redelivery exhausted"`. A 4xx logs
   `level=ERROR msg="webhook delivery refused terminally"`. Each is logged once per delivery.
   Every sweep logs an INFO `msg="webhook redelivery sweep"` line: `failed_attempts` (the failed
   attempts listed), `deliveries` (the deliveries the sweep decided: the GUIDs of the listed failed
-  attempts, plus refused deliveries the listing no longer returns), and one count per outcome,
-  which add up to `deliveries`. `closed` is a delivery an earlier sweep settled (GitHub recorded it
-  `OK`, it was refused terminally, or it was given up on): its failed attempt stays listed until it
-  is older than the sweep's hour, so after a burst of failures is redelivered, the next hour's
-  sweeps count the burst as `closed`.
-  `pending` is a redelivery GitHub accepted and has not made yet.
+  attempts, plus deliveries the listing no longer returns whose request was refused or whose
+  claim was never answered), and one count per outcome, which add up to `deliveries`. `closed` is
+  a delivery an earlier sweep settled (GitHub recorded it `OK`, it was refused terminally, or it
+  was given up on): its failed attempt stays listed until it is older than the sweep's hour, so
+  after a burst of failures is redelivered, the next hour's sweeps count the burst as `closed`.
+  `pending` is a redelivery GitHub accepted and has not made yet. `claimed_elsewhere` is a
+  delivery another sweep is asking GitHub for.
 - A sweep looks back one hour. After a gap in sweeping (Dispatch down), it resumes from its
   cursor, back to GitHub's three days. The first sweep ever made looks back one hour only.
 
 The cursor, the last rate limit, and one record per delivery acted on live in the JetStream KV
 bucket `envoy_webhook_redelivery`. Its 72-hour TTL matches GitHub's horizon. A compare-and-swap
-claim keeps two Dispatch processes from requesting the same attempt twice, and the operator
-command honours the same rate limit.
+claim, written before the request and replaced by GitHub's answer after it, keeps two Dispatch
+processes from requesting the same attempt twice, and the operator command honours the same rate
+limit.
 
 The operator command runs the same sweep over a chosen window. It does not move the running
 sweep's cursor. `--dry-run` lists every failed delivery and what the sweep would do with it,
