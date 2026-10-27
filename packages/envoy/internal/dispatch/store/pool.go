@@ -25,7 +25,7 @@ import (
 // release, and they are waiting for the lock. Two anchored writes and two document
 // settlements on one issue closed that cycle on a four-connection pool, and nothing but
 // pg_terminate_backend recovered it. Rationing connections cannot fix it, and neither can
-// sharedPoolSize's sixteen: the queue behind one writer's issue lock is unbounded - a
+// sharedPoolSize's size: the queue behind one writer's issue lock is unbounded - a
 // settlement per document, every issue-owned event append, the architecture importer - so a
 // bigger pool only moves the number of callers it takes.
 //
@@ -150,10 +150,12 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // blocked writer is all it takes to starve everything else: with four writers parked on one
 // issue's row lock, a read of an unrelated issue waited the whole seventeen seconds the lock
 // was held, where sixteen connections served 3,853 such reads at a four-millisecond median.
-// The shared Aurora cluster has thousands of connections spare, so the ceiling is picked here
-// rather than derived from the task's CPU allotment or read out of the DSN another
-// repository's URL builder writes.
-const sharedPoolSize = 16
+// The ceiling is picked here rather than derived from the task's CPU allotment or read out of
+// the DSN another repository's URL builder writes. It is 64, from 16, since 2026-10-27: a
+// request takes a connection per statement one after another (an issue read is about eleven),
+// so under ~240 agent requests a minute the API held all sixteen and the outbox, which shares
+// the pool, waited 1-3 s per event; the database (16 vCPU) has hundreds of connections spare.
+const sharedPoolSize = 64
 
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
 // finishes, so one is enough for the pool to be deadlock-free; a few let cold rooms load
