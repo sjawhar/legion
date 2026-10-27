@@ -35,35 +35,39 @@
 // answers (every SessionStart, and SubagentStart): puts what people wrote to the session in the
 // last 72 hours (dispatch://INFRA-148) into the model's context, as
 // `hookSpecificOutput.additionalContext` under the event that ran it: `readSessionAnswers`' list,
-// or its failure line when no list was ever read. The session is the hook input's `session_id`,
-// which at SubagentStart is the parent's, the session a subagent's `dispatch` command writes as.
+// or its failure line naming why when a read failed and no list read before has an item to show.
+// The session is the hook input's `session_id`, which at SubagentStart is the parent's, the
+// session a subagent's `dispatch` command writes as.
 // The hook prints by `ANSWERS_BY_MS` after its process started (bun's start-up included), or
 // `ANSWERS_LEAST_WAIT_MS` after its code began when the start-up took longer, carrying the last
 // list read, from `answers.json` in the session's Dispatch state directory, when Dispatch has not
 // answered by then; it then gives a read still in flight `ANSWERS_SETTLE_MS` more to write that
 // file for the next hook, and exits 0 whatever happened. Dispatch is resolved without running a
-// `!` token command first (`commands: "kept"`); a fresh process has kept none, so when that
-// resolution is off with an error the hook resolves again with commands run, in a worker thread
-// of this same bundle, and stops waiting for it at that print deadline: the command's 10 s
-// synchronous run blocks the worker, never the hook. A command still running then is left to end
-// on its own, in the process group the shared config reader gave it.
+// `!` token command first (`commands: "kept"`). A fresh process has kept none, so when that
+// resolution is off with an error the hook starts this bundle again, detached, in mode
+// `answers-refresh` (never named by hooks.json): that process resolves Dispatch with commands run,
+// reads the list with a long deadline, which writes `answers.json`, and leaves what it read in
+// `answers-refresh.json` beside it. The hook carries that when it lands by the print deadline, and
+// otherwise exits without it: the refresher is in its own session with no stdio of the hook's, so
+// the command always runs to its end or its 10 s timeout inside `envoy-config`'s own run, which
+// kills its process group and removes its temporary output, and the next hook carries the list
+// it read. One refresher runs per session at a time (`answers-refresh.lock`, holding its pid), so
+// a burst of SubagentStart hooks runs the command once.
 //
 // The name a person gave the session is recorded by a bundle of its own,
 // `hooks/session-title-hook.ts`: it runs before every user prompt, with the prompt blocked on it,
 // so it must not pay for this bundle's zod and Dispatch client. `open-asks` records it too, from
 // the same `session_title` field, so a session starts under its name before its first prompt.
 
-import { appendFileSync, readFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads"
-import type { DispatchConfigResolution } from "@legion/envoy-client/dispatch-config"
 import { formatOpenAsksSummary } from "@legion/envoy-client/dispatch-execute"
 import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first"
 import { DispatchClient } from "@legion/envoy-client/dispatch-http"
-import { sessionDirectory } from "@legion/envoy-client/dispatch-session-state"
+import { sessionDirectory, writeAtomically } from "@legion/envoy-client/dispatch-session-directory"
 import { offWithError } from "@legion/envoy-client/envoy-config"
 import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
 import {
@@ -103,6 +107,23 @@ const ANSWERS_LEAST_WAIT_MS = 150
 /** How long after the hook's print deadline a read that answered past it may still write
  *  `answers.json` for the next hook before the process exits. */
 const ANSWERS_SETTLE_MS = 50
+/** The refresher's lock, holding its pid, and what it read for the hooks, in the session's
+ *  Dispatch state directory. */
+const REFRESH_LOCK = "answers-refresh.lock"
+const REFRESH_OUTCOME = "answers-refresh.json"
+/** How often a hook waiting on the refresher looks for what it read. */
+const REFRESH_POLL_MS = 20
+/** How long the refresher waits on its read: past the read's own 10 s timeout, which ends it. */
+const REFRESH_READ_MS = 12_000
+/** The age past which a lock is no refresher's, whatever pid it holds: past a refresher's longest
+ *  run, a 10 s token command and a 10 s read after bun's start-up. */
+const REFRESH_LOCK_STALE_MS = 30_000
+const RefreshOutcome = z.object({
+  /** When the refresher finished (epoch ms): a hook carries only an outcome from after it started. */
+  finished_at: z.number(),
+  /** `readSessionAnswers`' message; null when there was nothing to show. */
+  text: z.string().nullable(),
+})
 
 const DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude"
 
@@ -209,28 +230,123 @@ function remainingUntil(at: number): number {
   return Math.max(0, Math.round(at - performance.now()))
 }
 
-/** Dispatch for the answers hook. Read first without running any `!` command; a fresh hook process
- *  has kept none, so a resolution that is off with an error is made again with commands run, in a
- *  worker running this bundle, waited on until `by` at most. Off with an error saying so when it
- *  has not answered by then: the read then carries the cached list or the failure line. */
-async function answersDispatch(directory: string, by: number): Promise<DispatchConfigResolution> {
+/** Whether a refresher holds `lock`: it exists, is younger than `REFRESH_LOCK_STALE_MS`, and the
+ *  pid in it is alive or not yet written. A lock its refresher died holding is stale at once. */
+function refreshLockHeld(lock: string): boolean {
+  let age: number
+  let text: string
+  try {
+    age = Date.now() - statSync(lock).mtimeMs
+    text = readFileSync(lock, "utf8")
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT")) return false
+    throw error
+  }
+  if (age > REFRESH_LOCK_STALE_MS) return false
+  const pid = Number(text)
+  if (!Number.isSafeInteger(pid) || pid <= 0) return true
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return !hasErrnoCode(error, "ESRCH")
+  }
+}
+
+/** Takes `lock` for this process, replacing a stale one; false when another refresher holds it. */
+function takeRefreshLock(lock: string): boolean {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      writeFileSync(lock, String(process.pid), { flag: "wx", mode: 0o600 })
+      return true
+    } catch (error) {
+      if (!hasErrnoCode(error, "EEXIST")) throw error
+    }
+    if (refreshLockHeld(lock)) return false
+    rmSync(lock, { force: true })
+  }
+  return false
+}
+
+/** What the refresher read, when it finished after `since` (epoch ms). */
+function refreshOutcome(file: string, since: number): z.infer<typeof RefreshOutcome> | undefined {
+  let value: unknown
+  try {
+    value = JSON.parse(readFileSync(file, "utf8"))
+  } catch {
+    // None written yet: nothing to carry from it now.
+    return undefined
+  }
+  const outcome = RefreshOutcome.safeParse(value)
+  return outcome.success && outcome.data.finished_at >= since ? outcome.data : undefined
+}
+
+/** What the refresher gave the hook: its message (undefined: nothing to show), or why none. */
+type Refreshed = { readonly text: string | undefined } | { readonly reason: string }
+
+/** Starts the session's refresher unless one is running, and waits until `by` for what it reads.
+ *  `startedAt` is when this process started (epoch ms): an outcome from before then is not this
+ *  hook's. */
+async function refreshedAnswers(
+  session: string,
+  cwd: string,
+  startedAt: number,
+  by: number,
+): Promise<Refreshed> {
+  let directory: string
+  try {
+    directory = sessionDirectory(process.env, session)
+  } catch (error) {
+    // An id that is not one plain path segment has no directory for the lock and the outcome.
+    return { reason: messageFor(error) }
+  }
+  if (!refreshLockHeld(join(directory, REFRESH_LOCK))) {
+    Bun.spawn([process.execPath, Bun.main, "answers-refresh", session, cwd], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      detached: true,
+    }).unref()
+  }
+  const file = join(directory, REFRESH_OUTCOME)
+  for (;;) {
+    const outcome = refreshOutcome(file, startedAt)
+    if (outcome !== undefined) return { text: outcome.text ?? undefined }
+    const left = remainingUntil(by)
+    if (left === 0) {
+      return {
+        reason: `a "!" command in envoy.json had not finished ${Math.round(by)} ms after the hook started`,
+      }
+    }
+    await Bun.sleep(Math.min(REFRESH_POLL_MS, left))
+  }
+}
+
+/** The answers hook's message for `session`. Dispatch is read first without running any `!`
+ *  command; when that is off with an error, the refresher's message stands, or, when it has not
+ *  landed by `by`, the last list read or the failure line naming why. */
+async function answersMessage(
+  session: string,
+  cwd: string,
+  startedAt: number,
+  by: number,
+): Promise<string | undefined> {
   const file = sessionConfigFile("claude", process.env)
-  const kept = sessionDispatchSettings(file, process.env, { cwd: directory, commands: "kept" })
-  if (kept.dispatch.enabled || kept.dispatch.error === null) return kept.dispatch
-  const worker = new Worker(import.meta.url, { workerData: { cwd: directory } })
-  const resolved = await Promise.race([
-    new Promise<DispatchConfigResolution>((resolve) => {
-      worker.once("message", resolve)
-      worker.once("error", (error) => resolve(offWithError(messageFor(error))))
-    }),
-    Bun.sleep(remainingUntil(by)).then(() => undefined),
-  ])
-  return (
-    resolved ??
-    offWithError(
-      `a "!" command in envoy.json had not finished ${Math.round(by)} ms after the hook started`,
-    )
-  )
+  let { dispatch } = sessionDispatchSettings(file, process.env, { cwd, commands: "kept" })
+  if (!dispatch.enabled && dispatch.error !== null) {
+    const refreshed = await refreshedAnswers(session, cwd, startedAt, by)
+    if ("text" in refreshed) return refreshed.text
+    dispatch = offWithError(refreshed.reason)
+  }
+  const read = await readSessionAnswers({
+    session,
+    dispatch,
+    env: process.env,
+    // The read itself always gets the least wait, so a start-up and a resolution that spent the
+    // budget on a loaded host never cost a list Dispatch answers at once.
+    deadlineMs: Math.max(ANSWERS_LEAST_WAIT_MS, remainingUntil(by)),
+  })
+  return read.text
 }
 
 /** The answers mode: never throws, and ends the process with status 0. */
@@ -238,32 +354,21 @@ async function answers(text: string): Promise<never> {
   // The print deadline: `ANSWERS_BY_MS` after the process started, or `ANSWERS_LEAST_WAIT_MS`
   // from now when the start-up already spent that.
   const by = Math.max(ANSWERS_BY_MS, performance.now() + ANSWERS_LEAST_WAIT_MS)
+  const startedAt = Date.now() - performance.now()
   try {
     const input = AnswersInput.parse(JSON.parse(text))
     const directory = claudeProjectDirectory(
       { CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] },
       input.cwd ?? process.cwd(),
     )
-    const dispatch = await answersDispatch(directory, by)
-    let stateDirectory: string | undefined
-    try {
-      stateDirectory = sessionDirectory(process.env, input.session_id)
-    } catch {
-      // An id that is not one plain path segment keeps no answers.json; the read still runs.
-    }
-    const read = await readSessionAnswers({
-      session: input.session_id,
-      dispatch,
-      stateDirectory,
-      deadlineMs: remainingUntil(by),
-    })
-    if (read.text !== undefined) {
+    const message = await answersMessage(input.session_id, directory, startedAt, by)
+    if (message !== undefined) {
       await Bun.write(
         Bun.stdout,
         JSON.stringify({
           hookSpecificOutput: {
             hookEventName: input.hook_event_name,
-            additionalContext: read.text,
+            additionalContext: message,
           },
         }),
       )
@@ -275,25 +380,55 @@ async function answers(text: string): Promise<never> {
   } catch (error) {
     process.stderr.write(`envoy: people's answers were not added — ${messageFor(error)}\n`)
   }
-  // Exits rather than returns: a read or a worker still running would hold the process open.
+  // Exits rather than returns: a read still running would hold the process open.
   process.exit(0)
 }
 
-if (isMainThread) {
-  const mode = process.argv[2]
-  if (mode !== "open-asks" && mode !== "dispatch-first" && mode !== "answers") {
-    throw new Error(
-      `session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks, dispatch-first or answers`,
-    )
+/** The answers-refresh mode, which the answers hook starts detached with the session id and the
+ *  project directory: resolves Dispatch with `!` commands run, reads the session's list (which
+ *  writes `answers.json`) and writes what it read to `answers-refresh.json` for the hooks waiting
+ *  on it. A second refresher for the session exits at once. Nothing reads its output. */
+async function answersRefresh(session: string, cwd: string): Promise<never> {
+  const directory = sessionDirectory(process.env, session)
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const lock = join(directory, REFRESH_LOCK)
+  if (takeRefreshLock(lock)) {
+    try {
+      const file = sessionConfigFile("claude", process.env)
+      const { dispatch } = sessionDispatchSettings(file, process.env, { cwd })
+      const read = await readSessionAnswers({
+        session,
+        dispatch,
+        env: process.env,
+        deadlineMs: REFRESH_READ_MS,
+      })
+      const outcome: z.infer<typeof RefreshOutcome> = {
+        finished_at: Date.now(),
+        text: read.text ?? null,
+      }
+      writeAtomically(join(directory, REFRESH_OUTCOME), JSON.stringify(outcome))
+    } finally {
+      rmSync(lock, { force: true })
+    }
   }
-  const text = await Bun.stdin.text()
-  if (mode === "answers") await answers(text)
-  const input: unknown = JSON.parse(text)
-  if (mode === "open-asks") await openAsks(input)
-  else dispatchFirst(input)
-} else {
-  // answersDispatch's worker: Dispatch resolved with `!` commands run, for the hook to wait on.
-  const { cwd } = workerData as { readonly cwd: string }
-  const file = sessionConfigFile("claude", process.env)
-  parentPort?.postMessage(sessionDispatchSettings(file, process.env, { cwd }).dispatch)
+  process.exit(0)
 }
+
+const [mode, ...modeArguments] = process.argv.slice(2)
+if (mode === "answers-refresh") {
+  const [session, cwd] = modeArguments
+  if (session === undefined || cwd === undefined) {
+    throw new Error("session-hook: answers-refresh takes a session id and a directory")
+  }
+  await answersRefresh(session, cwd)
+}
+if (mode !== "open-asks" && mode !== "dispatch-first" && mode !== "answers") {
+  throw new Error(
+    `session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks, dispatch-first or answers`,
+  )
+}
+const text = await Bun.stdin.text()
+if (mode === "answers") await answers(text)
+const input: unknown = JSON.parse(text)
+if (mode === "open-asks") await openAsks(input)
+else dispatchFirst(input)

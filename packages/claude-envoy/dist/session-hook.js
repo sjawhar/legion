@@ -46,9 +46,8 @@ var __export = (target, all) => {
 var __require = import.meta.require;
 
 // hooks/session-hook.ts
-import { appendFileSync as appendFileSync2, readFileSync as readFileSync7 } from "fs";
+import { appendFileSync, mkdirSync as mkdirSync2, readFileSync as readFileSync6, rmSync as rmSync3, statSync as statSync2, writeFileSync as writeFileSync2 } from "fs";
 import { join as join7 } from "path";
-import { isMainThread, parentPort, Worker, workerData } from "worker_threads";
 
 // ../envoy-client/src/dispatch-execute.ts
 import { resolve as resolvePath2 } from "path";
@@ -15693,8 +15692,8 @@ class DispatchClient {
   async resolveComment(id, actor) {
     return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
   }
-  async getComments(issue2, artifact) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"], undefined, artifact ? { artifact } : undefined);
+  async getComments(issue2) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"]);
   }
   async getIssueReferences(issue2) {
     return this.#json("GET", [
@@ -15821,6 +15820,9 @@ class DispatchClient {
 // ../envoy-client/src/dispatch-owner.ts
 function documentLabel(project, slug) {
   return `${project}/${slug}`;
+}
+function ownerTitle(owner) {
+  return "issue" in owner ? `${owner.issue.key}: ${owner.issue.title}` : `${owner.document.project} / ${owner.document.name}`;
 }
 function issueTopic(key) {
   return { label: key, topic: dispatchIssueSubject(key, ">") };
@@ -16499,9 +16501,40 @@ function searchAnswer(search, query, offset, configUrl) {
 }
 
 // ../envoy-client/src/session-answers.ts
+import { mkdirSync, readFileSync } from "fs";
+import { join as join2 } from "path";
+
+// ../envoy-client/src/dispatch-session-directory.ts
 import { randomUUID } from "crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { renameSync, rmSync, writeFileSync } from "fs";
+import { homedir } from "os";
 import { join } from "path";
+var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
+var PRIVATE_FILE = 384;
+function sessionStateRoot(env) {
+  const stateDir = env["DISPATCH_STATE_DIR"];
+  if (stateDir)
+    return stateDir;
+  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
+}
+function sessionDirectory(env, sessionId) {
+  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
+    throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
+  }
+  return join(sessionStateRoot(env), "sessions", sessionId);
+}
+function writeAtomically(path, text) {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, text, { mode: PRIVATE_FILE });
+    renameSync(temporary, path);
+  } catch (error48) {
+    rmSync(temporary, { force: true });
+    throw error48;
+  }
+}
+
+// ../envoy-client/src/session-answers.ts
 var SESSION_ANSWERS_WINDOW_MS = 72 * 3600000;
 var SESSION_ANSWERS_MAX_CHARS = 8000;
 var SESSION_ANSWERS_DEADLINE_MS = 800;
@@ -16529,7 +16562,7 @@ function renderSessionAnswerItem(item) {
   const head = [item.at, `user ${item.author.id}`, relation];
   if (item.edited_at !== undefined)
     head.push(`edited ${item.edited_at}`);
-  const owner = item.owner === null ? undefined : ("issue" in item.owner) ? `${item.owner.issue.key}: ${item.owner.issue.title}` : `${item.owner.document.project} / ${item.owner.document.name}`;
+  const owner = item.owner === null ? undefined : ownerTitle(item.owner);
   const where = item.ref === null ? `Direct message ${item.id}, on no issue` : owner === undefined ? item.ref : `${item.ref} \xB7 ${owner}`;
   const lines = [head.join(" \xB7 "), where];
   if (item.ask !== undefined) {
@@ -16559,8 +16592,8 @@ function renderSessionAnswers(items, options) {
   const count = shown.length + unsent;
   if (count === 0)
     return;
-  const header = options.cachedAt === undefined ? SESSION_ANSWERS_MARKER : `${SESSION_ANSWERS_MARKER}
-As read at ${options.cachedAt}; Dispatch did not answer now.`;
+  const header = options.cached === undefined ? SESSION_ANSWERS_MARKER : `${SESSION_ANSWERS_MARKER}
+As read at ${options.cached.readAt}; this read failed: ${options.cached.reason.replace(/\s+/g, " ").trim()}.`;
   const blocks = [];
   let length = header.length;
   for (const item of shown) {
@@ -16591,7 +16624,7 @@ function renderSessionAnswersList(items, options) {
 function sessionAnswersFailureLine(reason) {
   return `${FAILURE_MARKER}${reason.replace(/\s+/g, " ").trim()}); run \`dispatch answers\`.]`;
 }
-var STATE_KEY = Symbol.for("legion.pi-envoy.session-answers.v1");
+var STATE_KEY = Symbol.for("legion.pi-envoy.session-answers.v2");
 var processGlobal = globalThis;
 var state = processGlobal[STATE_KEY] ?? {
   sessions: new Map,
@@ -16599,25 +16632,19 @@ var state = processGlobal[STATE_KEY] ?? {
 };
 processGlobal[STATE_KEY] = state;
 var CACHE_FILE = "answers.json";
-function readCacheFile(directory) {
+function readCacheFile(directory, url2) {
   try {
-    const value = JSON.parse(readFileSync(join(directory, CACHE_FILE), "utf-8"));
-    if (typeof value === "object" && value !== null && "read_at" in value && typeof value.read_at === "string" && "total" in value && typeof value.total === "number" && "items" in value && Array.isArray(value.items)) {
-      return { read_at: value.read_at, total: value.total, items: value.items };
+    const value = JSON.parse(readFileSync(join2(directory, CACHE_FILE), "utf-8"));
+    if (typeof value === "object" && value !== null && "dispatch_url" in value && typeof value.dispatch_url === "string" && (url2 === undefined || value.dispatch_url === url2) && "read_at" in value && typeof value.read_at === "string" && "total" in value && typeof value.total === "number" && "items" in value && Array.isArray(value.items)) {
+      return {
+        dispatch_url: value.dispatch_url,
+        read_at: value.read_at,
+        total: value.total,
+        items: value.items
+      };
     }
   } catch {}
   return;
-}
-function writeCacheFile(directory, cache) {
-  mkdirSync(directory, { recursive: true, mode: 448 });
-  const temporary = join(directory, `${CACHE_FILE}.${process.pid}.${randomUUID()}.tmp`);
-  try {
-    writeFileSync(temporary, JSON.stringify(cache), { mode: 384 });
-    renameSync(temporary, join(directory, CACHE_FILE));
-  } catch (error48) {
-    rmSync(temporary, { force: true });
-    throw error48;
-  }
 }
 async function settleWithin(promise2, ms, signal) {
   if (signal?.aborted === true)
@@ -16639,45 +16666,56 @@ async function settleWithin(promise2, ms, signal) {
 }
 async function readSessionAnswers(options) {
   const now = options.now ?? Date.now;
-  const { dispatch, session, stateDirectory } = options;
+  const { dispatch, session } = options;
   if (!dispatch.enabled && dispatch.error === null) {
     return { text: undefined, source: "off", reason: dispatch.notice };
   }
-  const current = state.sessions.get(session) ?? {
+  let directory;
+  try {
+    directory = sessionDirectory(options.env, session);
+  } catch {}
+  const entries = state.sessions.get(session) ?? new Map;
+  state.sessions.set(session, entries);
+  const carry = (cache, reason) => {
+    const text = cache === undefined ? undefined : renderSessionAnswers(cache.items, {
+      now: now(),
+      total: cache.total,
+      cached: { readAt: cache.read_at, reason }
+    });
+    if (cache === undefined || text === undefined) {
+      return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
+    }
+    return { text, source: "cache", readAt: cache.read_at, reason };
+  };
+  if (!dispatch.enabled) {
+    let newest;
+    for (const { cache } of entries.values()) {
+      if (cache !== undefined && (newest === undefined || cache.read_at > newest.read_at)) {
+        newest = cache;
+      }
+    }
+    newest ??= directory === undefined ? undefined : readCacheFile(directory, undefined);
+    return carry(newest, dispatch.error);
+  }
+  const { url: url2 } = dispatch;
+  const current = entries.get(url2) ?? {
     cache: undefined,
     inFlight: undefined,
     overdue: false
   };
-  state.sessions.set(session, current);
-  if (current.cache === undefined && stateDirectory !== undefined) {
-    current.cache = readCacheFile(stateDirectory);
+  entries.set(url2, current);
+  if (current.cache === undefined && directory !== undefined) {
+    current.cache = readCacheFile(directory, url2);
   }
-  const carry = (reason) => {
-    const { cache } = current;
-    if (cache === undefined) {
-      return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
-    }
-    return {
-      text: renderSessionAnswers(cache.items, {
-        now: now(),
-        total: cache.total,
-        cachedAt: cache.read_at
-      }),
-      source: "cache",
-      readAt: cache.read_at,
-      reason
-    };
-  };
-  if (!dispatch.enabled)
-    return carry(dispatch.error);
-  if ((state.noRouteUntil.get(dispatch.url) ?? 0) > now())
-    return carry(NO_ANSWERS_ROUTE_REASON);
+  if ((state.noRouteUntil.get(url2) ?? 0) > now()) {
+    return carry(current.cache, NO_ANSWERS_ROUTE_REASON);
+  }
   if (current.inFlight !== undefined && current.overdue) {
-    return carry("an earlier read is still waiting on Dispatch");
+    return carry(current.cache, "an earlier read is still waiting on Dispatch");
   }
   let read = current.inFlight;
   if (read === undefined) {
-    const client = new DispatchClient(dispatch.url, dispatch.token, options.fetchImpl ?? fetch);
+    const client = new DispatchClient(url2, dispatch.token, options.fetchImpl ?? fetch);
     const started = client.sessionAnswers(session, {
       maxChars: SESSION_ANSWERS_MAX_CHARS,
       signal: AbortSignal.timeout(READ_TIMEOUT_MS)
@@ -16686,20 +16724,22 @@ async function readSessionAnswers(options) {
         return { failure: "Dispatch answered with something that is not an answers list" };
       }
       const cache = {
+        dispatch_url: url2,
         read_at: new Date(now()).toISOString(),
         total: response.total,
         items: response.items
       };
       current.cache = cache;
-      if (stateDirectory !== undefined) {
+      if (directory !== undefined) {
         try {
-          writeCacheFile(stateDirectory, cache);
+          mkdirSync(directory, { recursive: true, mode: 448 });
+          writeAtomically(join2(directory, CACHE_FILE), JSON.stringify(cache));
         } catch {}
       }
       return { cache };
     }, (error48) => {
       if (isNoAnswersRoute(error48)) {
-        state.noRouteUntil.set(dispatch.url, now() + NO_ROUTE_BACKOFF_MS);
+        state.noRouteUntil.set(url2, now() + NO_ROUTE_BACKOFF_MS);
         return { failure: NO_ANSWERS_ROUTE_REASON };
       }
       return { failure: messageFor(error48) };
@@ -16718,12 +16758,13 @@ async function readSessionAnswers(options) {
   if (outcome === "deadline") {
     if (current.inFlight === read)
       current.overdue = true;
-    return carry(`Dispatch did not answer within ${deadlineMs} ms`);
+    return carry(current.cache, `Dispatch did not answer within ${deadlineMs} ms`);
   }
-  if (outcome === "aborted")
-    return carry("the request was cancelled before Dispatch answered");
+  if (outcome === "aborted") {
+    return carry(current.cache, "the request was cancelled before Dispatch answered");
+  }
   if ("failure" in outcome)
-    return carry(outcome.failure);
+    return carry(current.cache, outcome.failure);
   return {
     text: renderSessionAnswers(outcome.cache.items, {
       now: now(),
@@ -16734,7 +16775,7 @@ async function readSessionAnswers(options) {
   };
 }
 async function sessionAnswersSettled(session) {
-  await state.sessions.get(session)?.inFlight;
+  await Promise.all(Array.from(state.sessions.get(session)?.values() ?? [], (entry) => entry.inFlight));
 }
 
 // ../envoy-client/src/dispatch-execute.ts
@@ -17927,12 +17968,9 @@ function openAskAge(ageSeconds) {
   const days = Math.floor(hours / 24);
   return `${days}d${hours % 24 === 0 ? "" : ` ${hours % 24}h`}`;
 }
-function openAskOwner(ask) {
-  return "issue" in ask.owner ? `${ask.owner.issue.key}: ${ask.owner.issue.title}` : `${ask.owner.document.project} / ${ask.owner.document.name}`;
-}
 function openAskLine(ask, baseUrl) {
   const priority = ask.priority === null ? "" : `P${ask.priority} \xB7 `;
-  return `- ${openAskAge(ask.age_seconds)} \xB7 ${priority}${openAskOwner(ask)} \xB7 ${ask.question} \xB7 ${new URL(ask.ref, baseUrl).toString()}`;
+  return `- ${openAskAge(ask.age_seconds)} \xB7 ${priority}${ownerTitle(ask.owner)} \xB7 ${ask.question} \xB7 ${new URL(ask.ref, baseUrl).toString()}`;
 }
 function formatOpenAsksSummary(response, baseUrl) {
   const scope = "active open asks you authored on open issues and project documents";
@@ -19332,10 +19370,10 @@ function asObject(value) {
 
 // ../envoy-client/src/dispatch-first.ts
 import { readFileSync as readFileSync2 } from "fs";
-import { join as join2 } from "path";
+import { join as join3 } from "path";
 var DISPATCH_FIRST_MARKER = "<dispatch-first-skill>";
 function dispatchFirstSkillFile(skillsDirectory) {
-  return join2(skillsDirectory, "dispatch-first", "SKILL.md");
+  return join3(skillsDirectory, "dispatch-first", "SKILL.md");
 }
 function readDispatchFirstContext(skillFile) {
   let skill;
@@ -19355,184 +19393,18 @@ function readDispatchFirstContext(skillFile) {
 `);
 }
 
-// ../envoy-client/src/dispatch-session-state.ts
-import { createHash } from "crypto";
-import {
-  appendFileSync,
-  closeSync,
-  fstatSync,
-  mkdirSync as mkdirSync2,
-  openSync,
-  readdirSync,
-  readFileSync as readFileSync3,
-  readSync,
-  renameSync as renameSync2,
-  rmSync as rmSync2,
-  statSync,
-  writeFileSync as writeFileSync2
-} from "fs";
-import { homedir } from "os";
-import { join as join3 } from "path";
-var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
-var PRIVATE_DIR = 448;
-var PRIVATE_FILE = 384;
-var IDLE_SESSION_MS = 14 * 86400000;
-var PRUNE_INTERVAL_MS = 86400000;
-var PRUNED_STAMP = ".pruned";
-var PICTURE_EXTENSIONS = {
-  "image/png": "png",
-  "image/jpeg": "jpg",
-  "image/gif": "gif",
-  "image/webp": "webp"
-};
-function sessionStateRoot(env) {
-  const stateDir = env["DISPATCH_STATE_DIR"];
-  if (stateDir)
-    return stateDir;
-  return join3(env["XDG_STATE_HOME"] || join3(homedir(), ".local", "state"), "dispatch");
-}
-function sessionDirectory(env, sessionId) {
-  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
-    throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
-  }
-  return join3(sessionStateRoot(env), "sessions", sessionId);
-}
-function ensureDirectory(dir) {
-  mkdirSync2(dir, { recursive: true, mode: PRIVATE_DIR });
-}
-function readIfPresent(path) {
-  try {
-    return readFileSync3(path, "utf-8");
-  } catch (error48) {
-    if (hasErrnoCode(error48, "ENOENT"))
-      return;
-    throw error48;
-  }
-}
-function writeAtomically(path, text) {
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync2(temporary, text, { mode: PRIVATE_FILE });
-  renameSync2(temporary, path);
-}
-function stringList(value) {
-  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
-}
-function loadSessionMemory(dir, sessionId) {
-  const path = join3(dir, "state.json");
-  const text = readIfPresent(path);
-  if (text === undefined)
-    return new Set;
-  let state2;
-  try {
-    state2 = JSON.parse(text);
-  } catch (error48) {
-    throw new Error(`the session state ${path} is not JSON (${error48.message}); remove it to start this session's memory over`);
-  }
-  const advice = adviceMemory();
-  for (const key of stringList(state2.advice))
-    advice.add(key);
-  const pictures = shownPictures(sessionId);
-  for (const address of stringList(state2.pictures))
-    pictures.add(address);
-  return new Set(stringList(state2.follows));
-}
-function writeMemory(dir, sessionId, follows) {
-  const state2 = {
-    advice: [...adviceMemory()],
-    pictures: [...shownPictures(sessionId)],
-    follows: [...follows]
-  };
-  writeAtomically(join3(dir, "state.json"), `${JSON.stringify(state2)}
-`);
-}
-function appendResult(dir, entry) {
-  ensureDirectory(dir);
-  writeResult(dir, entry);
-}
-function writeResult(dir, entry) {
-  const line = { at: new Date().toISOString(), ...entry };
-  appendFileSync(join3(dir, "results.jsonl"), `${JSON.stringify(line)}
-`, { mode: PRIVATE_FILE });
-}
-function recordOutcome(dir, sessionId, follows, entry) {
-  ensureDirectory(dir);
-  writeResult(dir, entry);
-  writeMemory(dir, sessionId, follows);
-}
-function writePicture(dir, image) {
-  const bytes = Buffer.from(image.data, "base64");
-  const name = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
-  const pictures = join3(dir, "pictures");
-  const path = join3(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
-  ensureDirectory(pictures);
-  try {
-    writeFileSync2(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
-  } catch (error48) {
-    if (!hasErrnoCode(error48, "EEXIST"))
-      throw error48;
-  }
-  return { path, bytes: bytes.length };
-}
-function writeLongOutput(dir, text) {
-  const out = join3(dir, "out");
-  ensureDirectory(out);
-  const path = join3(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
-  writeFileSync2(path, text, { mode: PRIVATE_FILE });
-  return path;
-}
-function writeSessionTitle(dir, title) {
-  ensureDirectory(dir);
-  writeAtomically(join3(dir, "title"), title);
-}
-function readSessionTitle(dir) {
-  return readIfPresent(join3(dir, "title")) || undefined;
-}
-function pruneSessions(root, now) {
-  const stamp = join3(root, PRUNED_STAMP);
-  try {
-    if (now - statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS)
-      return;
-  } catch (error48) {
-    if (!hasErrnoCode(error48, "ENOENT"))
-      throw error48;
-  }
-  const sessions = join3(root, "sessions");
-  let entries = [];
-  try {
-    entries = readdirSync(sessions, { withFileTypes: true });
-  } catch (error48) {
-    if (!hasErrnoCode(error48, "ENOENT"))
-      throw error48;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory())
-      continue;
-    const dir = join3(sessions, entry.name);
-    try {
-      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS) {
-        rmSync2(dir, { recursive: true, force: true });
-      }
-    } catch (error48) {
-      if (!hasErrnoCode(error48, "ENOENT"))
-        throw error48;
-    }
-  }
-  ensureDirectory(root);
-  writeFileSync2(stamp, "", { mode: PRIVATE_FILE });
-}
-
 // ../envoy-client/src/envoy-config.ts
 import {
   chmodSync,
-  closeSync as closeSync2,
+  closeSync,
   existsSync,
   lstatSync,
   mkdtempSync,
-  openSync as openSync2,
-  readFileSync as readFileSync5,
+  openSync,
+  readFileSync as readFileSync4,
   readlinkSync,
-  rmSync as rmSync3,
-  statSync as statSync2
+  rmSync as rmSync2,
+  statSync
 } from "fs";
 import { homedir as homedir2, tmpdir } from "os";
 import * as path from "path";
@@ -19624,14 +19496,14 @@ function jsonErrorPosition(text) {
 }
 
 // ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync4 } from "fs";
+import { readFileSync as readFileSync3 } from "fs";
 function sendable(value) {
   return !/[\s\p{Cc}]/u.test(value);
 }
 function readSecretFile(variable, filePath) {
   let contents;
   try {
-    contents = readFileSync4(filePath, "utf8");
+    contents = readFileSync3(filePath, "utf8");
   } catch (error48) {
     throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error48)}`);
   }
@@ -19765,7 +19637,7 @@ function danglingLink(filePath) {
 function parseFile(filePath, schema, checkout) {
   let raw;
   try {
-    raw = readFileSync5(filePath, "utf-8");
+    raw = readFileSync4(filePath, "utf-8");
   } catch (error48) {
     if (hasErrnoCode(error48, "ENOENT") || hasErrnoCode(error48, "ENOTDIR")) {
       return { kind: "absent", link: danglingLink(filePath) };
@@ -19809,7 +19681,7 @@ function runCommand(command, env, cwd) {
   try {
     chmodSync(directory, 448);
     const output = path.join(directory, "stdout");
-    const fd = openSync2(output, "wx", 384);
+    const fd = openSync(output, "wx", 384);
     let result;
     try {
       result = Bun.spawnSync(["/bin/sh", "-c", command], {
@@ -19824,7 +19696,7 @@ function runCommand(command, env, cwd) {
     } catch (error48) {
       return { failure: `could not start: ${messageFor(error48)}`, timedOut: false };
     } finally {
-      closeSync2(fd);
+      closeSync(fd);
     }
     try {
       process.kill(-result.pid, "SIGKILL");
@@ -19841,7 +19713,7 @@ function runCommand(command, env, cwd) {
         timedOut: false
       };
     }
-    const value = readFileSync5(output, "utf-8").trim();
+    const value = readFileSync4(output, "utf-8").trim();
     if (value.length === 0)
       return { failure: "printed nothing", timedOut: false };
     if (!sendable(value)) {
@@ -19852,7 +19724,7 @@ function runCommand(command, env, cwd) {
     }
     return { value };
   } finally {
-    rmSync3(directory, { recursive: true, force: true });
+    rmSync2(directory, { recursive: true, force: true });
   }
 }
 function fileValue(value, field, filePath, env, commands = "run") {
@@ -19880,7 +19752,7 @@ function fileValue(value, field, filePath, env, commands = "run") {
 }
 function statDevice(directory) {
   try {
-    return statSync2(directory).dev;
+    return statSync(directory).dev;
   } catch {
     return;
   }
@@ -20285,7 +20157,7 @@ import { readFile } from "fs/promises";
 import { basename as basename2, join as join6 } from "path";
 
 // src/session-state.ts
-import { readFileSync as readFileSync6 } from "fs";
+import { readFileSync as readFileSync5 } from "fs";
 import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
 import { dirname as dirname2, join as join5 } from "path";
 async function writeAtomicStateFile(file2, contents) {
@@ -20331,7 +20203,7 @@ async function removeChosenTitle(file2) {
 }
 function readChosenTitleSync(file2) {
   try {
-    return readFileSync6(file2, "utf8");
+    return readFileSync5(file2, "utf8");
   } catch {
     return;
   }
@@ -20452,11 +20324,20 @@ var AnswersInput = exports_external.object({ session_id: exports_external.string
 var ANSWERS_BY_MS = SESSION_ANSWERS_DEADLINE_MS;
 var ANSWERS_LEAST_WAIT_MS = 150;
 var ANSWERS_SETTLE_MS = 50;
+var REFRESH_LOCK = "answers-refresh.lock";
+var REFRESH_OUTCOME = "answers-refresh.json";
+var REFRESH_POLL_MS = 20;
+var REFRESH_READ_MS = 12000;
+var REFRESH_LOCK_STALE_MS = 30000;
+var RefreshOutcome = exports_external.object({
+  finished_at: exports_external.number(),
+  text: exports_external.string().nullable()
+});
 var DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude";
 function appendOnce(envFile, line) {
   let written = "";
   try {
-    written = readFileSync7(envFile, "utf8");
+    written = readFileSync6(envFile, "utf8");
   } catch (error48) {
     if (!hasErrnoCode(error48, "ENOENT"))
       throw error48;
@@ -20467,7 +20348,7 @@ function appendOnce(envFile, line) {
   const separator = written === "" || written.endsWith(`
 `) ? "" : `
 `;
-  appendFileSync2(envFile, `${separator}${line}
+  appendFileSync(envFile, `${separator}${line}
 `);
 }
 async function openAsks(raw) {
@@ -20540,44 +20421,112 @@ function dispatchFirst(raw) {
 function remainingUntil(at) {
   return Math.max(0, Math.round(at - performance.now()));
 }
-async function answersDispatch(directory, by) {
+function refreshLockHeld(lock) {
+  let age;
+  let text;
+  try {
+    age = Date.now() - statSync2(lock).mtimeMs;
+    text = readFileSync6(lock, "utf8");
+  } catch (error48) {
+    if (hasErrnoCode(error48, "ENOENT"))
+      return false;
+    throw error48;
+  }
+  if (age > REFRESH_LOCK_STALE_MS)
+    return false;
+  const pid = Number(text);
+  if (!Number.isSafeInteger(pid) || pid <= 0)
+    return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error48) {
+    return !hasErrnoCode(error48, "ESRCH");
+  }
+}
+function takeRefreshLock(lock) {
+  for (let attempt = 0;attempt < 2; attempt++) {
+    try {
+      writeFileSync2(lock, String(process.pid), { flag: "wx", mode: 384 });
+      return true;
+    } catch (error48) {
+      if (!hasErrnoCode(error48, "EEXIST"))
+        throw error48;
+    }
+    if (refreshLockHeld(lock))
+      return false;
+    rmSync3(lock, { force: true });
+  }
+  return false;
+}
+function refreshOutcome(file2, since) {
+  let value;
+  try {
+    value = JSON.parse(readFileSync6(file2, "utf8"));
+  } catch {
+    return;
+  }
+  const outcome = RefreshOutcome.safeParse(value);
+  return outcome.success && outcome.data.finished_at >= since ? outcome.data : undefined;
+}
+async function refreshedAnswers(session, cwd, startedAt, by) {
+  let directory;
+  try {
+    directory = sessionDirectory(process.env, session);
+  } catch (error48) {
+    return { reason: messageFor(error48) };
+  }
+  if (!refreshLockHeld(join7(directory, REFRESH_LOCK))) {
+    Bun.spawn([process.execPath, Bun.main, "answers-refresh", session, cwd], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      detached: true
+    }).unref();
+  }
+  const file2 = join7(directory, REFRESH_OUTCOME);
+  for (;; ) {
+    const outcome = refreshOutcome(file2, startedAt);
+    if (outcome !== undefined)
+      return { text: outcome.text ?? undefined };
+    const left = remainingUntil(by);
+    if (left === 0) {
+      return {
+        reason: `a "!" command in envoy.json had not finished ${Math.round(by)} ms after the hook started`
+      };
+    }
+    await Bun.sleep(Math.min(REFRESH_POLL_MS, left));
+  }
+}
+async function answersMessage(session, cwd, startedAt, by) {
   const file2 = sessionConfigFile("claude", process.env);
-  const kept = sessionDispatchSettings(file2, process.env, { cwd: directory, commands: "kept" });
-  if (kept.dispatch.enabled || kept.dispatch.error === null)
-    return kept.dispatch;
-  const worker = new Worker(import.meta.url, { workerData: { cwd: directory } });
-  const resolved = await Promise.race([
-    new Promise((resolve2) => {
-      worker.once("message", resolve2);
-      worker.once("error", (error48) => resolve2(offWithError(messageFor(error48))));
-    }),
-    Bun.sleep(remainingUntil(by)).then(() => {
-      return;
-    })
-  ]);
-  return resolved ?? offWithError(`a "!" command in envoy.json had not finished ${Math.round(by)} ms after the hook started`);
+  let { dispatch } = sessionDispatchSettings(file2, process.env, { cwd, commands: "kept" });
+  if (!dispatch.enabled && dispatch.error !== null) {
+    const refreshed = await refreshedAnswers(session, cwd, startedAt, by);
+    if ("text" in refreshed)
+      return refreshed.text;
+    dispatch = offWithError(refreshed.reason);
+  }
+  const read = await readSessionAnswers({
+    session,
+    dispatch,
+    env: process.env,
+    deadlineMs: Math.max(ANSWERS_LEAST_WAIT_MS, remainingUntil(by))
+  });
+  return read.text;
 }
 async function answers(text) {
   const by = Math.max(ANSWERS_BY_MS, performance.now() + ANSWERS_LEAST_WAIT_MS);
+  const startedAt = Date.now() - performance.now();
   try {
     const input = AnswersInput.parse(JSON.parse(text));
     const directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
-    const dispatch = await answersDispatch(directory, by);
-    let stateDirectory;
-    try {
-      stateDirectory = sessionDirectory(process.env, input.session_id);
-    } catch {}
-    const read = await readSessionAnswers({
-      session: input.session_id,
-      dispatch,
-      stateDirectory,
-      deadlineMs: remainingUntil(by)
-    });
-    if (read.text !== undefined) {
+    const message = await answersMessage(input.session_id, directory, startedAt, by);
+    if (message !== undefined) {
       await Bun.write(Bun.stdout, JSON.stringify({
         hookSpecificOutput: {
           hookEventName: input.hook_event_name,
-          additionalContext: read.text
+          additionalContext: message
         }
       }));
     }
@@ -20591,21 +20540,47 @@ async function answers(text) {
   }
   process.exit(0);
 }
-if (isMainThread) {
-  const mode = process.argv[2];
-  if (mode !== "open-asks" && mode !== "dispatch-first" && mode !== "answers") {
-    throw new Error(`session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks, dispatch-first or answers`);
+async function answersRefresh(session, cwd) {
+  const directory = sessionDirectory(process.env, session);
+  mkdirSync2(directory, { recursive: true, mode: 448 });
+  const lock = join7(directory, REFRESH_LOCK);
+  if (takeRefreshLock(lock)) {
+    try {
+      const file2 = sessionConfigFile("claude", process.env);
+      const { dispatch } = sessionDispatchSettings(file2, process.env, { cwd });
+      const read = await readSessionAnswers({
+        session,
+        dispatch,
+        env: process.env,
+        deadlineMs: REFRESH_READ_MS
+      });
+      const outcome = {
+        finished_at: Date.now(),
+        text: read.text ?? null
+      };
+      writeAtomically(join7(directory, REFRESH_OUTCOME), JSON.stringify(outcome));
+    } finally {
+      rmSync3(lock, { force: true });
+    }
   }
-  const text = await Bun.stdin.text();
-  if (mode === "answers")
-    await answers(text);
-  const input = JSON.parse(text);
-  if (mode === "open-asks")
-    await openAsks(input);
-  else
-    dispatchFirst(input);
-} else {
-  const { cwd } = workerData;
-  const file2 = sessionConfigFile("claude", process.env);
-  parentPort?.postMessage(sessionDispatchSettings(file2, process.env, { cwd }).dispatch);
+  process.exit(0);
 }
+var [mode, ...modeArguments] = process.argv.slice(2);
+if (mode === "answers-refresh") {
+  const [session, cwd] = modeArguments;
+  if (session === undefined || cwd === undefined) {
+    throw new Error("session-hook: answers-refresh takes a session id and a directory");
+  }
+  await answersRefresh(session, cwd);
+}
+if (mode !== "open-asks" && mode !== "dispatch-first" && mode !== "answers") {
+  throw new Error(`session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks, dispatch-first or answers`);
+}
+var text = await Bun.stdin.text();
+if (mode === "answers")
+  await answers(text);
+var input = JSON.parse(text);
+if (mode === "open-asks")
+  await openAsks(input);
+else
+  dispatchFirst(input);

@@ -6,11 +6,12 @@ import hooks from "../hooks/hooks.json" with { type: "json" }
 // process, after Bun has started. Claude Code's `timeout` is in seconds; a hook it kills first loses
 // the open-asks summary or the dispatch-first context silently, so each of those outlasts the
 // command with room for start-up. The answers hook prints and exits within its own bound, under
-// 1 s from its start (`ANSWERS_SETTLED_BY_MS` in hooks/session-hook.ts: a token command runs in a
-// worker it stops waiting for), so it gets the short bound, room for a slow start-up only. The
-// session-title hook resolves nothing and makes no network call while Claude Code blocks the
-// prompt on it, so it gets the short bound too, and a bundle of its own: the arguments are pinned
-// whole here, since which file each hook runs is half of what this row guards.
+// 1 s from its start (`ANSWERS_BY_MS`, then `ANSWERS_SETTLE_MS`, in hooks/session-hook.ts: a token
+// command runs in a detached refresher process it stops waiting for), so it gets the short bound,
+// room for a slow start-up only. The session-title hook resolves nothing and makes no network call
+// while Claude Code blocks the prompt on it, so it gets the short bound too, and a bundle of its
+// own: the arguments are pinned whole here, since which file each hook runs is half of what this
+// row guards.
 test("each hook runs its own bundle, with the timeout its work needs: 20 s for the hooks that run a token command, 5 s for answers and session-title", () => {
   const commands = Object.values(hooks.hooks).flatMap((matchers) =>
     matchers.flatMap((matcher) => matcher.hooks.map((hook) => [hook.args, hook.timeout])),

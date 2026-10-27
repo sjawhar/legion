@@ -21,10 +21,13 @@
   out. The hook prints within 800 ms of its start, or 150 ms after its code begins when Bun's
   start-up alone took longer, so a slow start-up never costs a list Dispatch answers at once; it
   exits 50 ms after that, always with status 0: when Dispatch has not answered it carries the last
-  list read, kept in `answers.json` in the session's Dispatch state directory, or one line saying
-  the list could not be read and why. A `!` command in envoy.json runs in a worker thread the hook
-  stops waiting for at that same deadline. Against a Dispatch older
-  than this release, the line says that Dispatch has no answers route.
+  list read, kept in `answers.json` in the session's Dispatch state directory, with when it was
+  read and why this read failed, or, when no list read before has an item to show, one line saying
+  the list could not be read and why. A `!` command in envoy.json runs in a process the hook starts
+  detached, one per session at a time, and waits on until that same deadline; a slower command
+  still runs to its end or its 10 s timeout in that process, which removes its output file and
+  reads the list with its token for the next hook. Against a Dispatch older than this release, the
+  line says that Dispatch has no answers route.
 - `tests/answers-claude.test.ts` runs the real Claude Code, the release the new repository-root
   `.claude-code-pin` pins (2.1.311), against a stand-in model and Dispatch, and shows the list on
   the Messages request after startup, `--resume`, `/compact` and a subagent's start. CI's
