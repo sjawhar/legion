@@ -34,3 +34,5 @@ trap 'rm -rf "$scratch"' EXIT
   done
 } >"$scratch/notices"
 mv "$scratch/notices" "$out"
+
+# scratch INFRA-520 worker-image
