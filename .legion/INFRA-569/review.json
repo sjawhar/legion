@@ -2,17 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-569",
-  "completed": "2026-10-27T05:44:05Z",
+  "completed": "2026-10-27T05:46:32Z",
   "decision": "changes_requested",
   "reviewedCodeHead": "284986e6a9d1d882334752d2c25937c4d153d471",
   "critical": 0,
-  "important": 1,
+  "important": 3,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
       "file": "packages/envoy-client/src/search-answer.ts:46",
       "description": "resolutionText puts resolution.reason in the CLI output as it is. The resolve route only trims the reason (packages/envoy/internal/dispatch/api/ask_transitions.go:268), so a reason can hold newlines, and each later line then prints at column 0, where `dispatch search` prints its hit lines. Answer text in the same output gets a four-space indent on each later line (answerLines, line 38). The fix: indent the reason's later lines the same way through one shared helper (the split/join answerLines uses), and add a search-answer.test.ts case with a multi-line reason for both `Closed with no answer` and `Closed after an answer`."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/search/SearchPalette.tsx:280",
+      "description": "The palette's 3-line clamp is CSS only, so the full answer text (up to ~1 MiB) is in the role=option element and becomes the option's accessible name; a screen reader reads it whole on each activation, where the 24-word excerpt bounded it before. Bound the text before MarkdownPreview (or give the option a short explicit name) and assert the accessible name stays bounded."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy-plugin/CHANGELOG.md",
+      "description": "opencode-legion-envoy (packages/envoy-plugin) bundles the same dispatch CLI from envoy-client and records dispatch_search changes in its CHANGELOG (line 102); this PR adds the entry to pi-envoy and claude-envoy only. Add the same [Unreleased] entry."
     }
   ],
   "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head 284986e6 (newest pull_request run); compare to f16b3907 handoffsOnly true, 2 files. Every check run at 284986e6 was queued at 05:31Z and still queued at 05:43Z. CI does not gate a REQUEST_CHANGES.",
@@ -22,5 +32,6 @@
     "deepReview": "APPROVE: no critical or important finding. The id mapping is safe (k.id::text and a.id::text, one row per (kind, id)); state and answer/resolution follow the constraints in 0007; no path returns an answered ask to open; ask_search_suffix is null-safe; suggestions change only their excerpt; the change is additive for consumers. Minor: the multi-line resolution reason in the CLI (this round's finding).",
     "codeQuality": "No critical. Selected-null normalization sits in search only; the other routes still send null for an answer with no selected (I judge this an adjacent pre-existing inconsistency, not this PR's defect, and send it to the architect). The removed-ask comment: asks are never deleted (no `delete from asks`, no cascade reaches asks), so not a defect. Four-way state branching in AskHitStatus, a badge class copied three times, raw-JSON test helpers: cleanup only; the raw helpers are needed to tell an absent key from null."
   },
-  "proofLines": "E2E (implementer) and E2E (tester) both present in the PR body, each with surface, command, observation, head 284986e6 and a negative control."
+  "proofLines": "E2E (implementer) and E2E (tester) both present in the PR body, each with surface, command, observation, head 284986e6 and a negative control.",
+  "fastFollow": "SearchPalette.tsx: derive answer/resolution once in AskHitStatus instead of four state branches; one BADGE_CLASS constant for the three badge class copies."
 }
