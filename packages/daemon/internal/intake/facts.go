@@ -903,6 +903,31 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 	return result, nil
 }
 
+// Applied is which of eventIDs from source ApplyFact has already applied, read in one query and
+// outside the fact lock. A fact's processed_events row commits with the fact and is never removed,
+// so an id read here as applied is one ApplyFact would only take the lock to skip. A caller that
+// replays many facts it has most likely applied before (the boot's terminal replay) applies only
+// the rest: the duplicates cost one read between them, not a transaction each queued on the lock
+// behind every live fact.
+func Applied(ctx context.Context, pool *pgxpool.Pool, source string, eventIDs []string) (map[string]bool, error) {
+	applied := make(map[string]bool, len(eventIDs))
+	if len(eventIDs) == 0 {
+		return applied, nil
+	}
+	rows, err := pool.Query(ctx, `select event_id from processed_events where source = $1 and event_id = any($2::text[])`, source, eventIDs)
+	if err != nil {
+		return nil, fmt.Errorf("read which %s facts are applied: %w", source, err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("read which %s facts are applied: %w", source, err)
+	}
+	for _, id := range ids {
+		applied[id] = true
+	}
+	return applied, nil
+}
+
 // settleObserved is the fact ApplyFact applies in fact's place, under the fact lock, and whether it
 // applies one: an Observed issue fact's view, as a plain observation, while the workflow records no
 // issue of its key, and once one is recorded the event it was prepared in place of (Delivered), or
