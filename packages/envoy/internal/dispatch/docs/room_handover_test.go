@@ -552,12 +552,12 @@ func TestAFailedRoomsUpdatesEndOrMoveWithTheRecordThatReplacesIt(t *testing.T) {
 	service.addConnection(artifactID, 11, bob)
 	hold := &roomHold{}
 	dropped := []byte("the update the failure dropped")
-	droppedCredit := service.creditContentChange(artifactID, nil, hold)
+	droppedCredit := service.creditContentChange(artifactID, nil, hold, nil)
 	service.recordUpdateClass(artifactID, dropped,
 		&documentUpdateClass{contentChanged: true, durable: true, credit: droppedCredit})
 	_, stranded := peerEdit(t, service.srv.GetDoc(artifactID), appendBlocks(t, "typed while the room was failing.\n"))
 	service.recordUpdateClass(artifactID, stranded,
-		&documentUpdateClass{contentChanged: true, durable: true, credit: service.creditContentChange(artifactID, nil, hold)})
+		&documentUpdateClass{contentChanged: true, durable: true, credit: service.creditContentChange(artifactID, nil, hold, nil)})
 	state.mu.Lock()
 	state.failed = errors.New("the room failed on an append")
 	state.mu.Unlock()

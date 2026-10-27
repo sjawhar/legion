@@ -55,7 +55,20 @@ type UpdateCredit struct {
 	// hold is the room instance whose update this is (roomHold), which holds the update once its
 	// append commits.
 	hold *roomHold
-	done bool
+	// askAuthors are the ask blocks the update's render first showed with no write's registration,
+	// each with the author the update observer named (observeAskBlocks), which the append records
+	// in its own transaction (recordAskAuthors) whether or not a version already listed the credit.
+	askAuthors map[string]model.Actor
+	done       bool
+}
+
+// takeAskAuthors is the ask block authors the update's append records. It is fixed before the
+// update's class is recorded anywhere, so it needs no lock.
+func (credit *UpdateCredit) takeAskAuthors() map[string]model.Actor {
+	if credit == nil {
+		return nil
+	}
+	return credit.askAuthors
 }
 
 // take is what the update's append writes: the credit's authors and latest edit source, and

@@ -552,7 +552,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	state := s.lockState(room)
 	state.closed = !open
 	// The ask blocks the room loaded with are the baseline its update observer tells new ones by.
-	// They were not introduced by any update the observer sees, so none gains an author here.
+	// They were not introduced by any update the observer sees, so none gains an author here: a
+	// settlement finds the author of one no ask indexes yet where its writer recorded it, in
+	// doc_ask_block_authors (askBlockSources.author).
 	if askBlocks == nil {
 		state.askBlocks = nil
 	} else {
@@ -663,8 +665,9 @@ func (s *Service) observeRoomLog(room string, instance *roomInstance, replica *r
 			// same, so the update after it is measured against the room the repair left.
 			return
 		}
+		var attributed map[string]model.Actor
 		if tree != nil {
-			s.observeAskBlocksForUpdate(room, tree, logged.Origin)
+			attributed = s.observeAskBlocksForUpdate(room, tree, logged.Origin)
 		}
 		// The cursor is this instance's, taken here rather than looked up when the update
 		// reaches the store: a room evicted and reloaded in between is a different instance,
@@ -672,7 +675,12 @@ func (s *Service) observeRoomLog(room string, instance *roomInstance, replica *r
 		// is stored at.
 		class := &documentUpdateClass{update: append([]byte(nil), logged.Update...), contentChanged: contentChanged, durable: true, cursor: &instance.cursor}
 		if contentChanged {
-			class.credit = s.creditContentChange(room, logged.Origin, &instance.hold)
+			// The authors of the ask blocks this render first showed go with the credit to the
+			// update's append, which records them durably (recordAskAuthors): a tree is rendered
+			// only for a content change, so a browser's update that names an author always carries
+			// a credit. A published live write carries none; its commit recorded its blocks'
+			// authors (Ledger.recordSettlementCredit).
+			class.credit = s.creditContentChange(room, logged.Origin, &instance.hold, attributed)
 			observed.changed = true
 		}
 		switch logged.Origin.(type) {
@@ -756,12 +764,14 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 // update observer renders tree in (renderedReplica.observe): the observer renders each update in
 // the order the replica took them, so the room's record of its ask blocks moves forward only. The
 // tree walk that lists those ask blocks runs only once the cheap markdown comparison inside
-// observe already showed a real change, so the no-op path, the common one, pays for neither.
+// observe already showed a real change, so the no-op path, the common one, pays for neither. It
+// returns the authors it named for blocks no write registered, which the update's append records.
 //
 // An update another process stored, which a catch-up applied (origin is a remoteUpdateOrigin),
 // introduced its blocks on that process: none of this room's connected peers wrote them, so the
-// blocks are recorded with no author here, as the blocks a room loads with are.
-func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node, origin any) {
+// blocks are recorded with no author here, as the blocks a room loads with are, and a settlement
+// finds the author that process recorded (askBlockSources.author).
+func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node, origin any) map[string]model.Actor {
 	askBlocks := askBlockIDs(tree)
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
@@ -773,7 +783,7 @@ func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node, origi
 	} else {
 		author = sole
 	}
-	state.observeAskBlocks(askBlocks, author)
+	return state.observeAskBlocks(askBlocks, author)
 }
 
 // creditContentChange credits an observed content change to its authors. A service repair (origin
@@ -788,9 +798,11 @@ func (s *Service) observeAskBlocksForUpdate(room string, tree *pmdoc.Node, origi
 // the edit cannot be pinned on a single peer and no older actor may stand in for it.
 //
 // The credit goes to F, the room's in-flight credits, until the edit's append lands it
-// (AppendUpdateWithCredit): the returned UpdateCredit is how that append reaches it. This takes
-// no advisory lock and touches no database: nothing reads F without holding state.mu.
-func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *UpdateCredit {
+// (AppendUpdateWithCredit): the returned UpdateCredit is how that append reaches it, and how
+// askAuthors, the authors of the ask blocks the edit's render first showed (observeAskBlocks),
+// reach the durable record in the same append. This takes no advisory lock and touches no
+// database: nothing reads F without holding state.mu.
+func (s *Service) creditContentChange(room string, origin any, hold *roomHold, askAuthors map[string]model.Actor) *UpdateCredit {
 	switch origin.(type) {
 	case *liveWriteOrigin, *remoteUpdateOrigin:
 		return nil
@@ -808,7 +820,7 @@ func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *
 	state.inflight[record.seq] = record
 	state.lastActor = record.lastActor
 	state.unsettled = true
-	return &UpdateCredit{service: s, room: room, state: state, record: record, hold: hold}
+	return &UpdateCredit{service: s, room: room, state: state, record: record, hold: hold, askAuthors: askAuthors}
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits

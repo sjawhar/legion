@@ -1282,8 +1282,9 @@ func settlementAuthors(state *roomState, owed map[string]model.Actor, recorded *
 	return credit
 }
 
-// consumeAskAuthors forgets the recorded author of each block a committed settlement indexed or
-// found indexed: its ask row names the author from then on.
+// consumeAskAuthors forgets the room's recorded author of each block a committed settlement indexed
+// or found indexed: its ask row names the author from then on. The settlement's transaction
+// deleted the durable record of the same authors (deleteSettledAskAuthors).
 func (credit settlementVersionCredit) consumeAskAuthors(blockIDs []string) {
 	if len(blockIDs) == 0 {
 		return
@@ -1593,7 +1594,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 
 	state.mu.Lock()
-	state.recordStampedAskBlocks(renamed)
+	// The authors the stamp carried are recorded durably in this transaction, the one that stores
+	// the stamp, whichever way it commits below (recordStampedAskAuthors).
+	carried := state.recordStampedAskBlocks(renamed)
 	if s.stopping.Load() || state.closed || state.failed != nil {
 		s.unlockState(room, state)
 		s.discardSuppressedPersistence(room, slots...)
@@ -1627,6 +1630,10 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			abandon(err)
 			return
 		}
+		if err := recordStampedAskAuthors(ctx, tx, room, renamed, carried); err != nil {
+			abandon(err)
+			return
+		}
 		// The room already holds this repair (applySuppressed wrote it there), so the instance
 		// takes the version it is stored at. It is recorded before the commit, under the advisory
 		// lock this transaction holds until then, so nothing reads the cursor in between; a
@@ -1644,6 +1651,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// observer has not left its blocks unseen, for the settlement that observer arms (askBlockSources).
 	credit.askSources = state.askSources()
 	state.mu.Unlock()
+	// Recorded before reconcileAskBlocks reads the durable authors, so a block the stamp renamed is
+	// found under its minted id there too.
+	if err := recordStampedAskAuthors(ctx, tx, room, renamed, carried); err != nil {
+		abandon(err)
+		return
+	}
 	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, credit, beforeMarkdown)
 	if err != nil {
 		abandon(err)
@@ -2273,7 +2286,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	}
 	// The stamp is in the room, whatever happens to its store write below.
 	state := s.lockState(artifactID)
-	state.recordStampedAskBlocks(renamed)
+	carried := state.recordStampedAskBlocks(renamed)
 	s.unlockState(artifactID, state)
 	// abandon gives up a stamp that is in the room but will not reach the store through the
 	// backfill: its slot is discarded and the room fails, which reloads the document from the store.
@@ -2297,6 +2310,11 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	stamped, err := s.persistence.AppendUpdateTx(withRoomCursor(ctx, cursor), tx, artifactID, update, stampedChanged)
 	if err != nil {
 		return abandon(fmt.Errorf("append identity update: %w", err))
+	}
+	// After the append, which took the document's advisory lock: the authors the stamp carried
+	// are recorded in the transaction that stores it.
+	if err := recordStampedAskAuthors(ctx, tx, artifactID, renamed, carried); err != nil {
+		return abandon(err)
 	}
 	// The stamp is in the room, so that instance takes the version it is stored at, under the
 	// advisory lock this transaction holds until it commits. A rollback fails the room (abandon).

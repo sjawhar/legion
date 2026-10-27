@@ -113,7 +113,8 @@ func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []by
 // rendered-content classification and the browser edit's in-flight credit: in the update's own
 // transaction, under the document's advisory lock, it writes the credit's authors to the
 // document's pending authors unless a committed version already listed them (UpdateCredit.take),
-// and it lands the credit before it releases that lock (UpdateCredit.landed).
+// records the authors of the ask blocks the update introduced (UpdateCredit.askAuthors), and it
+// lands the credit before it releases that lock (UpdateCredit.landed).
 func (p *PgVersioned) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	return p.appendUpdate(ctx, room, update, contentChanged, credit)
 }
@@ -312,6 +313,12 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 		if err := upsertPendingAuthors(ctx, tx, room, pendingAuthorsAt(authors, version)); err != nil {
 			return 0, err
 		}
+	}
+	// The authors of the ask blocks this update's render first showed are recorded with it, so a
+	// settlement on any process finds them (doc_ask_block_authors), consumed credit or not: a version
+	// lists authors, not ask blocks.
+	if err := recordAskAuthors(ctx, tx, room, credit.takeAskAuthors()); err != nil {
+		return 0, err
 	}
 	return version, nil
 }

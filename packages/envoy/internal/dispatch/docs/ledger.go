@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -405,8 +406,10 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 // version of the transaction lists (recordVersion), each at the append that recorded that author's
 // latest change (liveWrite.creditedBy), and each write's and seed's latest edit source on the
 // document's pending-settlement row. Deleting first means the write's own authors are recorded
-// after the delete that would otherwise take them out. Both commit or roll back with the content,
-// before the request context can be canceled after commit.
+// after the delete that would otherwise take them out. It records the author of every ask block
+// each seed and write introduced, too (recordAskAuthors), which creditRooms registers in the room
+// once the transaction has committed, so a settlement on any process finds it. All of it commits
+// or rolls back with the content, before the request context can be canceled after commit.
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 	for _, written := range l.versions {
 		if err := deleteCapturedPendingAuthors(ctx, l.tx, written.artifactID, written.capture); err != nil {
@@ -415,6 +418,9 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 	}
 	released := l.releasedAuthors()
 	for artifactID, seed := range l.seeds {
+		if err := recordAskAuthors(ctx, l.tx, artifactID, seededAskAuthors(seed)); err != nil {
+			return err
+		}
 		if _, listed := released[artifactID][actorKey(seed.actor)]; listed {
 			continue
 		}
@@ -434,8 +440,34 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if err := recordLatestEditSource(ctx, l.tx, artifactID, write.actor); err != nil {
 			return err
 		}
+		if err := recordAskAuthors(ctx, l.tx, artifactID, writtenAskAuthors(write)); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// seededAskAuthors is the author of every ask block seed introduced: its actor, as creditRooms
+// registers it.
+func seededAskAuthors(seed ledgerSeed) map[string]model.Actor {
+	ids := askBlockIDs(seed.rendered.tree)
+	authors := make(map[string]model.Actor, len(ids))
+	for id := range ids {
+		authors[id] = seed.actor
+	}
+	return authors
+}
+
+// writtenAskAuthors is the author of every ask block write introduced or renamed, as creditRooms
+// registers them: the carried-forward author of a renamed id over the write's actor, which gets
+// every id its own before/after diff added.
+func writtenAskAuthors(write *liveWrite) map[string]model.Actor {
+	authors := make(map[string]model.Actor, len(write.addedAskBlockIDs)+len(write.carriedAskAuthors))
+	for id := range write.addedAskBlockIDs {
+		authors[id] = *write.actor
+	}
+	maps.Copy(authors, write.carriedAskAuthors)
+	return authors
 }
 
 // releasedAuthors is, per artifact, the keys of the authors this transaction's own versions
@@ -456,9 +488,11 @@ func (l *Ledger) releasedAuthors() map[string]map[string]struct{} {
 }
 
 // creditRooms records, once the transaction has committed and before its live writes publish,
-// each seed's and write's latest edit source in its room, which the settlement it arms names on
-// its events, and registers the ask blocks each introduced to its author. The authors themselves
-// are already recorded in the database (recordSettlementCredit).
+// each seed's and write's latest edit source in its room, and registers the ask blocks each
+// introduced to its author. The authors themselves, the latest edit sources and the ask blocks'
+// authors are already recorded in the database (recordSettlementCredit), which is where a
+// settlement on any process reads the edit source its events name (settlementAuthors) and, for a
+// block its room did not register, the ask block's author (askBlockSources.author).
 func (l *Ledger) creditRooms() {
 	for artifactID, seed := range l.seeds {
 		state := l.service.lockState(artifactID)
