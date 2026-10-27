@@ -211,6 +211,13 @@ func TestOnlyAPromptRefusalIsErrPromptRefused(t *testing.T) {
 			if got := errors.Is(err, runtime.ErrPromptRefused); got != test.refused {
 				t.Fatalf("errors.Is(%v, runtime.ErrPromptRefused) = %v, want %v", err, got, test.refused)
 			}
+			// The supervisor reads Oh My Pi's words to tell its busy answer — a turn of its own,
+			// charged nothing — from a refusal of the work.
+			if test.refused {
+				if reason := runtime.RefusalReason(err); reason != "Agent is busy" {
+					t.Fatalf("runtime.RefusalReason(%v) = %q, want OMP's words %q", err, reason, "Agent is busy")
+				}
+			}
 		})
 	}
 }

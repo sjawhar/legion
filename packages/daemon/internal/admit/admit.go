@@ -2,11 +2,13 @@
 package admit
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -32,7 +34,7 @@ type Admission struct {
 	log     *slog.Logger
 	now     func() time.Time
 
-	// mu guards pending and target, the only Admission state a caller outside its own
+	// mu guards pending, target and catchingUp, the only Admission state a caller outside its own
 	// transactions touches: the daemon's boot-owned poll calls Held on every tick, outside any
 	// transaction and the database's own advisory fact lock, concurrently with whatever release
 	// call currently holds both while it clears them.
@@ -51,6 +53,13 @@ type Admission struct {
 	// first record behind: every key in pending releases once the Dispatch consumer's position
 	// has Reached it. Zero means nothing is held.
 	target int64
+	// catchingUp names each root the daemon's boot catch-up has yet to finish
+	// (HoldForCatchUp): its record may still miss what its Dispatch event log holds, so no pass
+	// decides whether it waits on a person (workflow's ReconcileAwaiting), nor resumes it once
+	// answered — it keeps its place at the front of the waiting line — until the catch-up has
+	// applied its window and releases it (ReleaseCatchUp). Unlike pending, a release's own pass
+	// does not lift it.
+	catchingUp map[string]struct{}
 
 	// openCapabilities answers the deployment capabilities with no decision, by name
 	// (capabilities.Deployment.Open), for the tick notice to carry; nil until the daemon registers
@@ -349,7 +358,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 
 	caughtUp := position.Reached(target)
 	deferred := make(map[string]dispatch.IssueSummary)
-	for _, summary := range summaries {
+	for _, summary := range parentsFirst(summaries) {
 		stored, err := a.store.Issue(ctx, tx, summary.Key)
 		if err != nil {
 			return fmt.Errorf("read reconciled issue %s: %w", summary.Key, err)
@@ -388,6 +397,35 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		return err
 	}
 	return a.wakeForFreeSlot(ctx, tx, append(released, returned...))
+}
+
+// parentsFirst orders a Dispatch listing by how many of each issue's ancestors the listing itself
+// holds, so every issue comes after its parent, and keeps the listing's own order among the issues
+// of one such depth. The workflow records a child only under a recorded parent, so an unrecorded
+// todo child under an unrecorded todo parent of a live tree is recorded in the same pass as that
+// parent, at any depth. A recorded issue is ordered by the same rule, so a root's own listed move —
+// a close, a re-admission — is applied before its children's, which is the order the tree's own
+// events carry: a child's re-entry then reads the tree as that move left it.
+func parentsFirst(summaries []dispatch.IssueSummary) []dispatch.IssueSummary {
+	parents := make(map[string]*string, len(summaries))
+	for _, summary := range summaries {
+		parents[summary.Key] = summary.Parent
+	}
+	depth := make(map[string]int, len(summaries))
+	for _, summary := range summaries {
+		// The bound stops a parent cycle Dispatch should never hold; such a cycle only orders late.
+		for parent, steps := summary.Parent, 0; parent != nil && steps < len(summaries); steps++ {
+			next, listed := parents[*parent]
+			if !listed {
+				break
+			}
+			depth[summary.Key]++
+			parent = next
+		}
+	}
+	ordered := slices.Clone(summaries)
+	slices.SortStableFunc(ordered, func(x, y dispatch.IssueSummary) int { return cmp.Compare(depth[x.Key], depth[y.Key]) })
+	return ordered
 }
 
 // putNewRoot records an unrecorded root or orphan handed to Legion in todo, on the repository its
@@ -441,7 +479,8 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 
 // applySummary applies one Dispatch boot-listing summary to admission's own record of the issue
 // it names, exactly as it would if nothing had ever deferred it: a still-unrecorded key is
-// admitted only when the summary itself shows it todo and handed to Legion, and a recorded key a
+// recorded only when the summary itself shows it todo — into its parent's live tree as the
+// workflow records a child, else as a root when it is handed to Legion — and a recorded key a
 // live event has already carried strictly past the summary's own sequence is left alone —
 // reapplying the summary would overwrite fresher information with stale. Both Reconcile,
 // immediately when the consumer is already caught up, and release, once the consumer catches up
@@ -457,11 +496,35 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		if summary.Status != "todo" {
 			return nil
 		}
+		listed := intake.ListedIssue(summary)
+		// An unrecorded todo child of a live tree is the workflow's to record, as its own todo event
+		// would (the engine's recordChildUnderLiveTree, which runs before admission on every live
+		// event), from the parent the listing shows now. Without this, a child no event of it ever
+		// recorded stays unrecorded under its running tree, and no later event of it need come:
+		// Dispatch already shows it todo, so nothing writes that status again. Two ways that
+		// happens — an event the daemon never received (a durable consumer created fresh takes only
+		// what is published after it, and the notification stream drops a message 72 hours old
+		// whether or not anyone read it), and one it received while the child's parent had no
+		// record or its tree was not live, where the workflow records nothing. A child the workflow
+		// does not record here (its tree is not live) is left to the root path below, as an orphan
+		// handed to Legion is.
+		if listed.Parent != "" {
+			if _, err := a.engine.Apply(ctx, tx, listed); err != nil {
+				return fmt.Errorf("record %s under its parent's tree: %w", summary.Key, err)
+			}
+			recorded, err := a.store.Issue(ctx, tx, summary.Key)
+			if err != nil {
+				return fmt.Errorf("re-read %s after recording it under its parent's tree: %w", summary.Key, err)
+			}
+			if recorded != nil {
+				return nil
+			}
+		}
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", summary.Key, "label", dispatch.LegionLabel)
 			return nil
 		}
-		return a.putNewRoot(ctx, tx, intake.ListedIssue(summary), false)
+		return a.putNewRoot(ctx, tx, listed, false)
 	}
 	if summary.LastSeq > 0 && summary.LastSeq < stored.LastDispatchSeq {
 		return nil
@@ -725,8 +788,13 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	}
 	// A generation that ended takes what its architect handed back with it: the re-admission is a
 	// handout, so an ask.opened or a hand-back of the old run, delivered late, at or below what the
-	// record holds now, declares nothing in this one.
+	// record holds now, declares nothing in this one. Its catch-up cursor starts again too, so the
+	// next boot reads from this handout rather than replaying the old generation's tail, whose
+	// changes requests the new generation would tell again.
 	if err := a.store.StartHandout(ctx, tx, stored.Key); err != nil {
+		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
+	}
+	if err := a.store.RestartCaughtUp(ctx, tx, stored.Key); err != nil {
 		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
 	}
 	// A child leaving its old tree, carried or fresh, takes its hand-over fence with it: left behind,
@@ -788,23 +856,17 @@ func releasesSlot(issue record.Issue) bool {
 // releaseSlots releases the slot of every issue of this project that release says is done with
 // it, and reports those issues in slot order; which describes such an issue in an error. Each
 // release is logged once the fact commits.
+//
+// It reads those issues in one query (record.Store.SlottedIssues), never a record per slot and
+// never the whole issues table: every fact applies this under the one fact lock
+// (intake.ApplyFact), twice for a Dispatch issue event, so a read per slot cost every fact of
+// every consumer, the API and the boot's replay a round trip to the database for each slot of the
+// shared table, and a read of every record would grow with every issue the project has ever
+// recorded. The read leaves out another project's slot, whose own daemon releases it.
 func (a *Admission) releaseSlots(ctx context.Context, tx pgx.Tx, which string, release func(record.Issue) bool) ([]string, error) {
-	slots, err := a.store.Slots(ctx, tx)
+	own, err := a.store.SlottedIssues(ctx, tx, a.project)
 	if err != nil {
-		return nil, fmt.Errorf("list admission slots: %w", err)
-	}
-	own := []record.Issue{}
-	for _, slot := range slots {
-		issue, err := a.store.Issue(ctx, tx, slot.Issue)
-		if err != nil {
-			return nil, fmt.Errorf("read slotted issue %s: %w", slot.Issue, err)
-		}
-		if issue == nil {
-			return nil, fmt.Errorf("slotted issue %s has no record", slot.Issue)
-		}
-		if issue.Project == a.project {
-			own = append(own, *issue)
-		}
+		return nil, fmt.Errorf("list this project's slotted issues: %w", err)
 	}
 	inUse := len(own)
 	var released []string
@@ -864,9 +926,9 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	if err != nil {
 		return 0, nil, fmt.Errorf("list admission slots: %w", err)
 	}
-	heldKeys := func(string) bool { return false }
+	heldKeys := a.catchingUpFor
 	if respectHolds {
-		heldKeys = a.held
+		heldKeys = func(key string) bool { return a.held(key) || a.catchingUpFor(key) }
 	}
 	entered, changed, err := a.engine.ReconcileAwaiting(ctx, tx, a.project, issues, slots, heldKeys)
 	if err != nil {
@@ -913,6 +975,13 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		waiting = waiting[1:]
 		if respectHolds && a.held(candidate.Key) {
 			continue
+		}
+		// An answered root the boot's catch-up still holds has not applied everything Dispatch
+		// recorded while the daemon was down, so its resume task would miss it; it keeps its place
+		// at the front of the line, and nothing behind it takes the slot, until its catch-up
+		// releases it and decides it on the next pass.
+		if a.catchingUpFor(candidate.Key) {
+			break
 		}
 		answered := candidate.Answered()
 		if answered {
@@ -1037,6 +1106,43 @@ func (a *Admission) held(key string) bool {
 	defer a.mu.Unlock()
 	_, held := a.pending[key]
 	return held
+}
+
+// HoldForCatchUp holds each of keys out of the decision whether it waits on a person until
+// ReleaseCatchUp releases it: the daemon's boot holds every root its catch-up will read before the
+// boot's own admission pass, so no root is decided on a record that has not yet applied what
+// Dispatch recorded while the daemon was down.
+func (a *Admission) HoldForCatchUp(keys ...string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.catchingUp == nil {
+		a.catchingUp = make(map[string]struct{}, len(keys))
+	}
+	for _, key := range keys {
+		a.catchingUp[key] = struct{}{}
+	}
+}
+
+// ReleaseCatchUp ends key's catch-up hold; the next pass decides it.
+func (a *Admission) ReleaseCatchUp(key string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.catchingUp, key)
+}
+
+// CatchUpHeld is every key the boot's catch-up still holds, in no order.
+func (a *Admission) CatchUpHeld() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Collect(maps.Keys(a.catchingUp))
+}
+
+// catchingUpFor says whether the boot's catch-up still holds key (HoldForCatchUp).
+func (a *Admission) catchingUpFor(key string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, holding := a.catchingUp[key]
+	return holding
 }
 
 // unslotted says whether issue is a root of this project left in the workflow (workflow's
@@ -1191,7 +1297,8 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 		for _, slot := range slots {
 			slotted[slot.Issue] = struct{}{}
 		}
-		for _, summary := range releasing {
+		held := slices.SortedFunc(maps.Values(releasing), func(x, y dispatch.IssueSummary) int { return cmp.Compare(x.Key, y.Key) })
+		for _, summary := range parentsFirst(held) {
 			if err := a.applySummary(ctx, tx, summary, slotted); err != nil {
 				return nil, err
 			}

@@ -71,6 +71,17 @@
   containers' sum) as rendered: below `500m` or `512Mi` or outside 1 to 6.5 GiB of memory per
   CPU, which Autopilot raises, or above 30 CPU or `110Gi`, which it rejects. On a cluster without
   Pod bursting Autopilot also rounds the pod's CPU up to a multiple of 250m.
+- `envoy-infra:gcp:Dispatch` takes `appPriorityClassName` and `appPdbMinAvailable`, which protect
+  the app Deployment's pods from being displaced, so a deployment sets both in its program rather
+  than by hand. `appPriorityClassName` is the app pod's `priorityClassName`, naming a PriorityClass
+  that already exists in the cluster; the component reads the class and the app Deployment waits
+  on the read, so a missing class fails the preview or update rather than leaving the one app pod
+  stopped and its replacement refused. `appPdbMinAvailable` registers a PodDisruptionBudget named
+  for the app, over its pods alone, with that `minAvailable` and Kubernetes' default
+  `unhealthyPodEvictionPolicy`, so a drain waits for the app. The front door and the listener are
+  unchanged, and with neither set the component renders what it always did. The component
+  refuses, naming the input, an `appPriorityClassName` that is empty, not a DNS subdomain or in
+  the reserved `system-` prefix, and an `appPdbMinAvailable` below 1 or above `replicas`.
 - Dispatch writes one access-log line per served request, so the callers behind a load spike can
   be named: `dispatch: request` at INFO when the request ends, with the method, the route's own
   pattern, the escaped request path, the caller (a person's email, a bearer's session, a personal
@@ -1469,6 +1480,31 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- Every `envoy-infra` component refuses a number in an integer input that is not a whole number
+  within the 64-bit integer range, at any depth (an object type's property, an array element, a
+  map value), naming the component and the input's path and never quoting a secret value, before
+  anything registers. Pulumi decoded such a number into the component's integer by conversion, so
+  a typed SDK or Pulumi YAML program sending `replicas: 2.5` got 2 replicas with no error, and one
+  past the range got whatever the conversion gave. The check reads the plugin's own schema, so an
+  integer input added later is covered with no list to keep.
+
+- Dispatch's event outbox publishes a backlog hundreds of times faster across a remote NATS hub.
+  It sent each envelope and waited for NATS to answer before it sent the next, then wrote the
+  answer to Postgres through the pool the API's requests queue for, so every destination of every
+  event cost a network round trip and a write: at a 150 ms round trip it published 1.7 to 1.9
+  events a second, and under load in production it fell up to about 29 minutes behind the events
+  being created. It now sends a whole claimed batch (100 events) before it waits for any answer
+  (`bus.Client.Window`), in id order, so NATS still takes each issue's events in order, and
+  writes the batch's outcome in one statement on a database pool of its own (`store.Pool.Outbox`):
+  540 events a second at a 150 ms round trip and 1,100 at 50 ms, with the API's pool busy
+  (`TestOutboxThroughputUnderRemoteLatency`). An event is still marked published only once NATS
+  accepted every destination of it. A publish NATS cannot take because the connection is down no
+  longer backs its event off behind the events after it: the batch stops and waits for the next
+  scan, so a backlog held up by an outage goes out in id order once NATS is back, where before the
+  first events of an issue reached the Legion daemon after later ones, which it drops as stale.
+  The shared database pool every request reads through holds 64 connections, from 16: under heavy
+  agent load the API held all sixteen and every other caller waited behind them.
 
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.

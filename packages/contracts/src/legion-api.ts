@@ -238,8 +238,7 @@ const legionWaitTimes = {
 
 /** `api.WaitingOnView` — what an `awaiting_person` root waits on from a person: `ask`, the oldest
  * question of its tree still with the person, or `gate`, a spec version (`gateVersion` of document
- * `artifactId`) a person has not reviewed. Contract 40 carries both shapes so the gate waits of a
- * later daemon need no plugin bump; a contract-40 daemon writes only `ask`. */
+ * `artifactId`) a person has not reviewed. Contract 40 carries both shapes, and a daemon writes either. */
 const legionWaitingOn = z
   .discriminatedUnion("kind", [
     z.strictObject({ kind: z.literal("ask"), ask: nonEmptyString, ...legionWaitTimes }),

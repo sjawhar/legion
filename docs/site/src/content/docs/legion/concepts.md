@@ -168,7 +168,7 @@ architect session with a task naming what answered it and what is still with you
 answer or resolution of another ask answers nothing, and an act of yours from before the wait
 began is one the architect already read. Taking the label off, or a person or an outside session
 claiming the root on Dispatch, takes it out of the workflow instead: Legion never resumes work
-another owner took. A root waiting on the design gate's approval request keeps its slot. The slot
+another owner took. A root whose architect requested approval of its spec and registered that version waits the same way, on the design gate, until the person reviews the spec or a newer version hands the request back to the architect. The slot
 a waiting root returns is no reason for the controller to label or admit anything: a root you
 handed to Legion takes it through the waiting line.
 
@@ -261,7 +261,13 @@ Legion uses GitHub's own review mechanisms rather than labels:
   code head's own would. The daemon reads each open pull request's required set with the implement
   App as it starts and every two minutes after, with the required workflows' runs on the head;
   until a read succeeds, no verdict stands for the head, and a read GitHub refuses is logged with
-  the repository and the HTTP status.
+  the repository and the HTTP status. The same read follows the pull request's head: when GitHub
+  shows a head the daemon has not recorded, the daemon takes it as the synchronize webhook would,
+  and takes its push too when GitHub shows that it changed only `.legion/`, so a lost or late
+  webhook leaves the record behind for at most one read. A push that changed code is still read
+  from its webhook. The daemon also looks up the open pull request of each issue whose implementer
+  completed while no pull request is recorded, and records it as the opened webhook would, which
+  moves the issue to testing.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
 - Two limits flag a loop: after `review_round_cap` rounds (three by default), or once
