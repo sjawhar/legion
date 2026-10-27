@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RECEIPT_TIMEOUT_CAUSE } from "../../../packages/contracts/src/dispatch-api.ts";
 import {
@@ -64,14 +64,37 @@ function counts(key: string, value: string): string {
   return input.counts.replace(new RegExp(`^${key}\t.*$`, "m"), `${key}\t${value}`);
 }
 
-interface Run {
+/** What a run of report.ts printed and its exit code. */
+interface Printed {
   readonly code: number;
   readonly stdout: string;
   readonly stderr: string;
 }
 
+interface Run extends Printed {
+  /** The pairs file, or undefined when the run wrote none. */
+  readonly pairs: string | undefined;
+  /** The names that the run left in the pairs file's directory. */
+  readonly left: readonly string[];
+}
+
+/** The base name of the pairs file of each run. */
+const PAIRS = "human-comment-delivery-pairs.tsv";
+
+/** Runs report.ts with `args`. */
+async function spawn(args: readonly string[]): Promise<Printed> {
+  const child = Bun.spawn(["bun", SCRIPT, ...args], { stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { code, stdout, stderr };
+}
+
 let written = 0;
-/** Runs report.ts on the fixtures, `files` put in their place, with `extra` arguments after. */
+/** Runs report.ts on the fixtures, `files` put in their place, with `extra` arguments after. The
+ *  pairs file of each run is PAIRS in a new, empty directory. */
 async function cli(files: Partial<ReportInput> = {}, extra: readonly string[] = []): Promise<Run> {
   const paths: Record<string, string> = {};
   for (const name of ["comments", "receipts", "counts"] as const) {
@@ -83,26 +106,26 @@ async function cli(files: Partial<ReportInput> = {}, extra: readonly string[] = 
       await writeFile(paths[name], text);
     }
   }
-  const child = Bun.spawn(
-    [
-      "bun",
-      SCRIPT,
-      "--comments",
-      paths.comments ?? "",
-      "--receipts",
-      paths.receipts ?? "",
-      "--counts",
-      paths.counts ?? "",
-      ...extra,
-    ],
-    { stdout: "pipe", stderr: "pipe" }
-  );
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
+  const directory = join(scratch, `${written++}-out`);
+  await mkdir(directory);
+  const pairs = join(directory, PAIRS);
+  const printed = await spawn([
+    "--comments",
+    paths.comments ?? "",
+    "--receipts",
+    paths.receipts ?? "",
+    "--counts",
+    paths.counts ?? "",
+    "--pairs",
+    pairs,
+    ...extra,
   ]);
-  return { code, stdout, stderr };
+  const left = (await readdir(directory)).sort();
+  return {
+    ...printed,
+    pairs: left.includes(PAIRS) ? await readFile(pairs, "utf8") : undefined,
+    left,
+  };
 }
 
 describe("the pairs and the comments", () => {
@@ -251,13 +274,15 @@ describe("the pairs and the comments", () => {
 });
 
 describe("the document", () => {
-  test("opens with the identity and the window, includes each trace verbatim, and is the same bytes on a re-run", async () => {
+  test("opens with the identity and the window, includes each trace verbatim, and gives the same document and pairs file on a re-run", async () => {
     const trace = join(FIXTURES, "trace.csv");
     const first = await cli({}, ["--trace", trace]);
     const second = await cli({}, ["--trace", trace]);
     expect(first.code).toBe(0);
     expect(first.stderr).toBe("");
     expect(second.stdout).toBe(first.stdout);
+    expect(first.pairs).toBeDefined();
+    expect(second.pairs).toBe(first.pairs);
     const lines = first.stdout.split("\n");
     expect(lines[2]).toBe(
       "Total 14 = delivered 4 + not delivered 7 (never-published 1, no-target 1, " +
@@ -278,11 +303,13 @@ describe("the document", () => {
         "running-no-row 3) + unknown 3"
     );
     expect(first.stdout).toContain(
-      `| ${id(11)} | session:01a1e001-0000-7000-8000-00000000000e | mention | no | ` +
-        "1 btw 01a1eeee-1111-7222-8333-000000000011; newest sent | " +
-        "01a1e001-0000-7000-8000-00000000000e | received | " +
-        "delivered (btw_reply:0b000011-0000-4000-8000-000000000011) |  |"
+      "## Each pair\n\n" +
+        `The rows of the pairs are in the TSV file \`${PAIRS}\`, beside this document: 15 rows ` +
+        "after a header line, one for each pair, in the order of the comments above. Its columns " +
+        "are `comment_id`, `target`, `owed_because`, `sent_by_the_outbox`, `mention_attempts`, " +
+        "`checked_session`, `status`, `class` and `cause`.\n\n## Unlisted receipts\n"
     );
+    expect(first.stdout).not.toContain("| Target |");
     expect(first.stdout).toContain(
       `| ${BET15} | BET-15 | 2026-10-19T01:31:21.247610Z | sami@theorem.dev | reply | ` +
         `not delivered | \`not-addressed:claimant\` | ${BET15_LEAD} (claimant): not-addressed:claimant |`
@@ -305,6 +332,65 @@ describe("the document", () => {
     );
     expect(first.stdout).toContain(
       `### trace.csv\n\n\`\`\`text\n${await fixture("trace.csv")}\`\`\``
+    );
+  });
+
+  test("the pairs file holds every pair, after a header, in the order of the comments", async () => {
+    const run = await cli();
+    expect(run.code).toBe(0);
+    expect(run.left).toEqual([PAIRS]);
+    const text = run.pairs ?? "";
+    expect(text.endsWith("\n")).toBe(true);
+    const lines = text.slice(0, -1).split("\n");
+    expect(lines[0]).toBe(
+      "comment_id\ttarget\towed_because\tsent_by_the_outbox\tmention_attempts\tchecked_session\t" +
+        "status\tclass\tcause"
+    );
+    expect(lines).toHaveLength(16);
+    for (const line of lines) expect(line.split("\t")).toHaveLength(9);
+    // Each listed receipts.tsv row is a pair, and so is the comments.csv row with no target.
+    const listed = input.receipts
+      .split("\n")
+      .map((line) => line.split("\t"))
+      .filter((fields) => fields[3] === "true")
+      .map((fields) => `${fields[0]}\t${fields[2]}`);
+    const pairs = lines.slice(1).map((line) => line.split("\t").slice(0, 2).join("\t"));
+    expect([...pairs].sort()).toEqual([...listed, `${id(4)}\t`].sort());
+    // The comments come in the order of the document's "Each comment" table.
+    const commentOrder = Array.from(
+      run.stdout.matchAll(/^\| ([0-9a-f-]{36}) \| /gm),
+      (match) => match[1]
+    );
+    expect(commentOrder).toHaveLength(14);
+    expect([...new Set(lines.slice(1).map((line) => line.split("\t")[0]))]).toEqual(commentOrder);
+    expect(lines).toContain(
+      `${id(11)}\tsession:01a1e001-0000-7000-8000-00000000000e\tmention\tno\t` +
+        "1 btw 01a1eeee-1111-7222-8333-000000000011; newest sent\t" +
+        "01a1e001-0000-7000-8000-00000000000e\treceived\t" +
+        "delivered (btw_reply:0b000011-0000-4000-8000-000000000011)\t"
+    );
+    expect(lines).toContain(`${id(4)}\t\t\t\t\t\t\tnot delivered\tno-target`);
+    expect(lines).toContain(
+      `${BET15}\t${BET15_LEAD}\tclaimant\tno\t\t01a14313-f0d7-765d-91c1-f2e043218727\t` +
+        "not_received\tnot delivered\tnot-addressed:claimant"
+    );
+  });
+
+  test("the pairs file writes a tab, a newline and a backslash in a value as \\t, \\n and \\\\", async () => {
+    const error = "no live session 01a1a001-0000-7000-8000-000000000001";
+    const comments = input.comments.replace(
+      `,failed,${error},`,
+      `,failed,"${error}\tone\ntwo\\three",`
+    );
+    expect(comments).not.toBe(input.comments);
+    const run = await cli({ comments });
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe("");
+    expect((run.pairs ?? "").split("\n")).toContain(
+      `${id(8)}\tsession:01a1a001-0000-7000-8000-000000000001\tmention\tno\t` +
+        `1 steer no envelope, 2 steer no envelope; newest failed: ${error}\\tone\\ntwo\\\\three\t` +
+        "01a1a001-0000-7000-8000-000000000001\tnot_received\tnot delivered\t" +
+        "mention-failed:session-not-live"
     );
   });
 
@@ -362,22 +448,39 @@ describe("refusals", () => {
     return lines.join("\n");
   };
 
-  test("a duplicated listed row is refused, naming both lines, and prints nothing", async () => {
+  test("a duplicated listed row is refused, naming both lines, and writes nothing", async () => {
     const run = await cli({ receipts: insert(input.receipts, 2, lineOf(input.receipts, 1)) });
     expect(run.code).toBe(1);
     expect(run.stdout).toBe("");
+    expect(run.pairs).toBeUndefined();
+    expect(run.left).toEqual([]);
     expect(run.stderr).toContain(
       `receipts.tsv lines 2 and 3: comment ${BET15} and target "${BET15_LEAD}" twice`
     );
   });
 
-  test("a findings or trace file that cannot be read is refused, and prints nothing", async () => {
+  test("a findings or trace file that cannot be read is refused, and writes nothing", async () => {
     for (const option of ["--findings", "--trace"]) {
       const run = await cli({}, [option, join(scratch, "absent.md")]);
       expect(run.code).toBe(1);
       expect(run.stdout).toBe("");
+      expect(run.left).toEqual([]);
       expect(run.stderr).toContain("absent.md");
     }
+  });
+
+  test("a run with no --pairs is refused, and prints nothing", async () => {
+    const run = await spawn([
+      "--comments",
+      join(FIXTURES, FILES.comments),
+      "--receipts",
+      join(FIXTURES, FILES.receipts),
+      "--counts",
+      join(FIXTURES, FILES.counts),
+    ]);
+    expect(run.code).toBe(1);
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toBe("--comments, --receipts, --counts and --pairs are required\n");
   });
 
   test("a duplicated unlisted row is refused: comment_id and target repeat", () => {

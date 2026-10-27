@@ -1,13 +1,14 @@
-import { readFile } from "node:fs/promises";
-import { basename } from "node:path";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join as joinPath } from "node:path";
 import { parseArgs } from "node:util";
 import { RECEIPT_TIMEOUT_CAUSE } from "../../../packages/contracts/src/dispatch-api";
 
-// Turns the three files of the comment delivery audit (INFRA-596) into a document for people:
-// comments.csv from packages/envoy/internal/dispatch/deliveryaudit/comments.sql, and receipts.tsv
-// and receipts-counts.txt from `tq receipts` (INFRA-608, theorem-labs/agent-infra
-// transcript-store). scripts/dispatch/README.md ("Comment delivery") gives the run. Input that
-// does not agree with itself is refused (exit 1, every problem on stderr, nothing on stdout),
+// Turns the three files of the comment delivery audit (INFRA-596) into a document for people,
+// and a TSV file of its pairs: comments.csv from
+// packages/envoy/internal/dispatch/deliveryaudit/comments.sql, and receipts.tsv and
+// receipts-counts.txt from `tq receipts` (INFRA-608, theorem-labs/agent-infra transcript-store).
+// scripts/dispatch/README.md ("Comment delivery") gives the run. Input that does not agree with
+// itself is refused (exit 1, every problem on stderr, nothing on stdout or in the pairs file),
 // never counted.
 
 /** comments.csv's columns, in order: the contract in deliveryaudit/README.md. */
@@ -1190,17 +1191,75 @@ function owedText(pair: Pair): string {
   return pair.reasons.length === 0 ? "not owed, only sent" : pair.reasons.join(", ");
 }
 
+/** The columns of the pairs file, in order. */
+const PAIR_COLUMNS = [
+  "comment_id",
+  "target",
+  "owed_because",
+  "sent_by_the_outbox",
+  "mention_attempts",
+  "checked_session",
+  "status",
+  "class",
+  "cause",
+] as const;
+
+/** A value as one TSV field: a backslash, a tab, a carriage return and a newline as `\\`, `\t`,
+ *  `\r` and `\n`. */
+function tsvField(value: string): string {
+  return value.replace(
+    /[\\\t\r\n]/g,
+    (char) => ({ "\\": "\\\\", "\t": "\\t", "\r": "\\r", "\n": "\\n" })[char] ?? char
+  );
+}
+
+/** The pairs file: a header, then one row for each pair in the order of the comments, and a
+ *  comment with no pair as one row with an empty target. Deterministic: the same files give the
+ *  same bytes. */
+function renderPairs(report: Report): { readonly text: string; readonly rows: number } {
+  const rows: (readonly string[])[] = [];
+  for (const judged of report.comments) {
+    const id = judged.comment.id;
+    if (judged.pairs.length === 0) {
+      rows.push([id, "", "", "", "", "", "", verdictText(judged.verdict), judged.verdict.cause]);
+      continue;
+    }
+    for (const { pair, verdict } of judged.pairs) {
+      rows.push([
+        id,
+        pair.target,
+        owedText(pair),
+        pair.addressed ? "yes" : "no",
+        mentionText(pair),
+        pair.receipt.checkedSession,
+        pair.receipt.status,
+        verdictText(verdict),
+        verdict.cause,
+      ]);
+    }
+  }
+  const lines = [PAIR_COLUMNS, ...rows].map((fields) => fields.map(tsvField).join("\t"));
+  return { text: `${lines.join("\n")}\n`, rows: rows.length };
+}
+
 /** A file named on the command line: its name and its text. */
 interface NamedText {
   readonly name: string;
   readonly text: string;
 }
 
+/** The pairs file as the document names it: its base name and its number of rows. */
+interface PairsFile {
+  readonly name: string;
+  readonly rows: number;
+}
+
 /** The markdown document. Deterministic: the same files give the same bytes. */
 function renderReport(
   report: Report,
   findings: readonly NamedText[],
-  traces: readonly NamedText[]
+  traces: readonly NamedText[],
+  pairs: PairsFile
 ): string {
   const { commentCounts: counts, pairCounts, receiptCounts: tq } = report;
   const out: string[] = [];
@@ -1326,26 +1385,13 @@ function renderReport(
   out.push("");
   out.push("## Each pair", "");
   out.push(
-    "| Comment | Target | Owed because | Sent by the outbox | Mention attempts | Checked session | Status | Class | Cause |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+    `The rows of the pairs are in the TSV file \`${pairs.name}\`, beside this document: ` +
+      `${pairs.rows} rows after a header line, one for each pair, in the order of the comments ` +
+      "above. Its columns are " +
+      `${PAIR_COLUMNS.slice(0, -1)
+        .map((column) => `\`${column}\``)
+        .join(", ")} and \`${PAIR_COLUMNS.at(-1)}\`.`
   );
-  for (const judged of report.comments) {
-    const id = judged.comment.id;
-    if (judged.pairs.length === 0) {
-      out.push(
-        `| ${id} | (none) |  |  |  |  |  | ${verdictText(judged.verdict)} | ${causeText(judged.verdict)} |`
-      );
-      continue;
-    }
-    for (const { pair, verdict } of judged.pairs) {
-      out.push(
-        `| ${id} | ${pair.target} | ${owedText(pair)} | ` +
-          `${pair.addressed ? "yes" : "no"} | ${cell(mentionText(pair))} | ` +
-          `${cell(pair.receipt.checkedSession)} | ${pair.receipt.status} | ` +
-          `${cell(verdictText(verdict))} | ${causeText(verdict)} |`
-      );
-    }
-  }
   out.push("");
   out.push("## Unlisted receipts", "");
   out.push(
@@ -1368,6 +1414,7 @@ interface Options {
   readonly comments: string;
   readonly receipts: string;
   readonly counts: string;
+  readonly pairs: string;
   readonly findings: readonly string[];
   readonly traces: readonly string[];
 }
@@ -1379,19 +1426,26 @@ function parseArguments(argv: readonly string[]): Options {
       comments: { type: "string" },
       receipts: { type: "string" },
       counts: { type: "string" },
+      pairs: { type: "string" },
       findings: { type: "string", multiple: true },
       trace: { type: "string", multiple: true },
     },
     strict: true,
   });
-  const { comments, receipts, counts } = values;
-  if (comments === undefined || receipts === undefined || counts === undefined) {
-    throw new Error("--comments, --receipts and --counts are required");
+  const { comments, receipts, counts, pairs } = values;
+  if (
+    comments === undefined ||
+    receipts === undefined ||
+    counts === undefined ||
+    pairs === undefined
+  ) {
+    throw new Error("--comments, --receipts, --counts and --pairs are required");
   }
   return {
     comments,
     receipts,
     counts,
+    pairs,
     findings: values.findings ?? [],
     traces: values.trace ?? [],
   };
@@ -1404,6 +1458,21 @@ function readNamed(paths: readonly string[]): Promise<NamedText[]> {
   );
 }
 
+/** Writes `text` to `path` through a temporary file in the same directory, so that `path` is
+ *  either absent or the whole text. */
+async function writeWhole(path: string, text: string): Promise<void> {
+  const temporary = joinPath(dirname(path), `.${basename(path)}.${process.pid}.tmp`);
+  try {
+    await writeFile(temporary, text);
+    await rename(temporary, path);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
+}
+
+/** Judges the files, writes the pairs file, and gives the document. Writes nothing when it
+ *  refuses. */
 async function run(argv: readonly string[]): Promise<string> {
   const options = parseArguments(argv);
   const [[comments, receipts, counts], findings, traces] = await Promise.all([
@@ -1418,7 +1487,13 @@ async function run(argv: readonly string[]): Promise<string> {
     receipts: receipts ?? "",
     counts: counts ?? "",
   });
-  return renderReport(report, findings, traces);
+  const pairs = renderPairs(report);
+  const document = renderReport(report, findings, traces, {
+    name: basename(options.pairs),
+    rows: pairs.rows,
+  });
+  await writeWhole(options.pairs, pairs.text);
+  return document;
 }
 
 if (import.meta.main) {

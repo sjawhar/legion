@@ -74,7 +74,8 @@ session, and why (INFRA-596). The run has three steps. Every step only reads.
    `comments.csv` and the transcript store. It writes `receipts.tsv`, one status for each pair,
    and `receipts-counts.txt`, its counts. It owns the transcript rules: which transcript row is a
    receipt of a comment, which sessions count as the pair's session, and each pair's status.
-3. `report.ts` reads the three files and writes one markdown document.
+3. `report.ts` reads the three files and writes one markdown document and one TSV file of the
+   document's pairs.
 
 INFRA-608's `transcript-store/comment-delivery/run.sh` does steps 1 and 2 on a dev box, which
 reaches both Dispatch's database and the transcript store.
@@ -101,17 +102,26 @@ PGOPTIONS='-c default_transaction_read_only=on' psql "$DATABASE_URL" -X -v ON_ER
 # 2. The transcript store (INFRA-608): receipts.tsv on stdout, the counts on stderr.
 tq receipts --comments comments.csv --from "$FROM" > receipts.tsv 2> receipts-counts.txt
 
-# 3. The document.
+# 3. The document, and the TSV file of its pairs.
 bun scripts/dispatch/comment-delivery/report.ts \
   --comments comments.csv --receipts receipts.tsv --counts receipts-counts.txt \
-  --findings findings-bet-15.md --trace trace-03207432.csv > human-comment-delivery-2026-10.md
+  --findings findings-bet-15.md --trace trace-03207432.csv \
+  --pairs human-comment-delivery-2026-10-pairs.tsv > human-comment-delivery-2026-10.md
 ```
+
+`--pairs` is required. `report.ts` writes the rows of the pairs to that file, and not to the
+document, because Dispatch refuses a Markdown document with too many elements; upload the file as
+an artifact beside the document. The file is TSV with a header line and one row for each pair, in
+the order of the document's comments. Its columns are `comment_id`, `target`, `owed_because`,
+`sent_by_the_outbox`, `mention_attempts`, `checked_session`, `status`, `class` and `cause`. A
+backslash, a tab, a carriage return and a newline in a value are written as `\\`, `\t`, `\r` and
+`\n`. The document's "Each pair" section gives the file's base name and its number of rows.
 
 `--findings` and `--trace` can each be given more than one time. The document holds each findings
 file whole, as Markdown, in the order given, in its "Findings" section after the table of causes
 and their fixes. Start the headings of a findings file at `###`, because the section is a `##`
 heading. The document holds each trace file whole, in a code block under the file's name, in the
-order given. The same files give the same document, byte for byte.
+order given. The same files give the same document and the same pairs file, byte for byte.
 
 `report.ts` reads `receipts-counts.txt` as exactly these 15 lines, in this order. Each line is a
 key, a tab and a value, with no header. `from` and `to` are UTC times in the form
@@ -211,11 +221,12 @@ An unknown is never counted as delivered or as not delivered.
 
 The document gives the counts of comments and of pairs with the identity
 `total = delivered + not delivered by cause + unknown`. `CAUSES` in `report.ts` maps each cause to
-its fix. The document has a row for each comment and a row for each pair, and it lists the
-unlisted rows. No session was owed a comment with the cause `no-target`; give the cause of each
-such comment in a findings file.
+its fix. The document has a row for each comment, the pairs file has a row for each pair, and the
+document lists the unlisted rows. No session was owed a comment with the cause `no-target`; give
+the cause of each such comment in a findings file.
 
-The report refuses its input (exit 1, each problem on stderr, nothing on stdout) in these cases:
+The report refuses its input (exit 1, each problem on stderr, nothing on stdout, no pairs file) in
+these cases:
 
 - A file that `--comments`, `--receipts`, `--counts`, `--findings` or `--trace` names cannot be
   read.
