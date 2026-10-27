@@ -175,6 +175,10 @@ type Options struct {
 type Sweeper struct {
 	GitHub GitHub
 	State  bus.KeyValue
+	// Open, when set, opens State at the start of each sweep until it has once: a sweep it fails
+	// for returns its error and asks GitHub nothing, so a sweeper made while NATS is down opens its
+	// bucket on the first sweep that finds NATS connected.
+	Open   func() (bus.KeyValue, error)
 	Logger *slog.Logger
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
@@ -271,8 +275,16 @@ func (s *Sweeper) sweepAndReport(ctx context.Context) {
 
 // Sweep lists the failed deliveries in its window, adds the refused deliveries the listing no
 // longer returns, and decides each: redeliver it, wait out its backoff, leave a pending
-// redelivery alone, or give up on it. A rate-limited answer from GitHub ends the sweep there.
+// redelivery alone, or give up on it. A rate-limited answer from GitHub ends the sweep there. It
+// opens State first when Open is set.
 func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
+	if s.Open != nil {
+		state, err := s.Open()
+		if err != nil {
+			return Report{}, err
+		}
+		s.State, s.Open = state, nil
+	}
 	now := s.now()
 	continuous := opts.Since.IsZero()
 	since := opts.Since

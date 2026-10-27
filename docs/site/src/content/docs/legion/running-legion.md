@@ -655,8 +655,9 @@ Closing the terminal leaves the project without one, and the daemon logs
 
   The `open production checks` line counts the closed issues whose production check is still
   open and names the oldest: its pull request, merge commit, which look it is on, what woke that
-  look (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build`
-  or `bound`) and when, and when the check's bound comes due (`none` when no check is open).
+  look (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start` (Dispatch's
+  announcement that every server process serves a build), `dispatch build` or `bound`) and when,
+  and when the check's bound comes due (`none` when no check is open).
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,

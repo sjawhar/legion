@@ -186,11 +186,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// INFRA-555: every NATS client of the server connects in the background (serverBus), so a bus
+	// that is down or refuses the credential at boot leaves the process serving everything that
+	// does not need the bus, and connected once the bus answers; only a configuration error (an
+	// unusable seed or proxy setting, a server that is not this machine's) ends the boot here.
 	var natsClient *bus.Client
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverBus(bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))...)
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -211,7 +215,7 @@ func main() {
 			slog.Info("dispatch: agent conversation relay off: it needs NATS")
 		}
 	} else {
-		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.Envoy.NatsURLs, env.lookup)
+		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.Envoy.NatsURLs, env.lookup, serverBus()...)
 		if err != nil {
 			slog.Error("dispatch: connect the agent conversation relay", "error", err)
 			os.Exit(1)
@@ -262,13 +266,14 @@ func main() {
 		slog.Info("dispatch: storing uploaded files in a bucket", "bucket", boot.FileStoreBucket)
 	}
 
-	signIn, err := discoverSignIn(ctx, boot)
-	if err != nil {
-		slog.Error("dispatch: discover the sign-in issuer", "error", err)
-		os.Exit(1)
-	}
+	// INFRA-555: neither issuer is read at boot. The sign-in issuer's code flow and the
+	// service-account token verifier each discover their issuer in the background from here, and
+	// until then what needs one answers 503 (SIGNIN_UNAVAILABLE, OIDC_ISSUER_UNAVAILABLE) while
+	// everything else serves; /healthz reports each as `signin` and `service_tokens`.
+	signIn := signInFlow(boot)
 	if signIn != nil {
 		signInRule(boot).BootLog(boot.SignInIssuer, boot.SignInClientID)
+		go signIn.Run(ctx)
 	}
 
 	people, signingKey, err := openPeople(boot, dataDir, database.Pool, signIn)
@@ -300,13 +305,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
-	if err != nil {
-		slog.Error("dispatch: discover OIDC issuer", "error", err)
-		os.Exit(1)
-	}
+	serviceTokens := serviceTokenVerifier(boot)
 	if serviceTokens != nil {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
+		go serviceTokens.Run(ctx)
 	}
 
 	// embedder is nil (meaning search off, search answers keyword-only and says so) when Bedrock,
@@ -318,7 +320,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
+	built := routes.AppContextOptions{
 		SigningKey:     signingKey,
 		WebDistDir:     webDistDir,
 		AssetStore:     dashboard.NewStore(database.Pool),
@@ -333,11 +335,16 @@ func main() {
 		Embedder:       embedder,
 		Events:         broker,
 		App:            appCfg,
-		OIDC:           serviceTokens,
 		AgentStream:    agentStream,
 		Files:          fileStore,
 		Lifetime:       ctx,
-	}))
+	}
+	// Set only when configured: a nil *oidc.LazyVerifier in the interface field would read as a
+	// configured verifier, and every JWT-shaped bearer would be sent to it.
+	if serviceTokens != nil {
+		built.OIDC = serviceTokens
+	}
+	appCtx, err := routes.BuildAppContext(appContextOptions(boot, built))
 
 	if err != nil {
 		slog.Error("dispatch: build app context", "error", err)
@@ -446,16 +453,17 @@ func main() {
 
 	// LEGION-567: the delivery timeline's 5-minute GitHub-App reconcile runs regardless of NATS
 	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
-	// a connected client, exactly like the outbox above. Both take the event broker: each writes
+	// a client, exactly like the outbox above. Both take the event broker: each writes
 	// issue.deployed on a pull request's issue once its shipping run is known (LEGION-781).
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker).Run(ctx, leases)
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
 		// its own (delivery.StartIntakes). Their clients stay open until the publisher closes, so a
 		// message still in its handler can be acknowledged while Dispatch shuts down; stop waits for
-		// both Runs, which return once ctx is cancelled, and not for that handler.
+		// both Runs, which return once ctx is cancelled, and not for that handler. Each connects in
+		// the background as the publisher does, and its bind poll binds the durable once it has.
 		connectIntake := func(name string) (*bus.Client, error) {
-			return bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName(name))
+			return bus.Connect(envoyConfig.Envoy.NatsURLs, serverBus(bus.WithEnvironment(env.lookup), bus.WithName(name))...)
 		}
 		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker)
 		if err != nil {
@@ -466,16 +474,23 @@ func main() {
 			cancel()
 			stopIntakes()
 		}()
-		// LEGION-781: the start, naming the stamped build commit, goes on the bus once the
-		// publisher is open, and is retried until the stream acknowledges it or the shutdown
-		// context ends; a binary with no stamped commit publishes none.
-		go startup.PublishStarted(ctx, natsClient, buildCommit, time.Now, slog.Default())
 	} else {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}
 
+	// LEGION-781, INFRA-555: the announcer publishes server.started once each time every live
+	// server process comes to serve one build (startup.Announcer), and /healthz reports the latest
+	// announcement's commit as fleet_commit. It runs once this process is registered, below. A
+	// process without NATS announces into the database and leaves the publish to a process whose
+	// bus answers.
+	var announcements startup.Publisher
+	if natsClient != nil {
+		announcements = natsClient
+	}
+	announcer := startup.New(startup.Deps{Pool: database.Pool, Publisher: announcements})
+
 	routesHandler, waitDelivery := routes.New(appCtx)
-	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit)
+	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -498,7 +513,8 @@ func main() {
 	// ones keep serving. The registration's heartbeat runs until shutdown deregisters it, after the
 	// HTTP drain (shutdown), so a draining process counts as live until its last request is
 	// answered. The prune loop deletes what processes that died without deregistering left behind,
-	// once overall under its lease.
+	// once overall under its lease. The announcer starts only now, so its first pass counts this
+	// process among the live ones and never announces a build the fleet is rolling away from.
 	if _, err := database.Pool.Healthy(ctx); err != nil {
 		slog.Error("dispatch: probe the database", "error", err)
 		os.Exit(1)
@@ -514,6 +530,7 @@ func main() {
 	}
 	slog.Info("dispatch: registered this server process", "instance", registration.ID)
 	go processes.RunPrune(ctx, database.Pool, leases)
+	go announcer.Run(ctx)
 	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery, deregisterAfterDrain(registration)); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
@@ -1069,36 +1086,86 @@ func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	return bucketStore, nil
 }
 
+// serverBus is the options every NATS client of the server connects with, after extra: it connects
+// in the background (bus.WithConnectInBackground), so a bus that is down at boot or refuses the
+// credential leaves the process serving and connects it once the bus answers, and it declares a
+// connection whose packets stop coming back lost within seconds (bus.WithSilentCutDetection), so
+// /healthz reports a cut bus within seconds of the cut.
+func serverBus(extra ...bus.ConnectOption) []bus.ConnectOption {
+	return append(extra, bus.WithConnectInBackground(), bus.WithSilentCutDetection())
+}
+
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API
 // route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
 // longer pattern, so "GET /healthz" wins over the router's "/".
-func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.Handler {
+func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit))
+	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit, announcer, issuers))
 	mux.Handle("/", handler)
 	return mux
 }
 
-// healthzHandler answers the probe: the process is serving, Postgres is reachable on the
-// health pool's own connection, and NATS is connected where it is configured. Nothing here
-// waits on the shared pool, and each probe bounds its own wait (store.healthProbeTimeout,
-// files.healthTimeout), which records why a probe that answers late is as bad as one that never
-// answers. The database and file-store probes run side by side: each takes up to two seconds,
-// and one after the other they would take four, past the three-second prober (the compose
-// healthcheck and the deploy script).
+// issuers are the two OIDC issuers the process discovers in the background, as /healthz reports
+// them: the sign-in issuer's code flow and the service-account token verifier, each nil when boot
+// configures none.
+type issuers struct {
+	signIn        *oidc.CodeFlow
+	serviceTokens *oidc.LazyVerifier
+}
+
+// serviceTokenVerifier is the verifier of the projected service-account tokens boot's
+// DISPATCH_OIDC_ISSUER issues to DISPATCH_OIDC_AUDIENCE, nil when boot configures none. It reads
+// nothing: the issuer is discovered in the background (oidc.LazyVerifier.Run, which main starts at
+// boot) or by the first token, and until then a JWT-shaped bearer is answered 503.
+func serviceTokenVerifier(boot bootConfig) *oidc.LazyVerifier {
+	if boot.OIDCIssuer == "" {
+		return nil
+	}
+	return oidc.NewLazyVerifier(boot.OIDCIssuer, boot.OIDCAudience)
+}
+
+// healthzHandler answers the readiness probe: 200 while this process can serve requests, which is
+// while Postgres answers on the health pool's own connection, and 503 while it does not; `ok` says
+// the same. Nothing here waits on the shared pool, and each probe bounds its own wait
+// (store.healthProbeTimeout, files.healthTimeout), which records why a probe that answers late is
+// as bad as one that never answers. The database and file-store probes run side by side: each
+// takes up to two seconds, and one after the other they would take four, past the three-second
+// prober (the compose healthcheck and the deploy script). A probe that fails while the database is
+// unreachable is right for readiness and wrong for liveness: a liveness probe on it would restart
+// every server process during a database failover.
 //
-// Where a file store is configured, `files` reports whether its bucket answered, and that is
-// all it does: it never decides `ok`. The load balancer replaces a task whose probe fails, and
-// production runs one, so a bucket outage, a slow HeadBucket or a grant someone changed would
-// take documents, asks and comments down with the files. A deploy check that wants the bucket
-// asserts `files: true` itself.
+// `nats` reports whether the server's publisher is connected to NATS (null when NATS is disabled),
+// and that is all it does: it never decides `ok`. A process serves reads and writes while the bus
+// is down or cut, and its outbox publishes what was written once the bus answers again, so a probe
+// that failed with the bus would take every server process out of service at once for an outage
+// each of them can serve through. The client declares a cut connection lost within seconds even
+// when no packet comes back to say so (bus.WithSilentCutDetection), so the field follows the bus
+// that closely. A check that needs the bus asserts `nats: true` itself, as the e2e scripts do.
 //
-// Beside those it reports what is deployed: `commit`, the legion commit the binary was built
-// from (null when the build did not stamp one), and `schema_version`, the highest migration
-// the database has applied, read by the same probe (null when the database did not answer).
-// A deploy check compares the two with the commit its image pin names and that commit's
-// migrations, so neither is ever filled with a guess.
-func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.HandlerFunc {
+// Where a file store is configured, `files` reports whether its bucket answered, and likewise
+// never decides `ok`: a bucket outage, a slow HeadBucket or a grant someone changed would
+// otherwise take documents, asks and comments down with the files. A deploy check that wants the
+// bucket asserts `files: true` itself.
+//
+// Where a sign-in issuer is configured, `signin` reports whether its discovery document has been
+// read, and where a service-account token issuer is, `service_tokens` reports the same of that
+// one; each is null when not configured. Neither decides `ok`: a process whose issuer is down
+// serves agents and the people whose confirmation stands, answers only what needs the issuer 503,
+// and discovers it in the background (oidc.CodeFlow.Run, oidc.LazyVerifier.Run), so failing the
+// probe would take that service away for an outage it serves through. A deploy check that needs
+// sign-in asserts `signin: true` itself.
+//
+// Beside those it reports what is deployed: `commit`, the legion commit this process's binary
+// was built from (null when the build did not stamp one), `fleet_commit`, the commit of the latest
+// announcement that every live server process serves one build (startup.Announcer.FleetCommit:
+// null when there is none, or before this process's announcer has first read the table, and up
+// to one announcer interval behind the table, a read the announcer makes anyway, so the probe
+// adds no statement to the database), and `schema_version`, the highest migration the database
+// has applied, read by the same probe (null when the database did not answer). A deploy check
+// compares commit and schema_version with the commit its image pin names and that commit's
+// migrations, so neither is ever filled with a guess; the Legion daemon reads fleet_commit, since
+// mid-roll whichever process answers it may serve a build the rest do not.
+func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.HandlerFunc {
 	var reportedCommit *string
 	if commit != "" {
 		reportedCommit = &commit
@@ -1139,8 +1206,17 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			connected := natsClient.Connected()
 			natsOK = &connected
 		}
+		var signInOK, serviceTokensOK *bool
+		if issuers.signIn != nil {
+			discovered := issuers.signIn.Discovered()
+			signInOK = &discovered
+		}
+		if issuers.serviceTokens != nil {
+			discovered := issuers.serviceTokens.Discovered()
+			serviceTokensOK = &discovered
+		}
 		<-filesProbed
-		ok := databaseOK && (natsOK == nil || *natsOK)
+		ok := databaseOK
 		status := http.StatusOK
 		if !ok {
 			status = http.StatusServiceUnavailable
@@ -1152,9 +1228,12 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			DB            bool    `json:"db"`
 			NATS          *bool   `json:"nats"`
 			Files         *bool   `json:"files"`
+			SignIn        *bool   `json:"signin"`
+			ServiceTokens *bool   `json:"service_tokens"`
 			Commit        *string `json:"commit"`
+			FleetCommit   *string `json:"fleet_commit"`
 			SchemaVersion *int    `json:"schema_version"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
+		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, SignIn: signInOK, ServiceTokens: serviceTokensOK, Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion})
 	}
 }
 

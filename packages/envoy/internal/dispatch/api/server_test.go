@@ -35,7 +35,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
-	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
@@ -66,7 +65,7 @@ type testServerOptions struct {
 	settle time.Duration
 	// oidc is the service-account token verifier; nil is the unconfigured
 	// deployment, whose bearer handling is untouched by that feature.
-	oidc *oidc.Verifier
+	oidc ServiceTokenVerifier
 	// envoyURL points the Envoy listener client at a fake listener; empty leaves the client
 	// unconfigured, which is every test that never asks whether a session is live.
 	envoyURL string

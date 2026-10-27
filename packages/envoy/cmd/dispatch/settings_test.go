@@ -321,11 +321,20 @@ func appContextFor(boot bootConfig, built routes.AppContextOptions) (*routes.App
 	return routes.BuildAppContext(appContextOptions(boot, built))
 }
 
+// testPeople is a people store over a fresh test database, with the pool it writes through, so a
+// test can date a confirmation back in SQL (ageConfirmation): the store dates every confirmation
+// by the database's clock.
+type testPeople struct {
+	*store.PgPeopleStore
+	pool *store.Pool
+}
+
 // peopleStore is a people store over a fresh test database, for a case whose requests record people,
 // sealing refresh tokens under the signing key appContextFor gives the router, as main does.
-func peopleStore(t *testing.T) auth.PeopleStore {
+func peopleStore(t *testing.T) testPeople {
 	t.Helper()
-	return store.NewPgPeopleStore(storetest.Open(t).Pool, testSigningKey, nil)
+	pool := storetest.Open(t).Pool
+	return testPeople{PgPeopleStore: store.NewPgPeopleStore(pool, testSigningKey, nil), pool: pool}
 }
 
 // currentSessions is a session store holding every login's session at generation 0, as a fresh
@@ -372,12 +381,12 @@ func signInPool(t *testing.T, clientID, clientSecret string) *oidctest.Issuer {
 }
 
 // signInRouter is the router main serves for boot over people, with the sign-in pool's code flow
-// main discovers from boot's DISPATCH_SIGNIN_* settings (discoverSignIn).
+// main builds from boot's DISPATCH_SIGNIN_* settings (signInFlow).
 func signInRouter(t *testing.T, boot bootConfig, people auth.PeopleStore) http.Handler {
 	t.Helper()
-	flow, err := discoverSignIn(context.Background(), boot)
-	if err != nil || flow == nil {
-		t.Fatalf("discover the sign-in pool %s: %v, %v", boot.SignInIssuer, flow, err)
+	flow := signInFlow(boot)
+	if flow == nil {
+		t.Fatalf("boot configures no sign-in pool: %+v", boot)
 	}
 	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: people})
 }
@@ -448,21 +457,15 @@ func whoamiAfter(handler http.Handler, signIn *httptest.ResponseRecorder) *httpt
 	return response
 }
 
-// ageConfirmation dates email's last confirmation two hours back, so their next request finds it
-// older than the hour.
-func ageConfirmation(t *testing.T, people auth.PeopleStore, email string) {
+// ageConfirmation dates email's last confirmation two hours back by the database's clock, so their
+// next request finds it older than the hour.
+func ageConfirmation(t *testing.T, people testPeople, email string) {
 	t.Helper()
 	membership, found, err := people.Membership(context.Background(), email)
 	if err != nil || !found || membership.RefreshToken == "" {
 		t.Fatalf("the membership of %s: %+v, found %t, %v; want a refresh token", email, membership, found, err)
 	}
-	if membership.Subject != "" {
-		if err := people.ConfirmSubject(context.Background(), email, membership.Subject, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	if err := people.Confirm(context.Background(), email, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+	if _, err := people.pool.Exec(context.Background(), `update people set confirmed_at = now() - interval '2 hours' where email = $1`, email); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -613,14 +616,18 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// Cookie identity is Google sign-in: with none of the sign-in settings, the server refuses to start.
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": "", "DISPATCH_SIGNIN_CLIENT_ID": "", "DISPATCH_SIGNIN_CLIENT_SECRET": "", "DISPATCH_SIGNIN_GROUP": ""},
 				"cookie identity signs people in: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN are required")
-			// The pool main discovers: /auth/start sends the browser to its authorization endpoint.
+			// The pool main builds the code flow for: /auth/start sends the browser to its
+			// authorization endpoint. A pool whose discovery fails does not stop the router being
+			// built: /auth/start answers 503 SIGNIN_UNAVAILABLE until the pool answers.
 			t.Run("router", func(t *testing.T) {
 				if location := startSignIn(t, signInRouter(t, boot, peopleStore(t))).Header().Get("Location"); !strings.HasPrefix(location, pool.URL()+"/") {
 					t.Errorf("DISPATCH_SIGNIN_ISSUER=%s: GET /auth/start redirected to %q, want the pool's authorization endpoint", pool.URL(), location)
 				}
 				pool.FailDiscovery(http.StatusServiceUnavailable)
-				if _, err := discoverSignIn(context.Background(), boot); err == nil || !strings.Contains(err.Error(), pool.URL()) {
-					t.Errorf("a pool whose discovery fails: err = %v, want a refusal naming %s", err, pool.URL())
+				response := httptest.NewRecorder()
+				signInRouter(t, boot, peopleStore(t)).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+				if response.Code != http.StatusServiceUnavailable || errorCode(response) != "SIGNIN_UNAVAILABLE" {
+					t.Errorf("a pool whose discovery fails: GET /auth/start answered %d %s, want 503 SIGNIN_UNAVAILABLE", response.Code, response.Body.String())
 				}
 			})
 		},
@@ -1124,7 +1131,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// with a new key put first, it still opens a refresh token sealed under the key before.
 			t.Run("people store", func(t *testing.T) {
 				database := storetest.Open(t)
-				if err := store.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("table-key"), nil).SignIn(context.Background(), "alice@example.com", "refresh-sealed", time.Now()); err != nil {
+				if err := store.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("table-key"), nil).SignIn(context.Background(), "alice@example.com", "refresh-sealed"); err != nil {
 					t.Fatal(err)
 				}
 				people, key, err := openPeople(resolveWith(t, map[string]string{"DISPATCH_SIGNING_KEY": "new-key table-key"}), t.TempDir(), database.Pool, nil)

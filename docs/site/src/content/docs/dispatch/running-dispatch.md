@@ -40,9 +40,9 @@ docker buildx imagetools inspect ghcr.io/sjawhar/legion/envoy:<that commit>   # 
 | Google sign-in | `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET`, and `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN` | The OpenID Connect issuer people sign in through, Dispatch's client there and that client's secret, and exactly one of: the group a person must be in, through a Cognito sign-in pool; or the Google Workspace domain whose people may sign in, with Google itself as the issuer. Required for the default cookie sign-in. [Signing people in](#signing-people-in) covers both. |
 | The browser address | `DISPATCH_SERVER_URL` | The exact address people type, such as `https://dispatch.internal.example`. Dispatch's client at the issuer lists this address followed by `/auth/callback` as a callback URL. |
 | The GitHub App | `DISPATCH_APP_CLIENT_ID`, `DISPATCH_APP_PEM_B64` | `DISPATCH_APP_PEM_B64` holds the App's private key as the PEM GitHub gives or the base64 of that PEM; a key that does not parse stops boot. Without the App the server starts, but the web app's GitHub reads answer `503` and architecture sources cannot be saved. |
-| A stable session key | `DISPATCH_SIGNING_KEY` | Signs sign-in cookies and seals the issuer's refresh tokens Dispatch stores. When unset, Dispatch creates one under `~/.local/share/dispatch`; keep that directory on a volume, or every restart signs everyone out. Give every server the same key when you run more than one, or a cookie one made is refused by the other and nothing tells you so ([Running more than one copy](#running-more-than-one-copy)). Changing the key signs everyone out and leaves every stored refresh token unopenable, so each person signs in again, but revokes none at the issuer: after the key leaks, sign people out at the issuer too. |
+| A stable session key | `DISPATCH_SIGNING_KEY` | Signs sign-in cookies and seals the issuer's refresh tokens Dispatch stores. It holds one key, or several separated by spaces: the first signs and seals, and every one is accepted, which is how the key is changed without signing anyone out ([Changing the session key](#changing-the-session-key)). When unset, Dispatch creates one under `~/.local/share/dispatch`; keep that directory on a volume, or every restart signs everyone out. Give every server the same keys when you run more than one: a server whose keys another running server does not share refuses to start ([Running more than one copy](#running-more-than-one-copy)). |
 | An Envoy listener | `ENVOY_URL` | Where the Agents page finds live agent sessions. Defaults to `http://127.0.0.1:9020`. |
-| NATS | `NATS_URLS`, `NATS_NKEY_SEED_FILE` | Where Dispatch publishes its events for agents. The Agents page's live view also needs it. Dispatch refuses a NATS server on another machine unless `ENVOY_ALLOW_REMOTE_NATS=1`. Set `DISPATCH_NATS_DISABLED=1` to run without it. |
+| NATS | `NATS_URLS`, `NATS_NKEY_SEED_FILE` | Where Dispatch publishes its events for agents. The Agents page's live view also needs it. Dispatch refuses a NATS server on another machine unless `ENVOY_ALLOW_REMOTE_NATS=1`. A NATS that is down, or refuses Dispatch's credential, when Dispatch starts does not stop it: Dispatch serves, connects once NATS answers, and publishes what was written meanwhile. Set `DISPATCH_NATS_DISABLED=1` to run without it. |
 | An address to listen on | `DISPATCH_LISTEN_HOST`, `DISPATCH_PORT` | Port `8766` by default. |
 | Meaning search | `DISPATCH_EMBEDDER`, and for Azure the `DISPATCH_AZURE_*` settings | Search by meaning embeds text with Cohere Embed v4 on AWS Bedrock (the default, with the AWS SDK's region and credentials) or on Azure AI Foundry (`DISPATCH_EMBEDDER=azure`: the endpoint, the deployment's tokens-per-minute quota, and either the deployment's key or a keyless sign-in through a federated token). Without it, search answers by words alone and says so. The server embeds everything it already holds by itself, at start and every ten minutes; `GET /api/v1/search/coverage` shows how far it has got. |
 
@@ -103,9 +103,16 @@ that admits a person is Dispatch's own.
 Either way, Dispatch keeps the issuer's refresh token, sealed, and confirms the person with it at
 least hourly: the first request after the hour refreshes the sign-in and applies the same rule to
 the refreshed ID token. A person the rule no longer admits loses every browser session, and so
-does anyone whose refresh fails for any reason, an outage at the issuer included: while the issuer
-cannot be reached, people are signed out as their hour lapses, and sign in again once it answers.
-Logout ends Dispatch's session only, not the issuer's.
+does anyone whose refresh token the issuer refuses as expired or revoked. A refresh the issuer
+does not answer, as in an outage at the issuer, signs nobody out: that request is refused with
+`503 SIGNIN_UNAVAILABLE`, and the person's first request after the issuer answers again refreshes
+and goes through. Logout ends Dispatch's session only, not the issuer's.
+
+Dispatch does not need the issuer to start. It reads the issuer's settings in the background,
+retrying until the issuer answers, and until then a sign-in answers `503 SIGNIN_UNAVAILABLE` while
+agents, and people whose hour has not lapsed, are served. A sign-in started on one server completes
+on whichever server the issuer sends the browser back to, since what it needs travels in a signed
+cookie, as long as every server has the same `DISPATCH_SERVER_URL`.
 
 A person is their email address, so an address that passes from one account to another is one
 person to Dispatch. With Google directly, Dispatch also records the Google account (its `sub`,
@@ -142,6 +149,32 @@ return to domain mode unprotected: the same Google account signing in again find
 `sub` still on the row, so nothing ends sessions a pool-era cookie still held. Everyone then signs
 in again under the new issuer; a refresh token left from the old one would be refused at the
 first hourly confirmation, and is still redeemable at the old issuer until it is revoked there.
+
+## Changing the session key
+
+`DISPATCH_SIGNING_KEY` takes the new key beside the old one, so the key changes without signing
+anyone out. Make the change in three steps, and restart every server after each before the next:
+
+1. Add the new key second, after the current one: `<old key> <new key>`. Every server still signs
+   with the old key and now accepts the new one.
+2. Move the new key first: `<new key> <old key>`. Every server signs with the new key and still
+   accepts the old one, so the sign-ins made under it keep working.
+3. Remove the old key, no sooner than 30 days after step 2: a sign-in cookie lasts 30 days, and each
+   stored refresh token is sealed again under the new key by its person's next hourly confirmation.
+
+Each step keeps every server's keys shared with the step before, so a rolling restart passes the
+check that refuses a server whose keys another running server does not share. Replacing the key in
+one step fails that check beside a server still on the old key, and on a single server signs
+everyone out.
+
+Two rules come with it. The first release of Dispatch that takes several keys is never the release
+you first change the key in, and while the setting holds two keys, never roll back to a release
+older than that: such a release reads both keys as one, and signs everyone out. Removing a key
+revokes no refresh token at the issuer: whoever holds a database backup and the old key can still
+use the tokens sealed under it until they expire, so after a key leaks, sign people out at the
+issuer too.
+
+Spaces and line breaks separate the keys, so a key itself holds neither.
 
 ## Running it on your machine
 
@@ -233,35 +266,52 @@ Sign in, then open **Settings**:
 
 ## Health check
 
-`GET /healthz` needs no credential. It answers `200` when the server is healthy:
+`GET /healthz` needs no credential. It answers `200` while the server can serve requests, which is
+while Postgres answers:
 
 ```json
-{"ok":true,"db":true,"nats":null,"files":null,"commit":null,"schema_version":63}
+{"ok":true,"db":true,"nats":null,"files":null,"signin":null,"service_tokens":null,"commit":null,"fleet_commit":null,"schema_version":121}
 ```
 
+It is a readiness check, not a liveness check: it fails while the database cannot be reached, so a
+liveness probe on it would restart every server at once during a database failover. Point a load
+balancer's or Kubernetes' readiness probe at it.
+
+- `ok` is whether this server can serve requests, the same as `db`.
 - `db` is whether Postgres answered within two seconds. When it does not, the answer is `503` with
   `db: false`.
-- `nats` is whether NATS is connected, or `null` when NATS is turned off.
+- `nats` is whether NATS is connected, or `null` when NATS is turned off. A server serves while NATS
+  is down, so it never decides `ok` or the status, and a NATS that stops answering without closing
+  the connection reads `false` within three seconds.
 - `files` is whether the file store's bucket (`DISPATCH_FILE_STORE_BUCKET`) answered within two
   seconds, or `null` when no bucket is set. It never decides `ok` or the status: a bucket that
   stops answering is `200` with `files: false`, so an outage of the bucket fails uploads and
-  downloads and nothing else; a check that wants the bucket asserts `files: true` itself.
-- `commit` is the source commit the image was built from, or `null` in a build that was not
-  stamped.
+  downloads and nothing else.
+- `signin` and `service_tokens` are whether the sign-in issuer and the service-account token issuer
+  have been reached, or `null` when that issuer is not set. Neither decides `ok` or the status.
+- `commit` is the source commit this server's image was built from, or `null` in a build that was
+  not stamped.
+- `fleet_commit` is the commit every running server was last found serving, the one Dispatch
+  announced on NATS, or `null` before any was found. It can trail by a few seconds.
 - `schema_version` is the newest database migration applied.
+
+A check that needs NATS, the bucket or sign-in asserts `nats: true`, `files: true` or `signin: true`
+itself.
 
 ## Running more than one copy
 
 Dispatch runs as more than one server against one database, so a new version rolls out without
 taking Dispatch away from everyone: start the new version, let it take traffic, then stop the old
-one. Three things have to be true first, and Dispatch can check none of them for you.
+one. Three things have to be true first; Dispatch checks the first for you.
 
-- **Give every server the same `DISPATCH_SIGNING_KEY`.** Left unset, each server makes a key of
-  its own in its own data directory, and a sign-in made by one server is then refused by the
-  other: everyone is signed out by whichever server answers next, and every stored refresh token
-  reads as missing. No server can see another's key, so nothing refuses to start, nothing is
-  logged, and the health check cannot report it. That is why this is a precondition rather than
-  something Dispatch tells you about.
+- **Give every server the same `DISPATCH_SIGNING_KEY`.** A sign-in made on one server is checked by
+  whichever server answers next, so each server must accept the key the others sign with. Left
+  unset, each server makes a key of its own in its own data directory. Each server records the
+  servers that are running in the database, with a fingerprint of each key that reveals nothing of
+  it, and a server whose keys a running server does not share refuses to start: it logs why,
+  naming the other server and the steps of [changing the session key](#changing-the-session-key),
+  and exits before it serves anything. A rolling update to a changed key stalls the same way on the
+  first new server while the old ones keep serving.
 - **Give every server the same embedder settings.** Each stored vector records the embedder that
   made it, and each server drops the vectors another embedder made and embeds that text again, so
   two servers set up differently keep replacing each other's work. A rollout that changes the
@@ -277,12 +327,13 @@ one. Three things have to be true first, and Dispatch can check none of them for
   rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
-to 64 connections for requests, up to 9 for the periodic work it runs once across the servers, up
+to 64 connections for requests, up to 10 for the periodic work it runs once across the servers, up
 to 4 for loading documents, one for the health check, and one for the events outbox, and it holds
-three more open for as long as it runs: one each for the three things that wait on Postgres
+four more open for as long as it runs: one each for the three things that wait on Postgres
 notifications, which are delivery, the live event stream, and closing a document session another
-server has written to. That is 82 connections for one server at its ceiling, and twice that for
-two, past a default Postgres's limit of 100. Check the database's connection
+server has written to, and one for its entry in the list of running servers, which it renews every
+five seconds. That is 84 connections for one server at its ceiling, and twice that for two, past a
+default Postgres's limit of 100. Check the database's connection
 limit before you start the second server: a limit sized for one server, with whatever else uses
 that database counted in, is the thing that runs out.
 
@@ -308,6 +359,13 @@ What a reader sees while two servers are serving:
 - The dashboard's **A new version is available** notice waits until every server runs one
   version: while two versions are serving, nobody is told to reload. A page that fails to load one
   of its files reloads itself, at most three times in five minutes.
+- Signing in works whichever server each step reaches, and a sign-in made on one server is good on
+  the other.
+
+Dispatch announces a new version on NATS (`server.started`) once every running server serves it,
+not as each one starts: a rollout announces once its last old server has stopped, restarting
+servers on the version already announced announces nothing, and rolling back announces the
+earlier version again.
 
 ## Migrations
 

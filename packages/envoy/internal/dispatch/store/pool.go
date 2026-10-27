@@ -264,13 +264,13 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // block-index reconciliation, the GitHub webhook redelivery sweep, the architecture import, the
 // delivery reconcile, one per delivery durable for the consumers' reconciliation
 // (delivery.consumerLease, a name each for delivery-events and delivery-jobs) and the server
-// process registry's prune (processes.RunPrune) - taken by ten callers, since each delivery intake
-// takes its own durable's name from a bind poll of its own, so ten callers can be inside Exclusive
-// at once. Ten connections are exactly those ten: the headroom is zero, not one, and the next
-// leased loop added here makes an eleventh caller that waits for a connection rather than failing,
-// for as long as the longest pass then holding one. They cannot come from the shared pool: a lease
-// is held for the whole pass, which is minutes for the compaction, and the shared pool's
-// sharedPoolSize connections are what every request reads through.
+// process registry's prune (processes.RunPrune) - taken by ten callers, since each delivery
+// intake takes its own durable's name from a bind poll of its own, so ten callers can be inside
+// Exclusive at once. Ten connections are exactly those ten: the headroom is zero, not one, and the
+// next leased loop added here makes an eleventh caller that waits for a connection rather than
+// failing, for as long as the longest pass then holding one. They cannot come from the shared
+// pool: a lease is held for the whole pass, which is minutes for the compaction, and the shared
+// pool's sharedPoolSize connections are what every request reads through.
 const leasePoolSize = 10
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that

@@ -27,6 +27,18 @@ type connectOpts struct {
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
 	environment                 func(string) (string, bool)
+	background                  bool
+	silentCutDetection          bool
+}
+
+// connectionSettings is what every connection of a client applies after envoy's own options
+// (connectWithContext): the NATS user credential names (nkeyCredential, nil for none), and the
+// pings of WithSilentCutDetection when the client asked for them.
+func (o connectOpts) connectionSettings(credential nats.Option) nats.Option {
+	if !o.silentCutDetection {
+		return credential
+	}
+	return allOf(credential, detectSilentCuts)
 }
 
 // parseConnectOptions applies options over the defaults every connect starts from.
@@ -80,6 +92,37 @@ func WithEnvironment(lookup func(string) (string, bool)) ConnectOption {
 // lifecycle log lines (`envoy nats disconnected`, `envoy nats recovery attempt` and the rest).
 func WithName(name string) ConnectOption {
 	return func(o *connectOpts) { o.name = name }
+}
+
+// WithConnectInBackground has the constructor (Connect, ConnectOwningStream, Dial) return without
+// waiting for NATS. A configuration error is still returned before any dial: an unusable nkey seed,
+// a server ENVOY_ALLOW_REMOTE_NATS does not allow, an unusable SOCKS5 setting. A server that does
+// not answer, or refuses the credential, is not an error: the client is returned with a connection
+// nats.go has yet to connect, which nats.go then connects in place, retrying forever as it does a
+// reconnect (connectInBackground). A refusal of the credential is logged at ERROR at most once a
+// minute and retried, never given up on. Until that first connection Connected reports false, a
+// publish waits for it within its own deadline and then fails as one does while reconnecting, a
+// core subscription is sent once it connects, and a JetStream subscription's bind fails while its
+// registration stays, so the first connection binds it. Only nats.go dials before then: the
+// constructor's connection is never closed, so nothing replaces it (ensureConnWithContext). The
+// first connection is a connection event, as a reconnect is (onConnect): the JetStream
+// subscription is bound and the reconnect hooks run, and an owning client (ConnectOwningStream)
+// reconciles the stream then, as its first hook, rather than in the constructor.
+//
+// envoy-dispatch's server takes it for each of its clients, so a bus that is down when it boots
+// leaves it serving everything that does not need the bus, and connected once the bus answers.
+func WithConnectInBackground() ConnectOption {
+	return func(o *connectOpts) { o.background = true }
+}
+
+// WithSilentCutDetection has every connection the client makes declare itself lost two to three
+// seconds after the server stops answering it (detectSilentCuts), where nats.go's defaults take
+// four to six minutes. A server that goes away cleanly closes the socket, which the client sees at
+// once; one whose packets are dropped (a partition, a node that vanished) closes nothing, and only
+// the client's own pings notice. envoy-dispatch's server takes it for each of its clients, so its
+// /healthz reports a cut bus within seconds of the cut.
+func WithSilentCutDetection() ConnectOption {
+	return func(o *connectOpts) { o.silentCutDetection = true }
 }
 
 type subscriptionTransport uint8
@@ -136,7 +179,7 @@ type Client struct {
 	js                          nats.JetStreamContext
 	urls                        []string
 	name                        string
-	credential                  nats.Option
+	connectionSettings          nats.Option
 	dialer                      *socks5Dialer
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
@@ -167,6 +210,10 @@ type Client struct {
 	// before the drain from one during it (closeStopped). Once the client is stopped c.Conn never
 	// changes (ensureConnWithContext), so the count needs no connection beside it.
 	drainedReconnects uint64
+	// awaitingConnection is true, under mu, from the constructor of a client that connects in the
+	// background (WithConnectInBackground) until nats.go has connected its connection for the
+	// first time (onConnect), and false for every other client.
+	awaitingConnection bool
 
 	// recovery state
 	recovering int32
@@ -183,9 +230,15 @@ type Client struct {
 // reading ENVOY_ALLOW_REMOTE_NATS from environment too, which answers as os.LookupEnv does
 // (WithEnvironment).
 //
+// Of the options it takes WithConnectInBackground, which returns the connection before it has
+// connected (a core subscription made on it before then is sent once it connects),
+// WithSilentCutDetection and WithReconnectErrClock; its name and its environment are its
+// parameters, so WithName and WithEnvironment change nothing here.
+//
 // For JetStream-backed publishing or a durable consumer, use Connect; to reconcile the stream
 // this codebase owns, ConnectOwningStream.
-func Dial(name string, urls []string, environment func(string) (string, bool)) (*nats.Conn, error) {
+func Dial(name string, urls []string, environment func(string) (string, bool), options ...ConnectOption) (*nats.Conn, error) {
+	opts := parseConnectOptions(options)
 	if err := refuseRemoteNATS(urls, environment); err != nil {
 		return nil, err
 	}
@@ -197,7 +250,17 @@ func Dial(name string, urls []string, environment func(string) (string, bool)) (
 	if err != nil {
 		return nil, err
 	}
-	return connect(name, urls, credential, dialer, nil, nil, nil, nil)
+	settings := opts.connectionSettings(credential)
+	if !opts.background {
+		return connect(name, urls, settings, dialer, nil, nil, nil, nil)
+	}
+	refusals := newReconnectErrThrottle(opts.reconnectErrClock)
+	nc, err := connect(name, urls, allOf(settings, connectInBackground(name, urls, refusals, nil)), dialer, nil, nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	go reportRefusalsUntilConnected(nc, name, urls, refusals)
+	return nc, nil
 }
 
 // Connect opens a client that publishes and subscribes without touching the shared
@@ -242,13 +305,30 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	c := &Client{
 		urls:                        urls,
 		name:                        opts.name,
-		credential:                  credential,
+		connectionSettings:          opts.connectionSettings(credential),
 		dialer:                      dialer,
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		reconnectErrClock:           opts.reconnectErrClock,
 		stopCh:                      make(chan struct{}),
 	}
-	nc, err := connect(c.name, urls, credential, dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+	stream := *streamCfg
+	stream.Replicas = opts.replicas
+	first := c.connectionSettings
+	var refusals *reconnectErrThrottle
+	if opts.background {
+		refusals = newReconnectErrThrottle(opts.reconnectErrClock)
+		first = allOf(c.connectionSettings, connectInBackground(c.name, urls, refusals, c.onConnect))
+		c.awaitingConnection = true
+		if ownsStream {
+			c.AddReconnectHook(c.ensureStreamOnce(&stream))
+		}
+		// nats.go can run onConnect as soon as the connect below returns, and onConnect counts
+		// the connection only once it is c.Conn, so the connection is installed under the lock
+		// onConnect takes.
+		c.mu.Lock()
+		defer c.mu.Unlock()
+	}
+	nc, err := connect(c.name, urls, first, dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
 	if err != nil {
 		return nil, err
 	}
@@ -257,17 +337,46 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		nc.Close()
 		return nil, err
 	}
-	if ownsStream {
-		cfg := *streamCfg
-		cfg.Replicas = opts.replicas
-		if err := ensureStreamWithConfig(js, &cfg); err != nil {
+	if ownsStream && !opts.background {
+		if err := ensureStreamWithConfig(js, &stream); err != nil {
 			nc.Close()
 			return nil, err
 		}
 	}
 	c.Conn = nc
 	c.js = js
+	if opts.background {
+		go reportRefusalsUntilConnected(nc, c.name, urls, refusals)
+	}
 	return c, nil
+}
+
+// ensureStreamOnce is the reconnect hook an owning client that connects in the background
+// reconciles the stream with (ensureStreamWithConfig) on its first connection, where every other
+// owning client's constructor does. It is the client's first hook, and the hooks run one at a time
+// (rewatch), so ensured needs no lock of its own. A run that fails leaves the hooks due, so a
+// recovery runs it again; once one has succeeded it does nothing, as no owning client reconciles
+// the stream again on a later connection.
+func (c *Client) ensureStreamOnce(stream *nats.StreamConfig) func(*nats.Conn) error {
+	ensured := false
+	return func(*nats.Conn) error {
+		if ensured {
+			return nil
+		}
+		if err := ensureStreamWithConfig(c.JS(), stream); err != nil {
+			return fmt.Errorf("reconcile the %s stream: %w", Stream, err)
+		}
+		ensured = true
+		return nil
+	}
+}
+
+// awaitingFirstConnection reports whether the client connects in the background and nats.go has
+// yet to connect it for the first time.
+func (c *Client) awaitingFirstConnection() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.awaitingConnection
 }
 
 func (c *Client) JS() nats.JetStreamContext {
@@ -285,7 +394,9 @@ func (c *Client) Connected() bool {
 
 // Subscribe creates the client's recoverable JetStream subscription. The client keeps one
 // JetStream subscription: a later call on the same subject replaces it, unsubscribing the handle
-// an earlier one returned, and a call on another subject is refused with ErrSubscriptionHeld.
+// an earlier one returned, and a call on another subject is refused with ErrSubscriptionHeld. On a
+// client that connects in the background and has not connected yet, the bind fails (nothing
+// reaches the server before then) and the registration stays, so the first connection binds it.
 func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
 	c.mu.Lock()
 	conn, js := c.Conn, c.js
@@ -302,10 +413,14 @@ func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats
 // identifies the stable queue group that shares role-lane delivery between
 // overlapping listeners. The client keeps one core subscription: a later call on the same
 // subject and queue replaces it, unsubscribing the handle an earlier one returned, and any other
-// call is refused with ErrSubscriptionHeld.
+// call is refused with ErrSubscriptionHeld. A client that connects in the background and has not
+// connected yet binds it on the connection it has, which nats.go sends once it connects: waiting
+// for that connection here would wait out the outage.
 func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues ...string) (*nats.Subscription, error) {
-	if err := c.ensureConn(); err != nil {
-		return nil, err
+	if !c.awaitingFirstConnection() {
+		if err := c.ensureConn(); err != nil {
+			return nil, err
+		}
 	}
 	queue := ""
 	if len(queues) > 0 {
@@ -708,7 +823,11 @@ func (c *Client) ensureConn() error {
 // finish replaces it: the others close theirs and serve with that one. So every connection the
 // client dials is either c.Conn, which Close and Drain close, or closed already; one left open
 // beside it would outlive Close, and, with MaxReconnect -1, reconnect forever once its server is
-// gone.
+// gone. A client that connects in the background (WithConnectInBackground) holds, from its
+// constructor on, a connection nats.go has yet to connect for the first time and does not close
+// before then, so a caller waits for that first connection as for a reconnect, and nothing here
+// dials beside nats.go before it; a connection dialled later to replace a closed one is an
+// ordinary one, connected before it is installed.
 func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	for {
 		c.mu.Lock()
@@ -733,7 +852,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 			continue
 		}
 
-		nc, err := connectWithContext(ctx, c.name, c.urls, c.credential, c.dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
+		nc, err := connectWithContext(ctx, c.name, c.urls, c.connectionSettings, c.dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
 		if err != nil {
 			return err
 		}

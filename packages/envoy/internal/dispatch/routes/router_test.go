@@ -71,24 +71,42 @@ func (s *memorySessionStore) RevokeSessions(_ context.Context, login string) err
 
 // memoryPeopleStore is auth.PeopleStore in memory. A sign-in under another subject than the one it
 // holds for the address ends the address's sessions in sessions, as store.PgPeopleStore does; a
-// store with no sessions refuses such a sign-in.
+// store with no sessions refuses such a sign-in. now stands in for the database's clock: it dates
+// each sign-in and confirmation, and Membership answers a confirmation's age by it; nil is
+// time.Now.
 type memoryPeopleStore struct {
 	mu       sync.Mutex
-	people   map[string]auth.PersonMembership
+	people   map[string]memoryPerson
 	sessions *memorySessionStore
+	now      func() time.Time
 	// afterSignIn, when set, runs once after the next SignIn or SignInSubject returns.
 	afterSignIn func()
 }
 
+// memoryPerson is one person's row in memoryPeopleStore: ConfirmedAt is the store clock's time of
+// the last confirmation, zero for none.
+type memoryPerson struct {
+	RefreshToken string
+	Subject      string
+	ConfirmedAt  time.Time
+}
+
 func newMemoryPeople() *memoryPeopleStore {
-	return &memoryPeopleStore{people: map[string]auth.PersonMembership{}}
+	return &memoryPeopleStore{people: map[string]memoryPerson{}}
+}
+
+func (s *memoryPeopleStore) clock() time.Time {
+	if s.now == nil {
+		return time.Now()
+	}
+	return s.now()
 }
 
 func (s *memoryPeopleStore) Record(_ context.Context, email string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, found := s.people[email]; !found {
-		s.people[email] = auth.PersonMembership{}
+		s.people[email] = memoryPerson{}
 	}
 	return nil
 }
@@ -102,22 +120,22 @@ func (s *memoryPeopleStore) runAfterSignIn() {
 	}
 }
 
-func (s *memoryPeopleStore) SignIn(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
+func (s *memoryPeopleStore) SignIn(_ context.Context, email, refreshToken string) error {
 	defer s.runAfterSignIn()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	membership := s.people[email]
-	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
-	s.people[email] = membership
+	person := s.people[email]
+	person.RefreshToken, person.ConfirmedAt = refreshToken, s.clock()
+	s.people[email] = person
 	return nil
 }
 
-func (s *memoryPeopleStore) SignInSubject(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+func (s *memoryPeopleStore) SignInSubject(ctx context.Context, email, subject, refreshToken string) error {
 	defer s.runAfterSignIn()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	membership, existed := s.people[email]
-	if existed && membership.Subject != subject {
+	person, existed := s.people[email]
+	if existed && person.Subject != subject {
 		if s.sessions == nil {
 			return errors.New("memoryPeopleStore: a sign-in under another subject has no sessions to end")
 		}
@@ -125,54 +143,58 @@ func (s *memoryPeopleStore) SignInSubject(ctx context.Context, email, subject, r
 			return err
 		}
 	}
-	membership.Subject = subject
-	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
-	s.people[email] = membership
+	person.Subject = subject
+	person.RefreshToken, person.ConfirmedAt = refreshToken, s.clock()
+	s.people[email] = person
 	return nil
 }
 
 func (s *memoryPeopleStore) Membership(_ context.Context, email string) (auth.PersonMembership, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	membership, found := s.people[email]
+	person, found := s.people[email]
+	membership := auth.PersonMembership{RefreshToken: person.RefreshToken, Subject: person.Subject}
+	if !person.ConfirmedAt.IsZero() {
+		membership.Confirmed, membership.ConfirmedAge = true, s.clock().Sub(person.ConfirmedAt)
+	}
 	return membership, found, nil
 }
 
-func (s *memoryPeopleStore) Confirm(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
+func (s *memoryPeopleStore) Confirm(_ context.Context, email, refreshToken string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	membership := s.people[email]
-	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
-	s.people[email] = membership
+	person := s.people[email]
+	person.RefreshToken, person.ConfirmedAt = refreshToken, s.clock()
+	s.people[email] = person
 	return nil
 }
 
-func (s *memoryPeopleStore) ConfirmSubject(_ context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+func (s *memoryPeopleStore) ConfirmSubject(_ context.Context, email, subject, refreshToken string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	membership := s.people[email]
-	if membership.Subject != subject {
+	person := s.people[email]
+	if person.Subject != subject {
 		return nil
 	}
-	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
-	s.people[email] = membership
+	person.RefreshToken, person.ConfirmedAt = refreshToken, s.clock()
+	s.people[email] = person
 	return nil
 }
 
 func (s *memoryPeopleStore) End(_ context.Context, email string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if membership, found := s.people[email]; found {
-		s.people[email] = auth.PersonMembership{Subject: membership.Subject}
+	if person, found := s.people[email]; found {
+		s.people[email] = memoryPerson{Subject: person.Subject}
 	}
 	return nil
 }
 
-func (s *memoryPeopleStore) get(email string) (auth.PersonMembership, bool) {
+func (s *memoryPeopleStore) get(email string) (memoryPerson, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	membership, found := s.people[email]
-	return membership, found
+	person, found := s.people[email]
+	return person, found
 }
 
 const (
@@ -183,7 +205,8 @@ const (
 )
 
 // signInRig is a Dispatch router signing people in through a fake sign-in issuer, with the
-// cookie identity production runs and a clock the membership refresh reads.
+// cookie identity production runs and a clock the people store dates and ages confirmations by,
+// standing in for the database's.
 type signInRig struct {
 	handler  http.Handler
 	ctx      *AppContext
@@ -215,13 +238,11 @@ func newSignInRigFor(t *testing.T, serverURL string, rule identity.SignInRule, h
 	t.Helper()
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), rigClientID, "dispatch-secret")
-	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), rigClientID, "dispatch-secret", hostedDomain)
-	if err != nil {
-		t.Fatalf("NewCodeFlow: %v", err)
-	}
+	flow := oidc.NewCodeFlow(issuer.URL(), rigClientID, "dispatch-secret", hostedDomain)
 	rig := &signInRig{issuer: issuer, people: newMemoryPeople(), sessions: &memorySessionStore{generations: map[string]int64{}}, now: time.Now()}
 	rig.people.sessions = rig.sessions
-	rig.membership = &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Rule: rule, Now: rig.clock}
+	rig.people.now = rig.clock
+	rig.membership = &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Rule: rule}
 	rig.options = AppContextOptions{
 		SigningKey: testSigningKey,
 		People:     rig.people,
@@ -231,6 +252,7 @@ func newSignInRigFor(t *testing.T, serverURL string, rule identity.SignInRule, h
 		SignInRule: rule,
 		ServerURL:  serverURL,
 	}
+	var err error
 	rig.ctx, err = BuildAppContext(rig.options)
 	if err != nil {
 		t.Fatalf("build context: %v", err)
@@ -416,6 +438,38 @@ func TestSignInRefusesAUsernameNoProviderIssued(t *testing.T) {
 	response := rig.signIn(t, claims)
 	if response.Code != http.StatusForbidden || sessionCookie(response) != nil {
 		t.Fatalf("callback for a pool account: status %d cookie %v, want 403 and no session", response.Code, sessionCookie(response))
+	}
+}
+
+// While the sign-in issuer has not been discovered, /auth/start answers 503 SIGNIN_UNAVAILABLE and
+// sets no state cookie, and a callback whose exchange meets the undiscovered issuer (a sign-in a
+// process that had discovered it started) answers the same, never 502.
+func TestSignInAgainstAnUndiscoveredIssuerAnswers503(t *testing.T) {
+	rig := newSignInRig(t, "")
+	rig.issuer.SignInAs(personClaims(rigGroup))
+	authURL, stateCookie := rig.start(t, "http://dispatch.test/auth/start")
+	code, state := rig.issuer.Authorize(t, authURL.String())
+
+	rig.issuer.FailDiscovery(http.StatusServiceUnavailable)
+	options := rig.options
+	options.SignIn = oidc.NewCodeFlow(rig.issuer.URL(), rigClientID, "dispatch-secret", "")
+	ctx, err := BuildAppContext(options)
+	if err != nil {
+		t.Fatalf("build the undiscovered process's context: %v", err)
+	}
+	undiscovered, _ := New(ctx)
+
+	response := httptest.NewRecorder()
+	undiscovered.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"SIGNIN_UNAVAILABLE"`) {
+		t.Fatalf("/auth/start before discovery: %d %s, want 503 SIGNIN_UNAVAILABLE", response.Code, response.Body.String())
+	}
+	if cookies := response.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("/auth/start before discovery set %v, want no cookie", cookies)
+	}
+	callback := callbackOn(undiscovered, code, state, stateCookie)
+	if callback.Code != http.StatusServiceUnavailable || !strings.Contains(callback.Body.String(), `"code":"SIGNIN_UNAVAILABLE"`) || sessionCookie(callback) != nil {
+		t.Fatalf("a callback whose exchange meets an undiscovered issuer: %d %s, want 503 SIGNIN_UNAVAILABLE and no session", callback.Code, callback.Body.String())
 	}
 }
 
@@ -617,7 +671,7 @@ func TestDomainSignInUnderAnotherSubjectEndsTheAddressSessions(t *testing.T) {
 // taken it yet.
 func TestDomainSignInEndsACookieFromBeforeTheSwitchToDomainMode(t *testing.T) {
 	rig := newDomainSignInRig(t)
-	if err := rig.people.SignIn(context.Background(), rigGoogleEmail, "old-refresh-token", rig.clock()); err != nil {
+	if err := rig.people.SignIn(context.Background(), rigGoogleEmail, "old-refresh-token"); err != nil {
 		t.Fatalf("sign in the pre-switch row: %v", err)
 	}
 	generation, err := rig.sessions.EnsureSession(context.Background(), rigGoogleEmail)
@@ -706,7 +760,7 @@ func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
 func TestDomainSignInGetsNoSessionWhenAnotherAccountTakesTheAddressBeforeItsCookie(t *testing.T) {
 	rig := newDomainSignInRig(t)
 	rig.people.afterSignIn = func() {
-		if err := rig.people.SignInSubject(context.Background(), rigGoogleEmail, "google-subject-2", "refresh-2", time.Now()); err != nil {
+		if err := rig.people.SignInSubject(context.Background(), rigGoogleEmail, "google-subject-2", "refresh-2"); err != nil {
 			t.Errorf("the other account's sign-in: %v", err)
 		}
 	}
@@ -1521,7 +1575,7 @@ func TestAuthStartAsksGoogleForOfflineAccessInTheDomain(t *testing.T) {
 func cookieRouter(t *testing.T, serverURL string) (http.Handler, *http.Cookie, *memoryPeopleStore) {
 	t.Helper()
 	people := newMemoryPeople()
-	if err := people.SignIn(context.Background(), "sami@d.example", "refresh-token", time.Now()); err != nil {
+	if err := people.SignIn(context.Background(), "sami@d.example", "refresh-token"); err != nil {
 		t.Fatalf("record sign-in: %v", err)
 	}
 	sessions := &memorySessionStore{generations: map[string]int64{"sami@d.example": 0}}
@@ -1608,8 +1662,8 @@ func TestCookieAuthenticatedUnsafeRequestsRequireSameOrigin(t *testing.T) {
 func (s *memoryPeopleStore) EndSubject(ctx context.Context, email, subject string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	membership, found := s.people[email]
-	if !found || membership.Subject != subject {
+	person, found := s.people[email]
+	if !found || person.Subject != subject {
 		return false, nil
 	}
 	if s.sessions == nil {
@@ -1618,6 +1672,6 @@ func (s *memoryPeopleStore) EndSubject(ctx context.Context, email, subject strin
 	if err := s.sessions.RevokeSessions(ctx, email); err != nil {
 		return false, err
 	}
-	s.people[email] = auth.PersonMembership{Subject: membership.Subject}
+	s.people[email] = memoryPerson{Subject: person.Subject}
 	return true, nil
 }

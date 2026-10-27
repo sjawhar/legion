@@ -133,15 +133,21 @@ func (k SigningKeys) SignFor(purpose, payload string) string {
 // VerifyFor reports whether signature is SignFor(purpose, payload) under any key of the set, so a
 // value signed before a rotation stays good while its own lifetime lasts.
 func (k SigningKeys) VerifyFor(purpose, payload, signature string) bool {
+	return k.anyKeySigned(signature, func(key string) []byte { return purposeMAC(purpose, payload, key) })
+}
+
+// anyKeySigned reports whether signature is the lowercase hex of macOf(key) for any key of the
+// set; a signature that is not hex is no key's.
+func (k SigningKeys) anyKeySigned(signature string, macOf func(key string) []byte) bool {
 	sigBytes, err := hex.DecodeString(signature)
 	if err != nil {
 		return false
 	}
-	// As in VerifySession: each key's MAC is compared in constant time and every key is tried
-	// whichever matches, so the timing gives away no byte of any MAC.
+	// Each key's MAC is compared in constant time, and every key is tried whichever matches, so
+	// the timing gives away no byte of any MAC.
 	matched := false
 	for _, key := range k.keys {
-		matched = hmac.Equal(sigBytes, purposeMAC(purpose, payload, key)) || matched
+		matched = hmac.Equal(sigBytes, macOf(key)) || matched
 	}
 	return matched
 }
@@ -223,18 +229,8 @@ func VerifySession(value string, keys SigningKeys) (Session, bool) {
 	if err != nil || expiry <= time.Now().UnixMilli() {
 		return Session{}, false
 	}
-	sigBytes, err := hex.DecodeString(signature)
-	if err != nil {
-		return Session{}, false
-	}
-	// Each key's MAC is compared in constant time, and every key is tried whichever matches, so
-	// the timing gives away no byte of any MAC.
 	payload := sessionPayload(encodedEmail, generationText, expiryStr)
-	matched := false
-	for _, key := range keys.keys {
-		matched = hmac.Equal(sigBytes, mac(payload, key)) || matched
-	}
-	if !matched {
+	if !keys.anyKeySigned(signature, func(key string) []byte { return mac(payload, key) }) {
 		return Session{}, false
 	}
 	email, err := base64.RawURLEncoding.DecodeString(encodedEmail)

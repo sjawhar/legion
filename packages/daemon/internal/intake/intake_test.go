@@ -330,6 +330,14 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			want:    DispatchClaim{Key: "CAPTURE-4", Seq: 12},
 		},
 		{
+			// Shared with packages/envoy/internal/dispatch/startup, whose test requires the
+			// envelope Dispatch builds for this announcement to equal it field for field.
+			name:    "Dispatch server fleet build announced (shared with Dispatch)",
+			subject: "notifications.dispatch.server.started",
+			file:    "dispatch/server-started.json",
+			want:    ServerStarted{Commit: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"},
+		},
+		{
 			name:    "pull request opened",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-opened.json",
