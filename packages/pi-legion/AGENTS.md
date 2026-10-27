@@ -200,7 +200,9 @@ not one it read, so it answers for none of them. `POST /legion/v1/handoff/comple
 completion of a run the issue has left, naming the current run's queued task when the claim holds
 one. Both are refused before the fact is applied, so neither is recorded: the same call in that
 task's turn is applied. The workflow's own stale refusal, for an issue that moves between the
-route's read and the fact's transaction, is still recorded. The pane's `LEGION_GENERATION` is the
+route's read and the fact's transaction, is still recorded, and blocks no later call: its key
+carries the issue generation the route read, which the issue has left, so a retry is refused at the
+route and the new run's completion has another key. The pane's `LEGION_GENERATION` is the
 claim's launch counter and says nothing about the run; nothing reads it for this.
 Contract 7 adds `holdReason` to an issue on `/legion/v1/state`: `escalated` while an issue its
 architect escalated stays held in a tree that runs, absent otherwise (a tree that lingers or is

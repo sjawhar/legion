@@ -414,6 +414,9 @@ type Machine struct {
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
+	// unansweredAsks counts the asks in a row the agent left unanswered while askFirst stayed armed
+	// on a working claim (askTurnOver); from unansweredAsksWarn on, each one is logged at Warn.
+	unansweredAsks int
 	// held is the suspension held for the agent's turn (holdSuspension), nil for none.
 	held *RequestSuspend
 	// interrupt is the turn this claim was interrupted in for a start that takes over its issue's

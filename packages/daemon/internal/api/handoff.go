@@ -155,7 +155,10 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// The run the completion is attributed to is part of the key for that guard's sake: a completion
 	// the route let through and the engine then refused as stale is recorded under it, and without
 	// the run it would take the key of the new run's completion of the same phase at the same
-	// commit, which would be answered ALREADY_RECORDED and never reach the workflow. The tree's
+	// commit, which would be answered ALREADY_RECORDED and never reach the workflow. With it, that
+	// recorded refusal blocks no later call: its key carries the issue generation this route read,
+	// the one the issue has since left, so a retry is refused here (recording nothing) and the new
+	// run's completion carries the new issue generation and serving run, another key. The tree's
 	// generation is part of it for the same reason: re-admission starts a new generation of the tree
 	// by bumping only the root's, and restarts a child's worker in the phase it stood in, so a
 	// child's completion refused before (while the tree lingered, or while the old gate was closed)
@@ -196,7 +199,7 @@ func staleCompletion(issue string, current, serving uint64, pending *supervise.D
 		return fmt.Sprintf("%s: your turn began before the daemon's generation-%d task (%s) reached this session. End this turn without completing; that task arrives as your next prompt, and handoff_complete at the same commit in its turn is applied",
 			stale, current, pending.ID)
 	}
-	return fmt.Sprintf("%s: the daemon has queued no task of generation %d for this claim yet. End this turn without completing; when that task arrives, call handoff_complete at the same commit in its turn", stale, current)
+	return fmt.Sprintf("%s: the daemon has queued no task of generation %d for this claim, and may queue none (the new run's phase may be another claim's). End this turn without completing and tell the architect; if that task arrives, call handoff_complete at the same commit in its turn", stale, current)
 }
 
 // checkReport records the implementer's report on a look of its closed issue's production check

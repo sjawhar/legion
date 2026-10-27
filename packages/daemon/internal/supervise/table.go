@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -719,6 +720,11 @@ func reconnectedMidTurn(m *Machine, ctx context.Context, ev Event) error {
 	return m.askTurnOver(ctx, ev)
 }
 
+// unansweredAsksWarn is the count of unanswered asks in a row from which askTurnOver logs each one
+// at Warn: a restored working claim whose agent never answers stays working with no limit while
+// its process lives, and an operator should see that.
+const unansweredAsksWarn = 3
+
 // askTurnOver asks a restored working claim's agent whether the turn an earlier daemon saw start
 // is still running, and ends it when the agent says it is not. An ask the agent does not answer
 // says nothing about the turn: the claim stays working, the question stays armed, and the next
@@ -735,10 +741,16 @@ func (m *Machine) askTurnOver(ctx context.Context, ev Event) error {
 	}
 	streaming, answered := m.streaming(ctx, conn)
 	if !answered {
-		m.log.Info("supervise: the agent did not say whether the turn an earlier daemon saw start is over; the claim stays working and the next sweep asks again")
+		m.unansweredAsks++
+		level := slog.LevelInfo
+		if m.unansweredAsks >= unansweredAsksWarn {
+			level = slog.LevelWarn
+		}
+		m.log.Log(ctx, level, "supervise: the agent did not say whether the turn an earlier daemon saw start is over; the claim stays working and the next sweep asks again",
+			"claim", m.claim.Token, "unanswered", m.unansweredAsks)
 		return nil
 	}
-	m.askFirst = false
+	m.askFirst, m.unansweredAsks = false, 0
 	if streaming {
 		return nil
 	}

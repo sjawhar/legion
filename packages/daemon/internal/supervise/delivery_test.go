@@ -824,6 +824,17 @@ func TestAFailedGetStateLeavesARestoredTurnRunning(t *testing.T) {
 	}
 	h.observe(runtime.Alive)
 	h.wantState(StateWorking)
+	// The hello's ask and this sweep's went unanswered: still under the limit, so no warning yet.
+	if warned := h.logs.lines("level=WARN", "unanswered"); len(warned) != 0 {
+		t.Fatalf("warned after two unanswered asks: %q", warned)
+	}
+	// The third unanswered ask warns, naming the claim, so an operator sees a turn the daemon
+	// cannot read.
+	h.observe(runtime.Alive)
+	h.wantState(StateWorking)
+	if warned := h.logs.lines("level=WARN", "unanswered", string(testToken)); len(warned) != 1 {
+		t.Fatalf("after three unanswered asks warned %q, want one warning naming the claim", warned)
+	}
 	h.wantPrompts(0)
 
 	// The agent answers on a later sweep: the turn is over, and it ends now.
