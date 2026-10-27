@@ -802,7 +802,10 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask, copied string, with
 		desired["answered_by"] = ask.Answer.User
 		desired["answered_at"] = ask.Answer.At.UTC().Format(time.RFC3339Nano)
 		if !withholdAnswer {
-			desired["selected"] = append([]string(nil), ask.Answer.Selected...)
+			// Never a nil list, even for an answer that selects nothing: a nil list renders as
+			// null from the tree a settlement repaired and as [] once it has gone through the
+			// room, so a version made from that tree would differ from the room.
+			desired["selected"] = append([]string{}, ask.Answer.Selected...)
 			if ask.Answer.Text != nil {
 				desired["answer"] = *ask.Answer.Text
 			}

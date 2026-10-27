@@ -4,14 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
@@ -20,17 +18,14 @@ import (
 // in place, and a peer can have written the same attributes into the room first, so the repair
 // writes nothing into the room. The version still holds the repaired block, with the answered
 // state, and its indexed blocks are the room's: reusing the rendering made before the repair would
-// version the block as still open and index the open block's text (LEGION/INFRA-647).
+// version the block as still open and index the open block's text (LEGION/INFRA-647). An answer
+// that selects nothing is versioned as the room holds it, an empty list.
 func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n\n- Yes: Monday.\n- No: Later.\n:::\n\nContext before.\n")
 	service.settleRoom(artifactID, 0)
-	// The answer selects an option. setAskServerAttributes writes an empty selection as a nil
-	// list, which renders as selected="null" from the tree the settlement repaired and as
-	// selected="[]" once it has gone through the room, so an empty one would part the version
-	// from the room for a reason this test is not about.
-	answer := answerBlockAskSelecting(t, service, artifactID, "Yes")
+	answer := answerBlockAsk(t, service, artifactID)
 	ask, err := ScanAsk(service.store.Pool.QueryRow(context.Background(), `
 		select `+AskColumns+` from asks a where a.block_artifact_id = $1
 	`, artifactID))
@@ -79,34 +74,13 @@ func TestSettlementVersionsARepairTheRoomAlreadyHolds(t *testing.T) {
 		t.Fatalf("latest version = %d, want %d: the settlement wrote no version of the edited document", versions, versionsBefore+1)
 	}
 	want := ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"" +
-		answer.At.Format(time.RFC3339Nano) + "\" selected=\"[&#x22;Yes&#x22;]\"}\nShip it?\n\n- Yes: Monday.\n- No: Later.\n:::\n\nContext after.\n"
+		answer.At.Format(time.RFC3339Nano) + "\" selected=\"[]\"}\nShip it?\n\n- Yes: Monday.\n- No: Later.\n:::\n\nContext after.\n"
 	markdown, offsets := roomRendering(t, service, artifactID)
 	if markdown != want {
 		t.Fatalf("the room renders %q, want %q", markdown, want)
 	}
 	requireLatestVersionMarkdown(t, service, artifactID, want)
 	requireIndexedBlocks(t, service, artifactID, markdown, offsets)
-}
-
-// answerBlockAskSelecting answers the document's one indexed ask in its row alone, as
-// answerBlockAsk does, with selected as the options the answer selects.
-func answerBlockAskSelecting(t *testing.T, service *Service, artifactID string, selected ...string) model.AskAnswer {
-	t.Helper()
-	answer := model.AskAnswer{User: "alice", Selected: selected, At: time.Now().UTC()}
-	answerJSON, err := json.Marshal(answer)
-	if err != nil {
-		t.Fatalf("encode answer: %v", err)
-	}
-	tag, err := service.store.Pool.Exec(context.Background(), `
-		update asks set state = 'answered', answer = $2 where block_artifact_id = $1
-	`, artifactID, answerJSON)
-	if err != nil {
-		t.Fatalf("answer indexed ask: %v", err)
-	}
-	if tag.RowsAffected() != 1 {
-		t.Fatalf("answered %d asks, want the document's one", tag.RowsAffected())
-	}
-	return answer
 }
 
 // A settlement that stamps block ids versions the tree its stamp left, not the one it read before
