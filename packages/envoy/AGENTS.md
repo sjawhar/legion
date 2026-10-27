@@ -1795,8 +1795,8 @@ URL pattern first and its email pattern over what that leaves (`linkTextAddresse
 an address differently (`x;https://x.test/a_ b` leaves the `_` out, `see http\://x.test/a_ b`
 keeps it), each as the engine does. So an address is a link after any punctuation, a letter
 outside ASCII, `]`, `|`, `!`, a character reference or an escape, a URL after a digit too, and at
-a line or table cell opening with punctuation, as in a comment and the browser editor. An email's
-href is its bare address (`emailHref`) until INFRA-530 makes it `mailto:`.
+a line or table cell opening with punctuation, as in a comment and the browser editor. An email
+links to its `mailto:` URL (`emailHref`), as in the engine.
 
 The renderer writes a run of inline text so that it reads back as written. A bare URL is written as
 its bytes where the readers read it back whole (`isBareAutolink`, `isBareWWWLink`); where the run

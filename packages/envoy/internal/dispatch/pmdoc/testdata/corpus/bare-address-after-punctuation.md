@@ -59,6 +59,46 @@ www.e.test*b*
 
 `www.e.test_
 
+Mail mailto:a@b.test now.
+
+Mail xmpp:a@b.test now.
+
+x;a@b.test end
+
+www.a@b.test
+
+Mail a'b@c.test now.
+
+Mail a!b@c.test now.
+
+Mail a@b.test1 now.
+
+_a@b.test_
+
+"a@b.test"
+
+a@-b.test
+
+a\@b.test
+
+\<a@b.test>
+
+\*a@b.test c
+
+éa@b.test c
+
+x&amp;a@b.test c
+
+see www\.a@b.test
+
+x;mailto:a@b.test end
+
+x^a@b.test end
+
+a~b~x@y.co
+
+~~a c~~x@y.co
+
 | a | b |
 | --- | --- |
 | x | "https://x.test" b |

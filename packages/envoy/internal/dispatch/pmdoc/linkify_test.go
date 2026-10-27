@@ -7,9 +7,8 @@ import (
 )
 
 // Go links exactly what the browser editor's engine (remark-gfm) links, and leaves text where the
-// engine does. Each row's expectation is the engine's reading (gen/differential.ts), except that an
-// email's href is its bare address, where the engine's is `mailto:` (INFRA-530 gives emails the
-// mailto: href).
+// engine does. Each row's expectation is the engine's reading (gen/differential.ts), an email's
+// href its mailto: URL.
 func TestLinkifyReadsWhatTheEngineReads(t *testing.T) {
 	for _, test := range []struct{ markdown, want string }{
 		{"mail alice@example.com now", `text "mail " | text "alice@example.com" link mailto:alice@example.com | text " now"`},

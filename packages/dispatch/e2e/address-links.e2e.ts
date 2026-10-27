@@ -89,6 +89,53 @@ const afterAnEscape: AddressRow[] = [
   },
 ];
 
+// A bare email the engine reads as a mail link, its href `mailto:` and the address: after
+// punctuation, an escape, a quote, a character reference, a letter outside ASCII or a scheme, at a
+// `www.` opening the local part, and at a `'` in the local part, which the engine's transform reads
+// as the address's start. A domain per row keeps every link name unique on the page.
+const emails: AddressRow[] = [
+  {
+    markdown: "x;a@semi.test b",
+    text: "x;a@semi.test b",
+    links: [{ name: "a@semi.test", href: "mailto:a@semi.test" }],
+  },
+  {
+    markdown: "www.a@www.test b",
+    text: "www.a@www.test b",
+    links: [{ name: "www.a@www.test", href: "mailto:www.a@www.test" }],
+  },
+  {
+    markdown: "\\*a@star.test c",
+    text: "*a@star.test c",
+    links: [{ name: "a@star.test", href: "mailto:a@star.test" }],
+  },
+  {
+    markdown: '"a@quote.test" c',
+    text: '"a@quote.test" c',
+    links: [{ name: "a@quote.test", href: "mailto:a@quote.test" }],
+  },
+  {
+    markdown: "x&amp;a@ref.test c",
+    text: "x&a@ref.test c",
+    links: [{ name: "a@ref.test", href: "mailto:a@ref.test" }],
+  },
+  {
+    markdown: "éa@accent.test c",
+    text: "éa@accent.test c",
+    links: [{ name: "a@accent.test", href: "mailto:a@accent.test" }],
+  },
+  {
+    markdown: "Mail mailto:a@scheme.test now.",
+    text: "Mail mailto:a@scheme.test now.",
+    links: [{ name: "a@scheme.test", href: "mailto:a@scheme.test" }],
+  },
+  {
+    markdown: "Mail a'b@apos.test now.",
+    text: "Mail a'b@apos.test now.",
+    links: [{ name: "b@apos.test", href: "mailto:b@apos.test" }],
+  },
+];
+
 /**
  * Writes `rows`, a paragraph each, as an issue's spec and as a comment on it, and expects each
  * address to be the engine's link in the Conversation and then in the live Document editor, which
@@ -147,5 +194,9 @@ test.describe("a bare web address is a link in a document written through the AP
 
   test("a www. or an uppercase scheme after an escape", async ({ browser }) => {
     await expectLinksInCommentAndDocument(browser, afterAnEscape);
+  });
+
+  test("an email after punctuation, escape or scheme is a mailto: link", async ({ browser }) => {
+    await expectLinksInCommentAndDocument(browser, emails);
   });
 });

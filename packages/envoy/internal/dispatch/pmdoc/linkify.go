@@ -564,7 +564,7 @@ func isASCIILetter(c byte) bool {
 // shows its source as written.
 const decodedLabelAttr = "pmdocDecodedLabel"
 
-// autolinkText is the text an autolink shows and the href it links to: an email's address
+// autolinkText is the text an autolink shows and the href it links to: an email's mailto: URL
 // (emailHref), and a URL's text, `http://` before a www URL's.
 func autolinkText(link *ast.AutoLink, source []byte) (label, href string) {
 	label = string(link.Label(source))
@@ -580,9 +580,9 @@ func autolinkText(link *ast.AutoLink, source []byte) (label, href string) {
 	return label, label
 }
 
-// emailHref is the href an email address links to: the address itself.
+// emailHref is the href an email address links to, as the engine links it: its mailto: URL.
 func emailHref(address string) string {
-	return address
+	return "mailto:" + address
 }
 
 // linkTextAddresses links what mdast-util-gfm-autolink-literal's transform links in parent's
