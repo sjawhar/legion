@@ -104,6 +104,15 @@
 
 ### Fixed
 
+- The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
+  daemon records. The daemon now refuses a completion of a run the issue has left before it applies
+  any fact and names the current run's queued task, so the worker ends the turn and calls
+  `handoff_complete` again at the same commit in that task's turn, which is applied.
+- The Legion tool's `handoff_complete` waits out a daemon restart: a connection refused, reset or
+  closed before a response, or a 502 or 503 from a proxy, is retried with backoff for up to 10
+  minutes, each attempt with a fresh grant, until the MCP client cancels the request
+  (`notifications/cancelled`), after which nothing more is sent. The retry notice goes to the MCP
+  server's stderr only. Every answer the daemon gives is passed on at once.
 - `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
   record every request you accept in Dispatch and read that record back before a turn ends.
 - The plugin's `legion/` copy of the `legion-architect` skill is regenerated with the same
