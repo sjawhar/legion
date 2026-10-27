@@ -271,79 +271,70 @@ func TestAResumeOverAForeignIncarnationWithItsSessionNowhereIsTheMissingSession(
 	}
 }
 
-// Under take_over too, a missing session file over a previous pane of this runtime, or with no
-// previous incarnation at all, is the refusal to start fresh, never runtime.ErrSessionFileMissing:
-// the claim resumes the agent it recorded or none, and the refusal is charged by the claim's
-// machine, which keeps the recorded session.
-func TestUnderTakeOverAMissingSessionOverAPaneOrNoneIsRefused(t *testing.T) {
+// While take_over is set, a session found nowhere starts a fresh agent whatever the claim's
+// previous incarnation is and wherever the session was recorded: over a pane of this runtime, with
+// no incarnation at all, at a pod's path or at one of this host's own. Neither the path nor the
+// incarnation tells the other runtime's sessions from this host's — a host built from the worker
+// image runs under the same home and profile a pod did, and a claim the other runtime suspended
+// has no incarnation left — so every one is runtime.ErrSessionFileMissing, which the claim's
+// machine answers with a fresh agent, charged nothing, rather than a refusal no retry gets past.
+func TestUnderTakeOverEverySessionFoundNowhereStartsFresh(t *testing.T) {
 	ctx := context.Background()
-	for name, prev := range map[string]func(spec runtime.SpawnSpec) *runtime.Locator{
-		"a previous pane": func(spec runtime.SpawnSpec) *runtime.Locator {
-			return &runtime.Locator{Runtime: runtime.RuntimeTmux, Claim: spec.Claim, Incarnation: "4242:77", Tmux: &runtime.TmuxLocator{Window: "@1", Pane: "%1"}}
+	for name, tc := range map[string]struct {
+		prev    func(spec runtime.SpawnSpec) *runtime.Locator
+		session func(f *fakeServerRuntime) string
+	}{
+		"a pod's session with no previous incarnation": {
+			prev:    func(runtime.SpawnSpec) *runtime.Locator { return nil },
+			session: func(*fakeServerRuntime) string { return podSession },
 		},
-		"no previous incarnation": func(runtime.SpawnSpec) *runtime.Locator { return nil },
+		"this host's own session over a previous pane": {
+			prev: func(spec runtime.SpawnSpec) *runtime.Locator {
+				return &runtime.Locator{Runtime: runtime.RuntimeTmux, Claim: spec.Claim, Incarnation: "4242:77", Tmux: &runtime.TmuxLocator{Window: "@1", Pane: "%1"}}
+			},
+			session: func(f *fakeServerRuntime) string {
+				return filepath.Join(paneSessions(f), "--legion-workspace--", "2026-10-20T10-00-00-000Z_ses-gone.jsonl")
+			},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := takingOver(t)
 			spec := f.spec(t, claim.RoleTester)
-			spec.ResumeSessionFile = filepath.Join(paneSessions(f), "--legion-workspace--", "2026-10-20T10-00-00-000Z_ses-gone.jsonl")
-			_, err := f.Resume(ctx, prev(spec), spec)
-			want := "Refusing to start LEGION-43 fresh while respawning: recorded OMP session file is missing: " + spec.ResumeSessionFile +
-				", and no other folder of " + paneSessions(f) + " holds that session"
-			if err == nil || errors.Is(err, runtime.ErrSessionFileMissing) || err.Error() != want {
-				t.Fatalf("Resume = %v, want %q", err, want)
+			spec.ResumeSessionFile = tc.session(f)
+			_, err := f.Resume(ctx, tc.prev(spec), spec)
+			if !errors.Is(err, runtime.ErrSessionFileMissing) || !strings.HasPrefix(err.Error(), "resume "+string(spec.Claim)+": the recorded session file is missing: no OMP session at "+spec.ResumeSessionFile) {
+				t.Fatalf("Resume = %v, want runtime.ErrSessionFileMissing naming %s", err, spec.ResumeSessionFile)
 			}
 			if opened(f.argvs) {
-				t.Errorf("a refused resume opened a pane: %q", f.argvs)
+				t.Errorf("a resume of a missing session opened a pane: %q", f.argvs)
 			}
 		})
 	}
 }
 
-// Under take_over, a session recorded outside this host's places — a pod's path, under neither the
-// pane's own sessions directory nor the state directory — is the other runtime's even when no
-// previous incarnation says so: a claim the Kubernetes daemon left suspended, or one whose takeover
-// launch failed before this daemon restarted, records no locator. Found nowhere, it is
-// runtime.ErrSessionFileMissing, a fresh agent, never a refusal that no retry could get past.
-// Without the key the same resume is the refusal.
-func TestAPodRecordedSessionFoundNowhereWithNoPreviousIncarnationIsTheMissingSessionOnlyUnderTakeOver(t *testing.T) {
+// With take_over off, the same resumes are the refusal to start fresh, never
+// runtime.ErrSessionFileMissing: the claim resumes the agent it recorded or none, and the refusal
+// is charged by the claim's machine, which keeps the recorded session.
+func TestWithoutTakeOverAMissingSessionIsRefused(t *testing.T) {
 	ctx := context.Background()
-	f := takingOver(t)
-	spec := f.spec(t, claim.RoleTester)
-	spec.ResumeSessionFile = podSession
-	_, err := f.Resume(ctx, nil, spec)
-	want := "resume " + string(spec.Claim) + ": the recorded session file is missing: no OMP session at " + podSession +
-		", and no other folder of " + filepath.Dir(filepath.Dir(podSession)) + " or of the pane's sessions directory " + paneSessions(f) + " holds that session"
-	if !errors.Is(err, runtime.ErrSessionFileMissing) || err.Error() != want {
-		t.Fatalf("Resume under take_over = %v, want runtime.ErrSessionFileMissing: %q", err, want)
-	}
-	if opened(f.argvs) {
-		t.Errorf("a resume of a missing session opened a pane: %q", f.argvs)
-	}
-
-	f.takeOver = ""
-	_, err = f.Resume(ctx, nil, spec)
-	if err == nil || errors.Is(err, runtime.ErrSessionFileMissing) || !strings.HasPrefix(err.Error(), "Refusing to start LEGION-43 fresh while respawning: ") {
-		t.Fatalf("Resume without take_over = %v, want the refusal to start fresh", err)
-	}
-}
-
-// within holds a path to the directory it lies below, and no other: a sibling whose name starts
-// with the directory's is outside it, and an empty directory holds nothing.
-func TestWithinHoldsOnlyWhatLiesBelowTheDirectory(t *testing.T) {
-	for _, tc := range []struct {
-		path, dir string
-		want      bool
-	}{
-		{"/state/home/.omp/agent/sessions/x/a.jsonl", "/state", true},
-		{"/state", "/state", true},
-		{"/state-other/a.jsonl", "/state", false},
-		{"/home/legion/.omp/profiles/legion/agent/sessions/x/a.jsonl", "/state", false},
-		{"/state/../elsewhere/a.jsonl", "/state", false},
-		{"/state/a.jsonl", "", false},
+	for name, session := range map[string]func(f *fakeServerRuntime) string{
+		"a pod's session": func(*fakeServerRuntime) string { return podSession },
+		"this host's own session": func(f *fakeServerRuntime) string {
+			return filepath.Join(paneSessions(f), "--legion-workspace--", "2026-10-20T10-00-00-000Z_ses-gone.jsonl")
+		},
 	} {
-		if got := within(tc.path, tc.dir); got != tc.want {
-			t.Errorf("within(%q, %q) = %t, want %t", tc.path, tc.dir, got, tc.want)
-		}
+		t.Run(name, func(t *testing.T) {
+			f := takingOver(t)
+			f.takeOver = ""
+			spec := f.spec(t, claim.RoleTester)
+			spec.ResumeSessionFile = session(f)
+			_, err := f.Resume(ctx, nil, spec)
+			if err == nil || errors.Is(err, runtime.ErrSessionFileMissing) || !strings.HasPrefix(err.Error(), "Refusing to start LEGION-43 fresh while respawning: recorded OMP session file is missing: "+spec.ResumeSessionFile) {
+				t.Fatalf("Resume without take_over = %v, want the refusal to start fresh", err)
+			}
+			if opened(f.argvs) {
+				t.Errorf("a refused resume opened a pane: %q", f.argvs)
+			}
+		})
 	}
 }

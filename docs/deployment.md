@@ -364,19 +364,21 @@ written by whichever daemon wrote last — so the order matters:
 3. Set `runtime.tmux.take_over: kubernetes` and boot the tmux daemon with the same Postgres. Each
    claim whose recorded process is a pod is reported gone, displaced, and relaunched in a pane,
    charged nothing, on its session when step 2 put its file in one of those places, searched by
-   file name or session id. A session the other runtime recorded — over a pod's process, or at a
-   path under neither the pane's sessions directory nor the state directory, as a claim the
-   Kubernetes daemon left suspended has — that is found nowhere starts a fresh agent, uncharged,
-   which registers a session of its own. A session recorded in this host's own places that is
-   missing is refused, charged, and the claim keeps it. Each workspace is provisioned before its
-   first launch.
+   file name or session id. While `take_over` is set, a session found nowhere starts a fresh agent,
+   uncharged, which registers a session of its own, whatever the claim's last process was and
+   wherever the session was recorded: a claim the Kubernetes daemon left suspended carries no
+   process, and a host built from the worker image records its own sessions at the paths a pod
+   used, so neither tells the two apart. That is what the key buys and what it costs: in this
+   window a session of this host's own that has gone missing starts fresh too. Each workspace is
+   provisioned before its first launch.
 4. Retry what failed to launch meanwhile, once the cause is gone: `legion claims retry --failed`
    (an architect relaunches on its session; a phase worker whose issue is held for its own role
    retries that phase).
-5. Remove `take_over` once no claim can still resume a session a pod recorded: every claim that was
-   running has relaunched in a pane, and no claim the Kubernetes daemon suspended (a production
-   check waiting for its deploy among them) is left to wake. From then on a tmux daemon pointed at
-   a store a Kubernetes daemon still drives refuses to start rather than take its claims.
+5. Remove `take_over` once no claim can still wake on a session a pod recorded: every claim that
+   was running has relaunched in a pane, and no claim the Kubernetes daemon suspended (a
+   production check waiting for its deploy among them) is left to wake. From then on a session
+   found nowhere is refused again, and a tmux daemon pointed at a store a Kubernetes daemon still
+   drives refuses to start rather than take its claims.
 
 ## Rotating the App keys
 
