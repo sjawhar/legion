@@ -215,7 +215,8 @@ tags are `sha-<the commit's first 12 hex digits>` for every build and `<legion v
 release. The package also currently holds `sha256-<image digest hex>` OCI referrer indexes from
 earlier proof runs; they hold attestations, not worker images, so inspecting one does not print a
 worker-image digest. A tag does not say which build published it, and a pull request's build publishes
-a `sha-` tag too. Every build except a pull request's carries a GitHub artifact attestation, and
+a `sha-` tag too. Every build except a pull request's, and a release build on `main` that links a
+plugin version which did not reach npm, carries a GitHub artifact attestation, and
 `docs/kubernetes.md` in the repository ("Pin by digest, never by tag") gives the `gh attestation
 verify` command that accepts an image only when `main` built it from the commit its tag names.
 

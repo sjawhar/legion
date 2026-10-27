@@ -261,7 +261,7 @@ check "a gate covering every input passes" "$(is "$status" 0)"
 check "names the caller and its gate" "$(contains "$out" 'release.yaml on.push.paths + jobs.image.if (jobs.changes filter image or jobs.changes filter other)')"
 
 # The calling job is gated by the jobs it needs as well as by its own if:, the shape
-# release.yaml's worker_image has (needs: [changes, cli], cli itself gated). Its always()
+# release.yaml's worker_image once had (needs: [changes, cli], cli itself gated). Its always()
 # is what breaks the inheritance there; without one the narrow gate binds.
 root=$(fixture called-transitive-gate)
 callers "$root" "$all_inputs"

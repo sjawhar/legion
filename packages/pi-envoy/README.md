@@ -98,8 +98,8 @@ for `omp.extensions` (only `omp.skills` ships as committed, since `dist/skills` 
 a repo checkout after the prepack and the published tarball), while the committed manifest keeps
 the TypeScript entry for repo checkouts. In `.github/workflows/release.yaml`, the `pi_envoy_build`
 job rewrites the manifest before `bun pm pack` and uploads the tarball (its tree is discarded,
-nothing is restored); the `pi_envoy_publish` job publishes that tarball and commits the version bump
-to the committed manifest, touching `.version` alone.
+nothing is restored); the `publish` job publishes that tarball and commits the version bump to the
+committed manifest, touching `.version` alone.
 Packing with the committed source manifest is refused by the prepack, because such a tarball would
 point OMP at an extension file it does not contain.
 

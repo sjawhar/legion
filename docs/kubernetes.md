@@ -450,8 +450,9 @@ Where the digest is published:
   `<legion version>` worker-image tag.
 
 Worker-image tags: `sha-<12 hex of the built commit>` on every run (on a pull request that is the
-PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion_publish`
-job released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
+PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `publish`
+job released that version in the same run, added after it by `release.yaml`'s `worker_image_release`
+job on the digest that run's `sha-` tag names. Runs from any other ref publish the `sha-` worker-image tag
 only and never touch a release. The package also currently holds `sha256-<image digest hex>` OCI
 referrer indexes from earlier proof runs; each holds an attestation, not a worker image, so
 inspecting one does not print a worker-image digest.
@@ -461,7 +462,9 @@ too, when two runs build one commit the tag names whichever pushed last, and a p
 the workflow, whose token can push, to point a `sha-` tag at any digest already in the package. The
 digest's GitHub artifact attestation does say. Every run except a pull request's ends
 with the workflow's `attest` job, which attests the pushed digest with
-`actions/attest-build-provenance` and stores the attestation with GitHub. Its Sigstore certificate
+`actions/attest-build-provenance` and stores the attestation with GitHub; in `release.yaml` that is a
+second call of the workflow after the `publish` job, which on `main` attests only when both plugins the
+image links are on npm. Its Sigstore certificate
 carries what the run's OIDC token says, which no workflow edit can change: its identity is the
 workflow file at the ref it was read from, and its source ref and source digest are the ref and commit
 the run started on. To accept a digest only when a run on `main` built it from commit `<C>`, the
@@ -499,9 +502,10 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 `.github/workflows/worker-image.yaml` builds on the GitHub-hosted runner with `docker/setup-buildx-action`
 + `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), layer cache in GitHub Actions
 cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
-— no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
-the `legion_build` and `legion_publish` jobs on every `main` push that touches any file the image builds
-from, (2) on every head of a pull request against `main` whose diff touches any of those files — building
+— no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` on
+every `main` run (its push paths include every file the image builds from): a build-only call beside the
+`publish` job, linking the plugin pair `legion_build` decided, then an attest-only call after `publish`;
+(2) on every head of a pull request against `main` whose diff touches any of those files — building
 the PR head and publishing `sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the
 workflow exists on `main`. The
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
@@ -534,9 +538,11 @@ host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is n
 pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
 running the published image locally is fine. A failed build is retried with `gh run rerun <run-id> --failed`
-(`--failed` keeps `legion_build`'s and `legion_publish`'s recorded outputs) or by pushing the branch again. A
-whole-run rerun of a `release.yaml` call, or a `workflow_dispatch` of it while main's tip still carries a
-`legion-v` tag, re-executes `legion_build` and `legion_publish`, which release that tag again: the image is
+or by pushing the branch again. In a `release.yaml` run, `--failed` keeps the build jobs' recorded outputs,
+and a failed `publish` reruns whole, each step safe to repeat: npm reuses a published version, the tag step
+accepts its own tag, the push to `main` pushes nothing once `main` holds that version, and the release step
+reuses a published release. A whole-run rerun of `release.yaml`, or a `workflow_dispatch` of it while main's
+tip still carries a `legion-v` tag, re-executes `legion_build`, which releases that tag again: the image is
 rebuilt, the `<legion version>` tag moves to the rebuild's digest, and the release body's "Worker image" names
 that digest. `release-envoy-listener.yaml` needs no re-run when its `release_publish` finds, at "Confirm the
 version", that another run took the tag first: it publishes nothing and, when its commit still needs a release
