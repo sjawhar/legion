@@ -2,21 +2,54 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-220",
-  "completed": "2026-10-25T20:44:30Z",
-  "round": 4,
-  "kind": "confirmation after a conflict-forced forward merge, not a new round",
-  "reviewedHead": "50aee6fcbecd8a661c1a9fb1f0c153012b521d12 plus this handoff commit (code head 990ebd7341e03fcab9a41a600bfdcbe6fb1e911e, a forward merge of 40a963e2 with main f2c17ded). Compare 990ebd73...50aee6fc: status ahead, total_commits 2, files_returned 2, truncated false; both files under .legion/.",
-  "fingerprint": {
-    "method": "skill://legion-worker/references/conflicts-and-rewrites.md: jj diff --from \"fork_point(\\\"main\\\"@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)', with @@ and index lines dropped, then sha256. This reads the branch's own changes from the local repository, with no forge file list and so no cap.",
-    "atLastReview": "40a963e258e5c34960df709a88de20f242f04142 (my APPROVE 5644238582): c0f38d54c32f00d83ce174f3191b5c0f10ae3051d145a811fa673b266dd9d3a9, fork point 371d6c87",
-    "atNewHead": "50aee6fcbecd8a661c1a9fb1f0c153012b521d12: c0f38d54c32f00d83ce174f3191b5c0f10ae3051d145a811fa673b266dd9d3a9, fork point f2c17ded",
-    "result": "unchanged. Control: the two fork points differ, so the equal hashes come from two different diff runs; neither hash is e3b0c442…, the hash of empty input."
-  },
-  "conflictResolution": "scripts/e2e/README.md: main's rewording of the claude-implementer-registers and every-launch-endpoint-checked bullets and of the rig paragraph, with this branch's stop-hook-reminds-the-open-phase bullet kept after the first. Read in full; no conflict marker anywhere in the tree at 990ebd73 (git grep for <<<<<<<, >>>>>>>, %%%%%%%, +++++++).",
-  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title. At CI head 990ebd73, read 20:43Z: lint, typecheck and test completed success (Tests run 40230176858); pr-title success (one superseded run cancelled).",
-  "decision": "approved",
+  "completed": "2026-10-27T16:40:00Z",
+  "round": 5,
+  "kind": "new round: the branch's own diff changed since my last approval (5645187326 at ea4e7e9d, code 990ebd73); plan generations 2-4, the session-table keeper, the live-proof rework and five forward merges",
+  "reviewedHead": "af60f544827cdfedd2361e456c7131a87468e7f8 (code head 86b9ecce0c4dea88b1fae4b37c37ca8bbc37f0b1; 2ec1b811 and af60f544 change only .legion/). GitHub: MERGEABLE.",
+  "scope": "58 files whose branch-own patch (fork point to head, excluding .legion) differs between ea4e7e9d (fork f2c17ded) and af60f544 (fork aaf24e34). 19 files left the branch's diff because main's #2173 removed the issue volume and the branch's volume-loss handling with it.",
+  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title; no branch protection. CI head 2ec1b811 (newest pull_request run); lint, typecheck, test, pr-title completed success; compare 2ec1b811...af60f544: ahead, 1 file, handoffsOnly true. Non-required Legion Envoy and Contracts jobs (claude-envoy, pi-shared, ...) still queued at 16:2xZ.",
+  "threads": "12 threads, all resolved, each carrying my answer from rounds 1 and 3; no bot threads.",
+  "e2e": "E2E (implementer) and E2E (tester) both present in the body; the tester's round 10 ran both live proofs and the SIGINT control at 2ec1b811.",
+  "thermo": "thermonuclear-deep-review at af60f544: CHANGES (one Medium, the keeper's unacked save; two hardening items). thermonuclear-code-quality at af60f544: CHANGES (structural duplication, no behaviour bug).",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "keyFindings": []
+  "important": 2,
+  "minor": 5,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/launcher/claude.go:383-399",
+      "description": "settle keeps only the latest unacked save. A save that landed but returned an error (e.g. the 10 s saveTimeout during COMMIT), followed by a second save that fails before the compare-and-set answers, overwrites f.unacked with the longer, unlanded attempt; the next save gets MovedError with Held equal to the first landed length, which matches nothing, so save() sets f.stopped and nothing more of that file is saved for the generation, the final save included. Effect: the replacement pod resumes a truncated transcript and reminder record, or, on a fresh transcript's first save, the .legion-saved marker is never written and claude-envoy's claim boot waits forever (legion-claim.ts). No test covers the unacked path. Fix: keep every unacked length since the last committed save (or, on MovedError, read the row and adopt it when it is a prefix of the local file), and add a test with two failures in a row after a save that landed."
+    },
+    {
+      "severity": "important",
+      "file": "PR body (packages/daemon/internal/api/version.go:398)",
+      "description": "No '## Contract change census'. The PR adds refusals at process boundaries: DaemonAPIVersion 41 with the image probe and boot gate refusing a mixed 40/41 pair; the CLAUDE_CONFIG_DIR, CLAUDE_CODE_DISABLE_* and LEGION_CLAUDE_SESSION_ID names made runtime-owned, so an operator's pod env naming them is refused; the launcher and claudelaunch refusing a recorded session id or resume path that is no uuid/transcript. The census lists the search commands, each hit with its disposition, and the rollout (immediate refusal naming why)."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/claude-backend-sandbox.sh:1086",
+      "description": "Security[secret]: $work/auth-plugin.env (the kubeconfig exec stanza's env) is removed only on prove_daemon_container's normal path (:948); a signal during the plugin's docker run leaves it in $work, which a failed run keeps. Add it to cleanup's rm -f."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/sandbox/plugins.go:353-364",
+      "description": "claudeCodeBlock's comment still says the npm cache is on the issue's volume so later pods reuse fetched tarballs, and calls a cold cache 'a new volume, or one just lost'. Since INFRA-80 the disk dies with its pod, so every pod starts cold; the comment hides the per-launch fetch cost."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/sandbox/live_app_test.go:78-83",
+      "description": "A second copy of app_key_command's runner rule (argv shape, --reason only for agent-secrets), where the sibling real_github_test.go runs the lib's own app_key_command so no copy can drift. Run the lib's command instead."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/lib/github-apps.sh:127-130,155,174",
+      "description": "app_key_command's output depends on the global app_key_dir, which resolve_app_keys must clear and set again around its own call. Keep app_key_command a pure runner-command builder and let write_github_apps choose the cat form from a passed key directory."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/launcher/claude.go:126-129,154-167; launcher.go:452-510,597-606",
+      "description": "The keeper copies sessionWritten's DSN lookup and retry loop (a Claude resume dials the database twice), start() repeats keeper.close() on four failure paths, open takes a resume flag the keeper already knows, and the kept files are told apart by index (files[0]/files[1]). One dial-with-backoff helper, a nil-safe keeper, named transcript/record fields. Also claude-backend-sandbox.sh (1625 lines) copies the tmux proof's transcript checks (521-584 vs tmux 485-548) and stage4b's session-database start (1320-1340); move them into the libs both proofs source."
+    }
+  ]
 }
