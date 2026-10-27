@@ -229,7 +229,10 @@ naming both, a role named twice, any other value, and `claude` under `runtime: k
 controller always runs on Oh My Pi.
 
 For such a role the pane's shim runs `legion claude-bridge -- claude -p --input-format stream-json
---output-format stream-json --verbose --permission-mode bypassPermissions --strict-mcp-config …`.
+--output-format stream-json --verbose --replay-user-messages --permission-mode bypassPermissions
+--strict-mcp-config …`. With `--replay-user-messages` Claude Code re-emits each user message it
+takes, and the bridge answers an Envoy delivery only then, so claude-envoy counts the delivery
+taken only once Claude Code has it.
 The claim's own Claude Code directory, `<state_dir>/claude/<claim token>`, is the pane's
 `CLAUDE_CONFIG_DIR`: it holds the transcript, the MCP configuration the daemon writes (one server,
 `legion`, running claude-envoy's `dist/envoy-channel.js` on bun) and the bridge's phase-stall state,

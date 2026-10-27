@@ -38,6 +38,47 @@
   VM once, with NATS down until the new VM starts; a hub with none of them keeps its VM. A
   listener whose NATS user lacks the read answers `/v1/replay` with `REPLAY_UNAVAILABLE`
   (INFRA-439).
+- Session consumers. `POST /v1/interests/subscribe` takes an optional `delivery`,
+  `{consumer, epoch, resume?}`. A registration that asks for a consumer, and every registration
+  with a serving port, gets a durable JetStream pull consumer of its own, `s-<session id>`, on
+  `ENVOY_NOTIFICATIONS` (explicit ack, 60 s ack wait, 1,024 pending, unlimited deliveries, 72 h
+  inactive threshold, the stream's replicas), filtered on the session's agent subject and each
+  followed topic the stream stores, and created or updated before the registration answers. Team
+  and other ad-hoc topics and role lanes stay on core NATS, live only. The answer carries
+  `delivery`: `{"mode": "consumer", "subject": "notifications.envoy.deliver.<id>", "stream_id",
+  "gap"}`, or `{"mode": "core", "reason"}` (`no_grant`, `invalid_session_id`, `consumer_error`,
+  `not_requested`); a registration with neither a `delivery` nor a port gets no field. An
+  unsubscribe and an interest DELETE set the consumer's filter before they answer. The listener
+  that owns the session (the machine id on its entry, the task holding that machine's durable
+  binding; for a serving port, the machine on its interest row) relays the consumer in stream
+  order: over NATS as a core frame on `notifications.envoy.deliver.<id>`, which the stream does not
+  store and the live topics lane skips, answered `received`, `progress`, `done` or `nak` and acked
+  only on `done`; or to a serving port as the `prompt_async` push, acked on the port's 204 and
+  pushed again after 1 s doubling to 30 s otherwise, later messages waiting behind it. Every start
+  of a relay restarts the consumer at its ack floor, so a session takes its messages in stream
+  order after any break, and a missing consumer starts from the plugin's resume point when that
+  names the stream's current `envoy_stream_id`. The durable path skips a session whose entry
+  records consumer delivery, so a stored message waits in its consumer, for up to 72 hours, while
+  the session restarts, its connection is down, or its owning listener restarts. Without the
+  grant below the listener answers `core` and delivery works as before: the session's own
+  subscriptions, the durable's `Skipped`, `/v1/replay`. Any rollout order works: a plugin of an
+  earlier release sends no `delivery` and stays on the core path, and a plugin of this release
+  reads an earlier listener's answer, which has no `delivery`, as `core`. No stream setting
+  changes (INFRA-594).
+- `envoy-infra`'s `ListenerPermissions`, and through it `HostPermissions` and
+  `DispatchPermissions`, grant the session consumers' calls on any consumer of
+  `ENVOY_NOTIFICATIONS` (`$JS.API.CONSUMER.CREATE`, with and without a filter subject, `INFO`,
+  `DELETE` and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, and `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`) and
+  subscribe on `notifications.role.> envoy-roles`, beside the machine's own role-lane group.
+  `SessionPermissions` does not change. The rendered users change, so moving a hub with a
+  `listener`, a `machineId` user or a `dispatchMachineId` user to this release replaces its VM
+  once, with NATS down until the new VM starts. A hub carries the grant only after that
+  replacement or a live reload of its configuration; until then the listener answers every
+  registration `core` with `no_grant` and subscribes its role lane in its machine's group
+  (INFRA-594).
+- `/healthz` answers `503 {"status":"unhealthy","error":"role lane subscription inactive"}` when
+  the role lane's own connection is not connected or holds no valid subscription, since no role
+  message is forwarded then (INFRA-594).
 - Each block of a Dispatch document is a node of the reference graph. A reference can name one
   block, `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
   `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
@@ -882,6 +923,34 @@
 
 ### Changed
 
+- The role lane forwards each role message once across listeners. Every listener subscribes
+  `notifications.role.>` in one queue group, `envoy-roles`, so NATS hands each role message to one
+  listener of all of them, and the stream stores one forward per message; a listener whose grant
+  refuses that group logs it once and subscribes in its machine's group, as before. The lane has a
+  connection of its own with its pending limits off, so nothing is dropped for being queued
+  (`envoy_role_lane_slow_consumers` counts any slow-consumer error still reported). Its handler
+  resolves the holder from the watched copy of `envoy_roles` and hands the forward on: forwards to
+  one holder are published in arrival order and each waits for its outcome on its own, at most
+  4,096 at once (`envoy_role_forwards_outstanding`), so a holder slow to answer holds up no other
+  role (INFRA-594).
+- A role forward counts as delivered only once the stream stored it. `bus.Client.RequestCoreTo`
+  succeeds only when both the stream's acknowledgement and the holder's empty receipt arrived; a
+  receipt without the acknowledgement is the new `bus.ErrForwardNotStored`, reported
+  `delivery_failed`, so a forward whose lasting copy is missing is retried or reported, never
+  counted. The forward carries `Nats-Msg-Id` of its dedupe key and subject, so repeats leave one
+  stored copy, which reaches the holder through its session consumer across a restart. A holder
+  on a serving port, which answers no receipt, counts on the stream's acknowledgement alone
+  (`StartRequestStoredTo`), and its stored copy is pushed to the port until the port accepts it
+  (INFRA-594).
+- The listener durable acknowledges, before it decodes it, a stored message whose subject no
+  session of its machine needs: the subject is matched against an index of the machine's
+  interests by subject token, not against every cached interest. The push to a serving-port
+  session runs on a FIFO worker per session, off the durable's handler: the worker pushes its
+  head message until the port answers 204, waiting 1 s doubling to 30 s between tries and keeping
+  the message in progress, so a slow session holds up no other session and its own messages stay
+  in order. A delivery exception the stream stores carries `Nats-Msg-Id`
+  `exception.<reason>.<original Nats-Msg-Id or stream sequence>`, so the stream keeps one however
+  many listeners raise it (INFRA-594).
 - `POST /v1/interests/subscribe` no longer stores a topic reaching a private stream subject other
   than the session's own agent subject (`bus.ReachesPrivateStreamSubject`): another session's
   `notifications.agent.<id>`, a failed-delivery lane

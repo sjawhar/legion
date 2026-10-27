@@ -26,6 +26,7 @@ related_issues:
   - "LEGION-108"
   - "sjawhar/legion#1079"
   - "LEGION-101"
+  - "INFRA-594"
 ---
 
 # Receipt-Backed Core NATS Delivery to Current Holders
@@ -34,7 +35,7 @@ related_issues:
 
 A role, lease, or session registry can identify a current holder and show that its heartbeat is fresh. That is useful routing state, but it does not prove that the holder still has a live core-NATS subscription or that its receiver pump can accept an envelope. Core NATS `Publish` reports success after accepting the publish locally even when zero subscribers match the subject.
 
-The Envoy role lane needs a different contract: a role message is live-only and must reach the current holder or become an explicit exception. Review hardening and a real listener-and-NATS proof exposed the gap: after a holder process was stopped, the listener recorded successful forwarding although the message had no recipient.
+The Envoy role lane needs a different contract: a role lane is core NATS, and a role message must reach the current holder or become an explicit exception. Review hardening and a real listener-and-NATS proof exposed the gap: after a holder process was stopped, the listener recorded successful forwarding although the message had no recipient.
 
 ## Guidance
 
@@ -122,7 +123,15 @@ if (reply !== "" && subject === agentSubject(sessionID)) {
 }
 ```
 
-This makes a fresh-but-deaf holder observable as `receipt_timeout` and a holder whose registration has gone stale as `delivery_failed`, while a live holder returns one receipt. The receipt comes from the direct agent receiver, not from JetStream persistence of the forwarded copy.
+This makes a fresh-but-deaf holder observable as `receipt_timeout` and a holder whose registration has gone stale as `delivery_failed`, while a live holder returns one receipt. The receipt comes from the direct agent receiver, not from JetStream persistence of the forwarded copy; the next section says why the forward must be persisted as well.
+
+## The stored forward (INFRA-594)
+
+The receipt still proves only that a live receiver decoded the forward. The forward's lasting copy is the stream's: `ENVOY_NOTIFICATIONS` captures agent subjects, so the forward is stored on the holder's inbox, under a `Nats-Msg-Id` of the forward's dedupe key and the subject, one copy however often it is sent. The holder's session consumer delivers that stored copy across a restart or a dropped connection, and the consumer's message is acknowledged only once the session wrote it (`packages/envoy/AGENTS.md`, "Session consumers"). A receipt alone therefore no longer counts: `RequestCoreTo` counts a forward as delivered only when both replies arrived, the stream's acknowledgement and the receipt. A receipt without the acknowledgement is `bus.ErrForwardNotStored`, reported `delivery_failed`, because the copy that survives a break is missing.
+
+- Both replies arrive on the one reply inbox. The forward carries headers, so the server hands each reply back with a header block: the stream's acknowledgement carries its JSON, and the receipt is a reply with no data and no header field. Tell them apart by that, never by their order.
+- A holder on a serving port has no NATS subscriber to answer a receipt. Its forward counts on the stream's acknowledgement alone (`StartRequestStoredTo`), since the stored copy reaches its port with acknowledgement and redelivery.
+- The role lane itself stays core, and no stream setting changes: the holder's forward is already stored on its agent subject, which the holder's own consumer delivers.
 
 ## Pitfalls learned on LEGION-108 (`sjawhar/legion#1079`)
 
@@ -140,7 +149,7 @@ The regression lock for the flush branch needed a real stalled transport — the
 
 ### The listener cannot tell deaf from slow, by construction
 
-`RequestCoreTo` publishes with `PublishRequest` to a manually subscribed inbox; it never uses `Conn.Request`, so there is no `ErrNoResponders` path. A holder whose session registration is still inside `ClaimStaleAfter` but whose process is gone therefore looks exactly like a busy holder: the publish succeeds, the flush succeeds, no receipt arrives, `receipt_timeout`. That is the intended division of labour — the registry check bounds how long a dead holder can look live, and the daemon owns the process probe that tells slow from dead — so a `receipt_timeout` consumer must not read it as "the holder has the envelope". Write the docs that way too: an earlier wording of this page said exactly that and had to be corrected in review.
+`RequestCoreTo` publishes to a manually subscribed inbox; it never uses `Conn.Request`. On an agent subject the stream itself answers that inbox with its acknowledgement, so a holder that is gone never shows as no responders. A holder whose session registration is still inside `ClaimStaleAfter` but whose process is gone therefore looks exactly like a busy holder: the publish succeeds, the flush succeeds, no receipt arrives, `receipt_timeout`. That is the intended division of labour — the registry check bounds how long a dead holder can look live, and the daemon owns the process probe that tells slow from dead — so a `receipt_timeout` consumer must not read it as "the holder has the envelope". Write the docs that way too: an earlier wording of this page said exactly that and had to be corrected in review.
 
 ### The forward mark is an internal namespace; the API must refuse it
 

@@ -1822,12 +1822,13 @@ a listener of an earlier release subscribes in and a listener refused the shared
 to.
 
 `SessionPermissions()` is what any agent session needs, with `*` for the session id. It publishes
-to `_INBOX.>`, for the receipt a role delivery waits for, and `agentstream.*.frames`, and
-subscribes to `notifications.>` and `agentstream.*.control`. It does not subscribe to `_INBOX.>`,
-so a client holding this set alone may answer a request but not make one: sessions that share one
-user holding it, as a `gcp:NatsHub`'s `sessionUser` does, would otherwise each receive every other
-session's replies, so request/reply from such a session is refused by design. A host's user,
-holding `HostPermissions`, subscribes to `_INBOX.>` for its listener.
+to `_INBOX.>`, for the receipt a role delivery waits for and the replies to a session consumer's
+relay frames, and `agentstream.*.frames`, and subscribes to `notifications.>`, which holds its relay
+subject `notifications.envoy.deliver.<session id>`, and `agentstream.*.control`. It does not
+subscribe to `_INBOX.>`, so a client holding this set alone may answer a request but not make one:
+sessions that share one user holding it, as a `gcp:NatsHub`'s `sessionUser` does, would otherwise
+each receive every other session's replies, so request/reply from such a session is refused by
+design. A host's user, holding `HostPermissions`, subscribes to `_INBOX.>` for its listener.
 
 `HostPermissions(machineID)` is the grant of a host's one NATS user, which its listener and every
 session on the host share: in each direction the listener's entries, then each of the session's

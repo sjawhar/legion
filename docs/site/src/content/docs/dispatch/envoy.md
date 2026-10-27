@@ -10,15 +10,18 @@ Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions
 
 - **NATS JetStream** holds the events. Events are messages on subjects under `notifications.`;
   the `ENVOY_NOTIFICATIONS` stream keeps those of GitHub, Slack, Dispatch, Legion and each
-  session's inbox for 72 hours, while role messages and team topics travel live and are not kept.
-  Envoy also keeps its own state in JetStream key-value buckets: which session is subscribed to
-  what (`envoy_interests`), which sessions are live (`envoy_sessions`), who holds each role
-  (`envoy_roles`), and pull request check results (`envoy_ci_state`).
+  session's inbox for 72 hours. Role messages and team topics travel over core NATS and are not
+  kept for a later subscriber, but the listener's forward of a role message to its current holder
+  is kept on that holder's inbox. Envoy also keeps its own state in JetStream key-value buckets:
+  which session is subscribed to what (`envoy_interests`), which sessions are live
+  (`envoy_sessions`), who holds each role (`envoy_roles`), and pull request check results
+  (`envoy_ci_state`).
 - **The listener** is an HTTP service in front of it. It takes webhooks in, publishes them as
   events, and delivers events to the agent sessions that subscribed to them. Agents and Legion
-  call its `/v1` API to subscribe, publish, claim roles, and send messages, and a session that
-  holds its own NATS connection asks it for the stored messages it missed while that connection
-  was down ([Messages a session missed](#messages-a-session-missed)).
+  call its `/v1` API to subscribe, publish, claim roles, and send messages. For each session it
+  keeps a durable consumer on the stream and delivers the stored messages from it in order, each
+  marked delivered only when the session has it, so a session that was down or disconnected gets
+  them when it is back ([Messages a session missed](#messages-a-session-missed)).
 
 ## How GitHub events arrive
 
@@ -131,29 +134,67 @@ An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscr
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
 request's `.>` gets its lifecycle events as well as its comments and checks.
 
-A role message is not stored for later. If no live session holds the role, a publish through the
-API is refused with `404`. If the holder does not take a message, the listener publishes an
-exception naming the reason: `no_holder`, `delivery_failed`, or `receipt_timeout`.
+A role message is not stored for a later holder. If no live session holds the role, a publish
+through the API is refused with `404`. If the holder does not take a message, the listener
+publishes an exception naming the reason: `no_holder`, `delivery_failed`, or `receipt_timeout`.
+The listener's forward to the live holder is stored on the holder's inbox, and it counts as
+delivered only once the stream has stored it, so a holder that restarts or loses its connection
+gets the forward once when it is back.
 
 ## Messages a session missed
 
-An Oh My Pi session (`@sjawhar/pi-envoy`) and a Claude Code session (`claude-envoy`) receive on
-their own NATS subscriptions, and NATS keeps nothing for a subscriber that is not connected: a
-message published while a session's connection is down, NATS is restarting, or the session is not
-running never reaches that subscription. The stream keeps what it captures, so the session asks
-its listener for it, `POST /v1/replay`, when it starts or resumes, when it reconnects, when a
-subscription comes back, and on every heartbeat. The listener reads the stream for the session's
-own inbox topic and for each topic it registered, after the place the session last read to, and
-the session shows each message it was not shown yet, once, marked as published while its
+An Oh My Pi session (`@sjawhar/pi-envoy`) and a Claude Code session (`claude-envoy`) hold their
+own NATS connection, and NATS keeps nothing for a subscriber that is not connected. So the
+listener keeps a durable consumer on the stream for each such session, and for each session on a
+serving port, filtered on the session's inbox and on each topic it follows that the stream keeps.
+The listener that owns the session sends it the stored messages in the order they were published,
+on `notifications.envoy.deliver.<session_id>`, a subject the stream does not keep, and marks each
+one delivered only when the session answers that it has it. A message published while the
+session was not running, was restarting or had lost its connection, or while its listener
+restarted, reaches the session once when it is back, up to 72 hours later.
+
+- **What comes this way:** the session's inbox, `notifications.agent.<session_id>` (direct
+  messages, Dispatch deliveries, and the forwards of role messages to a role it holds), and the
+  topics it follows that the stream keeps, such as an issue's
+  `notifications.dispatch.issue.<KEY>.>`.
+- **What does not:** team and other ad-hoc topics, which are live only, and anything published on
+  a topic before the session followed it.
+- **When a message counts as delivered:** an Oh My Pi session answers once the message is in its
+  session file. A Claude Code session under Legion's bridge answers once Claude Code took the
+  message as a user message. A Claude Code session in channel mode answers once Claude Code
+  accepted the channel notification, the last signal Claude Code gives there, so a notification it
+  drops after that (a channel it did not load) is not sent again. A session on a serving port, such
+  as an OpenCode agent, gets each message by the listener's push, marked delivered on the port's
+  `204` and pushed again until then.
+- **Nothing runs late:** a BTW delivered before, or published before the session's connection
+  began, starts no side turn: an Oh My Pi session shows it as one inert notice, and a Claude Code
+  session passes it over.
+
+The listener manages these consumers only when its NATS user may (the `envoy-infra` grant for a
+listener, `ListenerPermissions`, includes it). Any client that may subscribe to `notifications.>`,
+as every session's NATS user may, can read another session's delivery frames and answer one as
+delivered; such a client already reads every session's traffic.
+
+### Without session consumers
+
+A listener whose NATS user may not manage session consumers, a listener of an earlier release,
+and a plugin of an earlier release keep the earlier path: the session receives on its own NATS
+subscriptions, and a message published while its connection is down, NATS is restarting, or the
+session is not running never reaches that subscription. The stream keeps what it captures, so the
+session asks its listener for it, `POST /v1/replay`, when it starts or resumes, when it reconnects,
+when a subscription comes back, and on every heartbeat. The listener reads the stream for the
+session's own inbox topic and for each topic it registered, after the place the session last read
+to, and the session shows each message it was not shown yet, once, marked as published while its
 connection was down.
 
 - **What comes back:** messages on the session's inbox topic, `notifications.agent.<session_id>`,
   and on the topics it follows that the stream keeps, such as an issue's
   `notifications.dispatch.issue.<KEY>.>`, up to 72 hours old.
-- **What does not:** role messages and team topics, which are live only; anything from before the
-  session existed, before it followed the topic, or before it first ran a plugin version that
-  recovers; anything older than 72 hours. When the stream was recreated, or the session read it
-  too late to find everything still there, it is told once that messages may be missing.
+- **What does not:** role messages, which this path does not recover, and team topics, which are
+  live only; anything from before the session existed, before it followed the topic, or before
+  it first ran a plugin version that recovers; anything older than 72 hours. When the stream was
+  recreated, or the session read it too late to find everything still there, it is told once that
+  messages may be missing.
 - **Nothing runs late:** a person's Send or Aside, a Steer or a BTW that comes back this way is
   shown as a message only, since a person's input run late could act on an old instruction. The
   session does not take it as the person's turn and does not answer a BTW. A BTW that comes back
@@ -282,7 +323,7 @@ install it, what each component deploys and which settings it sets.
 | `200` `starting` | The listener is still binding its durable consumer. |
 | `200` `healthy` | Everything answers. The body includes the consumer's lag, and `live_topics`: `subscribed` when the listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`), `not_applicable` when it does not. |
 | `200` `degraded` | A passing key-value failure the listener is retrying. |
-| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. |
+| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. `role lane subscription inactive` when the role lane's own connection is down or holds no valid subscription, since no role message is forwarded then. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. |
 
 `/v1` opens before `/healthz` leaves `starting`: as soon as NATS is connected and the session and
 subscription caches are loaded. Until then `/v1` answers `503` `service starting`. During a rolling

@@ -4,6 +4,25 @@
 
 ### Added
 
+- Consumer delivery. The channel server subscribes the current session id's relay subject,
+  `notifications.envoy.deliver.<session id>`, before it registers, and every registration asks the
+  listener for the session's durable consumer, with an epoch per NATS connection and the resume
+  point `replay-<session id>.json` now keeps beside the replay state. Answered `consumer`, the
+  session takes its agent subject and every followed topic the stream stores from the listener's
+  relay, in stream order: each frame is answered `received` as it decodes and `done` once Claude
+  Code has it. In a Legion pane that is when `legion claude-bridge` answers its inbox, which it does
+  once Claude Code took the message into a step (`--replay-user-messages`). In channel mode it is
+  when the MCP notification write resolves, the last signal Claude Code gives there, so a
+  notification Claude Code drops after that (a channel it did not load) is not sent again. A
+  frame already shown or skipped is `done` at once; one whose write fails, or that arrives after
+  the session moved to another id, is answered `nak` and comes again, and from its third delivery
+  is replaced by a notice naming it. The core copies of those subjects then show nothing and only
+  answer a lane's receipt, and the replay engine makes no `/v1/replay` call. So a message
+  published while Claude Code was not running or its connection was down, a role message to a
+  role it holds included, is delivered once when it is back, for up to 72 hours. A NATS reconnect
+  begins a new epoch and registers at once, so the listener restarts the relay at the consumer's
+  ack floor. A BTW that arrives late is passed over, as a replayed one is. Answered `core`, or by
+  a listener of an earlier release, delivery works as before. `dist/` was rebuilt (INFRA-594).
 - The channel server delivers once each Envoy message the session missed while its NATS
   subscriptions were down, NATS was restarting or Claude Code was not running. It asks the
   listener's new `POST /v1/replay` for what the notification stream (72 hours) stored on the
@@ -62,6 +81,12 @@
 
 ### Changed
 
+- In a Legion pane, `legion claude-bridge` runs Claude Code with `--replay-user-messages` and
+  answers an Envoy delivery on its inbox (`LEGION_CLAUDE_INBOX`) only once Claude Code re-emits it
+  as the user message it took, no longer once the bridge queued it; a delivery Claude Code ended a
+  step without taking, or had not taken when it exited, is answered with an error. The inbox reads
+  a client's next deliveries while it waits and answers them in the order they came. So a relayed
+  frame is `done` only once Claude Code took the delivery (INFRA-594).
 - The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
   `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
   while its architect waits on a person's answer, and the issue field `waitingOn`, naming the
