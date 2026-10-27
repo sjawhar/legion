@@ -14,36 +14,38 @@
   loopback, `8766` and the `cloud-sql-proxy` sidecar's `5432`.
 - `envoy-infra:gcp:Dispatch` takes `appCpu` and `appMemory`, the Kubernetes quantities that size
   the app Deployment's `envoy-dispatch` container as both its request and its limit: 1 CPU and
-  `4Gi` by default, the size it always had, so a deployment that sets neither renders the same
-  container. The `cloud-sql-proxy` sidecar is sized by `proxyCpu` and `proxyMemory` (below), and
-  the front door and the listener keep their sizes. The component refuses, naming the input, a
-  value that is not a quantity, is empty or is not above 0, a decimal exponent outside `e-9` to
-  `e18`, and a size at which GKE Autopilot would not run the app pod (the two containers' sum) as
-  rendered: below `500m` or `512Mi` or outside 1 to 6.5 GiB of memory per CPU, which Autopilot
-  raises, or above 30 CPU or `110Gi`, which it rejects. On a cluster without Pod bursting
-  Autopilot also rounds the pod's CPU up to a multiple of 250m.
+  `4Gi` by default, the size it always had, so a deployment that sets neither renders the same pod.
+  The `cloud-sql-proxy` sidecar, the front door and the listener keep their sizes. The component
+  refuses, naming the input, a value that is not a quantity or is empty, a decimal exponent
+  outside `e-9` to `e18`, and a size at which GKE Autopilot would not run the app pod (the two
+  containers' sum) as rendered: below `500m` or `512Mi` or outside 1 to 6.5 GiB of memory per
+  CPU, which Autopilot raises, or above 30 CPU or `110Gi`, which it rejects. On a cluster without
+  Pod bursting Autopilot also rounds the pod's CPU up to a multiple of 250m.
+- `envoy-infra:gcp:Dispatch` takes `appPriorityClassName` and `appPdbMinAvailable`, which protect
+  the app Deployment's pods from being displaced, so a deployment sets both in its program rather
+  than by hand. `appPriorityClassName` is the app pod's `priorityClassName`, naming a PriorityClass
+  that already exists in the cluster; the component reads the class and the app Deployment waits
+  on the read, so a missing class fails the preview or update rather than leaving the one app pod
+  stopped and its replacement refused. `appPdbMinAvailable` registers a PodDisruptionBudget named
+  for the app, over its pods alone, with that `minAvailable` and Kubernetes' default
+  `unhealthyPodEvictionPolicy`, so a drain waits for the app. The front door and the listener are
+  unchanged, and with neither set the component renders what it always did. The component
+  refuses, naming the input, an `appPriorityClassName` that is empty, not a DNS subdomain or in
+  the reserved `system-` prefix, and an `appPdbMinAvailable` below 1 or above `replicas`.
 - `envoy-infra:gcp:Dispatch` takes `proxyCpu` and `proxyMemory`, the Kubernetes quantities that
   size the app pod's `cloud-sql-proxy` sidecar as both its request and its limit, so a deployment
   sizes the proxy every database call of the pod passes through. They default to 1 CPU and `2Gi`
   (see Changed), and the component judges them with `appCpu` and `appMemory` against Autopilot's
-  bounds for the pod's sum, refusing them as it refuses those, each refusal naming the inputs.
-- `envoy-infra:gcp:Dispatch` takes `priorityClassName`, `appPdbMinAvailable`,
-  `frontDoorPdbMinAvailable` and `listenerPdbMinAvailable`, which protect the pods from being
-  displaced, so a deployment sets them in its program rather than by hand. `priorityClassName` is
-  the `priorityClassName` of every pod of the three Deployments (the app, the front door and the
-  listener), naming a PriorityClass that already exists in the cluster; the component reads the
-  class once and all three Deployments wait on the read, so a missing class fails the preview or
-  update rather than leaving a one-pod workload stopped and its replacement refused. Each
-  `*PdbMinAvailable` registers a PodDisruptionBudget named for its Deployment (`<hostname>`,
-  `<hostname>-tailnet`, `<hostname>-listener`), over that Deployment's pods alone, with that
-  `minAvailable` and Kubernetes' default `unhealthyPodEvictionPolicy`, so a drain waits for that
-  workload. A pod template whose Deployment has a budget no longer carries the cluster
-  autoscaler's `safe-to-evict: "false"` annotation, since the budget bounds the autoscaler's
-  evictions too; a template with no budget keeps it. With none set the component renders no class
-  and no budget. The component refuses, naming the input, a `priorityClassName` that is empty, not
-  a DNS subdomain or in the reserved `system-` prefix, and a budget below 1 or above its
-  Deployment's replica count. A budget made by hand under one of those names must be deleted
-  before the update that sets its input, since the component's provider does not adopt it.
+  bounds for the pod's sum, refusing them as it refuses those, each refusal naming the inputs; a
+  size that is not above 0 is now refused too.
+- `envoy-infra:gcp:Dispatch` takes `frontDoorPdbMinAvailable` and `listenerPdbMinAvailable`, which
+  register a PodDisruptionBudget named for the front door (`<hostname>-tailnet`) or the listener
+  (`<hostname>-listener`), over that Deployment's pods alone, as `appPdbMinAvailable` does for the
+  app, each refused below 1 or above its Deployment's replica count. A pod template whose
+  Deployment has a budget no longer carries the cluster autoscaler's `safe-to-evict: "false"`
+  annotation, since the budget bounds the autoscaler's evictions too; a template with no budget
+  keeps it. A budget made by hand under one of those names must be deleted before the update that
+  sets its input, since the component's provider does not adopt it.
 - `envoy-infra:gcp:Dispatch` takes `frontDoorReplicas`, the front door's pod count, 2 by default,
   and `listenerReplicas`, the listener's, 1 by default, each refused below 1. The front door runs
   two by default, since with one pod every node drain, upgrade or scale-down that moves it takes
@@ -849,7 +851,10 @@
   and the new pods come up. The defaults changed size too: `databaseTier` is `db-custom-4-15360`
   (was `db-custom-1-3840`) and the `cloud-sql-proxy` sidecar 1 CPU and `2Gi` (was `200m` and
   `256Mi`), so a deployment that relied on either default changes size on its next update; set
-  `databaseTier` to the tier the instance runs to keep it.
+  `databaseTier` to the tier the instance runs to keep it. `appPriorityClassName` is renamed
+  `priorityClassName` and names the class of every pod of the three Deployments (the app, the
+  front door and the listener), read once, with all three Deployments waiting on the read and the
+  same refusals; a program that sets `appPriorityClassName` sets `priorityClassName` instead.
 - `envoy-infra:gcp:Dispatch` defaults `databaseTier` to `db-custom-4-15360` (4 vCPU, 15 GB), whose
   default `max_connections` of 500 holds 15 app pods at the 32 connections each pod's pools open,
   so up to 14 replicas roll inside it; the previous `db-custom-1-3840` (100 connections) held
