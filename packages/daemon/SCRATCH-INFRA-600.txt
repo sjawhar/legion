@@ -1,0 +1,1 @@
+Scratch file for the INFRA-600 production check; the pull request is closed unmerged.
