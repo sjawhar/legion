@@ -446,6 +446,35 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 (`LEGION_TEST_OMP`) through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`),
 which hands both plugin entries to the Oh My Pi child by path.
 
+## Credentials in tool results
+
+Oh My Pi writes every tool result into the session's transcript, and a large one's full text into
+an artifact beside it, and sends the result to the model. A Legion process's environment holds
+credentials: the shim exports the provider keys into it (`--provider-env-dir`), since Oh My Pi
+reads them from there, and any tool of the agent or of its `task` subagents reads that environment
+back (`read /proc/self/environ:raw`, `env` in bash). The entry's `tool_result` hook
+(`createToolResultRedactor` in `src/secret-redaction.ts`), registered for every instance, a
+subagent's too, replaces each value of this process's environment (`process.env` and the block
+`/proc/self/environ` shows) that may be a credential with `[redacted by Legion: $NAME]`: in the
+result's text, in every string of its details, and in the artifact it spilled to, before Oh My Pi
+keeps any of them. A session with no Legion environment is left as it is; a redaction that fails
+withholds the whole result.
+
+A value may be a credential when its variable is not in `PUBLIC_VARIABLES` and the value is 16
+characters or longer, or 8 or longer under a credential-shaped name (the daemon's
+`runtime.IsSecretLikeName`). A value naming an existing path never is; the one token a `*_FILE`
+variable's file holds always is, and so is a URL's password under any name. `PUBLIC_VARIABLES`
+lists the variables the runtimes set on a pane or pod and the host's ordinary ones: a variable the
+runtime starts setting joins it in the same change, or its value is masked in every tool result.
+
+Not caught, each held in `src/secret-redaction.test.ts`: a credential the environment does not
+hold (a file no `*_FILE` variable names, such as the gh bundle's `hosts.yml`; a command's output,
+such as `gh auth token`; another process's environment), one shorter than those floors, and one
+encoded, sliced or split on its way out. Only a tool result passes the hook. A Claude Code pane
+(`worker_backends: claude`) loads no Oh My Pi extension, so nothing redacts its transcript.
+`extensions/legion-redaction-omp.test.ts` proves the hook on the pinned Oh My Pi: a pane's `read`
+and `env`, a spilled result's artifact, and a `task` subagent's `read`.
+
 ## Where to look
 
 | Task | Location | Notes |
@@ -455,7 +484,8 @@ which hands both plugin entries to the Oh My Pi child by path.
 | Controller session | `src/controller-session.ts` | Owns the controller's identity, the transcript a session navigation compares to decide whether to claim again, the claim and reclaim hooks, and grant minting: it reads the daemon's project, registers on `claims/register` with the controller capability, claims the controller role, and mints with the registration's secret (see Daemon contract). The `legion` tool's `set_status` mints through it (`mintGrant`) and posts the grant with its request. |
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`, and the Legion modules claude-envoy's MCP server shares with this entry: the daemon client (`daemon-client`), the claim boot (`legion-claim-core`), the `legion` tool's phase ops (`legion-phase-ops`), the handoff-commit lookup (`handoff-commit`) and the stale git lock note (`git-lock`); inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | Extension unit tests | `extensions/legion.test.ts` | Mocked Pi and NATS surface; every test starts from no `LEGION_*`/`ENVOY_*`/`DISPATCH_*` environment and sets only what it declares, except `ENVOY_CONFIG_FILE`, which the file points at an envoy.json that holds no section before it imports the Envoy entry (the entry picks its file at module load) and `beforeEach` sets again, with `OMP_PROFILE` and `PI_CODING_AGENT_DIR` unset, so no caller's envoy.json reaches a pane; each stubs `fetch` itself, and `afterEach` resets the process-wide interface (`resetEnvoyPluginInterfaceForTests`) so one test's bound Envoy instance or bootstrapped session never reaches the next. Pins the three Envoy-plugin refusals, that `/legion-claim-controller` answers the sentence without exiting, and that `register_gate`'s lookup reads the envoy.json the Envoy entry chose |
-| Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The two omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the phase stall, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`) |
+| Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts`, `extensions/legion-redaction-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The three omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the phase stall, no role refused a tool, and no credential of the pane's environment in its transcripts, on the pinned Oh My Pi (`LEGION_TEST_OMP`) |
+| Credentials in tool results | `src/secret-redaction.ts`, `src/secret-redaction.test.ts` | The `tool_result` hook that masks the process environment's credentials in every result and its spilled artifact, `PUBLIC_VARIABLES`, and the limits it does not reach (Credentials in tool results, above) |
 | Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch: `oracle`, the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`, `deep-worker`, and the planner's `plan-gap-analyst` and `plan-reviewer`. The root architect also runs the planner's two on its spec before every approval request. Each agent declares the name of its file, and its model only as role aliases. The planner's two carry `bash` and no edit or write tool. Oh My Pi has no per-agent command limit, so their prompts hold them to read-only commands |
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
 | Capability report | `src/capability-report.ts`, `src/capability-report.test.ts` | The six live capability checks a claim session runs at boot and sends with `claims/ready` (see Daemon contract): `measureCapabilities` over a `CapabilityHost` that wraps every Oh My Pi import and the two child commands (`dispatch read --issue <issue>`, `gh api graphql {viewer{login}}`), with the budgets (8 s a check, 10 s the report) and each row's detail strings; `ompCapabilityHost` is the production host, string-literal `import()` only. The test fakes the host; `extensions/legion.test.ts` substitutes one through `setLegionCapabilityHostForTests` |
@@ -476,4 +506,4 @@ which hands both plugin entries to the Oh My Pi child by path.
 ## Checks
 
 `bunx tsc --noEmit`, `bun test`, `bunx biome check extensions/ src/`, each from this directory;
-`LEGION_TEST_OMP=<omp> bun test extensions/legion-phase-stall-omp.test.ts extensions/legion-role-tools-omp.test.ts` for the real binary.
+`LEGION_TEST_OMP=<omp> bun test extensions/legion-phase-stall-omp.test.ts extensions/legion-role-tools-omp.test.ts extensions/legion-redaction-omp.test.ts` for the real binary.

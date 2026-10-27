@@ -851,6 +851,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
+- A Legion session no longer writes its process environment's credentials into its transcript or
+  sends them to the model. Every tool result of a root architect, a phase worker, the controller
+  and each of their `task` subagents (a `read` of `/proc/self/environ`, `env` in bash, a token file
+  it opened) is stored with each such value replaced by `[redacted by Legion: $NAME]`, and the
+  artifact a large result spills to is rewritten the same way (`src/secret-redaction.ts`). A value
+  is masked when its variable is not one of Legion's own or the host's ordinary ones and the value
+  is 16 characters or longer, whatever its name, or 8 or longer under a credential-shaped name; a
+  path is never masked, the token a `*_FILE` variable's file holds always is, and so is a URL's
+  password. A redaction that fails withholds the whole result. A credential the environment does
+  not hold, one shorter than those floors, or one encoded on its way out is not caught.
 - The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
   daemon records. The daemon now refuses a completion of a run the issue has left before it applies
   any fact and names the current run's queued task, so the worker ends the turn and calls

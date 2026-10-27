@@ -57,6 +57,11 @@ export interface SessionContext {
      * is in it at once, before the transcript reaches disk.
      */
     readonly getEntries: () => readonly unknown[];
+    /**
+     * The file an artifact id names (`artifact://<id>`, where a tool spilled the full text of a
+     * result too large to keep inline), or null when the session keeps no such file.
+     */
+    readonly getArtifactPath?: (id: string) => Promise<string | null>;
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   /** The host's managed one-shot timer: a throw or rejection is contained, cleared on shutdown. */
@@ -130,12 +135,24 @@ export interface ToolCallEvent {
   readonly input: Record<string, unknown>;
 }
 
+/** A tool's finished result, before Oh My Pi stores it in the session or sends it to the model. */
 export interface ToolResultEvent {
   readonly toolName: string;
   readonly toolCallId: string;
   readonly input: Record<string, unknown>;
+  /** What the model reads; a large result's full text may have been spilled to an artifact. */
+  readonly content: readonly ContentBlock[];
   readonly details: unknown;
   readonly isError: boolean;
+}
+
+/** Replacements for the result's members: each member given replaces the one the tool produced,
+ * in the session's transcript and in what the model reads. Handlers chain in load order, each
+ * seeing the previous one's replacements. */
+export interface ToolResultEventResult {
+  readonly content?: readonly ContentBlock[];
+  readonly details?: unknown;
+  readonly isError?: boolean;
 }
 
 /** One of a run's messages, as far as an `agent_end` handler reads it. */
@@ -274,7 +291,7 @@ export interface PiEventContract {
     readonly result: SessionStopEventResult;
   };
   readonly tool_call: { readonly event: ToolCallEvent; readonly result: ToolCallEventResult };
-  readonly tool_result: { readonly event: ToolResultEvent; readonly result: undefined };
+  readonly tool_result: { readonly event: ToolResultEvent; readonly result: ToolResultEventResult };
 }
 
 /** The context OMP hands a registered slash-command handler. Its `sessionManager` is the same

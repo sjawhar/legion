@@ -39,6 +39,7 @@ import {
   restorePhaseStall,
   stepPhaseStall,
 } from "../src/phase-stall";
+import { createToolResultRedactor } from "../src/secret-redaction";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { daemonLaunchedController } from "../src/slack-channels";
 import { createLegionTool } from "../src/tools";
@@ -124,6 +125,13 @@ export default function legionExtension(pi: PiApi): void {
   if (daemonLaunchedController(process.env)) {
     legionRoleClaimBridge().slackRoleOwned = true;
   }
+
+  // Every tool result a Legion session's agent gets is written into its transcript and sent to the
+  // model, and the process environment holds credentials (the provider keys the shim exports): each
+  // result is stored with them replaced (src/secret-redaction.ts). Registered for every instance, a
+  // `task` subagent's too, since a subagent's tools read the same process environment; a session
+  // with no Legion environment is left as it is.
+  pi.on("tool_result", createToolResultRedactor());
 
   // Gates session_start and the session-change re-claim below, one call per hook; its settled
   // answer is kept, so it runs once per session.

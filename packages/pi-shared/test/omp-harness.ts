@@ -417,6 +417,8 @@ export interface LegionPaneOptions {
   readonly quietMs?: number;
   /** The one word the gateway answers the run-end self-check with; `PROCEEDING` by default. */
   readonly selfCheck?: string;
+  /** Lines appended to the profile's config.yml (`writeStandinProfile`). */
+  readonly config?: readonly string[];
 }
 
 /** What a settled Legion pane left behind. */
@@ -535,7 +537,7 @@ export async function runLegionPane(
       topics: [],
     });
   });
-  await writeStandinProfile(home, base);
+  await writeStandinProfile(home, base, options.config);
 
   // The run has settled when the RPC stream reports its terminal agent_end: a continuation the
   // host scheduled (the follow-up) starts its turn before that, under the same run. A steer the
