@@ -2,28 +2,27 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-560",
-  "completed": "2026-10-27T11:30:49Z",
-  "round": 6,
+  "completed": "2026-10-27T11:52:06Z",
+  "round": 7,
   "implementerProof": {
     "verdict": "verified",
-    "how": "cde9232f adds store.ConnectionsPerProcess (pool.go:306). It sums the pools 64+4+1+10+1 plus permanentListeners 3, which is 83. The gcp constants compute dispatchDefaultTierRollingReplicas = (500-3)/83 - 1 = 4, since 5 x 83 = 415 <= 497 < 6 x 83 = 498. TestDispatchConnectionsPerPodIsTheServers pins both. I checked the count against the code. The only non-test Postgres openers in the server are store.go:55 (the shared pool) and pool.go:340 (the separate pools: rooms, health, listener, leases, outbox); census.go's connection is a separate subcommand. Pool.Listener has exactly three non-test callers: api/delivery_live_hub.go:328, api/event_stream_relay.go:123 and docs/stale_room.go:123. README.md:194-203, CHANGELOG.md:939, dispatch.go:27 and :71 and pool.go:157-165 now name the constants or the bound of 4, and no stale 82 remains."
+    "how": "d31fcb18 removes dispatchDefaultTierRollingReplicas, its two input constants and every stated replica bound for the default tier (per the INFRA-63 architect after review round 4). It states the connection rule instead in dispatch.go:27-30, README.md:197-202, CHANGELOG.md:937-941 and pool.go:157-165: every app pod holding connections during a roll (replicas, surge pod, pods still terminating) times ConnectionsPerProcess must fit in max_connections less 3 superuser slots. A grep of packages/envoy (*.go, *.md) finds no reference left to dispatchDefaultTierRollingReplicas, dispatchDefaultTierMaxConnections or postgresSuperuserReservedConnections, and no stale '4 replicas', '82 in all' or '82 connections'. In pool.go only comments changed; ConnectionsPerProcess is still 64+4+1+10+1+3 = 83. `go vet ./gcp/` is clean, and TestDispatchConnectionsPerPodIsTheServers, TestDispatchDatabaseTierReachesTheInstance and TestDispatchProxyContainerDefaultsToOneCPUAnd2Gi pass."
   },
   "failed": 0,
   "failures": [],
-  "roundFiveFailure": "Resolved: the stale 82 / 492 / '5 replicas' figures are gone, and the bound is computed from the server's own pools with the superuser slots taken out.",
-  "changedSince": "Round 5 tested code head 728b5e29. Round 6 (cde9232f) changes comments, docs, two constant blocks (gcp dispatch.go and store pool.go, neither read at run time by the server or by what the component renders) and one test. No golden or rendered object changes, so round 5's live server and listener run and rounds 3-4's preview, schema and script results stand.",
+  "changedSince": "Round 6 tested code head cde9232f. Round 7 (d31fcb18) changes only comments, docs, one removed constant block and one shortened test. No golden or rendered object changes, and no run-time code of the server changes, so round 5's live server and listener run and rounds 3-4's preview, schema and script results stand.",
   "proof": [
     {
-      "criterion": "Spec BG-12: the default database tier fits a Dispatch at more than one pod, and every comment and document that sizes it is true of the server's pools",
-      "surface": "the server's pool constants and the component's default-tier bound, through the repository's test, run at the head and against a mutation of the head",
+      "criterion": "Spec BG-12: the component's sizing text matches the server's pools, and the component's count follows the server's",
+      "surface": "the server's pool constants and the component's dispatchConnectionsPerPod, through the repository's test, run at the head and against a mutation of the head",
       "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchConnectionsPerPodIsTheServers|TestDispatchDatabaseTierReachesTheInstance|TestDispatchProxyContainerDefaultsToOneCPUAnd2Gi' -count=1 -v",
-      "observed": "All three PASS at the head. ConnectionsPerProcess = 83 = dispatchConnectionsPerPod, the bound is 4, and (4+1) x 83 = 415 <= 497 < (5+1) x 83 = 498. README.md:197-202 states 3 superuser slots, ConnectionsPerProcess and 4 replicas rolling",
-      "headSha": "cde9232f880b",
-      "negativeControl": "leasePoolSize temporarily raised to 11 (reverted with jj restore): FAIL 'expected: 84 actual: 83 … dispatchConnectionsPerPod must be envoy-dispatch's store.ConnectionsPerProcess'"
+      "observed": "all three PASS at the head; store.ConnectionsPerProcess = dispatchConnectionsPerPod = 83",
+      "headSha": "d31fcb180037",
+      "negativeControl": "leasePoolSize temporarily raised to 11 (reverted with jj restore): TestDispatchConnectionsPerPodIsTheServers FAIL 'expected: 84 actual: 83'"
     }
   ],
   "observations": [
-    "CI at dc28412d was queued when read (2026-10-27T11:30Z). No head of this PR has had settled CI yet; the reviewer reads it.",
+    "CI at fd132522 was queued when read (2026-10-27T11:52Z). No head of this PR has had settled CI yet; the reviewer reads it.",
     "Unchanged from earlier rounds: hand-edited claim ledgers with tabs, newlines or escaped quotes between entries are undercounted; kube() has no --max-time (the architect left that out)."
   ]
 }
