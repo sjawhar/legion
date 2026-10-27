@@ -57,10 +57,8 @@ on:
   # publishing nothing. A draft's head builds no image until the pull request is marked ready
   # (`ready_for_review`), which builds that head. A `closed` run builds nothing: it enters the
   # concurrency group below and cancels the pull request's build still waiting or running, as a
-  # newer head's run cancels an older head's. GitHub can create the `closed` run after a reopen
-  # within about a minute of the close. That run then cancels the reopened build, and that head
-  # gets no image. To refresh the build, push, or wait a minute between close and reopen. After a
-  # quick reopen with a cancelled or skipped check, push or reopen again.
+  # newer head's run cancels an older head's. A reopen within about a minute of the close can race
+  # that closed run: tests-closed.yaml says what happens and what to do.
   # .github/scripts/check-image-trigger-paths.sh fails the build when this list misses a file the
   # image build reads.
   pull_request:
@@ -100,13 +98,15 @@ on:
 # pull_request the key is the pull request's number, so a newer head, or the closing, cancels an
 # older head's build of the same pull request whether it waits or runs (a merged pull request's
 # closed event carries github.ref = the base branch, so the number is the one key that names the
-# pull request). Every other event keys on github.sha, not github.ref, with cancel-in-progress
-# off, so a run never cancels a main, workflow_call or workflow_dispatch run, nor another pull
-# request's, and a dropped pending main run never leaves a commit with no image to pin (why: this
-# PR's description). Under workflow_call the github context is the caller's (release.yaml, on push
-# or workflow_dispatch), so a release run keys worker-image-<sha>, apart from release.yaml's own
-# `release-${{ github.ref }}` group. The build job repeats no group: a job group named like its
-# workflow's would wait on itself.
+# pull request). Every other event keys on github.sha, not github.ref, and cancel-in-progress is
+# off for those events, so a running main, workflow_call or workflow_dispatch build is never
+# cancelled, and none of those runs cancels a pull request's build. GitHub may still replace a
+# pending run with a newer one at the same sha, which builds the same image, so a dropped pending
+# main run never leaves a commit with no image to pin (why: this PR's description). Under
+# workflow_call the github context is the caller's (release.yaml, on push or workflow_dispatch),
+# so a release run keys worker-image-<sha>, apart from release.yaml's own
+# `release-${{ github.ref }}` group. The build job repeats no group: GitHub detects a job group
+# named like its workflow's as a deadlock and cancels the run.
 concurrency:
   group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

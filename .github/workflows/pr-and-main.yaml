@@ -5,6 +5,8 @@ name: Tests
 # review; each covers the shipped daemon (packages/daemon, the Go `legion`). On a draft's head they
 # report `skipped`, which GitHub counts as passing, but GitHub merges no draft, and marking it
 # ready (`ready_for_review`) starts a run at that head whose newer checks replace the skipped ones.
+# GitHub starts no pull_request run at a head that conflicts with its base, so there the skipped
+# checks stay newest until a push.
 on:
   push:
     branches:
@@ -20,8 +22,8 @@ on:
 # event carries github.ref = the base branch, so the number is the only key that names the pull
 # request on every event. Outside pull_request the key is github.sha, not github.ref, so a busy
 # runner pool never drops a main push's or merge-queue entry's run (why: this PR's description).
-# GitHub can create tests-closed.yaml's run after a reopen within about a minute of the close, and
-# that run then cancels the reopened Tests run. Push, or reopen again, to rerun the checks.
+# A reopen within about a minute of the close can race tests-closed.yaml's run: tests-closed.yaml
+# says what happens and what to do.
 concurrency:
   group: tests-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

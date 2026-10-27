@@ -543,8 +543,8 @@ check "always() is read as ungated" "$(is "$status" 0)"
 
 echo "case: an if: this check does not model is refused, never read as ungated"
 shape_index=0
-# The last three are a positive draft test and an == 'closed' test: each is false on push,
-# workflow_call and workflow_dispatch, so it would skip every pinnable build.
+# The last three are a positive draft test and an == 'closed' test, which would skip every
+# pinnable build (the next case's comment says why).
 for shape in "false" "vars.RUN_IT == 'true'" "needs.changes.outputs.img == 'true' && vars.RUN_IT" "needs.changes.outputs.img == 'true' && false" \
   "github.event.pull_request.draft" "github.event.pull_request.draft == true" "github.event.action == 'closed'"; do
   shape_index=$((shape_index + 1))

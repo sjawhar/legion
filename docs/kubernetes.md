@@ -507,12 +507,8 @@ workflow exists on `main`. Trigger (2) does not build every head. A draft's head
 publishes no `sha-` tag. Marking the pull request ready builds that head. A newer push to the pull
 request cancels the build of an older head, waiting or running, so that older head gets no image.
 Closing the pull request cancels its build too. No `main`, `release.yaml` or `workflow_dispatch` run is
-ever cancelled this way. A race comes with this. When the pull request is reopened within about a
-minute of its close, GitHub can create the `closed` run after the reopened pull request's run. The
-`closed` run then joins the same concurrency group and cancels the reopened build, so that head gets
-no image and its newest image check is the `closed` run's `skipped` one. To refresh a pull request's
-runs, push, or wait a minute between close and reopen. If the image check shows cancelled or skipped
-after a quick reopen, push or reopen again. The
+ever cancelled this way. A reopen within about a minute of the close can race the `closed` run:
+`.github/workflows/tests-closed.yaml` says what happens and what to do. The
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
 lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
 whole — the Dockerfile (`packages/daemon/docker/**`), the two plugins and what they bundle (`packages/pi-envoy/**`,

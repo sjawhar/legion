@@ -27,8 +27,7 @@ on:
 # `gh pr checks` does): a review run that cancelled a pull_request run would leave that event's
 # latest `pr-title` cancelled on the head until the next push or edit. A review run checks with
 # main's copy of check-pr-text.sh; the required lint job checks a pull request that changes it with
-# its own copy at every push to a pull request that is not a draft, and when a draft is marked
-# ready.
+# its own copy (pr-and-main.yaml says when it runs).
 concurrency:
   group: pr-title-${{ github.event_name }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -57,9 +56,10 @@ jobs:
           persist-credentials: false
 
       # The title, body, commit messages, comments and reviews are as public as the tree
-      # (check-pr-text.sh says where each lands). The required lint job checks them at every
-      # push; this step checks an edit or a review. Both steps read the event payload rather than
-      # an `env:` block, which the runner prints in the job log.
+      # (check-pr-text.sh says where each lands). The required lint job checks them too
+      # (pr-and-main.yaml says when it runs); this step checks them at every event above, an edit
+      # or a review included. Both steps read the event payload rather than an `env:` block, which
+      # the runner prints in the job log.
       - name: Check the title, body, branch name, commits, comments and reviews name nothing private
         env:
           GH_TOKEN: ${{ github.token }}

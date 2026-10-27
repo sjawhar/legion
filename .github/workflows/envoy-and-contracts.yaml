@@ -61,8 +61,8 @@ on:
       - "scripts/assemble-third-party-notices.sh"
       - ".github/go-release-targets.json"
   # A `closed` run tests nothing; it cancels the pull request's runs (concurrency comment below).
-  # GitHub can create it after a reopen within about a minute of the close. It then cancels the
-  # reopened runs, and its skipped checks stand at the head. Push, or reopen again, to rerun them.
+  # A reopen within about a minute of the close can race it: tests-closed.yaml says what happens
+  # and what to do.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, closed]
     paths:
@@ -114,10 +114,10 @@ on:
 # A new push to a pull request cancels that pull request's still-running checks here, and so does
 # its closing: the `closed` run, whose jobs all skip, enters the same group and replaces and
 # cancels the runs still waiting or running for it. On pull_request the key is the pull request's
-# number, because a merged pull request's closed event carries github.ref = the base branch, which
-# would name main's group rather than the pull request's. Outside pull_request the key is
-# github.sha, not github.ref, so a busy runner pool never drops a main push's or merge-queue
-# entry's run (why: this PR's description).
+# number, the only key that names the pull request on every event, its `closed` event included: a
+# merged pull request's closed event carries github.ref = the base branch. Outside pull_request
+# the key is github.sha, not github.ref, so a busy runner pool never drops a main push's or
+# merge-queue entry's run (why: this PR's description).
 concurrency:
   group: envoy-and-contracts-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

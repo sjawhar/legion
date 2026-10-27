@@ -14,11 +14,15 @@ name: Tests (closed pull request)
 # and test, which GitHub and the Legion daemon count as passing, at a head another run tested, and
 # so could turn a failure there green.
 #
-# A race: when a pull request is reopened within about a minute of its close, GitHub can create this
-# run after the reopened pull request's Tests run. This run then cancels that Tests run. The
-# required checks end `cancelled` and fail closed, because Tests has no `closed` trigger. To refresh
-# a pull request's runs, push, or wait a minute between close and reopen. If Tests shows cancelled
-# after a quick reopen, push or reopen again.
+# The quick-reopen race, for all four workflows' closed runs: this one cancels Tests, and
+# envoy-and-contracts.yaml, docs.yaml and worker-image.yaml cancel their own runs with a `closed`
+# run of their own. When a pull request is reopened within about a minute of its close, GitHub can
+# create the closed run after the reopened pull request's runs. The closed run then cancels them.
+# Tests has no `closed` trigger, so its required checks end `cancelled` and fail closed. Envoy,
+# Docs and Worker Image have one, so their closed run's skipped checks stay newest at the head, and
+# Worker Image builds no image at that head. To refresh a pull request's runs, push, or wait a
+# minute between close and reopen. If a check shows cancelled or skipped after a quick reopen, push
+# or reopen again.
 on:
   pull_request:
     types: [closed]
