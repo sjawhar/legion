@@ -405,6 +405,11 @@ export async function readSessionAnswers(
       })
       .then(
         (response): ReadOutcome => {
+          // A 200 whose body is no answers list (a proxy's page, another service on the URL) is a
+          // failed read, never a cache: rendering it would throw on the request path.
+          if (!Array.isArray(response?.items) || typeof response.total !== "number") {
+            return { failure: "Dispatch answered with something that is not an answers list" };
+          }
           const cache = {
             read_at: new Date(now()).toISOString(),
             total: response.total,

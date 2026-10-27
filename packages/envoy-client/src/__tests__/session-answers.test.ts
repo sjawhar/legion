@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { linkSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionAnswer } from "@legion/contracts";
@@ -316,6 +324,21 @@ describe("readSessionAnswers", () => {
       reason: "database is down",
     });
     expect(read.text).toBe(sessionAnswersFailureLine("database is down"));
+  });
+
+  test("a 200 whose body is no answers list is a failed read, not a cache and not a throw", async () => {
+    const directory = stateDir();
+    const { fetchImpl } = fakeDispatch(() => json({ session_id: "s", topics: [] }));
+    const read = await readSessionAnswers({
+      session: newSession(),
+      dispatch: dispatchAt(),
+      stateDirectory: directory,
+      fetchImpl,
+      now: () => NOW,
+    });
+    const reason = "Dispatch answered with something that is not an answers list";
+    expect(read).toEqual({ text: sessionAnswersFailureLine(reason), source: "failure", reason });
+    expect(existsSync(join(directory, "answers.json"))).toBe(false);
   });
 
   test("a failed read after a good one carries the cached list, saying when it was read", async () => {
