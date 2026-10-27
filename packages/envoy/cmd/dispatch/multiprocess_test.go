@@ -2338,3 +2338,200 @@ func TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain(t *test
 		t.Fatalf("the second run does not report the delivery redelivered:\n%s", second.Output.String())
 	}
 }
+
+// ───── two processes syncing one architecture source ───────────────────────
+
+// architectureGitHub is the GitHub both processes' architecture syncs read: one repository whose
+// branch head the test moves, each commit answering its own architecture files, and every blob
+// read of one commit held until the test releases it, the caller gives up, or githubHoldCap
+// passes. Any other App call answers an empty list, as githubFake's do.
+type architectureGitHub struct {
+	server      *httptest.Server
+	held        chan struct{}
+	release     chan struct{}
+	heldOnce    sync.Once
+	releaseOnce sync.Once
+
+	mu          sync.Mutex
+	head        string
+	commits     map[string]map[string]string
+	holdBlobsOf string
+}
+
+// startArchitectureGitHub serves on loopback until the test ends, its branch at head.
+func startArchitectureGitHub(t *testing.T, head string, commits map[string]map[string]string) *architectureGitHub {
+	t.Helper()
+	fake := &architectureGitHub{held: make(chan struct{}), release: make(chan struct{}), head: head, commits: commits}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"id":77,"app_slug":"multiprocess","permissions":{"contents":"read"}}`)
+	})
+	mux.HandleFunc("POST /app/installations/{id}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintf(w, `{"token":"ghs_multiprocess","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
+		fake.mu.Lock()
+		head := fake.head
+		fake.mu.Unlock()
+		// As GitHub does: the bare sha for Accept: application/vnd.github.sha, JSON otherwise.
+		if r.Header.Get("Accept") == "application/vnd.github.sha" {
+			_, _ = io.WriteString(w, head)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"sha":%q}`, head)
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/trees/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		commit, _, _ := strings.Cut(r.PathValue("ref"), ":")
+		fake.mu.Lock()
+		files := fake.commits[commit]
+		fake.mu.Unlock()
+		entries := []map[string]any{}
+		for _, name := range slices.Sorted(maps.Keys(files)) {
+			entries = append(entries, map[string]any{
+				"path": name, "mode": "100644", "type": "blob", "sha": commit + "." + name, "size": len(files[name]),
+			})
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"sha": "tree-" + commit, "truncated": false, "tree": entries}); err != nil {
+			t.Errorf("encode tree: %v", err)
+		}
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/blobs/{sha}", func(w http.ResponseWriter, r *http.Request) {
+		commit, name, _ := strings.Cut(r.PathValue("sha"), ".")
+		fake.mu.Lock()
+		content, ok := fake.commits[commit][name]
+		hold := commit == fake.holdBlobsOf
+		fake.mu.Unlock()
+		if hold {
+			fake.heldOnce.Do(func() { close(fake.held) })
+			select {
+			case <-fake.release:
+			case <-r.Context().Done():
+			case <-time.After(githubHoldCap):
+			}
+		}
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"content": base64.StdEncoding.EncodeToString([]byte(content)), "encoding": "base64",
+		}); err != nil {
+			t.Errorf("encode blob: %v", err)
+		}
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, "[]")
+	})
+	fake.server = httptest.NewServer(mux)
+	t.Cleanup(func() {
+		fake.releaseHeld()
+		fake.server.Close()
+	})
+	return fake
+}
+
+// holdBlobs holds every blob read of commit; moveHead pushes commit as the branch's new head.
+func (f *architectureGitHub) holdBlobs(commit string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holdBlobsOf = commit
+}
+
+func (f *architectureGitHub) moveHead(commit string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.head = commit
+}
+
+func (f *architectureGitHub) releaseHeld() { f.releaseOnce.Do(func() { close(f.release) }) }
+
+// Two processes sync one project's architecture source through the Refresh route: A is held
+// fetching the files of head X, the branch moves to Y, and B imports Y. Once A is released it
+// must not record X over Y: the source stays at Y with Y's components, the only synced event is
+// Y's, and A answers the row at Y. The source is disabled so the import ticker adds no sync of
+// its own.
+func TestTwoProcessesSyncingOneProjectNeverWriteTheOlderCommit(t *testing.T) {
+	const older, newer = "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"
+	github := startArchitectureGitHub(t, older, map[string]map[string]string{
+		older: {"api.md": "---\ntitle: API\n---\nThe API.\n"},
+		newer: {"queue.md": "---\ntitle: Queue\n---\nThe queue.\n", "store.md": "---\ntitle: Store\n---\nThe store.\n"},
+	})
+	github.holdBlobs(older)
+	pair := startPair(t, githubAppEnv(t, github.server.URL))
+	project := uniqueProjectKey(t, "ARC")
+	pair.a.createProject(t, project, "Architecture")
+	if _, err := pair.database.Pool.Exec(context.Background(), `
+		insert into architecture_sources (project_key, repo, branch, enabled, installation_id, created_by)
+		values ($1, 'acme/arch', 'main', false, 77, '{"kind":"user","id":"alice"}')
+	`, project); err != nil {
+		t.Fatalf("seed the architecture source: %v", err)
+	}
+	path := "/api/v1/projects/" + project + "/architecture-sources/acme/arch/sync"
+
+	type answer struct {
+		status int
+		body   []byte
+		err    error
+	}
+	held := make(chan answer, 1)
+	go func() {
+		response, err := pair.a.send(http.MethodPost, path, "")
+		if err != nil {
+			held <- answer{err: err}
+			return
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		held <- answer{status: response.StatusCode, body: body, err: err}
+	}()
+	select {
+	case <-github.held:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("A's sync never fetched the files of %s:\n%s", older, pair.a.Output.String())
+	}
+	github.moveHead(newer)
+	pair.b.call(t, http.MethodPost, path, "", http.StatusOK)
+	github.releaseHeld()
+
+	var fromA answer
+	select {
+	case fromA = <-held:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("A's sync never answered:\n%s", pair.a.Output.String())
+	}
+	if fromA.err != nil || fromA.status != http.StatusOK {
+		t.Fatalf("A's sync: status %d, err %v: %s", fromA.status, fromA.err, fromA.body)
+	}
+	var row struct {
+		LastCommit *string `json:"last_commit"`
+		LastError  *string `json:"last_error"`
+	}
+	if err := json.Unmarshal(fromA.body, &row); err != nil {
+		t.Fatalf("decode A's answer: %v: %s", err, fromA.body)
+	}
+	if row.LastCommit == nil || *row.LastCommit != newer || row.LastError != nil {
+		t.Errorf("A answered %s, want the row at %s with no error", fromA.body, newer)
+	}
+
+	var lastCommit string
+	var components, synced []string
+	if err := pair.database.Pool.QueryRow(context.Background(), `
+		select last_commit,
+		       array(select id from components where project_key = $1 order by id),
+		       array(select payload->>'commit' from events where project_key = $1 and type = 'architecture.synced' order by id)
+		from architecture_sources where project_key = $1
+	`, project).Scan(&lastCommit, &components, &synced); err != nil {
+		t.Fatalf("read the source: %v", err)
+	}
+	if lastCommit != newer {
+		t.Errorf("last_commit = %s, want %s", lastCommit, newer)
+	}
+	if want := []string{"queue", "store"}; !slices.Equal(components, want) {
+		t.Errorf("components = %v, want %s's %v", components, newer, want)
+	}
+	if want := []string{newer}; !slices.Equal(synced, want) {
+		t.Errorf("architecture.synced events name %v, want %v once", synced, want)
+	}
+}

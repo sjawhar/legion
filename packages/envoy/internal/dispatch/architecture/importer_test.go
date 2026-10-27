@@ -28,6 +28,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -1054,22 +1055,25 @@ func TestSyncDeadlineIsRecordedOnTheRow(t *testing.T) {
 }
 
 // Two server processes that both fetched the same head before either
-// projected it: the second waits on the row lock, then finds the commit
-// already recorded and stays silent — one snapshot, one architecture.synced.
-// The state-change decision is made from the locked row, not from the row
-// each process loaded before its fetch.
+// projected it: the second waits on the row lock, finds the row recorded since
+// its load, and starts again from the load, which takes the unchanged-head
+// refresh — one snapshot, one architecture.synced.
 func TestSyncAcrossProcessesEmitsOneEventForOneHead(t *testing.T) {
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles(), commit: commitOne}
-	// Gate the head lookups so both processes are mid-fetch at once: neither may
-	// project until both have loaded their (identical, pre-sync) source rows.
+	// Gate the first two head lookups so both processes are mid-fetch at once:
+	// neither may project until both have loaded their (identical, pre-sync)
+	// source rows. The second process's retry looks the head up once more.
 	var arrived sync.WaitGroup
 	arrived.Add(2)
+	var lookups atomic.Int64
 	mux := http.NewServeMux()
 	fetches := fake.handler()
 	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
-		arrived.Done()
-		arrived.Wait()
+		if lookups.Add(1) <= 2 {
+			arrived.Done()
+			arrived.Wait()
+		}
 		fetches.ServeHTTP(w, r)
 	})
 	mux.Handle("/", fetches)
@@ -1575,4 +1579,266 @@ func TestSyncProjectLeavesOutASourceDeletedMidCall(t *testing.T) {
 	if _, err := importer.SyncProject(ctx, "BARE"); !errors.Is(err, ErrNoSource) {
 		t.Fatalf("sync a project with no source: err %v, want ErrNoSource", err)
 	}
+}
+
+// movingBranch is archRepo's main branch as a GitHub the test pushes to while a sync is in
+// flight: the head is whatever the test last moved it to, each commit answers its own files
+// (the subtree sha derived from them, the blob shas naming their commit), and one read can be
+// held — the next head lookup, answering the head as it stood when the lookup arrived, or every
+// blob read of one commit — until the test releases it, so another process's sync lands while
+// the held one is mid-fetch.
+type movingBranch struct {
+	t       *testing.T
+	release chan struct{}
+	held    chan struct{}
+
+	mu          sync.Mutex
+	head        string
+	commits     map[string]map[string]string
+	holdHead    bool
+	holdBlobsOf string
+	heldOnce    sync.Once
+	released    sync.Once
+}
+
+func newMovingBranch(t *testing.T, head string, commits map[string]map[string]string) *movingBranch {
+	branch := &movingBranch{t: t, head: head, commits: commits, release: make(chan struct{}), held: make(chan struct{})}
+	t.Cleanup(branch.releaseHeld)
+	return branch
+}
+
+// moveHead pushes commit as the branch's new head.
+func (b *movingBranch) moveHead(commit string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.head = commit
+}
+
+// holdNextHeadLookup holds the next head lookup; holdBlobs holds every blob read of commit.
+func (b *movingBranch) holdNextHeadLookup() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.holdHead = true
+}
+
+func (b *movingBranch) holdBlobs(commit string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.holdBlobsOf = commit
+}
+
+// waitHeld returns once a held read has arrived.
+func (b *movingBranch) waitHeld(t *testing.T) {
+	t.Helper()
+	select {
+	case <-b.held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no read reached the hold within 10s")
+	}
+}
+
+func (b *movingBranch) releaseHeld() { b.released.Do(func() { close(b.release) }) }
+
+// wait blocks a held read until the release or the request's end.
+func (b *movingBranch) wait(r *http.Request) {
+	b.heldOnce.Do(func() { close(b.held) })
+	select {
+	case <-b.release:
+	case <-r.Context().Done():
+	}
+}
+
+// handler serves the branch's reads, and the installation and token routes from fakeSource.
+func (b *movingBranch) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/", (&fakeSource{t: b.t, installationID: 11}).handler())
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		head, hold := b.head, b.holdHead
+		b.holdHead = false
+		b.mu.Unlock()
+		if hold {
+			b.wait(r)
+		}
+		writeCommit(w, r, head)
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/trees/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		commit, _, _ := strings.Cut(r.PathValue("ref"), ":")
+		b.mu.Lock()
+		files := b.commits[commit]
+		b.mu.Unlock()
+		names := make([]string, 0, len(files))
+		for name := range files {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		digest := sha256.New()
+		entries := []map[string]any{}
+		for _, name := range names {
+			fmt.Fprintf(digest, "%s\x00%s\x00", name, files[name])
+			entries = append(entries, map[string]any{
+				"path": name, "mode": "100644", "type": "blob", "sha": commit + "." + name, "size": len(files[name]),
+			})
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"sha": "tree-" + hex.EncodeToString(digest.Sum(nil))[:12], "truncated": false, "tree": entries,
+		}); err != nil {
+			b.t.Errorf("encode tree: %v", err)
+		}
+	})
+	mux.HandleFunc("GET /repos/{owner}/{repo}/git/blobs/{sha}", func(w http.ResponseWriter, r *http.Request) {
+		commit, name, _ := strings.Cut(r.PathValue("sha"), ".")
+		b.mu.Lock()
+		content, ok := b.commits[commit][name]
+		hold := commit == b.holdBlobsOf
+		b.mu.Unlock()
+		if hold {
+			b.wait(r)
+		}
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"content": base64.StdEncoding.EncodeToString([]byte(content)), "encoding": "base64",
+		}); err != nil {
+			b.t.Errorf("encode blob: %v", err)
+		}
+	})
+	return mux
+}
+
+// twoProcesses seeds CORE's source from archRepo and returns two importers on one database, as
+// two server processes are: no mutex in common, one GitHub.
+func twoProcesses(t *testing.T, branch *movingBranch) (a, b *Importer, database *store.Store) {
+	t.Helper()
+	client := newGitHubClient(t, branch.handler())
+	database = storetest.Open(t)
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into architecture_sources (project_key, repo, branch, installation_id, created_by)
+		values ('CORE', 'legion/arch', 'main', 11, '{"kind":"user","id":"alice"}');
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	return NewImporter(database, client, events.NewBroker()), NewImporter(database, client, events.NewBroker()), database
+}
+
+// syncAnswer is what one Sync returned.
+type syncAnswer struct {
+	source model.ArchitectureSource
+	err    error
+}
+
+// syncInBackground starts process's sync of CORE's source and answers it on the channel.
+func syncInBackground(process *Importer) <-chan syncAnswer {
+	answer := make(chan syncAnswer, 1)
+	go func() {
+		source, err := process.Sync(context.Background(), "CORE", archRepo)
+		answer <- syncAnswer{source: source, err: err}
+	}()
+	return answer
+}
+
+// requireSettledAtTheNewerHead checks the held process's answer and the stored state once both
+// syncs have ended: the row, the components and the events are the newer head's, and the held
+// process answers that row with no error.
+func requireSettledAtTheNewerHead(t *testing.T, database *store.Store, held syncAnswer, head string, wantComponents, wantEvents []string) {
+	t.Helper()
+	text := func(value *string) string {
+		if value == nil {
+			return "<nil>"
+		}
+		return *value
+	}
+	if held.err != nil || text(held.source.LastCommit) != head || held.source.LastError != nil {
+		t.Errorf("the held sync answered commit %s, error %s (err %v); want the row at %s with no error",
+			text(held.source.LastCommit), text(held.source.LastError), held.err, head)
+	}
+	var lastCommit, lastError *string
+	if err := database.Pool.QueryRow(context.Background(),
+		`select last_commit, last_error from architecture_sources where project_key = 'CORE'`).Scan(&lastCommit, &lastError); err != nil {
+		t.Fatalf("read the source row: %v", err)
+	}
+	if text(lastCommit) != head || lastError != nil {
+		t.Errorf("the row records commit %s, error %s; want %s and no error", text(lastCommit), text(lastError), head)
+	}
+	if got := sourceComponents(t, database); !reflect.DeepEqual(got, wantComponents) {
+		t.Errorf("components = %#v\nwant %#v", got, wantComponents)
+	}
+	if got := projectEvents(t, database); !reflect.DeepEqual(got, wantEvents) {
+		t.Errorf("events = %#v\nwant %#v", got, wantEvents)
+	}
+}
+
+// infraComponents are infraFiles' components as sourceComponents names them on archRepo.
+var infraComponents = []string{archRepo + " infra", archRepo + " infra-db", archRepo + " infra-dns"}
+
+// A process held in its blob reads at one head while the branch moves and another process imports
+// the newer head: once released, the held process never projects its older head over the newer
+// one, and the newer head's synced event is the only one.
+func TestAProcessHeldAtAnOlderHeadNeverProjectsItOverTheNewer(t *testing.T) {
+	branch := newMovingBranch(t, commitOne, map[string]map[string]string{commitOne: validFiles(), commitTwo: infraFiles()})
+	branch.holdBlobs(commitOne)
+	a, b, database := twoProcesses(t, branch)
+
+	held := syncInBackground(a)
+	branch.waitHeld(t)
+	branch.moveHead(commitTwo)
+	if _, err := b.Sync(context.Background(), "CORE", archRepo); err != nil {
+		t.Fatalf("the second process's sync: %v", err)
+	}
+	branch.releaseHeld()
+
+	requireSettledAtTheNewerHead(t, database, <-held, commitTwo, infraComponents, []string{"architecture.synced " + commitTwo})
+}
+
+// The unchanged-head shortcut on a process whose head lookup answered the recorded commit before
+// another process imported a newer head: its freshness write never records the older commit over
+// the newer projection.
+func TestAStaleUnchangedHeadNeverRecordsTheOlderCommit(t *testing.T) {
+	branch := newMovingBranch(t, commitOne, map[string]map[string]string{commitOne: validFiles(), commitTwo: infraFiles()})
+	a, b, database := twoProcesses(t, branch)
+	if _, err := a.Sync(context.Background(), "CORE", archRepo); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	branch.holdNextHeadLookup()
+	held := syncInBackground(a)
+	branch.waitHeld(t)
+	branch.moveHead(commitTwo)
+	if _, err := b.Sync(context.Background(), "CORE", archRepo); err != nil {
+		t.Fatalf("the second process's sync: %v", err)
+	}
+	branch.releaseHeld()
+
+	requireSettledAtTheNewerHead(t, database, <-held, commitTwo, infraComponents,
+		[]string{"architecture.synced " + commitOne, "architecture.synced " + commitTwo})
+}
+
+// A failure a process met at a head the branch has since left, while another process imported
+// the newer head: the healthy source is never marked failed, and no sync_failed event is emitted.
+func TestAFailureMetBeforeAnotherProcessesImportNeverMarksTheSourceFailed(t *testing.T) {
+	branch := newMovingBranch(t, commitOne, map[string]map[string]string{
+		commitOne:    validFiles(),
+		commitBroken: {"api.md": "x\n", "API.md": "duplicate\n"},
+		commitTwo:    infraFiles(),
+	})
+	a, b, database := twoProcesses(t, branch)
+	if _, err := a.Sync(context.Background(), "CORE", archRepo); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	branch.moveHead(commitBroken)
+	branch.holdBlobs(commitBroken)
+	held := syncInBackground(a)
+	branch.waitHeld(t)
+	branch.moveHead(commitTwo)
+	if _, err := b.Sync(context.Background(), "CORE", archRepo); err != nil {
+		t.Fatalf("the second process's sync: %v", err)
+	}
+	branch.releaseHeld()
+
+	requireSettledAtTheNewerHead(t, database, <-held, commitTwo, infraComponents,
+		[]string{"architecture.synced " + commitOne, "architecture.synced " + commitTwo})
 }
