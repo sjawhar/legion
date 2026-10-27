@@ -851,7 +851,7 @@ describe("Mermaid diagrams", () => {
   // on the next page.
   test("a source no body still waits for is never sent to the worker", async () => {
     await warmMarkdownRenderer();
-    resetMermaidDiagrams(100);
+    resetMermaidDiagrams(60_000);
     const sent: string[] = [];
     FakeWorker.answer = (request) => {
       sent.push(request.source);
