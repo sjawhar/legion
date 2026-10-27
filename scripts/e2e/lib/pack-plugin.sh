@@ -112,3 +112,5 @@ if [ "${#tarballs[@]}" != 1 ] || [ ! -f "${tarballs[0]}" ]; then
   exit 1
 fi
 printf '%s\n' "${tarballs[0]}"
+
+# scratch INFRA-520 pi-envoy
