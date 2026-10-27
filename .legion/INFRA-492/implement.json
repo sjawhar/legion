@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-492",
-  "completed": "2026-10-27T12:43:01Z",
+  "completed": "2026-10-27T13:03:52Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2324",
-  "round": "3: the tester's 4 round-2 defects (red tests at a9d9f449), scope set by the architect at the review-round cap; one conflict merge of main c892b97df887",
+  "round": "conflict return after round 3: forward merge of main 1b859ea3 as 5873436a, nothing changed beyond the resolution",
   "proof": [
+    {
+      "criterion": "Acceptance 1-2 and the 4 round-3 defects hold on the merged head (rebase re-check fe1e97d2 -> 5873436a, fingerprint unchanged)",
+      "surface": "Dispatch in Chromium and iPhone (Playwright) against the merged tree's Go server, fake Envoy and a loopback Postgres 17 + pgvector, production SPA bundle built from the merged tree",
+      "command": "cd packages/dispatch && bun run build:web && DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e?sslmode=disable bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/refresh-freshness.e2e.ts e2e/refetch-budget.e2e.ts e2e/text-typed-blocks.e2e.ts e2e/block-references.e2e.ts e2e/references.e2e.ts e2e/hover-preview.e2e.ts e2e/live.e2e.ts e2e/inbox.e2e.ts; bun run test; fingerprint jj diff --from 'fork_point(\"main\"@origin | <sha>)' --to <sha> --git --context 0 '~(.legion | docs/solutions)' | sed ... | sha256sum at ae8d06d8 and 5873436a",
+      "observed": "151 passed, 7 skipped, 0 failed (10.4m); REFETCH-BUDGET 0 GETs and 0 untouched-issue reads on both projects; REFETCH-SIDEBAR inbox 1, pinned 1, projects 1; REFETCH-INDEX no GETs. Web unit 2535 pass, 0 fail. Fingerprint 373b9cee0101717c73a5b444b76ac851dc1d3019769623b4726a3973839620af at both heads. The merge brings in no server code (main touched only the web renderer, proof-editor and CI).",
+      "headSha": "5873436a73aff98676ce3bc58cd11dd0e21276f4",
+      "negativeControl": "The same refetch-budget file at base 16e4bb0f758e fails on the counts (Received 1120 against <= 5; sidebar reads sent twice); the round-3 red tests failed at 762eac00 before the fixes."
+    },
     {
       "criterion": "Round-3 defects: a document's panel follows an edited comment; a document citing 25 documents reads nothing for an unrelated open issue page; another person's stream carries nothing naming the snoozed ask (red tests in e2e/refresh-freshness.e2e.ts, commit e183b08f238c, unmodified), plus every earlier freshness test",
       "surface": "Dispatch in Chromium and iPhone (Playwright) against the branch's Go server, fake Envoy and a loopback Postgres 17 + pgvector, production SPA bundle built from the head",
@@ -72,7 +80,8 @@
     "Main merged three times for conflicts in total; the round-2 merges (4609a99b, d649b640) changed the fingerprint because #2210 needed integration; recorded at https://github.com/sjawhar/legion/pull/2324#issuecomment-6437731054.",
     "Not run: main's e2e/acceptance/*.sh scripts (they need a running server with an agent bearer and the dispatch client; not part of this change's surface).",
     "Round 3 scope was set by the architect at the review-round cap: the Children-tab active time for a child's comment or claim and the tester's suspected edges are not changed (main behaves the same).",
-    "Main merged a fourth time (fe1e97d2, main c892b97df887) for a conflict in sse.ts/sse.test.ts and the changelogs; main's artifact.human_edited got an explicit rule (the issue's log only) instead of the catch-all broad refresh. Record: https://github.com/sjawhar/legion/pull/2324#issuecomment-6442151664."
+    "Main merged a fourth time (fe1e97d2, main c892b97df887) for a conflict in sse.ts/sse.test.ts and the changelogs; main's artifact.human_edited got an explicit rule (the issue's log only) instead of the catch-all broad refresh. Record: https://github.com/sjawhar/legion/pull/2324#issuecomment-6442151664.",
+    "Conflict return: merged main 1b859ea3 as 5873436a; the only conflict was MarkdownBody.test.tsx's import list (both sides kept). Record: the PR comment after https://github.com/sjawhar/legion/pull/2324#issuecomment-6442151664."
   ],
   "openQuestions": [
     "Memory with kubectl top (dispatch://INFRA-492/comment/8d3d6ac7-d9a7-4187-a9bb-348c88cac96e) is not in the approved acceptance and not done; the architect decides (comment 32 says not added).",
