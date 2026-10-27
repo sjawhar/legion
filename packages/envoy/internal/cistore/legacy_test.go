@@ -163,8 +163,11 @@ func TestAHeadGatedListenersUnsettledRecordPastTheGraceIsNotSettled(t *testing.T
 	_, before := storedSchema(t, store, legacyHead.key())
 	_, beforeClaimed := storedSchema(t, store, claimed.key())
 
-	runSummaryTick(store, pub, debounce, logging.New("test"))
-	runSummaryTick(store, pub, debounce, logging.New("test"))
+	for range 2 {
+		if held := runSummaryTick(store, pub, debounce, logging.New("test")); held != 2 {
+			t.Fatalf("the tick held back %d records, want 2", held)
+		}
+	}
 
 	if got := pub.count(); got != 0 {
 		t.Fatalf("the head-gated backlog published %d settlements, want none: %+v", got, pub.all())
@@ -190,7 +193,9 @@ func TestANewCheckRunOnAHeadGatedRecordSettlesItOnce(t *testing.T) {
 	pub := &recPub{}
 	debounce := 20 * time.Millisecond
 	putHeadGatedRecord(t, store, legacyHead, time.Now().Add(-30*time.Hour).UnixMilli(), nil)
-	runSummaryTick(store, pub, debounce, logging.New("test"))
+	if held := runSummaryTick(store, pub, debounce, logging.New("test")); held != 1 {
+		t.Fatalf("the tick held back %d records, want 1", held)
+	}
 	if got := pub.count(); got != 0 {
 		t.Fatalf("the untouched backlog record published %d settlements, want none", got)
 	}
