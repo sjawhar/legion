@@ -157,12 +157,12 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // seconds for one. The database bounds it from above. Dispatch's database is the gcp:Dispatch
 // component's Cloud SQL Postgres instance, whose default max_connections follows its tier's
 // memory (https://cloud.google.com/sql/docs/postgres/flags, max_connections), and every server
-// pod opens up to ConnectionsPerProcess. That sum times the pod count, plus one pod during a
-// rolling update, must stay under what max_connections leaves for Dispatch, so raising a pool or
-// the pod count is checked against it: the gcp:Dispatch component computes how many replicas its
-// default tier holds from ConnectionsPerProcess (dispatchDefaultTierRollingReplicas in
-// packages/envoy/infra/gcp/dispatch.go), and on a running instance read SHOW max_connections
-// before raising a pool.
+// pod opens up to ConnectionsPerProcess. During a roll, every pod that holds connections (the
+// replicas, the surge pod and pods still terminating, for up to their grace period) times that
+// sum must fit in max_connections less PostgreSQL's 3 superuser-reserved slots, so raising a pool
+// or the pod count is checked against it: read SHOW max_connections on the instance before
+// raising either. A new pool, or a new permanent Listener caller, goes into
+// ConnectionsPerProcess with it.
 const sharedPoolSize = 64
 
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always

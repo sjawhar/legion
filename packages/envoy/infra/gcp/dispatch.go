@@ -24,7 +24,10 @@ const dispatchType = "envoy-infra:gcp:Dispatch"
 const (
 	defaultDispatchDatabaseVersion = "POSTGRES_16"
 	// defaultDispatchDatabaseTier is the Cloud SQL tier when databaseTier is unset: 4 vCPU and
-	// 15 GB, whose connections hold dispatchDefaultTierRollingReplicas app replicas (below).
+	// 15 GB. During a roll, every app pod that holds connections (the replicas, the surge pod and
+	// pods still terminating, for up to their grace period) times dispatchConnectionsPerPod must
+	// fit in the instance's max_connections less PostgreSQL's 3 superuser-reserved slots, so a
+	// consumer sets databaseTier for its replica count.
 	defaultDispatchDatabaseTier = "db-custom-4-15360"
 	defaultDispatchNamespace    = "dispatch"
 	defaultDispatchReplicas     = 1
@@ -80,28 +83,12 @@ const (
 	defaultDispatchProxyMemory = "2Gi"
 )
 
-// How many app replicas the default tier holds, in one place: every comment and document that
-// sizes the default tier names these constants rather than restating their numbers.
-const (
-	// dispatchDefaultTierMaxConnections is Cloud SQL's default max_connections for
-	// defaultDispatchDatabaseTier's memory: from 15 to under 30 GB it is 500
-	// (https://cloud.google.com/sql/docs/postgres/flags, max_connections).
-	dispatchDefaultTierMaxConnections = 500
-	// postgresSuperuserReservedConnections is PostgreSQL's superuser_reserved_connections
-	// default, slots only a superuser may take
-	// (https://www.postgresql.org/docs/16/runtime-config-connection.html); Dispatch's database
-	// user is not one, so they are not Dispatch's.
-	postgresSuperuserReservedConnections = 3
-	// dispatchConnectionsPerPod is the most connections one app pod opens: envoy-dispatch's
-	// store.ConnectionsPerProcess (packages/envoy/internal/dispatch/store/pool.go), the sum of
-	// its pools and its permanent listeners. The listener's and the front door's pods open none.
-	// TestDispatchConnectionsPerPodIsTheServers fails when a pool changes and this does not.
-	dispatchConnectionsPerPod = 83
-	// dispatchDefaultTierRollingReplicas is the most app replicas the default tier holds through
-	// a rolling update, which runs replicas plus one pod (maxSurge): (replicas + 1) x
-	// dispatchConnectionsPerPod must stay within max_connections less the superuser slots.
-	dispatchDefaultTierRollingReplicas = (dispatchDefaultTierMaxConnections-postgresSuperuserReservedConnections)/dispatchConnectionsPerPod - 1
-)
+// dispatchConnectionsPerPod is the most connections one app pod opens to Postgres: envoy-dispatch's
+// store.ConnectionsPerProcess (packages/envoy/internal/dispatch/store/pool.go), the sum of its
+// counted pools and its permanent listeners. The listener's and the front door's pods open none.
+// TestDispatchConnectionsPerPodIsTheServers fails when a counted pool's size changes and this
+// does not.
+const dispatchConnectionsPerPod = 83
 
 // Autopilot's bounds for the app pod's total request, the general-purpose compute class's for a pod
 // with pod anti-affinity, which every Dispatch pod carries, or with the safe-to-evict annotation,

@@ -2275,8 +2275,7 @@ func TestDispatchDatabaseAvailabilityTypeReachesTheInstance(t *testing.T) {
 }
 
 // Unset, databaseTier reaches the Cloud SQL instance's settings as db-custom-4-15360, 4 vCPU and
-// 15 GB, whose connections hold dispatchDefaultTierRollingReplicas app replicas; set, it
-// reaches them as written.
+// 15 GB; set, it reaches them as written.
 func TestDispatchDatabaseTierReachesTheInstance(t *testing.T) {
 	for _, row := range []struct {
 		value *string

@@ -934,14 +934,14 @@
   `priorityClassName` and names the class of every pod of the three Deployments (the app, the
   front door and the listener), read once, with all three Deployments waiting on the read and the
   same refusals; a program that sets `appPriorityClassName` sets `priorityClassName` instead.
-- `envoy-infra:gcp:Dispatch` defaults `databaseTier` to `db-custom-4-15360` (4 vCPU, 15 GB), whose
-  connections leave Dispatch room for up to 4 app replicas through a rolling update
-  (`dispatchDefaultTierRollingReplicas` in `packages/envoy/infra/gcp/dispatch.go` computes the
-  bound from the server's pools and the tier's `max_connections` less PostgreSQL's superuser
-  slots); the previous `db-custom-1-3840` (100 connections) holds one pod and no roll. It defaults
-  the `cloud-sql-proxy` sidecar to 1 CPU and `2Gi`, the proxy's own sidecar example's size for one
-  pod's pools, through whose TLS every database call passes; with the app's defaults the pod
-  requests 2 CPU and `6Gi`.
+- `envoy-infra:gcp:Dispatch` defaults `databaseTier` to `db-custom-4-15360` (4 vCPU, 15 GB), from
+  `db-custom-1-3840` (100 connections). During a roll, every app pod that holds connections (the
+  replicas, the surge pod and pods still terminating, for up to their grace period) times the
+  server's `store.ConnectionsPerProcess` must fit in the instance's `max_connections` less
+  PostgreSQL's 3 superuser-reserved slots, so a consumer sets `databaseTier` for its replica
+  count. It defaults the `cloud-sql-proxy` sidecar to 1 CPU and `2Gi`, the proxy's own sidecar
+  example's size for one pod's pools, through whose TLS every database call passes; with the
+  app's defaults the pod requests 2 CPU and `6Gi`.
 - `envoy-infra:gcp:Dispatch` takes each Deployment's update strategy from its own replica count:
   `Recreate` at one pod, since a roll would run two builds side by side, and `RollingUpdate` with
   `maxUnavailable: 0` and `maxSurge: 1` above one, so a new pod is ready before an old one goes

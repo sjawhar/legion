@@ -194,17 +194,16 @@ tailscaled writes its certificate cache readable by its own uid alone.
 `databaseTier`, `db-custom-4-15360` (4 vCPU and 15 GB) by default, is sized by connections. Cloud
 SQL's default `max_connections` follows the instance's memory, and from 15 to under 30 GB it is
 500 ([Configure database flags](https://cloud.google.com/sql/docs/postgres/flags),
-`max_connections`). PostgreSQL keeps 3 of them for superusers (`superuser_reserved_connections`),
-and Dispatch's user is not one. Every app pod opens up to the sum of its pools and its permanent
-`LISTEN` connections (`ConnectionsPerProcess` in `packages/envoy/internal/dispatch/store/pool.go`);
-the listener's and the front door's pods open none. A rolling update runs `replicas` plus one pod,
-so the default tier holds up to 4 replicas rolling: `dispatchDefaultTierRollingReplicas` in
-`packages/envoy/infra/gcp/dispatch.go` computes that bound from those figures, and a test fails
-when a pool changes and the bound does not follow. The previous default, `db-custom-1-3840`
-(3.75 GB, 100 connections), holds one pod and no roll, and its one vCPU served every query. A
-deployment that left `databaseTier` unset moves to the new default on its next update; one whose
-instance runs another tier, set by hand, sets `databaseTier` to that tier so the update does not
-resize it.
+`max_connections`). Every app pod opens up to `ConnectionsPerProcess` connections
+(`packages/envoy/internal/dispatch/store/pool.go`: the sum of its counted pools and its permanent
+`LISTEN` connections); the listener's and the front door's pods open none. During a roll, every
+app pod that holds connections, the replicas, the surge pod and pods still terminating for up to
+their grace period, times `ConnectionsPerProcess` must fit in the instance's `max_connections` less
+PostgreSQL's 3 superuser-reserved slots, so a consumer sets `databaseTier` for its replica count.
+The previous default was `db-custom-1-3840` (3.75 GB, 100 connections), whose one vCPU served
+every query. A deployment that left `databaseTier` unset moves to the new default on its next
+update; one whose instance runs another tier, set by hand, sets `databaseTier` to that tier so the
+update does not resize it.
 
 `databaseAvailabilityType` is the Cloud SQL instance's availability type: `ZONAL`, the default and
 the instance's value before the input existed, keeps it in one zone, and `REGIONAL` keeps a
