@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-583",
+  "completed": "2026-10-27T03:45:00Z",
+  "planDocument": "dispatch://INFRA-583/artifact/plan-md",
+  "summary": "In .github/workflows/envoy-and-contracts.yaml, replace the broad `envoy` gate of dispatch-memory, dispatch-multiprocess, broker-multiprocess, envoy-go-race and envoy-infra-go with one filter per job (dispatch_memory, dispatch_multiprocess, broker_multiprocess, envoy_go_race, envoy_infra_go), built from shared YAML anchors (bun_install, go_workspace, dispatch_server, listener_command, dispatch_command_tests) and identical to router PR #2316's filters except the workflow file name and without the four memory-profile guides CI never reads. `envoy` keeps its patterns and gates envoy-go alone. Add the five outputs, change the five if: lines, correct the false comments, add one sentence per guide naming each job's filter, prove AC2 with two scratch PRs based on legion/INFRA-583, and measure AC3 by replaying the INFRA-490 window's PR runs through the new filters.",
+  "tasks": [
+    "1. Fetch; before the final push diff main@origin against the fork point for packages/envoy, go.work*, packages/daemon/go.mod|sum, packages/contracts/fixtures, packages/proof-editor, package.json, bun.lock, patches, .github/actions; add any new closure package or file read (#2229 listenfd, #2167 cmd/listener race step and contracts/fixtures/dispatch-targeted-delivery.json) to every filter that compiles or reads it. Do not merge main without a real conflict.",
+    "2. Edit .github/workflows/envoy-and-contracts.yaml: shared groups and five filters (plan.md Appendix A) after bun_toolchain, with file:line comments ported from #2316 lines 101-306 and 624-705; five outputs in changes.outputs (127-138); if: lines 901, 957, 993, 1031, 1076; comment corrections at 49, 146-152, 182, 207-208, 209-211, 1103-1108, 1070-1072, and one clause per job header naming its filter. No on: edit (every new path is already under on.paths). No ! pattern; envoy_image untouched.",
+    "3. Throwaway checks: recompute closures (plan.md Appendix B) and run the coverage script against the edited workflow's filters with its negative control; check-image-trigger-paths.sh (+ .test.sh, needs PyYAML under $TMPDIR), check-action-pins.sh, check-private-names.sh, pinned actionlint. Restore packages/envoy/infra/go.work.sum after go list in infra (the pod's Go rewrites it).",
+    "4. Docs (AC4): no README describes these filters; correct the workflow comments and add one sentence naming the gating filter in packages/envoy/cmd/dispatch/AGENTS.md:570-590, packages/envoy/AGENTS.md:598-601 and 3843-3849, packages/envoy/infra/AGENTS.md:338-350.",
+    "5. Push, open the PR against main with `Dispatch: INFRA-583`, dispatch:// links only (check-private-names refuses the dashboard host). This PR's run runs all five (workflow file changed). Scratch PR A (base legion/INFRA-583): comment in a packages/contracts/src/*.ts file and a trailing blank line in skills/dispatch/SKILL.md -> five check runs conclusion skipped. Scratch PR B (base legion/INFRA-583): comment in a packages/envoy/internal/pgmigrate/*.go file (in all five closures) -> five start. Read via gh api commits/<sha>/check-runs. Close both and delete their branches after recording run URLs.",
+    "6. AC3: throwaway script over the INFRA-490 window (2026-10-23T21:05Z..10-26T20:34Z): PR runs of this workflow, jobs, PR files; billed minutes per measurement method; before = five jobs' minutes, after = only runs whose PR files match the new filter; per job, total, and minutes per PR push; plus one real non-Go-only PR run vs scratch PR A.",
+    "7. PR body per skill://legion-worker/references/pr-body.md with proofs, measurement table, the two departures, E2E lines."
+  ],
+  "acceptance": [
+    {"criterion": "AC1 filters name every file each job reads", "surface": "edited workflow + go list in the issue pod", "command": "plan.md Appendix B go list commands, then the coverage script on the edited workflow's filters", "pass": "0 unmatched for all five; contracts/src, contracts CHANGELOG, skills/dispatch*, skills/dispatch-writing-specs start none of the five; proof-editor and Bun inputs start only envoy-go-race; negative control reports misses"},
+    {"criterion": "AC2 scratch PRs", "surface": "GitHub Actions in sjawhar/legion, scratch PRs based on legion/INFRA-583", "command": "gh api \"repos/sjawhar/legion/commits/<scratch head>/check-runs?per_page=100\" --paginate --jq '.check_runs[] | select(.name|test(\"^(dispatch-memory|dispatch-multiprocess|broker-multiprocess|envoy-go-race|envoy-infra-go|changes)$\")) | [.name,.status,.conclusion,.html_url] | @tsv'", "pass": "A: five skipped; B: five not skipped"},
+    {"criterion": "AC3 minutes before and after per PR push", "surface": "GitHub Actions API data", "command": "Task 6 throwaway script", "pass": "table in the PR body"},
+    {"criterion": "AC4 docs", "surface": "the diff", "command": "jj diff of the Task 4 files", "pass": "each false or incomplete passage corrected"},
+    {"criterion": "the five jobs still pass", "surface": "this PR's own run", "command": "the check-runs query at the PR head", "pass": "five success"}
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: proof records and PR body (references/pr-body.md), conflicts with #2229/#2167/INFRA-584 (references/conflicts-and-rewrites.md), tools via pinned runners (references/tools.md).",
+      "asd-ste100: the PR body and any message to the architect or other trees are read by teammates.",
+      "ce-simplify-code: the simplify pass on the changed workflow block and comments before the final push.",
+      "dispatch: any write to Dispatch (a comment or ask)."
+    ],
+    "test": [
+      "legion-worker: the tester's proof records, re-running scratch PRs on GitHub Actions and reading every lane at the head (references/merge-gate.md, references/pr-body.md).",
+      "dispatch: any write to Dispatch."
+    ],
+    "review": [
+      "legion-worker: review and approval rules (references/merge-gate.md, references/review-threads.md).",
+      "asd-ste100: judging the PR body and comments a teammate reads."
+    ]
+  },
+  "measured": {
+    "closures": "go list -deps -test, workspace mode, 2026-10-27: memory 48, multiprocess 48 (different sets), broker 29, race packages 70, union 83 (all packages/envoy/internal/**, cmd/dispatch, cmd/broker); envoy-infra-go 69 incl. cmd/listener and cmd/dispatch built in the root workspace; internal/pgmigrate in all five.",
+    "coverage": "picomatch {dot:true} check of Appendix A: 0 unmatched in all five jobs (897/712/215/1359/882 files); AC2 probe paths start none; negative control (drop rds bundle and internal/testnats/*) reports 1 and 6 misses.",
+    "requiredChecks": "live ruleset 12331919: lint, typecheck, test, pr-title; none of the five is required."
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Router PR #2316 (INFRA-520) already defines per-job filters for these five jobs.", "answer": "The plan copies #2316's five filters and their anchors, changing only the workflow file name and dropping the four memory-profile guides; reported to the architect."},
+      {"finding": "cmd/broker/main_test.go:220 passes packages/envoy/docker/rds-global-bundle.pem; not covered by internal/** plus cmd/broker.", "answer": "broker_multiprocess names it."},
+      {"finding": "internal/** plus exact cmd dirs is not drift-proof: #2229 adds packages/envoy/listenfd imported by internal/cmdtest, cmd/dispatch, cmd/listener.", "answer": "Exact package lists (as #2316); Task 1 adds listenfd (or any new closure member on main) before the final push; envoy-go keeps the broad gate and runs every untagged unit test; guides name each filter."},
+      {"finding": "#2167 adds a race step over cmd/listener that reads packages/contracts/fixtures/dispatch-targeted-delivery.json.", "answer": "envoy_go_race already names packages/envoy/**; Task 1 adds the fixture if #2167 is on main first; reported to the architect for #2167's rebase otherwise."},
+      {"finding": "The four guides memory_profile_test.go:147-148 reads are behind t.Skip unless DISPATCH_EDIT_PROFILE_OUT is set; CI never reads them, and two of them are outside on.paths.", "answer": "No filter names them; #2316's error reported to the architect."},
+      {"finding": "Memory and multiprocess closures differ (apitest vs testnats).", "answer": "dispatch_multiprocess adds internal/testnats/*; apitest is under internal/dispatch/**."},
+      {"finding": "Spec AC1 contradicts the code for envoy-go-race (Bun, proof-editor, fixtures).", "answer": "Two recorded spec departures: five per-job filters, and envoy-go-race keeps starting on proof-editor, Bun install inputs and two fixture dirs."},
+      {"finding": "A frozen Bun install reads every workspace manifest, not only package.json and bun.lock.", "answer": "envoy_go_race uses bun_install (every workspace manifest, patches, Bun pin and installer), as #2316; existing filters are out of scope and keep their convention."},
+      {"finding": "Whether the workflow file belongs in the five filters.", "answer": "Yes: a step change must run its job, and this PR's own run then proves all five at the head; cost stated."},
+      {"finding": "AC2 needs scratch PRs based on the issue branch, checked by check-run conclusion.", "answer": "Task 5: both scratch PRs on base legion/INFRA-583; skipped vs not-skipped via the check-runs API; pgmigrate is in all five closures."},
+      {"finding": "AC3 as written has no data source, metric or expected range; the spec's 2,701 minutes come from a static scan; check-private-names refuses dashboard URLs.", "answer": "Task 6 names the window, API calls, billing rules, metric (per job, total, per PR push) and an [INFERENCE] range; PR text uses dispatch:// links."},
+      {"finding": "AC4 has no README to correct and Scope says nothing else.", "answer": "Task 4 lists the false workflow comments (49, 207-208, 1070-1072, ...) and one sentence per guide; outputs and comments are the minimum the filter change needs."},
+      {"finding": "check-image-trigger-paths.sh requires flat lists for image gates and predicate-quantifier some; dispatch output name is taken.", "answer": "envoy_image untouched, no anchors in it, no ! patterns, new names do not collide."},
+      {"finding": "internal/** costs savings (broker runs on Dispatch changes and vice versa).", "answer": "Exact package lists chosen."},
+      {"finding": "envoy-infra-go reads the root workspace (permissions_live_test.go builds cmd/listener and cmd/dispatch).", "answer": "envoy_infra_go names go_workspace, dispatch_server, listener_command, daemonpermissions, infra/**, pull-test-images."},
+      {"finding": "INFRA-584 edits the same jobs' cache steps tonight.", "answer": "Whichever merges second resolves; textual conflicts per conflicts-and-rewrites.md; reported to the architect."},
+      {"finding": "Main pushes: run always or gate by path.", "answer": "Keep today's shape: gate by path against the commit before the push, as envoy does now."},
+      {"finding": "Exact go list commands (tags, -race with CGO, infra tag sets, root-workspace cmd builds) and the coverage script; branch is behind main.", "answer": "Appendix B lists them and the script; .github and the closures are unchanged on main; Task 1 handles later main changes without merging."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "AC1: a new filter for the four Go-only jobs (dispatch-memory, dispatch-multiprocess, broker-multiprocess, envoy-go-race) and one for envoy-infra-go.",
+      "plan": "One filter per job (five), built from shared YAML anchors, identical to router PR #2316's per-job filters.",
+      "evidence": "envoy-go-race is not Go-only: envoy-and-contracts.yaml:977-978 install Bun, and pmdoc's update_test.go:236-239 runs Bun scripts that import @legion/proof-editor; its tests also read packages/contracts/fixtures/{delivery-live,decision-blocks} and every .go/.md under packages/envoy. A union filter for the four would start dispatch-memory on those, which AC1 itself forbids. The file's rule is one filter per job (line 146).",
+      "outcome": {"kind": "changed", "acceptance": ["AC1: 'a new filter for the four Go-only jobs … and one for envoy-infra-go' becomes 'one filter per job for the five jobs'"]}
+    },
+    {
+      "spec": "AC1: the TypeScript contracts, skill files, proof-editor and Bun lock files no longer start them.",
+      "plan": "Holds for dispatch-memory, dispatch-multiprocess, broker-multiprocess and envoy-infra-go. envoy-go-race keeps starting on packages/proof-editor/**, the frozen Bun install's inputs (every workspace manifest, bun.lock, patches/**, Bun pin and installer) and two packages/contracts/fixtures dirs, because it reads them. TypeScript contracts (packages/contracts/src) and skill files start none of the five, so AC2 is unchanged.",
+      "evidence": "Same reads as above; coverage check: the AC2 probe paths start none of the five.",
+      "outcome": {"kind": "changed", "acceptance": ["AC1: the proof-editor and Bun-lock exclusion applies to four of the five jobs; envoy-go-race keeps them"]}
+    }
+  ]
+}
