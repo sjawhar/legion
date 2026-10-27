@@ -2,42 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-141",
-  "completed": "2026-10-27T00:10:00Z",
+  "completed": "2026-10-27T00:45:00Z",
   "generation": 4,
-  "round": "race-fix round: 1e7885a9 (timeOutRoleClaimScan no longer writes Registry.holders; a 'Race-test the listener' step in envoy-go-race), head 5dfa7c20",
+  "round": "review 5660728893's round: 81c75d73 (the race step also covers ./internal/store and ./internal/kvwatch/...; envoy-go-race timeout-minutes 45 -> 75), head 118e2523",
   "verdictProvenance": "provider not verified: written in my own session, no subagent ran; the model in my configuration is the one requested, not one read from the run's transcript",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran both of its commands myself (the test 30 times under -race, and the full ./cmd/listener suite under -race) and its mutant control (RolesHeldBy answering on Ready() in place of Complete(), by go test -overlay, workspace untouched); each matches its proof. Added -race runs of ./internal/store and ./internal/kvwatch/... as the architect asked."
+    "how": "Ran the new step's exact command locally under -race (skipping only the four testpg tests, which need the job's Postgres service) and linted the workflow with a pinned actionlint; both match its proof. Checked its timeout arithmetic against the step's measured time."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The data race of the last round is gone, and the test still fails when the view answers while incomplete",
-      "surface": "go test -race of ./cmd/listener in this pod (CGO_ENABLED=1, gcc present)",
-      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race ./cmd/listener -count=30 -run '^TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes$'; then the same test with go test -overlay replacing RolesHeldBy's 'if !complete' by 'if !r.roleWatcher.Ready()'",
-      "observed": "30 runs: ok 22.421s, exit 0, 0 'WARNING: DATA RACE'. Mutant: --- FAIL at roles_from_claims_test.go:274 'GET /v1/sessions with a role claim view whose first scan timed out: status 200', the same for GET /v1/registry/ses_timed_out_view_holder, and :279 'a send whose role claim view timed out stamps roles [reviewer], want none'",
-      "headSha": "5dfa7c20ceb704f93f5817a6902f44a53185cd24",
-      "negativeControl": "at a9a44ddd the same 30-run command failed 2 of 30 with a DATA RACE (write by reflect.Value.Set in timeOutRoleClaimScan, read by setRoleHolderLocked); the Ready() mutant shows the test still discriminates after the fix"
+      "criterion": "The CI race step covers the packages where this PR's concurrency lives, and they are race-free",
+      "surface": "the step's own command, run in this pod (CGO_ENABLED=1, gcc present)",
+      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/... -skip '<the four testpg tests>'",
+      "observed": "exit 0, 0 'WARNING: DATA RACE'; ok cmd/listener 439.471s, ok internal/store 36.684s, ok internal/kvwatch 66.170s; 456 s wall",
+      "headSha": "118e2523290fd7027d119499a7f9c157683b1ddc",
+      "negativeControl": "the same kind of run found this PR's race at a9a44ddd (2 of 30 runs of TestARoleViewWhoseFirstScanTimedOutIsTheBusNotAnsweringOnTheSessionRoutes), so it detects races in these packages"
     },
     {
-      "criterion": "The listener suite, the role-holder store and the watcher package are race-free",
-      "surface": "go test -race in this pod",
-      "command": "CGO_ENABLED=1 go test -race ./internal/store ./internal/kvwatch/... -count=1; CGO_ENABLED=1 go test -race ./cmd/listener -count=1 -v -timeout 60m -skip '<the four testpg tests>'",
-      "observed": "store ok 36.602s, kvwatch ok 65.712s, 0 races; cmd/listener 239 --- PASS, 0 --- FAIL, 0 races, ok 435.445s",
-      "headSha": "5dfa7c20ceb704f93f5817a6902f44a53185cd24",
-      "negativeControl": "the last round's full -race run of ./cmd/listener at a9a44ddd found one race and failed, so the run detects races in this package"
-    },
-    {
-      "criterion": "No shipped code changed; the original acceptance still holds",
-      "surface": "the diff from bd9796df to 1e7885a9; scripts/e2e-local.sh",
-      "command": "jj diff --stat --from bd9796df3585 --to 5dfa7c20ceb7; bash scripts/e2e-local.sh and the A6' jq",
-      "observed": "changed: .github/workflows/envoy-and-contracts.yaml, cmd/listener/roles_from_claims_test.go, .legion/INFRA-141/implement.json; no non-test Go file, so the real-binary evidence of the previous rounds (6ea9f93b and bd9796df) carries. e2e-local exit 0, both PASS lines, three WARN bus_unavailable records",
-      "headSha": "5dfa7c20ceb704f93f5817a6902f44a53185cd24",
-      "negativeControl": "the e2e send answered 200 before NATS was stopped"
+      "criterion": "The workflow is valid and the job's limit lets each step's -timeout 30m fire first",
+      "surface": ".github/workflows/envoy-and-contracts.yaml at this head",
+      "command": "go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/envoy-and-contracts.yaml; read envoy-go-race",
+      "observed": "actionlint exit 0, no findings. timeout-minutes 75 against setup (~1 min) + first step up to 30 min + compile (~5 min) + second step up to 30 min = 66 min; the second step measured 456 s here",
+      "headSha": "118e2523290fd7027d119499a7f9c157683b1ddc",
+      "negativeControl": "at the previous head the job's 45 minutes ended before a second step's 30-minute -timeout could fire after a 12-18 minute first step, so a hung test would be cancelled without Go's dump"
     }
   ],
-  "ci": "Legion Envoy and Contracts run 40421693936 (which holds envoy-go-race and its new 'Race-test the listener' step) was queued with no job started when read twice, last after the runs above; cited unsettled and not waited for. Tests 40421693818, Docs 40421693892 and Worker Image 40421693838 queued too. The CI step runs ./cmd/listener whole, so it also runs the four testpg tests I skip here, against the job's Postgres service, which sets DISPATCH_TEST_DATABASE_URL, the variable internal/testpg reads.",
+  "carriedEvidence": "No Go file changed (jj diff --name-only 3ff34ede..81c75d73: the workflow and .legion/INFRA-141/review.json), so the real-binary evidence of commits 6ea9f93b, bd9796df and 3ff34ede carries.",
+  "ci": "At 118e2523: Legion Envoy and Contracts 40424820757 (envoy-go-race), Tests 40424820679, Docs 40424820755 and Worker Image 40424820829 queued when read, cited unsettled and not waited for. The runs at 5dfa7c20 were cancelled by this push, so the race step has not yet run in CI.",
   "regressionLocksAdded": []
 }
