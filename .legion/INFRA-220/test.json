@@ -2,52 +2,64 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-220",
-  "completed": "2026-10-25T20:25:00Z",
-  "round": 6,
-  "rebaseRecheck": "rebase re-check 801c889482930f3ce5ead51c08eabd30de754642 → 990ebd7341e03fcab9a41a600bfdcbe6fb1e911e: fingerprint unchanged, bare gates only. The unchanged-diff fingerprint (skill://legion-worker/references/conflicts-and-rewrites.md, base main) computed by the tester at both heads is c0f38d54c32f00d83ce174f3191b5c0f10ae3051d145a811fa673b266dd9d3a9 on each side. The merge (against main f2c17ded) resolved one conflict, scripts/e2e/README.md: main's #2172 rewording of the `claude-implementer-registers` bullet is kept and this branch's `stop-hook-reminds-the-open-phase` bullet follows it; the README holds no conflict marker, and `bash -n` passes on claude-backend-tmux.sh, claude-backend-sandbox.sh and stage1-skeleton.sh at the merge. The behavioural proofs below were made at 801c8894 and are not repeated, per that rule and the architect's direction. CI on 990ebd73 at 20:21Z: Legion Envoy and Contracts 40230176830 in progress; Tests 40230176858, Worker Image 40230176771, Docs 40230176770 and PR Title 40230236637 queued (40230176860 cancelled by the body-edit re-run); cited as running, not waited for.",
-  "testedHead": "990ebd7341e0 (code head: the forward merge against main f2c17ded; d57af10b is its handoff-only child). Behaviour proven at 801c88948293, whose branch diff is identical (fingerprint above).",
+  "completed": "2026-10-27T04:48:00Z",
+  "round": 7,
+  "testedHead": "036a7ffae8379032442104d7018255d2c5c29602 (code head; bb5d34f7 above it changes only .legion/). Red test committed above it at ed9e878998f30d5f37b73cb06f20063562683a86.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at 801c8894: `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts` -> 9 pass, 0 fail in 135.48s; `cd packages/claude-envoy && LEGION_TEST_CLAUDE=$TMPDIR/cc/node_modules/@anthropic-ai/claude-code-linux-x64/claude bun test tests/legion-phase-hook-claude.test.ts` -> 2 pass, 0 fail in 5.92s; and the fourth proof, the pod's install of the pinned release, driven independently by running the rendered install block (proof 1 below)."
+    "how": "The implementer's two proof entries are the devbox runs at 7a93f98f. I read their transcripts on Dispatch. infra220-7a93f98f-tmux-transcript-log: binaries stamped 7a93f98f modified=false, ten checks ok, 'claude backend e2e: PASS'. infra220-7a93f98f-sandbox-transcript-log: fifteen checks ok incl. pod-deleted-resumes-the-same-claude-session, 'claude backend sandbox e2e: PASS', namespace-clean. infra220-7a93f98f-sandbox-sigint-transcript-log: 'FAIL (check rig)' after 'ok prerequisites'. These match the entries. The entries do not cover the code head 036a7ffa; the architect required both runs again at that head (openQuestions), and that rerun is this round's failure."
   },
-  "reviewRound3": [
-    "Important (cold-cache race in claudeCodeBlock): fixed by construction, as the architect asked to judge it. In the block rendered at 801c8894 the only filesystem call on the shared cache before the flock is `mkdir -p -- \"$cache\" 2>/dev/null`, which succeeds when another role has just made the directory; the regular-file recovery `{ rm -f -- \"$cache\" && mkdir -p -- \"$cache\"; }` runs only when that mkdir fails. The old line's failure after the race shown deterministically: with the directory already made, `rm -f -- \"$cache\"` printed `rm: cannot remove 'c': Is a directory` and the subshell exited 1 before npm; the new line in the same state reached npm, exit 0. The race itself was not reproduced, and per the architect no attempt was made to hunt it.",
-    "Minor: packages/daemon/internal/runtime/backend.go:41-44 and scripts/e2e/stage1-skeleton.sh:250-253 now say the image carries Claude Code's pin and its plugin and a pod installs the binary at launch; the PR body's Change bullet says the same, and its E2E (implementer) line names 801c8894 with the pod install among its proofs."
-  ],
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "Acceptance 1 (a pod launches a Claude Code worker), review round 3's race: Claude roles of one pod installing on a cold shared npm cache at once, and a cache path an interrupted flock left as a regular file",
-      "surface": "claudeCodeBlock as the sandbox runtime renders it at 801c8894 for the implementer and the tester (written out by a throwaway in-package Go test), run with /bin/sh in this issue pod of the production cluster, which has the worker image's npm, node and /usr/bin/flock and real egress to npm; only the role state homes and /opt/legion/claude-code were rewritten to writable copies",
-      "command": "for i in 1 2: fresh XDG_CACHE_HOME, `sh run-implementer.sh & sh run-tester.sh & wait`; then `: > xdgf/legion-claude-code; XDG_CACHE_HOME=xdgf sh run-implementer.sh`",
-      "observed": "Both cold concurrent runs: implementer and tester each `added 2 packages`, exit 0 (12 s/9 s, 11 s/7 s), serialized on the cache lock. With a regular file at the cache path the block replaced it with a directory and installed (`added 2 packages in 10s`, exit 0)",
-      "headSha": "801c88948293",
-      "negativeControl": "The old line's second half in the post-race state (directory already present): `rm: cannot remove 'c': Is a directory`, subshell exit 1, npm never reached; the new line in the same state reached npm, exit 0"
+      "criterion": "The Claude Code tmux live proof (N1/N3) passes at the final code head, run as implement.json's command (a) gives it, with LEGION_E2E_APP_KEY_RUNNER=agent-secrets",
+      "evidence": "It cannot pass on the devbox. scripts/e2e/claude-backend-tmux.sh:596 requires a `secrets` command, and :608-613 checks each App key name with the box's own `secrets get <KEY> --no-request` and requires tier agent. It does not use LEGION_E2E_APP_KEY_RUNNER, which this branch added (fe493b81) as the way the keys come in. The devbox's local store no longer holds LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 / GH_REVIEW_APP_PRIVATE_KEY_B64 (removed on purpose ~03:56Z). Proofs220c lane run, 03:37:16-03:40:55Z, exit 1: 'FAIL prerequisites: secrets get LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 does not resolve' (dispatch://INFRA-220/artifact/infra220-036a7ffa-tmux-transcript-log). Reproduced in the issue pod with stand-in tools and a local store without the names: same FAIL line. Red test (commit ed9e8789): `cd scripts/e2e/lib && bun test claude-backend-key-runner.test.ts` -> 0 pass, 1 fail at 036a7ffa ('FAIL prerequisites: secrets get LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 does not resolve'). With lines 608-613 removed (the change sjawhar/legion#2304 makes) it passes: 1 pass, 0 fail. The test needs a fix that does not ask the box's own `secrets` store when LEGION_E2E_APP_KEY_RUNNER names the runner. It passes whether the tool list then asks for `agent-secrets` or for the runner."
     },
     {
-      "criterion": "Acceptance 3 and 5 on Oh My Pi, unchanged since round 4",
-      "surface": "The pinned Oh My Pi binary omp/18.8.9 with both real plugin entries and stand-ins",
-      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts",
-      "observed": "9 pass, 0 fail in 135.48s",
-      "headSha": "801c88948293",
-      "negativeControl": "The file's case that refuses the first architect publish with 404 unclaimed asserts it is not recorded as accepted and is retried under the same key"
-    },
-    {
-      "criterion": "Acceptance 11: Claude Code arms the shipped hook entries and acts on a blocked Stop",
-      "surface": "The real Claude Code 2.1.310 binary with the generated plugin tree and the built dist/envoy-channel.js, stand-ins for the Anthropic API, daemon, listener and NATS",
-      "command": "cd packages/claude-envoy && LEGION_TEST_CLAUDE=$TMPDIR/cc/node_modules/@anthropic-ai/claude-code-linux-x64/claude bun test tests/legion-phase-hook-claude.test.ts",
-      "observed": "2 pass, 0 fail in 5.92s",
-      "headSha": "801c88948293",
-      "negativeControl": "The file asserts PostToolUse fires for the model's own Bash call and for none of the hook's own legion_phase_hook calls"
+      "criterion": "The Claude Code sandbox live proof (N2/N4) passes at the final code head",
+      "evidence": "Proofs220c lane, 04:20:35-04:38:32Z, image ghcr.io/sjawhar/legion-worker@sha256:679f7e8a354fc297ca53ce5aaba43eb6b7135a701d74fbca3d03d04f5febc96e (Worker Image run 40444593180; I read its config blob: org.opencontainers.image.revision=036a7ffae8379032442104d7018255d2c5c29602), no priority class: exit 1, 'claude backend sandbox e2e: FAIL (check architect-registers-the-gate)'. Checks ok: prerequisites, rig, snapshot, bridge, operator-route, daemon, admission. The architect check failed after 300 s. Then: no 'FAIL cleanup', no app-keys dir left, namespace-clean ok with 0 objects before and after. daemon.log: 'list this project's slotted issues: read a slotted issue of project CCS5034217: number of field descriptions must equal number of destinations, got 20 and 31'. That is main's #2289 (47e85fdd, which 036a7ffa contains) and #2317 (baadccdc6a9a) fixes it. So it is main's defect, not this branch's, but the proof did not pass at this head. A forward merge of main is necessary, then a new run. Artifacts: dispatch://INFRA-220/artifact/infra220-036a7ffa-sandbox-transcript-log, -sandbox-daemon-log, -sandbox-namespace-before-txt, -sandbox-namespace-after-txt."
     }
   ],
-  "ci": "Runs of 801c8894 at 16:53Z: Docs 40212834988 success, PR Title 40212834826 success (and the body-edit re-runs), Tests 40212834721 in progress, Worker Image 40212834794 and Legion Envoy and Contracts 40212834732 queued.",
+  "failed": 2,
+  "proof": [
+    {
+      "criterion": "66f1d28f: the channel server's start is bounded when tmux hangs, and the title is still read from a tmux that answers",
+      "surface": "The built packages/claude-envoy/dist/envoy-channel.js, the MCP server Claude Code starts, run with bun 1.3.14 in this issue pod. TMUX and TMUX_PANE set, Envoy off (no envoy.json). A `tmux` on PATH that ignores SIGTERM and leaves a grandchild that holds stdout for 20 s.",
+      "command": "Send an MCP initialize on stdin and time the first answer. 10 runs of dist/envoy-channel.js at 036a7ffa, then 3 runs of the dist at 66f1d28f- (jj file show). Then sessionTitle from src/session-title.ts with stand-in tmux scripts: a good answer, exit 1 with output, output then hang, wrong server pid, a 0.5 s answer.",
+      "observed": "At 036a7ffa: 1.36-1.53 s in all 13 runs (10 + 3), and 0.59 s with no tmux on PATH. The answer is an initialize result. sessionTitle: 'work:edit 01234567' (32 ms) for a good answer and 521 ms for the slow one. 'myproj 01234567' for exit 1, a wrong server pid, and output-then-hang (1023 ms, bounded).",
+      "headSha": "036a7ffae8379032442104d7018255d2c5c29602",
+      "negativeControl": "The dist from before the fix (66f1d28f-), with the same hung tmux, answered initialize after 20.39 s in 1 of 3 runs: the start waited for the whole hang."
+    },
+    {
+      "criterion": "The session-table keeper (5cd07cbc/31f5a834), never tested by a tester before: a session database outage, a link at the transcript path, a transcript that shrinks in place, a resume with no database",
+      "surface": "The real launcher in its test rig (claudeRig: launcher process, real /bin/sh child, real files) against a real Postgres 16.4 (zonky portable binaries under $TMPDIR) in this pod. Throwaway probe file, removed afterwards.",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test ./internal/launcher/ -run TestProbe -count=1 -v (five probes; pg_ctl stop -m fast / start mid-generation)",
+      "observed": "Outage: during the outage each save logged 'could not save …: … connection refused; it is tried again at the next save'. The child stayed alive, and 2 s after the restart the table held both lines. The probe's only failure was its own testpg cleanup, which the restart cut. A link at the transcript path: each save refused with 'too many levels of symbolic links'. The target never reached the table, and a real file after that was saved. Shrink then diverge, and same-length rewrite: the table followed the file each time. Resume with the database at 127.0.0.1:1: start refused after 3.0 s with 'connect … (after 29 attempts in 3s)', and the child never ran. Resume onto a link: start refused with 'restore …: too many levels of symbolic links', and the target was not changed.",
+      "headSha": "036a7ffae8379032442104d7018255d2c5c29602",
+      "negativeControl": "The two refused resumes above are the refusals: an unreachable database and a link at the restored path, and in both the child never started."
+    },
+    {
+      "criterion": "M1: resolve_app_keys writes owner-only key files from the runner and fails naming the App, never the key",
+      "surface": "scripts/e2e/lib/github-apps.sh sourced in bash in this pod, with a stand-in runner that exports a URL-safe unpadded base64 PEM",
+      "command": "require_app_inputs implement review; resolve_app_keys <dir> implement review (ok, runner exit 7, runner prints nothing, a dir with a space, a missing dir)",
+      "observed": "ok: two 0600 files hold the decoded PEM, and app_key_command prints `cat -- '<dir>/IMPL_KEY.pem'`. Exit 7: 'the review App's key (App 3202653, secret-store key REV_FAIL) could not be resolved: … exited 7; the key is not printed', and no file for that key. Empty: '… printed nothing'. Space and missing dir: refused by name.",
+      "headSha": "036a7ffae8379032442104d7018255d2c5c29602",
+      "negativeControl": "Runner exit 7: refused with exit 1, no key file written, key not printed"
+    },
+    {
+      "criterion": "SIGINT control at the final code head",
+      "surface": "Devbox, claude-backend-sandbox.sh against the GKE cluster, Proofs220c lane",
+      "command": "Same command and image as the sandbox run, set -m, SIGINT to the script's bash at 04:42:05Z after 'ok prerequisites'",
+      "observed": "exit 130, 'claude backend sandbox e2e: FAIL (check rig)', no 'FAIL cleanup', `ls -d $XDG_RUNTIME_DIR/legion-e2eccs-app-keys.*` exit 2, no object of project ccs6733093 left (dispatch://INFRA-220/artifact/infra220-036a7ffa-sandbox-sigint-transcript-log)",
+      "headSha": "036a7ffae8379032442104d7018255d2c5c29602",
+      "negativeControl": "This run is the negative control: an interrupted run leaves no App key files and no cluster objects"
+    }
+  ],
+  "ci": "Read at 04:46Z for 036a7ffa. Tests run 40444593132: lint success, typecheck success, test failure. Docs 40444593197 success. PR Title 40444716117 success. Worker Image 40444593180 success. Legion Envoy and Contracts 40444593126 queued. All failing Go packages (internal/admit, internal/api, internal/daemon) are main's #2289 red: 375 of the 380 failing test names are the same set main's Tests run 40444755828 (main 9b92ac14) fails ('got 20 and 31'). The other five, TestRunLaunchesAgainALaunchThePreviousDaemonDidNotFinish (and its 2 subtests), TestRunRetriesAReleaseTheStoreRefusedAtTheNextOrphanSweep and TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds, are 0.1-0.3 s 'timed out waiting' failures in internal/daemon. That package hit the 10-minute test timeout here (600.057 s, 'panic: test timed out'), and main's own run took 595.2 s. The branch does not touch supervision_test.go. All other packages pass. The forward merge that takes #2317 must show test green.",
   "notTested": [
-    "scripts/e2e/claude-backend-tmux.sh and scripts/e2e/claude-backend-sandbox.sh were not run (no docker, tmux or cluster access from an issue pod); the architect has asked two devbox sessions to run them, and acceptance line 1's cluster run is still to happen before acceptance."
+    "The tmux and sandbox live proofs at a head where they can pass: the tmux proof is blocked by the failure above, and the sandbox proof by main's red. Both and the SIGINT control run again on the Proofs2229 lane at the implementer's next head (the lead agreed)."
   ],
   "risks": [
-    "A residual of the same shape, much narrower: when the cache path is a regular file (an interrupted flock left one) and two roles start at once, one role's `rm -f` can meet the directory the other just made, and that launch fails loudly with the install's failure line. Read from the construction, not reproduced.",
-    "Round 4's open risks stand: a corrupted platform tarball fails at the version check (ENOENT) because npm skips a corrupt optional package; every Claude launch downloads about 280 MB and fails without the npm registry; M1 recorded as a spec departure (a non-404-unclaimed publish failure is retried, not dropped)."
+    "sjawhar/legion#2304 (approved, auto-merge armed, not merged at 04:47Z) rewrites the same lines of claude-backend-tmux.sh and lib/github-apps.sh and moves the default Apps to 5341240/5341243 through agent-secrets. This branch's runner input and the resolve_app_keys path will conflict with it. #2304 also hard-wires `agent-secrets` in the tool list, which overlaps LEGION_E2E_APP_KEY_RUNNER.",
+    "The 7a93f98f sandbox transcript shows two 'command terminated with exit code 1' lines inside passing checks (kubectl exec polls). They are not a defect, but a reader can take them for failures."
   ]
 }
