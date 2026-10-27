@@ -28,6 +28,9 @@ const (
 	// WebhookRedeliveryBucket holds the cursor and records of Dispatch's sweep of the GitHub App
 	// webhook's failed deliveries (internal/dispatch/redeliver).
 	WebhookRedeliveryBucket = "envoy_webhook_redelivery"
+	// ListenerStateBucket holds the state every listener pod of a machine shares: the machine's
+	// delivery lease, keyed lease.<ListenerDurable(machineID)> (cmd/listener).
+	ListenerStateBucket = "envoy_listener"
 )
 
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
