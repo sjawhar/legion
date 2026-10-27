@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reearth/ygo/persistence"
+
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -17,19 +19,34 @@ import (
 
 // A room's append held for half a second while its settlement falls due: the settlement waits for
 // it and versions the document once it lands. Its waits wake when the append lands, not every
-// millisecond of the half second, and the version follows the append promptly.
+// millisecond of the half second, and the settlement starts promptly once the append commits. The
+// promptness is read between the append's commit (afterAppendCommit) and the settlement's start
+// (beforeSettleStart), in process: a bound on the version's write would also time the settlement's
+// own database work, which says nothing about how it is woken.
 func TestALaggingRoomsSettlementWakesOnceWhenItsAppendsLand(t *testing.T) {
 	const held = 500 * time.Millisecond
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
-	appends := &heldStore{VersionedStore: NewPgVersioned(database), room: artifactID, entered: make(chan struct{}), release: make(chan struct{})}
+	persist := NewPgVersioned(database)
+	var counting atomic.Bool
+	var committed, started atomic.Int64
+	persist.afterAppendCommit = func(room string, _ persistence.Version) {
+		if room == artifactID && counting.Load() {
+			committed.CompareAndSwap(0, time.Now().UnixNano())
+		}
+	}
+	appends := &heldStore{VersionedStore: persist, room: artifactID, entered: make(chan struct{}), release: make(chan struct{})}
 	t.Cleanup(appends.let)
 	service := newShutdownTestService(t, database, appends)
-	var counting atomic.Bool
 	var wakes atomic.Int64
 	service.settlementWoke = func(room string) {
 		if room == artifactID && counting.Load() {
 			wakes.Add(1)
+		}
+	}
+	service.beforeSettleStart = func(room string) {
+		if room == artifactID && counting.Load() && committed.Load() != 0 {
+			started.CompareAndSwap(0, time.Now().UnixNano())
 		}
 	}
 	seedServiceText(t, service, artifactID, "before")
@@ -48,20 +65,25 @@ func TestALaggingRoomsSettlementWakesOnceWhenItsAppendsLand(t *testing.T) {
 		t.Fatal("the room's append never reached the store")
 	}
 	time.Sleep(held)
-	released := time.Now()
 	appends.let()
 	waitFor(t, roomWait(t), "the settlement to version the edit", func() bool {
 		number, _, _ := latestDocumentVersion(t, observer, artifactID)
 		return number > versioned
 	})
-	written := time.Since(released)
 	counting.Store(false)
 
 	if got := wakes.Load(); got > 3 {
 		t.Errorf("the settlement woke %d times while its room's append was held for %s, want at most 3", got, held)
 	}
-	if written > 50*time.Millisecond {
-		t.Errorf("the version was written %s after the append was let go, want within 50ms", written.Round(time.Millisecond))
+	switch {
+	case committed.Load() == 0:
+		t.Errorf("the held append's commit was never seen")
+	case started.Load() == 0:
+		t.Errorf("no settlement started after the held append committed")
+	default:
+		if after := time.Duration(started.Load() - committed.Load()); after > 50*time.Millisecond {
+			t.Errorf("the settlement started %s after its room's append committed, want within 50ms", after.Round(time.Millisecond))
+		}
 	}
 	if _, markdown, _ := latestDocumentVersion(t, observer, artifactID); markdown != "after\n" {
 		t.Errorf("the settlement versioned %q, want the held edit", markdown)

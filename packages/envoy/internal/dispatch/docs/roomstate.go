@@ -74,10 +74,22 @@ type roomState struct {
 	// appendLinger is the channel a lingering browser append of the room waits on, made by the
 	// first one to linger and closed, then dropped, to end every linger at once: when something
 	// asks the room's appends to go now (flushRoomAppends, which also records appendsFlushed, so
-	// an update recorded before that ask no longer lingers), when the queue reaches a batch's cap
-	// (recordUpdateClass), and when the record is handed over (handOverFailedRoomLocked).
+	// an update recorded before that ask no longer lingers), when a wait for the room's appends
+	// begins (waitForRoomIdle, which also counts itself in appendWaiters, so no append lingers
+	// while it waits), when the queue reaches a batch's cap (recordUpdateClass), and when the
+	// record is handed over (handOverFailedRoomLocked).
 	appendLinger   chan struct{}
 	appendsFlushed time.Time
+	appendWaiters  int
+	// idle is the room's idle signal: the channel a wait for the room's appends waits on
+	// (waitForRoomIdle), made by the first waiter that finds pendingUpdates or durableAppends
+	// above zero and closed, then dropped, once both are zero again (countsFellLocked), or when the
+	// record is handed over with its counts (handOverFailedRoomLocked). Every place either count
+	// falls tells countsFellLocked; nothing is made while nobody waits. settleWhenIdle marks a
+	// settlement whose wait for the appends ran out (retrySettleSoon): the same fall that closes
+	// the signal arms it again, at once, as any settlement timer is armed.
+	idle           chan struct{}
+	settleWhenIdle bool
 	settle         *time.Timer
 	unrecorded     map[pmdoc.MarkRef]time.Time
 	durableAppends atomic.Int64
@@ -249,6 +261,9 @@ func (s *Service) forgetLocked(room string, state *roomState) {
 // the connection id the service gave it. Its caller holds state.mu.
 func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 	state.released = true
+	// A wait for the room's appends on this record looks the room up again, and waits on the
+	// record that counts the room's updates from now on, if any does.
+	state.wakeIdleLocked()
 	if len(state.connected) == 0 && len(state.updateClasses) == 0 {
 		s.rooms.CompareAndDelete(room, state)
 		return
@@ -344,6 +359,7 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdate
 	state.queuedBytes -= len(class.update)
 	if class.durable && !class.handed {
 		state.pendingUpdates--
+		s.countsFellLocked(room, state)
 	}
 	return class, state, true
 }
@@ -376,6 +392,12 @@ func (s *Service) hasPendingUpdates(room string) bool {
 		return false
 	}
 	defer s.unlockState(room, state)
+	return state.pendingLocked()
+}
+
+// pendingLocked is whether state counts an update the room's persistence has not taken yet. Its
+// caller holds state.mu.
+func (state *roomState) pendingLocked() bool {
 	return state.pendingUpdates > 0
 }
 
@@ -386,6 +408,7 @@ func (s *Service) hasPendingUpdates(room string) bool {
 func (s *Service) finishDurableAppend(room string, state *roomState) {
 	state.mu.Lock()
 	state.durableAppends.Add(-1)
+	s.countsFellLocked(room, state)
 	s.unlockState(room, state)
 }
 
@@ -395,7 +418,51 @@ func (s *Service) hasDurableAppend(room string) bool {
 		return false
 	}
 	defer s.unlockState(room, state)
+	return state.appendingLocked()
+}
+
+// appendingLocked is whether state counts a durable append that has not landed. Its caller holds
+// state.mu.
+func (state *roomState) appendingLocked() bool {
 	return state.durableAppends.Load() > 0
+}
+
+// countsFellLocked is told each time pendingUpdates or durableAppends falls on state, room's
+// record, wherever it falls: an update's class consumed (consumeUpdateClass) or taken by its call
+// (planRoomAppend), an append finished (finishDurableAppend) or committed (roomAppend.committed).
+// Once both are zero the room is idle: it closes the idle signal, so every wait for the room's
+// appends wakes (waitForRoomIdle), and arms the settlement a wait gave up on (retrySettleSoon) at
+// once, through scheduleSettleAfterLocked like any settlement timer, so settleWG counts it and
+// stopAllSettleTimers stops it. A record released meanwhile - handed over, its counts carried to
+// its successor - arms nothing: the failure that dropped it dropped its settlement
+// (failRoomLocked). Its caller holds state.mu.
+func (s *Service) countsFellLocked(room string, state *roomState) {
+	if state.pendingLocked() || state.appendingLocked() {
+		return
+	}
+	state.wakeIdleLocked()
+	if state.settleWhenIdle && !state.released {
+		s.rearmSettleLocked(room, state)
+	}
+}
+
+// idleSignalLocked is state's idle signal, made now when no waiter has made it yet. Its caller
+// holds state.mu and has found a count above zero, which countsFellLocked closes the signal for
+// once both are zero again.
+func (state *roomState) idleSignalLocked() <-chan struct{} {
+	if state.idle == nil {
+		state.idle = make(chan struct{})
+	}
+	return state.idle
+}
+
+// wakeIdleLocked closes state's idle signal, if a waiter made one, and drops it, so the next
+// waiter makes its own. Its caller holds state.mu.
+func (state *roomState) wakeIdleLocked() {
+	if state.idle != nil {
+		close(state.idle)
+		state.idle = nil
+	}
 }
 
 // hasOpenLiveWrite is whether an open live-write transaction of this process is writing room's

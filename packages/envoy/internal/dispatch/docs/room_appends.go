@@ -370,9 +370,10 @@ func queuedUpdateLocked(queue []documentUpdateClass, update []byte, from int) in
 // committed is the room's bookkeeping for a committed append, before the transaction releases the
 // document's lock: the figures, INFRA-593's noteStoredUpdates with the head the append left and the
 // oldest version the gate read, every class it stored marked stored, with its durable append, if
-// it is durable, finished on the record that holds it now, and the settlement scheduled once when
-// one of the durable ones changed content. The marks are made under the lock, so another append
-// that takes the lock next finds them (recheck).
+// it is durable, finished on the record that holds it now (countsFellLocked, which wakes the
+// room's waiters once nothing is left to store), and the settlement scheduled once when one of
+// the durable ones changed content. The marks are made under the lock, so another append that
+// takes the lock next finds them (recheck).
 func (a *roomAppend) committed(head, last, oldest int64) {
 	if a == nil {
 		return
@@ -400,6 +401,7 @@ func (a *roomAppend) committed(head, last, oldest int64) {
 				}
 			}
 		}
+		a.service.countsFellLocked(a.room, state)
 		a.service.unlockState(a.room, state)
 	}
 	if settles {
@@ -458,9 +460,10 @@ const (
 // the start of its call ends it, since the call has taken it; it stays queued for the call's
 // append to find and mark, and no other call's batch takes it. With linger, a batch whose run is
 // not full yet answers no classes but the channel its linger waits on and how long it waits: until
-// roomAppendLinger after the class was recorded, none while the service is stopping or once
-// something asked the room's appends to go after the class was recorded (flushRoomAppends). The
-// call then asks again without linger, and the batch is taken then.
+// roomAppendLinger after the class was recorded, none while the service is stopping, while a wait
+// for the room's appends is waiting (appendWaiters, waitForRoomIdle), or once something asked the
+// room's appends to go after the class was recorded (flushRoomAppends). The call then asks again
+// without linger, and the batch is taken then.
 func (s *Service) planRoomAppend(room string, update []byte, linger bool) (plan appendPlan, members []documentUpdateClass, wake <-chan struct{}, wait time.Duration) {
 	state := s.lockExistingState(room)
 	if state == nil {
@@ -479,13 +482,14 @@ func (s *Service) planRoomAppend(room string, update []byte, linger bool) (plan 
 		class.handed = true
 		if class.durable {
 			state.pendingUpdates--
+			s.countsFellLocked(room, state)
 		}
 	}
 	if !class.durable || s.suppressionQueued(room) {
 		return appendAlone, []documentUpdateClass{*class}, nil, 0
 	}
 	end, full := batchRunLocked(state.updateClasses, at)
-	if linger && !full && !s.stopping.Load() && !s.shuttingDown(room) && class.recorded.After(state.appendsFlushed) {
+	if linger && !full && state.appendWaiters == 0 && !s.stopping.Load() && !s.shuttingDown(room) && class.recorded.After(state.appendsFlushed) {
 		if wait = time.Until(class.recorded.Add(roomAppendLinger)); wait > 0 {
 			if state.appendLinger == nil {
 				state.appendLinger = make(chan struct{})
@@ -523,6 +527,27 @@ func (state *roomState) wakeAppendLingerLocked() {
 		close(state.appendLinger)
 		state.appendLinger = nil
 	}
+}
+
+// warmRoomAppends opens a connection of the room-appends pool (store.Pool.RoomAppends) when the
+// pool holds none, on a goroutine of its own, so the next batch of a room's browser updates finds
+// one waiting. A room's load asks for it (onLoadDocument). The pool opens on demand and keeps no
+// floor of idle connections (store.Pool.separate), so without it the first batch after the process
+// starts, or after the pool's connections have idled out, dials its connection between its
+// update's commit in the room and its durability - tens of milliseconds every wait for that
+// append waits out too: a settlement's, which versions the update only once it lands, and
+// Shutdown's drain. One warm-up runs at a time (warmingAppends).
+func (s *Service) warmRoomAppends() {
+	appends, err := s.store.Pool.RoomAppends()
+	if err != nil || appends.Stat().TotalConns() > 0 || !s.warmingAppends.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer s.warmingAppends.Store(false)
+		if conn, err := appends.Acquire(context.Background()); err == nil {
+			conn.Release()
+		}
+	}()
 }
 
 // noteStoredUpdates is told of each committed append of room's browser updates, after its commit

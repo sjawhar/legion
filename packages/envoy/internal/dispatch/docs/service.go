@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
@@ -211,10 +212,11 @@ type Service struct {
 	// closes the room (evictFailed). Nil outside tests; tests use it to close and reload the room
 	// another way first.
 	beforeFailedEviction func(room string)
-	// settlementWoke runs at each wake of a wait for a room's appends: each poll of
-	// waitForPendingUpdates and waitForDurableAppends - a settlement's waits, and Shutdown's drain,
-	// which waits through the second - and each re-arm retrySettleSoon makes for a settlement whose
-	// wait ran out. Nil outside tests; tests count the wake-ups a room whose appends lag costs.
+	// settlementWoke runs at each wake of a wait for a room's appends: each time the room's idle
+	// signal wakes waitForPendingUpdates or waitForDurableAppends - a settlement's waits, and
+	// Shutdown's drain, which waits through the second - and at each re-arm of a settlement whose
+	// wait ran out (retrySettleSoon, rearmSettleLocked), which runs under the room's state lock.
+	// Nil outside tests; tests count the wake-ups a room whose appends lag costs.
 	settlementWoke func(room string)
 	// roomScanned runs at each scan a document socket's admission makes over the rooms:
 	// canAddConnection's pass over every room record, and canOpenRoom's copy of ygo's live room
@@ -294,6 +296,9 @@ type Service struct {
 	// appendFigures counts what the rooms' browser append transactions did (room_appends.go), for
 	// the room figures.
 	appendFigures roomAppendFigures
+	// warmingAppends is set while warmRoomAppends opens a connection of the room-appends pool, so
+	// rooms that load together open one, not one each.
+	warmingAppends atomic.Bool
 }
 
 type artifactOwner struct {
@@ -893,6 +898,7 @@ func (s *Service) Quiesce(ctx context.Context) error {
 		// bumping it here ends that settlement before it opens a transaction.
 		state.roomGeneration = s.nextRoomGeneration()
 		s.stopSettleTimer(state.settle)
+		state.settleWhenIdle = false
 		// The closed room's settlement failures are not the next room's (see
 		// reserveRoomCloseLocked).
 		state.settleFailures = 0
@@ -945,7 +951,12 @@ func (s *Service) scheduleSettleLocked(room string, state *roomState) {
 	s.scheduleSettleAfterLocked(room, state, s.settle)
 }
 
+// scheduleSettleAfterLocked arms room's settlement to run after delay, in place of the one armed
+// on state, if any: the timer it had, and the re-arm a wait left for when the room's appends land
+// (settleWhenIdle, retrySettleSoon), which the settlement armed now runs in place of. Its caller
+// holds state.mu.
 func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay time.Duration) {
+	state.settleWhenIdle = false
 	if s.stopping.Load() || s.quiescing.Load() || s.shuttingDown(room) || state.closed || state.failed != nil {
 		return
 	}
@@ -1012,14 +1023,17 @@ func (s *Service) stopSettleTimer(timer *time.Timer) bool {
 
 // takeOverSettlementLocked is for a caller that has just moved state's generation, which ends every
 // settlement that read the old one: it stops the room's armed timer, and answers whether that ended
-// a settlement the caller now owes - one the timer would have run, one whose timer has fired and
+// a settlement the caller now owes - one the timer would have run, one a wait for the room's appends
+// left to re-arm once they land (settleWhenIdle, retrySettleSoon), one whose timer has fired and
 // whose callback has not returned (still registered, isSettleTimerArmed), or one running on the
 // state (settling, which settleLastPeer counts from the moment it takes the timer). A settlement
 // past its supersession check commits its own work, and the one its caller arms finds nothing new.
 // Its caller holds state.mu.
 func (s *Service) takeOverSettlementLocked(state *roomState) bool {
 	stopped := s.stopSettleTimer(state.settle)
-	return stopped || s.isSettleTimerArmed(state.settle) || state.settling > 0
+	rearm := state.settleWhenIdle
+	state.settleWhenIdle = false
+	return stopped || rearm || s.isSettleTimerArmed(state.settle) || state.settling > 0
 }
 
 // takeSettleTimer stops an armed settlement timer and hands its caller the settleWG count the timer
@@ -1088,16 +1102,35 @@ func (s *Service) scheduleSettleAfterAppend(room string) {
 	s.scheduleSettleLocked(room, state)
 }
 
+// retrySettleSoon arms room's settlement again for a settlement whose wait for the room's appends
+// ran out (settleRoomWithin): at once when they have all landed by now, and otherwise when they
+// do, since the fall of the room's counts to zero that closes its idle signal re-arms it
+// (settleWhenIdle, countsFellLocked). A lagging room's settlement so wakes once, when its appends
+// land, rather than on a timer for as long as they lag, and no goroutine waits for the appends: a
+// record holds the mark only while it counts an update, which it does until its counts fall, and
+// a record released with its counts carried away, a service that stops and a room that closes or
+// fails each refuse the re-arm (countsFellLocked, scheduleSettleAfterLocked).
 func (s *Service) retrySettleSoon(room string) {
 	if s.stopping.Load() || s.shuttingDown(room) {
 		return
 	}
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
+	if state.pendingLocked() || state.appendingLocked() {
+		state.settleWhenIdle = true
+		return
+	}
+	s.rearmSettleLocked(room, state)
+}
+
+// rearmSettleLocked arms room's settlement at once for a settlement whose wait for the room's
+// appends ran out, now that they have landed (retrySettleSoon, countsFellLocked). Its caller holds
+// state.mu.
+func (s *Service) rearmSettleLocked(room string, state *roomState) {
 	if s.settlementWoke != nil {
 		s.settlementWoke(room)
 	}
-	state := s.lockState(room)
-	defer s.unlockState(room, state)
-	s.scheduleSettleAfterLocked(room, state, 10*time.Millisecond)
+	s.scheduleSettleAfterLocked(room, state, 0)
 }
 
 // nextRoomGeneration is the generation a state moves to when something invalidates what a
@@ -2046,31 +2079,62 @@ func currentUpdateCursor(ctx context.Context, q Queryer, artifactID string) (int
 	return cursor, nil
 }
 
+// lockSettlementCursor takes the document's advisory lock in a settlement's transaction, which
+// already holds the document's owner row (lockArtifactOwner). Outside Shutdown it waits for the
+// lock as every writer of the document does (lockDocumentRoom).
+//
+// Shutdown will not wait long behind a writer, so a settlement during it waits for the lock at
+// most 100 ms, in one statement: pg_advisory_xact_lock under lock_timeout, inside a savepoint. A
+// lock still held when that runs out fails the statement (lock_not_available, 55P03); rolling back
+// to the savepoint undoes the statement and the timeout alone, so the transaction stays usable,
+// and the settlement leaves the document to resume, as one that finds its lock held has always
+// done. Taken, the lock moves to the transaction as the savepoint is released, and the previous
+// lock_timeout, read before the wait, is set again first: a setting made with set_config's local
+// flag outlives a released savepoint (as SET LOCAL does, writeAdvice), and the rest of the
+// settlement runs under the timeout it had.
+//
+// The bound is what makes joining the lock's queue safe here. What can be ahead of the settlement
+// is whatever holds or waits for the document's lock - a live write's transaction, a room's batch
+// of browser appends holding the lock across its transaction, the stale-room evictor's
+// confirmation, another process's writer - and what can queue behind it is a later taker of that
+// lock and a writer of the owner row it holds. A cycle through it - one Postgres sees, which it
+// would break only at deadlock_timeout, or one through a wait in a process that Postgres cannot
+// see, such as a holder waiting for a pooled connection - lasts no longer than the bound, after
+// which the settlement lets go of everything its transaction took. 100 ms is enough for a batch
+// of appends, a few round trips under the lock, to finish and let the settlement through, and
+// short against the drain budget the settlement runs under (ShutdownDrainBudget).
 func (s *Service) lockSettlementCursor(ctx context.Context, tx pgx.Tx, room string) error {
 	if !s.shuttingDown(room) {
 		return lockDocumentRoom(ctx, tx, room)
 	}
-	// Shutdown will not wait behind a live writer, so it try-locks the room instead of blocking
-	// on it, and gives up after the deadline rather than queueing. That is what makes this
-	// branch safe: it never joins a lock queue, so it can never be a party to a cycle.
-	deadline := time.NewTimer(100 * time.Millisecond)
-	defer deadline.Stop()
-	for {
-		var locked bool
-		if err := tx.QueryRow(ctx, `select pg_try_advisory_xact_lock(hashtext($1))`, room).Scan(&locked); err != nil {
-			return err
+	var previous string
+	wait := &pgx.Batch{}
+	wait.Queue(`savepoint shutdown_settlement_lock`)
+	wait.Queue(`select current_setting('lock_timeout')`).QueryRow(func(row pgx.Row) error {
+		return row.Scan(&previous)
+	})
+	wait.Queue(`select set_config('lock_timeout', '100ms', true)`)
+	wait.Queue(`select pg_advisory_xact_lock(hashtext($1))`, room)
+	err := tx.SendBatch(ctx, wait).Close()
+	if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+		undo := &pgx.Batch{}
+		undo.Queue(`rollback to savepoint shutdown_settlement_lock`)
+		undo.Queue(`release savepoint shutdown_settlement_lock`)
+		if err := tx.SendBatch(ctx, undo).Close(); err != nil {
+			return fmt.Errorf("leave the document cursor lock's wait during shutdown: %w", err)
 		}
-		if locked {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return errors.New("document cursor lock remained held during shutdown")
-		case <-time.After(time.Millisecond):
-		}
+		return errors.New("document cursor lock remained held during shutdown")
 	}
+	if err != nil {
+		return fmt.Errorf("lock document cursor during shutdown: %w", err)
+	}
+	restore := &pgx.Batch{}
+	restore.Queue(`select set_config('lock_timeout', $1, true)`, previous)
+	restore.Queue(`release savepoint shutdown_settlement_lock`)
+	if err := tx.SendBatch(ctx, restore).Close(); err != nil {
+		return fmt.Errorf("restore lock_timeout after the document cursor lock: %w", err)
+	}
+	return nil
 }
 
 // referenceSource names the reference source whose mention edges an event introduces: the
@@ -2299,6 +2363,7 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 				// over.
 				state.settleFailures = 0
 				s.stopSettleTimer(state.settle)
+				state.settleWhenIdle = false
 				// Snapshot while the state is locked, then write after unlocking: settlement holds
 				// the document's advisory lock before it takes state.mu, so taking that lock here
 				// while holding the state would invert the lock order. The authors are already in
@@ -2386,7 +2451,8 @@ func (s *Service) evictFailed(room string, state *roomState) error {
 
 // invalidateForEviction ends what room's state has armed, ahead of the room's close: the
 // generation bump ends a settlement whose timer already fired before it opens its transaction,
-// and the timer's stop the one still armed. It returns the state, for the eviction to settle once
+// the timer's stop the one still armed, and the cleared mark the re-arm a wait for the room's
+// appends left (settleWhenIdle). It returns the state, for the eviction to settle once
 // the room is closed (forgetEvicted: kept while held, forgotten when nothing holds it, or handed
 // over when it failed), or nil when the service holds none for room.
 func (s *Service) invalidateForEviction(room string) *roomState {
@@ -2395,6 +2461,7 @@ func (s *Service) invalidateForEviction(room string) *roomState {
 		state.roomGeneration = s.nextRoomGeneration()
 		state.settleFailures = 0
 		s.stopSettleTimer(state.settle)
+		state.settleWhenIdle = false
 		s.unlockState(room, state)
 	}
 	return state
@@ -2456,6 +2523,7 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	done := state.failedDone
 	state.roomGeneration = s.nextRoomGeneration()
 	s.stopSettleTimer(state.settle)
+	state.settleWhenIdle = false
 	s.purgeSuppressedPersistence(room)
 	// The failure drops this room's settlement: a queued one is stopped just above, one
 	// already running refuses on the failed room (settleRoom), and its retry stops because
@@ -2572,37 +2640,58 @@ func (s *Service) issueOpen(ctx context.Context, q Queryer, artifactID string) (
 // waitForPendingUpdates waits until the room has handed persistence every update its update
 // observer recorded, from every peer and the service alike. It counts the room, not a writer: a
 // peer still writing keeps it waiting for as long as the room stores more slowly than it writes.
-// It asks the room's appends to go first (flushRoomAppends), so it waits out no batch's linger.
+// It wakes on the room's idle signal (waitForRoomIdle), which a fall of the pending count to zero
+// while an append still runs does not close, so a room it finds pending it leaves once that
+// append has landed too - what each caller waits for next (waitForDurableAppends).
 func (s *Service) waitForPendingUpdates(ctx context.Context, room string) error {
-	s.flushRoomAppends(room)
-	for s.hasPendingUpdates(room) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Millisecond):
-			if s.settlementWoke != nil {
-				s.settlementWoke(room)
-			}
-		}
-	}
-	return nil
+	return s.waitForRoomIdle(ctx, room, (*roomState).pendingLocked)
 }
 
 // waitForDurableAppends waits until every durable append the room's record counts has landed,
-// asking the room's appends to go first (flushRoomAppends), as waitForPendingUpdates does.
+// woken by the room's idle signal (waitForRoomIdle), as waitForPendingUpdates is.
 func (s *Service) waitForDurableAppends(ctx context.Context, room string) error {
+	return s.waitForRoomIdle(ctx, room, (*roomState).appendingLocked)
+}
+
+// waitForRoomIdle waits until busy, read under the state lock of room's record, no longer holds,
+// or ctx ends; ctx is the wait's bound, a caller's deadline and not a poll. It asks the room's
+// appends to go first (flushRoomAppends), and none lingers while it waits (appendWaiters), so it
+// waits out no batch's linger. It sleeps on the room's idle signal, which closes once the record
+// counts no update its persistence has not taken and no append that has not landed
+// (countsFellLocked), and looks the room's record up again at each wake: a failed room's
+// eviction moves the counts to a successor record and closes the old one's signal
+// (handOverFailedRoomLocked). Each wake runs the settlementWoke hook.
+func (s *Service) waitForRoomIdle(ctx context.Context, room string, busy func(*roomState) bool) error {
 	s.flushRoomAppends(room)
-	for s.hasDurableAppend(room) {
+	for {
+		state := s.lockExistingState(room)
+		if state == nil {
+			return nil
+		}
+		if !busy(state) {
+			s.unlockState(room, state)
+			return nil
+		}
+		idle := state.idleSignalLocked()
+		state.appendWaiters++
+		state.wakeAppendLingerLocked()
+		s.unlockState(room, state)
+		var err error
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Millisecond):
-			if s.settlementWoke != nil {
-				s.settlementWoke(room)
-			}
+			err = ctx.Err()
+		case <-idle:
+		}
+		state.mu.Lock()
+		state.appendWaiters--
+		s.unlockState(room, state)
+		if err != nil {
+			return err
+		}
+		if s.settlementWoke != nil {
+			s.settlementWoke(room)
 		}
 	}
-	return nil
 }
 
 func (s *Service) shuttingDown(room string) bool {

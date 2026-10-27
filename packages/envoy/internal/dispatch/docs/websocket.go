@@ -433,6 +433,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
+	// The room's browser updates are stored on the room-appends pool, which opens a connection
+	// beside this load when it holds none, so the room's first batch dials none (warmRoomAppends).
+	s.warmRoomAppends()
 	open, err := s.issueOpen(ctx, rooms, room)
 	if err != nil {
 		return err
