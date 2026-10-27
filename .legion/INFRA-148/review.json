@@ -2,85 +2,42 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-148",
-  "completed": "2026-10-27T09:58:16Z",
+  "completed": "2026-10-27T13:09:26Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedCodeHead": "7eb8e74f3aca3cde959a3d5270c64d58e3179f78",
+  "reviewedCodeHead": "ca5af069ca51c9277e90fc8a5400aa835b41ee21",
+  "scope": "As the architect narrowed it after the round cap: only the round-1 fixes, any correctness bug they introduce, and the required checks. New minors go into the architect's acceptance notes.",
   "critical": 0,
-  "important": 5,
-  "minor": 9,
+  "important": 1,
+  "minor": 1,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/pi-envoy/extensions/envoy.ts:2859",
-      "description": "Oh My Pi runs the context handler for every transformContext, not only main-loop turns. runEphemeralTurn (BTW, the stop-time self-check via sideTurn), the handoff prompt and buildLiveProviderContext (Anthropic remote compaction) all go through it. The list is appended after the side prompt, each such request waits up to 800 ms, and the remote-compaction slice (length of convert(prefix) applied to convert(prefix+kept)) moves by one. Verified in /opt/omp/bin/omp: runEphemeralTurn -> convertMessagesToLlm -> transformContext Pb -> emitContext. No test covers these paths."
-    },
-    {
-      "severity": "important",
-      "file": "packages/claude-envoy/hooks/session-hook.ts:220",
-      "description": "process.exit(0) at the deadline kills the worker in the middle of Bun.spawnSync. runCommand's group kill and rmSync never run, so a slow `!` token command keeps running (detached group) and its stdout file, which holds the bearer token, stays in tmpdir/envoy-command-*. One is left per SessionStart and SubagentStart."
-    },
-    {
-      "severity": "important",
-      "file": "packages/claude-envoy/hooks/session-hook.ts:216-232",
-      "description": "With a `!` token command that does not finish in the ~0.7 s window, no hook ever completes a read or writes answers.json. Every Claude Code start, resume, compaction and subagent then carries the failure line and never the list. The README's recommended token form is a `!` command."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy-client/src/session-answers.ts:363",
-      "description": "On a failed read, carry() renders the cache. A cache that holds no item in the window (the usual empty list, or items past 72 h) renders undefined, so a session whose Dispatch now refuses (401/5xx/hang) carries nothing and looks the same as 'nothing'. D5 says that must not happen. The cached header also says 'Dispatch did not answer now' for every failure and drops the reason."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/store/session_answers.go:89",
-      "description": "S2 filters message_deliveries on session_id, state and created_at, but message_deliveries_session (0051) indexes session_id only. So every model request reads every delivery the session ever received, and the comment at :36-41 (and in 0130) says the opposite. Add a (session_id, created_at) index as 0130 does, or measure it and correct the comments."
+      "file": "packages/pi-envoy/src/session-answers-context.ts:72-99",
+      "description": "Round-1 finding 1 is only partly fixed. endsBeforeBranch matches only `type: \"message\"` branch entries. When a remote compaction's cut comes right after a custom_message entry (role `custom`, which is every Envoy delivery with triggerTurn, envoy.ts:1213) or a branch_summary entry, nothing matches. The prefix conversion then gets the list, and buildLiveProviderContext's slice (ve = convert(prefix).length) keeps one message past the cut. A custom_message after the match also never sets `later`. Confirmed by /legion/scratch/tmp/dr148b/probe.ts: a prefix [user, assistant, custom] returns the list. The docs (pi-envoy AGENTS.md:375-378, README.md:67-69, CHANGELOG.md:35-37) say a remote compaction carries no list."
     },
     {
       "severity": "minor",
-      "file": "packages/pi-envoy/src/session-answers-context.ts:32",
-      "description": "The two-copy guard finds only a list that was appended. With an empty list, copy B makes a second HTTP read after A's read settled, so the request can wait up to 2 x 800 ms, past the 1 s bound."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy-client/src/session-answers.ts:354",
-      "description": "The memory cache, answers.json and the in-flight join are keyed by session only, not by Dispatch URL. If the session's Dispatch changes, a list read from Dispatch A is shown when Dispatch B fails."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/AGENTS.md:2438-2452",
-      "description": "Still describes the old reply routing and the old suppressed_authors rule ('on a reply only the thread's root author'). The new route of a reply to the document's credited sessions and comment_create.go's new rule are missing."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/store/migrations/0129_events_person_words.up.sql:10",
-      "description": "Says a GIN index would end HOT updates. The outbox's recordBatch update already sets published_at and next_attempt_at, which events_unpublished and events_unpublished_ready use, so those updates are not HOT now. The same claim is in cmd/dispatch/README.md:876."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/store/session_answers.go:17",
-      "description": "Cleanup: the feature's read model (relation precedence, dispatch:// and href shapes) is in the infrastructure package store, which now imports contracts and model, and it adds a fifth copy of the Queryer interface. Move it to its own package, as asks, events and refs are."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:965",
-      "description": "Cleanup: loadThreadDocument copies loadRootCommentAuthor's recursive query, and the reply branch runs both on the same id. Use one loadThreadRoot that returns the author and the document."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy-client/src/session-answers.ts:267",
-      "description": "Cleanup: writeCacheFile copies dispatch-session-state's writeAtomically because of an import cycle, and the copies already differ. Both hosts also repeat the sessionDirectory try/catch. Move the state-dir helpers to a leaf module."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/pi-envoy/extensions/envoy.ts:2823",
-      "description": "Cleanup: sessionAnswersText repeats replyAddress's session resolution. Other duplicates: the owner rendering at session-answers.ts:83 repeats openAskOwner (dispatch-execute.ts:2169), and the message helpers in dispatch-first.ts are now shared."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy-client/src/dispatch-http.ts:961",
-      "description": "Cleanup after cutover: no production caller now passes getComments' artifact parameter. Also, hooks-timeout.test.ts:9 names ANSWERS_SETTLED_BY_MS, which does not exist."
+      "file": "packages/envoy-client/src/session-answers.ts:155",
+      "description": "The cached header `this read failed: <reason>.` ends with `..` when the reason already ends with a period (the tester saw it). This is output text an agent reads. The architect asked for it to be fixed in this PR."
     }
   ],
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head 7eb8e74f (the compare to 3eea430c is handoffsOnly true, 1 file). At review, build, changes, lint, test, typecheck and pr-title were queued, and two pr-title runs were cancelled. Not read as green; this request for changes does not wait on CI.",
-  "thermonuclear": "deep-review: CHANGES (M1 side-turn and compaction placement; minors). code-quality: CHANGES (cleanup only, no behaviour). Both ran at 3eea430c (code be08baf6/7eb8e74f).",
-  "threads": "0 review threads on the PR at review time."
+  "roundOneFindings": {
+    "1 side turns/handoff/compaction": "partial: side turns and handoff fixed (checked against the pinned binary's #jr and handoff; pi-legion legion-phase-stall-omp.test.ts passes locally at ca5af069, 5 pass, where CI failed it at 7eb8e74f); remote compaction open (finding above)",
+    "2 hook token leak": "fixed in d24dc759",
+    "3 slow ! command never lists": "fixed in d24dc759",
+    "4 failed read looks like nothing": "fixed in 833b0edf, except the doubled period",
+    "5 S2 index": "fixed in dab430a6 (0132 after the merge)",
+    "minors": "all fixed (two-copy WeakSet, URL-keyed cache, envoy AGENTS.md, GIN reason, sessionanswers package, loadThreadRoot, dispatch-session-directory, replyAddress, ownerTitle, context-message, getComments, test comment)"
+  },
+  "acceptanceNotes": [
+    "Live steering on the OpenAI Codex WebSocket path runs the context handler on the steering messages alone: the list goes out with a live steer, and the steer can wait up to 800 ms. Documented as a deviation in pi-envoy AGENTS.md; dispatch-first already rode along there on main.",
+    "A remote compaction whose kept tail is empty carries the list in both conversions, so it goes into the compaction request (consistent, no slice error).",
+    "claude-envoy refresher: when two refreshers both find a stale lock (REFRESH_LOCK_STALE_MS 30 s, session-hook.ts:257-268, :411), one can delete the other's lock, and the token command runs twice. No token file is left.",
+    "When Dispatch is off with an error, the newest cached list from any Dispatch URL stands in (session-answers.ts:387). Deliberate and documented.",
+    "pi-envoy CHANGELOG.md:27 has one over-long re-wrapped line."
+  ],
+  "ci": "Required set: lint, typecheck, test, pr-title (rulesets). CI head ca5af069; the compare to 6064648f is handoffsOnly true. At review every required check was queued: GitHub's runner queue held 173 queued runs. At the earlier head 7eb8e74f all four required checks passed, while the non-required pi-legion job failed (the self-check side turns carried the list; fixed now, verified locally) and the dispatch job failed on a web-app timing test this PR does not touch.",
+  "thermonuclear": "deep-review: CHANGES (custom_message compaction cut). code-quality: APPROVE (every cleanup done; low lock race). Both ran at 6064648f.",
+  "threads": "Answered all 13 round-1 threads. Accepted 12; unresolved PRRT_kwDORFy7ds6woeGm (finding 1, still partly open)."
 }
