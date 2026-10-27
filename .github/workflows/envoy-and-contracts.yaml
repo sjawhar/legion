@@ -1087,8 +1087,13 @@ jobs:
             packages/envoy/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
             packages/envoy/internal/tests3/seaweedfs.go Image
+      # The API package owns the largest set of Postgres-backed tests. Running it with the other
+      # package binaries makes all of their per-test database cleanup queue on the service's one
+      # checkpointer, so run it before the rest of the module.
       - name: Unit test envoy Go package
-        run: go list ./... | grep -v /integration | xargs go test
+        run: |
+          go test ./internal/dispatch/api
+          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
