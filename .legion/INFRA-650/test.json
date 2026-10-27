@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-650",
+  "completed": "2026-10-27T18:17:00Z",
+  "verdict": "pass",
+  "headTested": "2b85acda522f (code head; PR head 3c335c8c7f6a adds only .legion/INFRA-650/implement.json)",
+  "evidence": "dispatch://INFRA-650/artifact/infra650-tester-evidence-tgz (sha256 4cdee19c1abe9f003175a10c9c0c38d576c7a8e4db703e7bb00d239822e2e261)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "A2 run again: stack.sh setup from src-head (git archive of 2b85acda522f), stack.sh reset, refseed fetch of all 1,000 issues; tester-answers-head.tsv is byte-identical to the implementer's answers-base.tsv (sha256 6d11b80da38c775027b07abc8f6e21b58a1aecbc70744bd9783be8a6ad4b6c61). A3 profiles read again with my own go tool pprof -top -cum: encoding/json.Unmarshal under loadArtifactsByRefKey 6.38 s of 244.21 s at base, 0.58 s of 273.91 s at head; Dispatch core means match each run's summary.json; 417 references requests in every run. A1 test read: its oracle is the per-version load and a direct created_by select, and it fails on my aliasing-bug build. A4: authorsByJSON is a local of loadArtifactsByRefKey (references.go:334), no package-level state."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Every member's creator and version authors equal the document's own reads, nil and [] kept apart",
+      "surface": "Local Dispatch stack of the load test (Postgres 16.2 + pgvector, real migrations), refseed seed, GET /api/v1/issues/{key}/references for all 1,000 issues",
+      "command": "run-side.sh base; run-side.sh head (stack.sh setup from each side's source, stack.sh reset, psql -f adversarial.sql, refseed fetch -out adv-<side>.tsv); cmp adv-base.tsv adv-head.tsv",
+      "observed": "adversarial.sql set 250 creators to JSON null and others to humans and sessions with an origin of quotes, < > & and non-ASCII text; 1,486 author lists null, 2,443 [], others two-actor with \\u2028, unknown fields, swapped key order, the document's own creator (721 distinct lists). 1,000 answers, 258,431,006 bytes, all 200; cmp exit 0 (sha256 58de8aa76dd7d1da0a3bb70617656142cab37f3d749666adc9134d6a1a2cbbae). LGA-202 answer keeps 1,478 \"authors\":null versions apart from 2,427 \"authors\":[]",
+      "headSha": "2b85acda522f",
+      "negativeControl": "Head build decoding into one buffer every memo entry shares (aliasing-bug.diff, not committed): same 1,000 ETags, body differs on 301 of the 310 issues with members; the new Postgres test also fails on that build"
+    },
+    {
+      "criterion": "References answers and ETags byte-identical at real size",
+      "surface": "Same stack, plain refseed seed",
+      "command": "LOADTEST_SRC=src-head stack.sh setup && stack.sh reset && refseed fetch -root $LOADTEST_ROOT -out tester-answers-head.tsv; cmp answers-base.tsv tester-answers-head.tsv",
+      "observed": "1,000 issues, 310 with members, 370,201,386 bytes; cmp exit 0 against the implementer's base file (sha256 6d11b80da38c775027b07abc8f6e21b58a1aecbc70744bd9783be8a6ad4b6c61)",
+      "headSha": "2b85acda522f",
+      "negativeControl": "The aliasing-bug build above, on the hard data, differs on 301 bodies while every ETag stays equal, so an ETag compare alone would not see a regression: the body sha256 compare is the check"
+    },
+    {
+      "criterion": "A bad stored value fails as before, with the same error",
+      "surface": "Same stack, GET /api/v1/issues/{key}/references",
+      "command": "err-fetch.sh base; err-fetch.sh head (psql -f errors.sql: one undecodable author list on ref-target-7 v2, one undecodable creator on ref-target-9; refseed fetch; curl each non-200 body); cmp err-base.tsv err-head.tsv; cmp err-bodies-base.txt err-bodies-head.txt; grep 'decode artifact' dispatch-<side>.log",
+      "observed": "Both cmp exit 0: 87 issues 500 {\"code\":\"INTERNAL\",\"error\":\"internal server error\"}, 913 issues 200. Each side's log: 66 'decode artifact author: json: cannot unmarshal number into Go struct field Actor.kind of type string' and 108 'decode artifact version authors: json: cannot unmarshal number into Go struct field .0.id of type string'",
+      "headSha": "2b85acda522f",
+      "negativeControl": "The undecodable values themselves are the broken input; both builds refuse them with 500 and the same log text"
+    },
+    {
+      "criterion": "Repeat and concurrent requests give the same answer; the route refuses callers it must refuse",
+      "surface": "Same stack at head, curl to 127.0.0.1:18777",
+      "command": "4 parallel curl each on LGA-202, LGA-347, LGA-319 with the stack's bearer, sha256 of each body; curl -H 'If-None-Match: <etag>'; curl with no bearer, with a wrong bearer; curl LGA-99999",
+      "observed": "All 12 bodies equal to the sequential fetch (f9f9addf…, 023828a3…, 5d555e22…); If-None-Match 304; unknown issue 404",
+      "headSha": "2b85acda522f",
+      "negativeControl": "No bearer: 401 {\"code\":\"NO_IDENTITY\"}; wrong bearer: 401 {\"code\":\"UNAUTHORIZED\",\"error\":\"invalid bearer token\"}"
+    }
+  ],
+  "ci": "Read on GitHub at 2b85acda522f at 18:16Z: lint, build, changes success; envoy-go, envoy-go-race, dispatch, test, typecheck and others queued or in progress (not waited for).",
+  "notes": [
+    "The merge rule (A3) passes on its fallback (E < spread, head decode share 0.21% <= 0.6 x 2.61%); Dispatch core means alone do not separate base and head (base 0.398-0.526, head 0.443-0.599). I did not run the six load-test runs again; I read their profiles and summaries.",
+    "The references ETag hashes only artifact ids and last version numbers (references.go:304-311), so it does not cover author content; this is not changed by this PR and is why the byte checks compare body sha256."
+  ]
+}
