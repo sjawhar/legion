@@ -7,6 +7,7 @@ import {
   createIssue,
   createProject,
   getAsk,
+  getIssue,
   patchIssue,
   releaseClaim,
 } from "./api";
@@ -116,6 +117,17 @@ test("a follower that holds the claim is listed once, and unfollowing it says th
     { session_id: asker.id, title: "Asker (e2e)" },
     { roles: ["reviewer"], session_id: routed, title: "Reviewer (e2e)" },
   ]);
+  // The server answers route reads from one listener roster kept up to five seconds
+  // (routeRosterTTL), so an issue routed to the role is read until that roster holds the reviewer:
+  // the single refresh the card makes on the route change below must not read an older one.
+  const probe = await createIssue({
+    project: "CORE",
+    title: "A roster probe for the reviewer role",
+  });
+  await patchIssue(probe.key, { route: "role:reviewer" });
+  await expect
+    .poll(async () => (await getIssue(probe.key)).route_holder, { timeout: 15_000 })
+    .toBe(routed);
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
