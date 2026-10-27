@@ -2,36 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-595",
-  "completed": "2026-10-27T11:00:10Z",
-  "round": "conflict return after approval",
+  "completed": "2026-10-27T14:26:38Z",
+  "round": "second conflict return after approval",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2367",
-  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6440224951",
+  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6444589239",
   "merge": {
     "kind": "forward merge, not a rebase: jj new legion/INFRA-595 \"main\"@origin",
-    "approvedHead": "9791bbe6d33dbe85223f49abd53ea64963b7b78d",
-    "mainMerged": "2e8c68cd",
-    "newHead": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
+    "approvedHead": "9cdc516fb90338106b029e3e50deab840aba581d",
+    "mainMerged": "ae36683e",
+    "newHead": "c5ecb79f20a97a14f078183c3f9081354e1bc6ae",
     "fingerprintBefore": "9cfde11a35ae2b9601d92dab83bcc08daf816ef0774db140ab7372beb45741e7",
     "fingerprintAfter": "9cfde11a35ae2b9601d92dab83bcc08daf816ef0774db140ab7372beb45741e7",
     "verdict": "unchanged",
     "conflicts": [
-      "packages/envoy/AGENTS.md: kept both sides: main's recordWait lines on the CI-write bullet, then this branch's rewritten schema bullet"
+      ".dispatch/architecture/envoy-listener.md: kept this branch's event-driven sentence and main's interest-reaper paragraph",
+      "packages/envoy/CHANGELOG.md: kept both ### Changed entries"
     ],
-    "mergedWithoutConflict": ["packages/envoy/CHANGELOG.md"]
+    "mergedWithoutConflict": ["packages/envoy/AGENTS.md", "packages/envoy/cmd/listener/main.go"]
   },
   "proof": [
     {
       "criterion": "Behaviour visible to callers unchanged; existing cistore tests pass (rebase re-check, bare gates only).",
-      "surface": "internal/cistore and cmd/listener test suites; packages/envoy/scripts/e2e-local.sh on the merged tree",
-      "command": "bash $TMPDIR/infra595/fp.sh <sha> for 9791bbe6 and f48e32d9 (the conflicts-and-rewrites fingerprint); gofmt -l . && go vet ./internal/cistore/ ./cmd/listener/ && go test -count=1 ./internal/cistore/ && CGO_ENABLED=1 go test -race -count=1 ./internal/cistore/ && go test -count=1 ./cmd/listener/; bash packages/envoy/scripts/e2e-local.sh",
-      "observed": "fingerprint 9cfde11a...41e7 at both heads (unchanged); gofmt and vet clean; cistore ok 16.0 s; race ok 29.3 s; cmd/listener ok 450.2 s; e2e-local PASS with four pr.42.checks settlements; GitHub reports the PR MERGEABLE",
-      "headSha": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
-      "negativeControl": "before the merge, GitHub reported the PR CONFLICTING (mergeStateStatus DIRTY) at 9791bbe6; after it, MERGEABLE at f48e32d9"
+      "surface": "internal/cistore tests, the cmd/listener build and packages/envoy/scripts/e2e-local.sh on the merged tree",
+      "command": "bash $TMPDIR/infra595/fp.sh <sha> for 9cdc516f and c5ecb79f; gofmt -l . && go vet ./internal/cistore/ ./cmd/listener/ && go build ./cmd/listener && go test -count=1 ./internal/cistore/ && CGO_ENABLED=1 go test -race -count=1 ./internal/cistore/; bash packages/envoy/scripts/e2e-local.sh",
+      "observed": "fingerprint 9cfde11a...41e7 at both heads (unchanged); gofmt and vet clean; build ok; cistore ok 15.9 s; race ok 28.5 s; e2e-local PASS with four pr.42.checks settlements; GitHub reports the PR MERGEABLE",
+      "headSha": "c5ecb79f20a97a14f078183c3f9081354e1bc6ae",
+      "negativeControl": "before the merge GitHub reported the PR CONFLICTING at 9cdc516f; after it, MERGEABLE at c5ecb79f"
     }
   ],
   "filesChanged": [
-    "packages/envoy/AGENTS.md (merge resolution only)"
+    ".dispatch/architecture/envoy-listener.md (merge resolution only)",
+    "packages/envoy/CHANGELOG.md (merge resolution only)"
   ],
-  "deviations": [],
+  "deviations": [
+    "cmd/listener's test suite (7 min, needs Postgres) was not re-run locally this round to land before main moves; go vet and go build of cmd/listener pass, and CI runs the suite on the head."
+  ],
   "openQuestions": []
 }
