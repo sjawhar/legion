@@ -1506,9 +1506,10 @@ func requireAbandoned(t *testing.T, held ...heldRequest) {
 //
 // Each route's answer is decided in serve, in one place per route. A row that needs the listener
 // to misbehave for a while starts a take-over (takeOver): for its first phase the listener refuses
-// every connection, for its second it answers 503 as a starting listener does, and for its third
-// it holds no session yet - the registry read and the send answer "no live session", the live
-// list is empty - and after that it answers as before.
+// every connection, for its second it answers 503 "service starting" on every route as a starting
+// listener does, for its third the registry read is answered with the session's record while the
+// send still meets that 503, and for its fourth it holds no session yet - the registry read and
+// the send answer "no live session", the live list is empty - and after that it answers as before.
 type fakeListener struct {
 	server   *httptest.Server
 	sessions []listenerSession
@@ -1517,18 +1518,25 @@ type fakeListener struct {
 	answered []listenerSendRecord
 	holds    map[listenerRoute]*listenerHold
 	// takeOverFrom is when the take-over began, zero when there is none; takeOverPhases is how
-	// long it refuses connections, answers 503, and holds no session, in that order.
+	// long it refuses connections, answers 503 on every route, answers 503 on the send alone, and
+	// holds no session, in that order.
 	takeOverFrom   time.Time
-	takeOverPhases [3]time.Duration
+	takeOverPhases [4]time.Duration
 	// takeOverReads counts, by session id, the registry reads a take-over answered other than
 	// as the session's record.
 	takeOverReads map[string]int
+	// gatedSends counts, by idempotency key, the sends a take-over answered 503 "service
+	// starting".
+	gatedSends map[string]int
 }
 
 // startFakeListener serves the sessions on loopback until the test ends.
 func startFakeListener(t *testing.T, sessions ...listenerSession) *fakeListener {
 	t.Helper()
-	f := &fakeListener{sessions: sessions, holds: map[listenerRoute]*listenerHold{}, takeOverReads: map[string]int{}}
+	f := &fakeListener{
+		sessions: sessions, holds: map[listenerRoute]*listenerHold{},
+		takeOverReads: map[string]int{}, gatedSends: map[string]int{},
+	}
 	f.server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(func() {
 		f.mu.Lock()
@@ -1584,16 +1592,24 @@ const (
 	takeOverOver listenerTakeOverPhase = iota
 	takeOverRefusing
 	takeOverStarting
+	takeOverHandingOver
 	takeOverUnknown
 )
 
-// takeOver begins a take-over now: the listener refuses connections for refuse, then answers
-// 503 for starting, then holds no session for unknown.
-func (f *fakeListener) takeOver(refuse, starting, unknown time.Duration) {
+// takeOver begins a take-over now: the listener refuses connections for refuse, then answers 503
+// on every route for starting, then on the send alone for handingOver, then holds no session for
+// unknown.
+//
+// The handing-over phase is a replacement in which both listeners take requests behind the one
+// address: the registry read reaches the outgoing listener, which still holds the session, and
+// the send reaches its successor, still behind its starting gate (cmd/listener/main.go
+// startingGate). It is the one phase in which a send itself meets that gate, because every try
+// reads the registry before it sends.
+func (f *fakeListener) takeOver(refuse, starting, handingOver, unknown time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.takeOverFrom = time.Now()
-	f.takeOverPhases = [3]time.Duration{refuse, starting, unknown}
+	f.takeOverPhases = [4]time.Duration{refuse, starting, handingOver, unknown}
 }
 
 // endTakeOver ends the take-over at once, whatever phase it is in.
@@ -1611,7 +1627,7 @@ func (f *fakeListener) takeOverPhase() listenerTakeOverPhase {
 		return takeOverOver
 	}
 	elapsed := time.Since(f.takeOverFrom)
-	for index, phase := range []listenerTakeOverPhase{takeOverRefusing, takeOverStarting, takeOverUnknown} {
+	for index, phase := range []listenerTakeOverPhase{takeOverRefusing, takeOverStarting, takeOverHandingOver, takeOverUnknown} {
 		if elapsed -= f.takeOverPhases[index]; elapsed < 0 {
 			return phase
 		}
@@ -1627,6 +1643,20 @@ func (f *fakeListener) readsDuringTakeOver(sessionID string) int {
 	return f.takeOverReads[sessionID]
 }
 
+// sendsGatedUnder is how many sends under key a take-over answered 503 "service starting".
+func (f *fakeListener) sendsGatedUnder(key string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gatedSends[key]
+}
+
+// answerStarting answers as the real listener's starting gate does (cmd/listener/main.go
+// startingGate).
+func answerStarting(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "service starting"})
+}
+
 func (f *fakeListener) serve(w http.ResponseWriter, r *http.Request) {
 	// The whole body is read before anything waits, so the server sees the request end and
 	// notices its caller going away while the request is held.
@@ -1637,7 +1667,8 @@ func (f *fakeListener) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	phase := f.takeOverPhase()
-	if phase != takeOverOver && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/") {
+	if phase != takeOverOver && phase != takeOverHandingOver &&
+		r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/") {
 		f.mu.Lock()
 		f.takeOverReads[strings.TrimPrefix(r.URL.Path, "/v1/registry/")]++
 		f.mu.Unlock()
@@ -1651,10 +1682,20 @@ func (f *fakeListener) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	case takeOverStarting:
-		// The real listener's starting gate (cmd/listener/main.go startingGate).
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "service starting"})
+		answerStarting(w)
 		return
+	case takeOverHandingOver:
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send" {
+			var send struct {
+				IdempotencyKey string `json:"idempotency_key"`
+			}
+			_ = json.Unmarshal(body, &send)
+			f.mu.Lock()
+			f.gatedSends[send.IdempotencyKey]++
+			f.mu.Unlock()
+			answerStarting(w)
+			return
+		}
 	}
 	switch {
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/registry/"):
@@ -2072,12 +2113,14 @@ func requireWaitingOutTheTakeOver(t *testing.T, database *store.Store, listener 
 	}
 }
 
-// While the active listener is replaced, its successor refuses connections, then answers 503,
-// then does not yet hold the session, for a few seconds. A direct message and a mention sent then
-// wait it out under the attempt each holds and reach the session once it answers: attempt 1 sent,
-// one receipt, one send. A session the listener never knows still reads failed, "no live session",
-// once the take-over window has passed. And a process killed while it waits leaves its attempts
-// pending under the claim it renewed last, which the other process's resume loop sends.
+// While the active listener is replaced, its successor refuses connections, then answers 503
+// "service starting" - on every route, then on the send alone while the outgoing listener still
+// answers the registry read - then does not yet hold the session, for a few seconds. A direct
+// message and a mention sent then wait it out under the attempt each holds and reach the session
+// once it answers: attempt 1 sent, one receipt, one send. A session the listener never knows still
+// reads failed, "no live session", once the take-over window has passed. And a process killed
+// while it waits leaves its attempts pending under the claim it renewed last, which the other
+// process's resume loop sends.
 func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
 	t.Run("sent during the take-over", func(t *testing.T) {
 		listener := startFakeListener(t, resumeSession)
@@ -2087,9 +2130,20 @@ func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
 		pair.a.createProject(t, project, "Listener take-over")
 		issue, _ := pair.a.createIssueIn(t, project, "Mentioned during a take-over", "spec")
 
-		listener.takeOver(time.Second, time.Second, time.Second)
+		// A sender tries at once, then 0.25, 0.75, 1.75, 3.75, 5.75 and 7.75 s after its first try
+		// (takeoverRetry): from 1.75 s on its tries are two seconds apart plus each try's own time.
+		// The send-only 503 lasts 2.5 s, longer than that spacing, so at least one try of each
+		// sender meets it however late a loaded machine starts the tries; the take-over ends at
+		// 6 s, so the try that lands comes before the row's 10 s bound.
+		listener.takeOver(time.Second, time.Second, 2500*time.Millisecond, 1500*time.Millisecond)
 		direct, mention := sendDuringTakeOver(t, pair.a, pair.database, issue, "sent during a take-over")
 		requireDeliveredOnce(t, pair, listener, 10*time.Second, direct, mention)
+		for _, delivery := range []deliveryUnderTest{direct, mention} {
+			if gated := listener.sendsGatedUnder(delivery.key); gated == 0 {
+				t.Errorf("%s: no send under %s met the starting gate; the row must cover a send answered 503 "+
+					"\"service starting\"", delivery.what, delivery.key)
+			}
+		}
 	})
 
 	t.Run("sent to a session the listener never knows", func(t *testing.T) {
@@ -2125,7 +2179,7 @@ func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
 		pair.a.createProject(t, project, "Killed during a take-over")
 		issue, _ := pair.a.createIssueIn(t, project, "Mentioned, then killed", "spec")
 
-		listener.takeOver(time.Hour, 0, 0)
+		listener.takeOver(time.Hour, 0, 0, 0)
 		direct, mention := sendDuringTakeOver(t, pair.a, pair.database, issue, "killed during a take-over")
 		requireWaitingOutTheTakeOver(t, pair.database, listener, direct, mention)
 		pair.a.kill(t)

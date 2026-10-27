@@ -389,6 +389,51 @@ func TestRolePreservesListenerNotFoundText(t *testing.T) {
 	}
 }
 
+// A listener that is starting answers every /v1 route 503 with a JSON reason ("service starting",
+// cmd/listener/main.go's startingGate), and a gateway in front of one that is gone answers 502 or
+// 504, so on a role lookup and on a send alike those are ErrUnavailable - a caller's "ask again" -
+// whatever body they carry, and the error keeps the listener's reason because a person reads it.
+// A 4xx is the listener's answer, never unavailable: that is the discriminating control.
+func TestRoleAndSendReportAStartingListenerAsUnavailable(t *testing.T) {
+	calls := map[string]func(*Client) error{
+		"role": func(client *Client) error {
+			_, err := client.Role(context.Background(), "legion-planner")
+			return err
+		},
+		"send": func(client *Client) error {
+			_, err := client.Send(context.Background(), SendInput{TargetSession: "s1", Message: "m", IdempotencyKey: "k"})
+			return err
+		},
+	}
+	for _, tc := range []struct {
+		status      int
+		body        string
+		unavailable bool
+		reason      string
+	}{
+		{status: http.StatusServiceUnavailable, body: `{"error":"service starting"}`, unavailable: true, reason: "service starting"},
+		{status: http.StatusBadGateway, body: `{"error":"upstream connect error"}`, unavailable: true, reason: "upstream connect error"},
+		{status: http.StatusGatewayTimeout, body: `{"error":"upstream timed out"}`, unavailable: true, reason: "upstream timed out"},
+		{status: http.StatusServiceUnavailable, body: ``, unavailable: true, reason: "503"},
+		{status: http.StatusBadRequest, body: `{"error":"message is required"}`, reason: "message is required"},
+	} {
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		for name, call := range calls {
+			err := call(New(listener.URL))
+			if err == nil || errors.Is(err, ErrUnavailable) != tc.unavailable || !strings.Contains(err.Error(), tc.reason) {
+				t.Errorf("%s answered %d %s: err = %v, want ErrUnavailable %v carrying %q", name, tc.status, tc.body, err, tc.unavailable, tc.reason)
+			}
+			if errors.Is(err, ErrReceiptTimeout) || errors.Is(err, ErrNotFound) {
+				t.Errorf("%s answered %d %s: err = %v, want neither a receipt timeout nor a missing session", name, tc.status, tc.body, err)
+			}
+		}
+		listener.Close()
+	}
+}
+
 // A per-session read is the question "is this session live, and how is it named", so the body it
 // decodes is one row of GET /v1/sessions: the same fields, filled the same way. The listener may
 // leave the id out of its own answer, and leaves a session with no roles or no capabilities

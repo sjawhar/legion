@@ -211,6 +211,10 @@ func TestAListenerTakeOverIsWaitedOutAndARefusalSettlesAtOnce(t *testing.T) {
 		{name: "the send finds no live session yet", script: []takeOverAnswer{
 			{takeOverSend, answerJSON(http.StatusNotFound, `{"error":"no live session s1"}`)},
 		}},
+		{name: "the send meets the listener's starting gate", script: []takeOverAnswer{
+			{takeOverSend, answerJSON(http.StatusServiceUnavailable, `{"error":"service starting"}`)},
+			{takeOverSend, answerJSON(http.StatusServiceUnavailable, `{"error":"service starting"}`)},
+		}},
 		{name: "a gateway answers for the listener", script: []takeOverAnswer{
 			{takeOverSend, func(_ *takeOverListener, w http.ResponseWriter, _ *http.Request, _ resumeSend) {
 				w.WriteHeader(http.StatusBadGateway)
