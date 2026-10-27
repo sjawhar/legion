@@ -158,6 +158,50 @@ func TestSettlementIndexesRetractsAndRestoresTypedAskBlocks(t *testing.T) {
 	}
 }
 
+// An ask's question and options are caller text, which the ask's edit writes into the block as
+// plain text and reads back through the document's own markdown pipeline. Text holding a web
+// address - after a space, after a letter and `;`, with a lowercase scheme - is written, settles,
+// and its row reads back as written, whether or not a reader takes the address for a link
+// (INFRA-531).
+func TestAnAskWhoseTextHoldsWebAddressesSettlesAsWritten(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#hosts urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich host?\n\n- A: First\n:::\n")
+	settleCurrentGeneration(t, service, artifactID)
+	question := "Which host, see https://x.test\n\nx;https://x.test\n\nor see http://x.test"
+	options := []model.AskOption{
+		{Label: "Secure", Description: "see https://x.test"},
+		{Label: "x;https://x.test"},
+		{Label: "Plain", Description: "see http://x.test"},
+	}
+	var stored AskBlockText
+	if err := joinedWrite(service, func(ctx context.Context) (err error) {
+		stored, err = service.SetAskBlockText(ctx, artifactID, "hosts", AskBlockEdit{Question: &question, Options: &options},
+			model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+		return err
+	}); err != nil {
+		t.Fatalf("write the ask's text: %v", err)
+	}
+	if stored.Question != question || !reflect.DeepEqual(stored.Options, options) {
+		t.Fatalf("the block reads back question=%q options=%#v, want what was written", stored.Question, stored.Options)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	var settled string
+	var optionsJSON []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select question, options from asks where block_artifact_id = $1 and block_id = 'hosts' and state = 'open'
+	`, artifactID).Scan(&settled, &optionsJSON); err != nil {
+		t.Fatalf("read the settled ask: %v", err)
+	}
+	var settledOptions []model.AskOption
+	if err := json.Unmarshal(optionsJSON, &settledOptions); err != nil {
+		t.Fatalf("decode the settled options: %v", err)
+	}
+	if settled != question || !reflect.DeepEqual(settledOptions, options) {
+		t.Fatalf("the settled ask holds question=%q options=%#v, want what was written", settled, settledOptions)
+	}
+}
+
 // A spec's decisions are ask blocks, and the write that adds one already carries its words into
 // a version: indexing it afterwards is bookkeeping over the same document. Settlement recording
 // that bookkeeping as a version of its own wrote a byte-identical version credited to nobody,

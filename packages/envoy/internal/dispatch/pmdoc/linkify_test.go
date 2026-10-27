@@ -19,8 +19,11 @@ func TestLinkifyGuardReadsGoldmarksLocalPartCharacters(t *testing.T) {
 	}
 }
 
-// The guard links exactly what goldmark's linkify links, and leaves text where goldmark did.
-func TestLinkifyGuardLinksWhatGoldmarkLinks(t *testing.T) {
+// Go links exactly what the browser editor's engine (remark-gfm) links, and leaves text where the
+// engine does. Each row's expectation is the engine's reading (gen/differential.ts), except that an
+// email's href is its bare address, where the engine's is `mailto:` (INFRA-530 gives emails the
+// mailto: href).
+func TestLinkifyReadsWhatTheEngineReads(t *testing.T) {
 	for _, test := range []struct{ markdown, want string }{
 		{"mail alice@example.com now", `text "mail " | text "alice@example.com" link alice@example.com | text " now"`},
 		{"(bob@example.org)", `text "(" | text "bob@example.org" link bob@example.org | text ")"`},
@@ -30,6 +33,10 @@ func TestLinkifyGuardLinksWhatGoldmarkLinks(t *testing.T) {
 		{"see https://example.com/a_b and www.example.org/x", `text "see " | text "https://example.com/a_b" link https://example.com/a_b | text " and " | text "www.example.org/x" link http://www.example.org/x`},
 		{"@start of a line", `text "@start of a line"`},
 		{"end.@dot", `text "end.@dot"`},
+		{"x;https://x.test/a_ b", `text "x;" | text "https://x.test/a" link https://x.test/a | text "_ b"`},
+		{"see http\\://x.test/a_ b", `text "see " | text "http://x.test/a_" link http://x.test/a_ | text " b"`},
+		{"x;https://a.test/*b* c", `text "x;" | text "https://a.test/*b" link https://a.test/*b | text "* c"`},
+		{"\"www.a.test/?u=https://b.test\"", `text "\"" | text "www.a.test/?u=" link http://www.a.test/?u= | text "https://b.test" link https://b.test | text "\""`},
 	} {
 		doc, err := Parse(test.markdown)
 		if err != nil {

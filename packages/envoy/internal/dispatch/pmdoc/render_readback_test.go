@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -340,23 +341,23 @@ func TestTheFirstSpellingClosesACodeSpanBeforeAWWWLinkAfterIt(t *testing.T) {
 	}
 }
 
-// The browser editor's parser links a URL in decoded text, after an escape or a character
-// reference, which Go's parser, reading markdown, does not. Each row is markdown and whether Go and
-// the engine read it alike, so a change to either reading shows here: the divergences that remain
-// (a URL after a letter and `;`, `#` or `&`, after an escaped character, at a line opening with a
-// quote, a lowercase scheme written `http\:`, and a URL inside a www URL the transform reads) are
-// recorded as differing, and the writer keeps a plain-text `www.` and an uppercase scheme
-// unescaped, so they read as links in both, where an escape would leave Go reading text and the
-// engine a link.
-func TestURLReadingsBesideEscapesAgreeWhereRecorded(t *testing.T) {
+// Go reads every bare web address as the browser editor's engine reads it: remark-gfm's tokenizer
+// where the tokenizer starts an address in the markdown, and its transform over the decoded text
+// it leaves - after an escape or a character reference, after any punctuation, a letter outside
+// ASCII or a digit, at a line or a table cell opening with punctuation. Each row is markdown both
+// must read alike, the rows where the two engine readers end an address differently among them;
+// a row marked writtenAsIs is also written back exactly as it is, with no backslash before a
+// scheme's colon. The plain texts a person types in the browser editor, which has no autolink
+// input rule, are written and read back alike by both too.
+func TestURLReadingsAgreeWithTheEngine(t *testing.T) {
 	tests := []struct {
-		markdown string
-		agree    bool
+		markdown    string
+		writtenAsIs bool
 	}{
 		{"see www\\.x.test b\n", false},
 		{"see HTTP\\://x.test b\n", false},
 		{"see http\\://x.test b\n", false},
-		{"x;https://x.test b\n", false},
+		{"x;https://x.test b\n", true},
 		{"x#https://x.test b\n", false},
 		{"x&https://x.test b\n", false},
 		{"\\*https://x.test b\n", false},
@@ -366,37 +367,86 @@ func TestURLReadingsBesideEscapesAgreeWhereRecorded(t *testing.T) {
 		{"see \"https://x.test\" and 'https://y.test'.\n", true},
 		{"see www.x.test b\n", true},
 		{"see HTTP://x.test b\n", true},
+		// The tokenizer and the transform end these addresses differently.
+		{"x;https://x.test/a_ b\n", false},
+		{"x;https://x.test/a<b c\n", false},
+		{"x;https://a.test/*b* c\n", false},
+		{"see http\\://x.test/a_ b\n", false},
+		{"see http\\://x.test/a<b c\n", false},
+		// Each position the engine starts an address at.
+		{"éhttps://x.test b\n", false},
+		{"x—https://x.test b\n", false},
+		{"x;www.x.test b\n", false},
+		{"x]https://x.test b\n", false},
+		{"x|https://x.test b\n", false},
+		{"x!https://x.test b\n", false},
+		{"&amp;https://x.test b\n", false},
+		{"x\"https://x.test\" b\n", false},
+		{"[https://x.test b\n", false},
+		{"x1https://x.test b\n", false},
+		{"| a | b |\n| --- | --- |\n| x | \"https://x.test\" b |\n", false},
+		{"`c`;https://x.test b\n", false},
+		{"foo;\nhttps://x.test b\n", false},
+		// INFRA-172's wider comparison.
+		{"See <http://e.test/a\\\\b now.\n", false},
+		{"www.e.test*b*\n", false},
+		{"`www.e.test_\n", false},
 	}
 	plain := func(text string) *Node {
 		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}}}
 	}
-	written := map[string]string{}
-	for _, text := range []string{"see www.x.test b", "see HTTP://x.test b"} {
+	typed := []string{"see www.x.test b", "see HTTP://x.test b", "see http://x.test b"}
+	markdowns := make([]string, 0, len(tests)+len(typed))
+	for _, test := range tests {
+		markdowns = append(markdowns, test.markdown)
+	}
+	for _, text := range typed {
 		markdown, err := Render(plain(text))
 		if err != nil {
 			t.Fatal(err)
 		}
-		written[text] = markdown
-	}
-	markdowns := make([]string, 0, len(tests)+len(written))
-	for _, test := range tests {
-		markdowns = append(markdowns, test.markdown)
-	}
-	for _, text := range []string{"see www.x.test b", "see HTTP://x.test b"} {
-		markdowns = append(markdowns, written[text])
+		markdowns = append(markdowns, markdown)
 	}
 	readings := engineReadings(t, markdowns)
 	for index, markdown := range markdowns {
-		agree := true
-		if index < len(tests) {
-			agree = tests[index].agree
-		}
 		doc, err := Parse(markdown)
 		if err != nil {
 			t.Fatalf("Parse(%q) = %v", markdown, err)
 		}
-		if got := readings[index] != nil && doc.Equal(readings[index]); got != agree {
-			t.Errorf("%q: Go reads %s, the engine %s; recorded as agreeing: %v", markdown, inlineSummary(doc.Children[0]), inlineSummary(readings[index].Children[0]), agree)
+		if readings[index] == nil || !doc.Equal(readings[index]) {
+			t.Errorf("%q: Go reads %s, the engine %s; recorded as agreeing: true", markdown, readingSummary(doc), readingSummary(readings[index]))
+		}
+		if index < len(tests) && tests[index].writtenAsIs {
+			if rendered, err := Render(doc); err != nil || rendered != markdown {
+				t.Errorf("%q is written back as %q (%v), want it as it is", markdown, rendered, err)
+			}
 		}
 	}
+}
+
+// readingSummary names each textblock of doc and its inline nodes, with every mark they carry.
+func readingSummary(doc *Node) string {
+	var blocks []string
+	Walk(doc, func(node *Node) bool {
+		if len(node.Children) == 0 || len(node.Children[0].Children) != 0 {
+			return true
+		}
+		var parts []string
+		for _, child := range node.Children {
+			part := fmt.Sprintf("%s %q", child.Type, child.Text)
+			for _, mark := range child.Marks {
+				part += " " + mark.Type
+				if href, ok := mark.Attrs["href"].(string); ok {
+					part += " " + href
+				}
+			}
+			parts = append(parts, part)
+		}
+		blocks = append(blocks, node.Type+": "+strings.Join(parts, " | "))
+		return true
+	})
+	if len(blocks) == 0 {
+		return "no text"
+	}
+	return strings.Join(blocks, " / ")
 }

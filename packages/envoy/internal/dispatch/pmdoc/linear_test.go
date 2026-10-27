@@ -209,14 +209,18 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 	})
 }
 
-// A bare URL is read and written in time linear in its line. A line can hold a URL opening at
-// every place the guard is asked - each whitespace, `*`, `_`, `~` and `(`, and after the run of
-// quotes and other plain punctuation following one - that the browser editor's tokenizer refuses
-// only at its domain or its previous character, so nothing a refused read scans may be scanned
-// again from the next trigger. Each shape is one paragraph of one text node, which no element limit
+// A bare URL or email is read and written in time linear in its line. A line can hold an address
+// opening at every place the browser editor's engine starts one - after whitespace, any
+// punctuation, an escape, a character reference or a letter outside ASCII, in the markdown its
+// tokenizer reads and in the decoded text its transform reads - that the engine refuses only at
+// its domain, its `@` or its previous character, so nothing a refused read scans may be scanned
+// again from the next place. Each shape is one paragraph of one text node, which no element limit
 // stops, read as a rendering is and written from that tree.
 func TestBareURLShapesParseAndRenderLinearly(t *testing.T) {
-	for _, shape := range []string{"_www.a", "-www.x_", `(https://-a.b\`, ".www.a&", ".www", "www.", `www\.`, `www\.a `, "HTTP://a ", ` "'https://-a.b`, `(""www.a_`, ` ".www.a`} {
+	for _, shape := range []string{
+		"_www.a", "-www.x_", `(https://-a.b\`, ".www.a&", ".www", "www.", `www\.`, `www\.a `, "HTTP://a ", ` "'https://-a.b`, `(""www.a_`, ` ".www.a`,
+		";https://-a.b", "x;www.a_", `\*https://-a`, "&amp;https://-a.", "éhttps://-a.", `http\://-a.`, `www\.a_`, `x"www.a_`, ";;", `\*`, ";a_a@", "é+a@b-", `www\.a@`,
+	} {
 		growsLinearly(t, fmt.Sprintf("reading and writing %q", shape), []int{16 << 10, 256 << 10, 1 << 20}, growthAllowance, func(size int) (time.Duration, error) {
 			markdown := strings.Repeat(shape, size/len(shape)) + "._\n"
 			var doc *Node

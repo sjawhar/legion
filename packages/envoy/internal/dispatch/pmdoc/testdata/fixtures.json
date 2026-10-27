@@ -802,6 +802,1025 @@
     "rendered_by_milkdown": ":::ask{#ask-1 urgency=\"high\" multiple=\"false\" state=\"open\"}\nWhich transport should we expose?\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n"
   },
   {
+    "name": "bare-address-after-punctuation",
+    "markdown": "see www\\.x.test b\n\nsee HTTP\\://x.test b\n\nsee http\\://x.test b\n\nx;https://x.test b\n\nx#https://x.test b\n\nx&https://x.test b\n\n\\*https://x.test b\n\n\\(www.x.test b\n\n\"www.a.test/?u=https://b.test\"\n\n\"https://x.test\" b\n\nx;https://x.test/a_ b\n\nx;https://x.test/a<b c\n\nx;https://a.test/*b* c\n\nsee http\\://x.test/a_ b\n\nsee http\\://x.test/a<b c\n\néhttps://x.test b\n\nx—https://x.test b\n\nx;www.x.test b\n\nx]https://x.test b\n\nx|https://x.test b\n\nx!https://x.test b\n\n&amp;https://x.test b\n\nx\"https://x.test\" b\n\n[https://x.test b\n\nx1https://x.test b\n\n`c`;https://x.test b\n\nfoo;\nhttps://x.test b\n\nSee <http://e.test/a\\\\b now.\n\nwww.e.test*b*\n\n`www.e.test_\n\n| a | b |\n| --- | --- |\n| x | \"https://x.test\" b |\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "see "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "http://www.x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "www.x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "see "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "HTTP://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "HTTP://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "see "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "http://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "http://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x;"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x#"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x&"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "*"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "("
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "http://www.x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "www.x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "\""
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "http://www.a.test/?u=",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "www.a.test/?u="
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://b.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://b.test"
+            },
+            {
+              "type": "text",
+              "text": "\""
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000010"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "\""
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": "\" b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x;"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/a",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/a"
+            },
+            {
+              "type": "text",
+              "text": "_ b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x;"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/a",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/a"
+            },
+            {
+              "type": "text",
+              "text": "<b c"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x;"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://a.test/*b",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://a.test/*b"
+            },
+            {
+              "type": "text",
+              "text": "* c"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000014"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "see "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "http://x.test/a_",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "http://x.test/a_"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000015"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "see "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "http://x.test/a<b",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "http://x.test/a<b"
+            },
+            {
+              "type": "text",
+              "text": " c"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000016"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "é"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000017"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x—"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000018"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x;"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "http://www.x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "www.x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000019"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x]"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000020"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x|"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000021"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x!"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "&"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000023"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x\""
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": "\" b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000024"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "["
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000025"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x1"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000026"
+          },
+          "content": [
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                }
+              ],
+              "text": "c"
+            },
+            {
+              "type": "text",
+              "text": ";"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000027"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "foo; "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test"
+            },
+            {
+              "type": "text",
+              "text": " b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000028"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "See <"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "http://e.test/a\\\\b",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "http://e.test/a\\\\b"
+            },
+            {
+              "type": "text",
+              "text": " now."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000029"
+          },
+          "content": [
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "http://www.e.test*b",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "www.e.test*b"
+            },
+            {
+              "type": "text",
+              "text": "*"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000030"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "`www.e.test_"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "attrs": {
+            "blockId": "b-000031"
+          },
+          "content": [
+            {
+              "type": "table_header_row",
+              "attrs": {
+                "blockId": "b-000032"
+              },
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000033"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000034"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000035"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000036"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "attrs": {
+                "blockId": "b-000037"
+              },
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000038"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000039"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000040"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000041"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "\""
+                        },
+                        {
+                          "type": "text",
+                          "marks": [
+                            {
+                              "type": "link",
+                              "attrs": {
+                                "href": "https://x.test",
+                                "title": null
+                              }
+                            }
+                          ],
+                          "text": "https://x.test"
+                        },
+                        {
+                          "type": "text",
+                          "text": "\" b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AZsCAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBBHNlZSCGAQUEbGluayl7ImhyZWYiOiJodHRwOi8vd3d3LngudGVzdCIsInRpdGxlIjpudWxsfYQBBgp3d3cueC50ZXN0hgEQBGxpbmsEbnVsbIQBEQIgYigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAEVBgQAARYEc2VlIIYBGgRsaW5rJXsiaHJlZiI6IkhUVFA6Ly94LnRlc3QiLCJ0aXRsZSI6bnVsbH2EARsNSFRUUDovL3gudGVzdIYBKARsaW5rBG51bGyEASkCIGIoAAEVB2Jsb2NrSWQBdwhiLTAwMDAwMocBFQMJcGFyYWdyYXBoBwABLQYEAAEuBHNlZSCGATIEbGluayV7ImhyZWYiOiJodHRwOi8veC50ZXN0IiwidGl0bGUiOm51bGx9hAEzDWh0dHA6Ly94LnRlc3SGAUAEbGluawRudWxshAFBAiBiKAABLQdibG9ja0lkAXcIYi0wMDAwMDOHAS0DCXBhcmFncmFwaAcAAUUGBAABRgJ4O4YBSARsaW5rJnsiaHJlZiI6Imh0dHBzOi8veC50ZXN0IiwidGl0bGUiOm51bGx9hAFJDmh0dHBzOi8veC50ZXN0hgFXBGxpbmsEbnVsbIQBWAIgYigAAUUHYmxvY2tJZAF3CGItMDAwMDA0hwFFAwlwYXJhZ3JhcGgHAAFcBgQAAV0CeCOGAV8EbGluayZ7ImhyZWYiOiJodHRwczovL3gudGVzdCIsInRpdGxlIjpudWxsfYQBYA5odHRwczovL3gudGVzdIYBbgRsaW5rBG51bGyEAW8CIGIoAAFcB2Jsb2NrSWQBdwhiLTAwMDAwNYcBXAMJcGFyYWdyYXBoBwABcwYEAAF0AngmhgF2BGxpbmsmeyJocmVmIjoiaHR0cHM6Ly94LnRlc3QiLCJ0aXRsZSI6bnVsbH2EAXcOaHR0cHM6Ly94LnRlc3SGAYUBBGxpbmsEbnVsbIQBhgECIGIoAAFzB2Jsb2NrSWQBdwhiLTAwMDAwNocBcwMJcGFyYWdyYXBoBwABigEGBAABiwEBKoYBjAEEbGluayZ7ImhyZWYiOiJodHRwczovL3gudGVzdCIsInRpdGxlIjpudWxsfYQBjQEOaHR0cHM6Ly94LnRlc3SGAZsBBGxpbmsEbnVsbIQBnAECIGIoAAGKAQdibG9ja0lkAXcIYi0wMDAwMDeHAYoBAwlwYXJhZ3JhcGgHAAGgAQYEAAGhAQEohgGiAQRsaW5rKXsiaHJlZiI6Imh0dHA6Ly93d3cueC50ZXN0IiwidGl0bGUiOm51bGx9hAGjAQp3d3cueC50ZXN0hgGtAQRsaW5rBG51bGyEAa4BAiBiKAABoAEHYmxvY2tJZAF3CGItMDAwMDA4hwGgAQMJcGFyYWdyYXBoBwABsgEGBAABswEBIoYBtAEEbGluay17ImhyZWYiOiJodHRwOi8vd3d3LmEudGVzdC8/dT0iLCJ0aXRsZSI6bnVsbH2EAbUBDnd3dy5hLnRlc3QvP3U9hgHDAQRsaW5rBG51bGyGAcQBBGxpbmsmeyJocmVmIjoiaHR0cHM6Ly9iLnRlc3QiLCJ0aXRsZSI6bnVsbH2EAcUBDmh0dHBzOi8vYi50ZXN0hgHTAQRsaW5rBG51bGyEAdQBASIoAAGyAQdibG9ja0lkAXcIYi0wMDAwMDmHAbIBAwlwYXJhZ3JhcGgHAAHXAQYEAAHYAQEihgHZAQRsaW5rJnsiaHJlZiI6Imh0dHBzOi8veC50ZXN0IiwidGl0bGUiOm51bGx9hAHaAQ5odHRwczovL3gudGVzdIYB6AEEbGluawRudWxshAHpAQMiIGIoAAHXAQdibG9ja0lkAXcIYi0wMDAwMTCHAdcBAwlwYXJhZ3JhcGgHAAHuAQYEAAHvAQJ4O4YB8QEEbGluayh7ImhyZWYiOiJodHRwczovL3gudGVzdC9hIiwidGl0bGUiOm51bGx9hAHyARBodHRwczovL3gudGVzdC9hhgGCAgRsaW5rBG51bGyEAYMCA18gYigAAe4BB2Jsb2NrSWQBdwhiLTAwMDAxMYcB7gEDCXBhcmFncmFwaAcAAYgCBgQAAYkCAng7hgGLAgRsaW5rKHsiaHJlZiI6Imh0dHBzOi8veC50ZXN0L2EiLCJ0aXRsZSI6bnVsbH2EAYwCEGh0dHBzOi8veC50ZXN0L2GGAZwCBGxpbmsEbnVsbIQBnQIEPGIgYygAAYgCB2Jsb2NrSWQBdwhiLTAwMDAxMocBiAIDCXBhcmFncmFwaAcAAaMCBgQAAaQCAng7hgGmAgRsaW5rKXsiaHJlZiI6Imh0dHBzOi8vYS50ZXN0LypiIiwidGl0bGUiOm51bGx9hAGnAhFodHRwczovL2EudGVzdC8qYoYBuAIEbGluawRudWxshAG5AgMqIGMoAAGjAgdibG9ja0lkAXcIYi0wMDAwMTOHAaMCAwlwYXJhZ3JhcGgHAAG+AgYEAAG/AgRzZWUghgHDAgRsaW5rKHsiaHJlZiI6Imh0dHA6Ly94LnRlc3QvYV8iLCJ0aXRsZSI6bnVsbH2EAcQCEGh0dHA6Ly94LnRlc3QvYV+GAdQCBGxpbmsEbnVsbIQB1QICIGIoAAG+AgdibG9ja0lkAXcIYi0wMDAwMTSHAb4CAwlwYXJhZ3JhcGgHAAHZAgYEAAHaAgRzZWUghgHeAgRsaW5rKXsiaHJlZiI6Imh0dHA6Ly94LnRlc3QvYTxiIiwidGl0bGUiOm51bGx9hAHfAhFodHRwOi8veC50ZXN0L2E8YoYB8AIEbGluawRudWxshAHxAgIgYygAAdkCB2Jsb2NrSWQBdwhiLTAwMDAxNYcB2QIDCXBhcmFncmFwaAcAAfUCBgQAAfYCAsOphgH3AgRsaW5rJnsiaHJlZiI6Imh0dHBzOi8veC50ZXN0IiwidGl0bGUiOm51bGx9hAH4Ag5odHRwczovL3gudGVzdIYBhgMEbGluawRudWxshAGHAwIgYigAAfUCB2Jsb2NrSWQBdwhiLTAwMDAxNocB9QIDCXBhcmFncmFwaAcAAYsDBgQAAYwDBHjigJSGAY4DBGxpbmsmeyJocmVmIjoiaHR0cHM6Ly94LnRlc3QiLCJ0aXRsZSI6bnVsbH2EAY8DDmh0dHBzOi8veC50ZXN0hgGdAwRsaW5rBG51bGyEAZ4DAiBiKAABiwMHYmxvY2tJZAF3CGItMDAwMDE3hwGLAwMJcGFyYWdyYXBoBwABogMGBAABowMCeDuGAaUDBGxpbmspeyJocmVmIjoiaHR0cDovL3d3dy54LnRlc3QiLCJ0aXRsZSI6bnVsbH2EAaYDCnd3dy54LnRlc3SGAbADBGxpbmsEbnVsbIQBsQMCIGIoAAGiAwdibG9ja0lkAXcIYi0wMDAwMTiHAaIDAwlwYXJhZ3JhcGgHAAG1AwYEAAG2AwJ4XYYBuAMEbGluayZ7ImhyZWYiOiJodHRwczovL3gudGVzdCIsInRpdGxlIjpudWxsfYQBuQMOaHR0cHM6Ly94LnRlc3SGAccDBGxpbmsEbnVsbIQByAMCIGIoAAG1AwdibG9ja0lkAXcIYi0wMDAwMTmHAbUDAwlwYXJhZ3JhcGgHAAHMAwYEAAHNAwJ4fIYBzwMEbGluayZ7ImhyZWYiOiJodHRwczovL3gudGVzdCIsInRpdGxlIjpudWxsfYQB0AMOaHR0cHM6Ly94LnRlc3SGAd4DBGxpbmsEbnVsbIQB3wMCIGIoAAHMAwdibG9ja0lkAXcIYi0wMDAwMjCHAcwDAwlwYXJhZ3JhcGgHAAHjAwYEAAHkAwJ4IYYB5gMEbGluayZ7ImhyZWYiOiJodHRwczovL3gudGVzdCIsInRpdGxlIjpudWxsfYQB5wMOaHR0cHM6Ly94LnRlc3SGAfUDBGxpbmsEbnVsbIQB9gMCIGIoAAHjAwdibG9ja0lkAXcIYi0wMDAwMjGHAeMDAwlwYXJhZ3JhcGgHAAH6AwYEAAH7AwEmhgH8AwRsaW5rJnsiaHJlZiI6Imh0dHBzOi8veC50ZXN0IiwidGl0bGUiOm51bGx9hAH9Aw5odHRwczovL3gudGVzdIYBiwQEbGluawRudWxshAGMBAIgYigAAfoDB2Jsb2NrSWQBdwhiLTAwMDAyMocB+gMDCXBhcmFncmFwaAcAAZAEBgQAAZEEAngihgGTBARsaW5rJnsiaHJlZiI6Imh0dHBzOi8veC50ZXN0IiwidGl0bGUiOm51bGx9hAGUBA5odHRwczovL3gudGVzdIYBogQEbGluawRudWxshAGjBAMiIGIoAAGQBAdibG9ja0lkAXcIYi0wMDAwMjOHAZAEAwlwYXJhZ3JhcGgHAAGoBAYEAAGpBAFbhgGqBARsaW5rJnsiaHJlZiI6Imh0dHBzOi8veC50ZXN0IiwidGl0bGUiOm51bGx9hAGrBA5odHRwczovL3gudGVzdIYBuQQEbGluawRudWxshAG6BAIgYigAAagEB2Jsb2NrSWQBdwhiLTAwMDAyNIcBqAQDCXBhcmFncmFwaAcAAb4EBgQAAb8EAngxhgHBBARsaW5rJnsiaHJlZiI6Imh0dHBzOi8veC50ZXN0IiwidGl0bGUiOm51bGx9hAHCBA5odHRwczovL3gudGVzdIYB0AQEbGluawRudWxshAHRBAIgYigAAb4EB2Jsb2NrSWQBdwhiLTAwMDAyNYcBvgQDCXBhcmFncmFwaAcAAdUEBgYAAdYECmlubGluZUNvZGUCe32EAdcEAWOGAdgECmlubGluZUNvZGUEbnVsbIQB2QQBO4YB2gQEbGluayZ7ImhyZWYiOiJodHRwczovL3gudGVzdCIsInRpdGxlIjpudWxsfYQB2wQOaHR0cHM6Ly94LnRlc3SGAekEBGxpbmsEbnVsbIQB6gQCIGIoAAHVBAdibG9ja0lkAXcIYi0wMDAwMjaHAdUEAwlwYXJhZ3JhcGgHAAHuBAYEAAHvBAVmb287IIYB9AQEbGluayZ7ImhyZWYiOiJodHRwczovL3gudGVzdCIsInRpdGxlIjpudWxsfYQB9QQOaHR0cHM6Ly94LnRlc3SGAYMFBGxpbmsEbnVsbIQBhAUCIGIoAAHuBAdibG9ja0lkAXcIYi0wMDAwMjeHAe4EAwlwYXJhZ3JhcGgHAAGIBQYEAAGJBQVTZWUgPIYBjgUEbGluayx7ImhyZWYiOiJodHRwOi8vZS50ZXN0L2FcXFxcYiIsInRpdGxlIjpudWxsfYQBjwUSaHR0cDovL2UudGVzdC9hXFxihgGhBQRsaW5rBG51bGyEAaIFBSBub3cuKAABiAUHYmxvY2tJZAF3CGItMDAwMDI4hwGIBQMJcGFyYWdyYXBoBwABqQUGBgABqgUEbGluayt7ImhyZWYiOiJodHRwOi8vd3d3LmUudGVzdCpiIiwidGl0bGUiOm51bGx9hAGrBQx3d3cuZS50ZXN0KmKGAbcFBGxpbmsEbnVsbIQBuAUBKigAAakFB2Jsb2NrSWQBdwhiLTAwMDAyOYcBqQUDCXBhcmFncmFwaAcAAbsFBgQAAbwFDGB3d3cuZS50ZXN0XygAAbsFB2Jsb2NrSWQBdwhiLTAwMDAzMIcBuwUDBXRhYmxlBwABygUDEHRhYmxlX2hlYWRlcl9yb3cHAAHLBQMMdGFibGVfaGVhZGVyBwABzAUDCXBhcmFncmFwaAcAAc0FBgQAAc4FAWEoAAHNBQdibG9ja0lkAXcIYi0wMDAwMzQoAAHMBQdjb2xzcGFuAX0BKAABzAUHcm93c3BhbgF9ASgAAcwFB2Jsb2NrSWQBdwhiLTAwMDAzM4cBzAUDDHRhYmxlX2hlYWRlcgcAAdQFAwlwYXJhZ3JhcGgHAAHVBQYEAAHWBQFiKAAB1QUHYmxvY2tJZAF3CGItMDAwMDM2KAAB1AUHY29sc3BhbgF9ASgAAdQFB3Jvd3NwYW4BfQEoAAHUBQdibG9ja0lkAXcIYi0wMDAwMzUoAAHLBQdibG9ja0lkAXcIYi0wMDAwMzKHAcsFAwl0YWJsZV9yb3cHAAHdBQMKdGFibGVfY2VsbAcAAd4FAwlwYXJhZ3JhcGgHAAHfBQYEAAHgBQF4KAAB3wUHYmxvY2tJZAF3CGItMDAwMDM5KAAB3gUHY29sc3BhbgF9ASgAAd4FB3Jvd3NwYW4BfQEoAAHeBQdibG9ja0lkAXcIYi0wMDAwMziHAd4FAwp0YWJsZV9jZWxsBwAB5gUDCXBhcmFncmFwaAcAAecFBgQAAegFASKGAekFBGxpbmsmeyJocmVmIjoiaHR0cHM6Ly94LnRlc3QiLCJ0aXRsZSI6bnVsbH2EAeoFDmh0dHBzOi8veC50ZXN0hgH4BQRsaW5rBG51bGyEAfkFAyIgYigAAecFB2Jsb2NrSWQBdwhiLTAwMDA0MSgAAeYFB2NvbHNwYW4BfQEoAAHmBQdyb3dzcGFuAX0BKAAB5gUHYmxvY2tJZAF3CGItMDAwMDQwKAAB3QUHYmxvY2tJZAF3CGItMDAwMDM3KAABygUHYmxvY2tJZAF3CGItMDAwMDMxAA==",
+    "rendered_by_milkdown": "see [www.x.test](http://www.x.test) b\n\nsee <HTTP://x.test> b\n\nsee <http://x.test> b\n\nx;<https://x.test> b\n\nx#<https://x.test> b\n\nx&<https://x.test> b\n\n\\*<https://x.test> b\n\n([www.x.test](http://www.x.test) b\n\n\"[www.a.test/?u=](http://www.a.test/?u=)<https://b.test>\"\n\n\"<https://x.test>\" b\n\nx;<https://x.test/a>\\_ b\n\nx;<https://x.test/a>\\<b c\n\nx;<https://a.test/*b>\\* c\n\nsee <http://x.test/a_> b\n\nsee [http://x.test/a\\<b](http://x.test/a<b) c\n\né<https://x.test> b\n\nx—<https://x.test> b\n\nx;[www.x.test](http://www.x.test) b\n\nx]<https://x.test> b\n\nx|<https://x.test> b\n\nx!<https://x.test> b\n\n&<https://x.test> b\n\nx\"<https://x.test>\" b\n\n\\[<https://x.test> b\n\nx1<https://x.test> b\n\n`c`;<https://x.test> b\n\nfoo; <https://x.test> b\n\nSee <<http://e.test/a\\\\\\b> now.\n\n[www.e.test\\*b](http://www.e.test*b)\\*\n\n\\`www\\.e.test\\_\n\n| a | b                    |\n| - | -------------------- |\n| x | \"<https://x.test>\" b |\n"
+  },
+  {
     "name": "bare-url-trailing-punctuation",
     "markdown": "\"HTTP 401: Bad credentials (https://api.github.com/graphql)\" while CI ran\n\nSee https://x.test/a, https://x.test/b. and https://x.test/c; then https://x.test/d: or https://x.test/e!\n\nQuoted \"https://x.test/f\" and 'https://x.test/g' and (https://x.test/h(i)) and https://x.test/j_ and https://x.test/k*.\n\nA trail before more text continues the URL: https://x.test/l.m and https://x.test/n;o and https://x.test/p\"q.\n\nReferences and brackets: https://x.test/r&amp; and https://x.test/s] and https://x.test/t](u) and https://x.test/v]w.\n\nBackslashes, asterisks and letters outside ASCII are the URL's: https://x.test/a\\b https://x.test/a*b https://x.test/café\n\nAny case: HTTPS://X.TEST/Y and Www.x.test/z; no ftp://x.test/w\n\n| cell | text |\n| --- | --- |\n| x | \"HTTP 401: Bad credentials (https://api.github.com/graphql)\" while |\n| y | see \"https://x.test/a\"; and 'https://x.test/b'! |\n",
     "pm_json": {
