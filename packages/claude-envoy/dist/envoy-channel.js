@@ -43868,9 +43868,14 @@ var ReplayCursorSchema = exports_external.object({
   since: exports_external.number().int().nonnegative().optional(),
   after: exports_external.number().int().nonnegative().optional()
 });
-var ReplayPendingNoticeSchema = exports_external.enum(["retention_gap", "stream_recreated"]);
+var ReplayPendingNoticeSchema = exports_external.enum([
+  "retention_gap",
+  "stream_moved_back",
+  "stream_recreated"
+]);
 var PENDING_NOTICE_MESSAGES = {
   stream_recreated: "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
+  stream_moved_back: "Envoy's notification stream was restored to an earlier point, so messages published to this session while its connection was down may be shown again, and any published between that point and the restore are missing.",
   retention_gap: "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing."
 };
 var ReplayStateSchema = exports_external.object({
@@ -44129,10 +44134,9 @@ function createReplayEngine(options) {
     if (stream.id === undefined) {
       return streamCreated !== undefined && streamCreated !== "" && stream.created !== streamCreated;
     }
-    if (streamID !== undefined && streamID !== "")
-      return stream.id !== streamID;
-    if (streamCreated === undefined || streamCreated === "")
-      return false;
+    return streamID !== undefined && streamID !== "" && stream.id !== streamID;
+  };
+  const streamMovedBack = (stream) => {
     for (const cursor of cursors.values()) {
       if (cursor.after !== undefined && cursor.after > stream.last_seq)
         return true;
@@ -44208,6 +44212,31 @@ function createReplayEngine(options) {
         tell("stream_recreated");
         await flush(alive);
         return;
+      }
+      if (streamMovedBack(stream)) {
+        const from = Math.max(0, stream.first_seq - 1);
+        for (const [subject2, cursor] of cursors) {
+          if (cursor.after === undefined)
+            continue;
+          cursors.set(subject2, { ...cursor, after: from });
+          const reading = readings.get(subject2);
+          if (reading !== undefined) {
+            reading.read = from;
+            reading.more = true;
+          }
+        }
+        buffer.clear();
+        holes.clear();
+        failures.clear();
+        pending.add("stream_moved_back");
+        await flush(alive, true);
+        if (!alive())
+          return;
+        tell("stream_moved_back");
+        await flush(alive);
+        if (!alive())
+          return;
+        continue;
       }
       for (const [, reading] of asking)
         reading.more = false;
@@ -44419,9 +44448,13 @@ function failureNoticeFields(notice) {
     detail: `This session could not be shown this message, so it is not coming back on its own. ${readWith}`
   };
 }
+var REPLAY_NOTICE_NAMES = {
+  stream_recreated: "stream recreated",
+  stream_moved_back: "stream moved back"
+};
 function replayNoticeFields(notice) {
   return {
-    notice: notice.kind === "stream_recreated" ? "stream recreated" : "messages may be missing",
+    notice: REPLAY_NOTICE_NAMES[notice.kind] ?? "messages may be missing",
     detail: notice.message
   };
 }
