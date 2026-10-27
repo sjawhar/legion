@@ -79,6 +79,110 @@ func TestEventCommittedOnAnotherProcessReachesAnOpenStream(t *testing.T) {
 	}
 }
 
+// TestOutOfOrderCommitsOnAnotherProcessReachAnOpenStreamInIDOrder: process A commits two events
+// out of id order -- tx A appends on issue X (id a) and stays open while tx B appends on issue Y
+// (id b > a) and commits -- and a reader's connection is on process B. B's relay hears B's commit
+// and must not publish b while a is open: a relay that read `id > cursor` and moved its cursor to
+// b would never publish a, and the reader would miss it for good. B's relay reads only up to its
+// own process's horizon, which A's open transaction holds below a however far the two processes
+// are apart, so the stream on B sends nothing past a while A is open, and a then b once A commits.
+func TestOutOfOrderCommitsOnAnotherProcessReachAnOpenStreamInIDOrder(t *testing.T) {
+	first, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
+	other := createInteractionIssue(t, first, "OTHER", "Other issue", "A spec")
+	second := httptest.NewServer(secondProcessHandler(t, database))
+	t.Cleanup(second.Close)
+	stream := sseFrames(t, openSSEStream(t, second.URL+"/api/v1/events"))
+
+	// Appended through a broker of process A's own: B learns of them only from the rows.
+	low, high, commitLow := appendOutOfOrder(t, database, events.NewBroker(), issue.Key, other.Key)
+	expectNoSSEFrameAbove(t, stream, low-1, time.Second, "on process B while process A's lower id is open")
+	commitLow()
+	expectSSEFramesInOrder(t, stream, low, high)
+}
+
+// TestEventLogResetClearsTheRelaysHorizon: a reset log (`truncate events restart identity`, what
+// e2e/seed.ts does between browser scenarios) hands out ids from 1 again, far below the horizon the
+// relay read the old log through. The relay forgets that horizon (Horizon.Reset) and takes its new
+// cursor under one proven afresh, ends every subscription open across the reset as it always has,
+// and serves the new log to the connections opened after it.
+//
+// The refill here commits out of id order on process A -- id a still open, id b > a committed --
+// and the reader is on process B. Without Horizon.Reset, B's horizon stands at the old log's head,
+// above every new id, so its relay takes the new log's b for its cursor at once while a is open,
+// and a connection opened after that reset is never sent a when it commits, though it is sent the
+// event after it. With the horizon forgotten, the relay's new cursor waits for a to end, and a
+// connection opened meanwhile, on the old cursor, is ended with the rest.
+func TestEventLogResetClearsTheRelaysHorizon(t *testing.T) {
+	first, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
+	other := createInteractionIssue(t, first, "OTHER", "Other issue", "A spec")
+	second := httptest.NewServer(secondProcessHandler(t, database))
+	t.Cleanup(second.Close)
+	rename := func(title string) {
+		t.Helper()
+		if response := dispatchRequest(t, first, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+			"title": title,
+		}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("rename issue to %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+	}
+	openStream := func() <-chan []string {
+		t.Helper()
+		return sseFrames(t, openSSEStream(t, second.URL+"/api/v1/events"))
+	}
+
+	// B's relay publishes through the old log's head, so its cursor and horizon stand there.
+	across := openStream()
+	rename("Renamed before the reset")
+	head := eventHead(t, database)
+	expectSSEFramesInOrder(t, across, head)
+
+	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
+		t.Fatalf("reset the event log: %v", err)
+	}
+	low, high, commitLow := appendOutOfOrder(t, database, events.NewBroker(), issue.Key, other.Key)
+	if high >= head {
+		t.Fatalf("event %d committed after the reset is not below the pre-reset head %d: the reset reused no id, so this test proves nothing", high, head)
+	}
+	// Time for B's relay to hear the refill's commit and find the reset.
+	time.Sleep(500 * time.Millisecond)
+	meanwhile := openStream()
+	commitLow()
+	rename("Renamed after the reset")
+
+	// The stream open across the reset ends without a frame of the new log, whose ids it has
+	// already seen stand for other events.
+	for open := true; open; {
+		select {
+		case frame, more := <-across:
+			if !more {
+				open = false
+			} else if id := sseFrameID(t, frame); id <= head {
+				t.Fatalf("the stream open across the reset was sent event %d of the new log", id)
+			}
+		case <-time.After(sseFrameWait):
+			t.Fatal("the stream open across the reset was never ended")
+		}
+	}
+	// The connection opened while a was open is ended, or sent a: never left open past it.
+	select {
+	case frame, more := <-meanwhile:
+		if more {
+			if id := sseFrameID(t, frame); id != low {
+				t.Fatalf("the connection opened after the reset was sent event %d but not %d, which committed after it opened", id, low)
+			}
+		}
+	case <-time.After(sseFrameWait):
+		t.Fatalf("the connection opened after the reset was neither ended nor sent event %d, which committed after it opened", low)
+	}
+
+	// And a connection opened now is served the new log.
+	after := openStream()
+	rename("Renamed for the connection opened after the reset")
+	expectSSEFramesInOrder(t, after, eventHead(t, database))
+}
+
 // TestEventStreamRelayCatchesUpWhenItsListenerReconnects covers the window a redial leaves: a
 // notification sent while the relay has no connection reaches nobody, and nothing sends it again.
 // What covers it is the catch-up the listener's onConnected runs after every LISTEN, from the
@@ -104,12 +208,11 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 		stop()
 		relay.wait()
 	})
-	subscription, cancel, err := relay.subscribe(context.Background())
+	subscription, cancel, opened, err := relay.subscribe(context.Background())
 	if err != nil {
 		t.Fatalf("subscribe to the relay: %v", err)
 	}
 	defer cancel()
-	opened, _ := relay.at()
 
 	// Committed while the relay has no connection: its notification reaches nobody.
 	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
@@ -165,10 +268,11 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 // ids restart at 1, below the cursor the relay has published through, and `id > cursor` matches
 // nothing. A relay that only ever published forward would fall silent there for good: every live
 // update of every later scenario would be lost, with no error anywhere. The relay reads the reset
-// the way the delivery hub does (eventCursorCheck), moves its cursor to the new log's head and
-// ends every open subscription -- the stream's answer to a reader it can no longer serve in
-// order, which sends a browser through its reconnect -- and serves the events committed after the
-// reset to the connections opened after it.
+// the way the delivery hub does (eventCursorCheck), moves its cursor onto the new log (the last
+// event at or below a horizon proven after the reset) and ends every open subscription -- the
+// stream's answer to a reader it can no longer serve in order, which sends a browser through its
+// reconnect -- and serves the events committed after the reset to the connections opened after
+// it.
 func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
@@ -188,7 +292,7 @@ func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 		stop()
 		relay.wait()
 	})
-	subscription, cancel, err := relay.subscribe(context.Background())
+	subscription, cancel, _, err := relay.subscribe(context.Background())
 	if err != nil {
 		t.Fatalf("subscribe to the relay: %v", err)
 	}
@@ -234,7 +338,7 @@ func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 	}
 
 	// And the relay publishes again, from the new log, to a connection opened after the reset.
-	reopened, cancelReopened, err := relay.subscribe(context.Background())
+	reopened, cancelReopened, _, err := relay.subscribe(context.Background())
 	if err != nil {
 		t.Fatalf("subscribe to the relay after the reset: %v", err)
 	}

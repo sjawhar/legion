@@ -2181,6 +2181,16 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 
 	return mux, database, broker
 }
+
+// TestSSEResumeCursorOrdersConcurrentEventCommits: writes to two issues take no lock in common
+// (events.Broker.Append), so a lower event id can commit after a higher one: tx A appends on
+// issue X (id a) and stays open while tx B appends on issue Y (id b > a) and commits. A reader
+// resuming from just before a must be sent nothing while A is open, then a and b in that order,
+// on the connection it holds and on a fresh resume alike. Reading the log by `id > since` alone,
+// the stream sends b at once and the reader's position moves past a, which then never reaches
+// it: with Broker.Append's database-wide lock removed and no safe horizon, that is what this
+// reader got (b, and never a). The catch-up and the relay read only up to the horizon
+// (events.Horizon), which stays below a while A is open.
 func TestSSEResumeCursorOrdersConcurrentEventCommits(t *testing.T) {
 	handler, database, broker := newTestHandlerWithBroker(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -2211,81 +2221,73 @@ func TestSSEResumeCursorOrdersConcurrentEventCommits(t *testing.T) {
 	if otherCreated.Code != http.StatusCreated {
 		t.Fatalf("create other issue: status=%d body=%s", otherCreated.Code, otherCreated.Body.String())
 	}
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	// This connection starts the relay before A opens. A relay starting while A is open takes its
+	// first cursor under a horizon proven after the call, which waits for A to end, and the
+	// resuming connection below would not open until A committed.
+	openSSEStream(t, httpServer.URL+"/api/v1/events")
 
-	ctx := context.Background()
-	first, err := database.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin first transaction: %v", err)
+	low, high, commitLow := appendOutOfOrder(t, database, broker, issue.Key, other.Key)
+	resume := func() <-chan []string {
+		return sseFrames(t, openSSEStreamWith(t, httpServer.URL+"/api/v1/events", func(request *http.Request) {
+			request.Header.Set("Last-Event-ID", strconv.FormatInt(low-1, 10))
+		}))
 	}
-	defer first.Rollback(ctx)
-	low, err := broker.Append(ctx, first, model.Event{
-		IssueKey: new(issue.Key),
+	open := resume()
+	expectNoSSEFrameAbove(t, open, low-1, time.Second, "while the lower id is still open")
+
+	commitLow()
+	expectSSEFramesInOrder(t, open, low, high)
+	expectSSEFramesInOrder(t, resume(), low, high)
+}
+
+// appendOutOfOrder appends two events through broker so they commit out of id order: tx A
+// appends on issue first (the lower id, low) and stays open, then tx B appends on issue second
+// (high) and commits. commitLow commits A; until it runs, low is an id below a committed one that
+// is not yet visible. A that the test never commits rolls back when the test ends.
+func appendOutOfOrder(t *testing.T, database *store.Store, broker *events.Broker, first, second string) (low, high int64, commitLow func()) {
+	t.Helper()
+	ctx := t.Context()
+	open, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the lower id's transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = open.Rollback(context.Background()) })
+	lowEvent, err := broker.Append(ctx, open, model.Event{
+		IssueKey: new(first),
 		Type:     "test.concurrent",
 		Actor:    model.Actor{Kind: "session", ID: "seed"},
 		Payload:  map[string]any{},
 	})
 	if err != nil {
-		t.Fatalf("append first event: %v", err)
+		t.Fatalf("append the lower id: %v", err)
 	}
-
-	type appendResult struct {
-		event model.Event
-		err   error
-	}
-	started := make(chan struct{})
-	secondResult := make(chan appendResult, 1)
-	go func() {
-		second, err := database.Pool.Begin(ctx)
-		if err != nil {
-			secondResult <- appendResult{err: err}
-			return
-		}
-		defer second.Rollback(ctx)
-		close(started)
-		event, err := broker.Append(ctx, second, model.Event{
-			IssueKey: new(other.Key),
-			Type:     "test.concurrent",
-			Actor:    model.Actor{Kind: "session", ID: "seed"},
-			Payload:  map[string]any{},
-		})
-		if err == nil {
-			err = second.Commit(ctx)
-		}
-		secondResult <- appendResult{event: event, err: err}
-	}()
-	<-started
-	waitForDatabaseLocks(t, first, 1)
-
-	if err := first.Commit(ctx); err != nil {
-		t.Fatalf("commit first event: %v", err)
-	}
-	high := <-secondResult
-	if high.err != nil {
-		t.Fatalf("append second event: %v", high.err)
-	}
-	if high.event.ID <= low.ID {
-		t.Fatalf("event ids did not follow commit order: first=%d second=%d", low.ID, high.event.ID)
-	}
-
-	httpServer := httptest.NewServer(handler)
-	defer httpServer.Close()
-	request, err := http.NewRequest(
-		http.MethodGet,
-		httpServer.URL+"/api/v1/events?since="+fmt.Sprintf("%d", low.ID),
-		nil,
-	)
+	committed, err := database.Pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("construct resumed SSE request: %v", err)
+		t.Fatalf("begin the higher id's transaction: %v", err)
 	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
+	defer func() { _ = committed.Rollback(context.Background()) }()
+	highEvent, err := broker.Append(ctx, committed, model.Event{
+		IssueKey: new(second),
+		Type:     "test.concurrent",
+		Actor:    model.Actor{Kind: "session", ID: "seed"},
+		Payload:  map[string]any{},
+	})
 	if err != nil {
-		t.Fatalf("open resumed SSE stream: %v", err)
+		t.Fatalf("append the higher id while the lower one is open: %v", err)
 	}
-	defer stream.Body.Close()
-	frame := readSSEFrame(t, bufio.NewScanner(stream.Body))
-	if frame[0] != fmt.Sprintf("id: %d", high.event.ID) {
-		t.Fatalf("resume replay = %#v, want committed second event %d", frame, high.event.ID)
+	if err := committed.Commit(ctx); err != nil {
+		t.Fatalf("commit the higher id: %v", err)
+	}
+	if highEvent.ID <= lowEvent.ID {
+		t.Fatalf("event ids %d (open) and %d (committed) are not out of commit order, so this test proves nothing", lowEvent.ID, highEvent.ID)
+	}
+	return lowEvent.ID, highEvent.ID, func() {
+		t.Helper()
+		if err := open.Commit(ctx); err != nil {
+			t.Fatalf("commit the lower id: %v", err)
+		}
 	}
 }
 
@@ -2311,13 +2313,13 @@ const sseStreamDeadline = 30 * time.Second
 // with the cleanups, after every defer.
 func openSSEStream(t *testing.T, url string) *bufio.Scanner {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), sseStreamDeadline)
-	t.Cleanup(cancel)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatalf("construct SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
+	return openSSEStreamWith(t, url, func(*http.Request) {})
+}
+
+// openSSEStreamWith is openSSEStream for a request prepare finishes, with a Last-Event-ID say.
+func openSSEStreamWith(t *testing.T, url string, prepare func(*http.Request)) *bufio.Scanner {
+	t.Helper()
+	request := sseRequest(t, url, prepare)
 	stream, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("open SSE stream: %v", err)
@@ -2327,6 +2329,104 @@ func openSSEStream(t *testing.T, url string) *bufio.Scanner {
 		t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
 	}
 	return bufio.NewScanner(stream.Body)
+}
+
+// sseRequest is the request openSSEStreamWith sends, under the sseStreamDeadline, for a test that
+// has to send it from a goroutine of its own.
+func sseRequest(t *testing.T, url string, prepare func(*http.Request)) *http.Request {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), sseStreamDeadline)
+	t.Cleanup(cancel)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("construct SSE request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer agent-token")
+	prepare(request)
+	return request
+}
+
+// sseFrames reads scanner's event frames, as readSSEFrame does, on a goroutine of its own, so a
+// test can wait for a frame with a deadline or hold that none arrives. The channel closes when
+// the stream ends.
+func sseFrames(t *testing.T, scanner *bufio.Scanner) <-chan []string {
+	frames := make(chan []string)
+	ended := t.Context().Done()
+	go func() {
+		defer close(frames)
+		frame := []string{}
+		for scanner.Scan() {
+			line := scanner.Text()
+			switch {
+			case line == "":
+				if len(frame) == 0 {
+					continue
+				}
+				select {
+				case frames <- frame:
+				case <-ended:
+					return
+				}
+				frame = []string{}
+			case !strings.HasPrefix(line, ":"):
+				frame = append(frame, line)
+			}
+		}
+	}()
+	return frames
+}
+
+// sseFrameWait is how long a test waits for a frame it is owed before it fails: generous, since
+// an open write anywhere on the test cluster holds back the horizon every stream reads up to.
+const sseFrameWait = 10 * time.Second
+
+// expectNoSSEFrameAbove fails the test when frames carries an event above floor within hold, or
+// ends; frames at or below floor are let through.
+func expectNoSSEFrameAbove(t *testing.T, frames <-chan []string, floor int64, hold time.Duration, while string) {
+	t.Helper()
+	deadline := time.After(hold)
+	for {
+		select {
+		case frame, open := <-frames:
+			if !open {
+				t.Fatalf("the stream ended %s", while)
+			}
+			if id := sseFrameID(t, frame); id > floor {
+				t.Fatalf("the stream sent event %d %s, want nothing above %d", id, while, floor)
+			}
+		case <-deadline:
+			return
+		}
+	}
+}
+
+// expectSSEFramesInOrder reads frames until every id in want has arrived, in want's order, and
+// fails on an id at or below one already sent (a repeat, or an id delivered out of order), on an
+// id above the next wanted one before it (the wanted one skipped), and on a stream that ends or
+// falls silent for sseFrameWait first. Frames of ids want does not name are let through.
+func expectSSEFramesInOrder(t *testing.T, frames <-chan []string, want ...int64) {
+	t.Helper()
+	var last int64
+	for next := 0; next < len(want); {
+		select {
+		case frame, open := <-frames:
+			if !open {
+				t.Fatalf("the stream ended before event %d (after %d)", want[next], last)
+			}
+			id := sseFrameID(t, frame)
+			switch {
+			case id <= last:
+				t.Fatalf("the stream sent event %d after %d: a repeat, or ids out of order", id, last)
+			case id == want[next]:
+				next++
+			case id > want[next]:
+				t.Fatalf("the stream sent event %d before event %d, which it skipped", id, want[next])
+			}
+			last = id
+		case <-time.After(sseFrameWait):
+			t.Fatalf("the stream sent no event %d within %s (last sent %d)", want[next], sseFrameWait, last)
+		}
+	}
 }
 
 // sseFrameID is the event id of one frame readSSEFrame read.
@@ -2342,16 +2442,15 @@ func sseFrameID(t *testing.T, frame []string) int64 {
 	return id
 }
 
-// TestSSEDoesNotResendAnEventAtOrBelowItsSince covers the one id comparison the live loop makes.
-// The relay is one per process and can stand behind a connection opened after it: it then
-// publishes ids that connection's catch-up has already covered, which sentDuringCatchup cannot be
-// asked about, since it holds only the ids above since that catch-up sent. Forwarding them would
-// show a client an event it has already seen.
+// TestSSEDoesNotResendAnEventAtOrBelowItsSince covers a since above the relay's published cursor.
+// The relay is one per process and can stand behind a connection opened after it: a client
+// resuming from the last id it saw, which this process's relay has not yet read up to. The relay
+// then publishes into that connection's subscription ids at or below its since, events the client
+// already has; forwarding them would show it an event twice.
 //
-// The comparison is safe because since is fixed for the connection, and the commit-order lock
-// events.Broker.Append holds until its transaction commits leaves no uncommitted id at or below a
-// committed max(id). A late-committing lower id -- what the live loop used to carry a rule
-// against -- is now the lock's to prevent and TestOnlyTheBrokerInsertsEvents's to keep.
+// The live loop drops every id at or below max(since, published), and that is safe because the
+// relay publishes into a subscription only ids above published, in strictly increasing order: no
+// event above since can arrive later below it.
 func TestSSEDoesNotResendAnEventAtOrBelowItsSince(t *testing.T) {
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
 	// Long enough that the second connection below opens between a commit and the read that
@@ -2384,11 +2483,11 @@ func TestSSEDoesNotResendAnEventAtOrBelowItsSince(t *testing.T) {
 }
 
 // TestSSECappedCatchupDeliversACommitDuringPagingExactlyOnce: a catch-up that fills a page keeps
-// paging on the subscription it opened with. An event committing while it pages reaches the
-// client on a later page or live from the relay, whichever sees it first, and sentDuringCatchup is
-// what keeps it from arriving on both. A capped page that ended the stream instead, sending the
-// client to a reconnect, would leave a gap between the last page and the new subscription for that
-// commit to fall into.
+// paging through (since, published] on the subscription it opened with. An event committing while
+// it pages stands above published, so it reaches the client live from the relay and on no
+// catch-up page, since every page is capped at published. A page read up to the log's newest id
+// instead would send it on the page and again live; a catch-up that stopped at its first full
+// page would never send the events between that page and published.
 func TestSSECappedCatchupDeliversACommitDuringPagingExactlyOnce(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
@@ -2425,12 +2524,13 @@ func TestSSECappedCatchupDeliversACommitDuringPagingExactlyOnce(t *testing.T) {
 }
 
 // TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit: a cold connection (no since= and no
-// Last-Event-ID) resolves its own head inside this one handler, after it has subscribed. It is
-// sent nothing already committed, which is the backlog it asked not to get, and everything
-// committing after it, which lands in its subscription however its catch-up went. A client that
-// read its head through a separate request first would lose an event committing between that
-// request and this one: invisible to the catch-up (id <= since) and to a subscription registered
-// only afterwards.
+// Last-Event-ID) starts at the relay's published cursor, which it reads with its subscription
+// inside this one handler. A relay this connection starts takes its first cursor under a horizon
+// proven after the call, at or above everything committed before it, so the connection is sent
+// nothing already committed, which is the backlog it asked not to get, and everything committing
+// after it, which the relay publishes into its subscription. A client that read its head through a
+// separate request first would lose an event committing between that request and this one:
+// invisible to the catch-up (id <= since) and dropped by the live loop.
 func TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
@@ -2453,6 +2553,116 @@ func TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit(t *testing.T) {
 	}
 }
 
+// TestSSEConnectionOpeningWhileTheRelayPublishesMissesAndRepeatsNothing: a connection hands over
+// from the log to the live feed at the relay's published cursor, which it reads together with its
+// subscription. The relay publishes a page and then moves its cursor over it. A connection that
+// subscribed between the two would read a cursor below a page it was never sent: its catch-up
+// (since, published] stops short of the page and its subscription began after it, so the page is
+// lost to that connection for good. The relay holds one lock across each page's publish and
+// cursor move and across each subscription and its cursor read, so a connection subscribes before
+// the page (and is sent it live) or after the cursor moved (and replays it), never between.
+//
+// The test opens a connection from inside that window, through the relay's beforeAdvance hook,
+// and holds the window open far longer than a connection takes to subscribe; the connection must
+// then be sent every event after its since exactly once, in id order.
+func TestSSEConnectionOpeningWhileTheRelayPublishesMissesAndRepeatsNothing(t *testing.T) {
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	rename := func(title string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+			"title": title,
+		}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("rename issue to %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+	}
+
+	// opening is the connection the hook opens, once the relay publishes a page past since.
+	type opening struct {
+		since   int64
+		request *http.Request
+	}
+	type opened struct {
+		response *http.Response
+		err      error
+	}
+	arm := make(chan opening, 1)
+	answered := make(chan opened, 1)
+	var armed *opening // the relay's goroutine alone touches it
+	// Set before the relay starts, so its goroutine reads it after this write.
+	served.eventRelay.beforeAdvance = func(page []model.Event) {
+		if armed == nil {
+			select {
+			case next := <-arm:
+				armed = &next
+			default:
+				return
+			}
+		}
+		if armed.request == nil || page[len(page)-1].ID <= armed.since {
+			return
+		}
+		request := armed.request
+		armed.request = nil
+		go func() {
+			response, err := http.DefaultClient.Do(request)
+			answered <- opened{response: response, err: err}
+		}()
+		// A connection subscribes within milliseconds when nothing holds it back.
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	// This connection starts the relay.
+	openSSEStream(t, httpServer.URL+"/api/v1/events")
+	since := eventHead(t, database)
+	arm <- opening{since: since, request: sseRequest(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since), func(*http.Request) {})}
+	rename("Renamed while a connection opens")
+	published := eventHead(t, database)
+
+	var connection opened
+	select {
+	case connection = <-answered:
+	case <-time.After(sseFrameWait):
+		t.Fatalf("the relay published nothing past %d within %s, so the connection was never opened", since, sseFrameWait)
+	}
+	if connection.err != nil {
+		t.Fatalf("open the SSE stream from inside the relay's publish: %v", connection.err)
+	}
+	t.Cleanup(func() { connection.response.Body.Close() })
+	if connection.response.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status = %d, want 200", connection.response.StatusCode)
+	}
+	frames := sseFrames(t, bufio.NewScanner(connection.response.Body))
+	rename("Renamed after the connection opened")
+	expectSSEFramesInOrder(t, frames, published, eventHead(t, database))
+}
+
+// TestSSEColdClientStartsAtTheRelaysPublishedCursor: a cold connection asks for no backlog, but it
+// is owed every event that commits after it opened, and a lower id still open when it connects is
+// one of them. tx A appends on issue X (id a) and stays open, tx B appends on issue Y (id b > a)
+// and commits, and the connection opens. Started at the log's newest id (b), the live loop drops a
+// when A commits, for good, since a is at or below that start. Started at the relay's published
+// cursor, which never passes an id still open, it is sent a and then b.
+func TestSSEColdClientStartsAtTheRelaysPublishedCursor(t *testing.T) {
+	handler, database, broker := newTestHandlerWithBroker(t)
+	first := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	second := createInteractionIssue(t, handler, "OTHER", "Other issue", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	// This connection starts the relay before A opens: a relay starting while A is open waits for
+	// A to end before it answers its first subscriber.
+	openSSEStream(t, httpServer.URL+"/api/v1/events")
+
+	low, high, commitLow := appendOutOfOrder(t, database, broker, first.Key, second.Key)
+	cold := sseFrames(t, openSSEStream(t, httpServer.URL+"/api/v1/events"))
+	// Long enough for the relay to read b's commit while A is still open.
+	expectNoSSEFrameAbove(t, cold, low-1, time.Second, "while the lower id is still open")
+	commitLow()
+	expectSSEFramesInOrder(t, cold, low, high)
+}
+
 // TestSSEResumesAfterTheEventLogIsResetBeneathTheReader: the browser suite empties the event log
 // between its scenarios (`truncate ... restart identity cascade`, e2e/seed.ts), so the next row's
 // id is 1 again. The relay notices, ends every open subscription and sends the browser through
@@ -2464,8 +2674,8 @@ func TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit(t *testing.T) {
 //
 // The assertion is the frame of an event committed after the reset, whose id is below the
 // pre-reset head this connection resumed from. It can reach the reader only through a since the
-// handler clamped to the head it resolved for this connection; an unclamped since drops it, and
-// the only frame this reader then ever sees is a heartbeat.
+// handler clamped to the relay's published cursor, which this connection's relay took on the new
+// log; an unclamped since drops it, and the only frame this reader then ever sees is a heartbeat.
 func TestSSEResumesAfterTheEventLogIsResetBeneathTheReader(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")

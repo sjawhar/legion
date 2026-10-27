@@ -266,6 +266,12 @@ type server struct {
 	// eventRelay is the live feed every open SSE connection reads (INFRA-66), on every server
 	// register mounts: it starts its listening connection on the first connection to subscribe.
 	eventRelay *eventStreamRelay
+	// eventHorizon is the server's one events.Horizon: the safe horizon every reader that pages
+	// the event log by a global id cursor reads up to, shared through horizon() so one
+	// observation in flight serves them all. horizonOnce builds it on first use rather than in
+	// register, which must not touch the Store.
+	horizonOnce  sync.Once
+	eventHorizon *events.Horizon
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
 	// warned holds no production job or no configured apply step, so a read that judges a run again
 	// does not warn about it again. Nothing evicts an entry: the map holds one per configured job
@@ -328,6 +334,15 @@ func (s *server) waitBackground() {
 		s.deliveryHub.wait()
 	}
 	s.eventRelay.wait()
+}
+
+// horizon is the server's one events.Horizon over the shared pool (eventHorizon), built by the
+// first reader that asks for it. Every global-id reader of the event log on this server reads
+// through it: one per process is what lets concurrent readers share an observation, each of
+// which consumes a transaction id, rather than each reader observing on its own.
+func (s *server) horizon() *events.Horizon {
+	s.horizonOnce.Do(func() { s.eventHorizon = events.NewHorizon(s.deps.Store.Pool) })
+	return s.eventHorizon
 }
 
 // register is Register, answering the server it mounted, whose delivery hub and event stream

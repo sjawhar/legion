@@ -101,40 +101,47 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	// The live feed is the process's event stream relay (event_stream_relay.go), which publishes
 	// every committed event it reads back out of Postgres — this process's and the other
-	// envoy-dispatch process's alike. Subscribing before this connection reads the log's head is
-	// what leaves no gap: an event committing after the subscription exists lands in the
-	// channel whatever its id, while one committing before it is at or below the head read next
-	// and so is replayed by the catch-up below. The relay reads its cursor before it answers a
-	// subscription, so it cannot already stand past that head either.
+	// envoy-dispatch process's alike — in id order, and only up to the safe horizon of the
+	// server's events.Horizon, at or below which every event is final. Event ids are not commit
+	// order (writes to different owners take no lock in common, events.Broker.Append), so a
+	// reader that went by the log's newest id could step over a lower id still open; the relay's
+	// cursor never does.
 	//
-	// That ordering is also why the head is read here and not by the client: for a cold client
-	// (no since= and no Last-Event-ID) this handler IS its only request, and a client that
-	// fetched its own head through a separate request and then opened this connection with
-	// since=<that head> would lose an event committing between the two, excluded from catch-up
-	// (id <= since) and missed by a subscription registered only afterwards.
-	subscription, cancel, err := s.eventRelay.subscribe(r.Context())
+	// subscribe answers the subscription together with published, the id the relay had published
+	// through when the subscription began, both read under the one lock the relay also holds
+	// across each page's publish and its cursor's move over that page. So every event at or below
+	// published is final and was published before this subscription existed, and every event the
+	// relay publishes into it is above published, each once, in strictly increasing id order.
+	// published is where this connection hands over from the log to the live feed.
+	//
+	// That handover is also why the start is resolved here and not by the client: for a cold
+	// client (no since= and no Last-Event-ID) this handler IS its only request, and a client that
+	// fetched a head through a separate request and then opened this connection with
+	// since=<that head> would lose an event committing between the two, or a lower id still open
+	// when it read the head, excluded from catch-up (id <= since) and dropped by the live loop.
+	subscription, cancel, published, err := s.eventRelay.subscribe(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	defer cancel()
-	// Every connection resolves the head, a resuming one too, which costs it one extra round
-	// trip. The event log can be reset under a reader (`truncate events restart identity`, the
-	// browser suite's e2e/seed.ts): the ids restart at 1 and the relay, which notices, ends every
-	// open subscription and so sends the browser through its reconnect. The browser only ever
-	// raises its lastEventId and never lowers it (web/src/api/sse.ts), so it resumes with a since
-	// above the new log's head. Unclamped, the live loop below would then drop every event of the
-	// new log for ever, on a connection that stays open and heartbeats: a reader silent for good,
-	// with nothing logged and nothing failed.
+	// Every connection reads the log's newest id, a resuming one too, which costs it one extra
+	// round trip. The event log can be reset under a reader (`truncate events restart identity`,
+	// the browser suite's e2e/seed.ts): the ids restart at 1 and the relay, which notices, ends
+	// every open subscription and so sends the browser through its reconnect. The browser only
+	// ever raises its lastEventId and never lowers it (web/src/api/sse.ts), so it resumes with a
+	// since above the new log's newest id. Unclamped, the live loop below would then drop every
+	// event of the new log for ever, on a connection that stays open and heartbeats: a reader
+	// silent for good, with nothing logged and nothing failed.
 	var head int64
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), `select coalesce(max(id), 0) from events`).Scan(&head); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// A cold client asked for no backlog, and a since above the head can only be an id of a log
-	// this one replaced; both start at the head this connection just read.
+	// A cold client asked for no backlog, and a since above the newest id can only be an id of a
+	// log this one replaced; both start at published, the handover this connection holds.
 	if !sinceProvided || since > head {
-		since = head
+		since = published
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -149,20 +156,15 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flusher.Flush()
-	// Ids are assigned by nextval() when the insert statement runs, before commit,
-	// so a lower id can commit after a higher one is already visible to a catch-up
-	// query — a still-open transaction that grabbed an earlier id is exactly the
-	// case the subscription above (taken before any catch-up query runs) exists to
-	// cover. Page through the full backlog here without ever closing the stream: a
-	// capped page that ended the stream and forced a client reconnect would leave
-	// a gap between "read this page" and "reopen a new subscription" where a low
-	// id could commit and be missed by both the next page's `id > cursor` query
-	// (cursor has already moved past it) and the old subscription (already
-	// cancelled). Keeping one subscription live across every page closes that gap.
+	// Catch-up replays (since, published] from the log. Every event in it is final, since
+	// published is at or below the safe horizon, so a page read now holds the rows any later read
+	// would, and moving cursor to a page's last row skips nothing. It pages through the whole
+	// range on the one subscription, never ending the stream partway: whatever the relay publishes
+	// meanwhile waits in the subscription (or overflows it, which ends the stream and sends the
+	// client to its reconnect, Stream.Publish). A since at or above published needs no catch-up.
 	cursor := since
-	sentDuringCatchup := make(map[int64]bool)
-	for {
-		replay, err := s.readEventsAfterID(r.Context(), cursor)
+	for cursor < published {
+		replay, err := s.readEventsAfterID(r.Context(), cursor, published)
 		if err != nil {
 			return
 		}
@@ -170,7 +172,6 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			if err := writeSSEEvent(w, event); err != nil {
 				return
 			}
-			sentDuringCatchup[event.ID] = true
 			cursor = event.ID
 		}
 		flusher.Flush()
@@ -178,26 +179,21 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	// The live loop below must never compare an event's id against the last id it sent: a lower
-	// id committing after a higher one was already forwarded would be dropped forever, and that
-	// is exactly what the relay re-emits after a redial. The one comparison it does make is
-	// against since, which is fixed for this connection: the commit-order lock events.Broker.Append
-	// holds until commit means no id at or below a committed max(id) is still uncommitted, so
-	// nothing above since can hide below it later. A relay still catching up to a connection
-	// opened after it re-emits ids at or below since — events this client has already seen, or
-	// backlog a cold client asked not to get — and sentDuringCatchup cannot be asked about them,
-	// since it holds only the ids catch-up sent, all above since.
+	// The live loop sends only events above both since and published. The relay publishes into
+	// this subscription only events above published, each once and in strictly increasing id
+	// order, so catch-up's (since, published] and the live loop's ids above max(since, published)
+	// are together every event after since, each sent exactly once and in id order. A since above
+	// published belongs to a client that has already seen events this process's relay has not yet
+	// published (read from the other process, or before a reconnect): the relay's ids at or below
+	// it are events that client has, and the comparison drops them.
 	//
 	// That argument covers a log whose ids only ever grow. A reset reuses them, and the clamp
-	// above is what extends the comparison across one: since is held at or below the head this
-	// connection resolved, so an id the new log hands out is never taken for an id the old log
-	// already showed this reader. What the clamp cannot do is tell this reader apart from the
-	// events of the log it was reading; the relay ends the subscription at a reset instead, and
-	// the reader comes back on a new connection, which resolves the new log's head here.
-	//
-	// Dedup against that bounded set covers an id catch-up sent that is *also* still sitting in
-	// the subscription channel (committed, and thus queryable, in the narrow window between the
-	// subscription and a catch-up query, but not yet drained from it).
+	// above is what extends the comparison across one: a since above the newest id is replaced by
+	// published, so an id the new log hands out is not dropped as one the old log already showed
+	// this reader. What the clamp cannot do is tell this reader apart from the events of the log
+	// it was reading; the relay ends the subscription at a reset instead, and the reader comes
+	// back on a new connection, which clamps its since against the log as it then stands.
+	floor := max(since, published)
 
 	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
 	defer heartbeat.Stop()
@@ -215,10 +211,7 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			if event.ID <= since {
-				continue
-			}
-			if sentDuringCatchup[event.ID] {
+			if event.ID <= floor {
 				continue
 			}
 			if err := writeSSEEvent(w, event); err != nil {
@@ -296,11 +289,15 @@ func (s *server) readEvents(ctx context.Context, owner owner, options eventListO
 	`, ownerValue, options.after, options.limit)
 }
 
-func (s *server) readEventsAfterID(ctx context.Context, after int64) ([]model.Event, error) {
+// readEventsAfterID reads one page of the global event log in id order: the events whose ids are
+// in (after, through]. Ids are not commit order, so a reader that moves its cursor to a page's
+// last row passes a through at or below the safe horizon (events.Horizon), where every event is
+// final: no lower id the page skipped can commit later.
+func (s *server) readEventsAfterID(ctx context.Context, after, through int64) ([]model.Event, error) {
 	return s.readEventRows(ctx, eventSelect+`
-		where e.id > $1
-		order by e.id asc limit $2
-	`, after, maxSSEReplay)
+		where e.id > $1 and e.id <= $2
+		order by e.id asc limit $3
+	`, after, through, maxSSEReplay)
 }
 
 func (s *server) readEventRows(ctx context.Context, query string, arguments ...any) ([]model.Event, error) {
