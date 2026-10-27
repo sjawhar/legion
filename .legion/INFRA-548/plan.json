@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-548",
+  "completed": "2026-10-27T02:22:37Z",
+  "planDocument": "dispatch://INFRA-548/artifact/plan-md",
+  "summary": "Both session plugins dial NATS through one new envoy-client function with pingInterval 10 s and maxPingOut 2 (a frozen path is left within 30 s, 52 s when the first redial also hangs), every registration sends plugin and plugin_version which the listener stores and lists, and stall-proxy tests on a real natsd and listener prove the reconnect and #2228's catch-up for envoy-client, Oh My Pi and Claude Code. The branch stacks on sjawhar/legion#2228 and merges only after it.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: handoff, proof and PR body rules, and references/conflicts-and-rewrites.md for the forward merges of legion/INFRA-439 and later main that the stacking needs",
+      "ce-simplify-code: the one simplify pass the PR body rules require on a runtime-code diff"
+    ],
+    "test": [
+      "legion-worker: test handoff, verifying the implementer's proof and adding the tester's own on the stall-proxy suites and the real listener's session list",
+      "envoy: the session list and direct-message semantics the tester drives (envoy_sessions, delivery by session id, at-least-once with repeated ids dropped)"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md, including this plan's merge gate that #2228 merges first",
+      "thermonuclear-code-quality: the reviewer's diff-scoped maintainability pass recorded on the Thermo line",
+      "thermonuclear-deep-review: the reviewer's diff-scoped correctness pass, for the reconnect timing, the stall proxy and registration back-compatibility"
+    ]
+  },
+  "decisions": [
+    {
+      "decision": "pingInterval 10000 ms, maxPingOut 2; dial timeout (20 s) and reconnectTimeWait (2 s) unchanged",
+      "reason": "nats.js 2.29.3 heartbeats.js drops a connection on the tick that finds maxPingOut pings unanswered, so a freeze is noticed within 3 x 10 s = 30 s; a redial that also hangs adds 20 + 2 s = 52 s < 60 s; 15 s would give 67 s. Lowering timeout would also shorten the first connect on a slow tailnet."
+    },
+    {
+      "decision": "One exported envoy-client function natsConnectionOptions (subpath @legion/envoy-client/nats-connection) used by both plugins",
+      "reason": "The options are duplicated at pi-envoy/extensions/envoy.ts:977-986 and claude-envoy/src/envoy-channel-server.ts:1490-1497; INFRA-552's measurement job must dial with the same values."
+    },
+    {
+      "decision": "Registration fields plugin (npm package name) and plugin_version; Claude Code reports its plugin-cache directory's version segment (the 12-character marketplace commit) or 'source'; Oh My Pi and OpenCode report package.json version; SubscribeInput.plugin required; Go fields omitempty",
+      "reason": "claude-envoy package.json 1.0.0 is never bumped and Claude Code versions the plugin by marketplace commit (claude-envoy README 'Updates'); pi-envoy's release inlines the released version; numbers overlap across plugins so the name is needed; an older plugin's entry then shows neither field."
+    },
+    {
+      "decision": "PR base main, branch stacked on legion/INFRA-439 by forward merges; the architect does not accept and the merger does not build READY until #2228 has merged and its squash commit is in the branch",
+      "reason": "Spec 'Order: build on #2228 (merge after it)'; a base of legion/INFRA-439 would carry none of main's required checks; the repository squash-merges and deletes merged branches."
+    },
+    {
+      "decision": "New CI job envoy-session-stall with Go and LEGION_E2E_ENVOY_STACK=1 runs the three stall suites; existing pi-envoy, claude-envoy and envoy-client jobs keep their filters and skip them",
+      "reason": "The tests need go build of natsd and the listener; the pi-envoy and claude-envoy jobs have no Go, and widening their filters to packages/envoy/** would run them on every Dispatch change."
+    }
+  ],
+  "tasks": [
+    "0. Forward-merge legion/INFRA-439@origin into the branch: jj new legion/INFRA-548@origin legion/INFRA-439@origin -m 'merge: build on sjawhar/legion#2228 (legion/INFRA-439)'; push before the first code commit.",
+    "1. envoy-client src/nats-connection.ts (natsConnectionOptions, NATS_PING_INTERVAL_MS, NATS_MAX_PINGS_OUT) + package.json exports and build entry; both plugins' connect sites call it; claude-envoy dist rebuilt.",
+    "2. Registration: Go subscribeBody/sessionEntryFromSubscribe (claim_wiring.go), SessionEntry (registry.go), sessionInfo/sessionInfoFor and the subscribe log line (api.go); envoy-client SubscribeInput.plugin required, body plugin/plugin_version, SessionWireSchema optional fields; pi-envoy package.json import + tsconfig resolveJsonModule; claude-envoy installedPluginVersion(process.argv[1]) ?? 'source'; OpenCode envoy-plugin both subscribe calls.",
+    "3. envoy-client src/testing/stall-proxy.ts (freeze open connections: read and discard both sides, never close; new connections forward; stallNext(n); per-connection accept and first-SUB times) and src/testing/envoy-stack.ts (go build natsd and listener once, start on loopback, throw when the gate is set and Go is missing); exports with types and bun only; gate LEGION_E2E_ENVOY_STACK=1; ENVOY_HEARTBEAT_MS 240000 in stall tests; per-test timeout 120 s.",
+    "4. Tests: envoy-client nats-stall.test.ts rows A (freeze) and B (freeze + one hung redial), each reconnect and fresh publish within 60 s; pi-envoy row in extensions/envoy.test.ts (realConnect, real fetch, real listener) and claude-envoy tests/envoy-channel-stall.test.ts (spawned channel server): registration shows plugin and plugin_version in GET /v1/sessions, a direct message sent during the freeze is shown once with the replay suffix within 60 s, a message after the reconnect is shown once without it; unit rows for installedPluginVersion, Go claim_wiring/api/registry, envoy-client transport; update exact-body assertions in envoy-client, pi-envoy, pi-legion and envoy-plugin tests.",
+    "5. CI: envoy-and-contracts.yaml job envoy-session-stall (setup-go from packages/envoy/go.mod, timeout 15 min, LEGION_E2E_ENVOY_STACK=1, the three test commands) and changes filter envoy_session_stall (packages/envoy, envoy-client, pi-envoy, claude-envoy, pi-shared, contracts, go.work, go.work.sum, daemon go.mod/go.sum, package.json, bun.lock, Bun toolchain, the workflow).",
+    "6. Docs: .dispatch/architecture envoy-client.md, pi-envoy.md, claude-envoy-bridge.md, envoy-listener.md, envoy-plugin.md; packages/envoy/AGENTS.md field lists; packages/envoy/docs/architecture.md; docs/site dispatch/envoy.md session list (fields and the move's version rule); pi-envoy and claude-envoy AGENTS.md reconnect paragraphs and test tables; READMEs' reconnect sentences; CHANGELOGs of envoy, envoy-client, pi-envoy, claude-envoy, envoy-plugin."
+  ],
+  "acceptance": [
+    {
+      "criterion": "A client behind a TCP proxy that stops forwarding without closing either side reconnects within 60 s (shared code path)",
+      "surface": "envoy-client suite: real natsd, real nats.js, stall proxy",
+      "command": "cd packages/envoy-client && LEGION_E2E_ENVOY_STACK=1 bun test src/__tests__/nats-stall.test.ts"
+    },
+    {
+      "criterion": "The same for the Oh My Pi plugin's code path, and a message published while cut off reaches it through the catch-up",
+      "surface": "pi-envoy suite: the real extension, real nats.js, real natsd and listener",
+      "command": "cd packages/pi-envoy && LEGION_E2E_ENVOY_STACK=1 bun test extensions/envoy.test.ts -t '<row name>'"
+    },
+    {
+      "criterion": "The same for the Claude Code plugin's code path",
+      "surface": "claude-envoy suite: the real channel server process",
+      "command": "cd packages/claude-envoy && LEGION_E2E_ENVOY_STACK=1 bun test tests/envoy-channel-stall.test.ts"
+    },
+    {
+      "criterion": "A registered session's entry and the listener's session list carry the plugin version",
+      "surface": "the real listener's GET /v1/sessions and GET /v1/registry/<id> inside the plugin rows; Go listener and registry tests",
+      "command": "the two plugin commands above; cd packages/envoy && go test ./cmd/listener/ ./internal/session/ -run 'Subscribe|SessionEntry|Registry'"
+    },
+    {
+      "criterion": "The PR updates .dispatch/architecture/pi-envoy.md, envoy-client.md and claude-envoy-bridge.md on connection checks and registration",
+      "surface": "the architecture documents",
+      "command": "grep -n 'plugin_version' .dispatch/architecture/{pi-envoy,envoy-client,claude-envoy-bridge,envoy-listener}.md; grep -n '10 s\\|10 seconds' .dispatch/architecture/{pi-envoy,envoy-client,claude-envoy-bridge}.md"
+    }
+  ],
+  "negativeControls": [
+    "envoy-client row A with natsConnectionOptions' pingInterval reverted to the nats.js default fails its 60 s bound",
+    "a message sent before the freeze is shown without the replay suffix, and the message sent during the freeze never arrives live",
+    "a subscribe body without plugin lists a session row with neither key"
+  ],
+  "integration": [
+    "Merge only after sjawhar/legion#2228; READY waits for #2228's squash commit in the branch.",
+    "The hub's session listener must run this PR's listener before INFRA-553's move can read versions; INFRA-14 owns that rollout's timing.",
+    "Textual overlap expected with INFRA-546 (registry.go), INFRA-63 (cmd/listener) and INFRA-547 (listener send path, possibly plugin role subscriptions); whichever lands second merges forward."
+  ],
+  "productionCheck": "After the merge closes the issue and the hub's session listener and the worker image carry it, curl -fsS http://<hub>:9020/v1/sessions from the pod lists its own session with plugin @sjawhar/pi-envoy and the released plugin_version; pending until then.",
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The 60 s bound has no stated start, end or treatment of new connections during the stall; detection is up to (maxPingOut+1) x pingInterval and a hung redial adds the 20 s dial timeout.",
+        "answer": "Start = proxy freeze; end = the first connection opened after the freeze that forwards a SUB (recorded by the proxy, so it works for the out-of-process Claude Code server) plus a live delivery on it. New connections forward (a Tailscale Service routes a new flow to a live pod); row B stalls the first redial. Arithmetic in decision 1: 30 s, 52 s with one hung redial."
+      },
+      {
+        "finding": "A proxy that stops reading could leave nats.js's stale close waiting on a full send buffer.",
+        "answer": "The proxy reads and discards both sides of a frozen connection and never closes either."
+      },
+      {
+        "finding": "The missed message could arrive through a heartbeat sweep while NATS is still frozen, proving nothing about the reconnect; role messages are not stored.",
+        "answer": "Stall tests set ENVOY_HEARTBEAT_MS to 240000 so the reconnect is the only sweep trigger in the window; the message is a direct message to the session id; the test asserts the replay suffix on it and no suffix on a message sent after the reconnect."
+      },
+      {
+        "finding": "'Plugin version' is undefined for Claude Code (1.0.0 never bumped, versioned by marketplace commit) and for source runs; the value must name the plugin; OpenCode also registers.",
+        "answer": "Decision 3: plugin + plugin_version; Claude Code reports the plugin-cache version segment or 'source'; pi-envoy and OpenCode report package.json version; the move's rule is written into the docs."
+      },
+      {
+        "finding": "Old listener drops new fields; old plugins send none; envoy-client's zod schema strips unknown keys.",
+        "answer": "Go fields omitempty with a test that a body without them lists neither key; SessionWireSchema gains optional fields; the listener rollout before the move is reported to the architect as INFRA-14's sequencing."
+      },
+      {
+        "finding": "pi-envoy and claude-envoy CI jobs have no Go, no NATS and no LEGION_E2E; their filters miss packages/envoy; tests must fail, not skip, when the gate is set but Go is missing; Bun's 5 s default timeout.",
+        "answer": "Task 5's dedicated job and filter; the stack helper throws when the gate is set and Go is missing; 120 s per-test timeout."
+      },
+      {
+        "finding": "Stacking on unmerged #2228: base choice and what stops this PR merging first.",
+        "answer": "Base main, forward merges of legion/INFRA-439 and later main; the architect and merger hold acceptance and READY until #2228's squash commit is in the branch."
+      },
+      {
+        "finding": "Shorter pings raise spurious reconnects, and a role message inside such a gap is lost until INFRA-547.",
+        "answer": "Accepted in decision 1: a pong may take 20-30 s; every reconnect runs the catch-up; stale-disconnect logging left out of scope."
+      },
+      {
+        "finding": "'Both plugins' code path' could mean one shared-options test or a stall test per plugin entry.",
+        "answer": "Both: the envoy-client rows test the shared options, and each plugin gets a stall row through its real entry (the extension under createPi with real nats.js; the spawned channel server)."
+      },
+      {
+        "finding": "The three named architecture docs are stubs that describe neither topic, so the docs criterion cannot fail; other docs carry the registration fields and reconnect text.",
+        "answer": "Task 6 adds the text to the three docs (grep check in the acceptance table) and updates envoy-listener.md, envoy-plugin.md, packages/envoy/AGENTS.md, the docs site, package AGENTS.md/READMEs and CHANGELOGs."
+      },
+      {
+        "finding": "Overlap with INFRA-546, INFRA-547, INFRA-63; the measurement job must dial with the same values.",
+        "answer": "Overlap recorded under integration; natsConnectionOptions is a public envoy-client subpath for INFRA-552."
+      },
+      {
+        "finding": "Outcome 3 is verified only at #2228's unmerged head; the daemon's use of base-branch required checks is unverified.",
+        "answer": "After #2228 merges, the implementer re-checks the reconnect trigger, replay suffix and registration call against its merged form. Required checks were read from the repository rules for main (lint, typecheck, test, pr-title); a PR on main keeps them."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}
