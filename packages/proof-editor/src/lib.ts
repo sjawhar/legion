@@ -57,6 +57,7 @@ import { codeBlockExtPlugins } from 'proof-sdk-upstream/src/editor/schema/code-b
 import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
 import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
 import { libraryRemarkDirectivePlugin, typedBlockRemarkPlugin } from './lib-remark-directive-plugin';
+import { unfitTypedBlocksRemarkPlugin } from './typed-block-drawing';
 import { remarkProofMarksPlugin } from 'proof-sdk-upstream/src/editor/schema/remark-proof-marks-plugin';
 import { proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks';
 
@@ -320,6 +321,8 @@ export async function createProofEditor(
     // Register remark plugins for proof marks and dispatchAsk parsing
     .use(remarkProofMarksPlugin)
     .use(remarkDispatchMarksPlugin)
+    // After the mark plugins, so a block-level mark span is a mark node when the fit check reads it.
+    .use(opts.blockSchema ? unfitTypedBlocksRemarkPlugin : [])
     // Register contexts
     .use(heatmapCtx)
     .use(agentCursorCtx)
