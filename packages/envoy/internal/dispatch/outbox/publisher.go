@@ -192,16 +192,17 @@ type pendingEvent struct {
 	// claimed it.
 	claimant string
 	// threadSessions are the sessions a person's reply reaches through its thread
-	// (loadCommentRecipients), read for the whole batch by resolveCommentRecipients.
-	threadSessions []string
-	// primaryAuthors are the sessions the primary document of an issue with no route and no
-	// session claimant credits (loadPrimaryDocumentAuthors), which a person's comment reaches in
-	// the claimant's place, read for the whole batch by resolveCommentRecipients.
-	primaryAuthors []string
+	// (loadCommentRecipients), read for the whole batch by resolveCommentRecipients and filtered by
+	// publishAuthorRoutes.
+	threadSessions recipientList
+	// claimRecipients are the sessions a person's comment on an issue with no route reaches in
+	// the route's place - the session claimant, or the sessions the issue's primary document
+	// credits - read for the whole batch and filtered by resolveClaimRecipients.
+	claimRecipients recipientList
 	// failure is why the row cannot be published as it was read - it did not scan, or its
-	// actor or payload JSON did not decode, or its thread's sessions or its primary document's
-	// sessions could not be read - and failureLog is the predicate it reports under. The batch
-	// backs such an event off instead of publishing it.
+	// actor or payload JSON did not decode - and failureLog is the predicate it reports under.
+	// The batch backs such an event off instead of publishing it. A recipient query that failed
+	// is no failure of the row's (recipientList).
 	failure    error
 	failureLog string
 }
@@ -231,6 +232,18 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	if err != nil {
 		return 0, false, err
 	}
+	unavailable, err := publishBatch(ctx, deps, pending)
+	if err != nil {
+		return len(pending), true, err
+	}
+	return len(pending), blocked || unavailable, nil
+}
+
+// publishBatch is scanBatch's work after the read: it reads the batch's comment recipients
+// (resolveCommentRecipients), sends every event through one window, settles each and records what
+// the batch came to (recordBatch). It reports whether NATS was unreachable, which holds the rest of
+// the backlog for the next scan, and returns the record's error.
+func publishBatch(ctx context.Context, deps Deps, pending []pendingEvent) (bool, error) {
 	resolveCommentRecipients(ctx, deps, pending)
 
 	sender := deps.Publisher.Window()
@@ -262,9 +275,9 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	record, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	if err := recordBatch(record, deps, outcomes); err != nil {
-		return len(pending), true, err
+		return false, err
 	}
-	return len(pending), blocked || unavailable, nil
+	return unavailable, nil
 }
 
 // outcomeState is what an event of a batch came to.
@@ -555,9 +568,10 @@ func releaseClaim(ctx context.Context, deps Deps, ids []int64) {
 // (attempt.wait). A destination NATS denies (a role route outside Dispatch's grant, say) holds back
 // none of the others: it is left unreached, and the denial fails the attempt once every destination
 // was tried, so the event is retried. Any other failure that comes back before anything is sent, of
-// the connection or of the store, ends the attempt at once, since every destination after it would
-// fail the same way. The destinations the attempt reached are recorded with the batch
-// (recordBatch), so a retry publishes only the rest.
+// the connection or of the store (a recipient query of the batch that failed, recipientList, among
+// them), ends the attempt at once, since every destination after it would fail the same way. The
+// destinations the attempt reached are recorded with the batch (recordBatch), so a retry publishes
+// only the rest.
 func send(ctx context.Context, deps Deps, sender bus.Sender, pending pendingEvent, delivered map[string]struct{}) *attempt {
 	a := &attempt{delivered: delivered, sender: sender}
 	event := pending.event
@@ -580,10 +594,11 @@ func send(ctx context.Context, deps Deps, sender bus.Sender, pending pendingEven
 // publishDestinations sends item to each of the destinations of pending's event in turn, and
 // returns the first error that ends the attempt. The order is fixed: the owner topic, the route,
 // the claimant or, when the issue has no route and no session claimant, the sessions of its primary
-// document (publishClaimant), the author routes, the ask's followers, and the session that lost
-// the issue's claim. The route, the claimant and the author routes are for an event that notifies
-// (events.Broker.Notify) and is no targeted message. A topic is sent once, in its first place
-// (publishDestination).
+// document (publishClaimRecipients), the author routes, the ask's followers, and the session that
+// lost the issue's claim. The route, the claimant and the author routes are for an event that
+// notifies (events.Broker.Notify) and is no targeted message. A topic is sent once, in its first
+// place (publishDestination). A recipient query that failed for the batch ends the attempt at the
+// step that needed it, once the owner topic and the route are sent.
 func publishDestinations(ctx context.Context, deps Deps, pending pendingEvent, item contracts.Envelope, a *attempt) error {
 	event := pending.event
 	if err := publishDestination(deps, event.ID, item, a, "publish owner topic", item.Topic); err != nil {
@@ -597,7 +612,7 @@ func publishDestinations(ctx context.Context, deps Deps, pending pendingEvent, i
 				return err
 			}
 		}
-		if err := publishClaimant(deps, item, pending, a); err != nil {
+		if err := publishClaimRecipients(deps, item, pending, a); err != nil {
 			return err
 		}
 		if err := publishAuthorRoutes(ctx, deps, event.ID, item, event, pending.threadSessions, a); err != nil {
@@ -610,39 +625,25 @@ func publishDestinations(ctx context.Context, deps Deps, pending pendingEvent, i
 	return publishPreviousClaimant(deps, event.ID, item, event, a)
 }
 
-// publishClaimant sends a person's comment, or its edit, to the session that claimed the issue,
-// on its own topic, when the issue has no route. On an issue with a route, the route's holder hears
-// it, and the claimant does not. When nobody or a person claimed an issue with no route, the
-// comment goes in the claimant's place to every session the issue's primary document credits
-// (primaryAuthors, read by resolveCommentRecipients): a session that writes an issue's spec without
-// a claim still hears the comments on it. The comment's own thread does not matter: a comment in an
-// ask's thread, or a reply, reaches the claimant or those sessions too, as it would reach the
-// route. The actor is skipped, and so is a session the comment's mentions already reach
-// (suppressed_authors).
-func publishClaimant(deps Deps, item contracts.Envelope, pending pendingEvent, a *attempt) error {
-	event, route := pending.event, pending.route
-	if route != nil && *route != "" {
-		return nil
+// publishClaimRecipients sends a person's comment, or its edit, to the session that claimed the
+// issue, on its own topic, when the issue has no route. On an issue with a route, the route's holder
+// hears it, and the claimant does not. When nobody or a person claimed an issue with no route, the
+// comment goes in the claimant's place to every session the issue's primary document credits: a
+// session that writes an issue's spec without a claim still hears the comments on it. The comment's
+// own thread does not matter: a comment in an ask's thread, or a reply, reaches the claimant or
+// those sessions too, as it would reach the route. A session the comment's mentions already reach
+// is skipped (suppressed_authors). resolveClaimRecipients chose and filtered the sessions
+// (claimRecipients); when the query of the primary document's sessions failed, its error ends the
+// attempt here.
+func publishClaimRecipients(deps Deps, item contracts.Envelope, pending pendingEvent, a *attempt) error {
+	if pending.claimRecipients.err != nil {
+		return pending.claimRecipients.err
 	}
-	if event.Type != "comment.created" && event.Type != "comment.edited" {
-		return nil
-	}
-	recipients, label := pending.primaryAuthors, "publish primary document author route to"
+	label := "publish primary document author route to"
 	if pending.claimant != "" {
-		recipients, label = []string{pending.claimant}, "publish claimant route to"
+		label = "publish claimant route to"
 	}
-	suppressedAuthors := payloadStringSet(event.Payload, "suppressed_authors")
-	targets := make([]string, 0, len(recipients))
-	for _, sessionID := range recipients {
-		if event.Actor.SameAs(model.Actor{Kind: "session", ID: sessionID}) {
-			continue
-		}
-		if _, suppressed := suppressedAuthors[sessionID]; suppressed {
-			continue
-		}
-		targets = append(targets, sessionID)
-	}
-	return publishSessionRoutes(deps, event.ID, item, a, targets, label)
+	return publishSessionRoutes(deps, pending.event.ID, item, a, pending.claimRecipients.sessions, label)
 }
 
 // attempt is one pass over an event's destinations, sent through sender, its batch's window
@@ -820,29 +821,21 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 //
 // A reply (reply_to set), and its edit, reach threadSessions, which resolveCommentRecipients read
 // for the batch (loadCommentRecipients): every session that wrote a comment in the thread, its root
-// and each reply, then every session the thread's document credits. A new comment on a document
-// (no reply_to and no ask_id), and its edit, reach every session that document credits
-// (loadDocumentSessionAuthors); a new comment on an issue's conversation names no document and
-// reaches no author. A resolution or a reopening reaches the thread root's author only, so the
-// reopening a reply makes tells no session twice. Ask threads are not walked here: their asker and
-// repliers are the ask's followers (publishFollowerRoutes). The event's own actor is skipped, and
-// so is a session the comment's mentions already reach (suppressed_authors).
-func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, threadSessions []string, a *attempt) error {
-	suppressedAuthors := payloadStringSet(event.Payload, "suppressed_authors")
-	seen := map[string]bool{}
+// and each reply, then every session the thread's document credits; when that query failed, its
+// error ends the attempt here. A new comment on a document (no reply_to and no ask_id), and its
+// edit, reach every session that document credits (loadDocumentSessionAuthors); a new comment on an
+// issue's conversation names no document and reaches no author. A resolution or a reopening reaches
+// the thread root's author only, so the reopening a reply makes tells no session twice. Ask threads
+// are not walked here: their asker and repliers are the ask's followers (publishFollowerRoutes).
+// The event's own actor is skipped, and so is a session the comment's mentions already reach
+// (suppressed_authors), by the filter the claim recipients go through (recipientFilter).
+func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, threadSessions recipientList, a *attempt) error {
+	filter := newRecipientFilter(event)
 	var targets []string
 	consider := func(author model.Actor, found bool) {
-		if !found || author.Kind != "session" || seen[author.ID] {
-			return
+		if found && author.Kind == "session" && filter.keep(author.ID) {
+			targets = append(targets, author.ID)
 		}
-		if event.Actor.SameAs(author) {
-			return
-		}
-		seen[author.ID] = true
-		if _, suppressed := suppressedAuthors[author.ID]; suppressed {
-			return
-		}
-		targets = append(targets, author.ID)
 	}
 	considerLoaded := func(author model.Actor, found bool, err error) error {
 		if err != nil {
@@ -858,7 +851,10 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		case payloadString(event.Payload, "ask_id") != "":
 			// An ask's thread reaches the ask's followers (publishFollowerRoutes).
 		case payloadString(event.Payload, "reply_to") != "":
-			for _, sessionID := range threadSessions {
+			if threadSessions.err != nil {
+				return threadSessions.err
+			}
+			for _, sessionID := range threadSessions.sessions {
 				consider(model.Actor{Kind: "session", ID: sessionID}, true)
 			}
 		default:

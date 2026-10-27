@@ -33,15 +33,12 @@ func answered(err error) <-chan error {
 }
 
 // publish runs one attempt of event to its end, as scanBatch does for each event of a batch, with
-// the thread's sessions a reply reaches read as scanBatch reads a batch's
-// (resolveCommentRecipients), and returns why it failed. The claimant is not read: a test of it
-// goes through scanBatch, which reads it from the issue's row.
+// the comment recipients read as scanBatch reads a batch's (resolveCommentRecipients), and returns
+// why it failed. The claimant is not read: a test of it goes through scanBatch, which reads it from
+// the issue's row.
 func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
 	pending := []pendingEvent{{event: event, slug: slug, route: route}}
 	resolveCommentRecipients(ctx, deps, pending)
-	if pending[0].failure != nil {
-		return pending[0].failure
-	}
 	a := send(ctx, deps, deps.Publisher.Window(), pending[0], delivered)
 	a.wait(ctx)
 	return a.err()
@@ -349,7 +346,7 @@ func TestPublishAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing
 				Actor:   model.Actor{Kind: "user", ID: "alice"},
 				Payload: map[string]any{"ask_id": "5a660655-04ad-4ce0-8a9b-93dd03c412b7", "session_id": "session-asker"},
 			}
-			if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, nil, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
+			if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 				t.Fatalf("publish author routes: %v", err)
 			}
 			got := publisher.all()
@@ -823,7 +820,7 @@ func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load comment recipients: %v", err)
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipients[rootID], &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{sessions: recipients[rootID]}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 
@@ -847,7 +844,7 @@ func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T)
 			"topics":     []any{"notifications.dispatch.issue.T-1.>"},
 		},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, nil, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 
@@ -868,7 +865,7 @@ func TestPublishAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing
 		Actor:   model.Actor{Kind: "user", ID: "alice"},
 		Payload: map[string]any{"by": map[string]any{"kind": "user", "id": "alice"}, "topics": []any{}},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, nil, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 

@@ -113,19 +113,7 @@ func loadCommentRecipients(ctx context.Context, deps Deps, commentIDs []string) 
 	if len(ids) == 0 {
 		return map[string][]string{}, nil
 	}
-	rows, err := deps.Store.Pool.Query(ctx, commentRecipientsQuery, ids, maxCommentThreadDepth)
-	if err != nil {
-		return nil, fmt.Errorf("load comment recipients: %w", err)
-	}
-	recipients := map[string][]string{}
-	var key, sessionID string
-	if _, err := pgx.ForEachRow(rows, []any{&key, &sessionID}, func() error {
-		recipients[key] = append(recipients[key], sessionID)
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("load comment recipients: %w", err)
-	}
-	return recipients, nil
+	return loadKeyedSessions(ctx, deps, "load comment recipients", commentRecipientsQuery, ids, maxCommentThreadDepth)
 }
 
 // threadReplyOf names the comment a person's reply event replies under, the key of its
@@ -167,38 +155,95 @@ func loadPrimaryDocumentAuthors(ctx context.Context, deps Deps, issueKeys []stri
 	if len(issueKeys) == 0 {
 		return map[string][]string{}, nil
 	}
-	rows, err := deps.Store.Pool.Query(ctx, primaryDocumentAuthorsQuery, issueKeys)
+	return loadKeyedSessions(ctx, deps, "load primary document authors", primaryDocumentAuthorsQuery, issueKeys)
+}
+
+// loadKeyedSessions runs query, one statement for a whole batch whose every row is a key and a
+// session id, and returns each key's sessions in the order of its rows. what names the load in its
+// error.
+func loadKeyedSessions(ctx context.Context, deps Deps, what, query string, args ...any) (map[string][]string, error) {
+	rows, err := deps.Store.Pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("load primary document authors: %w", err)
+		return nil, fmt.Errorf("%s: %w", what, err)
 	}
-	authors := map[string][]string{}
+	sessions := map[string][]string{}
 	var key, sessionID string
 	if _, err := pgx.ForEachRow(rows, []any{&key, &sessionID}, func() error {
-		authors[key] = append(authors[key], sessionID)
+		sessions[key] = append(sessions[key], sessionID)
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("load primary document authors: %w", err)
+		return nil, fmt.Errorf("%s: %w", what, err)
 	}
-	return authors, nil
+	return sessions, nil
+}
+
+// recipientList is the sessions a batch query read for one event (resolveCommentRecipients), or
+// err, the query's failure. The failure is not the row's (pendingEvent.failure): the event's
+// attempt sends its owner topic and its route first and ends with err at the step that needed the
+// sessions, as a lookup made per event would, so settle backs the event off, or releases it when
+// the process is stopping or NATS is unreachable, as it does any attempt that failed.
+type recipientList struct {
+	sessions []string
+	err      error
+}
+
+// recipientFilter keeps, of the sessions a notifying event reaches on their own topics, each one
+// once, and none that is the event's actor or that the comment's mentions already reach
+// (suppressed_authors). publishAuthorRoutes and resolveClaimRecipients both filter through it.
+type recipientFilter struct {
+	actor      model.Actor
+	suppressed map[string]struct{}
+	seen       map[string]bool
+}
+
+func newRecipientFilter(event model.Event) *recipientFilter {
+	return &recipientFilter{
+		actor:      event.Actor,
+		suppressed: payloadStringSet(event.Payload, "suppressed_authors"),
+		seen:       map[string]bool{},
+	}
+}
+
+// keep reports whether sessionID is a recipient, the first time the filter is asked about it.
+func (f *recipientFilter) keep(sessionID string) bool {
+	if f.seen[sessionID] || f.actor.SameAs(model.Actor{Kind: "session", ID: sessionID}) {
+		return false
+	}
+	f.seen[sessionID] = true
+	_, suppressed := f.suppressed[sessionID]
+	return !suppressed
+}
+
+// filterRecipients returns, in order, the sessions of sessionIDs that event reaches
+// (recipientFilter).
+func filterRecipients(event model.Event, sessionIDs []string) []string {
+	filter := newRecipientFilter(event)
+	kept := make([]string, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		if filter.keep(sessionID) {
+			kept = append(kept, sessionID)
+		}
+	}
+	return kept
 }
 
 // resolveCommentRecipients reads, for a whole batch, the sessions a person's comment events reach
-// beyond their owner topic and route: the thread recipients of every reply event in one query
-// (loadCommentRecipients), for publishAuthorRoutes, and the primary document's sessions of every
-// event that reaches them in the claimant's place in one more (loadPrimaryDocumentAuthors), for
-// publishClaimant. Each is carried on its event. An event already failed is skipped. When a query
-// fails, each event of the batch that needed it fails with it and is backed off, as an event whose
-// publish failed is, and the batch's other events go on.
+// beyond their owner topic and route, and carries each on its event: the thread recipients of every
+// reply event in one query (loadCommentRecipients), for publishAuthorRoutes, and the claim
+// recipients of every event that takes them (resolveClaimRecipients), for publishClaimRecipients.
+// An event already failed is skipped. When a query fails, each event of the batch that needed it
+// carries the error in place of the sessions (recipientList), and the batch's other events are
+// untouched.
 func resolveCommentRecipients(ctx context.Context, deps Deps, pending []pendingEvent) {
 	resolveThreadSessions(ctx, deps, pending)
-	resolvePrimaryAuthors(ctx, deps, pending)
+	resolveClaimRecipients(ctx, deps, pending)
 }
 
 // resolveThreadSessions reads the thread recipients of every reply event of a batch in one query
 // (loadCommentRecipients) and carries each on its event as threadSessions.
 func resolveThreadSessions(ctx context.Context, deps Deps, pending []pendingEvent) {
 	// A reply's key is its comment's canonical uuid, or "" when it is not a uuid: such a reply
-	// has no entry, but still fails with the query.
+	// has no entry, but still carries the query's failure.
 	type reply struct {
 		index int
 		key   string
@@ -227,46 +272,48 @@ func resolveThreadSessions(ctx context.Context, deps Deps, pending []pendingEven
 	for _, r := range replies {
 		item := &pending[r.index]
 		if err != nil {
-			item.failure = err
-			item.failureLog = "dispatch outbox: load comment recipients"
+			item.threadSessions.err = err
 			continue
 		}
 		if r.key != "" {
-			item.threadSessions = recipients[r.key]
+			item.threadSessions.sessions = recipients[r.key]
 		}
 	}
 }
 
-// primaryAuthorsIssueOf names the issue whose primary document's sessions a person's comment event
-// reaches in the claimant's place (publishClaimant), the key of its loadPrimaryDocumentAuthors
-// entry, or "" when the event takes no such recipients: it is no comment.created or
-// comment.edited, it does not notify (only a person's comment does, events.Broker.Notify), it has
-// no issue (a project document's comment), or its issue has a route or a session's claim, whose
-// holder hears it in place of the document's sessions. The comment's thread does not matter.
-func primaryAuthorsIssueOf(item pendingEvent) string {
+// takesClaimRecipients reports whether a person's comment event reaches, in place of a route, the
+// session that claimed its issue or the sessions of the issue's primary document: it is a
+// comment.created or comment.edited, it notifies (only a person's comment does,
+// events.Broker.Notify), and its issue has no route, whose holder would hear it in their place. The
+// comment's thread does not matter.
+func takesClaimRecipients(item pendingEvent) bool {
 	event := item.event
 	if !event.Notify || (event.Type != "comment.created" && event.Type != "comment.edited") {
-		return ""
+		return false
 	}
-	if item.claimant != "" || (item.route != nil && *item.route != "") {
-		return ""
-	}
-	return item.issue
+	return item.route == nil || *item.route == ""
 }
 
-// resolvePrimaryAuthors reads the primary document's sessions of every event of a batch that
-// takes them (primaryAuthorsIssueOf) in one query (loadPrimaryDocumentAuthors) and carries each on
-// its event as primaryAuthors.
-func resolvePrimaryAuthors(ctx context.Context, deps Deps, pending []pendingEvent) {
+// resolveClaimRecipients carries, on every event of a batch that takes claim recipients
+// (takesClaimRecipients), the sessions it reaches in the route's place, filtered
+// (filterRecipients), as claimRecipients: the session that claimed the issue, or, when nobody or a
+// person claimed it, every session the issue's primary document credits, read for all such events
+// in one query (loadPrimaryDocumentAuthors). An event with no issue (a project document's comment)
+// takes none.
+func resolveClaimRecipients(ctx context.Context, deps Deps, pending []pendingEvent) {
 	var indexes []int
 	var issueKeys []string
-	for index, item := range pending {
-		if item.failure != nil {
+	for index := range pending {
+		item := &pending[index]
+		if item.failure != nil || !takesClaimRecipients(*item) {
 			continue
 		}
-		if issueKey := primaryAuthorsIssueOf(item); issueKey != "" {
+		switch {
+		case item.claimant != "":
+			item.claimRecipients.sessions = filterRecipients(item.event, []string{item.claimant})
+		case item.issue != "":
 			indexes = append(indexes, index)
-			issueKeys = append(issueKeys, issueKey)
+			issueKeys = append(issueKeys, item.issue)
 		}
 	}
 	if len(indexes) == 0 {
@@ -276,10 +323,9 @@ func resolvePrimaryAuthors(ctx context.Context, deps Deps, pending []pendingEven
 	for position, index := range indexes {
 		item := &pending[index]
 		if err != nil {
-			item.failure = err
-			item.failureLog = "dispatch outbox: load primary document authors"
+			item.claimRecipients.err = err
 			continue
 		}
-		item.primaryAuthors = authors[issueKeys[position]]
+		item.claimRecipients.sessions = filterRecipients(item.event, authors[issueKeys[position]])
 	}
 }
