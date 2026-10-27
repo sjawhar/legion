@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T13:20:00Z",
+  "completed": "2026-10-27T14:10:00Z",
   "proof": [
+    {
+      "criterion": "Review round 4 regression: a re-claim refusal widget shown for S2 comes down after a switch back to the registered session S1",
+      "surface": "pi-legion unit suite with the real extension wiring and the host widget recorded; the real interactive Oh My Pi 18.12.2 file for regressions",
+      "command": "cd packages/pi-legion && bun test extensions/legion.test.ts; LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:4222 bun test ./extensions/controller-start-omp.test.ts",
+      "observed": "129 pass, including 'a re-claim widget shown for a new session comes down when the operator switches back to the registered session' (503 for S2 shows the widget; the switch back to S1 calls setWidget('legion-controller-claim', undefined)); real-binary file as committed: 9 pass, 0 fail (338 s)",
+      "headSha": "bbc7410b5bb131d64f9e0c2d75b49186e299296c",
+      "negativeControl": "controller-session.ts from 6d51373b: the new test fails (the widget is never taken down after the switch back)"
+    },
     {
       "criterion": "Tester round 8: the focused-subagent case waits for the subagent's own model request, not the task-label request, and passes reliably on a slow host",
       "surface": "the real interactive Oh My Pi 18.12.2 under a pseudo-terminal with both plugins, stand-ins and real NATS, a task subagent focused from the Agent Hub",
@@ -111,7 +119,8 @@
     "Review round 3: packages/pi-legion/src/controller-session.ts (noteWait on the real context; hand-over and refusal notices in the legion-controller-claim widget, cleared at the next run or claim; timer fallback), packages/pi-legion/extensions/legion.ts (handleAgentStart), packages/pi-shared/src/pi-types.ts (optional ui.setWidget), tests and docs",
     "Tester round 6: packages/pi-legion/extensions/controller-start-omp.test.ts (STARTUP_DEADLINE_MS 150 s from the spawn, STEP_DEADLINE_MS 30 s per wait after it, CASE_TIMEOUT_MS 600 s)",
     "Tester round 7: packages/pi-legion/extensions/controller-start-omp.test.ts (the focused-subagent case waits for the subagent's first model request before focusing it)",
-    "Tester round 8: packages/pi-legion/extensions/controller-start-omp.test.ts (the focused-subagent case's wait skips the task-label request)"
+    "Tester round 8: packages/pi-legion/extensions/controller-start-omp.test.ts (the focused-subagent case's wait skips the task-label request)",
+    "Review round 4: packages/pi-legion/src/controller-session.ts (clear another session's claim widget before the early return), packages/pi-legion/extensions/legion.test.ts (the regression test)"
   ],
   "trickyParts": [
     "Sending the start message after the Envoy role claim was flaky (4/30): the listener forwards a role-lane card as soon as it records the role, which can reach the session before claimEnvoyRole resolves; the send now happens right after claims/register, before the role claim and the subscription.",
