@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-172",
+  "completed": "2026-10-27T00:03:13Z",
+  "pinnedCommit": "ad909178a0cbc43e0deef1a528051bc499ce1fb0",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2272",
+  "documents": [
+    "dispatch://INFRA-172/artifact/architecture-assessment-md (v1)",
+    "dispatch://INFRA-172/artifact/refactor-order-md (v2)",
+    "dispatch://INFRA-172/artifact/escaped-pipe-census-ts (v1, the script as run; the --projects and --latest-only flags added during the run are documented in the copy under $TMPDIR/infra172 and in refactor-order-md's method)"
+  ],
+  "proof": [
+    {
+      "criterion": "R4 settled in code: Go and the browser read a mid-row escaped pipe in a table row the same way",
+      "surface": "Dispatch's browser suite (packages/dispatch/e2e) against the real server and SPA with a rootless Postgres in the issue pod",
+      "command": "cd packages/dispatch && PLAYWRIGHT_BROWSERS_PATH=$TMPDIR/ms-playwright DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra172_head?sslmode=disable bun run e2e editor-paste -g \"two backslashes|row is empty, pasted into\"",
+      "observed": "'a pipe after two backslashes ends a table cell in Go as in the editor' passes in chromium and iphone; 18 passed (output $TMPDIR/infra172/e2e-head-a6ecbc12.txt)",
+      "headSha": "a6ecbc12b4dceda916933a07b35407da7cc30b64",
+      "negativeControl": "The same test against a server and SPA built from ad909178 fails both projects on the cell assertion: the editor shows [\"a \\\\| b\", \"\"] where [\"a \\\\\", \"b\"] is expected; 16 passed, 2 failed ($TMPDIR/infra172/e2e-C.txt)"
+    },
+    {
+      "criterion": "R4: no stored document regresses under the new reading (the plan's differential gate)",
+      "surface": "pmdoc differential over production's stored documents (2,050 latest versions from the census, kept under $TMPDIR, never committed)",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base ad909178 --head a6ecbc12 --corpus $TMPDIR/infra172/corpus.jsonl --out $TMPDIR/infra172/diff-a6",
+      "observed": "GATE regressions 0, misreads 0, churn 0, engine-tree regressions 0, engine-tree churn 0, head panics 0, lost fixed points 0; PASS. Reports: the in-repo table-cell-pipes case 'fixed' and the 4 documents the census found 'lost fixed point of a misread'. After those documents were rewritten, the same differential over their new versions (and LINUX-39's) reports 0 on every gate",
+      "headSha": "a6ecbc12b4dceda916933a07b35407da7cc30b64",
+      "negativeControl": "Before the rewrite, pmdoc.Parse at the head refuses BET-34 census-md v8 ('a table row holding 5 cells where its table has 4'), and the differential flags the 4 unrewritten documents"
+    },
+    {
+      "criterion": "A4: the plan states the escaped-pipe rule and the count",
+      "surface": "the census script through production Dispatch's HTTP API, and refactor-order-md",
+      "command": "bun escaped-pipe-census.ts --out census-out (AHXV6, BET, EVALS, GTM, INFRA, every version, 20:17-21:14Z) and --projects LINUX,OSSV,ROADMAP,SMOKE,XV6SSH,ZLIB --latest-only (22:59-23:52Z)",
+      "observed": "8 documents with a mid-row hit in their latest version, 0 closing hits, 0 approved versions with a hit; 671 hit versions across every version of the five finished projects; 0 failed requests. All 8 rewritten by guarded doc-edits; the matcher finds 0 hits in each new version",
+      "headSha": "a6ecbc12b4dceda916933a07b35407da7cc30b64",
+      "negativeControl": "bun escaped-pipe-census.ts --file matcher-fixture.md over one mid-row \\\\|, one closing \\\\|, one \\| and one \\\\| in a code fence reports exactly mid=1 closing=1"
+    },
+    {
+      "criterion": "A1: every cited permalink exists at the pinned commit",
+      "surface": "architecture-assessment-md and refactor-order-md against the repository at ad909178",
+      "command": "bash $TMPDIR/infra172/check-links.sh $TMPDIR/infra172/architecture-assessment.md $TMPDIR/infra172/refactor-order.md",
+      "observed": "checked=450 bad=0 for the assessment, checked=51 bad=0 for the refactor order",
+      "headSha": "a6ecbc12b4dceda916933a07b35407da7cc30b64",
+      "negativeControl": "a made-up packages/envoy/go.mod#L99999 citation is flagged PAST-END(148)"
+    }
+  ],
+  "filesChanged": [
+    ".dispatch/architecture/dispatch-pmdoc.md",
+    "packages/dispatch/e2e/editor-paste.e2e.ts",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/CHANGELOG.md",
+    "packages/envoy/internal/dispatch/docs/accept.go",
+    "packages/envoy/internal/dispatch/docs/edits.go",
+    "packages/envoy/internal/dispatch/docs/edits_test.go",
+    "packages/envoy/internal/dispatch/docs/marks.go",
+    "packages/envoy/internal/dispatch/docs/marks_test.go",
+    "packages/envoy/internal/dispatch/pmdoc/block_path.go",
+    "packages/envoy/internal/dispatch/pmdoc/insert_test.go",
+    "packages/envoy/internal/dispatch/pmdoc/render_inline.go",
+    "packages/envoy/internal/dispatch/pmdoc/render_readback_test.go",
+    "packages/envoy/internal/dispatch/pmdoc/render_table.go",
+    "packages/envoy/internal/dispatch/pmdoc/render_table_test.go",
+    "packages/envoy/internal/dispatch/pmdoc/table.go",
+    "packages/envoy/internal/dispatch/pmdoc/table_test.go",
+    "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/table-cell-pipes.md",
+    "packages/envoy/internal/dispatch/pmdoc/testdata/fixtures.json"
+  ],
+  "trickyParts": [
+    "Code in a table cell whose text holds a | right after an odd run of backslashes has no GFM spelling once \\\\| ends a cell. API writes (replace, delete by quote, accepted suggestion) that leave it are refused with TableCodePipeError naming the table, cell and header; a browser edit holding it is rendered with that | as text after the code (codePipesOutOfCode). A table that already held the shape does not block later writes (replacementBroke).",
+    "A header the browser reads as wider than its delimiter row no longer makes a table in Go either (it stays a paragraph, as in the browser); insert_test.go's '| A11 | new \\\\| extra |' case is now refused as too wide on both paths, by design.",
+    "TestUnescapeTablePipesLeavesTheTreeGoldmarksTransformerDoes compares against goldmark's own transformer, which cannot judge cells split later; it now skips inputs where a split happens and keeps generating until 5,000 are compared."
+  ],
+  "deviations": [
+    "Architect decision (2026-10-26 19:29Z): Go follows the browser everywhere, with stored documents rewritten by ordinary guarded doc-edits rather than left reading differently; eight documents rewritten, each owner commented on.",
+    "Architect decision (20:41Z): schema option C built as B first, recorded on INFRA-172 by the architect; step B sent as a draft for the architect to file as a child of INFRA-138 blocking INFRA-173; other refactor steps stay unfiled in refactor-order-md for the controller and a person.",
+    "Six uncovered render differences sent to the architect as drafts to file as INFRA-138 children; the assessment's 'Uncovered' list links nothing yet.",
+    "The every-version census of LINUX, OSSV, ROADMAP, SMOKE, XV6SSH and ZLIB was still running at completion (architect: it need not hold up the phase); its count goes on the pull request with the production check.",
+    "The pmdoc timing tests TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestBareURLShapesParseAndRenderLinearly and TestUpdateIsLinearInTheBlockCount fail on this 3-CPU pod at the base ad909178 as at the head; CI decides them.",
+    "refactor-order-md v2 was made by re-uploading the same name rather than doc-edit; later changes use doc-edit."
+  ],
+  "openQuestions": [],
+  "productionCheck": [
+    "dispatch-production-check.sh --commit <merged sha> --page /issues/INFRA-172 --route /api/v1/schema/blocks",
+    "Upload a scratch document on INFRA-138 with a table holding a mid-row \\\\| and a code-span shape, read it back with dispatch doc-read and the version route, then delete it (architect decision 6).",
+    "Run the census again (latest versions) and rewrite anything the old build stored in between; record the every-version count of the six projects."
+  ]
+}
