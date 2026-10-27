@@ -19,12 +19,17 @@ import (
 )
 
 // Build builds the main package in the test's working directory, its own command's, into a binary
-// named name that is removed when the test ends. ENVOY_TEST_GO_OVERLAY, when set, is passed to go
-// build -overlay, so a probe can build the binary from changed sources without editing the tree.
-func Build(t testing.TB, name string) string {
+// named name that is removed when the test ends, with the build tags tags when any are given (a
+// test of two builds builds one binary with a tag and one without). ENVOY_TEST_GO_OVERLAY, when
+// set, is passed to go build -overlay, so a probe can build the binary from changed sources
+// without editing the tree.
+func Build(t testing.TB, name string, tags ...string) string {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), name)
 	args := []string{"build", "-o", binary}
+	if len(tags) > 0 {
+		args = append(args, "-tags", strings.Join(tags, ","))
+	}
 	if overlay := os.Getenv("ENVOY_TEST_GO_OVERLAY"); overlay != "" {
 		args = append(args, "-overlay", overlay)
 	}

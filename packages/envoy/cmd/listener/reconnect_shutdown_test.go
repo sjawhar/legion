@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"net"
 	"net/url"
 	"strconv"
@@ -19,17 +18,32 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// listenerRelay lets this test hold one NATS request from the listener, then drop the live link so
-// nats.go reconnects through the same relay. New connections forward normally.
+// listenerRelay stands between one listener and its NATS server, so a test can fail the link the
+// ways a pod's link fails. arm holds one NATS request from the listener; drop closes every link,
+// which nats.go reconnects through the same relay at once; cut closes them and refuses new ones
+// for a while, an outage the listener reconnects in place after; freeze stops moving bytes in
+// either direction with every socket left open, as a lost node or network leaves the server's
+// side of the connection; delay holds every byte from the server for a time before the listener
+// reads it, a slow link. New connections forward normally.
 type listenerRelay struct {
 	listener net.Listener
 	target   string
 	relayed  string
+	done     chan struct{}
+	closing  sync.Once
 
 	mu        sync.Mutex
 	trigger   []byte
 	holdAfter int
 	links     []*listenerRelayLink
+	// refuseUntil is when a cut ends: a connection the relay accepts before it is closed at once,
+	// as a refused dial would be.
+	refuseUntil time.Time
+	// gate is nil while the relay moves bytes and open while it is frozen: every copy waits for it
+	// to close, which thawing does.
+	gate chan struct{}
+	// latency is how long each byte from the server waits before the listener may read it.
+	latency time.Duration
 
 	swallowed chan struct{}
 }
@@ -56,6 +70,7 @@ func startListenerRelay(t *testing.T, uri string) *listenerRelay {
 		listener:  listener,
 		target:    server.Host,
 		relayed:   relayed.String(),
+		done:      make(chan struct{}),
 		swallowed: make(chan struct{}, 1),
 	}
 	t.Cleanup(relay.close)
@@ -76,6 +91,11 @@ func (r *listenerRelay) serve() {
 func (r *listenerRelay) relay(client net.Conn) {
 	link := &listenerRelayLink{client: client}
 	r.mu.Lock()
+	if time.Now().Before(r.refuseUntil) {
+		r.mu.Unlock()
+		_ = client.Close()
+		return
+	}
 	r.links = append(r.links, link)
 	r.mu.Unlock()
 	server, err := net.Dial("tcp", r.target)
@@ -84,14 +104,12 @@ func (r *listenerRelay) relay(client net.Conn) {
 		return
 	}
 	link.server = server
-	go func() {
-		_, _ = io.Copy(client, server)
-		_ = client.Close()
-	}()
+	go r.toClient(client, server)
 	defer func() { _ = server.Close() }()
 
 	buffer := make([]byte, 32*1024)
 	for {
+		r.pass()
 		n, err := client.Read(buffer)
 		if n > 0 && !link.swallow.Load() {
 			if r.shouldSwallow(link, buffer[:n]) {
@@ -100,9 +118,58 @@ func (r *listenerRelay) relay(client net.Conn) {
 				case r.swallowed <- struct{}{}:
 				default:
 				}
-			} else if _, writeErr := server.Write(buffer[:n]); writeErr != nil {
-				return
+			} else {
+				r.pass()
+				if _, writeErr := server.Write(buffer[:n]); writeErr != nil {
+					return
+				}
 			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// toClient copies what the server sends to the listener, each read held for the relay's latency
+// as it was when the read came, in order, and none while the relay is frozen. When the server's
+// side ends, what was read is still written, then the listener's side is closed.
+func (r *listenerRelay) toClient(client, server net.Conn) {
+	type chunk struct {
+		data []byte
+		due  time.Time
+	}
+	chunks := make(chan chunk, 1024)
+	go func() {
+		defer func() { _ = client.Close() }()
+		failed := false
+		for c := range chunks {
+			if failed {
+				continue
+			}
+			if wait := time.Until(c.due); wait > 0 {
+				select {
+				case <-time.After(wait):
+				case <-r.done:
+				}
+			}
+			r.pass()
+			if _, err := client.Write(c.data); err != nil {
+				// Keep draining, so the read below never blocks on a full channel.
+				failed = true
+			}
+		}
+	}()
+	defer close(chunks)
+	buffer := make([]byte, 32*1024)
+	for {
+		r.pass()
+		n, err := server.Read(buffer)
+		if n > 0 {
+			r.mu.Lock()
+			latency := r.latency
+			r.mu.Unlock()
+			chunks <- chunk{data: bytes.Clone(buffer[:n]), due: time.Now().Add(latency)}
 		}
 		if err != nil {
 			return
@@ -139,8 +206,65 @@ func (r *listenerRelay) drop() {
 	r.links = nil
 }
 
+// cut drops every link and refuses each new one for d, after which the listener's reconnect, which
+// nats.go retries about once a second, lands on the same server again.
+func (r *listenerRelay) cut(d time.Duration) {
+	r.mu.Lock()
+	r.refuseUntil = time.Now().Add(d)
+	r.mu.Unlock()
+	r.drop()
+}
+
+// freeze stops the relay moving bytes in either direction, every socket left open, and returns the
+// func that thaws it, which runs once however often it is called. What either side sent meanwhile
+// is delivered, in order, once the relay thaws.
+func (r *listenerRelay) freeze() func() {
+	r.mu.Lock()
+	if r.gate == nil {
+		r.gate = make(chan struct{})
+	}
+	gate := r.gate
+	r.mu.Unlock()
+	return sync.OnceFunc(func() {
+		r.mu.Lock()
+		owned := r.gate == gate
+		if owned {
+			r.gate = nil
+		}
+		r.mu.Unlock()
+		if owned {
+			close(gate)
+		}
+	})
+}
+
+// delay holds every byte the server sends for d before the listener may read it, from the next
+// read on.
+func (r *listenerRelay) delay(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.latency = d
+}
+
+// pass waits while the relay is frozen, and returns at once once it is thawed or closed.
+func (r *listenerRelay) pass() {
+	r.mu.Lock()
+	gate := r.gate
+	r.mu.Unlock()
+	if gate == nil {
+		return
+	}
+	select {
+	case <-gate:
+	case <-r.done:
+	}
+}
+
 func (r *listenerRelay) close() {
-	_ = r.listener.Close()
+	r.closing.Do(func() {
+		close(r.done)
+		_ = r.listener.Close()
+	})
 	r.drop()
 }
 
