@@ -2,53 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-521",
-  "completed": "2026-10-27T06:35:56Z",
-  "round": 3,
-  "headSha": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1",
-  "branchHead": "08660e74f00eeee32657985cb3f76960f59d7481 (adds only .legion/INFRA-521/implement.json over 0fc4e40a)",
+  "completed": "2026-10-27T07:03:08Z",
+  "round": 4,
+  "headSha": "96fcf1de7511",
+  "branchHead": "201f90b97989480fc73dbdae2786e83ab88e761a (adds only .legion/ over 96fcf1de)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Applied the round-3 rule text to every test at 0fc4e40a with my own syntax-tree checker ($TMPDIR/infra521-test/rule3.ts), not the implementer's viewport-scan scripts: 0 mismatches with the tags. Its --list claim (iphone 223 = table v2) is the one I re-ran at 2cd0e103; jj diff --from 2cd0e103 --to 0fc4e40a touches only packages/dispatch/AGENTS.md and .legion/, so the specs and config are byte-identical."
+    "how": "Re-ran --list --reporter=json at the head against base and table v2 (iphone 223 = the 223 keep rows, 0 extra, 0 missing; every other project's set unchanged); applied the round-4 rule text, with its 768 px threshold, to all 663 test calls with my own checker (rule3.ts): 0 mismatches; read PHONE_VIEWPORT_QUERY = \"(max-width: 767px)\" at web/src/features/shell/useDialog.ts:9, as the text cites."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "2. the selection is something a future test author can follow: the documented rule gives the selection (round-2 tester failure on issue.e2e.ts:1226)",
-      "surface": "packages/dispatch/AGENTS.md \"Phone acceptance\" (lines 1314-1329 at 0fc4e40a) applied to the specs in packages/dispatch/e2e",
-      "command": "git archive 0fc4e40a721c packages/dispatch/e2e | tar -x -C $TMPDIR/infra521-test/r3 && bun $TMPDIR/infra521-test/rule3.ts r3/packages/dispatch/e2e (per test: skips all but chromium/webkit-iphone -> untag; skips all but iphone -> tag; a desktop width (>= 768) set by an unconditional setViewportSize before the first expect, with no width < 768 in a setViewportSize or viewport tuple anywhere -> untag; compared with the test's tag or its describe's)",
-      "observed": "663 test calls; the desktop-width exception reaches 27, all untagged (keyboard-issue.e2e.ts x10, keyboard-palette.e2e.ts x5 including :1030, board.e2e.ts x3, layout.e2e.ts x2, keyboard.e2e.ts x2, margin-composer-hold.e2e.ts x2, margin-thread-reply.e2e.ts:216, references.e2e.ts:174, ask-blocks.e2e.ts:381); every test that skips all but iphone is tagged, issue.e2e.ts:1226 (1920 then 390) among them. The checker's one MISMATCH line, shell.e2e.ts:492, is a false positive: its `const compact = testInfo.project.name !== \"chromium\"` (shell.e2e.ts:498) is a layout switch, not a skip, and R1 tags it.",
-      "headSha": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1",
-      "negativeControl": "Same checker over a scratch copy with ' @phone' removed from issue.e2e.ts:1226 and added to keyboard-issue.e2e.ts:46 (1280 for every project, never a phone width): it prints 'MISMATCH issue.e2e.ts:1226 tagged=false rule=tag (skips all but iphone)' and 'MISMATCH keyboard-issue.e2e.ts:46 tagged=true rule=untag (desktop width for every project, never phone)'."
+      "criterion": "2. the selection is something a future test author can follow: the documented rule gives the selection",
+      "surface": "packages/dispatch/AGENTS.md \"Phone acceptance\" at 96fcf1de applied to the specs in packages/dispatch/e2e",
+      "command": "git archive 96fcf1de7511 packages/dispatch/e2e | tar -x -C $TMPDIR/infra521-test/r4 && bun $TMPDIR/infra521-test/rule3.ts r4/packages/dispatch/e2e (skips all but chromium/webkit-iphone -> untag; skips all but iphone -> tag; an unconditional first setViewportSize >= 768 px before the first expect with no width < 768 anywhere -> untag)",
+      "observed": "663 test calls, 0 mismatches. The desktop-width exception reaches 27 tests, all untagged, including keyboard-palette.e2e.ts:1030 at 1024 px (compact but a desktop width under the new definition). issue.e2e.ts:1226 tagged under R5. Only MISMATCH line: shell.e2e.ts:492, a false positive from `const compact = testInfo.project.name !== \"chromium\"` (:498), a layout switch, not a skip.",
+      "headSha": "96fcf1de7511",
+      "negativeControl": "Scratch copy of 96fcf1de with ' @phone' removed from issue.e2e.ts:1226 and added to keyboard-issue.e2e.ts:46: the checker prints 'MISMATCH issue.e2e.ts:1226 tagged=false rule=tag (skips all but iphone)' and 'MISMATCH keyboard-issue.e2e.ts:46 tagged=true rule=untag (desktop width for every project, never phone)'."
     },
     {
-      "criterion": "1. iphone runs every test that takes a phone-only path; kept phone tests pass under iphone",
+      "criterion": "1/2. iphone runs the selected tests; other projects unchanged",
+      "surface": "Playwright CLI in packages/dispatch at 96fcf1de",
+      "command": "PLAYWRIGHT_BASE_URL=http://127.0.0.1:1 bunx playwright test --config e2e/playwright.config.ts --list --reporter=json > r4-list.json; bun cmp.ts base-list.json r4-list.json r4-sets.json; bun keep.ts selection-v2.md r4-sets.json",
+      "observed": "chromium 786/786, webkit 53/53, firefox 53/53, webkit-iphone 11/11, firefox-download-navigation 1/1, chromium-plain-http 4/4, 0 added 0 removed each; iphone 786 -> 223, 0 added, = table v2's 223 keep rows (0 extra, 0 missing); every iphone row carries @phone",
+      "headSha": "96fcf1de7511",
+      "negativeControl": "' @phone' removed from a tagged test drops iphone's list by one; ' @phones … x@phone' on an untagged title leaves it unchanged (rounds 1-2, same config and grep)."
+    },
+    {
+      "criterion": "1. kept phone tests pass under iphone; round-2 code changes pass under chromium",
       "surface": "Real browser in an issue pod (harness /legion/scratch/harness, lane tester; nothing else running)",
-      "command": "cd packages/dispatch && LANE=tester source /legion/scratch/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts --project iphone --reporter=list (log $TMPDIR/infra521-test/r2-iphone.log), run at 2cd0e103, whose specs and config equal 0fc4e40a's (jj diff --from 2cd0e103 --to 0fc4e40a: packages/dispatch/AGENTS.md and .legion/ only)",
-      "observed": "223 passed (21.2m), 0 skipped, 0 failed, exit 0",
-      "headSha": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1",
-      "negativeControl": "A scratch copy with ' @phone' removed from issue.e2e.ts:1226: --list -g \"the details rail fades\" lists it under [chromium] only, so the grep is what selects it for iphone."
-    },
-    {
-      "criterion": "1/2. the selection drops only tests with no phone-only path, and changes no other project",
-      "surface": "Playwright CLI --list --reporter=json at base 1357b95c and at 2cd0e103 (specs and config identical to 0fc4e40a)",
-      "command": "bun $TMPDIR/infra521-test/cmp.ts base-list.json r2-list.json r2-sets.json; bun keep.ts selection-v2.md r2-sets.json; chromium run: bunx playwright test --config e2e/playwright.config.ts --project chromium issue.e2e.ts:697 margin-thread-reply.e2e.ts agents-search.e2e.ts inbox.e2e.ts:355",
-      "observed": "chromium 786/786, webkit 53/53, firefox 53/53, webkit-iphone 11/11, firefox-download-navigation 1/1, chromium-plain-http 4/4, 0 added 0 removed each; iphone 786 -> 223 = the 223 keep rows of dispatch://INFRA-521/artifact/iphone-selection-md v2 (0 extra, 0 missing); the round-2 code changes under chromium: 12 passed",
-      "headSha": "0fc4e40a721cfcee0257ee8a20b82a6d60c6a5a1",
-      "negativeControl": "' @phones on iphone phone.e2e.ts x@phone' appended to an untagged title leaves iphone's list count unchanged (round 1); ' @phone' removed from a tagged test drops it by one."
-    },
-    {
-      "criterion": "3. browser step time before and after; phone tests still pass under iphone",
-      "surface": "GitHub Actions, Legion Envoy and Contracts, job dispatch",
-      "command": "gh api repos/sjawhar/legion/actions/runs/<id>/attempts/1/jobs; gh run view 40441476622 --job 121995880276 --log",
-      "observed": "This PR's one dispatch run (40441476622 at 357138e7): browser step 35.8 min, [iphone] 222 passed, every line @phone; base median 45.3 min over the 10 runs (re-read by API in round 1). The after median is the production check's (spec v5).",
-      "headSha": "357138e78c6017644331c97328e101b2a291c14a",
-      "negativeControl": "Base run 40400116211's dispatch job, read with the same count: iphone 654 passed + 132 skipped, so the 222 at head comes from the grep."
+      "command": "bunx playwright test --config e2e/playwright.config.ts --project iphone (r2-iphone.log) and --project chromium issue.e2e.ts:697 margin-thread-reply.e2e.ts agents-search.e2e.ts inbox.e2e.ts:355 (r2-chromium.log), at 2cd0e103; diff -r of the e2e trees 0fc4e40a vs 96fcf1de shows only comments changed (margin-thread-reply.e2e.ts:226-227, playwright.config.ts:15-18), and 2cd0e103 vs 0fc4e40a changed no spec or config",
+      "observed": "iphone 223 passed, 0 skipped, 0 failed (21.2m); chromium 12 passed",
+      "headSha": "96fcf1de7511",
+      "negativeControl": "Scratch copy without the tag on issue.e2e.ts:1226: --list names it under [chromium] only, so the grep selects it for iphone."
     }
   ],
+  "observations": [
+    "AGENTS.md:1365-1367's parenthetical for keeping a `!== \"chromium\"` skip ('it sets its own viewport, or does not depend on the layout') leaves out about ten skips whose reason is a desktop layout at chromium's own width: 7 'the desktop layout runs on the desktop project' (agent-view.e2e.ts), 'the rails are a desktop layout' (shell.e2e.ts:538), 'the mouse drag exercises a desktop viewport' (board.e2e.ts:816), 'One visible phone thread cannot queue a second action' (threads.e2e.ts:747). The instruction (keep the skip) and the selection are right for those tests too, so I did not fail on it; the reviewer may want 'for example' or a third case."
+  ],
   "ci": {
-    "readAt": "2026-10-27T06:35Z",
-    "head08660e74": "Tests 40461815373, Legion Envoy and Contracts 40461815372, Docs 40461815408 and PR Title 40461850596 queued; read as queued, not waited on.",
-    "head4cbd4a8d": "its runs were cancelled when 08660e74 was pushed."
+    "readAt": "2026-10-27T07:02Z",
+    "head201f90b9": "Tests 40464436139 and Legion Envoy and Contracts 40464436235 queued, Docs 40464436125 pending, PR Title pending; not waited on. The 08660e74 runs were cancelled by this push."
   }
 }
