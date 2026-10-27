@@ -554,6 +554,15 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	if req.Issues == nil {
 		req.Issues = []string{}
 	}
+	// A wave that names a child twice releases it once, at its first place: a second write would
+	// make Dispatch append another todo event for the same move, and the answer would name the child
+	// twice.
+	named := make(map[string]bool, len(req.Issues))
+	req.Issues = slices.DeleteFunc(req.Issues, func(key string) bool {
+		twice := named[key]
+		named[key] = true
+		return twice
+	})
 	// One wave's children share ancestors, and the walk to the tree root re-read each of them
 	// per child: the reads are cached for the life of this request.
 	read := s.cachedIssueReader()
