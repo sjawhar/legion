@@ -137,6 +137,23 @@ type DispatchArgs struct {
 	AppCpu    *string `pulumi:"appCpu,optional"`
 	AppMemory *string `pulumi:"appMemory,optional"`
 
+	// PprofPort turns on envoy-dispatch's Go profiler: DISPATCH_PPROF_PORT on its container alone,
+	// so it serves net/http/pprof on 127.0.0.1 at this port, reachable through kubectl
+	// port-forward and from nowhere outside the pod. Unset, nothing is rendered and no profiler
+	// listens.
+	PprofPort *int `pulumi:"pprofPort,optional"`
+
+	// AppPriorityClassName is the app pod's priorityClassName, the name of a PriorityClass that
+	// already exists in the cluster, which this component reads but never creates: a missing class
+	// fails the preview or update before the app Deployment changes, since Kubernetes refuses every
+	// pod naming one. Unset, the pod names none and runs at the cluster's default priority. The
+	// front door and the listener are unchanged.
+	AppPriorityClassName *string `pulumi:"appPriorityClassName,optional"`
+
+	// AppPdbMinAvailable turns on a PodDisruptionBudget, <hostname>, over the app's pods: its
+	// minAvailable, from 1 to replicas. Unset, the component creates no budget.
+	AppPdbMinAvailable *int `pulumi:"appPdbMinAvailable,optional"`
+
 	// AllowedNamespaces names the Kubernetes namespaces, in the Dispatch pod's own cluster, whose
 	// pods the app's NetworkPolicy admits on port 8766. Unset or empty admits no in-cluster
 	// namespace: only the component's own tailnet front door, which Tailscale Serve on 443 proxies
@@ -212,6 +229,9 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	if args.AppMemory != nil && bus.HoldsSeed(*args.AppMemory) {
 		return "appMemory", true
 	}
+	if args.AppPriorityClassName != nil && bus.HoldsSeed(*args.AppPriorityClassName) {
+		return "appPriorityClassName", true
+	}
 	if args.Namespace != nil && bus.HoldsSeed(*args.Namespace) {
 		return "namespace", true
 	}
@@ -258,6 +278,9 @@ type dispatchSettings struct {
 	deletionProtection, existingNamespace       bool
 	replicas                                    int
 	appCPU, appMemory                           string
+	pprofPort                                   int
+	appPriorityClassName                        string
+	appPDBMinAvailable                          int
 	strategy                                    dispatchStrategy
 	serveConfig                                 string
 	azure                                       dispatchAzure
@@ -513,6 +536,12 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if s.appCPU, s.appMemory, err = newDispatchAppResources(args); err != nil {
 		return dispatchSettings{}, err
 	}
+	if s.pprofPort, err = newDispatchPprofPort(args); err != nil {
+		return dispatchSettings{}, err
+	}
+	if s.appPriorityClassName, s.appPDBMinAvailable, err = newDispatchAppDisruption(args, s.replicas); err != nil {
+		return dispatchSettings{}, err
+	}
 	s.existingNamespace = args.ExistingNamespace != nil && *args.ExistingNamespace
 	if args.Namespace != nil {
 		if !dnsLabel(*args.Namespace) {
@@ -549,6 +578,55 @@ func dnsSubdomain(value string) bool {
 		}
 	}
 	return true
+}
+
+// newDispatchPprofPort resolves pprofPort, the port envoy-dispatch's profiler binds on the pod's
+// loopback: 0, rendering nothing, when it is unset. It refuses a value outside 1-65535, which
+// Dispatch would refuse at startup, and the two ports the app pod already binds on its loopback,
+// envoy-dispatch's own 8766 and the cloud-sql-proxy sidecar's 5432, where the bind would fail and
+// the pod would never start.
+func newDispatchPprofPort(args *DispatchArgs) (int, error) {
+	if args.PprofPort == nil {
+		return 0, nil
+	}
+	port := *args.PprofPort
+	switch {
+	case port < 1 || port > 65535:
+		return 0, fmt.Errorf("pprofPort %d must be a port number 1-65535; leave it unset for no profiler", port)
+	case port == 8766:
+		return 0, fmt.Errorf("pprofPort %d is envoy-dispatch's own port; choose another, such as 6060", port)
+	case port == 5432:
+		return 0, fmt.Errorf("pprofPort %d is the cloud-sql-proxy sidecar's port in the same pod; choose another, such as 6060", port)
+	}
+	return port, nil
+}
+
+// newDispatchAppDisruption resolves appPriorityClassName and appPdbMinAvailable, the app pod's
+// priority class and its PodDisruptionBudget's minAvailable: "" and 0, rendering nothing, when
+// unset. It refuses a class name that is empty or not a DNS subdomain, and one with the system-
+// prefix, which Kubernetes reserves for its own system-cluster-critical and system-node-critical
+// classes: those outrank every workload so the cluster's own components are scheduled first, and
+// an application pod holding one could preempt them. It refuses a budget below 1, which protects
+// no pod, and above replicas, which no number of ready pods can meet.
+func newDispatchAppDisruption(args *DispatchArgs, replicas int) (priorityClass string, pdbMinAvailable int, err error) {
+	if args.AppPriorityClassName != nil {
+		priorityClass = *args.AppPriorityClassName
+		switch {
+		case priorityClass == "":
+			return "", 0, errors.New("appPriorityClassName is empty; leave it unset for no priority class")
+		case !dnsSubdomain(priorityClass):
+			return "", 0, fmt.Errorf("appPriorityClassName %q must be a DNS subdomain, the shape of a PriorityClass's name", priorityClass)
+		case strings.HasPrefix(priorityClass, "system-"):
+			return "", 0, fmt.Errorf("appPriorityClassName %q is a class Kubernetes reserves for its own system components (the system- prefix); name a PriorityClass of your own", priorityClass)
+		}
+	}
+	if args.AppPdbMinAvailable != nil {
+		pdbMinAvailable = *args.AppPdbMinAvailable
+		if pdbMinAvailable < 1 || pdbMinAvailable > replicas {
+			return "", 0, fmt.Errorf("appPdbMinAvailable %d must be from 1 to replicas (%d); leave it unset for no PodDisruptionBudget", pdbMinAvailable, replicas)
+		}
+	}
+	return priorityClass, pdbMinAvailable, nil
 }
 
 // newDispatchAppResources resolves appCpu and appMemory, the envoy-dispatch container's request

@@ -20,12 +20,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// capped limits a smoke container to cpus CPUs and mib MiB, as every container the repository's
+// tests start is capped on a shared host. NATS holds the smoke's few messages; the listener serves
+// one client.
+func capped(cpus, mib int64) testcontainers.CustomizeRequestOption {
+	return testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
+		hostConfig.NanoCPUs = cpus * 1_000_000_000
+		hostConfig.Memory = mib << 20
+	})
+}
 
 func TestSmoke(t *testing.T) {
 	image := os.Getenv("ENVOY_SMOKE_IMAGE")
@@ -54,6 +65,7 @@ func TestSmoke(t *testing.T) {
 	// Start NATS using the same module the rest of the project uses.
 	natsC, err := tcnats.Run(ctx, testnats.Image,
 		network.WithNetwork([]string{"nats"}, net),
+		capped(1, 512),
 	)
 	testcontainers.CleanupContainer(t, natsC)
 	if err != nil {
@@ -62,6 +74,7 @@ func TestSmoke(t *testing.T) {
 
 	listenerC, err := testcontainers.Run(ctx, image,
 		network.WithNetwork([]string{"listener"}, net),
+		capped(1, 512),
 		testcontainers.WithEnv(map[string]string{
 			"NATS_URLS": "nats://nats:4222",
 			// The listener owns ENVOY_NOTIFICATIONS on a NATS that is not its own container, as

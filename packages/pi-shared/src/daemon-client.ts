@@ -192,6 +192,121 @@ export async function callReadyWithRetry(label: string, call: () => Promise<void
   }
 }
 
+/** What a call retried across a daemon restart is told: once, on its first connection failure,
+ * the sentence for the host to show (Oh My Pi's `onUpdate` reaches its TUI and RPC client, not
+ * the model); the abort signal that ends the wait, checked before every attempt; and the clock it
+ * waits on (a test's own). */
+export interface DaemonRestartRetry {
+  readonly onRetrying?: (message: string) => void;
+  readonly signal?: AbortSignal;
+  readonly now?: () => number;
+  readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+}
+
+/** How long a call waits for a restarting daemon, and its backoff from first to longest wait. */
+export const DAEMON_RESTART_BUDGET_MS = 10 * 60_000;
+const DAEMON_RESTART_FIRST_DELAY_MS = 500;
+const DAEMON_RESTART_MAX_DELAY_MS = 30_000;
+
+/** Why a request got no answer from the daemon: `refused` never reached it (nothing was sent);
+ * `dropped` may have reached it (a connection reset or closed before a response, or a 502 or 503
+ * from a proxy in front of it, whose body is not the daemon's refusal shape). Undefined for an
+ * answer the daemon gave, which is never retried: a 4xx above all, and the daemon's own 502/503,
+ * which carry a code. */
+export function daemonUnreachable(error: unknown): "refused" | "dropped" | undefined {
+  if (error instanceof LegionDaemonApiError) {
+    return (error.status === 502 || error.status === 503) && error.code === undefined
+      ? "dropped"
+      : undefined;
+  }
+  if (!(error instanceof Error)) return undefined;
+  const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
+  if (code === "ConnectionRefused" || code === "ECONNREFUSED") return "refused";
+  if (code === "ConnectionClosed" || code === "ECONNRESET" || code === "EPIPE") return "dropped";
+  return error instanceof TypeError &&
+    (error.message === "Failed to fetch" || error.message === "fetch failed")
+    ? "dropped"
+    : undefined;
+}
+
+/**
+ * Runs `call` until it gets the daemon's answer, retrying with capped exponential backoff while
+ * the daemon is unreachable (`daemonUnreachable`), for up to `DAEMON_RESTART_BUDGET_MS` or until
+ * `signal` aborts; an abort during a wait sends no further attempt. Only a call that the daemon
+ * applies at most once however often it arrives may run through it: `handoff_complete` (a repeat
+ * is answered HANDOFF_ALREADY_RECORDED, or, once the completion moved the issue, refused as no
+ * longer the role's phase), `sign_off` (a repeat finds the issue out of accepting and changes
+ * nothing) and `register_gate` (its fact is keyed by the gate's issue, generation, document,
+ * version and Dispatch sequence; a repeat after the sequence moved is a new fact, which the gate
+ * takes as a re-registration of the same document and tells no one again). `call` is the whole
+ * operation, grant mint included, since grants live in the daemon's memory and do not survive
+ * its restart. `onRetrying` is told once. A daemon refusal after a dropped attempt is told that
+ * the dropped one may have been applied.
+ */
+export async function retryWhileDaemonRestarts<T>(
+  label: string,
+  call: () => Promise<T>,
+  options: DaemonRestartRetry = {}
+): Promise<T> {
+  const { signal } = options;
+  const now = options.now ?? Date.now;
+  const sleep =
+    options.sleep ??
+    ((ms: number, abort?: AbortSignal) => {
+      const wait = Promise.withResolvers<void>();
+      const timer = setTimeout(wait.resolve, ms);
+      abort?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          wait.resolve();
+        },
+        { once: true }
+      );
+      return wait.promise;
+    });
+  const deadline = now() + DAEMON_RESTART_BUDGET_MS;
+  let delay = DAEMON_RESTART_FIRST_DELAY_MS;
+  let told = false;
+  let dropped = false;
+  let lastFailure: unknown;
+  for (;;) {
+    // An abort during the wait sends nothing more: a write the agent cancelled is never applied.
+    if (signal?.aborted && lastFailure !== undefined) {
+      throw new Error(
+        `${label}: the Legion daemon was unreachable (${messageFor(lastFailure)}) and the call was aborted${dropped ? "; an attempt lost its connection before the daemon answered and may have been applied, so read the record before calling again" : "; call it again once the daemon is back"}`
+      );
+    }
+    try {
+      return await call();
+    } catch (error) {
+      const unreachable = daemonUnreachable(error);
+      if (unreachable === undefined) {
+        if (dropped && error instanceof LegionDaemonApiError) {
+          error.message += ` (an earlier attempt of ${label} lost its connection before the daemon answered, and may have been applied: read the record before calling again)`;
+        }
+        throw error;
+      }
+      lastFailure = error;
+      dropped ||= unreachable === "dropped";
+      const remaining = deadline - now();
+      if (remaining <= 0) {
+        throw new Error(
+          `${label}: the Legion daemon was unreachable (${messageFor(error)}) and stayed so for ${DAEMON_RESTART_BUDGET_MS / 60_000} minutes${dropped ? "; an attempt lost its connection before the daemon answered and may have been applied, so read the record before calling again" : "; call it again once the daemon is back"}`
+        );
+      }
+      if (!told && !signal?.aborted) {
+        told = true;
+        const message = `The Legion daemon is unreachable, most likely restarting (${messageFor(error)}); ${label} is being retried for up to ${DAEMON_RESTART_BUDGET_MS / 60_000} minutes.`;
+        console.error(`[legion] ${message}`);
+        options.onRetrying?.(message);
+      }
+      if (!signal?.aborted) await sleep(Math.min(delay, remaining), signal);
+      delay = Math.min(delay * 2, DAEMON_RESTART_MAX_DELAY_MS);
+    }
+  }
+}
+
 /** `body` read through `schema`, or the reason it is not what the schema describes. */
 function parseStrictly<T>(
   schema: z.ZodType<T>,

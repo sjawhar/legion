@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -563,10 +564,20 @@ func highestMigrationFile(t *testing.T) int {
 // they commit - and a probe that queues behind them is read as a dead process: the ALB fails
 // it at five seconds, ECS replaces the task, and every in-flight request of every other client
 // is cancelled. The probe therefore takes its connection from a pool of its own, and the short
-// client timeout here is what tells a queued probe from an answered one.
+// client timeout here is what tells a queued probe from an answered one. The shared pool here
+// holds four connections: the property holds at any size, and holding all of production's
+// sixty-four while the other packages' tests share the server would push a default Postgres
+// past its hundred.
 func TestHealthzAnswersWhileEveryPooledConnectionIsHeld(t *testing.T) {
-	database := storetest.Open(t)
 	ctx := context.Background()
+	config := storetest.Open(t).Pool.Config().Copy()
+	config.MaxConns = 4
+	shared, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open a four-connection shared pool: %v", err)
+	}
+	database := &store.Store{Pool: store.NewPool(shared)}
+	t.Cleanup(database.Pool.Close)
 	for held := int32(0); held < database.Pool.Config().MaxConns; held++ {
 		connection, err := database.Pool.Acquire(ctx)
 		if err != nil {
@@ -1269,7 +1280,9 @@ func TestListenAddressJoinsAnIPv6LoopbackHost(t *testing.T) {
 			t.Errorf("host %q port %q: listenAddress = %q, %v; want %q", tc.host, tc.port, got, err, tc.want)
 		}
 	}
-	for _, port := range []string{"0", "70000"} {
+	// 2^64+1000 overflows int: a check that ignores overflow accepts it, and only the bind, after
+	// NATS and the migrations, refuses it. It must be refused here, before anything connects.
+	for _, port := range []string{"0", "70000", "18446744073709552616"} {
 		if got, err := listenAddress(envGetter(map[string]string{"DISPATCH_LISTEN_HOST": "127.0.0.1", "DISPATCH_PORT": port})); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
 			t.Errorf("port %q: listenAddress = %q, %v; want a refusal naming DISPATCH_PORT", port, got, err)
 		}
