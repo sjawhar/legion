@@ -557,8 +557,9 @@ func (e *Engine) HoldLapsed(pr record.PullRequest) bool {
 	return !since.IsZero() && !e.now().Before(since.Add(redHold)) && pr.Run.Decided != pr.HeadSHA
 }
 
-// noteLapse marks pr's lapsed hold decided (record.HeadRun.Decided) and says so, when the checks
-// are about to be decided with the hold lapsed, so the pass does not send the read again.
+// noteLapse marks pr's lapsed hold decided (record.HeadRun.Decided) and says so, naming the
+// verdict decided, when the checks are about to be decided with the hold lapsed, so the pass does
+// not send the read again.
 func (e *Engine) noteLapse(ctx context.Context, pr *record.PullRequest) {
 	if !e.HoldLapsed(*pr) {
 		return
@@ -566,12 +567,20 @@ func (e *Engine) noteLapse(ctx context.Context, pr *record.PullRequest) {
 	run := *pr.Run
 	run.Decided = pr.HeadSHA
 	pr.Run = &run
-	e.logOnCommit(ctx, "workflow: the hold on a red whose head waited for its push lapsed; the red is decided as it stands",
-		"issue", pr.Issue, "pullRequest", pr.Number, "head", pr.HeadSHA, "heldSince", heldSince(*pr), "held", e.now().Sub(heldSince(*pr)))
+	verdict := classify.HeadVerdict(*pr)
+	decided := "the checks are decided as they stand"
+	if verdict != "" {
+		decided = "the " + verdict + " is decided as it stands"
+	}
+	e.logOnCommit(ctx, "workflow: the hold on the checks of a head that waited for its push lapsed; "+decided,
+		"issue", pr.Issue, "pullRequest", pr.Number, "head", pr.HeadSHA, "verdict", verdict, "heldSince", heldSince(*pr), "held", e.now().Sub(heldSince(*pr)))
 }
 
 // stampRun records when pr's head arrived on the run's last head step, the step that arrival
-// added (record.RunStep.At), when a head run is open.
+// added (record.RunStep.At), when a head run is open. The arrival starts the head's hold afresh,
+// so it clears the mark of a lapse decided before it (record.HeadRun.Decided): a branch that
+// returns to a head whose lapse was decided earlier in the run is held, and its lapse decided,
+// again.
 func (e *Engine) stampRun(pr *record.PullRequest) {
 	if pr.Run == nil {
 		return
@@ -583,7 +592,7 @@ func (e *Engine) stampRun(pr *record.PullRequest) {
 		if pr.Run.Steps[i].At.IsZero() {
 			run := *pr.Run
 			run.Steps = append([]record.RunStep{}, run.Steps...)
-			run.Steps[i].At = e.now()
+			run.Steps[i].At, run.Decided = e.now(), ""
 			pr.Run = &run
 		}
 		return

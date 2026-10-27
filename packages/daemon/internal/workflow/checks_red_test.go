@@ -1,8 +1,10 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
@@ -1045,6 +1047,101 @@ func TestAHeadThatJoinsAnOldRunIsHeldFromItsOwnArrival(t *testing.T) {
 	if got := issuePhase(t, pool); got != phase.Implementing {
 		t.Fatalf("once h4's own hold lapses the issue is in %s, want implementing", got)
 	}
+}
+
+// A branch that returns, inside one open head run, to a head whose lapse was already decided is
+// held from its new arrival, and the pass's unchanged read decides its red once that hold lapses:
+// the arrival clears the mark of the earlier lapse (stampRun). h3's push is lost for good, so the
+// run h3 opened stays open; h3 settles green and its hold lapses, decided green; the branch moves
+// to h4 and back to h3, by a synchronize alone or by a forced push, and h3 settles red.
+func TestAHeadTheBranchReturnsToIsHeldAndDecidedAgain(t *testing.T) {
+	const required = "pr-checks-result"
+	type timed struct {
+		at   time.Duration
+		fact intake.Fact
+	}
+	forcedBack := func(from, to string) intake.Fact {
+		paths, forced, whole := "src/widget.go", "true", "false"
+		return intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: from, After: to,
+			ChangedPaths: &paths, Truncated: &whole, Forced: &forced, Pusher: "legion-implementer[bot]"}
+	}
+	unchanged := intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{required}}
+	for _, tc := range []struct {
+		name string
+		// lapse is when the pass decides h3's first, green, hold; returned is when the branch is
+		// back at h3.
+		lapse, returned time.Duration
+		back            []timed
+	}{
+		{name: "by a synchronize", lapse: 11 * time.Minute, returned: 13 * time.Minute, back: []timed{
+			{12 * time.Minute, syncedTo("h4")},
+			{12 * time.Minute, pushedFromTo("h3", "h4", "src/widget.go", "legion-implementer[bot]")},
+			{13 * time.Minute, syncedTo("h3")},
+			{14 * time.Minute, settledAt("h3", required, 5, required)},
+		}},
+		{name: "by a forced push", lapse: time.Hour, returned: time.Hour + 5*time.Minute, back: []timed{
+			{time.Hour, pushedFromTo("h3", "h4", "src/widget.go", "legion-implementer[bot]")},
+			{time.Hour, syncedTo("h4")},
+			{time.Hour, settledAt("h4", required, 3)},
+			{time.Hour + 5*time.Minute, forcedBack("h4", "h3")},
+			{time.Hour + 5*time.Minute, syncedTo("h3")},
+			{time.Hour + 6*time.Minute, settledAt("h3", required, 4, required)},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h2", CheckedHead: "h2", Failing: []string{},
+				CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: 1})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			var logged bytes.Buffer
+			at := func(d time.Duration) *Engine {
+				return New(record.NewStore(), Config{
+					Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: "merge-queue", Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+					Clock: func() time.Time { return start.Add(d) },
+				}, slog.New(slog.NewTextHandler(&logged, nil)))
+			}
+			applyRefusingNothing(t, pool, at(0), syncedTo("h3"))
+			applyRefusingNothing(t, pool, at(time.Minute), settledAt("h3", required, 2))
+			applyRefusingNothing(t, pool, at(tc.lapse), unchanged)
+			if pr := runOf(t, pool); pr.Run == nil || pr.Run.Decided != "h3" || !strings.Contains(logged.String(), "lapsed; the green is decided as it stands") {
+				t.Fatalf("h3's green hold lapsed with run %+v and log %q, want the run open, its lapse decided at h3 and logged as a green", pr.Run, logged.String())
+			}
+			for _, step := range tc.back {
+				applyRefusingNothing(t, pool, at(step.at), step.fact)
+			}
+			held := at(tc.returned + redHold - time.Minute)
+			applyRefusingNothing(t, pool, held, unchanged)
+			if got, kinds := issuePhase(t, pool), noticeKinds(t, pool, "LEGION-208"); got != phase.Testing || len(kinds) != 0 {
+				t.Fatalf("h3's red within ten minutes of the return leaves the issue in %s and the architect told %v, want testing and nothing", got, kinds)
+			}
+			lapsed := at(tc.returned + redHold + time.Second)
+			if pr := runOf(t, pool); !lapsed.HoldLapsed(pr) {
+				t.Fatalf("ten minutes after the return the hold on h3's red has not lapsed (run %+v), want it lapsed: the return starts h3's hold afresh", pr.Run)
+			}
+			applyRefusingNothing(t, pool, lapsed, unchanged)
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("once the return's hold lapses the issue is in %s, want implementing", got)
+			}
+			if !strings.Contains(logged.String(), "lapsed; the red is decided as it stands") {
+				t.Fatalf("the log %q does not say the red was decided", logged.String())
+			}
+		})
+	}
+}
+
+// runOf is LEGION-208's pull request as recorded.
+func runOf(t *testing.T, pool *pgxpool.Pool) record.PullRequest {
+	t.Helper()
+	var pr *record.PullRequest
+	seedRecord(t, pool, func(tx pgx.Tx) (err error) {
+		pr, err = record.NewStore().PullRequest(t.Context(), tx, "LEGION-208")
+		return err
+	})
+	return *pr
 }
 
 // A red that settles while its head waits for its push is held, and reported once the push closes

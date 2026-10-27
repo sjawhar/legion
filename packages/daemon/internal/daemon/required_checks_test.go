@@ -521,3 +521,60 @@ func TestThePassDecidesARedWhoseHoldLapsed(t *testing.T) {
 		})
 	}
 }
+
+// A head the branch returns to inside one open head run, after the pass already decided that
+// head's lapse, is held from its new arrival, and the pass decides its red once that hold lapses,
+// though every read it makes is unchanged: the head's push is lost for good, so its run stays open;
+// the pass decides its green once the hold lapses; the branch moves on and back, and the head
+// settles red.
+func TestThePassDecidesARedAtAHeadTheBranchReturnedTo(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
+	w := requiredRuntime(pool, mergeableStandIn(t, "true").URL, quietLogger())
+	start := time.Now().Add(-2 * time.Hour)
+	var now time.Time
+	w.engine = workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: func() time.Time { return now }}, quietLogger())
+	w.handlers = []intake.Handler{w.engine}
+	apply := func(at time.Duration, facts ...intake.Fact) {
+		t.Helper()
+		now = start.Add(at)
+		for i, fact := range facts {
+			if _, err := intake.ApplyFact(context.Background(), pool, "github", strconv.Itoa(int(at))+"-"+strconv.Itoa(i), fact, w.handlers...); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	pass := func(at time.Duration) {
+		now = start.Add(at)
+		for range 3 {
+			w.readRequiredChecks(context.Background())
+		}
+	}
+	synced := func(head string) intake.Fact {
+		return intake.PullRequestSynchronized{Repo: "acme/widgets", Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: head}
+	}
+	settled := func(head string, attempt int64, failing ...string) intake.Fact {
+		return intake.PullRequestChecks{Repo: "acme/widgets", Number: 86, HeadSHA: head, CheckRuns: []record.AttemptRun{{Name: "pr-checks-result", ID: attempt}},
+			Generation: attempt, Snapshot: head + "-" + strconv.FormatInt(attempt, 10), Failing: append([]string{}, failing...), Cancelled: []string{}}
+	}
+	paths, unforced, whole := "src/widget.go", "false", "false"
+	apply(0, synced("h3"))
+	apply(time.Minute, settled("h3", 2))
+	pass(11 * time.Minute)
+	if got, pr := capturePhase(t, pool); got != phase.Testing || pr.Run == nil || pr.Run.Decided != "h3" {
+		t.Fatalf("the pass after h3's green hold lapsed leaves the issue in %s with run %+v, want testing, the run open and its lapse decided at h3", got, pr.Run)
+	}
+	apply(12*time.Minute, synced("h4"), intake.Push{Repo: "acme/widgets", Branch: "legion/CAPTURE-1", Before: "h3", After: "h4",
+		ChangedPaths: &paths, Truncated: &whole, Forced: &unforced, Pusher: "legion-implementer[bot]"})
+	apply(13*time.Minute, synced("h3"))
+	apply(14*time.Minute, settled("h3", 5, "pr-checks-result"))
+	pass(20 * time.Minute)
+	if got := noticeReasons(t, pool, "checks-red"); len(got) != 0 {
+		t.Fatalf("the pass seven minutes after the return told checks-red %q, want nothing: h3 is held from its return", got)
+	}
+	pass(time.Hour)
+	got, pr := capturePhase(t, pool)
+	if red := noticeReasons(t, pool, "checks-red"); got != phase.Implementing || len(red) != 1 {
+		t.Fatalf("the pass after the return's hold lapsed leaves the issue in %s with checks-red notices %q (run %+v), want implementing and 1", got, red, pr.Run)
+	}
+}

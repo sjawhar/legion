@@ -252,3 +252,94 @@ func TestARedeliveredSettlementAfterItsHeadArrivesStandsInEveryOrder(t *testing.
 			want.CheckedHead, HeadVerdict(want), got.CheckedHead, HeadVerdict(got), got.Run != nil)
 	}
 }
+
+// A reopen at the same head starts its settlement afresh, so a settlement redelivered after the
+// reopen is a step of its own, as it is after a head's arrival: h3's settlement, a reopen at h3 and
+// the listener's redelivery leave h3 red whether h3's push came first or last.
+func TestASettlementRedeliveredAfterAReopenStandsInEveryOrder(t *testing.T) {
+	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
+	p3, h3red, reopen := record.ClassifiedPush{SHA: "h3", Before: "h2"}, settles("h3", 3, "ci"), runFact{reopen: "h3"}
+	want := red
+	for _, f := range []runFact{pushed(p3), arrives("h3"), h3red, reopen, h3red} {
+		want = stored(t, deliver(f, want))
+	}
+	got := red
+	for _, f := range []runFact{arrives("h3"), h3red, reopen, h3red, pushed(p3)} {
+		got = stored(t, deliver(f, got))
+	}
+	if HeadVerdict(want) != "red" || got.Run != nil || JudgementChanged(want, got) {
+		t.Fatalf("pushes first: checked=%q verdict=%q; pushes last: checked=%q verdict=%q run open=%v",
+			want.CheckedHead, HeadVerdict(want), got.CheckedHead, HeadVerdict(got), got.Run != nil)
+	}
+}
+
+// A head no chain of recorded pushes reaches is planned by every push that left it and may change
+// code, in whatever order they were recorded (unchainedPlan): h4 arrives from h2, and the pushes
+// that left it came from h3 and h5, heads the branch never held. All the review App's plan the red;
+// any other's clears it.
+func TestAnUnchainedHeadIsPlannedTheSameInEveryOrderOfItsPushes(t *testing.T) {
+	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
+	byApp := record.ClassifiedPush{SHA: "h4", Before: "h3", ByReviewApp: true}
+	for _, tc := range []struct {
+		name    string
+		other   record.ClassifiedPush
+		planned bool
+	}{
+		{"another's forced push", record.ClassifiedPush{SHA: "h4", Before: "h5", Forced: true}, false},
+		{"the review App's forced push", record.ClassifiedPush{SHA: "h4", Before: "h5", Forced: true, ByReviewApp: true}, true},
+	} {
+		for _, order := range [][]record.ClassifiedPush{{byApp, tc.other}, {tc.other, byApp}} {
+			pr := red
+			for _, p := range order {
+				pr = stored(t, ApplyPush(pr, p))
+			}
+			if pr = stored(t, deliver(arrives("h4"), pr)); pr.PlannedRed != tc.planned {
+				t.Fatalf("%s: pushes recorded %v plan h4's red %v, want %v", tc.name, order, pr.PlannedRed, tc.planned)
+			}
+		}
+	}
+}
+
+// A push redelivered while a head run is open, whose move was judged before the run opened, is
+// spent at the run's anchor as it is spent when it arrives with no run open: h2..h3 (the review
+// App's code) and h3..h4 bring the branch to h4; it returns to h3 by a push never delivered, which
+// opens a run; then h2..h3 is delivered again. It left h3 long ago and plans nothing there.
+func TestAPushRedeliveredIntoARunAfterItsMoveIsSpent(t *testing.T) {
+	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2, PlannedRed: true}
+	p3, p4 := record.ClassifiedPush{SHA: "h3", Before: "h2", ByReviewApp: true}, record.ClassifiedPush{SHA: "h4", Before: "h3"}
+	want := red
+	for _, f := range []runFact{pushed(p3), pushed(p4), arrives("h4"), arrives("h3")} {
+		want = stored(t, deliver(f, want))
+	}
+	got := red
+	for _, f := range []runFact{pushed(p4), pushed(p3), arrives("h4"), arrives("h3"), pushed(p3)} {
+		got = stored(t, deliver(f, got))
+	}
+	if got.Run == nil || JudgementChanged(want, got) {
+		t.Fatalf("delivered once: planned=%v fix=%d; redelivered into the run: planned=%v fix=%d run open=%v",
+			want.PlannedRed, want.FixAttempts, got.PlannedRed, got.FixAttempts, got.Run != nil)
+	}
+}
+
+// The mark of a run's decided lapse (record.HeadRun.Decided) is the workflow's, and a replay keeps
+// it: a settlement, a read of the required set and a push each replay the open run and leave the
+// mark as it was.
+func TestAReplayKeepsTheRunsDecidedLapse(t *testing.T) {
+	red := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
+		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 2}
+	pr := stored(t, deliver(arrives("h3"), red))
+	if pr.Run == nil {
+		t.Fatal("h3 arrived before its push with no run open")
+	}
+	run := *pr.Run
+	run.Decided = "h3"
+	pr.Run = &run
+	for _, f := range []runFact{settles("h3", 2, "ci"), {required: []string{"ci"}}, pushed(record.ClassifiedPush{SHA: "hy", Before: "hx"})} {
+		if pr = stored(t, deliver(f, pr)); pr.Run == nil || pr.Run.Decided != "h3" {
+			t.Fatalf("after %v the run is %+v, want it open with its lapse decided at h3", f, pr.Run)
+		}
+	}
+}
