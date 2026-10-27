@@ -1,6 +1,7 @@
 package roles_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -13,17 +14,18 @@ import (
 )
 
 // claims is a ClaimStore in memory: holders read in turn on each RoleClaim (the last one repeats),
-// releases answered in turn on each ReleaseExpiredRoleClaim.
+// releases answered in turn on each ReleaseExpiredRoleClaim, after onRelease when it is set.
 type claims struct {
-	holders  []string
-	readErr  error
-	releases []store.ExpiredRoleClaimRelease
-	release  error
-	reads    int
-	released []string
+	holders   []string
+	readErr   error
+	releases  []store.ExpiredRoleClaimRelease
+	release   error
+	onRelease func()
+	reads     int
+	released  []string
 }
 
-func (c *claims) RoleClaim(string) (store.RoleClaim, error) {
+func (c *claims) RoleClaim(context.Context, string) (store.RoleClaim, error) {
 	if c.readErr != nil {
 		return store.RoleClaim{}, c.readErr
 	}
@@ -32,8 +34,11 @@ func (c *claims) RoleClaim(string) (store.RoleClaim, error) {
 	return store.RoleClaim{HolderSessionID: holder}, nil
 }
 
-func (c *claims) ReleaseExpiredRoleClaim(_, sessionID string, _ time.Duration) (store.ExpiredRoleClaimRelease, error) {
+func (c *claims) ReleaseExpiredRoleClaim(_ context.Context, _, sessionID string, _ time.Duration) (store.ExpiredRoleClaimRelease, error) {
 	c.released = append(c.released, sessionID)
+	if c.onRelease != nil {
+		c.onRelease()
+	}
 	if c.release != nil {
 		return store.ExpiredRoleClaimRetained, c.release
 	}
@@ -49,7 +54,7 @@ type sessions struct {
 	readErr error
 }
 
-func (s sessions) Holder(sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
+func (s sessions) Holder(_ context.Context, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
 	if s.readErr != nil {
 		return session.SessionEntry{}, s.readErr
 	}
@@ -89,7 +94,7 @@ func TestResolveHolderReadsEachState(t *testing.T) {
 			roles.Churned, "", 0, []string{"ses_gone", "ses_other"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			resolution, err := roles.ResolveHolder(tc.claims, live, "reviewer", anyEntry)
+			resolution, err := roles.ResolveHolder(context.Background(), tc.claims, live, "reviewer", anyEntry)
 			if err != nil {
 				t.Fatalf("resolve: %v", err)
 			}
@@ -110,7 +115,7 @@ func TestResolveHolderReadsEachState(t *testing.T) {
 func TestResolveHolderReleasesAHolderLiveRefuses(t *testing.T) {
 	held := &claims{holders: []string{"ses_live"}, releases: []store.ExpiredRoleClaimRelease{store.ExpiredRoleClaimReleased}}
 	registered := sessions{entries: map[string]session.SessionEntry{"ses_live": {}}}
-	resolution, err := roles.ResolveHolder(held, registered, "reviewer", func(session.SessionEntry) bool { return false })
+	resolution, err := roles.ResolveHolder(context.Background(), held, registered, "reviewer", func(session.SessionEntry) bool { return false })
 	if err != nil || resolution.State != roles.Lapsed || len(held.released) != 1 {
 		t.Fatalf("resolution %+v, %v, released %v: want the refused holder's claim released", resolution, err, held.released)
 	}
@@ -131,11 +136,28 @@ func TestResolveHolderNamesTheStepThatFailed(t *testing.T) {
 		{"the release", &claims{holders: []string{"ses_gone"}, release: failure}, sessions{}, roles.Release, "ses_gone"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			resolution, err := roles.ResolveHolder(tc.claims, tc.sessions, "reviewer", anyEntry)
+			resolution, err := roles.ResolveHolder(context.Background(), tc.claims, tc.sessions, "reviewer", anyEntry)
 			readErr, ok := errors.AsType[*roles.ReadError](err)
 			if !ok || readErr.Step != tc.step || readErr.Holder != tc.holder || !errors.Is(err, failure) || resolution.Holder != tc.holder {
 				t.Fatalf("resolve returned %+v, %v; want a read error at %s about %q wrapping the failure", resolution, err, tc.step, tc.holder)
 			}
 		})
+	}
+}
+
+// No attempt starts once the context has ended: a release that loses to a fresh claim while the
+// context ends reads the claim no second time, and the answer is the context's error, naming the
+// role, rather than a read error or a resolution.
+func TestResolveHolderStartsNoAttemptOnceTheContextEnded(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	raced := &claims{holders: []string{"ses_gone", "ses_live"}, releases: []store.ExpiredRoleClaimRelease{store.ExpiredRoleClaimSuperseded}, onRelease: cancel}
+	live := sessions{entries: map[string]session.SessionEntry{"ses_live": {}}}
+	resolution, err := roles.ResolveHolder(ctx, raced, live, "reviewer", anyEntry)
+	if _, isReadErr := errors.AsType[*roles.ReadError](err); isReadErr || !errors.Is(err, context.Canceled) || err.Error() != "resolve role reviewer's holder: context canceled" {
+		t.Fatalf("resolve under a context that ended returned %+v, %v; want the context's error naming the role", resolution, err)
+	}
+	if raced.reads != 1 {
+		t.Fatalf("the claim was read %d times, want once: an attempt started after the context ended", raced.reads)
 	}
 }

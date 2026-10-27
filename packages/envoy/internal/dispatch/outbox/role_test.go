@@ -32,15 +32,15 @@ const roleHolder = "role-holder"
 // a Request that the test publisher answers.
 type heldRoles struct{}
 
-func (heldRoles) RoleClaim(string) (envoystore.RoleClaim, error) {
+func (heldRoles) RoleClaim(context.Context, string) (envoystore.RoleClaim, error) {
 	return envoystore.RoleClaim{HolderSessionID: roleHolder}, nil
 }
 
-func (heldRoles) ReleaseExpiredRoleClaim(string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
+func (heldRoles) ReleaseExpiredRoleClaim(context.Context, string, string, time.Duration) (envoystore.ExpiredRoleClaimRelease, error) {
 	return envoystore.ExpiredRoleClaimSuperseded, nil
 }
 
-func (heldRoles) Holder(_ string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
+func (heldRoles) Holder(_ context.Context, _ string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
 	entry := session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().UnixMilli()}
 	if !live(entry) {
 		return session.SessionEntry{}, natsgo.ErrKeyNotFound

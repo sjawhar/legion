@@ -71,7 +71,7 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	}
 	list, resolveErr := eventDestinations(event, item.Topic, route, found)
 	single := &batchEvent{item: item, destinationsOf: list}
-	resolveRoleHolders(deps, []*batchEvent{single})
+	resolveRoleHolders(ctx, deps, []*batchEvent{single})
 	sender := deps.Publisher.Window()
 	var failures []error
 	for _, dest := range single.destinationsOf {

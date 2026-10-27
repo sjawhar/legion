@@ -85,7 +85,7 @@ read_only() {
 }
 
 run_case FAKE_CONTAINER=absent
-if [ "$status" -ne 0 ] || [ "$(cat "$out")" != "$url" ] || ! grep -qxF "run -d --name dispatch-pg -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 $pinned" "$calls"; then
+if [ "$status" -ne 0 ] || [ "$(cat "$out")" != "$url" ] || ! grep -qxF "run -d --name dispatch-pg --cpus 2 --memory 2g -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 $pinned" "$calls"; then
   fail "no dispatch-pg: created from the pinned image"
 else
   printf 'PASS: no dispatch-pg: created from the pinned image, URL printed\n'
@@ -112,7 +112,7 @@ for want in \
   "dispatch-pg runs postgres:16 (image $stale_id), not the pinned $pinned, so it has no pgvector" \
   "  docker stop dispatch-pg" \
   "  docker rename dispatch-pg $backup" \
-  "  docker run -d --name dispatch-pg -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 -v 6383303ba5ac:/var/lib/postgresql/data $pinned" \
+  "  docker run -d --name dispatch-pg --cpus 2 --memory 2g -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432 -v 6383303ba5ac:/var/lib/postgresql/data $pinned" \
   "  docker rm $backup"; do
   if ! grep -qF -- "$want" "$err"; then
     fail "a stale dispatch-pg: the refusal names \"$want\""

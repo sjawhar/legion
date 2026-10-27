@@ -1,5 +1,6 @@
 import {
   ArtifactCreatedEventPayloadSchema as ArtifactCreatedPayloadSchema,
+  ArtifactHumanEditedEventPayloadSchema as ArtifactHumanEditedPayloadSchema,
   ArtifactVersionEventPayloadSchema as ArtifactVersionPayloadSchema,
   AskEditedEventPayloadSchema as AskEditedPayloadSchema,
   AskFollowerEventPayloadSchema as AskFollowerPayloadSchema,
@@ -31,6 +32,7 @@ import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine } from "./dispatch-command";
 import { dispatchChildRef, dispatchDocumentRef, dispatchIssueRef } from "./dispatch-owner";
 import { pictureAddresses } from "./dispatch-pictures";
+import { humanEditDiffBlock, humanEditHead } from "./human-edit";
 
 const KNOWN_SOURCES: Readonly<Record<string, unknown>> = EnvelopeSchema.shape.source.enum;
 const FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
@@ -423,6 +425,7 @@ export function replyWith(envelope: DeliveryEnvelope): ReplyHint | undefined {
 // ask.opened/anchor_refreshed/handed_back/answered/resolved the Ask, ask.edited the edited Ask plus
 // its prior fields and editor, message.created the Message, comment.*/suggestion.* the Comment plus
 // artifact_name, artifact.created {artifact}, artifact.version {artifact_id, name, version, diff?},
+// artifact.human_edited {artifact_id, name, from_version, to_version, editors, diff, diff_truncated},
 // and child.status {child_key, from, to}.
 // Bus frames are untrusted, so each schema below declares exactly the fields
 // this renderer surfaces and a frame that disagrees renders without them.
@@ -436,6 +439,7 @@ const DISPATCH_PAYLOAD_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
   "issue.closed": IssuePayloadSchema,
   "artifact.created": ArtifactCreatedPayloadSchema,
   "artifact.version": ArtifactVersionPayloadSchema,
+  "artifact.human_edited": ArtifactHumanEditedPayloadSchema,
   "ask.opened": AskPayloadSchema,
   "ask.anchor_refreshed": AskPayloadSchema,
   "ask.edited": AskEditedPayloadSchema,
@@ -536,6 +540,13 @@ function dispatchCompact(
   event: DispatchEvent,
   comment: CommentPayload | undefined
 ): CompactDispatch | undefined {
+  if (event.type === "artifact.human_edited") {
+    // A person's edit names its document, versions and editors in the card; its diff follows the
+    // card as a fenced block (humanEditDiffBlock), where a reader sees it as the diff it is.
+    const edit = ArtifactHumanEditedPayloadSchema.safeParse(event.payload);
+    if (!edit.success) return undefined;
+    return { askId: undefined, record: { edit: humanEditHead(edit.data) } };
+  }
   if (event.type === "comment.created") {
     if (comment?.ask_id === undefined || comment.ask_id === null) return undefined;
     const question = dispatchAskQuestion(comment);
@@ -791,6 +802,8 @@ export function renderInbound(
   // On an ask event the payload is the ask itself, whose author is another follower's
   // session when this session merely replied; naming it is not a spoof to flag.
   let askAuthor: string | undefined;
+  // Text that follows the card's TOON block: a person's edit's diff as a fenced `diff` block.
+  let trailer = "";
   const dispatchRendered = envelope.source === "dispatch" && envelope.payload !== undefined;
   if (envelope.source === "dispatch") {
     const topic = subject ?? envelope.topic;
@@ -926,6 +939,10 @@ export function renderInbound(
         };
         dispatchActor = frame.event.actor;
         pictures = eventPictures(frame.event);
+        if (frame.event.type === "artifact.human_edited") {
+          const edit = ArtifactHumanEditedPayloadSchema.safeParse(frame.event.payload);
+          if (edit.success) trailer = humanEditDiffBlock(edit.data.diff, edit.data.diff_truncated);
+        }
       } else {
         dispatchEvent = frame.raw;
         rejectedDelivery = frame.rejectedDelivery;
@@ -1025,7 +1042,8 @@ export function renderInbound(
 
   return {
     skip: false,
-    content: encode({ envoy: rendered }),
+    content:
+      trailer === "" ? encode({ envoy: rendered }) : `${encode({ envoy: rendered })}\n\n${trailer}`,
     envelope,
     ...(dispatchActor === undefined ? {} : { dispatchActor }),
     ...(delivery === undefined ? {} : { delivery }),

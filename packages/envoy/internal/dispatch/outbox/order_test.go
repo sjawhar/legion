@@ -456,13 +456,15 @@ func TestAnEventNATSNeverAcknowledgesIsBackedOffAndRecorded(t *testing.T) {
 }
 
 // A batch of 100 events of every kind whose destinations need a lookup - replies to comments, ask
-// answers, replies to messages and comments on documents - reads their followers and authors in at
-// most four statements, one per kind, and publishes every one of them.
+// answers, replies to messages, comments on documents and a person's settled edits of documents -
+// reads their followers and authors in at most four statements, one per kind, and publishes every
+// one of them. A document's writers are one kind, whether a comment on it or an edit of it asks for
+// them, so the edits add no statement.
 func TestTheBatchResolvesFollowersAndAuthorsInAtMostFourStatements(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
-	const each = batchSize / 4
+	const each = batchSize / 5
 	var seeded []model.Event
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	for index := range each {
@@ -490,6 +492,11 @@ func TestTheBatchResolvesFollowersAndAuthorsInAtMostFourStatements(t *testing.T)
 			IssueKey: new("T-1"), Type: "comment.created", Actor: alice,
 			Payload: map[string]any{"id": uuid.NewString(), "body": "A note", "anchor": anchorOn(document)},
 		}))
+		edited := seedDocument(t, database, new("T-1"), fmt.Sprintf("spec-%d", index), model.Actor{Kind: "session", ID: fmt.Sprintf("spec-author-%d", index)})
+		seeded = append(seeded, appendEvent(t, database, broker, model.Event{
+			IssueKey: new("T-1"), Type: "artifact.human_edited", Actor: alice,
+			Payload: map[string]any{"artifact_id": edited, "name": "spec.md", "from_version": 1, "to_version": 2, "editors": []any{alice.ID}},
+		}))
 	}
 
 	tracer := &statementTracer{}
@@ -508,8 +515,9 @@ func TestTheBatchResolvesFollowersAndAuthorsInAtMostFourStatements(t *testing.T)
 		}
 	}
 	// Each comment reply reaches its root's author, each ask answer its two followers, each message
-	// reply its parent's sender, and each document comment the document's author.
-	if want := each * 5; agents != want {
+	// reply its parent's sender, each document comment the document's author, and each person's edit
+	// the edited document's author.
+	if want := each * 6; agents != want {
 		t.Fatalf("the batch reached %d sessions' own subjects, want %d", agents, want)
 	}
 	var lookups []string

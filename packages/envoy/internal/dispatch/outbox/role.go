@@ -1,6 +1,7 @@
 package outbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -51,11 +52,12 @@ type roleResolution struct {
 }
 
 // resolveRoleHolders resolves the holder of every role a batch's events route to and have not
-// reached yet, once per role and every role at once, and gives each such role destination its
-// forward (forwardOf). It reads the role and session buckets directly (Deps.RoleClaims,
-// Deps.Sessions), releasing a claim whose holder is gone. Events that are not due are resolved too:
-// their unreached role destinations hold later events back from the holder's agent subject.
-func resolveRoleHolders(deps Deps, events []*batchEvent) {
+// reached yet, once per role and every role at once, within ctx, and gives each such role
+// destination its forward (forwardOf). It reads the role and session buckets directly
+// (Deps.RoleClaims, Deps.Sessions), releasing a claim whose holder is gone. Events that are not due
+// are resolved too: their unreached role destinations hold later events back from the holder's
+// agent subject.
+func resolveRoleHolders(ctx context.Context, deps Deps, events []*batchEvent) {
 	var routed []string
 	seen := map[string]struct{}{}
 	for _, event := range events {
@@ -81,7 +83,7 @@ func resolveRoleHolders(deps Deps, events []*batchEvent) {
 			if deps.RoleClaims != nil && deps.Sessions != nil {
 				// Any registered session is the holder here: one that has stopped heartbeating
 				// is found stale by forwardOf, and stays pending rather than losing its claim.
-				result.resolution, result.err = roles.ResolveHolder(deps.RoleClaims, deps.Sessions, role, roles.Registered)
+				result.resolution, result.err = roles.ResolveHolder(ctx, deps.RoleClaims, deps.Sessions, role, roles.Registered)
 			}
 			if result.err == nil && result.resolution.State == roles.Lapsed {
 				slog.Info("dispatch outbox: a role's holder is gone", "role", role, "holder", result.resolution.Holder,

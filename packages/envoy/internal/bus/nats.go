@@ -28,6 +28,7 @@ type connectOpts struct {
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
 	environment                 func(string) (string, bool)
+	reconnectWaitTick           func()
 }
 
 // parseConnectOptions applies options over the defaults every connect starts from.
@@ -141,7 +142,13 @@ type Client struct {
 	dialer                      *socks5Dialer
 	publishAcknowledgementClock AcknowledgementClock
 	reconnectErrClock           func() time.Time
-	mu                          sync.Mutex
+	// reconnectWaitTick, when not nil, runs at each pass of ensureConnWithContext's wait for a
+	// reconnect, before the pass blocks; a connection event it causes is read before the wait looks
+	// at its context, as one that wakes the wait would be. It is nil outside tests: a test sets it
+	// (WithReconnectWaitTick, export_test.go) to know a publish is inside that wait, or to act at
+	// the moment the wait ends.
+	reconnectWaitTick func()
+	mu                sync.Mutex
 
 	// subscriptionsMu guards subscriptions and stopMode. It is held to read and write them, never
 	// across a bind's request to the server, so a reconnect's restore, the health reads and Drain
@@ -255,6 +262,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		dialer:                      dialer,
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		reconnectErrClock:           opts.reconnectErrClock,
+		reconnectWaitTick:           opts.reconnectWaitTick,
 		stopCh:                      make(chan struct{}),
 	}
 	nc, err := connect(c.name, urls, credential, dialer, c.onReconnect, c.connectionChanged, c.onClosed, c.onAsyncError, c.reconnectErrClock)
@@ -776,6 +784,14 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		}
 		if conn != nil && !conn.IsClosed() {
 			c.reconnectWaits.Add(1)
+			if c.reconnectWaitTick != nil {
+				c.reconnectWaitTick()
+				select {
+				case <-changed:
+					continue
+				default:
+				}
+			}
 			select {
 			case <-ctx.Done():
 				return fmt.Errorf("bus: waiting for NATS to reconnect: %w", ctx.Err())
@@ -918,12 +934,30 @@ func (c *Client) refused(err error, size int) error {
 	return err
 }
 
+// publishBound bounds Publish, PublishCoreTo and PublishReportingDuplicate, and the publishJetStream
+// and publishCoreTo of a caller that passed no deadline of its own: their wait for a reconnect and
+// their flush or JetStream acknowledgement together. A publish window's sends take
+// publishAcknowledgementTimeout instead. It is also the HTTP client's per-attempt deadline
+// (packages/envoy-client/src/transport.ts), which a publish that spends the whole bound can never
+// be answered inside, and that is what the Within forms below exist for.
+const publishBound = 5 * time.Second
+
 // Publish routes role lanes, their delivery-exception lanes and every topic the stream does not
 // capture through core NATS (usesCoreTransport); every notification the stream captures retains
 // JetStream durability. Its signature is an interface method in cistore, outbox and webhook, so a
-// caller that wants JetStream's duplicate verdict calls PublishReportingDuplicate instead.
+// caller that wants JetStream's duplicate verdict calls PublishReportingDuplicate instead, and one
+// that has a deadline of its own calls PublishWithin.
 func (c *Client) Publish(item contracts.Envelope) error {
 	_, err := c.PublishReportingDuplicate(item)
+	return err
+}
+
+// PublishWithin publishes as Publish does, with ctx as the whole publish's bound - the wait for a
+// reconnect, the flush and the JetStream acknowledgement all end with it - instead of publishBound.
+// The listener's HTTP handlers publish this way, so a bus they cannot reach is answered inside the
+// deadline their own caller gave them.
+func (c *Client) PublishWithin(ctx context.Context, item contracts.Envelope) error {
+	_, err := c.PublishReportingDuplicateWithin(ctx, item)
 	return err
 }
 
@@ -939,17 +973,44 @@ func (c *Client) Publish(item contracts.Envelope) error {
 // have landed, so the very publish that put the message on the subject can come
 // back a duplicate.
 func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error) {
-	if usesCoreTransport(item.Topic) {
-		return false, c.PublishCore(item)
-	}
-	return c.publishJetStream(item)
+	ctx, cancel := context.WithTimeout(context.Background(), publishBound)
+	defer cancel()
+	return c.PublishReportingDuplicateWithin(ctx, item)
 }
 
-// publishJetStream publishes item to the notification stream. The MsgId, where the envelope earns
-// one, is the dedupe key and the topic together, because one upstream event can be published on
-// several topics under one key - a GitHub comment that mentions the trigger is published on its
-// mention topic beside its comment topic - and each of those must be retained.
-func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
+// PublishReportingDuplicateWithin publishes as PublishReportingDuplicate does, reporting the same
+// duplicate verdict over the same two transports, with ctx as the whole publish's bound instead of
+// publishBound.
+func (c *Client) PublishReportingDuplicateWithin(ctx context.Context, item contracts.Envelope) (bool, error) {
+	if usesCoreTransport(item.Topic) {
+		return false, c.publishCoreTo(ctx, item.Topic, item)
+	}
+	return c.publishJetStream(ctx, item)
+}
+
+// publishJetStream publishes item to the notification stream within ctx's bound. The MsgId, where
+// the envelope earns one, is the dedupe key and the topic together, because one upstream event can
+// be published on several topics under one key - a GitHub comment that mentions the trigger is
+// published on its mention topic beside its comment topic - and each of those must be retained.
+// The bound below is the earlier of the caller's own deadline and publishBound, since WithTimeout
+// keeps the parent's deadline when that is the earlier one; publishBound is what bounds a caller
+// that passed none. The acknowledgement wait is still taken from publishAcknowledgementClock, the
+// seam a test uses to expire that bound without spending it.
+//
+// A ctx that has already ended never puts the message on the wire here, and that protection is
+// the dependency's rather than this repository's: js.Publish under nats.Context is a request, and
+// nats.go's requestWithContext returns ctx.Err() before it sends anything (nats.go v1.50.0,
+// context.go), on the first attempt, on each of its no-responders retries and on the reconnect
+// retry below alike. That read comes after ensureConnWithContext has returned, so it also refuses
+// a ctx cancelled as a reconnect wait ends. So the core path's own check (publishConfirmed's read
+// of ctx) has no counterpart here, and it is not redundant with this one: a change that stopped
+// passing nats.Context(ctx), or a nats.go that stopped checking first, would reopen the case on
+// this path silently.
+// TestAPublishWithAnEndedContextSendsNothing pins it, so either change fails that test instead of
+// reaching the wire. What a context that ends during the acknowledgement wait leaves is a message
+// the stream may hold while the caller is answered failure; that is the acknowledgement's own
+// ambiguity, which the MsgId's duplicate window absorbs for an envelope that earns one.
+func (c *Client) publishJetStream(ctx context.Context, item contracts.Envelope) (bool, error) {
 	if err := checkSubject(item.Topic); err != nil {
 		return false, err
 	}
@@ -957,7 +1018,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(context.Background(), publishAcknowledgementTimeout)
+	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(ctx, publishBound)
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return false, err
@@ -990,8 +1051,27 @@ func (c *Client) PublishCore(item contracts.Envelope) error {
 // (publishConfirmed), so a nil error means it did: a publish NATS denies (a permissions violation
 // of a per-client grant), a flush that fails and a publish the server cannot be shown to have
 // accepted all return an error. The subject can differ from item.Topic when an authoritative
-// router forwards an envelope while retaining its original topic for the recipient.
+// router forwards an envelope while retaining its original topic for the recipient. It bounds
+// itself at publishBound; a caller with a deadline of its own reaches the same publish through
+// PublishWithin.
 func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
+	ctx, cancel := context.WithTimeout(context.Background(), publishBound)
+	defer cancel()
+	return c.publishCoreTo(ctx, subject, item)
+}
+
+// publishCoreTo is PublishCoreTo under ctx: ctx is the whole publish's bound, so it is both what
+// the wait for a reconnect ends with and the window publishConfirmed flushes and confirms within.
+// The bound taken below is the earlier of ctx's own deadline and publishBound, since WithTimeout
+// keeps the parent's deadline when that is the earlier one; publishBound is what bounds a caller
+// that passed none.
+//
+// A ctx that has ended puts nothing on the wire: ensureConnWithContext returns its error rather
+// than wait for a reconnect or dial one, and publishConfirmed refuses it immediately before the
+// publish, which also catches a cancel that lands as a reconnect completes. A deadline arrives
+// spent through publishHandler (cmd/listener/api.go), whose role-holder resolution shares the
+// route's context with the publish.
+func (c *Client) publishCoreTo(ctx context.Context, subject string, item contracts.Envelope) error {
 	if err := checkSubject(subject); err != nil {
 		return err
 	}
@@ -999,14 +1079,13 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), publishAcknowledgementTimeout)
+	ctx, cancel := context.WithTimeout(ctx, publishBound)
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	deadline, _ := ctx.Deadline()
 	conn := c.Conn
-	return c.publishConfirmed(conn, &nats.Msg{Subject: subject, Data: data}, deadline, conn.PublishMsg)
+	return c.publishConfirmed(ctx, conn, &nats.Msg{Subject: subject, Data: data}, conn.PublishMsg)
 }
 
 // ErrReceiptTimeout is returned by RequestCoreTo only when the publish and the
@@ -1072,7 +1151,7 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 	defer receipt.Unsubscribe()
 	forward := &nats.Msg{Subject: subject, Reply: inbox, Data: data, Header: nats.Header{}}
 	forward.Header.Set(nats.MsgIdHdr, ForwardMsgID(item.DedupeKey, subject))
-	err = c.publishConfirmed(conn, forward, deadline, conn.PublishMsg)
+	err = c.publishConfirmed(ctx, conn, forward, conn.PublishMsg)
 	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
 		return err
 	}

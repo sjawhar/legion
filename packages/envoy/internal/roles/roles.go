@@ -3,6 +3,7 @@
 package roles
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -16,18 +17,20 @@ import (
 // ClaimStore is where a role's claim is read and an expired one released: store.Registry in the
 // listener, Buckets in Dispatch.
 type ClaimStore interface {
-	// RoleClaim returns role's claim, or a zero claim without an error when the role is unclaimed.
-	RoleClaim(role string) (store.RoleClaim, error)
+	// RoleClaim returns role's claim, read within ctx, or a zero claim without an error when the
+	// role is unclaimed.
+	RoleClaim(ctx context.Context, role string) (store.RoleClaim, error)
 	// ReleaseExpiredRoleClaim deletes role's claim while sessionID still holds it, as a compare and
-	// set on the claim's revision, and says what came of it (store.ExpiredRoleClaimRelease).
-	ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL time.Duration) (store.ExpiredRoleClaimRelease, error)
+	// set on the claim's revision, waiting no longer than ctx, and says what came of it
+	// (store.ExpiredRoleClaimRelease).
+	ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID string, sessionTTL time.Duration) (store.ExpiredRoleClaimRelease, error)
 }
 
 // SessionLookup reads a role holder's session entry.
 type SessionLookup interface {
-	// Holder returns sessionID's entry when live accepts it. nats.ErrKeyNotFound says the session
-	// is gone or live refuses it; any other error is a read that did not answer.
-	Holder(sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error)
+	// Holder returns sessionID's entry when live accepts it, read within ctx. nats.ErrKeyNotFound
+	// says the session is gone or live refuses it; any other error is a read that did not answer.
+	Holder(ctx context.Context, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error)
 	// TTL is the session bucket's liveness window, which a release passes on.
 	TTL() time.Duration
 }
@@ -112,18 +115,23 @@ func Fresh(entry session.SessionEntry, now time.Time) bool {
 	return entry.UpdatedAt > 0 && now.UnixMilli()-entry.UpdatedAt < session.ClaimStaleAfter.Milliseconds()
 }
 
-// ResolveHolder resolves role's holder. It reads the role's claim (Unclaimed when there is none),
-// then the holder's session through sessions, which live judges (Live when it is there). A holder
-// that is gone, or that live refuses, has its claim released (claims.ReleaseExpiredRoleClaim, a
-// compare and set on the claim it read), and the resolution is Lapsed with what the release came
-// to - unless the release found the claim superseded by a fresh one, which is read again, at most
-// resolutionAttempts times in all, after which it is Churned. ExpiredRoleClaimSuperseded is
-// interpreted here and nowhere else, so a claim raced by a live replacement resolves to that
-// replacement for every caller. A read that fails returns a *ReadError naming its step, with the
-// claim's holder in the Resolution when it was read.
-func ResolveHolder(claims ClaimStore, sessions SessionLookup, role string, live func(session.SessionEntry) bool) (Resolution, error) {
+// ResolveHolder resolves role's holder within ctx. It reads the role's claim (Unclaimed when there
+// is none), then the holder's session through sessions, which live judges (Live when it is there).
+// A holder that is gone, or that live refuses, has its claim released
+// (claims.ReleaseExpiredRoleClaim, a compare and set on the claim it read), and the resolution is
+// Lapsed with what the release came to - unless the release found the claim superseded by a fresh
+// one, which is read again, at most resolutionAttempts times in all, after which it is Churned.
+// ExpiredRoleClaimSuperseded is interpreted here and nowhere else, so a claim raced by a live
+// replacement resolves to that replacement for every caller. A read that fails returns a
+// *ReadError naming its step, with the claim's holder in the Resolution when it was read. Every
+// read waits no longer than ctx, and no attempt starts once ctx has ended: that is ctx's error,
+// wrapped to name the role, and no *ReadError.
+func ResolveHolder(ctx context.Context, claims ClaimStore, sessions SessionLookup, role string, live func(session.SessionEntry) bool) (Resolution, error) {
 	for range resolutionAttempts {
-		claim, err := claims.RoleClaim(role)
+		if err := ctx.Err(); err != nil {
+			return Resolution{}, fmt.Errorf("resolve role %s's holder: %w", role, err)
+		}
+		claim, err := claims.RoleClaim(ctx, role)
 		if err != nil {
 			return Resolution{}, &ReadError{Step: ClaimRead, Err: err}
 		}
@@ -131,14 +139,14 @@ func ResolveHolder(claims ClaimStore, sessions SessionLookup, role string, live 
 		if holder == "" {
 			return Resolution{State: Unclaimed}, nil
 		}
-		entry, err := sessions.Holder(holder, live)
+		entry, err := sessions.Holder(ctx, holder, live)
 		if err == nil {
 			return Resolution{State: Live, Holder: holder, Entry: entry}, nil
 		}
 		if !errors.Is(err, nats.ErrKeyNotFound) {
 			return Resolution{Holder: holder}, &ReadError{Step: SessionRead, Holder: holder, Err: err}
 		}
-		release, err := claims.ReleaseExpiredRoleClaim(role, holder, sessions.TTL())
+		release, err := claims.ReleaseExpiredRoleClaim(ctx, role, holder, sessions.TTL())
 		if err != nil {
 			return Resolution{Holder: holder}, &ReadError{Step: Release, Holder: holder, Err: err}
 		}

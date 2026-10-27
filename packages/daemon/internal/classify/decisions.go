@@ -123,7 +123,8 @@ func keptPushes(pushes []record.ClassifiedPush, head string) []record.Classified
 }
 
 // carriesApproval is whether an approval of the head a push replaced also approves the head it
-// left: the push changed only .legion/, did not rewrite history, and said which head it replaced.
+// left: the push changed only the issue's own .legion/<issue>/ (HandoffPath), did not rewrite
+// history, and said which head it replaced.
 func carriesApproval(p record.ClassifiedPush) bool {
 	return !p.MayChangeCode() && p.Before != ""
 }
