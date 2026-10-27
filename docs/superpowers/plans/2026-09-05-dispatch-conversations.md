@@ -6954,3 +6954,5 @@ Rollout order is operational, not a PR split (spec §Rollout): merge → CI publ
 T15 wrote the envoy-client and dispatch documentation before Tasks 8 and 9 had landed, so it described `web/src/dom.ts`, the `e2e/` directory, and `bun run e2e` on faith. All three exist at head, confirmed against the tree, so the entries stand as written and nothing in the docs is owed.
 
 T8 touched two files outside its file list. `packages/dispatch/web/src/styles.css` gained `display: contents` on `#sidebar-root` and `#detail-root`, because the wrapper shell the task brief prescribed broke the two-column grid; and `packages/dispatch/web/src/types.ts` widened `parentNumber` to `number | null`. Both were reviewed with the task and accepted; the file lists above were not amended.
+
+<!-- scratch INFRA-520 dispatch-memory -->
