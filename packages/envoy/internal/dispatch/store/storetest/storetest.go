@@ -6,7 +6,9 @@
 // Open clones each database from a template this test process migrates once. Running every
 // migration, each in its own committed transaction, is most of the Postgres work a test would
 // otherwise do, so a package's wall time would scale with its test count times the speed of the
-// Postgres it runs against; a clone costs one create database.
+// Postgres it runs against; a clone costs one create database. That create database writes the
+// whole template through the WAL, a few hundred milliseconds paid by every test, so Open clones the
+// database the next test takes in the background while the current test runs.
 //
 // A test's database is dropped in the background once the test ends, and Main waits for the
 // drops. Dropping a database forces a checkpoint and waits for it, and every package testing
@@ -46,6 +48,17 @@ var shared struct {
 	drops     sync.WaitGroup
 	dropMu    sync.Mutex
 	dropFails []string
+
+	// next is the clone the next Open takes, made while the test before it ran; nil until the first
+	// Open. cloneMu guards it.
+	cloneMu sync.Mutex
+	next    chan clone
+}
+
+// clone is a database cloned from the template, or the error that kept it from being made.
+type clone struct {
+	name string
+	err  error
 }
 
 // Open returns a store on a new database carrying every migration, dropped after t ends. It skips
@@ -65,8 +78,8 @@ func Open(t testing.TB) *store.Store {
 	}
 
 	ctx := context.Background()
-	name := randomName(t, "dispatch_test_")
-	if _, err := shared.admin.Exec(ctx, "create database "+name+" template "+shared.template); err != nil {
+	name, err := takeClone()
+	if err != nil {
 		t.Fatalf("clone isolated database from template: %v", err)
 	}
 	t.Cleanup(func() { dropDatabase(name) })
@@ -88,6 +101,13 @@ func Main(m *testing.M) int {
 		return code
 	}
 	defer shared.admin.Close()
+	shared.cloneMu.Lock()
+	if shared.next != nil {
+		if unused := <-shared.next; unused.err == nil {
+			dropDatabase(unused.name)
+		}
+	}
+	shared.cloneMu.Unlock()
 	shared.drops.Wait()
 	for _, failure := range shared.dropFails {
 		fmt.Fprintf(os.Stderr, "storetest: %s\n", failure)
@@ -105,6 +125,41 @@ func Main(m *testing.M) int {
 		}
 	}
 	return code
+}
+
+// takeClone answers a database cloned from the template for the calling test: the one cloned in
+// the background since the Open before it, or one cloned now for the first. Before waiting for it,
+// it starts cloning the database the next Open takes, so that clone runs while this test does.
+func takeClone() (string, error) {
+	shared.cloneMu.Lock()
+	taken := shared.next
+	if taken == nil {
+		taken = startClone()
+	}
+	shared.next = startClone()
+	shared.cloneMu.Unlock()
+	made := <-taken
+	return made.name, made.err
+}
+
+// startClone clones the template into a new database in the background and answers the channel
+// that receives it.
+func startClone() chan clone {
+	made := make(chan clone, 1)
+	go func() {
+		suffix, err := randomSuffix()
+		if err != nil {
+			made <- clone{err: err}
+			return
+		}
+		name := "dispatch_test_" + suffix
+		if _, err := shared.admin.Exec(context.Background(), "create database "+name+" template "+shared.template); err != nil {
+			made <- clone{err: err}
+			return
+		}
+		made <- clone{name: name}
+	}()
+	return made
 }
 
 // dropDatabase drops name without waiting for it; Main waits for every drop. Drops in flight
@@ -169,15 +224,6 @@ func prepare(raw string) error {
 func databaseURL(server url.URL, database string) string {
 	server.Path = "/" + database
 	return server.String()
-}
-
-func randomName(t testing.TB, prefix string) string {
-	t.Helper()
-	suffix, err := randomSuffix()
-	if err != nil {
-		t.Fatalf("%v", err)
-	}
-	return prefix + suffix
 }
 
 func randomSuffix() (string, error) {

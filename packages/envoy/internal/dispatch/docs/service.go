@@ -2047,6 +2047,20 @@ func (s *Service) ScheduleSettlement(artifactID string) {
 	s.scheduleSettle(artifactID)
 }
 
+// SettleNow arms the document's settlement to run at once rather than at the end of the settle
+// window, as a settlement retry is armed (retrySettleSoon): it replaces the timer a write armed, and
+// a settlement with nothing owed writes nothing. Nothing in production calls it. It exists for
+// tests that hold a write unsettled across a window wide enough to land another write in it: once
+// that write has landed, the test settles the document now instead of waiting the window out.
+func (s *Service) SettleNow(artifactID string) {
+	if s.stopping.Load() || s.shuttingDown(artifactID) {
+		return
+	}
+	state := s.lockState(artifactID)
+	defer s.unlockState(artifactID, state)
+	s.scheduleSettleAfterLocked(artifactID, state, 0)
+}
+
 type BlockIDBackfill struct {
 	ArtifactID string
 	Stamped    int
