@@ -16,7 +16,9 @@ image="pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f3
 # The PostgreSQL major version the pinned image runs: a data directory moves onto it only from 16.
 image_major="16"
 data_dir="/var/lib/postgresql/data"
-run_flags=(-d --name "$container" -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432)
+# Two CPUs and 2 GiB, as every container on a shared devbox carries limits; a dev database's
+# working set fits, and its data stays on the volume, outside that memory.
+run_flags=(-d --name "$container" --cpus 2 --memory 2g -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch -p 127.0.0.1:55432:5432)
 database_url="postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable"
 
 refuse() {

@@ -6,7 +6,11 @@ import {
   type LegionState,
 } from "@legion/contracts/legion-api";
 import { z } from "zod";
-import type { LegionDaemonClient } from "./daemon-client";
+import {
+  type DaemonRestartRetry,
+  type LegionDaemonClient,
+  retryWhileDaemonRestarts,
+} from "./daemon-client";
 
 /** The claim a session registered, as the phase ops need it, and as the claim boot
  * (`legion-claim-core`) records it: its own id, the daemon's answer for tree, issue and role, and
@@ -168,6 +172,9 @@ export interface PhaseOpRuntime {
   /** The commit a completion of `phase` by `role` reports (`findHandoffCommit` with the pane's
    * environment): throws naming the remedy when the handoff is not committed and pushed. */
   readonly handoffCommit: (phase: LegionPhase, role: LegionRole) => Promise<string>;
+  /** How `handoff_complete` waits out a daemon restart (`retryWhileDaemonRestarts`): the host's
+   * sentence to the agent, and a test's clock. */
+  readonly restart?: DaemonRestartRetry;
 }
 
 /** A grant for one write of the claim's session, minted on `/grants`' session form with the
@@ -238,49 +245,16 @@ export async function executePhaseOp(
   switch (args.op) {
     case "read_record":
       return { record: recordFrom(await daemon.state(), args.issue) };
-    case "handoff_complete": {
-      // The record is read before anything is minted: it says whether this is a phase
-      // completion or a check report, by the daemon's own rule (`api/handoff.go`): the
-      // implementer's call on an issue no role works (`done`) is a check report, whether or not
-      // the record shows a check — a done issue whose check closed, or opened none, has no
-      // handoff for the implementer to commit, so no commit is looked up, and the daemon answers
-      // the report `CHECK_NOT_OPEN`. The report's own refusals (a verdict, no READY) apply while
-      // the record shows the check it is of. A refusal here posts nothing and mints nothing.
-      const record = recordFrom(await daemon.state(), claim.issue);
-      if (claim.role === "implementer" && record.phase === "done") {
-        if (record.check !== undefined) {
-          if (args.verdict === undefined) {
-            throw new Error(
-              "handoff_complete on a production check names a verdict of pass, pending or fail"
-            );
-          }
-          if (args.ready === true) {
-            throw new Error("handoff_complete on a production check is no READY: leave ready out");
-          }
-        }
-        return daemon.handoffComplete({
-          grantId: await mintClaimGrant(daemon, claim),
-          summary: args.summary,
-          verdict: args.verdict ?? "",
-          ready: false,
-        });
-      }
-      if (args.verdict === "pending") {
-        throw new Error(
-          "handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's"
-        );
-      }
-      // The commit is found before the grant is minted. The phase is the issue record's, the
-      // role the claim's.
-      const commit = await runtime.handoffCommit(record.phase, claim.role);
-      return daemon.handoffComplete({
-        grantId: await mintClaimGrant(daemon, claim),
-        summary: args.summary,
-        verdict: args.verdict ?? "",
-        ready: args.ready ?? false,
-        commit,
-      });
-    }
+    case "handoff_complete":
+      // Retried whole while the daemon restarts: the record, the commit and a fresh grant are read
+      // again on each attempt. A repeat never applies twice, but it cannot tell a landed attempt
+      // from a refused one (the daemon records both under the completion's key), so its refusal
+      // is passed on, marked as possibly following an applied attempt.
+      return retryWhileDaemonRestarts(
+        "handoff_complete",
+        () => completeHandoff(runtime, args),
+        runtime.restart
+      );
     case "request_backward_move": {
       // An architect's grant serves its whole tree, so its move names the issue it returns from
       // accepting. A phase worker's grant names its own issue, the only one it may move, so its
@@ -306,4 +280,53 @@ export async function executePhaseOp(
       return {};
     }
   }
+}
+
+/** One attempt of `handoff_complete` (`executePhaseOp`'s doc comment). */
+async function completeHandoff(
+  runtime: PhaseOpRuntime,
+  args: Extract<z.infer<typeof PhaseOpArguments>, { op: "handoff_complete" }>
+): Promise<Readonly<Record<string, unknown>>> {
+  const { daemon, claim } = runtime;
+  // The record is read before anything is minted: it says whether this is a phase
+  // completion or a check report, by the daemon's own rule (`api/handoff.go`): the
+  // implementer's call on an issue no role works (`done`) is a check report, whether or not
+  // the record shows a check — a done issue whose check closed, or opened none, has no
+  // handoff for the implementer to commit, so no commit is looked up, and the daemon answers
+  // the report `CHECK_NOT_OPEN`. The report's own refusals (a verdict, no READY) apply while
+  // the record shows the check it is of. A refusal here posts nothing and mints nothing.
+  const record = recordFrom(await daemon.state(), claim.issue);
+  if (claim.role === "implementer" && record.phase === "done") {
+    if (record.check !== undefined) {
+      if (args.verdict === undefined) {
+        throw new Error(
+          "handoff_complete on a production check names a verdict of pass, pending or fail"
+        );
+      }
+      if (args.ready === true) {
+        throw new Error("handoff_complete on a production check is no READY: leave ready out");
+      }
+    }
+    return daemon.handoffComplete({
+      grantId: await mintClaimGrant(daemon, claim),
+      summary: args.summary,
+      verdict: args.verdict ?? "",
+      ready: false,
+    });
+  }
+  if (args.verdict === "pending") {
+    throw new Error(
+      "handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's"
+    );
+  }
+  // The commit is found before the grant is minted. The phase is the issue record's, the
+  // role the claim's.
+  const commit = await runtime.handoffCommit(record.phase, claim.role);
+  return daemon.handoffComplete({
+    grantId: await mintClaimGrant(daemon, claim),
+    summary: args.summary,
+    verdict: args.verdict ?? "",
+    ready: args.ready ?? false,
+    commit,
+  });
 }

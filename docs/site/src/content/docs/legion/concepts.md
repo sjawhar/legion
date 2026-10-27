@@ -105,11 +105,12 @@ comes back, with everything it knew, the next time its role is needed.
 
 | Phase | Worker | What it does | GitHub identity |
 | --- | --- | --- | --- |
+| `awaiting_person` | none | The root returned its admission slot while its architect waits on a person's answer to a question on the root. The architect's session is suspended until the answer brings the root back through admission. | none |
 | `planning` | planner | Writes the implementation plan into its handoff and the issue's document. | review App |
 | `implementing` | implementer | Writes the change, proves it works, pushes `legion/<KEY>` and opens the pull request. | implement App |
 | `testing` | tester | Runs the changed surface for real, tries to break it, judges whether the tests would catch what breaks, and reads CI for everything static; reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
-| `accepting` | the architect | Reads the tester's handoff, the pull request's two `E2E` lines and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. The daemon refuses the acceptance (`SIGNOFF_CHILD_IN_WORKFLOW`) while any issue beneath this one is still in the workflow, naming each of them. No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
+| `accepting` | the architect | Reads the tester's handoff, the pull request's two `E2E` lines and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. Issues still running beneath it do not hold the acceptance: a root's close waits for them instead (`awaiting_merge`). No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
 | `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes, those notes included. | implement App |
 | `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head plus retro's notes, and submits the merge, which GitHub completes under the base branch's own rules. | implement App |
 | `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. The merge closes the issue; a root whose tree still runs records the merge and waits here until the last other issue of its tree is done or parked. | none |
@@ -150,6 +151,26 @@ one on its own.
 
 A child issue needs no label: it runs under its tree once the root is admitted. Taking the label
 off a waiting root takes it out of line; taking it off a running tree does not stop the tree.
+
+A root whose architect asked you a question and now waits only on your answer gives its slot back
+rather than holding the project up: once nothing else of its tree runs and the architect has taken
+the task it was last given, the root moves to `awaiting_person` and the slot goes to the next root
+in line at once, while its architect's session is suspended once its current turn ends, and kept.
+Its tree stays live for its children, and `waitingOn` in `legion state` names the question and
+when the wait began. Your act on any ask of the root answers it, whichever ask the wait names:
+your answer, resolution, or reply that hands an open ask back to the agent; so does your approval
+or changes request of the root's spec, and so does the spec's design gate standing open. The wait
+also ends when nothing is asked of you any more: Dispatch retracts the question because its
+decision block left the spec, a session closes it, or a session hands it back to the agent's
+turn. The answered root goes to the front of the waiting line, ahead of every root that never
+ran, and the next free slot resumes the same
+architect session with a task naming what answered it and what is still with you. An agent's
+answer or resolution of another ask answers nothing, and an act of yours from before the wait
+began is one the architect already read. Taking the label off, or a person or an outside session
+claiming the root on Dispatch, takes it out of the workflow instead: Legion never resumes work
+another owner took. A root whose architect requested approval of its spec and registered that version waits the same way, on the design gate, until the person reviews the spec or a newer version hands the request back to the architect. The slot
+a waiting root returns is no reason for the controller to label or admit anything: a root you
+handed to Legion takes it through the waiting line.
 
 ## The design gate
 
@@ -240,7 +261,13 @@ Legion uses GitHub's own review mechanisms rather than labels:
   code head's own would. The daemon reads each open pull request's required set with the implement
   App as it starts and every two minutes after, with the required workflows' runs on the head;
   until a read succeeds, no verdict stands for the head, and a read GitHub refuses is logged with
-  the repository and the HTTP status.
+  the repository and the HTTP status. The same read follows the pull request's head: when GitHub
+  shows a head the daemon has not recorded, the daemon takes it as the synchronize webhook would,
+  and takes its push too when GitHub shows that it changed only `.legion/`, so a lost or late
+  webhook leaves the record behind for at most one read. A push that changed code is still read
+  from its webhook. The daemon also looks up the open pull request of each issue whose implementer
+  completed while no pull request is recorded, and records it as the opened webhook would, which
+  moves the issue to testing.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
 - Two limits flag a loop: after `review_round_cap` rounds (three by default), or once

@@ -249,17 +249,61 @@ Check, in order:
    person or another session already holds the claim, the architect starts nothing and asks the
    holder, on the issue, to release it or take the issue back; the tree keeps its slot meanwhile.
 
-## A tree waits at the design gate
+## A tree waits on a person
 
-The root's phase stays `admitted` until a person approves the spec at its current version:
+When a root's architect asked a person a question on the root and nothing else of its tree runs,
+its phase is `awaiting_person`: it returned its admission slot and its architect's session is
+suspended until the answer. Read the wait:
 
 ```sh
-legion state --config legion.yaml --json | jq '.issues["<KEY>"] | {phase, designGate}'
+legion state --config legion.yaml --json |
+  jq '.issues["<KEY>"] | {phase, waitingOn, designGate}'
 ```
 
-`designGate.approvedVersion` is `null`, or lower than `currentVersion`, until someone approves the
-latest version from the document's header or the Inbox. An approval of an earlier version does not
-count: the spec changed since. The merger's `READY` waits on the same approval.
+`waitingOn.kind` is `ask` for a wait on a question, with `waitingOn.ask` the question, or `gate`
+for a wait on the spec's approval, with `gateVersion` and `artifactId`; `since` is Dispatch's time
+of the hand-back the wait began at. `answeredAt` means the wait was answered, and `answeredBy`
+names how — not always by a person: `ask` or `reply` (a person's act on an ask of the root),
+`changes_requested` (a person's changes request on the spec), `version` (a newer spec version once
+the approval request is on the architect's turn), `closed` (a session or anyone else who is not a
+person closed the question), `turn` (a session handed it back to the agent's turn), `retracted`
+(Dispatch's settlement), and `approved` also when the spec's gate stands open with nobody's
+approval under `gates.design: off`, or when the gate was switched off while the root waited on it. The root is
+at the front of `admission.waiting` and resumes itself at the next free slot. Do not park it or
+start it by hand. Without `answeredAt`, check, in order:
+
+1. **The question is still with the person.** `dispatch read <KEY>` shows the root's asks. A
+   person's answer, resolution or reply on any ask of the root wakes it, whichever ask the wait
+   names, and so does their approval or changes request of the spec, or the spec's gate standing
+   open (`designGate.approvedVersion` equal to `currentVersion`) on the next admission pass. A
+   question Dispatch retracted or a session closed, or one a session handed back to the agent's
+   turn, wakes it once nothing else is with the person. An agent's answer or resolution of another
+   ask never wakes it, nor does a person's act from before the wait began.
+2. **The hand-over label.** A root whose `legion` label was taken off is not resumed: the daemon
+   takes it out of the workflow (`phase: done`) and tells the controller `unslotted`. Put the label
+   back and set the root to `todo` to queue it again.
+3. **The Dispatch claim.** `dispatch read <KEY>` shows `Claimed by:`. A claim held by a person or a
+   session outside the tree stops the resume and takes the root out of the workflow the same way,
+   with an `unslotted` notice: Legion never resumes work another owner took. Release the claim,
+   then `todo` with the label queues the root again.
+4. **An answer the daemon never saw.** When `dispatch read <KEY>` shows the person already
+   answered after `since` and none of the above holds, the answer's event never reached the
+   daemon, and nothing re-reads a waiting root's asks until the next boot. Restarting the daemon
+   (`legion restart`) catches the root up: the boot applies the root's Dispatch event log after
+   its catch-up cursor, with the root held until the whole window is in, then decides it once.
+   Without a restart, have the person (or anyone acting as them) add a reply in the thread of any
+   ask of the root, one that leaves the turn with the agent: that new act wakes the root on its
+   own event.
+
+A root whose architect registered its spec while the approval request waits on the person is in
+`awaiting_person` with `waitingOn.kind` `gate`, once nothing else holds its slot; one still
+`admitted` waiting on its design gate keeps its slot for one of the reasons above, or because
+Dispatch shows the request on the architect's turn (a reply or a newer version since the request),
+when the architect has nothing handed to the person. A root waiting on its gate at a daemon's deploy
+gives its slot back at that daemon's first boot. The gate stays closed until a person approves the
+spec at its current version; `designGate.approvedVersion` is `null`, or lower than `currentVersion`,
+until someone approves the latest version from the document's header or the Inbox. An approval of an
+earlier version does not count: the spec changed since. The merger's `READY` waits on the same approval.
 
 ## An issue is held
 
@@ -307,8 +351,15 @@ its tree stands:
   legion status <KEY> todo    --config legion.yaml --operator-token-file operator-token
   ```
 
-`legion claims retry` relaunches only a failed architect. It refuses a claim in any other state,
-naming the state, and a failed phase worker or controller, naming who retries it.
+`legion claims retry --claim <token>` relaunches a failed architect on its session with fresh
+budgets, and retries a failed phase worker whose issue is held for that worker's own role by
+applying the held phase's retry, as its architect's `retry_or_escalate` would. It refuses a claim
+in any other state, naming the state, a failed phase worker whose issue is not held or is held for
+another role, and a failed controller, naming who retries it; a retry that leaves the issue held,
+as a lingering tree's does, is refused naming the issue. `legion claims retry --failed` asks the
+same of every failed claim the daemon holds, in turn, prints each one it retried, and exits 1
+naming each it refused: run it once the cause of a run of failed launches is gone (a host moved
+onto tmux, a broken key replaced).
 
 To see why the launches failed, read the failed role's lines of the `roles` container's log in the
 issue's pod. The launcher prefixes each role's lines with the role's name:
@@ -392,7 +443,10 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
 
 - **`retry`** (a failed architect): retry it. The daemon relaunches it on the session it kept,
   with fresh budgets, and sends it a catch-up of its tree once it is ready, so the tree carries on
-  at the generation and phase it stands at:
+  at the generation and phase it stands at. The daemon drops every notice it could not deliver to
+  the failed architect, the reviewer's approval that moved an issue into `accepting` among them,
+  so the catch-up's reason names each issue of the tree waiting in `accepting` for the architect's
+  acceptance; no worker runs there, and nothing else would wake the architect for it:
 
   ```sh
   legion claims retry --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-14-architect
@@ -403,16 +457,17 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
 
 - **`needsWorkflowStart`** (a failed phase worker): its issue is held
   ([An issue is held](#an-issue-is-held)), and its tree's architect retries the phase or escalates
-  it to the controller. A failed claim ignores `legion claims resume` and `legion claims deliver`,
-  and `legion claims retry` refuses a phase worker's.
+  it to the controller; `legion claims retry` applies the same retry when the architect cannot. A
+  failed claim ignores `legion claims resume` and `legion claims deliver`.
 
 The list names only claims of trees that hold an admission slot, and leaves out claims that
 something will still start: a worker whose phase is not its own is started again when its phase
-comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
-while every slot was taken waits for admission to start it once one frees. Never resume or retry by
-hand a claim of a lingering tree or of an issue parked out of the workflow, nor that waiting
-architect: it would run outside the admission cap, and re-admission or the issue's return to `todo`
-starts it.
+comes, a parked tree's claims wait for its re-admission, the architect of a tree re-admitted
+while every slot was taken waits for admission to start it once one frees, and the architect of a
+root in `awaiting_person` waits for the person's answer, after which admission resumes it at the
+next free slot. Never resume or retry by hand a claim of a lingering tree or of an issue parked out
+of the workflow, nor those waiting architects: they would run outside the admission cap, and
+re-admission, the answer, or the issue's return to `todo` starts it.
 A claim an operator suspended is listed even when a workflow start is queued for it: that start
 waits for the operator's resume. One whose `suspendedBy` is `unknown` is listed only while no start
 is queued for it, since the next phase start or re-admission resumes it as before.
@@ -651,6 +706,15 @@ it, then look at what the row `waitsOn` names is doing.
   the `operation` and `subject`). The daemon's NATS user is missing a grant;
   [Envoy](/legion/dispatch/envoy/) lists the subjects it needs. A daemon can boot healthy and
   consume events with one grant missing, so search the log for this line after a NATS change.
+- **`intake: a durable consumer is behind its stream; every event it has not reached yet waits for
+  it`** (a warning with `consumer`, `behindSeconds`, `pending` and `delivered`). The daemon is
+  handling events JetStream stored more than five minutes before; it says so at most once a minute
+  per consumer. `pending` near zero with `delivered` above one is one event retried after
+  failures, not a backlog: a retried event keeps the time it was first stored.
+  Every event that consumer has not reached waits: on the GitHub consumer a pull request's opened
+  or push, on the Dispatch consumer a status change. The daemon's two-minute read of each open
+  pull request still follows its head, and records the pull request of an issue whose implementer
+  completed, so neither waits for the backlog to drain.
 - **`agent-secrets: the token login failed; retrying`** (an error line with the broker's answer).
   With `runtime.kubernetes.agent_secrets` set, the daemon logs in to the
   [Secrets Broker](/legion/broker/) with its own ServiceAccount token, read from `token_file`, at
