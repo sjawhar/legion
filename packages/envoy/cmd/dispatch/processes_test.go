@@ -1,33 +1,29 @@
 //go:build multiprocess || twobuild
 
 // What the two suites that start more than one envoy-dispatch process on one Postgres and one NATS
-// share: the pair and its database, the processes' own logs, the API calls a row makes, the
-// notification stream read by sequence, and the GitHub App a process boots with. The multiprocess
-// suite (multiprocess_test.go) starts two processes of this tree; the two-build suite
-// (twobuild_test.go) starts one of this tree and one of an earlier build.
+// share: the pair and its database, the API calls a row makes, the notification stream's head and
+// its full publication, and which process holds a delivery durable. The multiprocess suite
+// (multiprocess_test.go) starts two processes of this tree; the two-build suite (twobuild_test.go)
+// starts one of this tree and one of an earlier build. The processes' own logs, the stream read by
+// sequence, the delivery durables and settings, and the GitHub App a process boots with are in
+// nats_unreachable_test.go, which every build of the tests compiles.
 
 package main
 
 import (
 	"context"
 	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -43,10 +39,9 @@ func multiprocessNATS(t *testing.T) string {
 	return url
 }
 
-// multiprocessSigningKey is the one DISPATCH_SIGNING_KEY every process of a pair carries: the
-// deployment rule INFRA-66 wrote down, since a session cookie minted by one process is presented
-// to the other on the next request and nothing can tell a key the other process does not hold
-// from a session that has ended.
+// multiprocessSigningKey is the one DISPATCH_SIGNING_KEY every process of a pair carries: a
+// session cookie minted by one process is presented to the other on the next request, and a
+// process whose key set a live peer does not share refuses to start (processes.Register).
 const multiprocessSigningKey = "multiprocess-signing-key"
 
 // dispatchPair is two envoy-dispatch processes on one database and one NATS server.
@@ -95,57 +90,6 @@ func (p *dispatchPair) name(one *dispatchProcess) string {
 		return "A"
 	}
 	return "B"
-}
-
-// ───── the processes' own logs ──────────────────────────────────────────────
-
-// logLines is every line of the process's output that holds all of parts, which is how a slog
-// text line is matched: the message and the attribute that narrows it.
-func (p *dispatchProcess) logLines(parts ...string) []string {
-	var matched []string
-	for line := range strings.Lines(p.Output.String()) {
-		if holdsAll(line, parts...) {
-			matched = append(matched, strings.TrimRight(line, "\n"))
-		}
-	}
-	return matched
-}
-
-func holdsAll(line string, parts ...string) bool {
-	for _, part := range parts {
-		if !strings.Contains(line, part) {
-			return false
-		}
-	}
-	return true
-}
-
-// logged reports whether the process has written a line holding all of parts.
-func (p *dispatchProcess) logged(parts ...string) bool {
-	return len(p.logLines(parts...)) > 0
-}
-
-// waitForLog waits up to within for a line holding all of parts, polling rather than sleeping a
-// fixed time, and fails the test with the process's whole output when none arrives, at once when
-// the process exits without it: a process that has exited writes no more lines.
-func (p *dispatchProcess) waitForLog(t *testing.T, within time.Duration, parts ...string) {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	for !p.logged(parts...) {
-		select {
-		case <-p.Exited:
-			// Exited closes only once the output is whole, so this read is final.
-			if p.logged(parts...) {
-				return
-			}
-			t.Fatalf("the process exited without a line holding %v:\n%s", parts, p.Output.String())
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no line holding %v within %v:\n%s", parts, within, p.Output.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
 }
 
 // ───── the API a row drives ─────────────────────────────────────────────────
@@ -249,57 +193,7 @@ func streamHead(t *testing.T, js natsgo.JetStreamContext) uint64 {
 	return info.State.LastSeq
 }
 
-// readStreamFrom is every envelope the stream retains past head, read by sequence rather than
-// through a consumer so the read creates nothing on the server and cannot miss a message a
-// consumer's filter would skip. A sequence the stream no longer holds is passed over.
-func readStreamFrom(t *testing.T, js natsgo.JetStreamContext, head uint64) []contracts.Envelope {
-	t.Helper()
-	info, err := js.StreamInfo(bus.Stream)
-	if err != nil {
-		t.Fatalf("read the notification stream: %v", err)
-	}
-	var items []contracts.Envelope
-	for seq := head + 1; seq <= info.State.LastSeq; seq++ {
-		msg, err := js.GetMsg(bus.Stream, seq)
-		if err != nil {
-			if errors.Is(err, natsgo.ErrMsgNotFound) {
-				continue
-			}
-			t.Fatalf("read message %d of the notification stream: %v", seq, err)
-		}
-		var item contracts.Envelope
-		if err := json.Unmarshal(msg.Data, &item); err != nil {
-			t.Fatalf("decode message %d of the notification stream: %v", seq, err)
-		}
-		items = append(items, item)
-	}
-	return items
-}
-
 // ───── the delivery durables ────────────────────────────────────────────────
-
-// deliveryDurables are the two push durables the delivery intakes bind, one subscriber each.
-var deliveryDurables = []string{"delivery-events", "delivery-jobs"}
-
-// githubAppEnv is a GitHub App a Dispatch process boots with: a throwaway RSA key generated for
-// this test, and apiBase as the only origin its App JWT is ever sent to. Without an App the
-// delivery intakes never connect and the webhook redelivery sweep never runs, so a row about
-// either needs these rows.
-func githubAppEnv(t *testing.T, apiBase string) map[string]string {
-	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate the test App key: %v", err)
-	}
-	encoded := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-	return map[string]string{
-		"DISPATCH_APP_CLIENT_ID":   "Iv1.multiprocess",
-		"DISPATCH_APP_ID":          "4242",
-		"DISPATCH_APP_SLUG":        "multiprocess",
-		"DISPATCH_APP_PEM_B64":     base64.StdEncoding.EncodeToString(encoded),
-		"DISPATCH_GITHUB_API_BASE": apiBase,
-	}
-}
 
 // waitForDurableHolder waits for exactly one of the pair to log that it bound durable, and
 // answers which.

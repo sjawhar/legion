@@ -651,7 +651,7 @@ func TestTheTestHookClosesEveryDeliverySocket(t *testing.T) {
 		}
 		for name, client := range map[string]*socketClient{"the person's": person, "the agent's": agent} {
 			if code, _ := client.closeCode(t, 5*time.Second); code != gws.CloseServiceRestart {
-				t.Errorf("%s socket closed with %d, want 1012, which a page answers by resuming at once", name, code)
+				t.Errorf("%s socket closed with %d, want 1012, which a page answers by resuming within the first reconnect's spread", name, code)
 			}
 		}
 
@@ -700,9 +700,9 @@ func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
 
 // A page that answers no ping is closed once two heartbeats pass without a pong. It has gone or
 // stopped reading, so the socket sends it no close frame: the connection ends, which gorilla and a
-// browser report as 1006, and the page reconnects with backoff, as after every close but 1012
-// (packages/dispatch/web/src/api/delivery-live.ts, lost). 1008 would say its caller no longer
-// resolves.
+// browser report as 1006, and the page reconnects on its backoff, as after every close but 1012,
+// which starts the backoff over (packages/dispatch/web/src/api/delivery-live.ts, lost). 1008
+// would say its caller no longer resolves.
 func TestAPageThatAnswersNoPingLosesItsSocketWithNoCloseFrame(t *testing.T) {
 	const heartbeat = 200 * time.Millisecond
 	rig := newDeliverySocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)

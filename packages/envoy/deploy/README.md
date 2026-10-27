@@ -91,9 +91,10 @@ Two releases of Dispatch never serve the database together in this compose deplo
 new one, which boots and migrates. That order is this deployer's own, not a rule every deployment
 keeps: a deployment that rolls Dispatch instead, running two processes against one database while
 it rolls, is supported under the preconditions the server's own guidance names — one
-`DISPATCH_SIGNING_KEY` every process is given, and every migration written to leave the release
-before it able to read and write the schema (`../cmd/dispatch/README.md`, "Running more than one
-process" and "Database migrations"). What no deployment does is start an image older than its
+`DISPATCH_SIGNING_KEY` every process is given, which the server checks itself (a process whose
+keys a live process does not share refuses to start), and every migration written to leave the
+release before it able to read and write the schema (`../cmd/dispatch/README.md`, "Running more
+than one process" and "Database migrations"). What no deployment does is start an image older than its
 database's schema: migrations `0113` and `0117` are each deployed with no earlier release running,
 and none is started over either again.
 

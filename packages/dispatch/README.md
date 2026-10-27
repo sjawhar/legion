@@ -49,7 +49,8 @@ SIGTERM to the pid it hands its caller stops the server. It pins every server
 setting: cookie identity, the production mode, with `alice` and `bob` signed in through the
 server's dev sign-in route (`DISPATCH_DEV_SIGNIN=1`, fenced to a loopback
 origin, listener and database, with a signing key the server generates for its
-process), `DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
+process, or one key per run in two-process mode, below),
+`DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
 key, a loopback listen host and the suite's dashboard origin. Address the
 harness as `127.0.0.1:<port>`, never `localhost`: under that flag the router
 refuses any other `Host`. The server process has no caller Home or XDG
@@ -95,6 +96,28 @@ DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslm
   bun run e2e
 ```
 
+Two-process mode runs two Dispatch servers against the one database, behind a round-robin proxy,
+the way a rolling release serves a browser from two builds at once:
+
+```bash
+cd packages/dispatch
+DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
+  bun run e2e:multiprocess
+```
+
+It builds the dashboard twice (`web/dist`, and `web/dist-b` under another build id), then runs
+Playwright with `DISPATCH_E2E_PROCESSES=2`: Dispatch A on `DISPATCH_E2E_PORT_A` (default `8787`)
+serving `web/dist`, Dispatch B on `DISPATCH_E2E_PORT_B` (default `8788`) serving
+`DISPATCH_E2E_WEB_DIST_B` (here `web/dist-b`; default A's), and `e2e/round-robin-proxy.ts` on
+`DISPATCH_E2E_PORT`, which alternates requests and websockets between them. Both servers sign
+cookies with one key the run generates, so a person stays signed in whichever answers. It runs
+only the `*.multiprocess.e2e.ts` specs, in Chromium, which the default run leaves out; arguments
+after `--` reach Playwright (`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). A spec
+pins a request to one process with the `X-Dispatch-E2E-Process: a|b` header or a whole browser
+context with the `dispatch-e2e-process` cookie, and reads which process served what from the
+proxy's `/_proxy/requests` and `/_proxy/sockets`; `AGENTS.md`'s end-to-end section has the whole
+contract. Any `DISPATCH_E2E_PROCESSES` other than `1`, `2` or unset is refused.
+
 ## Local instance
 
 `bun run dispatch:local`, from the repository root or from this package, brings up a seeded
@@ -133,6 +156,44 @@ A spec runs against the instance with the printed command, which sets
 fake Envoy, so restart the command to reseed it. `bun run build:web` while it runs refreshes the
 SPA, which the server reads from `web/dist` on each request. `docker rm -f dispatch-pg` removes the
 container and every database in it.
+
+## Acceptance drivers
+
+`e2e/acceptance/block-graph.sh` drives the block graph end to end against a running server, as an
+agent sees it, through the HTTP API and the real `dispatch` CLI
+(`packages/envoy-client/bin/dispatch.ts`, run in an environment the script builds, so a calling
+shell's Dispatch URL, token file and Envoy configuration never reach it). It covers a comment
+citing a block and the block's backlinks, a deleted and restored block, a pinned block reference
+that changes and is removed, `GET /api/v1/block-links` between the blocks of two documents, each
+block's changed version, every block `part_of` its document, a link in a list item, and the older
+`GET /api/v1/artifacts/{id}/references` route. Each passing check prints
+`PASS: <section> <what>`; the first failure prints `FAIL: <section> <what>: <observed>` and exits 1.
+Its three inputs:
+
+- `DISPATCH_URL`, the server;
+- `DISPATCH_TOKEN`, an agent bearer, or `DISPATCH_TOKEN_FILE`, a file holding one, which the script
+  reads itself and never prints;
+- `PROJECT`, an existing project key.
+
+It writes one issue in `PROJECT` (its spec, comments and the documents `cites.md`, `decisions.md`,
+`changes.md` and `list.md`) and closes it, also when a check fails. Against
+`bun run dispatch:local`:
+
+```bash
+DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE \
+  bash packages/dispatch/e2e/acceptance/block-graph.sh
+```
+
+`e2e/acceptance/block-coverage.sh` takes the same inputs, with `PROJECT` optional (unset, every
+project), and only reads. For every document it can list (each project's documents and each
+issue's documents), it counts the document as not indexed when `GET /api/v1/artifacts/{id}/blocks`
+lists blocks while `GET /api/v1/references?to=<document>&kind=part_of` lists none, and prints
+`documents=<n> indexed=<n> not_indexed=<n>`, then each not-indexed document's reference. A document
+with no blocks counts as indexed, since it owes no nodes.
+
+Both source `e2e/acceptance/lib.sh`, the preamble they share: it refuses an unset input or a
+missing command with exit 2, and reads the bearer from `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`
+without printing it, unsetting both so no process the script starts inherits it.
 
 ## Acceptance run against the deployed image
 

@@ -35,7 +35,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
-	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
@@ -66,7 +65,7 @@ type testServerOptions struct {
 	settle time.Duration
 	// oidc is the service-account token verifier; nil is the unconfigured
 	// deployment, whose bearer handling is untouched by that feature.
-	oidc *oidc.Verifier
+	oidc ServiceTokenVerifier
 	// envoyURL points the Envoy listener client at a fake listener; empty leaves the client
 	// unconfigured, which is every test that never asks whether a session is live.
 	envoyURL string
@@ -93,17 +92,23 @@ type testServerOptions struct {
 	lifetime context.Context
 	// streamHeartbeat replaces the event streams' and the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
+	// dashboardEntry is the entry chunk of the dashboard build the server serves; empty is a
+	// server with no dashboard, as the Go test rigs are.
+	dashboardEntry string
 }
+
+// testSigningKey is the one-key set the package's session cookies are signed with.
+var testSigningKey = auth.SingleSigningKey("signing-key")
 
 // headerIdentity is the test header identity that records each named person in the database.
 func headerIdentity(database *store.Store) identity.HeaderIdentity {
-	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)}
+	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)}
 }
 
 // seedPeople records emails as people who have signed in: the assignee picker's options.
 func seedPeople(t testing.TB, database *store.Store, emails ...string) {
 	t.Helper()
-	people := store.NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := store.NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	for _, email := range emails {
 		if err := people.Record(context.Background(), email); err != nil {
 			t.Fatalf("seed person %q: %v", email, err)
@@ -188,6 +193,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		AgentStream:      options.agentStream,
 		Embedder:         options.embedder,
 		Files:            options.files,
+		DashboardEntry:   options.dashboardEntry,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -614,6 +620,8 @@ func TestEventNotifyRules(t *testing.T) {
 		{name: "user resolve", event: model.Event{Type: "ask.resolved", Actor: user}, want: true},
 		{name: "user named version", event: model.Event{Type: "artifact.version", Actor: user, Payload: map[string]any{"version": model.Version{Named: true}}}, want: true},
 		{name: "session named version", event: model.Event{Type: "artifact.version", Actor: session, Payload: map[string]any{"version": model.Version{Named: true}}}, want: false},
+		{name: "user unnamed version", event: model.Event{Type: "artifact.version", Actor: user, Payload: map[string]any{"version": model.Version{Named: false}}}, want: false},
+		{name: "user human edit", event: model.Event{Type: "artifact.human_edited", Actor: user, Payload: model.ArtifactHumanEditedEventPayload{ArtifactID: "artifact-1", FromVersion: 4, ToVersion: 7}}, want: true},
 		{name: "child status", event: model.Event{Type: "child.status", Actor: session}, want: true},
 		{name: "child added", event: model.Event{Type: "child.added", Actor: session}, want: true},
 		{name: "child removed", event: model.Event{Type: "child.removed", Actor: session}, want: true},
@@ -1872,7 +1880,7 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 	t.Helper()
 	database := storetest.Open(t)
 	sessions := store.NewPgSessionStore(database.Pool)
-	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions}
+	cookieIdentity := identity.CookieIdentity{SigningKey: testSigningKey, Sessions: sessions}
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
 		Store: database, Events: broker, Identity: cookieIdentity, Settle: time.Hour,
@@ -1891,7 +1899,7 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)
 	}
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice@d.example", generation, "signing-key", true))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice@d.example", generation, testSigningKey, true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}

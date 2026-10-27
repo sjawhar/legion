@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { baseUrl, getInbox, listAgents, listBroadcasts, userHeaders } from "./api";
 import { type HarnessListener, harnessListeners } from "./harness-listeners";
 import { harnessPorts } from "./harness-ports";
+import { harnessProcessCount } from "./harness-processes";
 import { databaseUrlRefusal, Interrupted, Supervisor, shellQuote } from "./local-instance-support";
 import { isPortUsed, takenPorts } from "./port-probe";
 import { sqlAt } from "./psql";
@@ -114,6 +115,14 @@ async function main(): Promise<void> {
   // 1. Preconditions: no deployed-server override, the tools, a loopback database, free ports.
   if (process.env.PLAYWRIGHT_BASE_URL) {
     throw new Error("unset PLAYWRIGHT_BASE_URL: this command starts its own servers");
+  }
+  // It waits on one server's /healthz and starts each listener with the caller's environment
+  // alone, where two-process mode's servers each need inputs of their own (e2e/harness-listeners.ts).
+  if (harnessProcessCount !== 1) {
+    throw new Error(
+      "unset DISPATCH_E2E_PROCESSES: this command runs one Dispatch server; " +
+        "`bun run e2e:multiprocess` runs two"
+    );
   }
   const given = process.env.DATABASE_URL?.trim();
   for (const tool of ["go", "psql", "flock", "openssl", ...(given ? [] : ["docker"])]) {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -51,26 +52,58 @@ const silentProbes = 3
 // probes it runs every pass.
 const drainPollInterval = 250 * time.Millisecond
 
-// serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown). It returns
-// the error that ended serving when serving failed, which cancels ctx.
+// deregisterTimeout bounds the delete that takes this process out of the registry of live server
+// processes at shutdown. It is one delete by primary key, so five seconds is a slow round trip
+// rather than a slow statement; a deregistration that does not land leaves a row whose heartbeat
+// has stopped, which drops out of the live window (processes.LiveWindow) on its own.
+const deregisterTimeout = 5 * time.Second
+
+// deregisterAfterDrain is the deregistration shutdown runs once HTTP has drained: registration's
+// row deleted within deregisterTimeout, a failure logged.
+func deregisterAfterDrain(registration *processes.Registration) func() {
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
+		defer cancel()
+		if err := registration.Deregister(ctx); err != nil {
+			slog.Warn("dispatch: deregister this server process", "instance", registration.ID, "error", err)
+			return
+		}
+		slog.Info("dispatch: deregistered this server process", "instance", registration.ID)
+	}
+}
+
+// serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown), deregistering
+// it once HTTP has drained. Two things end serving before the signal does, each logged at ERROR and
+// returned once shutdown has run, so main exits 1 and a supervisor never reads either as a clean
+// stop: serving failed, or the registry refused to count this process as live again beside a live
+// process whose signing keys it does not share (lost, processes.Registration.Lost). Either cancels
+// ctx, so the stop is the one a signal makes: the listener closes at once, the requests in flight
+// are answered, and the registry's row is deleted.
 func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener,
-	addr string, documentService *docs.Service, pool *store.Pool, waitDelivery func()) error {
+	addr string, documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func(), lost <-chan error) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("dispatch: listening", "addr", addr)
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("dispatch: serve", "error", err)
 			serveErr <- err
 			cancel()
 		}
 	}()
-	<-ctx.Done()
+	var refused error
+	select {
+	case <-ctx.Done():
+	case refused = <-lost:
+		slog.Error("dispatch: this server process no longer shares its signing keys with a live server process", "error", refused)
+		cancel()
+	}
 	slog.Info("dispatch: shutting down")
-	shutdown(server, documentService, pool, waitDelivery)
+	shutdown(server, documentService, pool, waitDelivery, deregister)
 	select {
 	case err := <-serveErr:
 		return err
 	default:
-		return nil
+		return refused
 	}
 }
 
@@ -82,10 +115,13 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // (waitDelivery). The database pool closes once every request has answered and no
 // connection of the shared or document-rooms pool is in use. While the database answers, nothing
 // but the runtime's kill bounds that wait, so a write in flight commits and is answered if it
-// finishes before the kill. A database that has stopped answering (silentProbes) holds its
-// connections forever, so Dispatch exits without them, and the database rolls back whatever they
-// held open.
-func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func()) {
+// finishes before the kill. Then deregister takes this process out of the registry of live server
+// processes: it runs only once HTTP has drained, so a draining process counts as live until its
+// last request is answered, and before the pool closes. A database that has stopped answering
+// (silentProbes) holds its connections forever, so Dispatch exits without them, and the database
+// rolls back whatever they held open; it deregisters nothing then, since the delete would wait on
+// that database too, and its row's heartbeat stops with the process instead.
+func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func()) {
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -105,6 +141,7 @@ func shutdown(server *http.Server, documentService *docs.Service, pool *store.Po
 	}
 	waitDelivery()
 	if waitUntilIdle(drained, pool) {
+		deregister()
 		pool.Close()
 	}
 }

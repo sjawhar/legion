@@ -323,3 +323,50 @@ func TestAClientFollowsASubjectANewerBuildAddsWhileItRuns(t *testing.T) {
 		})
 	}
 }
+
+// A client that connects in the background (WithConnectInBackground) while its server is down
+// reads the deployed stream's subjects at its first connection, as a client that waits reads them
+// at connect: an owning client through its ensure of the stream, any other through its read. A
+// topic under a subject only a newer build added then takes JetStream at once, without waiting a
+// streamSubjectsRefresh.
+func TestABackgroundClientReadsTheDeployedSubjectsAtItsFirstConnection(t *testing.T) {
+	const topic = "notifications.x.y"
+	for _, tc := range []struct {
+		name    string
+		connect func(urls []string, options ...ConnectOption) (*Client, error)
+	}{
+		{"an owning client", ConnectOwningStream},
+		{"a client that owns no stream", Connect},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, uri := testnats.Start(t)
+			js := rawJetStream(t, uri)
+			newer := *streamCfg
+			newer.Replicas = 1
+			newer.Subjects = append(slices.Clone(streamSubjects), "notifications.x.>")
+			newer.Metadata = map[string]string{generationKey: "2"}
+			if _, err := js.AddStream(&newer); err != nil {
+				t.Fatalf("the newer build creates the stream: %v", err)
+			}
+			srv.Stop(t)
+
+			client, err := tc.connect([]string{uri}, WithConnectInBackground(), withStreamSubjectsRefresh(time.Hour))
+			if err != nil {
+				t.Fatalf("connect while the server is down: %v", err)
+			}
+			t.Cleanup(client.Close)
+			if !client.usesCoreTransport(topic) {
+				t.Fatalf("%s takes JetStream before the client has read any stream", topic)
+			}
+
+			srv.Start(t)
+			deadline := time.Now().Add(15 * time.Second)
+			for client.usesCoreTransport(topic) {
+				if time.Now().After(deadline) {
+					t.Fatalf("the client still sends %s over core NATS 15 s after the server came up", topic)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		})
+	}
+}

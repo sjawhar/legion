@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-559",
+  "completed": "2026-10-27T14:05:00Z",
+  "round": 2,
+  "reviewAnswered": "Changes requested at cdac1941: (1) forward-merge main and renumber with INFRA-555, (2) false 'A new version is available' under bun run dev (thread PRRT_kwDORFy7ds6wqNPo, fixed in ba1703c9, replied and resolved); plus the architect's request: GET /assets/foo%00.js answered 500 (fixed in 599232ec).",
+  "proof": [
+    {
+      "criterion": "Review finding 2: a page that names no entry chunk (Vite's dev server) is offered no 'A new version is available'",
+      "surface": "DeploymentResilience in happy-dom with the document Vite's dev server serves (only /src/main.tsx) and GET /api/v1/dashboard/builds answering one live entry; the two-process browser rows for the notice",
+      "command": "cd packages/dispatch && bun test web/src/features/shell; bun run e2e:multiprocess -- two-builds.multiprocess.e2e.ts",
+      "observed": "shell suite 73 pass, 0 fail, including `shows no update notice on a page that names no entry chunk, as Vite's dev server's does`; two-builds rows 4 and 5 (no notice while both builds live, notice once only the other build is live) pass; DISPATCH_BUILD=zz-probe-build bun run build:web still writes the build id into the entry chunk (`return\"zz-probe-build\"` in index-*.js), so every build's entry chunk stays distinct",
+      "headSha": "390992ddcab56ccc823d68fcf5a88a7b1481a693",
+      "negativeControl": "With the round-1 DeploymentResilience.tsx the new test fails: the notice renders (`<section aria-label=\"A new version is available\" ... role=\"status\">`), 22 pass 1 fail."
+    },
+    {
+      "criterion": "Architect's request: a static path os.Stat refuses (NUL byte, name too long, file as a directory) answers as a missing file, never 500, and a NUL path never reaches the Postgres asset store",
+      "surface": "the real envoy-dispatch server built from the branch (run-server.sh on port 18777, store configured, 45 assets published) via curl; routes staticHandler tests",
+      "command": "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18777/assets/foo%00.js (and /assets/nope.js, /issues/CORE-1%00, a published /assets/index-*.js); cd packages/envoy && go test -count=1 -run TestStaticHandler ./internal/dispatch/routes/",
+      "observed": "/assets/foo%00.js 404 {\"error\":\"not found\"}, /assets/nope.js 404 (same answer), /issues/CORE-1%00 200 (SPA shell), a published entry chunk 200, no 'retained asset store failed' log line; TestStaticHandlerRetainedAssets (16 subtests) and TestStaticHandlerAnswers500WhenTheFilesystemFails pass",
+      "headSha": "390992ddcab56ccc823d68fcf5a88a7b1481a693",
+      "negativeControl": "On the unfixed router the seven new cases answer 500 `{\"error\":\"stat failed\"}` (NUL in an asset name with and without a store, an asset name too long, an asset below a file, NUL in a non-asset file, NUL in a page, a page name too long); a directory with mode 0 (EACCES) still answers 500 after the fix and never reaches the store."
+    },
+    {
+      "criterion": "A1: Dispatch's browser suite, against two server processes running two builds, loads every page and lazily loaded route with no failed asset and no blank page; fails before, passes after",
+      "surface": "Dispatch web app in Chromium through e2e/round-robin-proxy.ts in front of two real envoy-dispatch processes on one Postgres 17 + pgvector, A serving web/dist and B serving web/dist-b (another build id)",
+      "command": "cd packages/dispatch && DATABASE_URL=<isolated db> bun run e2e:multiprocess -- two-builds.multiprocess.e2e.ts (after `go build -o ./dispatch-e2e ./cmd/dispatch` in packages/envoy)",
+      "observed": "5 passed (1.6m) at the final code head, after the merges and the reservation fix: both cross-pinned route walks, every file of both builds 200 with its bytes from both processes, both notice rows; go test -tags multiprocess -run TestDashboard ./cmd/dispatch ok at the same head",
+      "headSha": "801a4f269c6a00bdb58d86cd1b0db45f8194245f",
+      "negativeControl": "The same harness and spec at 47c3ba79d2e4 (server without the shared store): 3 of 3 failed, every page load `\"/assets/index-CNAstPYb.js from Dispatch B answered 404\"` then `net::ERR_ABORTED`, 60 files answered 404 from the process lacking them (re-run by the tester in round 1)."
+    },
+    {
+      "criterion": "A2/A3: every file of either build answers 200 from every process; publish before listen; restart writes no bytes; burst served; store, prune, race and cache; INFRA-555's registry and this branch's code together after the forward merges",
+      "surface": "two envoy-dispatch processes started by the Go multiprocess rig on real Postgres; dashboard, routes, processes and cmd/dispatch packages",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 ./cmd/dispatch (at 599232ec, whose Go equals 390992dd's but for main's #2325 CI filters); go test -count=1 ./internal/dispatch/routes/... ./internal/dispatch/dashboard/... ./cmd/dispatch/... at 390992dd",
+      "observed": "multiprocess package ok 599s (the four TestDashboard tests and INFRA-555's key-set tests, including TestAProcessThatResumesBesideAPeerWhoseKeySetItDoesNotShareDoesNotServeBesideIt); routes, dashboard, processes, cmd/dispatch ok",
+      "headSha": "390992ddcab56ccc823d68fcf5a88a7b1481a693",
+      "negativeControl": "Before INFRA-555's e1754f3c was merged, TestAProcessThatResumesBesideAPeerWhoseKeySetItDoesNotShareDoesNotServeBesideIt failed on the merged tree; with it, the test passes (30 s)."
+    },
+    {
+      "criterion": "A4/A6: reload budget (3 per 5 minutes, main stylesheet) and reconnect spread still hold after the merges",
+      "surface": "Dispatch web app in Chromium (single-process harness); unit suite",
+      "command": "bunx playwright test --config e2e/playwright.config.ts shell.e2e.ts delivery-live.e2e.ts live.e2e.ts doc.e2e.ts --project chromium; bun run test; bunx biome check .; bunx tsc --noEmit",
+      "observed": "52 passed (4.0m); bun run test 2545 pass 0 fail; biome no errors; tsc clean",
+      "headSha": "390992ddcab56ccc823d68fcf5a88a7b1481a693",
+      "negativeControl": "Round 1: the pre-change index.html/DeploymentResilience.tsx fail 7 of 18 shell rows; the pre-change live.ts fails the spread tests (`Expected: <= 100 Received: 1000`)."
+    },
+    {
+      "criterion": "Reviewer's hardening note: an asset store read a request abandons stays within the 64 MiB reservation cap until it ends",
+      "surface": "routes staticHandler with a blocking fake store (regression lock; no user-facing surface beyond the /assets/ fallback the A1 run drives)",
+      "command": "cd packages/envoy && go test -count=5 -run TestStaticHandlerHoldsTheReservationOfAnAbandonedRequestUntilItsReadEnds ./internal/dispatch/routes/; CGO_ENABLED=1 go test -race -count=1 ./internal/dispatch/routes/...",
+      "observed": "20 requests for distinct missing assets, each cancelled when its read reaches the store, never hold more than 8 store reads at once, and every reservation comes back once the reads end; 5 of 5 pass; race run ok",
+      "headSha": "801a4f269c6a00bdb58d86cd1b0db45f8194245f",
+      "negativeControl": "On the round-1 router: `20 abandoned requests held 20 store reads at once, want at most the cap's room of 8`."
+    }
+  ],
+  "filesChanged": [
+    "packages/dispatch/web/src/features/shell/DeploymentResilience.tsx(+test): no reload offered when the page names no entry chunk",
+    "packages/envoy/internal/dispatch/routes/router.go, assets_test.go: isMissingFile; NUL paths never reach the store; an abandoned store read keeps its request's reservation until it ends",
+    ".github/workflows/envoy-and-contracts.yaml: dispatch_server filter names internal/dispatch/dashboard and processes",
+    "merges: legion/INFRA-555 at 2f16634c6f26 and e1754f3c416e, main at c892b97d and 1b859ea3; migrations 0130_server_processes (INFRA-555's, renamed in step with it) and 0131_dashboard_assets; store/pool.go leasePoolSize 11; cmd/dispatch/edit_notice_restart_test.go (INFRA-555's version)"
+  ],
+  "trickyParts": [
+    "__DISPATCH_BUILD__ stays referenced in runningIndexAsset's fallback: vite.config.ts defines it and that reference writes it into the entry chunk, which keeps every build's entry chunk distinct; deploymentChanged only compares an entry path.",
+    "A NUL path skips the store: its key is a Postgres text parameter, which cannot carry a NUL byte, so asking would answer a store failure (502) for a name no build can hold."
+  ],
+  "deviations": [
+    "Pod-only Go failures from round 1 (S3 test needs Docker; pmdoc, docs and api timing tests under a loaded 2-CPU pod) are unchanged and not caused by this change; CI is the record."
+  ],
+  "openQuestions": [
+    "#2323 merges only after INFRA-555's #2390; the architect holds it at acceptance and one more forward merge follows #2390's merge.",
+    "The branch carries .legion/INFRA-555/ from the INFRA-555 merges; retro removes .legion/INFRA-559/ and must remove .legion/INFRA-555/ too if it is still on the head.",
+    "The reviewer's Minor hardening note is fixed in 801a4f26 (an abandoned read keeps its reservation until it ends)."
+  ]
+}

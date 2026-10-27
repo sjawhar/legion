@@ -1,8 +1,11 @@
-/** The five harness ports, resolved and validated once for every reader in `e2e/`.
+/** The harness ports, resolved and validated once for every reader in `e2e/`.
  *
  * `e2e/run-server.sh:21-24` resolves the first four variables with `${VAR:-default}`, so an empty
- * value means the default here too, the same rule for all five. `PLAIN_HTTP_PORT` is the
+ * value means the default here too, the same rule for all of them. `PLAIN_HTTP_PORT` is the
  * plain-HTTP project's browser-facing proxy, which only the TypeScript harness reads.
+ * `DISPATCH_E2E_PORT_A` and `DISPATCH_E2E_PORT_B` are Dispatch A's and B's in two-process mode
+ * (`e2e/harness-processes.ts`), where `DISPATCH_E2E_PORT` is the round-robin proxy's; the harness
+ * hands each to its run-server.sh as `DISPATCH_E2E_SERVER_PORT`.
  * A value that is not a port in canonical decimal is refused naming its variable, because every
  * later consumer turns it into something that names nothing: `net.connect` raises
  * `ERR_SOCKET_BAD_PORT` on `NaN`, `Bun.serve` binds a random port for `0`, and a URL built from a
@@ -13,11 +16,13 @@
  * This module refuses a bad or duplicated value and otherwise only computes: it opens no socket
  * and reads nothing but the environment, so importing it is safe from any process. The port
  * probe and the reuse decision stay in `e2e/playwright.config.ts` for that reason —
- * `e2e/fake-envoy.ts`, `e2e/fake-github.ts`, `e2e/fake-broker.ts` and `e2e/plain-http-proxy.ts`
- * import this module as plain `bun` processes with no `process.send`, so a probe reached through
- * an import would fire inside them and refuse the second listener as soon as the first is
- * listening.
+ * `e2e/fake-envoy.ts`, `e2e/fake-github.ts`, `e2e/fake-broker.ts`, `e2e/plain-http-proxy.ts` and
+ * `e2e/round-robin-proxy.ts` import this module as plain `bun` processes with no `process.send`,
+ * so a probe reached through an import would fire inside them and refuse the second listener as
+ * soon as the first is listening.
  */
+
+import { harnessProcessCount } from "./harness-processes";
 
 /** One harness listener's port, beside the variable a refusal has to name. */
 export interface HarnessPort {
@@ -34,10 +39,12 @@ function harnessPort(variable: string, fallback: string): HarnessPort {
   return { port, variable };
 }
 
-/** The five ports by listener, the one place a port is paired with its variable: the Playwright
+/** The ports by listener, the one place a port is paired with its variable: the Playwright
  *  config's listener table spreads these, and the collision check below names them. */
 export const harnessPorts = {
   dispatch: harnessPort("DISPATCH_E2E_PORT", "8777"),
+  dispatchA: harnessPort("DISPATCH_E2E_PORT_A", "8787"),
+  dispatchB: harnessPort("DISPATCH_E2E_PORT_B", "8788"),
   fakeBroker: harnessPort("FAKE_BROKER_PORT", "9024"),
   fakeEnvoy: harnessPort("FAKE_ENVOY_PORT", "9021"),
   fakeGithub: harnessPort("FAKE_GITHUB_PORT", "9022"),
@@ -47,8 +54,13 @@ export const harnessPorts = {
 // Two variables naming one port would each pass a per-port check, and every consumer would then
 // fail in its own words: Playwright refuses the second `webServer` without naming a variable, and
 // the second fake listener dies on `EADDRINUSE`. Refused here, where the ports resolve, so every
-// importer refuses it the same way, including the four Bun listeners.
-const resolvedPorts = Object.values(harnessPorts);
+// importer refuses it the same way, including the Bun listeners. A's and B's ports take part only
+// in two-process mode, the one mode that listens on them.
+const resolvedPorts = Object.values(harnessPorts).filter(
+  (entry) =>
+    harnessProcessCount === 2 ||
+    (entry !== harnessPorts.dispatchA && entry !== harnessPorts.dispatchB)
+);
 const collisions = [...new Set(resolvedPorts.map((entry) => entry.port))]
   .map((port) => ({
     port,

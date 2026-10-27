@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -226,7 +227,7 @@ func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
 			close(entered)
 			<-release
 			waitDelivery()
-		})
+		}, func() {})
 	}()
 	select {
 	case <-entered:
@@ -540,16 +541,23 @@ type dispatchOptions struct {
 	SigningKey string
 	// SettleDelay is DISPATCH_TEST_SETTLE_DELAY; zero leaves the server's own default.
 	SettleDelay time.Duration
+	// Binary is the envoy-dispatch binary to run. Empty builds the command's own, unstamped
+	// (cmdtest.Build); a row whose processes serve given builds builds each once with
+	// cmdtest.BuildStamped and runs it here, and the two-build test names an earlier build's
+	// binary here (twobuild_test.go).
+	Binary string
 	// Env overrides and adds to the rows below, by name: a row the caller names wins over the
 	// one here, and a name not here is added. It is how a test gives the process a GitHub App,
 	// a sign-in issuer or cookie identity without every other test growing those rows.
 	Env map[string]string
-	// Binary is the envoy-dispatch the process runs. Empty builds this tree's own (cmdtest.Build);
-	// the two-build test names an earlier build's binary here (twobuild_test.go).
-	Binary string
 	// WebDist is DISPATCH_WEB_DIST, the web app the process serves. Empty serves the process's own
 	// empty home, which is all a test that loads no page needs.
 	WebDist string
+	// OwnProcessGroup starts the process in a process group of its own, so a test can stop it
+	// with SIGSTOP and resume it without the stop reaching the test's own process group: a
+	// kernel that hangs up an orphaned process group holding a stopped process (gVisor does)
+	// would otherwise end the test with it.
+	OwnProcessGroup bool
 }
 
 // startDispatchProcess builds Dispatch and starts it on a free loopback port against databaseURL,
@@ -613,6 +621,9 @@ func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatch
 	// Sorted, so a failure's process listing and a test's own log read the same whichever run
 	// printed them: Go's map iteration order is not.
 	slices.Sort(cmd.Env)
+	if options.OwnProcessGroup {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 	return &dispatchProcess{Process: cmdtest.Start(t, "Dispatch", cmd), port: port}
 }
 

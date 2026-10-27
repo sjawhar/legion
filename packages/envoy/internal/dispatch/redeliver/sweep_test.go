@@ -3,6 +3,7 @@ package redeliver_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -716,5 +717,54 @@ func TestTheSweepSummaryCountsEveryOutcome(t *testing.T) {
 	}
 	if h.logs.count("webhook redelivery sweep", want...) != 1 {
 		t.Fatalf("summary line does not carry %v:\n%s", want, h.logs)
+	}
+}
+
+// A sweeper built with Open and no State, as envoy-dispatch builds it for both the running loop
+// and the redeliver-webhooks command, opens its state when it sweeps, and only once: the command
+// calls Sweep directly, with no loop ahead of it to open the bucket.
+func TestASweepOpensTheStateItWasBuiltWithout(t *testing.T) {
+	h := newHarness(t)
+	failed := h.fail("guid-a", http.StatusServiceUnavailable, time.Minute)
+	sweeper := h.sweeper()
+	sweeper.State = bus.KeyValue{}
+	opens := 0
+	sweeper.Open = func() (bus.KeyValue, error) {
+		opens++
+		return h.state, nil
+	}
+
+	report, err := sweeper.Sweep(context.Background(), redeliver.Options{Since: h.clock.Now().Add(-time.Hour)})
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if got := outcome(report, "guid-a"); got != redeliver.Redelivered {
+		t.Fatalf("outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("redelivery requests %v, want %v", got, want)
+	}
+	if _, err := sweeper.Sweep(context.Background(), redeliver.Options{Since: h.clock.Now().Add(-time.Hour)}); err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if opens != 1 {
+		t.Fatalf("the state was opened %d times over two sweeps, want once", opens)
+	}
+}
+
+// A sweep whose state cannot be opened returns the error and asks GitHub nothing.
+func TestASweepWhoseStateWillNotOpenFails(t *testing.T) {
+	h := newHarness(t)
+	h.fail("guid-a", http.StatusServiceUnavailable, time.Minute)
+	sweeper := h.sweeper()
+	sweeper.State = bus.KeyValue{}
+	refused := errors.New("NATS is not connected")
+	sweeper.Open = func() (bus.KeyValue, error) { return bus.KeyValue{}, refused }
+
+	if _, err := sweeper.Sweep(context.Background(), redeliver.Options{}); !errors.Is(err, refused) {
+		t.Fatalf("sweep error %v, want %v", err, refused)
+	}
+	if got := h.requests(); len(got) != 0 {
+		t.Fatalf("a sweep without its state requested %v", got)
 	}
 }

@@ -34,8 +34,9 @@ EOF
 - `--project` is the issue key's prefix before `-<n>` (`LEGSMOKE-3` → `LEGSMOKE`).
 - In a root session `$LEGION_ISSUE` is the root (it equals `$LEGION_TREE`): pass it as `--parent`.
   The daemon makes the sub-issue link from `--parent`.
-- Group the returned keys into ordered waves: you release each wave by key with
-  `release_children`, and a child is inert until then.
+- Order the returned keys into waves with `--blocked-by` links (a later wave's child blocked by the
+  children it builds on), then release every child at once with `release_children`: Legion holds a
+  released child until its last blocker closes, and a child is inert only until it is released.
 - Do not pass `--assignee`, because the default keeps the tree's questions in one Inbox: under the
   shared token a child inherits its parent's assignee (the human who answers the tree's asks), else
   the project's default assignee, which a person sets on the Settings page; under a personal token

@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // HandoffCompleteRequest is what a worker reports when its phase is done, or what the implementer
@@ -110,6 +111,15 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 			"this completion belongs to no task: this claim has taken none, so the run it reports cannot be told")
 		return
 	}
+	// A completion of a run that is over is refused here, before the fact is applied, so nothing is
+	// recorded under its key: a refusal the workflow committed would be stored as processed, and the
+	// worker's retry at the same commit would be answered HANDOFF_ALREADY_RECORDED, "received", while
+	// the phase waits. The worker's turn began before the current run's task reached it; that task
+	// arrives as its next prompt, and the same completion in its turn is applied.
+	if serving != issue.Generation {
+		writeFailure(w, http.StatusConflict, "HANDOFF_STALE_GENERATION", staleCompletion(grant.Issue, issue.Generation, serving, machine.Claim().Pending))
+		return
+	}
 	treeGeneration, round := position.treeGeneration, position.round
 	// READY is held to the pull request's head on GitHub before the fact is applied: a refusal the
 	// workflow committed would be recorded as processed under this completion's key, which leaves
@@ -137,18 +147,22 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// retried call for the same phase is the same fact; the next phase's completion at the same
 	// commit (the implementer's retro, standing on its implementing round's last push) is a
 	// different one, and so is a corrected report at the same commit (a merger's ready: true after
-	// READY_REQUIRED), since a refusal is recorded as processed. The position is read before the
-	// fact's own transaction: should the issue move in between, the engine re-reads it there and
-	// refuses a completion whose role no longer owns the phase.
+	// READY_REQUIRED), since a refusal the workflow commits is recorded as processed. The position is
+	// read before the fact's own transaction: should the issue move in between, the engine re-reads
+	// it there and refuses a completion whose role no longer owns the phase, or whose run is no
+	// longer the issue's (workflow's HANDOFF_STALE_GENERATION guard).
 	//
-	// The run the completion is attributed to is part of the key, because a refusal is recorded
-	// under it: a stale completion of the run that is over would otherwise take the key of the new
-	// run's completion of the same phase at the same commit, and the real one would be answered
-	// ALREADY_RECORDED and never reach the workflow. The tree's generation is part of it for the
-	// same reason: re-admission starts a new generation of the tree by bumping only the root's, and
-	// restarts a child's worker in the phase it stood in, so a child's completion refused before
-	// (while the tree lingered, or while the old gate was closed) would otherwise take the new
-	// generation's key.
+	// The run the completion is attributed to is part of the key for that guard's sake: a completion
+	// the route let through and the engine then refused as stale is recorded under it, and without
+	// the run it would take the key of the new run's completion of the same phase at the same
+	// commit, which would be answered ALREADY_RECORDED and never reach the workflow. With it, that
+	// recorded refusal blocks no later call: its key carries the issue generation this route read,
+	// the one the issue has since left, so a retry is refused here (recording nothing) and the new
+	// run's completion carries the new issue generation and serving run, another key. The tree's
+	// generation is part of it for the same reason: re-admission starts a new generation of the tree
+	// by bumping only the root's, and restarts a child's worker in the phase it stood in, so a
+	// child's completion refused before (while the tree lingered, or while the old gate was closed)
+	// would otherwise take the new generation's key.
 	eventID := fmt.Sprintf("handoff:%s:%d:%d:%d:%s:%s:%d:%s:%s:%t", grant.Issue, treeGeneration, issue.Generation, serving, grant.Role, issue.Phase, round, req.Commit, req.Verdict, req.Ready)
 	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Generation: serving, Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim,
 		Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit, MergeNote: answer.mergeNote,
@@ -174,6 +188,18 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, HandoffCompleteResponse{Note: answer.note})
+}
+
+// staleCompletion is the refusal of a completion attributed to a run the issue has left. It names
+// the current run's task when the claim holds one, which the worker's turn began before: that task
+// is sent as the worker's next prompt, and the same completion in its turn is applied.
+func staleCompletion(issue string, current, serving uint64, pending *supervise.Delivery) string {
+	stale := fmt.Sprintf("%s is on generation %d and this completion is generation %d's; nothing was recorded", issue, current, serving)
+	if pending != nil && pending.Generation == current {
+		return fmt.Sprintf("%s: your turn began before the daemon's generation-%d task (%s) reached this session. End this turn without completing; that task arrives as your next prompt, and handoff_complete at the same commit in its turn is applied",
+			stale, current, pending.ID)
+	}
+	return fmt.Sprintf("%s: the daemon has queued no task of generation %d for this claim, and may queue none (the new run's phase may be another claim's). End this turn without completing and tell the architect; if that task arrives, call handoff_complete at the same commit in its turn", stale, current)
 }
 
 // checkReport records the implementer's report on a look of its closed issue's production check

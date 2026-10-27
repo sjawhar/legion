@@ -23,6 +23,33 @@ fake_envoy_port="${FAKE_ENVOY_PORT:-9021}"
 fake_github_port="${FAKE_GITHUB_PORT:-9022}"
 fake_broker_port="${FAKE_BROKER_PORT:-9024}"
 
+# This process's own inputs, read before the sweep below. In one-server mode the server listens on
+# DISPATCH_E2E_PORT and serves web/dist, and its dashboard origin is its own. In two-process mode
+# (DISPATCH_E2E_PROCESSES=2, e2e/harness-processes.ts) the harness runs this script twice, giving
+# each run its own DISPATCH_E2E_SERVER_PORT (DISPATCH_E2E_PORT_A or _B), B a web dist of its own
+# in DISPATCH_E2E_SERVER_WEB_DIST (a path from packages/envoy, where the server runs), and both one
+# DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY; DISPATCH_E2E_PORT is then the round-robin proxy in front of
+# them (e2e/round-robin-proxy.ts), whose origin both serve as their dashboard origin. The shared
+# key is required there: with a key apiece, a person signed in on one process is signed out by the
+# first request the other answers.
+server_port="${DISPATCH_E2E_SERVER_PORT:-$e2e_port}"
+web_dist="${DISPATCH_E2E_SERVER_WEB_DIST:-../dispatch/web/dist}"
+shared_key_env=()
+if [ -n "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:-}" ]; then
+  shared_key_env=(DISPATCH_DEV_SIGNIN_SHARED_KEY="$DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY")
+fi
+case "${DISPATCH_E2E_PROCESSES:-1}" in
+  1) dashboard_origin="http://127.0.0.1:$server_port" ;;
+  2)
+    : "${DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY:?DISPATCH_E2E_DEV_SIGNIN_SHARED_KEY must give both processes of DISPATCH_E2E_PROCESSES=2 one cookie key}"
+    dashboard_origin="http://127.0.0.1:$e2e_port"
+    ;;
+  *)
+    echo "DISPATCH_E2E_PROCESSES must be 1, 2 or unset, not '$DISPATCH_E2E_PROCESSES'" >&2
+    exit 1
+    ;;
+esac
+
 # The secrets broker the server relays credential requests to, read before
 # the sweep below drops every DISPATCH_* variable. DISPATCH_E2E_AGENT_SECRETS_URL
 # is the harness's one switch, which e2e/harness-broker.ts reads the same way
@@ -83,13 +110,14 @@ done
 # commit) beside a fake client id. Identity is the production cookie: the server
 # mints it for the email a test names at its dev sign-in route
 # (DISPATCH_DEV_SIGNIN=1) with a signing key it generates for this process
-# alone, so no key is passed and nothing reaches the caller's persistent data
-# dir; DISPATCH_INSECURE_COOKIE=1 keeps the cookie usable over plain HTTP in
-# every engine. DISPATCH_SERVER_URL stays
-# http://127.0.0.1:$e2e_port: it is the origin the CSRF guard compares writes
-# against, the only Host the router serves under the flag, and the Playwright
-# config's baseURL. The flag also refuses a DATABASE_URL whose host is not
-# loopback or a unix socket, and any DISPATCH_SIGNIN_* setting.
+# alone, or in two-process mode derives from the shared key above, so no
+# signing key is passed and nothing reaches the caller's persistent data dir;
+# DISPATCH_INSECURE_COOKIE=1 keeps the cookie usable over plain HTTP in every
+# engine. DISPATCH_SERVER_URL is the dashboard origin above: it is the origin
+# the CSRF guard compares writes against, the only Host the router serves under
+# the flag, and the Playwright config's baseURL. The flag also refuses a
+# DATABASE_URL whose host is not loopback or a unix socket, and any
+# DISPATCH_SIGNIN_* setting.
 app_pem="$(openssl genrsa 2048 2>/dev/null)"
 
 cd "$(dirname "$0")/../../envoy"
@@ -98,12 +126,14 @@ cd "$(dirname "$0")/../../envoy"
 # so a SIGTERM to it ends the go command and leaves the server listening. Playwright kills the
 # whole process group and the skill-scenarios rig the whole process tree, but a caller that
 # signals the one pid it started (`kill $!`) needs that pid to be the server. One binary per
-# checkout, built under a lock so two harnesses starting at once serialise: Go rewrites it only
-# when the source changed, and a running server keeps the inode it started from.
+# checkout, built under a lock so two harnesses, or two-process mode's two servers, starting at
+# once serialise: Go rewrites it only when the source changed, and a running server keeps the
+# inode it started from.
 flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
 exec env \
   "${broker_env[@]}" \
   "${file_store_env[@]}" \
+  "${shared_key_env[@]}" \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \
   DISPATCH_APP_CLIENT_ID=Iv1.e2efake \
@@ -114,10 +144,10 @@ exec env \
   DISPATCH_INSECURE_COOKIE=1 \
   DISPATCH_LISTEN_HOST=127.0.0.1 \
   DISPATCH_NATS_DISABLED=1 \
-  DISPATCH_PORT="$e2e_port" \
-  DISPATCH_SERVER_URL="http://127.0.0.1:$e2e_port" \
+  DISPATCH_PORT="$server_port" \
+  DISPATCH_SERVER_URL="$dashboard_origin" \
   DISPATCH_TEST_HOOKS=1 \
-  DISPATCH_WEB_DIST=../dispatch/web/dist \
+  DISPATCH_WEB_DIST="$web_dist" \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \
   HOME=/nonexistent \
   XDG_CACHE_HOME=/nonexistent \

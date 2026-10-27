@@ -139,10 +139,18 @@ const agentModelsMark = "agent-models="
 // into its profile, which a pod of this daemon would load twice.
 const extensionsMark = "extensions=discovered"
 
-// capabilitiesMark is on the OK line once the probe has checked the capability list
-// (internal/capabilities, CheckImage) and found every image-site capability present: a CLI that
-// predates the check prints no such token, having checked none of them.
-const capabilitiesMark = "capabilities=checked"
+// The capabilities mark's states: the probe checked the capability list (internal/capabilities,
+// CheckImage) and found every image-site capability present, or found every one present but the
+// browser, whose row it left unchecked (`probe-image --skip-browser`: the build of an image for a
+// deployment that turns Oh My Pi's browser off, which carries no Chromium). A CLI that predates the
+// check prints no mark, having checked none of them.
+const (
+	CapabilitiesAll            = "checked"
+	CapabilitiesBrowserSkipped = "browser-skipped"
+)
+
+// capabilitiesMark carries one of those states on the OK line.
+const capabilitiesMark = "capabilities="
 
 // modelFallbackMark carries, on the OK line, whether the image's Oh My Pi falls back to another
 // model under the operator's configuration (capabilities.ReadModelFallback): ModelFallbackOn,
@@ -161,16 +169,16 @@ const (
 )
 
 // OKLine is that line: the OMP invocation probed, the session-storage mark, the extensions mark,
-// the agent-models mark (AgentModelsResolved or AgentModelsSkipped), the capabilities mark, the
-// model-fallback mark (ModelFallbackOn, ModelFallbackOff, or ModelFallbackUnread), and the daemon
-// API contract the image's plugin declared, last. The daemon's probe Sandbox passes the image
-// only on a line that confirms the daemon's own contract (ConfirmedContract) with the extensions
-// mark (ExtensionsDiscovered), the agents' models resolved (AgentModels) and the capability list
-// checked (CapabilitiesChecked), and keeps the model-fallback mark (ModelFallback) in its
-// ImageReport.
-func OKLine(omp string, contract int, agentModels, modelFallback string) string {
-	return fmt.Sprintf("%s (%s) %s %s %s%s %s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, extensionsMark, agentModelsMark, agentModels,
-		capabilitiesMark, modelFallbackMark, modelFallback, contract)
+// the agent-models mark (AgentModelsResolved or AgentModelsSkipped), the capabilities mark
+// (CapabilitiesAll or CapabilitiesBrowserSkipped), the model-fallback mark (ModelFallbackOn,
+// ModelFallbackOff, or ModelFallbackUnread), and the daemon API contract the image's plugin
+// declared, last. The daemon's probe Sandbox passes the image only on a line that confirms the
+// daemon's own contract (ConfirmedContract) with the extensions mark (ExtensionsDiscovered), the
+// agents' models resolved (AgentModels) and the whole capability list checked (Capabilities:
+// CapabilitiesAll), and keeps the model-fallback mark (ModelFallback) in its ImageReport.
+func OKLine(omp string, contract int, agentModels, capabilities, modelFallback string) string {
+	return fmt.Sprintf("%s (%s) %s %s %s%s %s%s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, extensionsMark, agentModelsMark, agentModels,
+		capabilitiesMark, capabilities, modelFallbackMark, modelFallback, contract)
 }
 
 // ImageReport is what the daemon keeps of a passed probe: what its OK line said of the image, and
@@ -224,12 +232,13 @@ var agentModelsState = markPattern(agentModelsMark)
 // none: no OK line, or one from a CLI that predates the agent-model check.
 func AgentModels(output string) string { return markValue(agentModelsState, output) }
 
-// capabilitiesChecked is the capabilities mark on an OK line.
-var capabilitiesChecked = markPattern(capabilitiesMark)
+// capabilitiesState is the capabilities mark on an OK line.
+var capabilitiesState = markPattern(capabilitiesMark)
 
-// CapabilitiesChecked is whether an OK line in output carries the capabilities mark; false when
-// output holds none: no OK line, or one from a CLI that predates the capability check.
-func CapabilitiesChecked(output string) bool { return capabilitiesChecked.MatchString(output) }
+// Capabilities is the capabilities state an OK line in output carries (CapabilitiesAll, or
+// CapabilitiesBrowserSkipped from a probe run with --skip-browser), and "" when output holds none:
+// no OK line, or one from a CLI that predates the capability check.
+func Capabilities(output string) string { return markValue(capabilitiesState, output) }
 
 // extensionsDiscovered is the extensions mark on an OK line.
 var extensionsDiscovered = markPattern(extensionsMark)

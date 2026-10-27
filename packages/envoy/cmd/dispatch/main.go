@@ -4,6 +4,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +31,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/dispatch/dashboard"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
@@ -35,6 +39,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
@@ -80,6 +85,10 @@ type bootConfig struct {
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
+	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
+	// before its edit notice goes, zero for the document service's own 30 s; only
+	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
+	EditNoticeQuiet time.Duration
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -101,16 +110,18 @@ type bootConfig struct {
 	// (pprofAddress); empty, nothing listens.
 	PprofAddr string
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
-	// fence; the signing key is then per process.
+	// fence; the signing key is then per process, or derived from DevSignInSharedKey.
 	DevSignIn bool
+	// DevSignInSharedKey is DISPATCH_DEV_SIGNIN_SHARED_KEY: under dev sign-in, the secret every
+	// process of one local harness derives its cookie key from (sessionSigningKey), so they
+	// accept each other's cookies. resolveBootConfig refuses it without dev sign-in.
+	DevSignInSharedKey string
 	// WebDist is DISPATCH_WEB_DIST: the dashboard directory to serve, or empty to find it from
 	// the binary (defaultWebDistDir).
 	WebDist string
-	// AssetStoreBucket is DISPATCH_ASSET_STORE_BUCKET. Empty preserves local-only asset serving.
-	AssetStoreBucket string
-	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie key, or empty to keep one in the
-	// data dir (sessionSigningKey).
-	SigningKey string
+	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie keys, the current one first, or the
+	// empty set to keep one key in the data dir (sessionSigningKey).
+	SigningKey auth.SigningKeys
 	// InsecureCookie (DISPATCH_INSECURE_COOKIE set to anything) drops Secure from every cookie.
 	InsecureCookie bool
 	// EnvoyToken is ENVOY_TOKEN, the bearer every Envoy listener call sends.
@@ -163,7 +174,11 @@ func main() {
 		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource.String())
 	}
 	if boot.DevSignIn {
-		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in issuer; cookies are valid on this process only", "origin", serverURL)
+		cookies := "cookies are valid on this process only"
+		if boot.DevSignInSharedKey != "" {
+			cookies = "cookies are valid on every process given this DISPATCH_DEV_SIGNIN_SHARED_KEY"
+		}
+		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in issuer; "+cookies, "origin", serverURL)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -175,6 +190,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// INFRA-555: every NATS client of the server connects in the background (serverBus), so a bus
+	// that is down or refuses the credential at boot leaves the process serving everything that
+	// does not need the bus, and connected once the bus answers; only a configuration error (an
+	// unusable seed or proxy setting, a server that is not this machine's) ends the boot here.
 	var natsClient *bus.Client
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
@@ -182,7 +201,7 @@ func main() {
 		// No WithReplicas: Dispatch keeps the stream's deployed replica count on every update and
 		// creates it with one replica, so a Dispatch process never changes the count the listener
 		// (ENVOY_NATS_REPLICAS) or an operator set.
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverBus(bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))...)
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -203,7 +222,7 @@ func main() {
 			slog.Info("dispatch: agent conversation relay off: it needs NATS")
 		}
 	} else {
-		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.Envoy.NatsURLs, env.lookup)
+		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.Envoy.NatsURLs, env.lookup, serverBus()...)
 		if err != nil {
 			slog.Error("dispatch: connect the agent conversation relay", "error", err)
 			os.Exit(1)
@@ -232,6 +251,17 @@ func main() {
 		slog.Error("dispatch: resolve web dist dir", "error", err)
 		os.Exit(1)
 	}
+	// The build's assets are in the database before the process listens, so a page of this build
+	// that another process serves, during a rolling update or a rollback, finds its chunks here,
+	// and this process answers another build's from there (dashboard.Store below). A process that
+	// cannot publish exits before it is ready, and a rolling update keeps the processes it would
+	// have replaced. The build is what the process registers below as the build it serves, and its
+	// entry chunk what GET /api/v1/dashboard/builds answers as this process's.
+	dashboardBuild, err := publishDashboard(store.WithTransactionTracking(ctx), database.Pool, webDistDir, dashboardPublishTimeout)
+	if err != nil {
+		slog.Error("dispatch: publish dashboard assets", "error", err)
+		os.Exit(1)
+	}
 
 	// The store's construction reads no network: credentials come with the first request.
 	fileStore, err := openFileStore(ctx, boot)
@@ -242,22 +272,15 @@ func main() {
 	if fileStore != nil {
 		slog.Info("dispatch: storing uploaded files in a bucket", "bucket", boot.FileStoreBucket)
 	}
-	var assetStore routes.AssetStore
-	if boot.AssetStoreBucket != "" {
-		assetStore, err = routes.NewS3AssetStore(ctx, boot.AssetStoreBucket)
-		if err != nil {
-			slog.Error("dispatch: configure retained asset store", "error", err)
-			os.Exit(1)
-		}
-	}
 
-	signIn, err := discoverSignIn(ctx, boot)
-	if err != nil {
-		slog.Error("dispatch: discover the sign-in issuer", "error", err)
-		os.Exit(1)
-	}
+	// INFRA-555: neither issuer is read at boot. The sign-in issuer's code flow and the
+	// service-account token verifier each discover their issuer in the background from here, and
+	// until then what needs one answers 503 (SIGNIN_UNAVAILABLE, OIDC_ISSUER_UNAVAILABLE) while
+	// everything else serves; /healthz reports each as `signin` and `service_tokens`.
+	signIn := signInFlow(boot)
 	if signIn != nil {
 		signInRule(boot).BootLog(boot.SignInIssuer, boot.SignInClientID)
+		go signIn.Run(ctx)
 	}
 
 	people, signingKey, err := openPeople(boot, dataDir, database.Pool, signIn)
@@ -275,11 +298,12 @@ func main() {
 
 	broker := events.NewBroker()
 	documentService := newDocumentService(boot, docs.Deps{
-		Store:     database,
-		Events:    broker,
-		Identity:  requestIdentity,
-		ServerURL: serverURL,
-		Settle:    boot.SettleDelay,
+		Store:           database,
+		Events:          broker,
+		Identity:        requestIdentity,
+		ServerURL:       serverURL,
+		Settle:          boot.SettleDelay,
+		EditNoticeQuiet: boot.EditNoticeQuiet,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
@@ -289,13 +313,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
-	if err != nil {
-		slog.Error("dispatch: discover OIDC issuer", "error", err)
-		os.Exit(1)
-	}
+	serviceTokens := serviceTokenVerifier(boot)
 	if serviceTokens != nil {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
+		go serviceTokens.Run(ctx)
 	}
 
 	// embedder is nil (meaning search off, search answers keyword-only and says so) when Bedrock,
@@ -307,25 +328,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
-		SigningKey:  signingKey,
-		WebDistDir:  webDistDir,
-		AssetStore:  assetStore,
-		People:      people,
-		Sessions:    sessions,
-		Identity:    requestIdentity,
-		SignIn:      signIn,
-		Store:       database,
-		ServerURL:   serverURL,
-		Docs:        documentService,
-		Embedder:    embedder,
-		Events:      broker,
-		App:         appCfg,
-		OIDC:        serviceTokens,
-		AgentStream: agentStream,
-		Files:       fileStore,
-		Lifetime:    ctx,
-	}))
+	built := routes.AppContextOptions{
+		SigningKey:     signingKey,
+		WebDistDir:     webDistDir,
+		AssetStore:     dashboard.NewStore(database.Pool),
+		DashboardEntry: dashboardBuild.Entry,
+		People:         people,
+		Sessions:       sessions,
+		Identity:       requestIdentity,
+		SignIn:         signIn,
+		Store:          database,
+		ServerURL:      serverURL,
+		Docs:           documentService,
+		Embedder:       embedder,
+		Events:         broker,
+		App:            appCfg,
+		AgentStream:    agentStream,
+		Files:          fileStore,
+		Lifetime:       ctx,
+	}
+	// Set only when configured: a nil *oidc.LazyVerifier in the interface field would read as a
+	// configured verifier, and every JWT-shaped bearer would be sent to it.
+	if serviceTokens != nil {
+		built.OIDC = serviceTokens
+	}
+	appCtx, err := routes.BuildAppContext(appContextOptions(boot, built))
 
 	if err != nil {
 		slog.Error("dispatch: build app context", "error", err)
@@ -336,7 +363,7 @@ func main() {
 	// maintenance loop below either runs once overall or is deliberately per-process. The ones
 	// that must run once overall take a named lease on this pool for the length of their pass
 	// (duty.Exclusive): a lease is a session-level advisory lock on a connection of its own, so
-	// it needs a pool the shared one's sixteen request connections are not spent on. A boot that
+	// it needs a pool the shared one's request connections are not spent on. A boot that
 	// cannot open it is a boot whose loops would each run everywhere, so it ends here. Under that
 	// lease each pass is also recorded with its loop's own period (duty_passes, migration 0115),
 	// which is what makes a loop run once per period rather than once per process: two tickers
@@ -365,8 +392,13 @@ func main() {
 	}
 
 	if natsClient != nil {
+		outboxPool, err := database.Pool.Outbox()
+		if err != nil {
+			slog.Error("dispatch: open the events outbox's pool", "error", err)
+			os.Exit(1)
+		}
 		go outbox.Run(ctx, outbox.Deps{
-			Store:     database,
+			Store:     &store.Store{Pool: outboxPool},
 			Publisher: natsClient,
 			Broker:    broker,
 			Docs:      documentService,
@@ -407,6 +439,15 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
+	// Each document's edit notice goes once its quiet window after a person's last
+	// settled version ends, as one artifact.human_edited event; the window is a row, so a notice
+	// still pending when this process stops is sent by the next sweep of either process.
+	go documentService.RunEditNotices(ctx, leases)
+	// The block index: each document version no block-aware write indexed - every document at
+	// migration 0121, each version a build without the block index writes during a roll, and each
+	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such
+	// a build indexed without the block grammar.
+	go documentService.RunBlockIndexReconciliation(ctx, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -424,7 +465,7 @@ func main() {
 
 	// LEGION-567: the delivery timeline's 5-minute GitHub-App reconcile runs regardless of NATS
 	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
-	// a connected client, exactly like the outbox above. Both take the event broker: each writes
+	// a client, exactly like the outbox above. Both take the event broker: each writes
 	// issue.deployed on a pull request's issue once its shipping run is known (LEGION-781).
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker).Run(ctx, leases)
 	// stopIntakes waits for both intakes to stop. The shutdown calls it before it closes the
@@ -435,12 +476,13 @@ func main() {
 	stopIntakes := func() {}
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
-		// its own (delivery.StartIntakes). Once ctx is cancelled each Run stops delivering: the
-		// message in its handler finishes and is acknowledged, the messages behind it go back to
-		// NATS, and the intake's hold is released, so another process takes its durable over at
-		// once. stop waits for both Runs, then closes their clients.
+		// its own (delivery.StartIntakes). Each connects in the background as the publisher does,
+		// and its bind poll binds the durable once it has. Once ctx is cancelled each Run stops
+		// delivering: the message in its handler finishes and is acknowledged, the messages behind
+		// it go back to NATS, and the intake's hold is released, so another process takes its
+		// durable over at once. stop waits for both Runs, then closes their clients.
 		connectIntake := func(name string) (*bus.Client, error) {
-			return bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName(name))
+			return bus.Connect(envoyConfig.Envoy.NatsURLs, serverBus(bus.WithEnvironment(env.lookup), bus.WithName(name))...)
 		}
 		stop, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker)
 		if err != nil {
@@ -448,20 +490,27 @@ func main() {
 			os.Exit(1)
 		}
 		stopIntakes = stop
-		// LEGION-781: the start, naming the stamped build commit, goes on the bus once the
-		// publisher is open, and is retried until the stream acknowledges it or the shutdown
-		// context ends; a binary with no stamped commit publishes none.
-		go startup.PublishStarted(ctx, natsClient, buildCommit, time.Now, slog.Default())
 	} else {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}
+
+	// LEGION-781, INFRA-555: the announcer publishes server.started once each time every live
+	// server process comes to serve one build (startup.Announcer), and /healthz reports the latest
+	// announcement's commit as fleet_commit. It runs once this process is registered, below. A
+	// process without NATS announces into the database and leaves the publish to a process whose
+	// bus answers.
+	var announcements startup.Publisher
+	if natsClient != nil {
+		announcements = natsClient
+	}
+	announcer := startup.New(startup.Deps{Pool: database.Pool, Publisher: announcements})
 
 	routesHandler, waitDelivery := routes.New(appCtx)
 	waitDeliveryAndIntakes := func() {
 		waitDelivery()
 		stopIntakes()
 	}
-	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit)
+	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit, announcer, issuers{signIn: signIn, serviceTokens: serviceTokens})
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -475,8 +524,39 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDeliveryAndIntakes); err != nil {
-		slog.Error("dispatch: serve", "error", err)
+	// INFRA-555: the process enters the registry of live server processes once its port is bound
+	// and before it serves its first request, after one probe that the database answers. The
+	// registration refuses a key set a live peer does not share (processes.Register): a cookie this
+	// process minted would not verify there, or the reverse, and the people it signed in would be
+	// signed out on the next request the load balancer sends to the other. That refusal ends the
+	// process with 1 here, before anything is served, so a roll stalls on the new pod while the old
+	// ones keep serving. The registration's heartbeat runs until shutdown deregisters it, after the
+	// HTTP drain (shutdown), so a draining process counts as live until its last request is
+	// answered. A heartbeat that lapsed (the process frozen, or cut from the database) or whose
+	// row was pruned checks the keys again before the process counts as live once more; beside a
+	// live process whose keys it does not share it refuses (registration.Lost), and serving stops
+	// as at a signal and ends the process with 1 once drained (serveUntilStopped). The prune loop
+	// deletes what processes that died without deregistering left behind, once overall under its
+	// lease. The announcer starts only now, so its first pass counts this process among the live
+	// ones and never announces a build the fleet is rolling away from.
+	if _, err := database.Pool.Healthy(ctx); err != nil {
+		slog.Error("dispatch: probe the database", "error", err)
+		os.Exit(1)
+	}
+	registration, err := processes.Register(ctx, database.Pool, processes.Instance{
+		Commit:         buildCommit,
+		DashboardBuild: dashboardBuild.Build,
+		SigningKeys:    signingKey.Fingerprints(),
+	})
+	if err != nil {
+		slog.Error("dispatch: register this server process", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("dispatch: registered this server process", "instance", registration.ID)
+	go processes.RunPrune(ctx, database.Pool, leases)
+	go announcer.Run(ctx)
+	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDeliveryAndIntakes,
+		deregisterAfterDrain(registration), registration.Lost()); err != nil {
 		os.Exit(1)
 	}
 }
@@ -590,8 +670,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
 		WebDist:            env.get("DISPATCH_WEB_DIST"),
 		FileStoreBucket:    strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
-		AssetStoreBucket:   strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
-		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
+		DevSignInSharedKey: env.get("DISPATCH_DEV_SIGNIN_SHARED_KEY"),
 		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
 		EnvoyToken:         env.get("ENVOY_TOKEN"),
 	}
@@ -607,6 +686,11 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_TOKEN %w", err)
 	}
 	boot.AgentTokens = tokens
+	if setting := env.get("DISPATCH_SIGNING_KEY"); strings.TrimSpace(setting) != "" {
+		if boot.SigningKey, err = auth.ParseSigningKeys(setting); err != nil {
+			return bootConfig{}, fmt.Errorf("DISPATCH_SIGNING_KEY %w", err)
+		}
+	}
 	listenAddr, err := listenAddress(env)
 	if err != nil {
 		return bootConfig{}, err
@@ -627,6 +711,16 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		}
 		boot.SettleDelay = delay
 	}
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_EDIT_NOTICE_QUIET")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_EDIT_NOTICE_QUIET")
+		}
+		quiet, err := time.ParseDuration(raw)
+		if err != nil || quiet <= 0 {
+			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", raw)
+		}
+		boot.EditNoticeQuiet = quiet
+	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {
 		return bootConfig{}, err
@@ -638,6 +732,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		devSignIn = true
 	default:
 		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
+	}
+	// The shared key only ever replaces dev sign-in's per-process key; a server without the flag
+	// would ignore it, and a value an operator sets expecting it to sign their deployment's cookies
+	// would sign nothing.
+	if !devSignIn && boot.DevSignInSharedKey != "" {
+		return bootConfig{}, errors.New("DISPATCH_DEV_SIGNIN_SHARED_KEY is read only with DISPATCH_DEV_SIGNIN=1, by the processes of one local harness; unset it, and set DISPATCH_SIGNING_KEY to give a deployment's processes one key")
 	}
 
 	switch mode := identityMode; {
@@ -705,7 +805,9 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 // main loads after it. With the flag any loopback client signs in as any person it names, so the
 // process must listen, keep its data and reach the services that act on a human's word (NATS, the
 // secrets broker, the Envoy listener that delivers mentions and messages, GitHub as the App) on
-// this machine alone, and sign its cookies with a key no other process holds.
+// this machine alone, and sign its cookies with a key no production server holds: one of its own,
+// or one derived from DISPATCH_DEV_SIGNIN_SHARED_KEY under a dev-only label (sessionSigningKey),
+// which the other processes of its harness derive too and a production server never signs with.
 func devSignInFence(boot bootConfig, env settingValues) error {
 	if boot.IdentityHeader != "" {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
@@ -719,8 +821,8 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 	if err := loopbackDatabase(boot.DatabaseURL); err != nil {
 		return err
 	}
-	if boot.SigningKey != "" {
-		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process; unset DISPATCH_SIGNING_KEY")
+	if !boot.SigningKey.Empty() {
+		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process, or derived from DISPATCH_DEV_SIGNIN_SHARED_KEY when the processes of one local harness share their cookies; unset DISPATCH_SIGNING_KEY")
 	}
 	if !boot.NATSDisabled && env.get(bus.AllowRemoteEnvVar) == "1" {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 publishes to this machine's NATS only: unset %s, or set DISPATCH_NATS_DISABLED=1", bus.AllowRemoteEnvVar)
@@ -816,19 +918,42 @@ func explainMigrateError(err error) error {
 	)
 }
 
-// sessionSigningKey is the key session cookies are signed with: one generated for this process
-// under dev sign-in, otherwise DISPATCH_SIGNING_KEY when it is set (a deployment's, from its
-// secrets manager), otherwise the data dir's signing-key file, created on first start (a local
-// run's). Outside dev sign-in the key must stay the same across deploys, or every dsession cookie
-// is invalidated whenever a container rolls.
-func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
+// sessionSigningKey is the key set session cookies are signed with. Under dev sign-in it holds one
+// key: the key derived from DISPATCH_DEV_SIGNIN_SHARED_KEY when it is set
+// (devSignInSharedSigningKey), otherwise one generated for this process. Outside it, it is
+// DISPATCH_SIGNING_KEY's keys when that is set (a deployment's, from its secrets manager),
+// otherwise the data dir's signing-key file, created on first start (a local run's). Outside dev
+// sign-in the keys must stay the same across deploys, or every dsession cookie is invalidated
+// whenever a container rolls; a rotation adds the new key second first.
+func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error) {
 	if boot.DevSignIn {
-		return auth.NewSigningKey()
+		if boot.DevSignInSharedKey != "" {
+			return auth.SingleSigningKey(devSignInSharedSigningKey(boot.DevSignInSharedKey)), nil
+		}
+		key, err := auth.NewSigningKey()
+		if err != nil {
+			return auth.SigningKeys{}, err
+		}
+		return auth.SingleSigningKey(key), nil
 	}
-	if boot.SigningKey != "" {
+	if !boot.SigningKey.Empty() {
 		return boot.SigningKey, nil
 	}
 	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))
+}
+
+// devSignInSharedSigningKeyLabel separates the cookie key dev sign-in derives from every key a
+// production server signs with.
+const devSignInSharedSigningKeyLabel = "dispatch dev sign-in"
+
+// devSignInSharedSigningKey is the cookie key every dev-sign-in process given shared derives, the
+// base64url of HMAC-SHA256 keyed by shared over a fixed dev-only label. It is never shared itself,
+// so a production DISPATCH_SIGNING_KEY pasted into DISPATCH_DEV_SIGNIN_SHARED_KEY signs no cookie,
+// and seals no refresh token, that the production server it came from accepts.
+func devSignInSharedSigningKey(shared string) string {
+	mac := hmac.New(sha256.New, []byte(shared))
+	mac.Write([]byte(devSignInSharedSigningKeyLabel))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 // newDocumentService is the document service main serves the document websocket and the API's
@@ -838,6 +963,50 @@ func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
 	built.AgentTokens = boot.AgentTokens
 	return docs.New(built)
+}
+
+// dashboardPublishTimeout bounds the boot's publish of its dashboard build and the prune after it.
+// A first publish writes the whole build, 45 files and 5.4 MB for the dashboard of 2026-10-27; a
+// restart on a stored build writes nothing.
+const dashboardPublishTimeout = 60 * time.Second
+
+// publishDashboard stores the dashboard build at webDistDir in the database
+// (dashboard.Publish, stamped with buildCommit) and then prunes the builds no process needs any
+// more (dashboard.Prune), both within timeout, and returns what it published: the build's id
+// (processes.DashboardBuild's) and entry chunk among it. A dist with no index.html (the Go test
+// rigs serve an empty directory) publishes nothing, logs that it did not, and returns the zero
+// Published, whose empty build and entry say this process serves no dashboard. A failed publish
+// is the error returned, and refuses the boot; a failed prune is logged and the start goes on,
+// since it leaves only builds the next boot's prune deletes.
+func publishDashboard(ctx context.Context, pool *store.Pool, webDistDir string, timeout time.Duration) (dashboard.Published, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	published, err := dashboard.Publish(ctx, pool, webDistDir, buildCommit)
+	switch {
+	case errors.Is(err, dashboard.ErrNoBuild):
+		slog.Info("dispatch: no dashboard build to publish: the web dist holds no index.html", "dir", webDistDir)
+	case err != nil:
+		return dashboard.Published{}, err
+	default:
+		slog.Info("dispatch: published dashboard assets", "build", published.Build, "entry", published.Entry,
+			"assets", published.Assets, "written", published.Written)
+	}
+	// The prune keeps every build a live server process serves (processes.Live, read here at boot)
+	// beside the newest dashboard.KeepNewest. This process registers only once it listens, after
+	// this, so it is not among them yet; the publish above has just renewed its build's
+	// last_started_at, which puts it among the newest.
+	liveBuilds, err := api.LiveDashboardBuilds(ctx, pool)
+	if err != nil {
+		slog.Error("dispatch: prune dashboard builds", "error", err)
+		return published, nil
+	}
+	pruned, err := dashboard.Prune(ctx, pool, liveBuilds)
+	if err != nil {
+		slog.Error("dispatch: prune dashboard builds", "error", err)
+		return published, nil
+	}
+	slog.Info("dispatch: pruned dashboard builds", "builds", pruned.Builds, "assets", pruned.Assets)
+	return published, nil
 }
 
 // decidedWordingRestoreTimeout bounds the boot's restoration of decided asks' wordings. On the
@@ -951,36 +1120,86 @@ func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	return bucketStore, nil
 }
 
+// serverBus is the options every NATS client of the server connects with, after extra: it connects
+// in the background (bus.WithConnectInBackground), so a bus that is down at boot or refuses the
+// credential leaves the process serving and connects it once the bus answers, and it declares a
+// connection whose packets stop coming back lost within seconds (bus.WithSilentCutDetection), so
+// /healthz reports a cut bus within seconds of the cut.
+func serverBus(extra ...bus.ConnectOption) []bus.ConnectOption {
+	return append(extra, bus.WithConnectInBackground(), bus.WithSilentCutDetection())
+}
+
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API
 // route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
 // longer pattern, so "GET /healthz" wins over the router's "/".
-func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.Handler {
+func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit))
+	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit, announcer, issuers))
 	mux.Handle("/", handler)
 	return mux
 }
 
-// healthzHandler answers the probe: the process is serving, Postgres is reachable on the
-// health pool's own connection, and NATS is connected where it is configured. Nothing here
-// waits on the shared pool, and each probe bounds its own wait (store.healthProbeTimeout,
-// files.healthTimeout), which records why a probe that answers late is as bad as one that never
-// answers. The database and file-store probes run side by side: each takes up to two seconds,
-// and one after the other they would take four, past the three-second prober (the compose
-// healthcheck and the deploy script).
+// issuers are the two OIDC issuers the process discovers in the background, as /healthz reports
+// them: the sign-in issuer's code flow and the service-account token verifier, each nil when boot
+// configures none.
+type issuers struct {
+	signIn        *oidc.CodeFlow
+	serviceTokens *oidc.LazyVerifier
+}
+
+// serviceTokenVerifier is the verifier of the projected service-account tokens boot's
+// DISPATCH_OIDC_ISSUER issues to DISPATCH_OIDC_AUDIENCE, nil when boot configures none. It reads
+// nothing: the issuer is discovered in the background (oidc.LazyVerifier.Run, which main starts at
+// boot) or by the first token, and until then a JWT-shaped bearer is answered 503.
+func serviceTokenVerifier(boot bootConfig) *oidc.LazyVerifier {
+	if boot.OIDCIssuer == "" {
+		return nil
+	}
+	return oidc.NewLazyVerifier(boot.OIDCIssuer, boot.OIDCAudience)
+}
+
+// healthzHandler answers the readiness probe: 200 while this process can serve requests, which is
+// while Postgres answers on the health pool's own connection, and 503 while it does not; `ok` says
+// the same. Nothing here waits on the shared pool, and each probe bounds its own wait
+// (store.healthProbeTimeout, files.healthTimeout), which records why a probe that answers late is
+// as bad as one that never answers. The database and file-store probes run side by side: each
+// takes up to two seconds, and one after the other they would take four, past the three-second
+// prober (the compose healthcheck and the deploy script). A probe that fails while the database is
+// unreachable is right for readiness and wrong for liveness: a liveness probe on it would restart
+// every server process during a database failover.
 //
-// Where a file store is configured, `files` reports whether its bucket answered, and that is
-// all it does: it never decides `ok`. The load balancer replaces a task whose probe fails, and
-// production runs one, so a bucket outage, a slow HeadBucket or a grant someone changed would
-// take documents, asks and comments down with the files. A deploy check that wants the bucket
-// asserts `files: true` itself.
+// `nats` reports whether the server's publisher is connected to NATS (null when NATS is disabled),
+// and that is all it does: it never decides `ok`. A process serves reads and writes while the bus
+// is down or cut, and its outbox publishes what was written once the bus answers again, so a probe
+// that failed with the bus would take every server process out of service at once for an outage
+// each of them can serve through. The client declares a cut connection lost within seconds even
+// when no packet comes back to say so (bus.WithSilentCutDetection), so the field follows the bus
+// that closely. A check that needs the bus asserts `nats: true` itself, as the e2e scripts do.
 //
-// Beside those it reports what is deployed: `commit`, the legion commit the binary was built
-// from (null when the build did not stamp one), and `schema_version`, the highest migration
-// the database has applied, read by the same probe (null when the database did not answer).
-// A deploy check compares the two with the commit its image pin names and that commit's
-// migrations, so neither is ever filled with a guess.
-func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.HandlerFunc {
+// Where a file store is configured, `files` reports whether its bucket answered, and likewise
+// never decides `ok`: a bucket outage, a slow HeadBucket or a grant someone changed would
+// otherwise take documents, asks and comments down with the files. A deploy check that wants the
+// bucket asserts `files: true` itself.
+//
+// Where a sign-in issuer is configured, `signin` reports whether its discovery document has been
+// read, and where a service-account token issuer is, `service_tokens` reports the same of that
+// one; each is null when not configured. Neither decides `ok`: a process whose issuer is down
+// serves agents and the people whose confirmation stands, answers only what needs the issuer 503,
+// and discovers it in the background (oidc.CodeFlow.Run, oidc.LazyVerifier.Run), so failing the
+// probe would take that service away for an outage it serves through. A deploy check that needs
+// sign-in asserts `signin: true` itself.
+//
+// Beside those it reports what is deployed: `commit`, the legion commit this process's binary
+// was built from (null when the build did not stamp one), `fleet_commit`, the commit of the latest
+// announcement that every live server process serves one build (startup.Announcer.FleetCommit:
+// null when there is none, or before this process's announcer has first read the table, and up
+// to one announcer interval behind the table, a read the announcer makes anyway, so the probe
+// adds no statement to the database), and `schema_version`, the highest migration the database
+// has applied, read by the same probe (null when the database did not answer). A deploy check
+// compares commit and schema_version with the commit its image pin names and that commit's
+// migrations, so neither is ever filled with a guess; the Legion daemon reads fleet_commit, since
+// mid-roll whichever process answers it may serve a build the rest do not.
+func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.HandlerFunc {
 	var reportedCommit *string
 	if commit != "" {
 		reportedCommit = &commit
@@ -1021,8 +1240,17 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			connected := natsClient.Connected()
 			natsOK = &connected
 		}
+		var signInOK, serviceTokensOK *bool
+		if issuers.signIn != nil {
+			discovered := issuers.signIn.Discovered()
+			signInOK = &discovered
+		}
+		if issuers.serviceTokens != nil {
+			discovered := issuers.serviceTokens.Discovered()
+			serviceTokensOK = &discovered
+		}
 		<-filesProbed
-		ok := databaseOK && (natsOK == nil || *natsOK)
+		ok := databaseOK
 		status := http.StatusOK
 		if !ok {
 			status = http.StatusServiceUnavailable
@@ -1034,9 +1262,12 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			DB            bool    `json:"db"`
 			NATS          *bool   `json:"nats"`
 			Files         *bool   `json:"files"`
+			SignIn        *bool   `json:"signin"`
+			ServiceTokens *bool   `json:"service_tokens"`
 			Commit        *string `json:"commit"`
+			FleetCommit   *string `json:"fleet_commit"`
 			SchemaVersion *int    `json:"schema_version"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
+		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, SignIn: signInOK, ServiceTokens: serviceTokensOK, Commit: reportedCommit, FleetCommit: announcer.FleetCommit(), SchemaVersion: schemaVersion})
 	}
 }
 

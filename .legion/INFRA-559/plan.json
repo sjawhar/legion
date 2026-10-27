@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-559",
+  "completed": "2026-10-27T02:31:28Z",
+  "planDocument": "dispatch://INFRA-559/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase mechanics, PR body and proof rules (references/pr-body.md), the red-then-green evidence the plan requires, and the production check after the close",
+      "ce-simplify-code: the simplify pass over the new store, proxy and budget code before the proof head",
+      "envoy: coordinate the shared harness (INFRA-555, INFRA-556) and the shared process registry (INFRA-555) with sibling implementers before touching shared files",
+      "dispatch: any Dispatch write (a finding ask, a comment recording a contract change), and the deployment instructions' Dispatch production-check command"
+    ],
+    "test": [
+      "legion-worker: tester proof rules (six-field proof with negative control), re-running the plan's commands A1-A10 including the red run of the two-builds spec",
+      "dispatch: the deployment instructions' rule that a reader-facing Dispatch change is proven by a browser-suite test failing before and passing after, quoted on the pull request"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for review and approval by head SHA, and references/review-threads.md for threads",
+      "ce-simplify-code: judge whether the proxy, cache and budget code is the simplest correct shape"
+    ]
+  },
+  "contracts": {
+    "assetStore": "Dispatch's Postgres, not a bucket: tables dashboard_builds, dashboard_assets, dashboard_build_assets; every server process publishes its web dist's assets at boot after migrations and before net.Listen; prune at boot keeps live builds plus the 20 most recently started. gcp:Dispatch needs no setting (agreed with the INFRA-560 planner, Envoy message 2d54b29566424e15a682d369d44e2009). DISPATCH_ASSET_STORE_BUCKET and the S3 reader are removed and the variable is added to removedSettings.",
+    "buildId": "hex of the first 16 bytes of sha256(<web dist>/index.html); whichever of INFRA-555 and INFRA-559 lands first defines the function, the other reuses it.",
+    "processRegistry": "Owned by INFRA-555: table server_processes (instance, commit, dashboard_build, signing_keys, started_at, heartbeat_at) and package internal/dispatch/processes (Register after the port binds and first probe, heartbeat 5 s, Live within 15 s on the database clock, Deregister after the HTTP drain, leased prune). INFRA-559 adds no registry table; GET /api/v1/dashboard/builds reads processes.Live joined to dashboard_builds. Envoy messages 0d403201ade911b87d45ec4354f7818c, 51d1a94506b33d34bc4952df39f69983, c6445b76d6c3e6ab51b4550a0bdb6f83.",
+    "twoProcessHarness": "Owned by INFRA-559, used by INFRA-555 and INFRA-556: DISPATCH_E2E_PROCESSES=2; servers A/B on DISPATCH_E2E_PORT_A/B (8787/8788); e2e/round-robin-proxy.ts on DISPATCH_E2E_PORT (8777) alternating requests and websocket upgrades, streaming SSE, Host and Origin unchanged; pin by header X-Dispatch-E2E-Process: a|b (any request kind, wins) or cookie dispatch-e2e-process=a|b; /_test/ paths to both; GET /_proxy/requests, GET /_proxy/sockets [{id,path,upstream,open,openedAt}], POST /_proxy/reset; both servers NATS disabled; DISPATCH_DEV_SIGNIN_SHARED_KEY (dev-only domain-separated key, a key set of one value once INFRA-555's key set lands); DISPATCH_E2E_WEB_DIST_B; specs *.multiprocess.e2e.ts; script e2e:multiprocess; CI job dispatch-browser-multiprocess (INFRA-563 routes it into the required check). INFRA-555 adds DISPATCH_E2E_SIGNIN=oidc on top. Envoy messages 9170c3ab6515aa22f494c74e7a9e9da7, 6ff9941d165c37c10ede5ca14530cb00, 7c9f46701fc31c58c87ad4912df32d32, 0ce5c9fb75f80a633081ee725eec2bb9, 59cc73103eb84fd9f4866caf2b055e6e."
+  },
+  "taskOrder": [
+    "T1 two-process browser harness",
+    "T2 two-builds acceptance spec, run red against the server without the store and record the output",
+    "T3 Postgres asset store, S3 reader removed, cache and size gate",
+    "T4 recovery budget (3 reloads per 5 minutes, stylesheets and module preloads)",
+    "T6 reconnect spread (SSE, delivery socket, agent stream, document socket)",
+    "T5 banner on GET /api/v1/dashboard/builds, on INFRA-555's processes package",
+    "T7 documentation and changelog"
+  ],
+  "acceptance": [
+    {
+      "id": "A1",
+      "criterion": "Browser suite against two processes running two builds loads every page and lazily loaded route with no failed asset or blank page; red before T3, green after",
+      "command": "cd packages/dispatch && DATABASE_URL=<isolated db> bun run e2e:multiprocess -- two-builds.multiprocess.e2e.ts"
+    },
+    {
+      "id": "A2",
+      "criterion": "Every file of either build answers 200 from every process; publish before listen; restart writes no bytes; burst served",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<db> go test -tags multiprocess -count=1 -run TestDashboard ./cmd/dispatch"
+    },
+    {
+      "id": "A3",
+      "criterion": "Store, publish, prune, publish/prune race, cache",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<db> go test -count=1 ./internal/dispatch/dashboard/... ./internal/dispatch/routes/... ./cmd/dispatch/..."
+    },
+    {
+      "id": "A4",
+      "criterion": "Item 2 budget renews and covers the main stylesheet",
+      "command": "cd packages/dispatch && bun test web/src/features/shell && bun run build:web && bunx playwright test --config e2e/playwright.config.ts shell.e2e.ts"
+    },
+    {
+      "id": "A5",
+      "criterion": "Item 3 no banner while two builds are live; banner when one other build is live",
+      "command": "cd packages/dispatch && bun test web/src/features/shell; A2 with -run TestDashboardBuilds"
+    },
+    {
+      "id": "A6",
+      "criterion": "Item 4 first reconnect spread over [0, 2 s) on every stream and socket",
+      "command": "cd packages/dispatch && bun test web/src/__tests__/live.test.ts web/src/api web/src/features/doc web/src/features/delivery e2e/__tests__"
+    },
+    {
+      "id": "A7",
+      "criterion": "Harness behaviour",
+      "command": "cd packages/dispatch && bun test e2e/__tests__"
+    },
+    {
+      "id": "A8",
+      "criterion": "No stale document or comment; removed setting refused",
+      "command": "the grep in plan T7; cd packages/envoy && go test ./cmd/dispatch -run Settings"
+    },
+    {
+      "id": "A9",
+      "criterion": "CI job dispatch-browser-multiprocess green on the pull request",
+      "command": "the pull request's checks"
+    },
+    {
+      "id": "A10",
+      "criterion": "Lint, types, unit suites",
+      "command": "bunx biome check packages/dispatch/ && (cd packages/dispatch && bunx tsc --noEmit && bun run test); cd packages/envoy && go vet ./... && go test ./internal/dispatch/... ./cmd/dispatch/..."
+    }
+  ],
+  "production": "After the merge: the deployment instructions' dispatch-production-check.sh --commit <merged sha> --page / --route /api/v1/dashboard/builds; the root acceptance line on assets answering 200 through the front door during an overlap is dispatch://INFRA-564's measurement.",
+  "sequencingForArchitect": [
+    "The outgoing build must already carry the store: the first release carrying INFRA-559 must not overlap with an older build. Today one replica is Recreate (packages/envoy/infra/gcp/dispatch.go:378 dispatchStrategyFor). If INFRA-560 makes a one-replica release rolling, or the count rises, that release must deploy onto a build already serving INFRA-559 at every pod; belongs with root item 7's gate.",
+    "Item 3 (T5) depends on INFRA-555's internal/dispatch/processes; T1-T4 and T6 do not.",
+    "INFRA-555 and INFRA-556 browser specs depend on T1; INFRA-563 routes dispatch-browser-multiprocess into the required check.",
+    "Migration numbers collide across children; whoever merges second renumbers."
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Two web builds are identical in CI because vite.config.ts takes GITHUB_SHA before DISPATCH_BUILD, so the acceptance test would pass with no fix.",
+        "answer": "T1.5 changes the order to DISPATCH_BUILD ?? GITHUB_SHA ?? Date.now() (nothing sets DISPATCH_BUILD today; the image build sets neither), builds B into web/dist-b, and T2.1 fails the spec unless the entry chunks and asset lists differ."
+      },
+      {
+        "finding": "The store protects a roll only when the outgoing build carries it; no rule guarantees that.",
+        "answer": "Plan section 'Sequencing' item 1 and sequencingForArchitect[0], sent to the INFRA-63 architect for root item 7's gate; states what an older-build tab sees during that first roll."
+      },
+      {
+        "finding": "Storage growth not estimated; 14 days not tied to release rate; census 1 GiB table limit.",
+        "answer": "Measured 14 releases a day on average, 47 at most (git log). Retention changed to live builds plus the 20 most recently started (about 110 MB raw); prune tests in T3.8."
+      },
+      {
+        "finding": "Publish and prune can race.",
+        "answer": "Publish holds pg_advisory_xact_lock_shared and prune the exclusive lock on one key; the build row and its links commit with the assets in one transaction; a concurrent publish/prune test in T3.8."
+      },
+      {
+        "finding": "A new leased loop has no lease-pool connection (leasePoolSize 8, zero headroom).",
+        "answer": "No loop is added: prune runs at boot, the only moment the newest-20 set changes (decision 8)."
+      },
+      {
+        "finding": "A store read can still fail an asset during a roll (8 MiB reservation, 64 MiB cap, 3 s bound).",
+        "answer": "T3.4 adds a 64 MiB process-wide cache of store reads with singleflight for concurrent misses; hits need no reservation; reads use the shared pool; a 200-request burst test through the real store in T3.8."
+      },
+      {
+        "finding": "Both builds share the tab's sessionStorage key and the inline script duplicates the rule.",
+        "answer": "New key dispatch.chunk-reloads (JSON times); the old key is neither read nor written, so the builds never misread each other; each copy names the other; an e2e row where the inline script and a lazy chunk share the budget (T4.4)."
+      },
+      {
+        "finding": "Registry undefined: build identity, 404 from old pods, clock, test speed, ownership.",
+        "answer": "Identity = sha256(index.html)[:16] hex mapped to the entry chunk; 404/401/5xx/network = no banner with unit tests; database clock; Go test ages a row in the database instead of waiting; registry owned by INFRA-555 (agreed over Envoy)."
+      },
+      {
+        "finding": "Existing tests, docs and the delivery-live probe hard-code reconnect at once; whole-cache refresh spread risks staleness.",
+        "answer": "T6.4 rewrites the named tests and the probe; T7 the docs; the refresh is not delayed further, only the reconnect is spread over [0, 2 s), mean equal to today's 1 s; distribution test with a 10 % per-100 ms bound."
+      },
+      {
+        "finding": "Every page and lazily loaded route has no machine-derived list.",
+        "answer": "T2.3 lists app.tsx's routes and non-route lazy pieces, a bun test fails when app.tsx's lazy() set names a page the list lacks, and T2.4 requires every .js and .css of both builds requested and answered 200, exclusions named."
+      },
+      {
+        "finding": "Fails before, passes after has no way to show it; per-finding tests missing.",
+        "answer": "T2.7 records the red run at the T1+T2 commit; F4 by T3.8, F5 by T4.4 fake-clock renewal, F6 by the stylesheet-abort row, F7 by T5.3, F9 by T6.4."
+      },
+      {
+        "finding": "Refusing boot on a file over 8 MiB catches it at deploy instead of in CI.",
+        "answer": "T3.7 adds check:asset-sizes in the dispatch CI job after the build; the boot refusal stays and stalls a roll rather than failing pods in service."
+      },
+      {
+        "finding": "Harness shared with no named owner.",
+        "answer": "Decision 5 and contracts.twoProcessHarness: INFRA-559 owns the proxy, pinning, fan-out, DISPATCH_DEV_SIGNIN_SHARED_KEY and the CI job; INFRA-563 routes it."
+      },
+      {
+        "finding": "Removing DISPATCH_ASSET_STORE_BUCKET touches more places.",
+        "answer": "T3.5 and T7 list every one (main.go, settings.go, settings_test.go, README, AGENTS.md, files/s3.go, assets.go comments, S3 tests, CHANGELOG)."
+      },
+      {
+        "finding": "Migration rules (census, README paragraph, number, boot order docs).",
+        "answer": "T3.1: next free number at implementation, census select 0 with comment, README paragraph; T7 documents the boot order."
+      },
+      {
+        "finding": "seed.ts must not truncate the new tables.",
+        "answer": "T3.6 keeps them off the list and out of any cascade, with a comment."
+      },
+      {
+        "finding": "Unverified claims: no deployment sets the variable, sibling agreements, Hocuspocus defaults, which chunks import the entry.",
+        "answer": "Plan cites the gh search command and its zero result, the Envoy message ids of each agreement, the lifeomic attempt source lines read, and the measured build; T6.3 pins the provider behaviour with a test."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}

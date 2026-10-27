@@ -19,11 +19,11 @@ below add only what a setting's one line cannot say.
 | --- | --- |
 | `DATABASE_URL` | Postgres connection string. Dispatch applies embedded migrations before serving. The pool size is fixed in code (`store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter. |
 | `DISPATCH_AGENT_TOKEN` | One value, or several separated by whitespace, so the shared token can rotate with an overlap: write the new value followed by the old one, move every consumer to the new one, then write the new value alone. The first is the current value; the API and the document websocket accept every value, comparing a bearer with each in constant time. Whitespace at either end is ignored; startup refuses an empty entry (two whitespace characters in a row, a CR LF among them) or a repeated one, naming its position, never its value. A request that authenticates with a value after the first logs one WARN line, `dispatch: request authenticated with a previous shared agent token`, with `entry` (the value's position), `address` (the rightmost `X-Forwarded-For` entry, which is the load balancer's view of the caller, or the connection's own address without one), `user_agent` and `path`, at most once per address and User-Agent every 10 minutes, and never a token. Each field keeps its first 256 bytes, and the server remembers up to 10,000 callers; one past that is logged on each request. Callers that share an address and User-Agent share a line, so the log says whether a value on its way out is still in use, not who uses it. |
-| `DISPATCH_SIGNING_KEY` | The HMAC key every session cookie is signed and verified with, and the key the stored refresh tokens' seal is derived from (Identity, below). Unset, each process mints a key of its own in its own data directory (`auth.LoadOrCreateSigningKey`), so a deployment of more than one process sets one value every process is given: with a key apiece, a session minted on one process is refused by the other — every person is signed out by whichever process answers next — and every stored refresh token reads as absent. No process can see another's key, so nothing refuses the boot and `/healthz` cannot report it; it is a precondition of running more than one process, never a check (Running more than one process, below). Rotating it signs everyone out and leaves every stored refresh token unopenable. |
-| `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
+| `DISPATCH_SIGNING_KEY` | One key, or several separated by whitespace, the first the current key: it signs every new session cookie, seals every refresh token Dispatch stores, and, under a key derived from it for that purpose alone, signs the sign-in's state cookie; every key of the set verifies a cookie and opens a seal (Identity, below). It is parsed as `DISPATCH_AGENT_TOKEN` is: whitespace at either end is ignored, and startup refuses an empty or repeated entry, naming its position and never its value. A value of nothing but whitespace counts as unset. Unset, each process mints a key of its own in its own data directory (`auth.LoadOrCreateSigningKey`), which no other process holds, so a deployment of more than one process gives every process the same keys: a session minted on one process is presented to whichever process answers next, and a key that process does not hold signs the person out and leaves their stored refresh token unopenable. A process whose key set a live server process does not share both ways, a minted key included, refuses to start, exiting 1 before it serves (Running more than one process, below). A rotation in three steps signs nobody out (Identity, below); dropping the key a cookie or a seal was made under signs its person out and leaves that seal unopenable. |
+| `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. A NATS that does not answer at boot, or refuses the credential, refuses nothing: the server starts and serves, each of its NATS clients connects in the background and retries forever, and a refused credential is logged at ERROR at most once a minute (Running more than one process, below). |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount test-only routes: `POST /api/v1/events/_test/disconnect` closes every open SSE connection; `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements; and `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses. Leave unset in every real deployment. |
-| `DISPATCH_ASSET_STORE_BUCKET` | Optional bucket of immutable dashboard assets from earlier builds, each stored under its URL path without the leading slash (`assets/<file>`). When a local `/assets/*` file is absent, Dispatch reads the object under that key through the AWS SDK default credential chain, which takes its region and credentials from the task's environment. It reads the whole object, at most 8 MiB, within 3 seconds before it answers, so the browser's own download is not held to that time. It never reads `index.html` or a non-asset path from the bucket. An absent object stays a 404; any other store failure (an error, a short body, an object over the limit) is a 502 with no cache header, logged at ERROR with its key. An object stays in memory until its client has read it, so at most 64 MiB of retained objects are held at once: a request reserves 8 MiB before it asks the bucket, waiting within its 3 seconds for earlier requests to finish, and keeps its object's size until the response is written or the client goes away. A request that cannot reserve room in time, or whose admitted fetch then runs out of that same 3 seconds before the bucket answers, is a 503 with `Cache-Control: no-store` and `Retry-After: 1`, logged at WARN with its key — the bound expiring is never a 502, since the store was only asked too late to answer in time; a room refusal asks the bucket nothing. A client that disconnects while still queued for room logs nothing above a debug line and gets no response. The task role needs `s3:GetObject` on `<bucket>/assets/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing key with 403, and Dispatch returns 502 where it should return 404. Leave it unset for local-only static serving. |
-| `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
+| `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server, unless `DISPATCH_DEV_SIGNIN_SHARED_KEY` (below) gives the processes of one local harness one key; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
+| `DISPATCH_DEV_SIGNIN_SHARED_KEY` | Only with `DISPATCH_DEV_SIGNIN=1`, which every fence above still applies to; boot refuses it otherwise. Every process given the same value signs session cookies with one key, so a person signed in on one of them stays signed in on the others: the browser suite's two-process mode (`packages/dispatch/e2e/run-server.sh`) gives both of its servers one random value per run. The key is not the value but the base64url of HMAC-SHA256 keyed by it over the fixed label `dispatch dev sign-in` (`devSignInSharedSigningKey`), so a production `DISPATCH_SIGNING_KEY` placed here signs no cookie, and seals no refresh token, that the production server accepts, and that server's cookies sign nobody in here. `DISPATCH_SIGNING_KEY` stays refused beside it. Unset, each dev-sign-in process generates a key of its own. |
 | `DISPATCH_FILE_STORE_BUCKET` | Files are stored under `files/sha256/<hash>`, one object however often a file is uploaded; a document's markdown never leaves Postgres. The credential chain on Fargate is the task role, which needs `s3:GetObject` and `s3:PutObject` on `files/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing object 403, which Dispatch reads as a store failure. The SDK must also find a region (`AWS_REGION`, or the shared config); without one the boot is refused. An upload writes its object before its row and before any lock or connection is taken, within 30 seconds, so a store that refuses answers 502 `FILE_STORE_UNAVAILABLE` and writes no version. The version route serves a row still holding bytes from the row and any other from the bucket: it opens the object within 30 seconds, sends its headers and `Content-Length` only then, and streams the body at the client's pace, checking it against the row's hash as it goes; a bucket that does not answer is 502, a row whose object the bucket does not hold is 500 `FILE_MISSING` (a restore from the bucket's versioning, not a retry), a cleared row on a server with the setting unset is 503, and a body that fails or hashes wrong mid-stream is cut off rather than ended as if whole. `/healthz` reports `files`: null when unset, else whether the bucket answered a two-second `HeadBucket`; it never decides `ok`, since a bucket outage must not take the one task, and with it documents and asks, down. `envoy-dispatch backfill-files` moves the rows uploaded before the bucket, and `--restore` is the rollback ("Moving uploaded files to the bucket", below). |
 | `DISPATCH_EMBEDDER`, `DISPATCH_AZURE_EMBED_*`, `DISPATCH_AZURE_TENANT_ID`, `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE` | Where meaning search embeds, and with what credential. Every process of one deployment takes the same values, and a model change on Azure takes a new deployment name, since each vector records an identity that names the deployment and not the model behind it (Search, below). A model service or Entra that is down refuses no boot: search answers by keyword and says so, and the queue retries. |
 
@@ -39,8 +39,8 @@ created through the default also gets a `repo:owner/name` label.
 humans type into their browser, and the sign-in pool's app client must list
 `<DISPATCH_SERVER_URL>/auth/callback` as a callback URL.
 
-`DISPATCH_ALLOWED_LOGINS` and `DISPATCH_APP_CLIENT_SECRET` are removed: a boot
-that still sets either is refused, naming what replaced it.
+`DISPATCH_ALLOWED_LOGINS`, `DISPATCH_APP_CLIENT_SECRET` and `DISPATCH_ASSET_STORE_BUCKET` are
+removed: a boot that still sets any of them is refused, naming what replaced it.
 
 Agents normally authenticate with a personal `dsp_` token minted in Settings,
 sent as `Authorization: Bearer <token>`. `DISPATCH_AGENT_TOKEN` remains the
@@ -48,9 +48,13 @@ shared devbox fallback and does not attribute callers to an owner.
 
 With `DISPATCH_OIDC_ISSUER` and `DISPATCH_OIDC_AUDIENCE` set, a Kubernetes pod's
 projected service-account token is a third bearer credential: the server reads
-the issuer's discovery document at boot (an unreachable issuer refuses to start,
-naming it) and verifies a JWT-shaped bearer against its published keys, the
-configured audience, and the token's expiry. Half the pair refuses to boot,
+the issuer's discovery document in the background from boot, retrying after one
+second and doubling to thirty while it fails (each failure logged at ERROR at
+most once a minute), and an issuer that cannot be reached refuses nothing; it
+verifies a JWT-shaped bearer against the issuer's published keys, the
+configured audience, and the token's expiry. Until the document has been read,
+a JWT-shaped bearer is `503 OIDC_ISSUER_UNAVAILABLE`, never a 401, and every
+other credential is served. Half the pair refuses to boot,
 naming the missing variable; neither leaves bearer handling exactly as it is
 without them. A verified caller acts as the `session` it names in the request
 body, and every actor it writes carries `service`, the token's verified subject
@@ -122,7 +126,9 @@ reach the stream adds nothing to the stream.
   cursor, back to GitHub's three days. The first sweep ever made looks back one hour only.
 
 The cursor, the last rate limit, and one record per delivery acted on live in the JetStream KV
-bucket `envoy_webhook_redelivery`. Its 72-hour TTL matches GitHub's horizon. A compare-and-swap
+bucket `envoy_webhook_redelivery`. Its 72-hour TTL matches GitHub's horizon. The server opens the
+bucket on the first sweep that finds NATS connected, not at boot, so a NATS that is down at boot
+skips the sweeps until it answers, each logged as failed. A compare-and-swap
 claim keeps two Dispatch processes from requesting the same attempt twice, and the operator
 command honours the same rate limit.
 
@@ -200,6 +206,25 @@ lowercase email:
   or a domain that is not a lowercase DNS name refuse the boot, each naming
   what is wrong (`checkSignInSettings`).
 
+  The issuer's discovery document is read in the background from boot, on the
+  service-account issuer's schedule (above), and an issuer that cannot be
+  reached refuses nothing: until the document has been read, `/auth/start`
+  and the callback answer `503 SIGNIN_UNAVAILABLE`, and the rest of Dispatch
+  serves. A sign-in in flight (its state, its nonce, the page it returns to
+  and when it lapses, ten minutes after it started) travels in the browser's
+  `dispatch_oauth_state` cookie, signed under a key derived from the current
+  signing key for that purpose alone, and no process keeps it: a sign-in one
+  process started completes on whichever process the issuer's redirect
+  reaches, given one `DISPATCH_SERVER_URL` on every process: the exchange
+  must send the callback URL the sign-in started with, and each process
+  builds it from that setting, or without one from the request's `Host`. The
+  callback clears the cookie first, and answers `400` "invalid or expired
+  state" to a cookie that does not verify under a
+  key of the set, has lapsed, or names a state other than the one the issuer
+  returned. Each sign-in completes at most once: the issuer's code is
+  single-use, and the exchange accepts only an ID token carrying the
+  cookie's nonce.
+
   Through a shared Cognito sign-in pool (`DISPATCH_SIGNIN_GROUP`), the callback
   names the person by the email in their pool username (`<provider>_<email>`,
   for a provider the ID token's `identities` names), never by the `email`
@@ -222,11 +247,18 @@ lowercase email:
   a pool refusal logs `username=<username>`.
 
   Either way, Dispatch keeps the issuer's refresh token and confirms the person
-  with it at least hourly: a refresh the issuer refuses or cannot answer (an
-  outage included, so people are signed out as their hour lapses while it
-  lasts), or one whose ID token no longer passes the rule or names another
-  email, ends every session they hold. Logout ends Dispatch's session only, not
-  the issuer's.
+  with it at least hourly, the hour measured on the database's clock
+  (`people.confirmed_at`), so processes whose clocks differ agree on when it
+  lapses. A refresh the issuer refuses (`400` or `401` with the OAuth error
+  `invalid_grant`: the token expired, was revoked or is not the client's), or
+  one whose ID token no longer passes the rule or names another email, ends
+  every session they hold. A refresh that fails any other way (the issuer
+  undiscovered, down or slow, a `5xx` or `429`, another OAuth error, or an
+  answer without an ID token that verifies) ends nothing: the request that
+  found the confirmation lapsed is refused `503 SIGNIN_UNAVAILABLE`, the
+  sessions and the refresh token are kept, and the first request after the
+  issuer answers again refreshes and is served. Logout ends Dispatch's session
+  only, not the issuer's.
 
   A person is their email, so an address passed from one account to another is
   one person. In domain mode `people.sub` records the Google account (`sub`,
@@ -244,9 +276,12 @@ lowercase email:
   unless the pool user is removed from `DISPATCH_SIGNIN_GROUP` or disabled.
 
   The refresh token is stored sealed (`people.refresh_token`): AES-256-GCM
-  under a key derived from `DISPATCH_SIGNING_KEY` with HKDF and a fixed purpose
-  label, bound to the person's email, in a format whose `v1:` prefix names its
-  version. A stored value that does not open (sealed under another signing key,
+  under a key derived from the current key of `DISPATCH_SIGNING_KEY` with HKDF
+  and a fixed purpose label, bound to the person's email, in a format whose
+  `v1:` prefix names its version. A value is opened under each key of the set
+  in turn, the GCM tag refusing a key it was not sealed under; it names no key,
+  so the `v1:` format is byte for byte the one earlier releases write and read.
+  A stored value that does not open (sealed under a key the set does not hold,
   moved from another person's row, or in plain text) counts as no refresh token:
   each read of it logs
   `msg="dispatch: a stored refresh token did not open; the person signs in again"`
@@ -263,7 +298,8 @@ lowercase email:
   value. A sign-in that replaces a plain-text token retires it the same way
   first. A sealed value is never sent to the pool, and a redirect from the
   revocation endpoint is a failure, never followed. A token the boot cannot
-  revoke stays in its row for the next boot and logs
+  revoke, the issuer's discovery document not yet read included, stays in its
+  row for the next boot and logs
   `msg="dispatch: the sign-in pool did not revoke a refresh token stored in plain text"`
   at ERROR with the email and the error (the pool's HTTP status, when it
   answered), never the token. A sign-in that cannot revoke the token it
@@ -281,10 +317,24 @@ lowercase email:
   pool revokes them. A plain-text token `0068`'s release removed without
   revoking (a sign-in that replaced it, or a logout that cleared it) stays
   valid at the pool until it expires, in any backup that holds it (Database
-  migrations, below). Rotating `DISPATCH_SIGNING_KEY` leaves Dispatch unable
-  to open any stored refresh token, so each person signs in again, but it
-  revokes none at the pool: whoever holds a backup and the old key can still
-  redeem them until they expire, so after a key leak, sign each person out at
+  migrations, below).
+
+  A rotation of `DISPATCH_SIGNING_KEY` signs nobody out when it is made in
+  three steps, each rolled to every process before the next: (a) add the new
+  key second, after the current one; (b) move it first; (c) remove the old key,
+  no sooner than 30 days after (b), the session cookie's lifetime. A cookie
+  made under the old key verifies until it expires, and a refresh token sealed
+  under it is sealed again under the new key by the person's next hourly
+  confirmation. Each step passes the boot's key check beside processes still
+  on the step before (Running more than one process, below). Replacing the key
+  in one step fails that check beside a live process that holds only the old
+  key, and on a lone process signs everyone out. The
+  release that first ships the key set is never also the release of a first
+  rotation, and no build older than the key set is rolled back to while the
+  setting holds two values: such a build reads `"K1 K0"` as one key, which
+  signs everyone out. Removing a key revokes no refresh token at the pool:
+  whoever holds a backup and the old key can still redeem the tokens sealed
+  under it until they expire, so after a key leak, sign each person out at
   the pool.
 - `header:<Header-Name>` is for tests and local harnesses only, never for a
   production Dispatch deployment. It accepts a header value, lowercases it and
@@ -310,7 +360,11 @@ indistinguishable from one that is. The per-process key bounds the cookie, not
 every credential a dev session can write: a `dsp_` token it mints, and the
 session and token rows its sign-out changes, live in the database, and every
 server that reads that database acts on them. A dev-sign-in server therefore
-needs a database of its own.
+needs a database of its own. The one exception to the per-process key is a
+harness that runs several dev-sign-in processes on one database on purpose,
+as the browser suite's two-process mode does: `DISPATCH_DEV_SIGNIN_SHARED_KEY`
+gives them one key, derived from the value under a dev-only label, so their
+cookies are each other's and never a production server's.
 
 ## Local Postgres
 
@@ -366,23 +420,39 @@ rate.
 
 Two `envoy-dispatch` processes serve one Postgres and one NATS, so a release rolls instead of
 taking Dispatch away from everyone while it deploys. A rolling update is supported, under two
-preconditions, one of which the server cannot check for itself.
+preconditions; the server checks the first itself.
 
-**Every process is given the same `DISPATCH_SIGNING_KEY`.** Unset, each process mints a key of its
-own in its own data directory (`cmd/dispatch/main.go`, `auth.LoadOrCreateSigningKey`), and a
-session is verified by HMAC under the key of the process that answers: at two processes with data
-directories of their own, every person is signed out by whichever process answers next, and every
-stored refresh token, sealed under a key derived from the same value (Identity, above), reads as
-absent (`store/refresh_token_seal.go`). One process cannot detect another's key, so nothing
-refuses the boot, no log line names it and `/healthz` cannot report it: it is a hard precondition
-of a multi-process deployment rather than something the server checks.
+**Every process is given the same `DISPATCH_SIGNING_KEY`.** A session cookie, or the sign-in's
+state cookie, minted by one process is presented to whichever process the next request reaches,
+and every stored refresh token is sealed under a key derived from the current key (Identity,
+above). Unset, each process mints a key of its own in its own data directory
+(`cmd/dispatch/main.go`, `auth.LoadOrCreateSigningKey`), which no other process holds. The server
+refuses that through the registry of live server processes (`internal/dispatch/processes`,
+migration `0130`): once a process has bound its port, and before it serves, it registers the
+fingerprint of each of its keys (none reveals its key), and it refuses to start, logging
+`msg="dispatch: register this server process"` at ERROR with an error that names the other process
+and the rotation steps, and exiting 1, when a live process's key set does not share its own both
+ways: the other's current key among its keys, and its current key among the other's. So a process
+with a minted key refuses beside any live process, and a process refuses beside it; processes
+that share one data directory share its key and start. A pod rolled with a changed secret beside
+pods that hold only the old key refuses the same way, so the roll stalls on the new pod while the
+old ones keep serving. Each step of a rotation (Identity, above) passes the check beside processes
+still on the step before. A process whose heartbeat lapsed (frozen, or cut from the database, for
+longer than the live window) or whose row was pruned drops out of the registry while it runs, so a
+process started meanwhile is checked without it; the first one checks its keys again before it
+counts as live once more, and beside a live process whose keys it does not share it logs
+`msg="dispatch: this server process no longer shares its signing keys with a live server process"`
+at ERROR, stops serving as a SIGTERM stops it (the listener closes at once, the requests in flight
+are answered, its row is deleted), and exits 1.
 
 **Every release keeps the build before it working** (Two builds at once, below): a rolling update
 runs the old build and the new build against one database and one NATS at once, and the page and
-the `dispatch` command of either build reach either process. No release is an exception to that,
-and no release stops every server process. The one crossing left is migration `0117` (Database
-migrations, below): a deployment still on a release before it crosses it once with Dispatch
-stopped, before it runs more than one replica, and every release after it rolls.
+the `dispatch` command of either build reach either process. From the release that carries this
+rule on, no release is an exception to that, and no release stops every server process. Two
+crossings came before it, each taken once: migration `0117` (Database migrations, below), which a
+deployment still on a release before it crosses with Dispatch stopped, before it runs more than one
+replica; and the release that introduced the process registry (`server.started`, below), deployed
+with no process of the release before it serving beside it.
 
 What the two processes share, and what each keeps to itself:
 
@@ -394,7 +464,7 @@ What the two processes share, and what each keeps to itself:
   through a per-process relay on `listen dispatch_events` (migration `0107_events_notify`), so an
   event committed on either process reaches every open stream with no reconnect.
 - Each delivery durable delivers to one process at a time: the process that holds that durable's
-  hold (`duty.Hold`, migration `0121_duty_holds`, a row with a 15-second lease on the database's
+  hold (`duty.Hold`, migration `0132_duty_holds`, a row with a 15-second lease on the database's
   clock, renewed every five seconds). The other processes stand by and try for the hold every two
   seconds. A process that stops hands back every message it was delivered and did not handle and
   releases the hold, so another process takes the durable over at once and is redelivered those
@@ -403,7 +473,7 @@ What the two processes share, and what each keeps to itself:
   the old holder off: a subscription its client sends again after a reconnect gets nothing. A
   durable bound by a build before holds, which binds by lookup and holds nothing, is left to that
   build until it lets go (`delivery/intake.go`, `heldDurable`).
-- Six periodic maintenance loops run once per period across the processes, not once per process.
+- Nine periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`), in a row per lease and period, so a process whose
@@ -417,6 +487,50 @@ What the two processes share, and what each keeps to itself:
   make, so every process takes the same embedder settings (Search, below); `cmd/dispatch/main.go`
   says at the call site which loop is which and why.
   <!-- INFRA-558 E-a/E-b: this sentence changes when the embedder is coordinated by the code. -->
+- The registry of live server processes is shared. Each process stamps its `server_processes` row
+  every 5 seconds, on a one-connection pool of its own, and counts as live while that heartbeat is
+  within 15 seconds of the database's `now()`; it deletes its row once its HTTP drain has ended, so
+  a draining process counts as live until its last request is answered. A row a process left
+  behind (killed, its node lost) is deleted 10 minutes after its last heartbeat by the prune loop,
+  under the lease `server-processes`. A process whose heartbeat lapsed (frozen, cut from the
+  database) or whose row was pruned checks its keys again, under the registry's lock, before it
+  counts as live once more: it writes its row again, logging that it rejoined at WARN, when every
+  live process shares its key set, and otherwise stops, after draining, and exits 1 (the signing
+  key precondition, above). Operator subcommands never register.
+- A sign-in started on one process completes on the other: its state travels in the browser's
+  signed `dispatch_oauth_state` cookie, not in a process (Identity, above), given one
+  `DISPATCH_SERVER_URL` on every process.
+- `server.started` names the build every live process serves, once each time that build changes.
+  A process that finds every live process serving one stamped, non-empty commit that the latest
+  row of `server_build_announcements` does not name inserts a row; any process whose bus is
+  connected publishes each row not yet published, with the event id
+  `dispatch-server-started-<commit>-<seq>` and `started_at` the database's time of the
+  announcement. Each process looks every 5 seconds, and an advisory lock keeps two from inserting
+  or publishing at once. So a roll announces nothing until its last old process is gone, a restart
+  of every process on one commit announces nothing, and a rollback to an earlier commit announces
+  it again. A process whose NATS is down announces into the table and leaves the publish to one
+  whose bus answers. Builds before this registry do not register: the first release that carries it
+  announces as soon as its own processes agree, and a process of an earlier release that starts
+  during that release still publishes its own start, so that release is deployed with no process
+  of the earlier one serving beside it (production ran one pod with `Recreate` for it).
+- Neither NATS nor an OIDC issuer gates the boot. A process whose NATS does not answer, or refuses
+  its credential, starts and serves everything that does not need the bus, and each of its NATS
+  clients connects in the background, retrying forever; the outbox publishes what was written
+  meanwhile once the bus answers, the webhook redelivery sweep opens its KV bucket on its first
+  pass with NATS connected, and the agent conversation relay answers `503 STREAM_UNAVAILABLE`
+  until then. A sign-in issuer or service-account issuer that cannot be reached is discovered in
+  the background (Identity, above); until then only what needs it answers `503`. `/healthz`
+  reports each as `nats`, `signin` and `service_tokens`, and none of them fails the probe.
+- Each build's dashboard assets are in the database. Every process publishes its web dist's
+  assets at boot, before it listens (`internal/dispatch/dashboard`, migration `0131`), and answers
+  a local miss under `/assets/` from there (Routes, below), so a page of one build served by one
+  process is served its chunks by a process of another build. A process that cannot publish (the
+  database refuses the write, or the build holds a file over 8 MiB, which CI's
+  `bun run check:asset-sizes` in `packages/dispatch` refuses first) exits before it is ready, so a
+  rolling update keeps the processes it would have replaced. A restart on a build already stored
+  writes no bytes. The prune after each publish keeps
+  every build a live server process serves and the 20 builds started most recently; a failed prune
+  is logged and the boot goes on.
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
@@ -905,7 +1019,87 @@ the release before it runs over the new schema unchanged, and the trigger gives 
 release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
 schema has moved it refuses to start the previous tag, and recovery there is forward.
 
-Migration `0121_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, the holds a
+Migration `0121_block_graph` creates the tables behind a document's blocks as graph nodes
+(`packages/envoy/AGENTS.md`, "References form one graph"): `document_blocks`, `block_refs`,
+`document_block_versions`, `document_block_texts` and `document_indexed_versions`, each with a
+foreign key to `artifacts`, and `block_grammar_owed`, with their indexes, among them the partial
+`document_block_versions_owed` and `block_grammar_owed_enqueued` through which the block-index
+reconciliation reads what is owed. It creates the trigger function `block_grammar_owe`, which no
+trigger calls until `0123`, and re-states the `graph_edges` view with two more arms: a block's
+mentions and its `part_of` edge to its document. The five foreign keys take `SHARE ROW EXCLUSIVE`
+on `artifacts` for the migration's short transaction, so an artifact write waits behind it while a
+read does not, and re-stating the view holds `graph_edges` `ACCESS EXCLUSIVE`, so a reference read
+waits too. Its one insert marks every document owed a block index in `document_block_versions`, a
+table it creates, and the server's reconciliation indexes them with no command run. It refuses and
+rewrites no existing row; its census answers `0`.
+
+Migration `0122_artifact_versions_block_index_trigger` creates `document_block_versions_owe` and
+an `after insert` trigger on `artifact_versions` that marks a document owed a block index whenever
+any build inserts a version carrying markdown. A version a build without the block index writes
+during the roll is then indexed by the reconciliation, and a block-aware build's own index of the
+version, later in the same transaction, settles the mark. The trigger takes `SHARE ROW EXCLUSIVE`
+on `artifact_versions` alone, so a version write waits behind it while a read does not. It touches
+no row; its census answers `0`.
+
+Migration `0123_comments_block_grammar_trigger` attaches `block_grammar_owe` to `comments`,
+`after insert or update of body`, for a body that holds `#b-`: a comment any build writes that may
+cite a block is owed an index with the block grammar, which a build that predates the grammar does
+not give it. The trigger takes `SHARE ROW EXCLUSIVE` on `comments` alone, so a comment write waits
+behind it while a read does not. It touches no row; its census answers `0`.
+
+Migration `0124_asks_block_grammar_trigger` does the same for `asks`, `after insert or update of
+question`, for a question that holds `#b-`. Its trigger takes `SHARE ROW EXCLUSIVE` on `asks` alone,
+so an ask write waits behind it while a read does not. It touches no row; its census answers `0`.
+
+Migration `0125_messages_block_grammar_trigger` does the same for `messages`, `after insert or
+update of body`, for an issue message (`issue_key` set) whose body holds `#b-`; a direct message is
+indexed by nothing, so it owes nothing. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages`
+alone, so a message write waits behind it while a read does not. It touches no row; its census
+answers `0`.
+
+Migration `0126_block_grammar_seed` owes the same index to every comment, ask and issue message
+already stored whose text holds `#b-`, read with the three triggers' predicates. The triggers are
+live by then, so a write that lands while it runs is owed by its trigger, and a row a trigger has
+already written keeps its `enqueued_at`. It takes `ACCESS SHARE` on `comments`, `asks` and
+`messages`, which no write waits behind, and writes only `block_grammar_owed`. Its census answers
+`0`: the one table it writes is `0121`'s, which holds no row at deploy, and the rows it inserts are
+new work owed, not a rewrite.
+
+Migration `0127_asks_block_id_key` creates `block_id_key(id)`, the SHA-256 of a block id's UTF-8
+bytes, written to be immutable so an index can use it, and rebuilds `asks_block_id_unique`
+(`0018`) and `asks_anchor_block_id_idx` (`0023`) under their names over it. A B-tree entry holds
+at most 2704 bytes, and both indexes keyed the id itself, so an ask block or an ask anchored in a
+block whose incompressible id a browser's edit made longer failed its write, a settlement opening
+that ask included; under the 32-byte key every such write is written. `asks_block_id_unique`
+still keeps `(block_artifact_id, block_id)` unique under its name, and each index keeps the first
+column every read of it leads with, so the earlier release writes and reads through them as
+before. Each drop holds `asks` `ACCESS EXCLUSIVE` until the migration commits, so every read and
+write of an ask waits while the two indexes build over its rows. It refuses and rewrites no row:
+rows the old unique index held apart differ in their id, so they differ in its SHA-256. Its census
+answers `0`.
+
+Migration `0128_comments_anchor_block_id_key` rebuilds `comments_anchor_block_id_idx` (`0023`)
+over `0127`'s `block_id_key` the same way, so a comment anchored in a block whose id is any length
+is written. Its own migration, so its transaction holds `comments` alone: the drop holds it
+`ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds. It
+refuses and rewrites no row; its census answers `0`.
+
+Migration `0130_server_processes` creates two tables: `server_processes`, the registry of live
+server processes, and `server_build_announcements`, each build the fleet has announced as
+`server.started` (Running more than one process, above). It reads, locks and rewrites nothing that
+exists, and the release before it neither reads nor writes either table, so that release runs
+over the new schema unchanged and the census answers `0`.
+
+Migration `0131_dashboard_assets` creates `dashboard_builds`, `dashboard_assets` and
+`dashboard_build_assets`, where every server process publishes its dashboard build's assets at
+boot and from which it answers a page of another build that asks it for that build's chunks
+(`internal/dispatch/dashboard`). It creates tables and touches no row; its census answers `0`.
+The release before it never reads or writes these tables, so it serves beside `0131` unaffected
+while both run — its own pages are served from its own image, as before — and rolling Dispatch
+back past `0131` is an image rollback alone, with no schema to restore: the tables are left for
+the next release that carries them, whose boot prunes what no build still needs.
+
+Migration `0132_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, the holds a
 process keeps by renewing them (`duty.Hold`): each delivery intake holds one name per durable
 (Running more than one process, above), and the holder records its deliver subject as `token`.
 `expires_at` is always written from the database's `now()`, so a lapse is judged by one clock. It
@@ -1103,13 +1297,45 @@ out of every list and every count that build serves (`nodeLoaders`, `refs/graph.
 kinds it knows). The migration refuses to run when an ask or comment anchor carries a non-uuid
 `artifact_id`.
 
+Each block of a document is a node of the graph too (migration `0121`; `packages/envoy/AGENTS.md`,
+"References form one graph"). Its reference is the document's with `#b-` and the block's id,
+percent-encoded as `encodeBlockId` (`@legion/contracts`) writes it:
+`dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
+`dispatch://PROJECT/artifact/<slug>#b-<id>`. Text cites a block only while its id holds at most
+256 bytes decoded (`text.MaxBlockIDBytes`), and any node only while its target id, the id its
+edge is stored under (`text.TargetID`: an issue's key, a document's `<KEY or PROJECT>/<slug>`, a
+block's `<KEY or PROJECT>/<slug>#<id>`, an ask's, a comment's or a message's id), holds at most
+2048 bytes (`text.MaxTargetBytes`), since `refs` and `block_refs` hold it in B-tree keys and
+neither a slug nor an item id has a bound of its own: text citing past either is written with no
+edge. The bounds decide only what the graph indexes. Every write is taken whatever the length of
+a block id it names (a seeded spec, an upload, an `insert`, a rebuild, an accepted suggestion, a
+browser's edit); a block carrying an id past 256 bytes is no node, and the server logs a warning
+naming the document, the longest id's length and the bound, and writes the version. A route reads
+the reference it is given whatever its length (`text.ParseRef`): `?to=`, `?from=` and
+`GET /api/v1/block-links` read a node of any name, and a block whose id is past 256 bytes is
+`404 NOT_FOUND`, no node. An ask block and an anchor in a block are written under
+an id of any length (migrations `0127` and `0128`, Database migrations above). A mention written
+inside a block starts at the
+innermost block holding it, so `?to=` a cited node names that block, whose `document` is the
+citing document; a document's own read also lists the links at its blocks, each edge naming its
+block as `block`, and `?kind=part_of` on a document lists each of its current blocks. A block
+reference pinned to a version of its document, `#b-<id>@v<N>` with N at most
+9223372036854775807, reads the block as that version
+held it: the node's `pin` carries the block's text at `N` and says whether the block is
+`unchanged`, `changed` or `removed` since. `GET /api/v1/block-links?from=<document>&to=<document>`
+lists the links from the blocks of one document to the blocks of another. Text stored before the
+release, and text an earlier build writes during the roll, is indexed by the server's block-index
+reconciliation (lease `block-index`), with no command run.
+
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
 ```
 
 reparses every source and reconciles the index with the text (surviving edges keep their
-provenance, edges of deleted sources are removed) and prints
-`rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N`. It reads
+provenance, edges of deleted sources are removed), marks every document owed a block index, which
+the server's block-index reconciliation then indexes, and prints
+`rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N`,
+`blocks_owed` being the documents it marked. It reads
 `dispatch.server_url` from the envoy config the same way the server does and refuses an empty
 value: dashboard-URL mentions are recognised only against it, so an empty URL would drop them all.
 
@@ -1284,12 +1510,13 @@ then method. `envoy-dispatch routes` prints the same body from the table alone, 
 or listener and never a test hook; the docs site's HTTP API reference is generated from it. The
 table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
 or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
-/v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell. When
-`DISPATCH_ASSET_STORE_BUCKET` is configured, a missing local file under `/assets/` is read whole
-from the same key in the retained-assets bucket before Dispatch answers; it never reads
-`index.html` or a non-asset path from that bucket. An absent object remains
-`404 {"error":"not found"}` and any other store failure is a 502 with no cache header; without the
-setting every local asset miss remains the 404. The dashboard's
+/v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell. Every server
+process publishes its dashboard build's assets into the database at boot (Running more than one
+process, above), so a missing local file under `/assets/` is read whole from the database under
+the same key (`assets/<file>`) before Dispatch answers, through a cache of at most 64 MiB the
+process's requests share; it never reads `index.html` or a non-asset path from there. A path no
+build published remains `404 {"error":"not found"}` and any other read failure is a 502 with no
+cache header. The dashboard's
 pages (`index.html` and the shell served for a browser route) carry `Cache-Control: no-cache` and
 an `ETag` of their bytes, no `Last-Modified`, and its hashed `/assets` files
 `public, max-age=31536000, immutable`, so a browser keeps no page from another build.
@@ -1300,13 +1527,13 @@ Dispatch uses cookie identity through the sign-in pool.
 | Path | Method | Identity | Purpose |
 | --- | --- | --- | --- |
 | `/api/v1` | GET | none | List every `/api/v1` route with its auth and purpose. |
-| `/auth/start` | GET | none | Start Google sign-in at the sign-in issuer: the Cognito sign-in pool, or Google itself for `DISPATCH_SIGNIN_DOMAIN`, asking for offline access with `prompt=consent` and the domain as `hd`. `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
-| `/auth/callback` | GET | sign-in state | Exchange the issuer's code and sign in the person `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN` admits: under a group, named by the email in their pool username, anyone outside the group refused with a 403 page naming them; under a domain, named by the verified `email` of a Google account whose `hd` is the domain, anyone else refused with a 403 page giving the reason. Record the person and the refresh token (and, under a domain, the account's `sub`, ending the address's sessions when another account held it), issue the cookie. `409 SIGNIN_SUPERSEDED` and no cookie when, under a domain, another account signed in to the address between this sign-in's record and its cookie. |
+| `/auth/start` | GET | none | Start Google sign-in at the sign-in issuer: the Cognito sign-in pool, or Google itself for `DISPATCH_SIGNIN_DOMAIN`, asking for offline access with `prompt=consent` and the domain as `hd`, with the sign-in's state in the signed `dispatch_oauth_state` cookie. `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`; `503 SIGNIN_UNAVAILABLE`, and no cookie, while the issuer's discovery document has not been read. |
+| `/auth/callback` | GET | sign-in state | Exchange the issuer's code and sign in the person `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN` admits: under a group, named by the email in their pool username, anyone outside the group refused with a 403 page naming them; under a domain, named by the verified `email` of a Google account whose `hd` is the domain, anyone else refused with a 403 page giving the reason. Record the person and the refresh token (and, under a domain, the account's `sub`, ending the address's sessions when another account held it), issue the cookie. Any process holding a key of the set completes a sign-in another process started. `400` "invalid or expired state" when the state cookie is missing, does not verify, has lapsed or names another state; `503 SIGNIN_UNAVAILABLE` while this process has not read the issuer's discovery document; `409 SIGNIN_SUPERSEDED` and no cookie when, under a domain, another account signed in to the address between this sign-in's record and its cookie. |
 | `/auth/logout` | POST | cookie or trusted header | End the person's Dispatch sessions, forget their refresh token, and clear the session cookie. |
 | `/auth/whoami` | GET | cookie or trusted header | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
 | `/auth/_dev/signin` | GET | none; `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Sign in the person `login` names, lowercased, without the sign-in issuer: `302` to the sanitized `next` (default `/`) with the session cookie. `400 DEV_SIGNIN_INPUT` without `login`, `403 DEV_SIGNIN_FORBIDDEN` for a non-loopback peer or a request carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` or `Via`. Each mint logs at WARN with the email and the peer. Not mounted otherwise. |
 | `/api/github/rest/...` | GET | cookie or trusted header | Read GitHub as the GitHub App installation that covers the repository: a pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`), a commit's check runs (`repos/{o}/{r}/commits/{sha}/check-runs`) or a commit's workflow runs (`repos/{o}/{r}/actions/runs?head_sha={sha}`, the query being the full 40-hex `head_sha` and at most a numeric `per_page` and `page`, each once), the only reads the web app makes; the checks pill joins each check run to its workflow run for the workflow name and event, keeping the newest run of each check as GitHub's merge does and dropping the runs of an event GitHub does not evaluate for a pull request (only `push`, `pull_request`, `pull_request_review`, `pull_request_target`, `deployment` and `deployment_status` count). A workflow-runs answer of `200` is trimmed to `total_count` and, per run in GitHub's order, only `check_suite_id`, `event` and `name`, so a run's head commit (message, author), actor and repository never reach the browser; a body that does not decode is `502 GITHUB_UPSTREAM`, and any other status passes through unchanged. The pill needs the App's Actions: read, which the delivery reconcile already needs: without it `actions/runs` answers `403` and the pill disappears. Every person shares the App's credential, which reads far more of a repository than that, so any other method is `405 METHOD_NOT_ALLOWED`; any other path, a workflow-runs read with any other query, or a path under it (`actions/runs/{id}`, its jobs or logs) `404 GITHUB_PATH_REFUSED`; and a repository the App is not installed on, or no App key, `503 GITHUB_TOKEN_UNAVAILABLE`. |
-| `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`files`; null when it is not). A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. `files` is reported and never decides `ok` or the status: a bucket that stops answering is `200` with `files: false`, so a bucket outage fails uploads and downloads and nothing else, and a deploy check that wants the bucket asserts `files: true` itself. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). |
+| `/healthz` | GET | none | The readiness probe: `200` while this process can serve requests, which is while Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — and `ok` says the same. A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. It is not a liveness check: it fails while the database is unreachable, so a liveness probe on it would restart every server process during a database failover. Every other field is reported and never decides `ok` or the status, and a deploy check that needs one asserts it itself (`nats: true`, `files: true`, `signin: true`): `nats`, whether the server's publisher is connected to NATS (`null` with `DISPATCH_NATS_DISABLED=1`), so a bus outage is `200` with `nats: false` while the process serves and its outbox waits for the bus; the client pings every second and declares a connection lost at two pings outstanding, so a silently cut bus reads `false` within two to three seconds; `files`, whether the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`null` when it is not), so a bucket outage fails uploads and downloads and nothing else; `signin` and `service_tokens`, whether the sign-in issuer's and the service-account token issuer's discovery documents have been read (`false` before, `null` where that issuer is not configured). Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit this process's image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build); `fleet_commit`, the commit of the latest announcement that every live server process serves one build, the one `server.started` carries (`null` when there is none, or before this process's announcer has first read the table, and up to one announcer pass, five seconds, behind it); and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). |
 | `/api/v1/events` | GET | cookie, trusted header, or bearer | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every live document and wait for the settlements in flight; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/artifacts/{id}/_test/outside-schema` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Write the crafted malformed tree e2e uses; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
@@ -1328,11 +1555,13 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/me/agent-tokens/{id}` | DELETE | cookie or trusted header (human only) | Revoke a personal agent token. |
 | `/api/v1/users` | GET | cookie or trusted header (human only) | Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options. |
 | `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's owner by lowercase email, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
+| `/api/v1/dashboard/builds` | GET | cookie, trusted header, or bearer | Which dashboard builds are served: `{serving, live}`, `serving` the entry chunk (`/assets/index-*.js`) of the build this process serves (`""` when it serves none), `live` the distinct entry chunks of the builds the live server processes serve (the registry of live server processes joined to `dashboard_builds` on the build id), sorted. The dashboard offers "A new version is available" only when `live` holds exactly one entry and it is not the tab's own, so no tab is told to reload while a rolling update or a rollback still runs two builds. An older process answers `404`, which the dashboard reads as no new version. |
 | `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` against the process's one copy of the listener's `GET /v1/sessions`, stored in no table: that copy is at most 5 s old, one listener call refreshes it for every read that asks while it runs, and a listener that fails or does not answer within 2 s is asked again only after 5 s, every read in that window reading `unknown` at once. The status is `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only ([Search](#search)). |
 | `/api/v1/search/coverage` | GET | cookie, trusted header, or bearer | Meaning search's coverage, counted in one statement ([Search](#search)): `{identity, place, model, total, kinds}`, the configured embedder's identity, its place (`bedrock` or `azure`) and its model, all three null with no embedder; then, in `total` and for each kind in `kinds` (`issue`, `document`, `comment`, `ask`, `message`), `items` (the searchable ones, a text with nothing to embed left out), `current` (embedded at the item's current text by that identity), `failed` (dead and not current), `lacking` (the rest) and `oldest_lacking_seconds`, how long the longest-waiting lacking item has waited (null when none lacks). With no embedder nothing is current. |
-| `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
-| `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds, and a kind this build does not emit (a newer build's, during a release) has no edges and is listed in the top-level `unknown_kinds`; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_SINCE`; `404` for a node that does not exist. |
+| `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure; a reference to a block reaches the block's document while a current version holds the block. An `If-None-Match` value equal to the response ETag returns `304`. |
+| `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference, read whatever its length (`text.ParseRef`); `kind` filters a csv of edge kinds, and a kind this build does not emit (a newer build's, during a release) has no edges and is listed in the top-level `unknown_kinds`; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document); a document's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`. A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`; pinned to a version (`#b-<id>@v<N>`) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges. `400 INVALID_REFERENCE` / `INVALID_SINCE`; `404` for a node that does not exist, a block no current version holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at. |
+| `/api/v1/block-links?from=&to=` | GET | cookie, trusted header, or bearer | The links from blocks of the document `from` names to blocks of the document `to` names (an issue's spec or document, or a project's document; one document may be both), each reference read whatever its length: `{from, to, links}`, each link with its `kind`, both block nodes, and the `created_at` and `created_version` at which the source block first held it, newest first. A link is listed only while both blocks are current blocks of their documents. `400 INVALID_REFERENCE` when either is not a document reference; `404 NOT_FOUND` for a document that does not exist. |
 | `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. `repo` (`owner/name`) is the issue's own repository and must be mapped to its project: `400 INVALID_ISSUE` when it is not `owner/name`, `400 REPO_NOT_MAPPED` when it is not mapped. A title over 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after trimming) is `400 CAP_EXCEEDED` before the duplicate check. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`, and a spec whose markdown makes more than 65,536 elements (weighed as Element weights below lists) is `413 CAP_EXCEEDED`, naming the line that passes the limit; so is one whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements. |
 | `/api/v1/issues/{key}` | PATCH | cookie, trusted header, or bearer | Update an issue's `title`, `status`, `priority`, `labels` (or `labels_add`, which adds to the labels the issue holds when the write commits; not with `labels`), `route`, `external_links`, `parent`, `rank`, `assignee`, `components` or `repo` (`null` clears it); `AGENTS.md` gives each field's rules. A title is trimmed, and one over 1,000 characters is `400 CAP_EXCEEDED`, as on creation. `expected_sequence` makes the write conditional: `409 ISSUE_CHANGED` when the issue's last event is no longer that sequence. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. A quote mark carries the ask's id and who asked, which no rendering shows and every load of the document builds: the marks a document's comments, suggestions and asks hold on its text carry at most 1 MiB of ids and authors, and a quote anchor that would leave them past it and carrying more is `413 CAP_EXCEEDED`, naming the bound and both sizes. |
@@ -1351,8 +1580,8 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/comments/{id}/reject` | POST | cookie or trusted header | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
 | `/api/v1/issues/{key}/messages` | GET | cookie, trusted header, or bearer | List an issue's message threads: every root message, oldest first, unpaged, each with its delivery attempts and its replies. |
-| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. A `text/markdown` file is a document. Any other file's kind is read from its bytes, never from the part's declared `Content-Type`: it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image. A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |
-| `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact, its kind read as an issue upload's is. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |
+| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. A `text/markdown` file is a document. Any other file's kind is read from its bytes, never from the part's declared `Content-Type`: it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image. A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`. A name no artifact has yet is `400 INVALID_ARTIFACT`, naming the bound, when it, or the reference key `<owner>/<slug>` it gives the new artifact, is over 2692 bytes, the most a B-tree entry of `artifacts_ref_key_key` holds of incompressible text; an upload under an existing artifact's name, one stored longer included, is never refused for its length. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |
+| `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact, its kind read, and a new artifact's name held to 2692 bytes, as an issue upload's are. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |
 | `/api/v1/artifacts/{id}` | GET | cookie, trusted header, or bearer | Read an artifact, its versions, and incoming references. `{id}` must be a UUID. Every version on every artifact read and list (this route, the issue and project artifact lists, the issue read, the reference reads, and each version write's answer and event) carries `size`: the bytes it stores, a file's or an image's bytes or a document's markdown, read from the row's own length without rendering the document or loading its history. |
 | `/api/v1/artifacts/{id}/rebuild` | POST | cookie or trusted header (human only) | Rebuild a document only when its durable history cannot load (`409 DOCUMENT_UNLOADABLE` on its reads): deletes its document updates, checkpoints, and snapshots, then writes one fresh update from the latest saved version or optional `{markdown}`. A supplied markdown source that changes the document writes the next immutable version, emits `artifact.version`, and moves an open approval request to that version, where it waits on its agent, as every version does; an omitted source keeps the existing latest-version behavior. The rebuild, that version, its event and the move commit in one transaction, and every refusal comes before anything is written: a live room is `409 DOCUMENT_LIVE`; a healthy, non-resident document is `409 DOCUMENT_LOADS`; supplied markdown on a closed issue's document is `409 ISSUE_CLOSED`; supplied markdown held to a new document's limits - more than 65,536 elements, or stored as markdown longer than 1 MiB or making more than 65,536 elements - is `413 CAP_EXCEEDED`. The latest saved version rebuilds whatever it weighs, except a document whose tree is more items than ygo decodes in one update (1,048,576), which no document can hold and which is `413 CAP_EXCEEDED` naming the count, from either source. A refused or failed rebuild leaves the document unchanged. It answers the report, whose `source_version` is the version the rebuilt document holds: its latest saved version, or the version supplied markdown wrote. |
 | `/api/v1/artifacts/{id}/text` | GET | cookie, trusted header, or bearer | Read a live document's markdown. `{id}` must be a UUID. A stored tree outside the Proof schema is `409 DOC_SCHEMA`, a stored tree holding an element this build cannot read `409 DOC_NEWER_CONTENT`, and a stored history that cannot load `409 DOCUMENT_UNLOADABLE` (Document errors). |
@@ -1363,7 +1592,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | cookie, trusted header, or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | cookie, trusted header, or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | cookie, trusted header, or bearer | Read an unlinked document's events. |
-| `/api/v1/artifacts/{id}/references` | GET | cookie, trusted header, or bearer | Read an artifact's outgoing and incoming reference edges. |
+| `/api/v1/artifacts/{id}/references` | GET | cookie, trusted header, or bearer | Read an artifact's outgoing and incoming reference edges. A link a block of the artifact holds is outgoing from the artifact, a block target listed with its document as `artifact` while a current version holds the block; every item and document citing the artifact or one of its current blocks is listed once, a document as itself. |
 | `/api/v1/issues/{key}/artifacts/{slug}` | GET | cookie, trusted header, or bearer | Read an issue artifact and its incoming references. `{slug}` is resolved within `{key}`. |
 | `/api/v1/issues/{key}/artifacts/{slug}/text` | GET | cookie, trusted header, or bearer | Read an issue artifact's live document markdown. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions/{n}` | GET | cookie, trusted header, or bearer | Read an issue artifact version or download its blob, as `/api/v1/artifacts/{id}/versions/{n}` does. |

@@ -80,6 +80,17 @@ notification envelopes, and proves both the Go prompt text and the shared
 TypeScript renderer print the full direct message once, with no separate
 summary line repeating its first line.
 
+It also proves the three answers a sender gets when a send cannot be delivered:
+a send to a session the store does not hold is refused `404 {"error":"no live
+session <id>"}`; each send leaves exactly one `listener send` record in
+`listener.log`, INFO when accepted and WARN when refused, carrying
+`target_session`, `event_id`, `source`, `source_session`, `payload_summary`,
+`outcome` and `status`; and a send whose bus is gone is refused `503` with
+`{"error":"envoy: the message bus did not answer: …"}` and `Retry-After: 1`
+inside the sending client's five-second deadline, both over curl and through
+`createEnvoyClient`, which raises an `EnvoyApiError` rather than timing out. The
+bus-down step runs last, because it ends the run's NATS.
+
 ```bash
 packages/envoy/scripts/e2e-local.sh
 ```
@@ -90,6 +101,12 @@ The run writes its reusable evidence to `packages/envoy/out/e2e/`:
 - `session-prompts.jsonl` — raw fake-session `prompt_async` requests
 - `rendered-ts.txt` — `renderInbound` output for every envelope
 - `rendered-go.txt` — the corresponding Go `Deliverer.Text` output
+- `listener.log` — the listener's own log, including one record per send and publish
+- `absent-session-response.json` — the 404 body naming the session nothing registered
+- `bus-down-send-response.json`, `bus-down-send-headers.txt`,
+  `bus-down-send-result.txt` — the bus-down 503 body, its headers, and its
+  status and `time_total`
+- `bus-down-client-error.json` — the `EnvoyApiError` the real client raised for it
 
 Use `E2E_NATS_PORT`, `E2E_PORT`, or `E2E_SESSION_PORT` to avoid local port
 collisions. The NATS server is a process of this checkout's own build, stopped
@@ -195,8 +212,8 @@ It downloads the dump under `DISPATCH_CORPUS_DIR` (default `$TMPDIR` or `/tmp`) 
 it is restored, whether or not the restore succeeded. `DISPATCH_CORPUS_CONTAINER` (default
 `dispatch-corpus-pg`), `DISPATCH_CORPUS_PORT` (default `55433`, on `127.0.0.1`) and
 `DISPATCH_CORPUS_DATABASE` (default `dispatch_corpus`) name the copy. Run again while the container
-holds the database, it prints the URL and restores nothing; `docker rm -f <container>` deletes the
-copy.
+holds the database, it prints the URL and restores nothing; `docker rm -f -v <container>` deletes the
+copy and its data volume.
 
 `search-smoke.sh` prints what a searcher sees for each query in a file
 (`search-smoke-queries.txt` is one): it starts `envoy-dispatch` against the copy, built from this

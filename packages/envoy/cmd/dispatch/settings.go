@@ -48,7 +48,7 @@ var settings = []setting{
 	{Name: "DISPATCH_IDENTITY", Default: "`cookie`", Required: "no",
 		Description: "How a browser request names its person: `cookie` (Google sign-in, through a Cognito sign-in pool or with Google directly, then a signed session cookie) or `header:<Header-Name>` (tests and local harnesses only: the header names the person by email)."},
 	{Name: "DISPATCH_SIGNIN_ISSUER", Required: "when `DISPATCH_IDENTITY` is `cookie` and `DISPATCH_DEV_SIGNIN` is unset",
-		Description: "OpenID Connect issuer people sign in through: a Cognito sign-in pool, with `DISPATCH_SIGNIN_GROUP`, or Google itself (`https://accounts.google.com`), with `DISPATCH_SIGNIN_DOMAIN`; Dispatch reads its endpoints from the issuer's discovery document at startup. Google sign-in takes the issuer, client ID, client secret and exactly one of the group or the domain, or none of them, and header identity and dev sign-in refuse every one of them."},
+		Description: "OpenID Connect issuer people sign in through: a Cognito sign-in pool, with `DISPATCH_SIGNIN_GROUP`, or Google itself (`https://accounts.google.com`), with `DISPATCH_SIGNIN_DOMAIN`; Dispatch reads its endpoints from the issuer's discovery document in the background from startup, and until then answers a sign-in `503 SIGNIN_UNAVAILABLE`. Google sign-in takes the issuer, client ID, client secret and exactly one of the group or the domain, or none of them, and header identity and dev sign-in refuse every one of them."},
 	{Name: "DISPATCH_SIGNIN_CLIENT_ID", Required: "when `DISPATCH_IDENTITY` is `cookie` and `DISPATCH_DEV_SIGNIN` is unset",
 		Description: "Client ID of Dispatch's confidential client at the issuer: the sign-in pool's app client, or a Google OAuth web client."},
 	{Name: "DISPATCH_SIGNIN_CLIENT_SECRET", Required: "when `DISPATCH_IDENTITY` is `cookie` and `DISPATCH_DEV_SIGNIN` is unset",
@@ -100,7 +100,7 @@ var settings = []setting{
 	{Name: "DISPATCH_GITHUB_API_BASE", Default: "`https://api.github.com`", Required: "no",
 		Description: "GitHub API origin the App calls; tests point it at a fake. `redeliver-webhooks` reads it too."},
 	{Name: "DISPATCH_SIGNING_KEY", Default: "a key kept in `~/.local/share/dispatch/signing-key`, created on first start", Required: "no",
-		Description: "HMAC key that signs session cookies and seals the refresh tokens Dispatch stores; changing it signs everyone out."},
+		Description: "One or more HMAC keys separated by whitespace, which sign session cookies and seal the refresh tokens Dispatch stores: the first signs and seals, and every one verifies a cookie and opens a seal. Every server process takes the same keys, and one whose keys a live server process does not share refuses to start. Dropping the key a cookie or seal was made under signs its person out; to rotate, add the new key second, then move it first, then remove the old key no sooner than 30 days later."},
 	{Name: "DISPATCH_INSECURE_COOKIE", Required: "no",
 		Description: "Any value drops the `Secure` attribute from Dispatch's cookies, for browsers that reach it over plain http."},
 	{Name: "DISPATCH_OIDC_ISSUER", Required: "when `DISPATCH_OIDC_AUDIENCE` is set",
@@ -129,14 +129,16 @@ var settings = []setting{
 		Description: "Path of the federated token (a Kubernetes projected service-account token) Dispatch exchanges with Entra for an Azure access token; re-read on every exchange, since the token rotates."},
 	{Name: "DISPATCH_WEB_DIST", Default: "the `packages/dispatch/web/dist` directory found from the binary's location", Required: "no",
 		Description: "Directory of the built dashboard the server serves."},
-	{Name: "DISPATCH_ASSET_STORE_BUCKET", Required: "no",
-		Description: "Bucket holding immutable assets from prior dashboard builds. Unset, Dispatch serves only its local dashboard files."},
 	{Name: "DISPATCH_DEV_SIGNIN", Required: "no",
 		Description: "Set to `1` on a loopback-only local server to sign anyone in by email at `/auth/_dev/signin` without the sign-in issuer; refused alongside any `DISPATCH_SIGNIN_*` setting, `DISPATCH_SIGNIN_DOMAIN` included."},
+	{Name: "DISPATCH_DEV_SIGNIN_SHARED_KEY", Default: "a key generated for each process", Required: "no",
+		Description: "With `DISPATCH_DEV_SIGNIN=1`, a secret every process of one local harness is given, so a session cookie one of them mints is accepted by the others; each signs with HMAC-SHA256 of it under a dev-only label, never with the value itself, so no value placed here signs a cookie a production server accepts. Refused without `DISPATCH_DEV_SIGNIN=1`."},
 	{Name: "DISPATCH_TEST_HOOKS", Required: "no",
 		Description: "Set to `1` to mount the end-to-end tests' hook routes; never in a real deployment."},
 	{Name: "DISPATCH_TEST_SETTLE_DELAY", Default: "`2s`", Required: "no",
 		Description: "Document settlement delay for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
+	{Name: "DISPATCH_TEST_EDIT_NOTICE_QUIET", Default: "`30s`", Required: "no",
+		Description: "How long a document stays quiet after a person's last settled version before its `artifact.human_edited` notice goes, for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // removedSettings are the variables a release stopped reading, each with what replaced it. None is
@@ -149,6 +151,7 @@ var removedSettings = []struct{ Name, Replacement string }{
 	{"COHERE_API_KEY", "meaning search (LEGION-549) calls Cohere Embed v4 through AWS Bedrock (the AWS SDK's default credential chain) or Azure AI Foundry (the DISPATCH_AZURE_* settings), chosen by DISPATCH_EMBEDDER, never with a Cohere API key"},
 	{"DISPATCH_AGENT_SECRETS_TOKEN", noSharedBrokerBearer},
 	{"DISPATCH_AGENT_SECRETS_TOKEN_FILE", noSharedBrokerBearer},
+	{"DISPATCH_ASSET_STORE_BUCKET", "every server process now keeps its build's dashboard assets in Dispatch's database"},
 }
 
 // noSharedBrokerBearer is why the secrets broker's shared bearer and its file are gone: the
