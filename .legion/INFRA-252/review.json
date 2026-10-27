@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-252",
+  "completed": "2026-10-27T06:26:00Z",
+  "round": 11,
+  "scope": "Five forward merges of main (8f2a161d, fb434588, c2fefc33, f95c4f77, 5851a336) since the approval at 8f1ce629; the fingerprint changed (3d830fce… to d555033a…), so a full round on the merged result, judged for correctness.",
+  "reviewedCodeHead": "5851a336da30779f25df6deeea9a4d50f6729348",
+  "decision": "changes_requested",
+  "critical": 1,
+  "important": 1,
+  "minor": 0,
+  "mergeResolution": "All five resolutions sound: liveRoots and TreeLive count a root waiting on a person as live, so a give-back orphans no child and frees no held root; waveRelease still adopts before any Dispatch write and #2290's recording finds an adopted root as a member; #2293's boot path records a live tree's child as a member and leaves held roots to their chain; every issue read selects issueColumns (ancestry, handed_over_from); migrations.All lists 57 awaiting_person, 58 catch_up_cursor, 59 issue_ancestry; migration_0059_test.go keeps every seed and assertion; the docs/solutions learning names 0059 and version 58.",
+  "keyFindings": [
+    {
+      "severity": "critical",
+      "file": "packages/daemon/internal/daemon",
+      "description": "The required check `test` is red at 5851a336 (Tests run 40455983324, job 122029290487): the daemon package hit Go's 10-minute package timeout (`panic: test timed out after 10m0s`, `FAIL github.com/sjawhar/legion/daemon/internal/daemon 600.043s`; running at the alarm: TestThePassFollowsAHandoffPushSoAnApprovalBeneathItStands, 0s). Main's last two green runs took 401s and 530s for that package and this branch at c78e5a51 took 362s, so the merged package sits near the limit. Rerun once; if it times out again, the package's time must be brought under the limit in this pull request."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/admit/admit.go",
+      "description": "Promotion (promoteHolds, the PutIssue at :1147) keeps the Dispatch chain a root queued with. Since #2273, line() takes an answered awaiting_person root and Waiting applies the ancestry hold to it, so an answered root whose leftover chain names a key that has since become live is dropped from the line until the root's next observation (normally the echo of promotion's in_progress write) clears the chain. Reproduced on Waiting with an answered root carrying Ancestry [LEGION-1] and LEGION-1 in the line: Waiting returns [LEGION-1] only. This contradicts Waiting's own doc ('a root that ran ... records no chain, so the hold never takes an answered root out of the line'). Fix: candidate.Ancestry = nil before that PutIssue; the root has a tree lifecycle from here on, so this is what workflow.Engine.Ancestry would compute."
+    }
+  ],
+  "thermonuclear": "thermonuclear-deep-review at cdd8be7f (code 5851a336): APPROVE, ruling the stale chain out as needing the echo never to apply. thermonuclear-code-quality: CHANGES on it, with the Waiting reproduction. The reviewer takes it as a finding: it changes which root is in the line, contradicts the merged doc, and its fix is one line. The deep run's store, record and api suites passed and admit and workflow passed on re-run. Provider not verified.",
+  "ci": "At 5851a336, read 2026-10-27T06:24Z: Tests 40455983324 test failure (daemon package timeout), typecheck success, lint in progress; PR Title 40456546573 success; Docs and Worker Image success. Compare 5851a336...cdd8be7f touches only .legion/. GitHub MERGEABLE; main 448a4100 unchanged since the merge."
+}
