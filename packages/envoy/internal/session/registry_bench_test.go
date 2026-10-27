@@ -19,9 +19,12 @@ var registrySizes = []int{400, 1000, 3000}
 // involved. live lists the ids that have not expired, all lists every cached id, and gone is one
 // id that has only a last-seen record.
 //
-// On today's code the first read (Get, List, LastSeen) prunes the expired tenth into lastSeen, so
-// only that read pays for removing them; every later read still walks the whole cache to look for
-// more. Each sub-benchmark builds its own registry, so each starts from this same state.
+// On code where a read prunes, the first read (Get, List, LastSeen) pays for moving the expired
+// tenth into lastSeen, and every later read still walks the whole cache to look for more. Where
+// entries expire on a timer, no read removes anything, and these entries, written into the struct
+// rather than through a write, have no deadline scheduled, so the expired tenth stays in the cache
+// and reads only skip it. Each sub-benchmark builds its own registry, so each starts from this same
+// state.
 func benchRegistry(n int) (r *SessionRegistry, live, all []string, gone string) {
 	now := time.Now()
 	r = &SessionRegistry{

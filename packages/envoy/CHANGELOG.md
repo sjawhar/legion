@@ -1411,6 +1411,25 @@
 
 ### Fixed
 
+- A listener's NATS reconnect, and a self-health rebuild of a cache watcher, no longer read the
+  interest, session and CI buckets again in full. Each `Rewatch` now resumes after the last
+  revision its cache applied and delivers only what was written since, and its
+  `<cache> cache warm-up` line says `outcome: "resumed"`, with `entries` and `delete_markers`
+  counting what was written since. A listener start still reads every bucket in full, and so does
+  a rewatch onto a recreated bucket, after a scan that did not complete, or onto a stream whose
+  last sequence is below the last revision applied. A resume sees what a full read of the same
+  bucket saw: a delete marker purged, or a value `MaxAge` expired, while the watcher was away
+  leaves nothing to deliver either way.
+- Session-cache reads no longer queue behind one another, and an interest reaper pass no longer
+  holds up subscribes. Every read of a listener's session cache (`GET /v1/sessions`, a delivery's
+  liveness check, the `envoy_active_sessions` gauge) took the cache's exclusive lock and walked
+  every cached session to remove the expired ones, and the interest reaper checked each session's
+  liveness while holding the interest registry's lock, so each subscribe waited out the whole
+  pass. Reads now take a shared lock and change nothing; an expired session leaves the cache at
+  its deadline, on a timer, and `last_seen` answers the same before and after. The reaper checks
+  liveness with no interest lock held, re-checks each candidate and deletes it only at the
+  revision it checked, so an interest written during the pass is kept. Each `reaper cycle` line
+  now carries `elapsed_ms`.
 - A Dispatch page in Firefox now shows what changed while its live event stream was reconnecting,
   such as a session's answer to a model switch, without waiting for the stream's heartbeat.
   Firefox opened the stream only once its first byte arrived, and a stream with no backlog and no

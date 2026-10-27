@@ -44,6 +44,14 @@ Agent messages  --/       |
 ## Listener API
 
 All `/v1/*` endpoints answer 503 until NATS is connected and the interest and session caches are warm; they do not wait for the durable consumer.
+A listener's caches follow their buckets through watchers (`internal/kvwatch`): the interest and
+session buckets, and the CI bucket on a listener that mounts the GitHub webhook route. A start
+reads each bucket in full. A rewatch, after a NATS reconnect or a self-health rebuild, resumes
+after the last revision its cache applied, so it delivers only what was written since; it reads in
+full again when it cannot resume (a recreated bucket, or a scan that did not complete). JetStream
+delivers no event when the session bucket's 5m `MaxAge` expires a key, so the session cache gives
+each entry a deadline one TTL after its write: a read reports an entry past it as absent and
+changes nothing, and a timer removes the entry at that deadline.
 Every `/v1` request with a body must set `Content-Type: application/json` (parameters such as
 `charset=utf-8` are accepted). The listener returns a JSON 415 error otherwise. Webhook routes
 retain their signature and content handling.

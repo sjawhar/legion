@@ -42,8 +42,11 @@ machine's role lane.
   that does not answer takes nothing. A plain `Get` stays right for a send to a missing target,
   which refuses and lets its caller retry.
   The interest reaper (`Registry.Reap`, `internal/store/kv.go`) is the one exception kept: it still
-  deletes an interest on a cache miss. It checks liveness while holding the interest registry's
-  lock, so a bucket read there would block every interest write behind it. It also deletes only an
+  deletes an interest on a cache miss. Its liveness check (`isAlive`, the session cache's `Get`)
+  now runs with no interest lock held: a pass copies the cached interests under the read lock and
+  releases it, then re-checks each candidate and deletes it only at the revision it checked, so a
+  write to that interest that lands during the pass keeps it. A bucket read there would cost one KV
+  round trip per candidate on every pass. It also deletes only an
   interest whose own timestamp is more than 10 minutes old, so a session registered a moment ago is
   never one it reaches.
 - **Don't fix it by making `SessionRegistry.Get` fall back to the bucket.** Fan-out checks the
