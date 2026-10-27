@@ -712,3 +712,5 @@ func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin) m
 		policy.KindGoogleLogin: googleLogin.Mint,
 	}
 }
+
+// scratch INFRA-520 broker-multiprocess
