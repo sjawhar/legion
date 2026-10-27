@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-591",
+  "completed": "2026-10-27T04:40:13Z",
+  "plan": "dispatch://INFRA-591/artifact/plan-md",
+  "summary": "Remove the database-wide advisory lock from events.Broker.Append (packages/envoy/internal/dispatch/events/broker.go:85); each write keeps only its owner row lock, so one issue's events keep their order and different issues never wait. Every reader that pages events by a global id cursor (SSE handler and Last-Event-ID resume, event stream relay, delivery hub catch-up, GET /references?since=, and INFRA-607's planned sweep) reads only up to a safe horizon from a new events.Horizon: an observation is one statement (max(id), pg_current_snapshot(), the observer's own xid) committed with synchronous_commit off, and it is safe once a later snapshot's xmin is above that xid. Readers keep id order, so no client cursor changes.",
+  "tasks": [
+    "1. events/horizon.go + tests: snapshot parser, observation, safety check xmin(S') > X, singleflight, bounded pending list, Reset, rate-limited stall warning naming the oldest running backend below X.",
+    "2. events/broker.go: delete commitOrderAdvisoryLock; pg_current_xact_id() folded into lockEventOwner (default branch for ownerless events) so the xid exists before nextval; no per-session lock (ownerless appends follow their own row locks; confirm at state.go:425, messages.go:174, message_delivery.go:242,412,746,868, broadcasts.go:530); doc comments; events_id_seq cache-1 test.",
+    "3. api/event_stream_relay.go: reads capped at H, cursor on last existing row <= H with its created_at, start from first safe H, reset clears the horizon, pending re-read backoff 10 ms doubling to 250 ms, one mutex across publish+advance and subscribe+read.",
+    "4. api/events.go: subscribe returns the relay's published cursor P atomically; cold since = P; since > max(id) is a reset; catch-up (since, P]; live loop sends id > max(since, P); sentDuringCatchup removed; readEventsAfterID takes an upper bound.",
+    "5. api/delivery_live_hub_intake.go + delivery_live_events.go: start and catch-up capped at H, pending re-read via wakeEvents, reset clears horizon; receive unchanged (comment fixed). Shrinks to nothing if INFRA-606 merges first (hub on relay feed).",
+    "6. api/references.go + refs/graph.go: source_seq <= H when since is given; route docs (routes_table.go:95, cmd/dispatch/AGENTS.md:480, README.md:1222).",
+    "7. api/server.go: one events.Horizon per process.",
+    "8. Rewrite lock-choreographed tests: api/server_test.go:2195-2290 and 2341-2354, api/repo_projects_race_test.go:154-160, api/copy_lock_order_test.go model, api/event_insert_guard_test.go justification, comment mentions in upload_lock_test.go:70-79 and docs/copied_asks_test.go:1123-1124.",
+    "9. Comments citing the lock: docs/copied_asks.go, docs/service.go:1638-1642, docs/persistence.go:249-251, docs/approval_review.go:59-60, api/replies.go:195-198, duty/exclusive.go:23-24, events/stream.go:20-26, relay, hub.",
+    "10. Docs: .dispatch/architecture/dispatch-events.md (no 'global advisory lock'; names the horizon rule, costs, primary-only), packages/envoy/AGENTS.md (1768-1769, 1803-1815, 1942, 423-424), packages/envoy/CHANGELOG.md [Unreleased].",
+    "11. Measurements (plan.md section 6.2) before (merge base) and after (PR head) at factor 1 and 2, attached to dispatch://INFRA-591 and in the PR body."
+  ],
+  "acceptance": [
+    {
+      "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
+      "surface": "Dispatch store against a real Postgres 16, and the load reproduction's lock samplers",
+      "check": "T1 (tx A appends on issue X and stays open; tx B appends on issue Y and commits within 1 s; storetest.CountLockWaits = 0; fails on main). Load run: general ungranted-lock sampler shows no waiter on a lock held by a write to another issue; the commit-order lock probe reads 0 after. NOTIFY commit lock measured and reported (decision D1)."
+    },
+    {
+      "criterion": "A reader resuming from a cursor never misses an event that commits later with a lower id; a test commits two writes out of id order and a resuming reader gets both in a defined order.",
+      "surface": "GET /api/v1/events with Last-Event-ID on a test server and on a local Dispatch; events.Horizon",
+      "check": "T3 (A lower id open, B higher committed: horizon stays below A, stream sends nothing past it; after A commits the open stream and a fresh resume get A then B), T3b (xid at or above xmax), smoke in plan.md 6.1 with a negative control on the base build."
+    },
+    {
+      "criterion": "Every consumer of the event stream keeps the order it relies on; the plan lists each and the test covers each.",
+      "surface": "Each consumer's own path: SSE handler, relay (two processes), delivery hub catch-up and receive, references since, outbox per-issue NATS order (the daemon's fence input), per-owner readers",
+      "check": "Consumer table in plan.md 2.3; tests T2 (per-owner), T3/T4 (SSE), T5 (relay across two processes and reset), T6 (hub), T7 (references), T8 (outbox one issue's events in seq order)."
+    },
+    {
+      "criterion": "Before and after on the committed load reproduction at tonight's step and twice it: lock hold samples, committed vs offered, write latency p50/p99, delivery latency from the write's arrival.",
+      "surface": "INFRA-589 harness (main if merged, else archive dispatch://INFRA-589/artifact/repro-harness-tar-gz), same pod, Postgres 16, 1 ms proxy",
+      "check": "./run-step.sh before-1x 1, before-2x 2, after-1x 1, after-2x 2, then analyze.py; pass at 1x after: no cross-issue lock waiter, committed/offered >= 0.99, SSE frame p99 <= 1 s; before must reproduce the knee. Tables attached to the issue and the PR body."
+    },
+    {
+      "criterion": ".dispatch/architecture/dispatch-events.md says what is now true.",
+      "surface": "The architecture doc",
+      "check": "The sentence about ordering commits with a global advisory lock is gone; the doc names the horizon rule, the writer invariants, costs and the primary-only constraint; reviewer reads it against the code."
+    }
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the proof rules, push, PR body (references/pr-body.md) and the identity check before each push.",
+      "ce-simplify-code: the simplify pass on the settled diff that references/pr-body.md asks of the implementer.",
+      "dispatch: attaching the before/after tables to dispatch://INFRA-591 as an artifact.",
+      "envoy: settling merge-order details with the planners or implementers of INFRA-606, INFRA-607, INFRA-592, INFRA-590 and INFRA-589, which touch the same readers or the harness."
+    ],
+    "test": [
+      "legion-worker: re-run each proof at the head that merges, with its negative control, and the e2e/SSE scenario check named in plan.md section 11.",
+      "dispatch: attaching the re-run tables and smoke output to dispatch://INFRA-591."
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md and references/review-threads.md for the review, and the plan's consumer table (plan.md 2.3) as the checklist for ordering and horizon correctness."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: one snapshot's xip misses transactions with xid at or above its xmax, so 'H = A when xip is empty' can skip a row.",
+        "answer": "Observation adds the observer's own xid X (assigned after the snapshot); safe once a later snapshot's xmin > X. Test T3b scripts the counterexample."
+      },
+      {
+        "finding": "F2: cold since = relay cursor races with a page the relay published before advancing.",
+        "answer": "Relay holds one mutex across publish+advance and subscribe+read; SSE uses the cursor returned with the subscription. Test T4. Agreed with INFRA-606, which implements the same rule."
+      },
+      {
+        "finding": "F3: horizon valid only on the primary.",
+        "answer": "Primary-only constraint written in the architecture doc and sent to the architect for INFRA-63."
+      },
+      {
+        "finding": "F4: a per-session advisory lock creates deadlock cycles (accept path, pending delivery, broadcasts).",
+        "answer": "No per-session lock. Non-conflicting transactions have no defined order; every ownerless append follows its own row lock; the implementer confirms each site and documents it in Append."
+      },
+      {
+        "finding": "F5: mixed-version deploy during a rolling update.",
+        "answer": "Production runs one replica with Recreate (agent-infra dispatch/Pulumi.prod.yaml; envoy/infra/gcp/dispatch.go:372-386); decision D2 to the architect: ship before INFRA-63's replicas or roll this release with Recreate."
+      },
+      {
+        "finding": "F6: liveness: H waits on every open writer cluster-wide; start-up blocks; tests share the cluster.",
+        "answer": "Costs stated; rate-limited stall warning names the blocking backend; start waits on ctx; tests keep second-scale deadlines and short holds."
+      },
+      {
+        "finding": "F7: reset must reset the horizon and cursors must sit on a row at or below H.",
+        "answer": "Horizon.Reset on detected reset; relay and hub cursors on the last existing row <= H with its created_at."
+      },
+      {
+        "finding": "F8: writer invariant guard, cache-1 check, source for xid assignment.",
+        "answer": "pg_current_xact_id() made explicit in lockEventOwner (no reliance on the row lock's side effect); cache-1 test in T2; insert-guard test justification rewritten."
+      },
+      {
+        "finding": "F9: moving the notify out of the transaction loses wakes and misses consumers.",
+        "answer": "Not moved in this plan; trigger 0107 stays; waits on the NOTIFY commit lock are measured; decision D1 to the architect."
+      },
+      {
+        "finding": "F10: references since is stateless.",
+        "answer": "Capped at H from the per-process events.Horizon; route docs say a just-written mention appears once H passes it."
+      },
+      {
+        "finding": "F11: write advice inside the transaction (API-2's other half).",
+        "answer": "Not required by the spec; named to the architect as D3."
+      },
+      {
+        "finding": "F12: acceptance line 1 names no check.",
+        "answer": "T1 plus the general ungranted-lock sampler on the load run."
+      },
+      {
+        "finding": "F13: acceptance line 4 has no thresholds and the harness does not see SSE latency.",
+        "answer": "Pass thresholds set in plan.md 6.2; SSE frame timing and general sampler added to the harness (in INFRA-589's committed harness if merged, else a patch attached and sent to INFRA-589)."
+      },
+      {
+        "finding": "F14: 'the test covers each' includes the daemon fence and misses SSE resume, hub receive, references.",
+        "answer": "Consumer table lists them all; T8 stands for the daemon fence on the Dispatch side."
+      },
+      {
+        "finding": "F15: doc acceptance needs a mechanical part.",
+        "answer": "Check that the global-advisory-lock sentence is gone and the horizon is named."
+      },
+      {
+        "finding": "F16: moving NOTIFY is not required on the spec's own framing; ask the architect.",
+        "answer": "Done: D1 sent with measurement plan; recorded as a spec departure pending the architect."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Acceptance line 1: 'a write holds no lock shared with writes to other issues'. Read literally, this includes Postgres's NOTIFY commit lock (async.c PreCommit_Notify, LockSharedObject on database 0, held through commit), which every event write takes through trigger 0107, and every document append and delivery-change write takes too.",
+      "plan": "Removes the advisory lock and every lock held from the append to commit across issues; keeps trigger 0107 and measures waits on the NOTIFY commit lock on the load run; sends the decision (D1) to the architect, recommending its own child covering all three notifies.",
+      "evidence": "Postgres REL_16_STABLE src/backend/commands/async.c lines 939-956; store/migrations/0107_events_notify.up.sql; docs/persistence.go:238-243 and docs/stale_room.go:27-51 (INFRA-556's lane); migration 0100; INFRA-607 and INFRA-590 plan to wake on dispatch_events.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "The global serialization is gone: a write holds no lock shared with writes to other issues (a per-issue order, if needed, is kept per issue)."
+        ],
+        "scope": "Acceptance line 1 is checked for locks held during the write transaction; the commit-time NOTIFY lock is measured, not removed, unless the architect directs otherwise."
+      }
+    }
+  ]
+}
