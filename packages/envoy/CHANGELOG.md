@@ -15,15 +15,19 @@
   with delivery latency from the write's arrival and from its commit, write latency by kind,
   process CPU and memory, the commit-order lock's holds and waiters, every ungranted Postgres lock
   with its waiter's and first blocker's statements, the dashboard streams' frame latency and order,
-  transaction ids per second, and latency by route.
-  `run-series.sh` runs the six steps from 0.25x to 10x into one `TABLES.md`. Every endpoint comes
-  from the stack's own `stack.json`, and a step checks that NATS, Dispatch and the listener hold
-  the stack's name and random tokens before its first write, so it refuses the pod's live listener
-  and production. One run at a time holds a `LOADTEST_ROOT`: a second `run-step.sh`,
-  `run-series.sh` or stack command on it is refused, naming the run that holds it. A step in which
-  Dispatch or another stack process exits fails, naming the process, and its row carries a mark;
-  `meta.json` records how busy the box was just before the step. `packages/envoy/loadtest/README.md`
-  says how to run it, what every column means and how the stack differs from production.
+  transaction ids per second, and latency by route. `run-series.sh` runs the six steps from 0.25x
+  to 10x on one build into one `TABLES.md`. Every endpoint comes from the stack's own
+  `stack.json`, and a step checks that NATS, Dispatch and the listener hold the stack's name and
+  random tokens before its first write, so it refuses the pod's live listener and production; a
+  run aimed at another stack with `-allow-foreign` must name every endpoint and token. Each run
+  marks its writes with its own random number, so it counts only its own commits. One run at a
+  time holds a `LOADTEST_ROOT`: `run-step.sh`, `run-series.sh`, and `stack.sh setup`, `start`,
+  `seed`, `reset` and `stop` on a root another run holds are refused, naming the holder, and a
+  series' running step keeps the root if the series process dies. A step in which Dispatch or
+  another stack process exits fails, naming the process, and its row carries a mark; a lock
+  probe whose reads fail says so in its table; `meta.json` records how busy the box was just
+  before the step. `packages/envoy/loadtest/README.md` says how to run it, what every column
+  means and how the stack differs from production.
 - A person's browser edit of a document reaches the agent sessions that wrote it. Once the
   document has been quiet for 30 seconds after a person's last settled version, Dispatch appends
   one `artifact.human_edited` event: the person who edited last is its actor, and its payload
