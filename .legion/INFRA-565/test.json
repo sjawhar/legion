@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-565",
+  "completed": "2026-10-27T09:24:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's command in the tester lane of /legion/harness (ports 28777/29021-29024, database dispatch_infra565_tester) at 08952b8c: build:web, then playwright typed-block-content-rule.e2e.ts editor-paste.e2e.ts ask-blocks.e2e.ts --project chromium -> 148 passed (11.9m). Re-ran its negative control independently: the same spec copied into the b08a56bc tree (/legion/scratch/tmp/infra565-base, changed files byte-equal to git show b08a56bc), SPA rebuilt -> 2 failed, getByText(':::ask{#a1}') and getByText('Q?') not found, page snapshot editor holds only 'paragraph: Intro text.' and an empty paragraph."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A1: pasting :::ask holding a heading into a document in the live editor keeps every word of it",
+      "surface": "Dispatch document editor in Chromium against the real Go Dispatch server and Postgres 17 + pgvector (issue-pod harness, tester lane)",
+      "command": "cd packages/dispatch && (LEGION_ROLE=tester source /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts typed-block-content-rule.e2e.ts editor-paste.e2e.ts ask-blocks.e2e.ts --project chromium)",
+      "observed": "148 passed (11.9m); both typed-block-content-rule rows pass (editor shows ':::ask{#a1}', heading 'Heading words', ':::'; stored markdown exactly 'Intro text.\\n\\n\\\\:::ask{#a1}\\n\\n# Heading words\\n\\n:::\\n'; open_asks []; no 'Cannot create node').",
+      "headSha": "08952b8cf2dab419a11bdd6c9945b72087f9ab01",
+      "negativeControl": "Same spec in a b08a56bc tree, SPA rebuilt, same lane: 2 failed; the editor after the paste holds only 'Intro text.' and an empty paragraph."
+    },
+    {
+      "criterion": "A1 breakage attempts: the drawn block keeps every word wherever and however it is pasted, and stays text for other readers and after a reload",
+      "surface": "Dispatch document editor in Chromium, real Go server and Postgres (throwaway spec /legion/scratch/tmp/infra565-tester/zz-tester-probe.e2e.ts, removed from the tree)",
+      "command": "bunx playwright test --config e2e/playwright.config.ts zz-tester-probe.e2e.ts --project chromium (tester lane)",
+      "observed": "10 probes, every pasted word kept, 0 'Cannot create node', 0 page errors: into a valid ask's question -> joins the question as text ('Which here?:::ask{#a1} Heading words :::'), ask q1 still the only ask; after a valid ask's last option -> drawn after the ask; into a table cell -> joins the cell text; after a callout's text -> drawn after the callout; mid paragraph -> 'Alpha:::ask{#a1}' / heading / '::: beta.' stored with the closing line escaped; CRLF and leading U+FEFF clipboards -> same stored markdown as LF; an ask holding a code block -> 'Q?', code block 'code words' kept; a broken ask inside a pasted ::::callout -> callout kept typed, ask drawn inside it. A second reader (bob) sees the drawn lines live; alice's reload shows them with no ask block; a second paste stores both copies exactly; Ctrl+Z removes only the second.",
+      "headSha": "08952b8cf2dab419a11bdd6c9945b72087f9ab01",
+      "negativeControl": "Headless engine at b08a56bc with the same CRLF, U+FEFF, blockquote, callout-nested and code-block asks: each parses to an empty paragraph (or an empty blockquote/callout) with 'Cannot create node for ask' logged; at the head each keeps every line."
+    },
+    {
+      "criterion": "Default mode draws in both editors after the mark plugins; shared U+FEFF helper (unit locks catch the plausible breaks)",
+      "surface": "@legion/proof-editor headless engine and createProofEditor in happy-dom",
+      "command": "cd packages/proof-editor && bun test tests/typed-block-drawing.test.ts, once per source mutation, each mutation restored after",
+      "observed": "Unmutated 16 pass. Mutations: lib.ts .use(unfitTypedBlocksRemarkPlugin) removed -> 4 fail (every live-editor row); moved before the mark plugins -> 1 fail (the after-the-mark-plugins row); lib-headless.ts without remarkUnfitTypedBlocks -> 5 fail; block-schema.ts back to file.toString() -> 2 fail (the U+FEFF rows).",
+      "headSha": "08952b8cf2dab419a11bdd6c9945b72087f9ab01",
+      "negativeControl": "Each mutation above is the broken input; the named rows fail on it."
+    },
+    {
+      "criterion": "Read-only mode (INFRA-529) unchanged after read-only-directives.ts moved onto the shared module",
+      "surface": "Dispatch conversation view in Chromium, real Go server and Postgres",
+      "command": "bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium (tester lane)",
+      "observed": "4 passed: unknown container directive bodies, a typed block breaking its rule, a lone-CR message, a BOM-led message all drawn as text with every line.",
+      "headSha": "08952b8cf2dab419a11bdd6c9945b72087f9ab01",
+      "negativeControl": "none on this surface (a regression check of moved code); the headless probes above show the base's loss for the default mode."
+    }
+  ],
+  "ci": "At 08952b8c every workflow (Tests: lint/typecheck/test, Legion Envoy and Contracts, Docs, Worker Image, PR Title) was queued when read at 2026-10-27T09:22Z; not waited for.",
+  "notes": [
+    "No defect found. Unknown-type paste, Yjs-merge drops and suggestion markdown stay out of scope as the plan records; not driven.",
+    "Headless engine: a source starting with two U+FEFF keeps the second as text in the first drawn line (micromark drops one); no word lost."
+  ]
+}
