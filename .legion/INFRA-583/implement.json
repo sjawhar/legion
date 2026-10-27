@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-583",
+  "completed": "2026-10-27T06:35:13Z",
+  "proof": [
+    {
+      "criterion": "AC2: a scratch pull request that changes only packages/contracts/src or a skills/dispatch* file starts none of the five; one that changes a package in each job's import closure starts it",
+      "surface": "GitHub Actions in sjawhar/legion: scratch pull requests #2326 (A) and #2327 (B), base legion/INFRA-583",
+      "command": "gh api \"repos/sjawhar/legion/commits/<scratch head>/check-runs?per_page=100\" --paginate --jq '.check_runs[] | select(.name|test(\"^(dispatch-memory|dispatch-multiprocess|broker-multiprocess|envoy-go-race|envoy-infra-go|changes)$\")) | [.name,.status,.conclusion,.html_url] | @tsv'",
+      "observed": "Scratch #2326 (head 8bf58099; a comment in packages/contracts/src/index.ts and a trailing blank line in skills/dispatch/SKILL.md), run 40447824879 attempt 1 (https://github.com/sjawhar/legion/actions/runs/40447824879/attempts/1): changes completed success; dispatch-memory, dispatch-multiprocess, broker-multiprocess, envoy-go-race, envoy-infra-go all completed with conclusion skipped and no runner. Scratch #2327 (head fcdba9fa; a comment in packages/envoy/internal/pgmigrate/scan.go), run 40447830920 (https://github.com/sjawhar/legion/actions/runs/40447830920): all five ran on a runner and ended success (dispatch-memory 05:35:37-05:57:32Z, envoy-go-race 05:29:49-05:45:22Z, envoy-infra-go 05:35:26-05:43:04Z, dispatch-multiprocess 05:46:46-05:51:31Z, broker-multiprocess 05:40:25-05:43:23Z). Both scratch PRs closed, branches deleted. Proof heads: scratch heads built on b3e849ad; eb8c3209 changed two comments inside the filter block; rebase re-check eb8c3209 -> 9ec4eb64 (forward merge of main b69f636f): fingerprint ea4a4d26ae99 unchanged, bare gates only.",
+      "headSha": "9ec4eb64e307e5bd9fd32e33e84307276ef61568",
+      "negativeControl": "Scratch #2327 is the control for #2326: a one-line comment in internal/pgmigrate, a package all five compile, starts all five jobs (success), so #2326's skips come from the filters and not from jobs that cannot start."
+    },
+    {
+      "criterion": "AC1: each job's filter names every file the job reads; contracts/src, contracts CHANGELOG and skills/dispatch* start none of the five",
+      "surface": "the edited .github/workflows/envoy-and-contracts.yaml, matched with dorny/paths-filter's matcher (picomatch {dot:true}) against go list -deps -test of each job's command in the issue pod",
+      "command": "plan.md Appendix B go list commands (memory, multiprocess, broker multiprocess, -race packages, infra both tag sets plus root-workspace cmd/listener and cmd/dispatch), then bun cover.ts on the filters block extracted from the edited workflow",
+      "observed": "re-run at 9ec4eb64 after the merge of main (closures recomputed: memory 48, multiprocess 48, broker 29, race 70, infra 69 packages): dispatch_memory 932 files, dispatch_multiprocess 731, broker_multiprocess 215, envoy_go_race 1378, envoy_infra_go 901: 0 unmatched each, exit 0; no AC2 probe path (packages/contracts/src/index.ts, packages/contracts/CHANGELOG.md, skills/dispatch/SKILL.md, skills/dispatch-writing-specs/SKILL.md) starts any of the five; proof-editor, bun.lock and package.json start only envoy_go_race",
+      "headSha": "9ec4eb64e307e5bd9fd32e33e84307276ef61568",
+      "negativeControl": "the same check with packages/envoy/docker/rds-global-bundle.pem and packages/envoy/internal/testnats/* removed from the filters: broker_multiprocess 1 unmatched (the RDS bundle), dispatch_multiprocess 6 and envoy_infra_go 6 (testnats files), exit 1"
+    },
+    {
+      "criterion": "AC3: measured minutes saved per pull-request push, before and after",
+      "surface": "GitHub Actions API data for sjawhar/legion, 987 pull-request runs of envoy-and-contracts.yaml, 2026-10-23T21:05Z..2026-10-26T20:34Z",
+      "command": "python3 $TMPDIR/i583/fetch.py (runs, jobs of every attempt, PR files), then bun $TMPDIR/infra583/js/ac3.ts on the edited workflow's filters",
+      "observed": "five jobs 24,659 billed minutes before, 18,107 after, plus 918 for runs the workflow-file pattern adds; per push 25.0 -> 19.3 minutes, 5.7 saved net (5,634 minutes over three days); table in the PR body",
+      "headSha": "9ec4eb64e307e5bd9fd32e33e84307276ef61568",
+      "negativeControl": "the same script with the old envoy filter put in place of all five new filters keeps all 2,396 job runs: 24,659 minutes after, 0 saved, 0 added, so the matcher reproduces how the old gate actually fired; with the new filters, PR #2169 (skills/dispatch/SKILL.md only, run 40163698062, 53 minutes on these jobs) counts 0"
+    }
+  ],
+  "filesChanged": [
+    ".github/workflows/envoy-and-contracts.yaml",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/cmd/dispatch/AGENTS.md",
+    "packages/envoy/infra/AGENTS.md"
+  ],
+  "trickyParts": [
+    "dorny/paths-filter flattens YAML anchors; check-image-trigger-paths.sh reads envoy_image as a flat list, so envoy_image is untouched and names no anchor.",
+    "Running go list in packages/envoy/infra rewrites packages/envoy/infra/go.work.sum with the pod's Go; it was restored before every commit.",
+    "Scratch PRs are based on legion/INFRA-583 so their runs use the new workflow and their file list holds only the probe change."
+  ],
+  "deviations": [
+    "One filter per job (five) rather than one for four jobs plus one; envoy-go-race keeps starting on proof-editor, Bun install inputs and two contracts fixture dirs, which it reads. Both accepted by the architect on dispatch://INFRA-583.",
+    "dispatch_memory does not name the four guides #2316 lists: memory_profile_test.go reads them only when DISPATCH_EDIT_PROFILE_OUT is set, which no workflow sets.",
+    "ce-simplify-code: 2 comment fixes applied (head b3e849ad -> eb8c3209), 2 skipped (per-job 'It runs when' clauses the plan asks for; *go_workspace in envoy/envoy_e2e_local, filters outside scope).",
+    "Forward merge of main (b69f636f) into the branch at 9ec4eb64, authorized by the INFRA-490 architect: the required `test` check failed at eb8c3209 (run 40448233739) only on the daemon read #2317 fixed on main after that run started; fingerprint unchanged (ea4a4d26ae99), merge commit adds no change of its own."
+  ],
+  "openQuestions": []
+}
