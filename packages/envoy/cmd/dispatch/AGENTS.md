@@ -592,9 +592,8 @@ env DISPATCH_TEST_DATABASE_URL=… go test -tags memory -count=1 -timeout 60m ./
 
 The `dispatch-memory` job runs only when a file its `dispatch_memory` filter in
 `.github/workflows/envoy-and-contracts.yaml` names changes. `cmdtest.Build` builds `./cmd/dispatch`
-itself, so the server's production imports are in that filter's closure: any change that makes
-the job's command, or a binary its tests build, compile a new package or read a new file -
-production code included, not only a test - adds it to that filter.
+itself, so every package the server imports is in that filter; `packages/envoy/AGENTS.md` (Critical
+conventions) says what keeps it current.
 
 The two-process tests (`multiprocess_test.go`, INFRA-66) start two real Dispatch servers on one
 Postgres and one NATS and drive the properties a rolling release depends on — one pass per period
@@ -609,9 +608,8 @@ env DISPATCH_TEST_DATABASE_URL=… go test -tags multiprocess -count=1 -timeout 
 ```
 
 The `dispatch-multiprocess` job runs only when a file its `dispatch_multiprocess` filter in
-`.github/workflows/envoy-and-contracts.yaml` names changes, so any change that makes the job's
-command, or a binary its tests build, compile a new package or read a new file - production code
-included, not only a test - adds it to that filter.
+`.github/workflows/envoy-and-contracts.yaml` names changes; `packages/envoy/AGENTS.md` (Critical
+conventions) says what keeps it current.
 
 A developer who runs only the block above runs neither tagged suite, which is why both are named
 here: the evidence for anything about two processes serving one database is in the second one.

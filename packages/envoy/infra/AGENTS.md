@@ -349,10 +349,9 @@ go test -tags natslive ./core/ ./seed/
 ```
 
 The `envoy-infra-go` job runs only when a file its `envoy_infra_go` filter in that workflow names
-changes, so any change that makes the job's command, or a binary its tests build, compile a new
-package or read a new file - production code included, not only a test - adds it to that filter.
-That includes every import of `cmd/dispatch` and `cmd/listener`, which
-`core/permissions_live_test.go:298-299` builds.
+changes. That filter includes every package `cmd/dispatch` and `cmd/listener` import, since
+`core/permissions_live_test.go:298-299` builds them; `packages/envoy/AGENTS.md` (Critical
+conventions) says what keeps it current.
 
 The release workflow's `build` job runs vet and the unit tests again before it builds. The required
 `lint` job of `.github/workflows/pr-and-main.yaml` compiles the module's commands for every release
