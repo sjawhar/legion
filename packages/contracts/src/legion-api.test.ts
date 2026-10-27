@@ -145,12 +145,15 @@ test("a backward move rejects future read-only phases", () => {
   ).toBeFalse();
 });
 
-// Contract 33: the architect accepts before the merge, in `accepting`, between `reviewing` and
-// `retro`; the merge closes the issue (`done`), and the production check after the close is no
-// phase, so no phase follows `awaiting_merge` and `integrating` but the close itself.
-test("the phase lists are the daemon's, with accepting between reviewing and retro", () => {
+// Contract 40: `awaiting_person`, a root that gave its slot up while its architect waits on a
+// person, follows `admitted`, and no backward move reaches it. Contract 33: the architect accepts
+// before the merge, in `accepting`, between `reviewing` and `retro`; the merge closes the issue
+// (`done`), and the production check after the close is no phase, so no phase follows
+// `awaiting_merge` and `integrating` but the close itself.
+test("the phase lists are the daemon's, with awaiting_person after admitted and accepting before retro", () => {
   expect(LEGION_WORKFLOW_PHASES).toEqual([
     "admitted",
+    "awaiting_person",
     "planning",
     "implementing",
     "testing",
@@ -184,6 +187,51 @@ test("the phase lists are the daemon's, with accepting between reviewing and ret
       reason: "retro reopened the review",
     }).success
   ).toBeTrue();
+});
+
+// Contract 40: the state golden carries LEGION-212, a root waiting on a person whose question the
+// person answered. Both shapes of `waitingOn` parse, an answer comes with the act that gave it, and
+// the strict shapes refuse a field of the other kind.
+test("the state golden carries what an awaiting_person root waits on", () => {
+  const state = fixture("state.json") as {
+    issues: Record<string, { phase: string; waitingOn?: Record<string, unknown> }>;
+  };
+  const waiting = state.issues["LEGION-212"];
+  if (waiting === undefined || waiting.waitingOn === undefined) {
+    throw new Error("state fixture lacks LEGION-212 or its waitingOn");
+  }
+  expect(waiting.phase).toBe("awaiting_person");
+  expect(waiting.waitingOn).toEqual({
+    kind: "ask",
+    ask: "9a8fd348-55d5-4d72-a793-3cd037f75f13",
+    since: "2026-09-22T08:05:00Z",
+    answeredAt: "2026-09-22T09:21:00Z",
+    answeredBy: "ask",
+  });
+
+  const parses = (waitingOn: Record<string, unknown>) => {
+    waiting.waitingOn = waitingOn;
+    return LegionStateResponse.safeParse(state).success;
+  };
+  expect(parses({ kind: "ask", ask: "ask-7" })).toBeTrue();
+  expect(parses({ kind: "gate", gateVersion: 3, artifactId: "spec-doc" })).toBeTrue();
+  expect(
+    parses({
+      kind: "gate",
+      gateVersion: 3,
+      artifactId: "spec-doc",
+      answeredAt: "2026-09-22T09:21:00Z",
+      answeredBy: "approved",
+    })
+  ).toBeTrue();
+  expect(parses({ kind: "ask", ask: "ask-7", answeredAt: "2026-09-22T09:21:00Z" })).toBeFalse();
+  expect(parses({ kind: "ask", ask: "ask-7", answeredBy: "ask" })).toBeFalse();
+  expect(
+    parses({ kind: "ask", ask: "ask-7", answeredAt: "2026-09-22T09:21:00Z", answeredBy: "guess" })
+  ).toBeFalse();
+  expect(parses({ kind: "ask", ask: "ask-7", gateVersion: 3 })).toBeFalse();
+  expect(parses({ kind: "gate", gateVersion: 3 })).toBeFalse();
+  expect(parses({ kind: "other", ask: "ask-7" })).toBeFalse();
 });
 
 // The state golden carries LEGION-207, closed by its merge, with its production check open: the

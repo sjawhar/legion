@@ -26,6 +26,10 @@ legion({ op: "sign_off", issue: "LEGION-40" })
 ```
 
 - The issue's Dispatch status stays `needs_review` in `accepting`; `sign_off` moves it to `retro`.
+- A `catch-up` whose `reason` names an issue as waiting for your acceptance is the wake for it: it
+  is in `accepting` with nothing beneath it in the workflow, and the `phase-finished` notice that
+  moved it there may never have reached you (the daemon drops a notice to a failed architect, so a
+  retried one learns of the wait from its catch-up alone). Accept it as above.
 - Only what is beneath the issue counts for `SIGNOFF_CHILD_IN_WORKFLOW`: a child with nothing
   beneath it is accepted while its own root runs.
 - `request_backward_move` names the issue, because your grant serves the tree; the daemon starts

@@ -232,9 +232,11 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 // sessionStatusWrite takes a lifecycle status change written by a session whose write the workflow
 // does not act on. A session holding a claim in the issue's tree is an agent, never a human move,
 // since a phase ends only by its completion (the `legion` tool's `handoff_complete`) and a tree only by the
-// architect's sign-off. Any other session on the root of an admitted tree — another tree's agent, or
-// one outside Legion that took the issue for its own — has no part in the running tree it would end
-// or park, so the tree's architect is told who wrote what. Either way the workflow does not react:
+// architect's sign-off. Any other session on the root of a running tree — one holding its admission
+// slot, or one waiting on a person, whose tree stays live while it gave its slot back — another
+// tree's agent, or one outside Legion that took the issue for its own, has no part in the tree it
+// would end or park, so the tree's architect is told who wrote what (held until a waiting root's
+// architect resumes). Either way the workflow does not react:
 // the observation is recorded with the status kept (keepStatus), and the daemon re-asserts its own
 // status through the outbox. A person's move and the daemon's own write carry no session
 // (intake.DispatchIssue.ActorSession): they are the workflow's to act on.
@@ -247,7 +249,8 @@ func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record
 		return false, err
 	}
 	if !agent {
-		if admitted, err := e.admittedRoot(ctx, tx, issue); err != nil || !admitted {
+		waiting := claim.IsTreeRoot(issue.Key, issue.Tree) && issue.AwaitingPerson() && !issue.Lingers()
+		if admitted, err := e.admittedRoot(ctx, tx, issue); err != nil || !admitted && !waiting {
 			return false, err
 		}
 	}
@@ -461,7 +464,7 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	if err != nil {
 		return err
 	}
-	if gate != nil && classify.DesignGateOpen(*gate) {
+	if gate != nil && classify.DesignGateOpen(*gate) && !root.AwaitingPerson() {
 		return e.gateOpened(ctx, tx, child)
 	}
 	return nil
@@ -943,7 +946,7 @@ func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, 
 // would hold its slot with nothing left to start it — StartUnblockedChildren starts children, and
 // the state's `blocked` names no slotted root — so it would be neither started nor reported.
 func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record.Issue, gate record.DesignGate) error {
-	if !classify.DesignGateOpen(gate) {
+	if root.AwaitingPerson() || !classify.DesignGateOpen(gate) {
 		return nil
 	}
 	members, err := e.treeMembers(ctx, tx, root)
@@ -1033,10 +1036,12 @@ func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues [
 }
 
 // treesStartingChildren says, for each tree of trees, whether it starts a child of its own now:
-// its root is among issues, the tree is live, and its design gate is open — the two conditions
-// enterChild and advanceAdmittedTree between them stand for. issues is the caller's read of the
-// project's records, which holds every root of those trees; a tree whose root it does not hold
-// starts nothing, as one with no record does.
+// its root is among issues, not waiting on a person (a root whose wait a person's approval
+// answered, opening its gate, starts its children with its resume, advanceAdmittedTree, once it
+// has its slot again), the tree is live, and its design gate is open — the conditions enterChild
+// and advanceAdmittedTree between them stand for. issues is the caller's read of the project's
+// records, which holds every root of those trees; a tree whose root it does not hold starts
+// nothing, as one with no record does.
 func (e *Engine) treesStartingChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, trees []string) (map[string]bool, error) {
 	slots, err := e.store.Slots(ctx, tx)
 	if err != nil {
@@ -1049,13 +1054,16 @@ func (e *Engine) treesStartingChildren(ctx context.Context, tx pgx.Tx, issues []
 	for _, waiting := range record.Waiting(issues, slots) {
 		live[waiting.Key] = true
 	}
-	lingering := map[string]bool{}
+	// A root that lingers, and one waiting on a person, start no child of their own: the second
+	// gives its slot back while it waits, so record.Waiting carries it and the live check alone
+	// would read it as a tree that starts its children.
+	waits := map[string]bool{}
 	for _, issue := range issues {
-		lingering[issue.Key] = issue.Lingers()
+		waits[issue.Key] = issue.Lingers() || issue.AwaitingPerson()
 	}
 	open := make([]string, 0, len(trees))
 	for _, tree := range trees {
-		if lingers, recorded := lingering[tree]; recorded && !lingers && live[tree] {
+		if held, recorded := waits[tree]; recorded && !held && live[tree] {
 			open = append(open, tree)
 		}
 	}
@@ -1191,6 +1199,11 @@ func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue)
 	if err != nil {
 		return nil, err
 	}
+	return openBeneathIn(members, issue.Key), nil
+}
+
+// openBeneathIn is openBeneath's walk over members, the issues of key's tree as already read.
+func openBeneathIn(members []record.Issue, key string) []string {
 	// The index holds each child's place in members rather than its record: an Issue is a wide
 	// struct, and the walk reads only its key and whether it is in the workflow.
 	children := map[string][]int{}
@@ -1200,8 +1213,8 @@ func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue)
 		}
 	}
 	running := []string{}
-	seen := map[string]bool{issue.Key: true}
-	for frontier := []string{issue.Key}; len(frontier) > 0; {
+	seen := map[string]bool{key: true}
+	for frontier := []string{key}; len(frontier) > 0; {
 		current := frontier[len(frontier)-1]
 		frontier = frontier[:len(frontier)-1]
 		for _, index := range children[current] {
@@ -1217,7 +1230,7 @@ func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue)
 		}
 	}
 	slices.Sort(running)
-	return running, nil
+	return running
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {
