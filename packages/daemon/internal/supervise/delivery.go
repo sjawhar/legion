@@ -158,8 +158,8 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	// The question a restart left — whether the turn the agent may be in is the pending
 	// delivery's — is asked once, here, whether or not that delivery survived the phase check.
 	// Left armed with nothing pending, it would make the next task the running turn's: confirmed,
-	// never prompted. Discarded, it leaves the claim ready while its agent works, and the next
-	// task is prompted into a busy agent and charged for it. A turn of the agent's own moves the
+	// never prompted. Discarded, it leaves the claim ready while its agent works, and the next task
+	// is refused busy at every send until that turn ends. A turn of the agent's own moves the
 	// claim to working either way; it confirms the delivery only when there is still one to
 	// confirm, and a dropped task's successor waits for that turn to end.
 	if m.askFirst {
