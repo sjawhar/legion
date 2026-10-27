@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -524,10 +525,13 @@ func TestTargetedMessagePrefixesUnavailableListenerErrors(t *testing.T) {
 	})
 
 	t.Run("timeout", func(t *testing.T) {
+		// An unanswered read is what a listener take-over gives, so the send asks again for the
+		// take-over window before it settles; every one of those reads is cancelled the same way.
 		cancelled := make(chan struct{})
+		var cancelledOnce sync.Once
 		listener := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 			<-r.Context().Done()
-			close(cancelled)
+			cancelledOnce.Do(func() { close(cancelled) })
 		}))
 		defer listener.Close()
 		handler, _ := newTargetedMessageHandler(t, listener.URL)
@@ -1587,12 +1591,16 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 // its own. While the key carried the attempt number, that retry was a key no dedupe layer had
 // ever seen and the agent was handed the same instruction twice. The key is now stable across
 // the attempts of one message in one mode, so the stream recognises the repeat, answers
-// duplicate, and the retry's row says so instead of claiming a delivery that never happened.
+// duplicate, and the retry's row says so instead of claiming a delivery that never happened. A
+// missed receipt is tried again inside the listener take-over window (takeoverRetry) under the
+// same key, so the attempt is recorded failed only when every try of that window missed; this
+// listener misses every one until the message's own request has answered.
 func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
 		keys      []string
 		delivered map[string]struct{}
+		answering bool
 	}
 	listenerState.delivered = map[string]struct{}{}
 	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
@@ -1612,7 +1620,7 @@ func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing
 			}
 			listenerState.Lock()
 			listenerState.keys = append(listenerState.keys, request.IdempotencyKey)
-			first := len(listenerState.keys) == 1
+			missing := !listenerState.answering
 			// The real listener publishes the envelope before it answers, so the send has
 			// landed by this point whatever the caller later learns. JetStream's MsgId, built
 			// from this key, is what keeps a repeat out of the stream - and what makes the
@@ -1621,7 +1629,7 @@ func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing
 			_, held := listenerState.delivered[key]
 			listenerState.delivered[key] = struct{}{}
 			listenerState.Unlock()
-			if first {
+			if missing {
 				// Past the window the handler below gives the client, so Dispatch records the
 				// attempt failed while the agent already has the message.
 				time.Sleep(400 * time.Millisecond)
@@ -1647,11 +1655,14 @@ func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing
 	}
 	message := decodeBody[model.Message](t, created)
 	if len(message.Deliveries) != 1 || message.Deliveries[0].State != "failed" {
-		t.Fatalf("first attempt = %#v, want one attempt recorded failed after the receipt timeout", message.Deliveries)
+		t.Fatalf("first attempt = %#v, want one attempt recorded failed once every try missed its receipt", message.Deliveries)
 	}
 	if failure := message.Deliveries[0].Error; failure == nil || !strings.Contains(*failure, "may already have been delivered") {
 		t.Fatalf("receipt-timeout error = %v, want the text that tells a human a retry is safe", failure)
 	}
+	listenerState.Lock()
+	listenerState.answering = true
+	listenerState.Unlock()
 
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
@@ -1669,8 +1680,8 @@ func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing
 	delivered := len(listenerState.delivered)
 	listenerState.Unlock()
 	original := message.ID + ":steer"
-	if len(keys) != 2 || keys[0] != original || keys[1] != original {
-		t.Fatalf("send keys = %#v, want both sends under the mode-scoped key %q", keys, original)
+	if len(keys) < 2 || slices.ContainsFunc(keys, func(key string) bool { return key != original }) {
+		t.Fatalf("send keys = %#v, want every send under the mode-scoped key %q", keys, original)
 	}
 	if delivered != 1 {
 		t.Fatalf("the listener delivered %d distinct keys %#v, want the agent to receive the message once", delivered, keys)

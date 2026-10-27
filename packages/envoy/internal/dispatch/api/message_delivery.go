@@ -626,6 +626,9 @@ var errAttemptNotPending = errors.New("delivery attempt is no longer pending")
 // (delivery_resume.go). A human who changes the mode from the agent card in the meantime settles
 // the attempt and sends their own, and a bound sender that then opened an attempt of its own
 // would put a second frame on the session's subject.
+//
+// Bound or not, a send that meets a listener take-over tries again under the attempt it claimed
+// (takeoverRetry, renewMessageDeliveryClaim) and settles only with the last try's outcome.
 func (s *server) deliverMessageResuming(
 	ctx context.Context,
 	message model.Message,
@@ -657,10 +660,58 @@ func (s *server) deliverMessageResuming(
 	// repeat it is (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts says by what). The
 	// listener scopes it further by recipient, which is what lets a role's new holder still be
 	// reached.
+	key := message.ID + ":" + pending.resolved.Delivery
+	takeover := newTakeoverRetry()
 	envelopeID, duplicate, deliveryError := s.sendResolvedDelivery(
-		ctx, pending.resolved, message.Body, message.ID+":"+pending.resolved.Delivery, urgency, pending.frame,
+		ctx, pending.resolved, message.Body, key, urgency, pending.frame,
 	)
+	for takeover.again(ctx, deliveryError) {
+		renewed, held, err := s.renewMessageDeliveryClaim(ctx, message, pending)
+		if err != nil {
+			return model.MessageDelivery{}, err
+		}
+		if !held {
+			break
+		}
+		pending = renewed
+		envelopeID, duplicate, deliveryError = s.sendResolvedDelivery(
+			ctx, pending.resolved, message.Body, key, urgency, pending.frame,
+		)
+	}
 	return s.completeMessageDelivery(ctx, message, actor, pending, envelopeID, duplicate, deliveryError)
+}
+
+// renewMessageDeliveryClaim prepares one more try of an attempt this sender holds, after a try a
+// listener take-over failed: it resolves again only the recipient the attempt names - the session
+// its row is pinned to, or, for a row still unpinned, the message's own target, which is written
+// once - and renews the claim, pinning an unpinned row to the session that resolution found, in
+// one statement scoped to the claim held, as every settle statement is. It answers the attempt
+// as the next try sends and settles it, and held = false, with pending unchanged, when the claim
+// is no longer this sender's: the attempt was answered or taken meanwhile, and the settle that
+// follows reads which.
+func (s *server) renewMessageDeliveryClaim(
+	ctx context.Context, message model.Message, pending pendingMessageDelivery,
+) (pendingMessageDelivery, bool, error) {
+	route := messageTarget(message.Target)
+	if pending.resolved.attemptSessionID != "" {
+		route = "session:" + pending.resolved.attemptSessionID
+	}
+	renewed := pending
+	renewed.resolved = s.resolveMentionTargets(ctx, []string{route}, pending.resolved.Delivery)[0]
+	err := s.deps.Store.Pool.QueryRow(ctx, `
+		update message_deliveries
+		set claimed_at = now(), session_id = coalesce(nullif(session_id, ''), $4)
+		where message_id = $1 and attempt = $2 and state = 'pending' and claimed_at = $3
+		returning claimed_at, session_id
+	`, message.ID, pending.attempt, pending.claimedAt, renewed.resolved.attemptSessionID,
+	).Scan(&renewed.claimedAt, &renewed.resolved.attemptSessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return pending, false, nil
+	}
+	if err != nil {
+		return pending, false, err
+	}
+	return renewed, true, nil
 }
 
 func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {

@@ -116,8 +116,10 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 		*attempt.SessionID != "s1" || attempt.State != "failed" || attempt.Error == nil || *attempt.Error != "no live session s1" {
 		t.Fatalf("absent original holder retry = %#v, want the pin kept on a failed no-live-session attempt", attempt)
 	}
-	if registry.lookups != 1 || registry.sessionReads != 1 || len(registry.sent) != 0 {
-		t.Fatalf("absent original holder retry = lookups:%d session reads:%d sends:%#v, want the pin rechecked once, no role re-resolution and no send attempt",
+	// "no live session" is what a listener take-over answers too, so the retry rechecks the pin
+	// on every try of the take-over window before it settles; each read is of s1 itself.
+	if registry.lookups != 1 || registry.sessionReads < 1 || len(registry.sent) != 0 {
+		t.Fatalf("absent original holder retry = lookups:%d session reads:%d sends:%#v, want the pin rechecked on each try, no role re-resolution and no send attempt",
 			registry.lookups, registry.sessionReads, registry.sent)
 	}
 }
@@ -256,8 +258,10 @@ func TestStrandedRoleAttemptRetriedDuringAnOutageKeepsThePinAndRefusesTheNewHold
 	if attempt.Attempt != 1 || attempt.State != "failed" || attempt.SessionID == nil || *attempt.SessionID != "s1" {
 		t.Fatalf("attempt settled during the outage = %#v, want the pin on s1 kept", attempt)
 	}
-	if registry.lookups != 0 || registry.sessionReads != 1 || len(registry.sent) != 0 {
-		t.Fatalf("retry during the outage = lookups:%d session reads:%d sends:%#v, want the pin rechecked directly once and no send attempted",
+	// "no live session" is what a listener take-over answers too, so the retry rechecks the pin
+	// on every try of the take-over window before it settles; each read is of s1 itself.
+	if registry.lookups != 0 || registry.sessionReads < 1 || len(registry.sent) != 0 {
+		t.Fatalf("retry during the outage = lookups:%d session reads:%d sends:%#v, want the pin rechecked directly on each try and no send attempted",
 			registry.lookups, registry.sessionReads, registry.sent)
 	}
 

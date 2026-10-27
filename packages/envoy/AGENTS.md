@@ -1248,20 +1248,22 @@ held; the transaction then re-reads under its own lock whatever the resolution d
 decides with the resolution only while the locked row still agrees, taking it once more when it
 does not and answering a conflict after that. `api/envoy_resolve.go` owns that loop
 (`resolveThenLock`, `errStaleResolution`), the delivery read every send resolves through
-(`resolveDeliveryTarget`) and the settle half (`settleDeliveryAttempt`, `attemptClaim`,
-`claimLapsed`, `deliveryOutcome`, `receiptError`); its callers are `api/comment_create.go`
-(the mention and route resolution behind `suppress_route`), `api/comment_delivery.go` and
-`api/message_delivery.go` (a delivery's recipient, its claim and its settle) and
-`api/issue_claim.go` (the holder's liveness, on both the claim and the release route). Three of
-those decisions now read one session by id rather than scanning the live list: a comment mention's
-`session:` target, each selected recipient of a broadcast (`resolveBroadcastSessions`, eight reads
-in flight under one five-second budget) and whether an issue's claim holder is still working
+(`resolveDeliveryTarget`), the settle half (`settleDeliveryAttempt`, `attemptClaim`,
+`claimLapsed`, `deliveryOutcome`, `receiptError`) and the take-over wait between a send and its
+settle (`takeoverRetry`, `retryableDeliveryFailure`, `listenerTakeoverWindow`); its callers are
+`api/comment_create.go` (the mention and route resolution behind `suppress_route`),
+`api/comment_delivery.go` and `api/message_delivery.go` (a delivery's recipient, its claim and its
+settle) and `api/issue_claim.go` (the holder's liveness, on both the claim and the release
+route). Three of those decisions now read one session by id rather than scanning the live list: a
+comment mention's `session:` target, each selected recipient of a broadcast
+(`resolveBroadcastSessions`, eight reads in flight under one five-second budget) and whether an
+issue's claim holder is still working
 (`fetchHolderLiveness`). A list is one listener's cache of the session registry, so only the
 per-session read tells a session that ended from one that cache has not refilled yet, and a read
 that did not answer never reports the session gone: a broadcast and a claim are refused `503
 ENVOY_UNAVAILABLE`, the broadcast with nothing written, while a mention's comment is still
 created `201` and that mention's delivery is recorded `failed` with the listener's own `envoy
-listener: …` text. A write -
+listener: …` text once the take-over window below has passed. A write -
 `Envoy.Send`, `Unsubscribe` - runs after a commit, never inside: the attempt is committed first,
 sent, and settled by a second short transaction, so a process that dies in between leaves a
 record of the attempt rather than losing it.
@@ -1277,6 +1279,25 @@ resolution, the send follows, and `completeMessageDelivery` settles it with the 
 event. Either way the pending row names the session its frame is going to before that frame is
 sent, and each of those statements is its own short transaction or single pooled read, so no
 step of a delivery holds a connection across another.
+
+**A send that meets a listener take-over waits it out under the attempt it holds.** While the
+active listener pod is replaced its successor refuses connections, answers 503, or does not hold
+the session yet for a few seconds (INFRA-557's take-over target is under 10). A try whose outcome
+is one of those - the listener unreachable (`envoy listener: …`, never the `ENVOY_URL is not
+configured` text), a receipt timeout, or `no live session` (`retryableDeliveryFailure`) - is
+tried again under the same attempt and the same idempotency key, without a new claim: the sender
+resolves again only the recipient the attempt names (its pinned session, rechecked; for a row no
+session is pinned to yet, the message's or the mention's own target, pinning what it finds),
+renews its claim (`claimed_at = now()`, scoped to the claim it holds, as every settle statement
+is) before each try, and settles on the claim it renewed last. The backoff is 250 ms doubling to
+2 s, and no try starts later than `listenerTakeoverWindow` (12 s) after the first; the attempt
+then settles with the last try's outcome exactly as before, so a session that is really gone
+still reads `failed: no live session`, about 12 seconds after the send. Any other outcome - a
+mode the session does not take, a send the listener refused - settles at once. Every sender
+takes this path: a request's own send (whose request therefore answers up to 12 s later), a
+broadcast worker, a Retry and the resume loop. A process killed during the wait leaves the
+attempt pending under the claim it renewed last, which the resume loop sends once that claim's
+lease has passed.
 
 A claim outlives its sender by a minute, which Postgres judges (`claimLapsed`) against the
 `claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or
