@@ -1,0 +1,261 @@
+package main
+
+import (
+	"cmp"
+	"context"
+	"log"
+	"slices"
+	"strconv"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+)
+
+// lockWait is one ungranted heavyweight lock in pg_locks: what the waiter runs and what the
+// first of its blockers (pg_blocking_pids) runs. Waits group by lock type, target and mode. The
+// target is a label for the two locks this harness tracks (commit_order_lock: Dispatch's
+// commit-order advisory lock; notify_commit_lock: Postgres's NOTIFY commit lock, the database-0
+// object lock PreCommit_Notify takes), a relation name, row_wait for a transaction-id wait (a row
+// lock held by another transaction), and the raw ids otherwise.
+type lockWait struct {
+	locktype, mode, target string
+	relDB                  string // a relation or tuple outside the connection's database: its database,
+	relOID                 uint32 // and relation oid, which resolveRelations names
+	query                  string
+	blockerQuery           string
+}
+
+// ungrantedSample is one 20 ms look at every ungranted lock.
+type ungrantedSample struct {
+	waits []lockWait
+}
+
+type lockSampler struct {
+	url     string
+	samples []ungrantedSample
+}
+
+// ungrantedLocksQuery reads pg_locks once per sample. pg_blocking_pids takes the lock manager's
+// partition locks, so the materialized CTE keeps it to one call per waiter. $1 and $2 are the
+// commit-order lock's classid and objid.
+const ungrantedLocksQuery = `
+with w as materialized (
+  select l.locktype, l.mode, l.pid, l.database, l.relation, l.page, l.tuple, l.virtualxid, l.transactionid,
+         l.classid, l.objid, l.objsubid, pg_blocking_pids(l.pid) as bp
+  from pg_locks l
+  where not l.granted
+)
+select w.locktype, w.mode,
+  case
+    when w.locktype = 'advisory' and w.classid = $1 and w.objid = $2 then 'commit_order_lock'
+    when w.locktype = 'advisory' then w.classid::text || ':' || w.objid::text
+    when w.locktype = 'object' and w.classid = 'pg_database'::regclass and w.objid = 0 then 'notify_commit_lock'
+    when w.locktype in ('relation', 'tuple') and w.database in (0, (select oid from pg_database where datname = current_database())) then w.relation::regclass::text
+    when w.locktype in ('relation', 'tuple') then ''
+    when w.locktype = 'transactionid' then 'row_wait'
+    else concat_ws(':', w.database, w.relation, w.page, w.tuple, w.virtualxid, w.transactionid, w.classid, w.objid, w.objsubid)
+  end,
+  coalesce(d.datname, ''), coalesce(w.relation, 0),
+  coalesce(left(regexp_replace(a.query, '\s+', ' ', 'g'), 80), ''),
+  coalesce(left(regexp_replace(b.query, '\s+', ' ', 'g'), 80), '')
+from w
+left join pg_database d on d.oid = w.database
+left join pg_stat_activity a on a.pid = w.pid
+left join pg_stat_activity b on b.pid = w.bp[1]`
+
+// loop samples every 20 ms from from to to over a direct Postgres connection, as the lock probe
+// does.
+func (p *lockSampler) loop(ctx context.Context, url string, from, to time.Time, lg *log.Logger) {
+	p.url = url
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		lg.Printf("locksampler: %v", err)
+		return
+	}
+	defer conn.Close(context.Background())
+	if !sleepUntil(ctx, from) {
+		return
+	}
+	t := time.NewTicker(20 * time.Millisecond)
+	defer t.Stop()
+	errs := 0
+	for time.Now().Before(to) {
+		var s ungrantedSample
+		rows, err := conn.Query(ctx, ungrantedLocksQuery, commitOrderLockClassID, commitOrderLockObjID)
+		if err == nil {
+			for rows.Next() {
+				var w lockWait
+				if err = rows.Scan(&w.locktype, &w.mode, &w.target, &w.relDB, &w.relOID, &w.query, &w.blockerQuery); err != nil {
+					break
+				}
+				s.waits = append(s.waits, w)
+			}
+			rows.Close()
+			if err == nil {
+				err = rows.Err()
+			}
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if errs++; errs <= 3 {
+				lg.Printf("locksampler: %v", err)
+			}
+		} else {
+			p.samples = append(p.samples, s)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// resolveRelations names the relations the sampling connection could not, because they live in
+// another database: one short connection per database, after the load has ended. A relation it
+// cannot name gets the target <database>:<oid>.
+func (p *lockSampler) resolveRelations() {
+	byDB := map[string]map[uint32]string{}
+	for _, s := range p.samples {
+		for _, w := range s.waits {
+			if w.target == "" && w.relDB != "" && w.relOID != 0 {
+				if byDB[w.relDB] == nil {
+					byDB[w.relDB] = map[uint32]string{}
+				}
+				byDB[w.relDB][w.relOID] = ""
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for db, names := range byDB {
+		cfg, err := pgx.ParseConfig(p.url)
+		if err != nil {
+			continue
+		}
+		cfg.Database = db
+		conn, err := pgx.ConnectConfig(ctx, cfg)
+		if err != nil {
+			continue
+		}
+		oids := make([]uint32, 0, len(names))
+		for o := range names {
+			oids = append(oids, o)
+		}
+		rows, err := conn.Query(ctx, `select r, r::regclass::text from unnest($1::oid[]) r`, oids)
+		if err == nil {
+			for rows.Next() {
+				var o uint32
+				var name string
+				if rows.Scan(&o, &name) == nil {
+					names[o] = name
+				}
+			}
+			rows.Close()
+		}
+		conn.Close(ctx)
+	}
+	for i := range p.samples {
+		for j := range p.samples[i].waits {
+			w := &p.samples[i].waits[j]
+			if w.target == "" && w.relDB != "" {
+				if name := byDB[w.relDB][w.relOID]; name != "" {
+					w.target = name
+				} else {
+					w.target = w.relDB + ":" + strconv.FormatUint(uint64(w.relOID), 10)
+				}
+			}
+		}
+	}
+}
+
+type ungrantedSummary struct {
+	Samples int `json:"samples"`
+	// ShareWithAny is the share of samples that saw at least one ungranted lock.
+	ShareWithAny float64          `json:"share_of_samples_with_any_ungranted"`
+	Groups       []ungrantedGroup `json:"groups"`
+}
+
+// ungrantedGroup is the waits on one (lock type, target, mode).
+type ungrantedGroup struct {
+	LockType string `json:"locktype"`
+	Target   string `json:"target"`
+	Mode     string `json:"mode"`
+	// TopPairs are the three most frequent (waiter query, first blocker query) pairs over the
+	// group's waits.
+	TopPairs []waitPair `json:"top_pairs"`
+	// WaitersP50 and WaitersMax are over every sample, 0 where the group had no waiter.
+	WaitersP50      float64 `json:"waiters_p50"`
+	WaitersMax      float64 `json:"waiters_max"`
+	ShareWithWaiter float64 `json:"share_of_samples_with_waiter"`
+}
+
+type waitPair struct {
+	WaiterQuery  string `json:"waiter_query"`
+	BlockerQuery string `json:"blocker_query"`
+	Count        int    `json:"count"`
+}
+
+// summarizeUngranted groups the samples' waits by (lock type, target, mode), the group that has
+// waiters in the most samples first.
+func summarizeUngranted(samples []ungrantedSample) ungrantedSummary {
+	out := ungrantedSummary{Samples: len(samples), Groups: []ungrantedGroup{}}
+	if len(samples) == 0 {
+		return out
+	}
+	type groupKey struct{ locktype, target, mode string }
+	type pairKey struct{ waiter, blocker string }
+	type group struct {
+		key        groupKey
+		withWaiter int
+		perSample  []float64 // waiters in each sample, 0 where the group had none
+		pairs      map[pairKey]int
+	}
+	groups := map[groupKey]*group{}
+	anyWaiter := 0
+	for i, s := range samples {
+		if len(s.waits) > 0 {
+			anyWaiter++
+		}
+		for _, w := range s.waits {
+			k := groupKey{w.locktype, w.target, w.mode}
+			g := groups[k]
+			if g == nil {
+				g = &group{key: k, perSample: make([]float64, len(samples)), pairs: map[pairKey]int{}}
+				groups[k] = g
+			}
+			if g.perSample[i] == 0 {
+				g.withWaiter++
+			}
+			g.perSample[i]++
+			g.pairs[pairKey{w.query, w.blockerQuery}]++
+		}
+	}
+	list := make([]*group, 0, len(groups))
+	for _, g := range groups {
+		list = append(list, g)
+	}
+	slices.SortFunc(list, func(a, b *group) int {
+		return cmp.Or(cmp.Compare(b.withWaiter, a.withWaiter),
+			cmp.Compare(a.key.locktype, b.key.locktype), cmp.Compare(a.key.target, b.key.target), cmp.Compare(a.key.mode, b.key.mode))
+	})
+	for _, g := range list {
+		pairs := make([]waitPair, 0, len(g.pairs))
+		for k, n := range g.pairs {
+			pairs = append(pairs, waitPair{WaiterQuery: k.waiter, BlockerQuery: k.blocker, Count: n})
+		}
+		slices.SortFunc(pairs, func(a, b waitPair) int {
+			return cmp.Or(cmp.Compare(b.Count, a.Count), cmp.Compare(a.WaiterQuery, b.WaiterQuery), cmp.Compare(a.BlockerQuery, b.BlockerQuery))
+		})
+		ws := mkStat(g.perSample)
+		out.Groups = append(out.Groups, ungrantedGroup{
+			LockType: g.key.locktype, Target: g.key.target, Mode: g.key.mode, TopPairs: pairs[:min(3, len(pairs))],
+			WaitersP50: ws.P50, WaitersMax: ws.Max,
+			ShareWithWaiter: float64(g.withWaiter) / float64(len(samples)),
+		})
+	}
+	out.ShareWithAny = float64(anyWaiter) / float64(len(samples))
+	return out
+}

@@ -301,6 +301,75 @@ func renderTables(steps []stepData) string {
 		row(s.label(), num(100*l.HeldFraction, 0)+"%", pair(l.Waiters, p50, smax, 0), holds, num(float64(l.HoldsObserved), 0), strings.Join(doing, "; "))
 	}
 
+	emptyRow := func(label string, columns int) {
+		cells := []string{label}
+		for range columns - 1 {
+			cells = append(cells, "-")
+		}
+		row(cells...)
+	}
+
+	w("\n## Delivery from sending, and SSE frames\n")
+	w("NATS: every issue-topic receipt of a primary event. SSE: the dashboard stream frames that arrived in the window; from write response counts only the frames that carry the primary event of a committed in-window write with a 2xx status.\n")
+	sseCells := []string{"step", "NATS delivery ms from sent p50 / p99", "SSE frame ms from created_at p50 / p99",
+		"SSE frame ms from write response p50 / p99", "SSE frames", "SSE order violations"}
+	header(sseCells...)
+	for _, s := range steps {
+		sse := s.sum.SSE
+		if sse == nil {
+			cells := []string{s.label(), pair(s.sum.Events.DeliveryMsFromSent, p50, p99, 0)}
+			for range len(sseCells) - 2 {
+				cells = append(cells, "-")
+			}
+			row(cells...)
+			continue
+		}
+		row(s.label(), pair(s.sum.Events.DeliveryMsFromSent, p50, p99, 0), pair(sse.FrameMsFromCreatedAt, p50, p99, 0),
+			pair(sse.FrameMsFromWriteResponse, p50, p99, 0), num(float64(sse.Frames), 0), num(float64(sse.OrderViolations), 0))
+	}
+
+	w("\n## Ungranted locks\n")
+	w("Every ungranted heavyweight lock in pg_locks, sampled every 20 ms from 20 s into the window to its end. Up to four locks per step, most samples with a waiter first.\n")
+	ungrantedCells := []string{"step", "samples with an ungranted lock", "locks waited for: type target mode, samples with a waiter, waiters p50 / max",
+		"top waiter query → first blocker query (count), per lock"}
+	header(ungrantedCells...)
+	for _, s := range steps {
+		u := s.sum.UngrantedLocks
+		if u.Samples == 0 {
+			emptyRow(s.label(), len(ungrantedCells))
+			continue
+		}
+		var locks, pairs []string
+		for i, g := range u.Groups {
+			if i == 4 {
+				break
+			}
+			locks = append(locks, fmt.Sprintf("%s %s %s %s%%, %s / %s", mdCell(g.LockType), mdCell(g.Target), mdCell(g.Mode),
+				num(100*g.ShareWithWaiter, 0), num(g.WaitersP50, 0), num(g.WaitersMax, 0)))
+			top := "-"
+			if len(g.TopPairs) > 0 {
+				p := g.TopPairs[0]
+				top = fmt.Sprintf("%s → %s (%s)", mdCell(p.WaiterQuery), mdCell(p.BlockerQuery), num(float64(p.Count), 0))
+			}
+			pairs = append(pairs, top)
+		}
+		lockText, pairText := "-", "-"
+		if len(locks) > 0 {
+			lockText, pairText = strings.Join(locks, "; "), strings.Join(pairs, "; ")
+		}
+		row(s.label(), num(100*u.ShareWithAny, 0)+"%", lockText, pairText)
+	}
+
+	w("\n## Transaction ids\n")
+	header("step", "transaction ids per s")
+	for _, s := range steps {
+		if r := s.sum.Resources; r != nil && r.XIDsPerS != nil {
+			row(s.label(), num(*r.XIDsPerS, 1))
+			continue
+		}
+		emptyRow(s.label(), 2)
+	}
+
 	w("\n## Requests by route\n")
 	w("p50 / p99 ms (failures, non-2xx or transport, / count).\n")
 	cells = []string{"route"}
@@ -458,4 +527,12 @@ func byCount(m map[string]int) []countKV {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].v > out[j].v || (out[i].v == out[j].v && out[i].k < out[j].k) })
 	return out
+}
+
+// mdCell is s as text in a markdown table cell: "|" escaped, "(none)" when empty.
+func mdCell(s string) string {
+	if s = strings.TrimSpace(s); s == "" {
+		return "(none)"
+	}
+	return strings.ReplaceAll(s, "|", `\|`)
 }

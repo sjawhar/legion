@@ -15,10 +15,11 @@ type writeRec struct {
 	Marker int64
 	Kind   string
 	Issue  string
-	// Arrival is when the whole request was in Dispatch's socket (httptrace WroteRequest), or
-	// when the client began it if it never got there (callResult.arrival); Response is when the
-	// response was read.
-	Arrival, Response int64
+	// Sent is when the client began the write's request (callResult.start; for an upload, the
+	// POST's, not the GET's before it). Arrival is when the whole request was in Dispatch's
+	// socket (httptrace WroteRequest), or Sent if it never got there (callResult.arrival);
+	// Response is when the response was read.
+	Sent, Arrival, Response int64
 	// ConnWait is the client's own wait for a connection (GetConn to GotConn).
 	ConnWait     time.Duration
 	Status       int
@@ -49,8 +50,9 @@ type eventsSummary struct {
 	Committed     int                    `json:"committed"`
 	CommittedPerS float64                `json:"committed_per_s"`
 	ByKind        map[string]kindSummary `json:"by_kind"`
-	// DeliveryMsFromArrival and DeliveryMsFromCommit hold one value per (primary event,
-	// subscribed session) issue-topic receipt.
+	// DeliveryMsFromSent, DeliveryMsFromArrival and DeliveryMsFromCommit hold one value per
+	// (primary event, subscribed session) issue-topic receipt.
+	DeliveryMsFromSent         stat `json:"delivery_ms_from_sent"`
 	DeliveryMsFromArrival      stat `json:"delivery_ms_from_arrival"`
 	DeliveryMsFromCommit       stat `json:"delivery_ms_from_commit"`
 	IssueTopicReceipts         int  `json:"issue_topic_receipts"`
@@ -91,15 +93,12 @@ type writeErrors struct {
 // Offered counts writes scheduled in the window. A write is committed when a commit row of its
 // marker has its kind's primary type, whatever its HTTP status (a write that hit the client
 // timeout but committed still counts); its primary event is the lowest such event id. Each
-// issue-topic receipt of a primary event gives one delivery latency from the write's arrival and
-// one from the event's commit; expected receipts are committed primary events times the issue's
-// subscriptions (watchers).
+// issue-topic receipt of a primary event gives one delivery latency from the write's sending, one
+// from its arrival and one from the event's commit; expected receipts are committed primary
+// events times the issue's subscriptions (watchers).
 func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, watchers map[string]int, durationS float64) eventsSummary {
 	out := eventsSummary{ByKind: map[string]kindSummary{}}
-	byMarker := map[int64][]commitRow{}
-	for _, c := range commits {
-		byMarker[c.Marker] = append(byMarker[c.Marker], c)
-	}
+	byMarker := commitsByMarker(commits)
 	type timed struct {
 		w      *writeRec
 		commit int64
@@ -126,12 +125,7 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 		default:
 			writeMs[w.Kind] = append(writeMs[w.Kind], float64(w.Response-w.Arrival)/1e6)
 		}
-		var first *commitRow
-		for j, c := range byMarker[w.Marker] {
-			if c.Type == k.PrimaryType && (first == nil || c.EventID < first.EventID) {
-				first = &byMarker[w.Marker][j]
-			}
-		}
+		first := primaryCommit(byMarker[w.Marker], k.PrimaryType)
 		for _, c := range byMarker[w.Marker] {
 			if first == nil || c.EventID != first.EventID {
 				other[c.EventID] = true
@@ -150,7 +144,7 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 	}
 	out.OtherEvents = len(other)
 
-	var fromArrival, fromCommit []float64
+	var fromSent, fromArrival, fromCommit []float64
 	kindArrival := map[string][]float64{}
 	kindCommit := map[string][]float64{}
 	for _, r := range receipts {
@@ -166,6 +160,7 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 			continue
 		}
 		out.IssueTopicReceipts++
+		fromSent = append(fromSent, float64(r.Recv-t.w.Sent)/1e6)
 		arrival := t.w.Arrival
 		ms := float64(r.Recv-arrival) / 1e6
 		fromArrival = append(fromArrival, ms)
@@ -180,6 +175,7 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 		}
 	}
 	out.Missing = out.ExpectedIssueTopicReceipts - out.IssueTopicReceipts
+	out.DeliveryMsFromSent = mkStat(fromSent)
 	out.DeliveryMsFromArrival = mkStat(fromArrival)
 	out.DeliveryMsFromCommit = mkStat(fromCommit)
 	out.ConnWaitMs = mkStat(connWait)
@@ -194,6 +190,27 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 		out.CommittedPerS = float64(out.Committed) / durationS
 	}
 	return out
+}
+
+// commitsByMarker groups commit rows by their marker.
+func commitsByMarker(commits []commitRow) map[int64][]commitRow {
+	byMarker := map[int64][]commitRow{}
+	for _, c := range commits {
+		byMarker[c.Marker] = append(byMarker[c.Marker], c)
+	}
+	return byMarker
+}
+
+// primaryCommit is a write's primary event among the commit rows of its marker: the lowest event
+// id of the kind's primary type, nil when no row has that type.
+func primaryCommit(rows []commitRow, primaryType string) *commitRow {
+	var first *commitRow
+	for j, c := range rows {
+		if c.Type == primaryType && (first == nil || c.EventID < first.EventID) {
+			first = &rows[j]
+		}
+	}
+	return first
 }
 
 // parseMarker reads the counter of an "lgm<N>x" marker.

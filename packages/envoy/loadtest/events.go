@@ -218,7 +218,7 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 		text, markdown := w.specText(ctx, p.issue, id)
 		old, found := currentRevision(markdown)
 		if !found {
-			rec.Arrival, rec.Response, rec.Status = text.start, text.end, text.status
+			rec.Sent, rec.Arrival, rec.Response, rec.Status = text.start, text.start, text.end, text.status
 			rec.TransportErr = fmt.Sprintf("read %s before upload: status %d, revision token found %t, %v", specName, text.status, found, text.err)
 			w.lg.Printf("write %s %s: %s", p.kind, is.Key, rec.TransportErr)
 			return rec
@@ -232,7 +232,7 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 		body["actor"] = sessionActor(sessionID(p.session))
 	}
 	res := w.a.call(ctx, "POST", path, id, body)
-	rec.Arrival, rec.Response, rec.Status, rec.ConnWait = res.arrival(), res.end, res.status, res.connWait
+	rec.Sent, rec.Arrival, rec.Response, rec.Status, rec.ConnWait = res.start, res.arrival(), res.end, res.status, res.connWait
 	if res.err != nil {
 		rec.TransportErr = res.err.Error()
 	}

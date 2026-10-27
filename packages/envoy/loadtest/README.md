@@ -24,8 +24,10 @@ same step before and after its change, and compares the two rows.
 | `events.go` | The five write kinds and the event mix |
 | `routes.go` | The route-mix file parser and the request paths |
 | `delivery.go` | The join of writes, database commits and receipts into delivery latencies |
-| `sample.go` | The 5 s sampler: CPU, RSS, Postgres connections, goroutines, pool waiters, heap, NATS `/varz` |
+| `sample.go` | The 5 s sampler: CPU, RSS, Postgres connections, goroutines, pool waiters, heap, NATS `/varz`. The transaction-id probe. |
 | `lockprobe.go` | The 20 ms sampler of the commit-order lock |
+| `locksampler.go` | The 20 ms sampler of every ungranted lock in `pg_locks` |
+| `sse.go` | The parser of the dashboard SSE frames, and the SSE frame latencies |
 | `proxy.go` | The TCP latency proxy toward Postgres |
 | `tables.go` | `TABLES.md` from one or more `summary.json` files, the pprof tops and the goroutine summary |
 | `guard.go` | `stack.json`, the endpoint flags and the check that every endpoint is the stack's own |
@@ -321,11 +323,13 @@ For example, a build at migration 0128 on a seed at 0120 indexes the blocks of a
 every step. To measure one build alone, seed with it (`stack.sh seed --force`). `meta.json`
 records the build commit and whether the tree had uncommitted changes.
 
-Committed rate at 1x varied from run to run on one build: 0.34 to 2.14 events/s in the
-2026-10-27 runs, with the commit-order lock held 100% of the time in every run. In the runs that
-recorded `box_busy_before`, it was at most 7%. It sees only this pod's CPU: other pods on the same
-node are not in `/proc/stat`. So a before and after compares several runs of each side, not one run
-of each.
+Committed rate at 1x varies from run to run. Across the runs of 2026-10-27 it was 0.34 to 2.14
+events/s. The lowest ran a build at migration 0128 on a seed at 0120, with the block-index backfill
+inside the step. With a seed made by the same build, three runs in a row committed 1.81, 1.77 and
+1.63 events/s, each with the commit-order lock held in 99.6-100% of samples and 45-46 waiters
+(p50), and `box_busy_before` at most 1%. That number sees only this pod's CPU: other pods on the
+same node are not in `/proc/stat`. So a before and after compares several runs of each side, not
+one run of each.
 
 ## The load
 
@@ -434,6 +438,10 @@ envelope's payload.
 A write's **primary event** is the event with the lowest id among the events that carry its marker
 and have its kind's primary type. Only primary events on issue topics are timed.
 
+- **From sent**: the receipt time minus the write's send time. The send time is when the client
+  started the write's request. For an upload, it is the start of the `POST`, not of the `GET`
+  before it. So the value also includes the client's own wait for a connection and the time to
+  write the request.
 - **From arrival**: the receipt time minus the write's arrival time. The arrival time is when the
   whole request is in Dispatch's socket (`httptrace.ClientTrace.WroteRequest`). When the trace does
   not see that, it is when the client started the request. So the value includes the time in
@@ -505,7 +513,7 @@ series `TABLES.md`, because `run-step.sh` already wrote them for each step.
 
 ## The tables
 
-`TABLES.md` has five tables, with one row per step. The window is the measured window
+`TABLES.md` has eight tables, with one row per step. The window is the measured window
 (`--duration`). "Cores" means CPU-seconds per second. A cell is `-` when it has no value. A JSON
 path below is a field of the step's `summary.json`.
 
@@ -580,7 +588,7 @@ divided by 100 ticks per second and by the seconds between the two samples.
 | `heap in use MiB p50 / max` | MiB | Dispatch's `HeapInuse` from `/debug/pprof/heap?debug=1`, read every 15 s. | `resources.heap_inuse_mib` |
 | `goroutines p50 / max` | count | Dispatch's goroutines, from `/debug/pprof/goroutine?debug=1`. | `resources.goroutines` |
 | `goroutines waiting for a pool connection p50 / max` | count | Dispatch's goroutines with a pgx pool `Acquire` frame (puddle) in their stack. | `resources.pool_acquire_goroutines` |
-| `Postgres connections max` | count | The highest number of `pg_stat_activity` rows for database `dispatch`. It includes the 2 connections of `loadgen`'s sampler and lock probe. | `resources.pg_conns_total.max` |
+| `Postgres connections max` | count | The highest number of `pg_stat_activity` rows for database `dispatch`. It includes up to 4 connections of `loadgen`: the sampler, the lock probe, the ungranted-lock sampler and the transaction-id probe. | `resources.pg_conns_total.max` |
 | `connections waiting on a lock p50` | count | The p50 of `dispatch` connections with state `active` and wait event type `Lock`, over the samples that saw at least one. `0` when no sample saw one. An advisory lock wait has this type. | `resources.pg_conns_by_state["active\|Lock"]` |
 | `Dispatch CPU-s per operation` | CPU-seconds | Dispatch's mean cores divided by the operation rate. An operation is a committed write or a sent request in the window. | `resources.dispatch_cpu_s_per_op` |
 
@@ -603,6 +611,70 @@ commits.
 | `hold ms p50 / p90 / p99` | ms | Hold durations. One hold is a run of samples with the same holder pid and transaction start. It lasts from its first sample to the sample that ends it. A hold that is open at the last sample is not counted. The resolution is the sample interval. | `commit_order_lock.hold_ms` |
 | `holds seen` | count | The holds counted for `hold ms`. | `commit_order_lock.holds_observed` |
 | `what the holder was doing (share of held samples)` | text, percent | Up to four holder states, most frequent first, each with its share of held samples. A state is `<state> (<wait event type>:<wait event>)`, or `active: <query>` with the query cut to 70 characters. `idle in transaction (Client:ClientRead)` means that Postgres waits for Dispatch to send the next statement. | `commit_order_lock.holder_doing` (up to 12 entries) |
+
+When dispatch://INFRA-591 removes the commit-order lock, this table reads 0 by construction. No
+backend can hold or wait for a lock that Dispatch does not take. The ungranted-locks table
+(Ungranted locks, below) is then the measure of lock waits.
+
+### Delivery from sending, and SSE frames
+
+The dashboard SSE streams (`--sse`) parse each frame. A frame is one event: an `id` line, an
+`event` line and a `data` line, then a blank line. Comment lines (`: open`, `: heartbeat`) are not
+frames. The frame time is when its blank line arrives. Only the frames that arrive in the window
+count. A frame's event id is the `id` in its `data`, or the `id` line when the data has none.
+
+| Column | Unit | What it shows | Source |
+| --- | --- | --- | --- |
+| `step` | name | The step name. | `config.step` |
+| `NATS delivery ms from sent p50 / p99` | ms | Delivery latency from sent (Delivery latency, above), over every issue-topic receipt of a primary event. | `events.delivery_ms_from_sent` |
+| `SSE frame ms from created_at p50 / p99` | ms | The frame time minus the `created_at` of the frame's event, over every frame with a `created_at`. | `sse.sse_frame_ms_from_created_at` |
+| `SSE frame ms from write response p50 / p99` | ms | The frame time minus the time when the client read the write's response. Only the frame of a primary event counts. Its write must be in the window, have a 2xx status and be committed. A write with no complete response has no response time, so its frames do not count. | `sse.sse_frame_ms_from_write_response` |
+| `SSE frames` | count | The frames of all SSE streams that arrived in the window. | `sse.sse_frames` |
+| `SSE order violations` | count | The frames whose event id is not more than the event id of the previous frame on the same connection. The check starts again on each new connection. A value above 0 means that a stream sent events out of id order. | `sse.sse_order_violations` |
+
+A `summary.json` from before these keys has no `sse` and no `events.delivery_ms_from_sent`. Its
+cells are `-`.
+
+### Ungranted locks
+
+The ungranted-lock sampler reads `pg_locks` every 20 ms, from the same start to the same end as the
+lock probe (Commit-order lock, above). It reads over a direct Postgres connection, not through the
+proxy. Each sample lists every heavyweight lock that a backend waits for (`granted` is false). The
+sampler groups these waits by lock type, target and mode.
+
+The target names the lock:
+
+- `commit_order_lock`: Dispatch's commit-order advisory lock (Commit-order lock, above).
+- `notify_commit_lock`: the commit lock of Postgres's `NOTIFY`. It is the `object` lock on database
+  0 that `PreCommit_Notify` takes.
+- A relation name, for a `relation` or `tuple` lock. For a relation in another database, `loadgen`
+  reads the name after the step, with one short connection to that database. When that read
+  fails, the target is `<database>:<oid>`.
+- `row_wait`, for a `transactionid` lock: a wait for a row that another transaction locked.
+- `<classid>:<objid>`, for another advisory lock.
+- The ids of the lock, joined by `:`, for any other lock.
+
+For each wait, the sampler records the waiter's statement and the statement of its first blocker
+(the first pid of `pg_blocking_pids`). Each statement is the `query` of `pg_stat_activity`, cut to
+80 characters.
+
+| Column | Unit | What it shows | Source |
+| --- | --- | --- | --- |
+| `step` | name | The step name. | `config.step` |
+| `samples with an ungranted lock` | percent | The share of samples that saw at least one ungranted lock. | `ungranted_locks.share_of_samples_with_any_ungranted` |
+| `locks waited for: type target mode, samples with a waiter, waiters p50 / max` | text, percent, count | Up to four groups. The group with a waiter in the most samples comes first. Each group shows its lock type, target and mode. Then it shows the share of samples with at least one waiter in the group. Then it shows the waiters per sample, p50 / max. A sample with no waiter in the group counts as 0. | `ungranted_locks.groups[]`: `locktype`, `target`, `mode`, `share_of_samples_with_waiter`, `waiters_p50`, `waiters_max` |
+| `top waiter query → first blocker query (count), per lock` | text, count | One entry for each group of the column before, in the same order. The entry is the most frequent pair of waiter statement and first-blocker statement, then the number of waits with that pair. `(none)` is an empty statement: the sampler found no blocker, or the backend had no statement text. | `ungranted_locks.groups[].top_pairs[0]`: `waiter_query`, `blocker_query`, `count` |
+
+`ungranted_locks.samples` is the number of samples. `groups` holds every group, and `top_pairs`
+holds up to 3 pairs per group, most frequent first. A `summary.json` from before these keys has no
+`ungranted_locks`. Its cells are `-`.
+
+### Transaction ids
+
+| Column | Unit | What it shows | Source |
+| --- | --- | --- | --- |
+| `step` | name | The step name. | `config.step` |
+| `transaction ids per s` | transaction ids per second | The transaction ids that Postgres assigned per second in the window, in all databases of the server. The transaction-id probe reads the next transaction id (`pg_snapshot_xmax(pg_current_snapshot())`) at the window start and at the window end. It divides the difference by the seconds between the two reads. The probe assigns no transaction id itself. `-` when a read failed, or when `resources` is null. | `resources.xids_per_s` |
 
 ### Requests by route
 
@@ -658,7 +730,8 @@ With it, a given endpoint flag wins and an empty one falls back to `stack.json`.
   search falls back to keyword.
 - **A smaller dataset.** 1,000 issues and about 10,000 events at the start of each step.
 - **No browser documents.** No document websockets and no dashboard refetch fan-out. The browser
-  share of the route mix is plain GETs. The SSE streams read `/api/v1/events` and do nothing more.
+  share of the route mix is plain GETs. The SSE streams read `/api/v1/events`, time each frame,
+  and do nothing more.
 - **One listener, sessions on NATS.** The sessions receive from NATS directly, as the pi plugin's
   self-subscription does. They register with port 0, so the listener delivers nothing to them.
 - **One process each.** One Dispatch process, one NATS server and one listener, all on
@@ -671,8 +744,8 @@ Compare the right rows:
 - 0.25x and 0.5x run 100 and 200 sessions (the spec's definition). The report ran 350 and 367.
 - Every step starts from the seed. The report's database grew across steps, which it ran in the
   order 1x, 2x, 5x, controls, 10x, 1x-rerun, 0.25x, 0.5x.
-- Delivery is reported from arrival and from commit (the spec's columns). The report had "after
-  commit response" and "after event created_at".
+- Delivery is reported from arrival and from commit (the spec's columns), and from sent. The report
+  had "after commit response" and "after event created_at".
 - Committed writes come from the database. The report counted 2xx responses.
 - The default event mix is production's (`production-2026-10-26`), which adds replies and uploads.
   `--event-mix report-2026-10-27` runs the report's mix. Compare that row with the report's

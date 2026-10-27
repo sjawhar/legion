@@ -385,6 +385,40 @@ func natsVarz(mon string) map[string]float64 {
 	return map[string]float64{"cpu_pct": v.CPU, "mem": v.Mem, "connections": v.Connections, "in_msgs": v.InMsgs, "out_msgs": v.OutMsgs, "slow_consumers": v.SlowCons, "subscriptions": v.Subs}
 }
 
+// xidRate reads the next transaction id to be assigned at from and at to, over a direct Postgres
+// connection, and returns the transaction ids assigned per second between the two reads; nil when
+// either read failed or ctx ended first. pg_current_snapshot assigns no transaction id, so the
+// probe does not count itself.
+func xidRate(ctx context.Context, url string, from, to time.Time, lg *log.Logger) *float64 {
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		lg.Printf("xid probe: %v", err)
+		return nil
+	}
+	defer conn.Close(context.Background())
+	read := func(at time.Time) (int64, time.Time, bool) {
+		if !sleepUntil(ctx, at) {
+			return 0, time.Time{}, false
+		}
+		var x int64
+		if err := conn.QueryRow(ctx, `select pg_snapshot_xmax(pg_current_snapshot())::text::bigint`).Scan(&x); err != nil {
+			lg.Printf("xid probe: %v", err)
+			return 0, time.Time{}, false
+		}
+		return x, time.Now(), true
+	}
+	x0, t0, ok := read(from)
+	if !ok {
+		return nil
+	}
+	x1, t1, ok := read(to)
+	if !ok || !t1.After(t0) {
+		return nil
+	}
+	r := float64(x1-x0) / t1.Sub(t0).Seconds()
+	return &r
+}
+
 // --- statistics -------------------------------------------------------------------------------
 
 type stat struct {
@@ -430,6 +464,9 @@ type resourcesSummary struct {
 	// DispatchCPUSPerOp is Dispatch's CPU-seconds per committed event or sent request; null
 	// with no operations or no Dispatch pid.
 	DispatchCPUSPerOp *float64 `json:"dispatch_cpu_s_per_op"`
+	// XIDsPerS is the transaction ids Postgres assigned per second from the window start to its
+	// end (xidRate); null when a read failed.
+	XIDsPerS *float64 `json:"xids_per_s"`
 }
 
 // summarizeResources reduces the in-window samples; ops is committed events plus requests sent

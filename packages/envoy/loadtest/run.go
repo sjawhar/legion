@@ -217,8 +217,11 @@ type summary struct {
 	Requests        requestsSummary   `json:"requests"`
 	Resources       *resourcesSummary `json:"resources"`
 	CommitOrderLock lockSummary       `json:"commit_order_lock"`
+	UngrantedLocks  ungrantedSummary  `json:"ungranted_locks"`
 	Sessions        sessionsSummary   `json:"sessions"`
-	SSEBytes        int64             `json:"sse_bytes"`
+	// SSE is nil when read from a summary.json older than the SSE frame timing.
+	SSE      *sseSummary `json:"sse"`
+	SSEBytes int64       `json:"sse_bytes"`
 	// StackExits are the stack processes that exited during the step; such a step fails and its
 	// row does not measure the load.
 	StackExits []stackExit `json:"stack_exits,omitempty"`
@@ -429,25 +432,6 @@ func execute(cfg runConfig, sf seedFile) error {
 		}
 	}()
 
-	// Dashboard SSE streams.
-	var sseBytes atomic.Int64
-	sseClient := &http.Client{}
-	for i := range cfg.sse {
-		go func() {
-			for ctx.Err() == nil {
-				req, _ := http.NewRequestWithContext(ctx, "GET", cfg.ep.dispatch+"/api/v1/events", nil)
-				req.Header.Set("X-Dispatch-User", fmt.Sprintf("viewer-%d", i))
-				req.Header.Set("Accept", "text/event-stream")
-				if resp, err := sseClient.Do(req); err == nil {
-					n, _ := io.Copy(io.Discard, resp.Body)
-					sseBytes.Add(n)
-					_ = resp.Body.Close()
-				}
-				sleepUntil(ctx, time.Now().Add(time.Second))
-			}
-		}()
-	}
-
 	// The measured window.
 	start := time.Now()
 	winStart := start.Add(cfg.warmup)
@@ -456,6 +440,35 @@ func execute(cfg runConfig, sf seedFile) error {
 	meta.Start, meta.WindowStart, meta.WindowEnd = start, winStart, winEnd
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, lg)
 	lg.Printf("window %s to %s", winStart.UTC().Format(time.RFC3339), winEnd.UTC().Format(time.RFC3339))
+
+	// Dashboard SSE streams: every data frame is timed on arrival (readSSE), and the frames that
+	// arrive in the window are kept.
+	var sseBytes atomic.Int64
+	var sseMu sync.Mutex
+	sseFrames := make([]sseFrame, 0, 1<<14)
+	sseClient := &http.Client{}
+	for i := range cfg.sse {
+		go func() {
+			for ctx.Err() == nil {
+				req, _ := http.NewRequestWithContext(ctx, "GET", cfg.ep.dispatch+"/api/v1/events", nil)
+				req.Header.Set("X-Dispatch-User", fmt.Sprintf("viewer-%d", i))
+				req.Header.Set("Accept", "text/event-stream")
+				if resp, err := sseClient.Do(req); err == nil {
+					n, _ := readSSE(resp.Body, time.Now, func(f sseFrame) {
+						if !inWindow(time.Unix(0, f.at)) {
+							return
+						}
+						sseMu.Lock()
+						sseFrames = append(sseFrames, f)
+						sseMu.Unlock()
+					})
+					sseBytes.Add(n)
+					_ = resp.Body.Close()
+				}
+				sleepUntil(ctx, time.Now().Add(time.Second))
+			}
+		}()
+	}
 
 	// Event generator: open-loop Poisson from its own deterministic stream.
 	var wmu sync.Mutex
@@ -547,18 +560,31 @@ func execute(cfg runConfig, sf seedFile) error {
 		}
 	}()
 
-	// Sampler, lock probe and profiles.
+	// Sampler, lock probe, ungranted-lock sampler, transaction-id probe and profiles. The two
+	// 20 ms samplers run from 20 s into the window to its end.
 	smp := newSampler(cfg.ep)
 	go smp.loop(ctx, winStart, winEnd)
+	lockFrom := winStart.Add(20 * time.Second)
+	if lockFrom.After(winEnd) {
+		lockFrom = winStart
+	}
 	lp := &lockProbe{}
 	lpDone := make(chan struct{})
 	go func() {
 		defer close(lpDone)
-		from := winStart.Add(20 * time.Second)
-		if from.After(winEnd) {
-			from = winStart
-		}
-		lp.loop(ctx, cfg.ep.pg, from, winEnd, lg)
+		lp.loop(ctx, cfg.ep.pg, lockFrom, winEnd, lg)
+	}()
+	ls := &lockSampler{}
+	lsDone := make(chan struct{})
+	go func() {
+		defer close(lsDone)
+		ls.loop(ctx, cfg.ep.pg, lockFrom, winEnd, lg)
+	}()
+	var xidsPerS *float64
+	xidDone := make(chan struct{})
+	go func() {
+		defer close(xidDone)
+		xidsPerS = xidRate(ctx, cfg.ep.pg, winStart, winEnd, lg)
 	}()
 	profDone := make(chan struct{})
 	go func() {
@@ -582,6 +608,8 @@ func execute(cfg runConfig, sf seedFile) error {
 	smp.checkAlive(time.Now())
 	<-profDone
 	<-lpDone
+	<-lsDone
+	<-xidDone
 	cancel()
 	for _, nc := range conns {
 		nc.Close()
@@ -609,6 +637,10 @@ func execute(cfg runConfig, sf seedFile) error {
 	rmu.Lock()
 	rq := append([]reqRec(nil), reqs...)
 	rmu.Unlock()
+	sseMu.Lock()
+	frames := append([]sseFrame(nil), sseFrames...)
+	sseMu.Unlock()
+	ls.resolveRelations()
 
 	var markers []int64
 	for _, w := range ws {
@@ -637,6 +669,8 @@ func execute(cfg runConfig, sf seedFile) error {
 			NATSSubscriptions: subs, NATSConnections: len(conns),
 		},
 		CommitOrderLock: summarizeLock(lp.samples),
+		UngrantedLocks:  summarizeUngranted(ls.samples),
+		SSE:             new(summarizeSSE(frames, ws, commits)),
 		SSEBytes:        sseBytes.Load(),
 	}
 	if commitsErr != nil {
@@ -646,6 +680,9 @@ func execute(cfg runConfig, sf seedFile) error {
 	ss := smp.all()
 	writeJSONFile(filepath.Join(cfg.out, "samples.json"), ss, lg)
 	sum.Resources = summarizeResources(ss, sum.Events.Committed+sum.Requests.Sent, durS)
+	if sum.Resources != nil {
+		sum.Resources.XIDsPerS = xidsPerS
+	}
 	sum.StackExits = smp.stackExits()
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, lg)
 	meta.End = time.Now()

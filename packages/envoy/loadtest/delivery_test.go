@@ -9,13 +9,13 @@ const msNs = int64(1e6)
 
 func TestJoinDelivery(t *testing.T) {
 	writes := []writeRec{
-		// A plain comment answered 201.
-		{Marker: 1, Kind: kindComment, Issue: "LGA-1", InWindow: true, Arrival: 1000 * msNs, Response: 1100 * msNs, Status: 201},
+		// A plain comment answered 201. Each committed write was sent 10 ms before it arrived.
+		{Marker: 1, Kind: kindComment, Issue: "LGA-1", InWindow: true, Sent: 990 * msNs, Arrival: 1000 * msNs, Response: 1100 * msNs, Status: 201},
 		// An edit that hit the client timeout, but committed.
-		{Marker: 2, Kind: kindEdit, Issue: "LGA-2", InWindow: true, Arrival: 2000 * msNs, Response: 32000 * msNs, TransportErr: "context deadline exceeded"},
+		{Marker: 2, Kind: kindEdit, Issue: "LGA-2", InWindow: true, Sent: 1990 * msNs, Arrival: 2000 * msNs, Response: 32000 * msNs, TransportErr: "context deadline exceeded"},
 		// An anchored comment whose transaction also appended a document snapshot (id 30), and
 		// carried its marker on two comment.created rows (31, 32): 31 is the primary event.
-		{Marker: 3, Kind: kindAnchored, Issue: "LGA-1", InWindow: true, Arrival: 3000 * msNs, Response: 3400 * msNs, Status: 201},
+		{Marker: 3, Kind: kindAnchored, Issue: "LGA-1", InWindow: true, Sent: 2990 * msNs, Arrival: 3000 * msNs, Response: 3400 * msNs, Status: 201},
 		// Before the window: neither offered nor timed.
 		{Marker: 4, Kind: kindComment, Issue: "LGA-1", InWindow: false, Arrival: 10 * msNs, Response: 20 * msNs, Status: 201},
 		// A reply refused with 500 that committed nothing.
@@ -61,6 +61,10 @@ func TestJoinDelivery(t *testing.T) {
 	}
 	if got.WriteErrors.Transport != 1 || got.WriteErrors.Non2xx != 1 {
 		t.Errorf("write errors %+v, want 1 transport and 1 non-2xx", got.WriteErrors)
+	}
+	wantSent := stat{N: 7, P50: 310, P90: 610, P99: 610, Max: 610} // 110 110 210 310 610 610 610
+	if got.DeliveryMsFromSent != wantSent {
+		t.Errorf("delivery from sent %+v, want %+v", got.DeliveryMsFromSent, wantSent)
 	}
 	wantArrival := stat{N: 7, P50: 300, P90: 600, P99: 600, Max: 600} // 100 100 200 300 600 600 600
 	if got.DeliveryMsFromArrival != wantArrival {
