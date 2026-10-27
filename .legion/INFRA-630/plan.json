@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-630",
+  "completed": "2026-10-27T15:16:55Z",
+  "plan": "dispatch://INFRA-630/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, push and handoff, references/pr-body.md for the proof shape and the simplify pass, references/conflicts-and-rewrites.md if main moves under the branch",
+      "ce-simplify-code: the simplify pass over build.ts, release-push.sh push-built and the new workflow before the hand-off",
+      "dispatch: the production-check record and any Dispatch write",
+      "asd-ste100: messages to the architect and sibling trees (INFRA-629) over Envoy"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md 'What a proof is' for the four criteria's proofs, each with a negative control (the merge-tree pairs, the scratch pull request, the credential check mutation)"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md and references/review-threads.md for the review round; the deploy key now pushes from a second workflow, so run the thermonuclear-deep-review agent over .github/workflows/claude-envoy-rebuild.yaml and release-push.sh push-built"
+    ]
+  },
+  "summary": "Pull requests stop committing packages/claude-envoy/dist and legion. build.ts gains --out <dir> (runnable copy outside the repo), --in-place, and refuses no mode. Tests build fresh. The required test job and the claude-envoy job build from source. A new workflow .github/workflows/claude-envoy-rebuild.yaml (push to main, hourly, dispatch, and pull_request on its own files) builds main's tip in a credential-free job and lands a changed build with release-push.sh push-built (deploy key), which pushes only onto the commit it built from and otherwise dispatches a fresh run. check-release-credentials.sh covers the workflow and push-built. Guides, scripts and docs/solutions notes follow.",
+  "decisions": [
+    {"decision": "No programmatic gate on a pull request's diff", "reason": "Deployment instructions order instruction, cross-review, then a gate after measurement; the plan rewrites the instruction, names the reviewer's check, and removes the accidental in-place write (build.ts refuses no mode; --out refuses a directory inside the repository)."},
+    {"decision": "The required test job builds the plugin", "reason": "The claude-envoy job is not required (ruleset 12331919); without this a source that does not build could merge and keep main's rebuild failing."},
+    {"decision": "Push only onto the built commit; when main moved, dispatch a fresh run", "reason": "Release bump commits carry GitHub's skip keyword and start no run; dispatching avoids classifying build inputs and never rebases stale bytes."},
+    {"decision": "Rebuild commit starts CI (no skip keyword)", "reason": "Main's lint then checks the committed bundle for private names; no release path matches the two directories."},
+    {"decision": "Stale copy noticed by every run's compare, a red hourly run when a repaired copy was stale over 30 minutes, the production check of each plugin-changing pull request, and INFRA-633", "reason": "Spec asks how a stale copy is noticed; a repair alone reports nothing."},
+    {"decision": "A claude-envoy changelog entry in main's current form", "reason": "Spec's changelog exclusion is the changelog mechanism (INFRA-629)."}
+  ],
+  "acceptance": [
+    {"criterion": "1. From the head, two branches changing different plugin sources merge in either order with no conflict; the same with rebuilt files conflict", "surface": "git merge-tree --write-tree in a scratch clone of the head under $TMPDIR", "check": "Control pair: packages/contracts/src/dispatch-tools.ts 'dispatch issue' description sentences 'Create a native Dispatch issue for newly tracked work.' and 'Create a project only when a person asks for one;' (lines 353 and 356 at 4e350fdf): sources exit 0 both orders; with bun packages/claude-envoy/scripts/build.ts --in-place committed on each, exit 1 both orders in dist/*.js. Also sources-only pairs skills/legion-worker vs skills/legion-architect SKILL.md and contracts/src/actor-label.ts vs envoy-client/src/ask-answer.ts exit 0; gh pr diff --name-only lists nothing under the two directories."},
+    {"criterion": "2. PR CI still fails when the plugin's sources do not build or its tests fail", "surface": "the pull request's CI (required test job, claude-envoy job)", "check": "Head green; scratch non-draft PR from scratch/infra-630-negative with a syntax error in packages/envoy-client/src/ask-answer.ts: test red at 'Build the Claude Code plugin from source', claude-envoy red at 'Build the plugin from source'; then a broken assertion in packages/claude-envoy/tests/send-arguments.test.ts: claude-envoy red at its test step. Close and delete. Local fallback: the job's commands on the broken tree."},
+    {"criterion": "3. Release-credential check (extended) and lint, typecheck, test pass", "surface": "lint and test jobs; shell", "check": "bash .github/scripts/check-release-credentials.sh, its .test.sh, and release-push.test.sh exit 0; a copy of the new workflow with DEPLOY_KEY in the build job makes the check exit 1 naming the job; lint/typecheck/test green at the head."},
+    {"criterion": "4. Production: the first merge whose fresh build differs from main's files is followed by the workflow's commit; check-dist passes there", "surface": "the Rebuild Claude Envoy plugin workflow run on main", "check": "gh run list --repo sjawhar/legion --workflow claude-envoy-rebuild.yaml --branch main; the commit's author github-actions[bot] and subject 'chore(claude-envoy): rebuild dist/ and legion/ from <merge sha>'; git diff --name-only <sha>^ <sha> only the two directories; bun run check-dist at <sha> passes. Verdict pending until such a merge."}
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Nothing stops a pull request from committing dist/ or legion/; jj snapshots the in-place build; a guard in the non-required claude-envoy job blocks nothing", "answer": "No diff gate (deployment instruction order). Instruction rewritten with the reviewer's check; build.ts refuses no mode and --out refuses a directory inside the repository, so nothing a PR needs writes the tracked files; INFRA-588's measurement decides any later gate."},
+      {"finding": "A build that breaks can still merge (claude-envoy job not required) and then main's rebuild keeps failing", "answer": "The required test job builds the plugin with --out."},
+      {"finding": "The draft repairs a stale copy but never reports one", "answer": "Hourly run ends red when it repaired a copy stale over 30 minutes; each plugin-changing PR's production check names the rebuild run and runs check-dist; INFRA-633 reads the latest run."},
+      {"finding": "Skip-keyword rebase condition too loose; this PR's own text must not carry a literal skip keyword", "answer": "No rebase at all: push only onto the built commit, else dispatch a fresh run. The plan tells the implementer to keep the literal keyword out of the PR's title, body and commits."},
+      {"finding": "One concurrency group for every ref lets a branch run cancel main's pending run", "answer": "Group claude-envoy-rebuild-${{ github.ref }}; build runs only on main or a pull_request touching its own files; push job only on main, with the rule 6 always()/needs.build.result shape."},
+      {"finding": "A partial or empty artifact could delete the plugin from main; upload-artifact drops hidden files", "answer": "One tar artifact; push-built refuses links, '..', members outside dist/ and legion/, and a tar missing the four bundles, THIRD_PARTY_NOTICES, legion/.claude-plugin/plugin.json, or any file under legion/skills or legion/agents; it checks the commit changes only the two directories."},
+      {"finding": "Acceptance 1's example pairs do not conflict with rebuilt files, and the criterion proves little", "answer": "Measured; control pair is two sentences of one folded tool description in contracts/src/dispatch-tools.ts; recorded as a spec departure; the tester also checks the PR diff carries nothing under the two directories."},
+      {"finding": "Acceptance 4 may have no commit to name after this PR's own merge", "answer": "Read as the first merge whose fresh build differs from main's files; exact checks named; recorded as a spec departure; verdict pending until then."},
+      {"finding": "Outcome's 'main still holds matching files' cannot hold at every commit", "answer": "Lag of one workflow run stated in the guide and the plan's risks; recorded as a spec departure."},
+      {"finding": "Rules naming exactly three release workflows need rewording", "answer": "check-release-credentials.sh WORKFLOWS/PUSH_COMMANDS/header/messages and its fixture; root AGENTS.md release-credential convention names the new workflow while the version clause stays the release workflows'; 'Deploys come only from main' rewritten."},
+      {"finding": "A whole-repository private-name scan in the build job is fragile, and --out paths would miss the vendored-nats exemption", "answer": "Run from the repository root with targets packages/claude-envoy/dist packages/claude-envoy/legion in both the rebuild job and the claude-envoy job."},
+      {"finding": "The --out copy's skill symlinks would break; the dev-marketplace staged copy and smoke-clear-rebind default also run a built plugin", "answer": "--out dereferences skills/; README's staged-copy paragraph and smoke-clear-rebind.sh's default use --out."},
+      {"finding": "Siblings edit the same files; changelog entry vs 'not in scope: changelogs'", "answer": "Implementer reads INFRA-629's open PR before editing root AGENTS.md, release.yaml or check-release-credentials.sh; INFRA-632 starts after this merges; one claude-envoy changelog entry in main's current form."},
+      {"finding": "INFRA-633's 'a search of the repository shows it' needs a defined search; build.ts and legion-plugin-fresh messages say 'commit the result'", "answer": "Exact git grep command in plan task 8; both messages rewritten (the test is deleted)."},
+      {"finding": "Claims without a source: ruleset, deploy-key bypass, measurements, spec's line and input list", "answer": "Ruleset read via gh api (quoted in plan facts); deploy-key bypass evidenced by bump commit 8e53cdf3 landing on main; measurements quoted in the plan; build inputs no longer needed by the push logic; guides list the full build inputs."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Acceptance 1 gives 'two skills under skills/, or contracts and envoy-client' as pairs whose rebuilt dist/ and legion/ files conflict.",
+      "plan": "The control pair is two edits to different sentences of one tool description in packages/contracts/src/dispatch-tools.ts (lines 353 and 356 at 4e350fdf); the spec's pairs prove only the no-conflict half.",
+      "evidence": "Scratch clone at 4e350fdf, Bun 1.3.14: two skills with rebuilt legion/ merge-tree exit 0; try/catch edits in contracts/src/actor-label.ts and envoy-client/src/ask-answer.ts with rebuilt dist/ exit 0; the description pair exits 0 as sources and 1 in both orders with rebuilt dist/ (dispatch.js, envoy-channel.js, session-hook.js).",
+      "outcome": {"kind": "changed", "acceptance": ["1: control pair replaced by two sentences of one folded tool description; the spec's example pairs do not conflict even with rebuilt files"]}
+    },
+    {
+      "spec": "Acceptance 4: the first merge to main that changes a plugin source is followed by the workflow's commit.",
+      "plan": "The first merge whose fresh build differs from main's committed files is followed by the workflow's commit; a source change that leaves the bytes the same (this PR's own merge) is followed by a green run and no commit.",
+      "evidence": "This PR changes build.ts, tests and guides, which the bundles and legion/ do not contain (build.ts:101-131, 192-226), so its merge rebuilds identical bytes.",
+      "outcome": {"kind": "changed", "acceptance": ["4: trigger read as the first merge whose fresh build differs from main's files"]}
+    },
+    {
+      "spec": "Outcome: main still holds built files that match its sources.",
+      "plan": "Main's files match its sources one workflow run after each merge; between the merge and the rebuild commit (minutes) they are the previous build.",
+      "evidence": "The Scope's after-merge rebuild cannot commit inside the merge itself; the build job checks out main's tip and the push lands only onto that commit.",
+      "outcome": {"kind": "changed", "summary": ["Outcome's matching holds one workflow run after each merge, a lag of minutes"]}
+    }
+  ]
+}
