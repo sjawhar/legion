@@ -149,6 +149,17 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 			return nil
 		}
 	}
+	// A running architect whose own live session (RecipientSession == held.Session) failed to take
+	// this notice again (notice.Resends > 0, so a re-held copy already tried and failed) has gone
+	// deaf while still registered: the listener resolved its stale registration and forwarded, and
+	// the forward kept failing, so the publish path's ErrNoHolder never fires for it. Relaunch it
+	// to re-claim, in addition to re-holding the notice below — the two do not fight: the relaunch
+	// re-claims the role, and the re-held copy lands once it does. A first receipt timeout, or one
+	// whose recipient is a stale predecessor session the claim already moved off, is left for the
+	// re-held copy, so a healthy architect on a new session is not relaunched.
+	if notice.Resends > 0 && exception.RecipientSession != "" && exception.RecipientSession == held.Session {
+		r.reclaimUnheldRunning(ctx, reported.architect, "exception")
+	}
 	if notice.Resends >= len(noticeReholdDelays) {
 		r.log.Warn("outbox notice not re-held again: it was queued again the most times a notice is",
 			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason, "resends", notice.Resends)

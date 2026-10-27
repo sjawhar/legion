@@ -694,6 +694,11 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "because", ended)
 		return nil
 	}
+	// The architect can hold its role again, yet the listener has no holder for it (ErrNoHolder is
+	// authoritative: a role genuinely unheld now). If the pane is a running one that went deaf,
+	// relaunch it so its claim boot re-claims; the notice is held either way and lands on the next
+	// copy once the role is re-held.
+	r.reclaimUnheldRunning(ctx, architect, "publish")
 	return fmt.Errorf("%w: %s holds no role for %s: %w", errNoticeWaits, architect, row.Issue, published)
 }
 
