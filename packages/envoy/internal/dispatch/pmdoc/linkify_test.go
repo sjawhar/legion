@@ -4,20 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/yuin/goldmark/util"
 )
-
-// The guard's local-part table is goldmark's: a byte the guard reads as a local-part character is
-// one util.FindEmailIndex reads as one, and no other.
-func TestLinkifyGuardReadsGoldmarksLocalPartCharacters(t *testing.T) {
-	for c := range 256 {
-		goldmarks := util.FindEmailIndex([]byte{byte(c), '@', 'x', '.', 'y'}) > 0
-		if goldmarks != emailLocal[c] {
-			t.Errorf("byte %q: goldmark reads it as a local-part character: %v; the guard: %v", byte(c), goldmarks, emailLocal[c])
-		}
-	}
-}
 
 // Go links exactly what the browser editor's engine (remark-gfm) links, and leaves text where the
 // engine does. Each row's expectation is the engine's reading (gen/differential.ts), except that an
@@ -77,8 +64,8 @@ func TestLiteralURLReadsEachOffsetAsAFreshRead(t *testing.T) {
 				continue
 			}
 			shared.base = offset
-			got, _, _ := literalURL(line[offset:], shared)
-			fresh, _, _ := literalURL(line[offset:], &literalDomains{from: -1, end: -1, base: offset})
+			got, _ := literalURL(line[offset:], shared)
+			fresh, _ := literalURL(line[offset:], &literalDomains{from: -1, end: -1, base: offset})
 			if got != fresh {
 				t.Errorf("%q at %d: %d with the line's record, %d read fresh", test.line, offset, got, fresh)
 			}

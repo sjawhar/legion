@@ -256,8 +256,8 @@ func inlineParserOptions(emphasis emphasisParser) []parser.Option {
 		parser.WithInlineParsers(
 			util.Prioritized(elementInlineCounter{}, -1),
 			util.Prioritized(newStrikethroughGuard(), 500),
-			util.Prioritized(newLinkifyGuard(), 999),
 		),
+		parser.WithInlineParsers(linkifyParsers()...),
 	}
 }
 
@@ -955,7 +955,8 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			}
 			children = append(children, content...)
 		case *ast.AutoLink:
-			children = appendTextPiece(children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.URL(source)), "title": nil}}))
+			label, href := autolinkText(current, source)
+			children = appendTextPiece(children, label, append(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}))
 		case *extensionast.Strikethrough:
 			content, err := within(current, Mark{Type: "strike_through"})
 			if err != nil {

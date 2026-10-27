@@ -79,15 +79,14 @@ type lineCandidate struct {
 // inlineWithEscapes writes one textblock's inline nodes. Delimiters in text the escape rules leave
 // alone can still pair into a mark the text never had, or break one it has: GFM reads a single
 // tilde as a strikethrough delimiter and refuses a run of three, and asterisks and underscores pair
-// across a hard break, around a reference or inside a link label. A bare URL's text, escapes
-// included, can read back as another URL, and linkify continues one into the text written right
-// after it unless that text opens with trailing punctuation and then an end, or, for a URL the
-// tokenizer refuses and goldmark's parser reads, an escape. A mark's
-// delimiter run beside punctuation inside it and a letter outside it opens or closes nothing
-// (`**Which here?**Careful.`). A run whose text holds any of these is read back after it is
-// written, and when it does not come back as written it is written again in each spelling
-// respellings lists, keeping the first that reads back, so a run that fails for another reason
-// keeps the bytes it had.
+// across a hard break, around a reference or inside a link label. A bare URL's text can read back
+// as another URL, or run on into the text written right after it, which the browser editor's
+// engine continues a URL it reads in decoded text into up to whitespace; plain text can read back
+// as an address. A mark's delimiter run beside punctuation inside it and a letter outside it opens
+// or closes nothing (`**Which here?**Careful.`). A run whose text holds any of these is read back
+// after it is written, and when it does not come back as written it is written again in each
+// spelling respellings lists, keeping the first that reads back, so a run that fails for another
+// reason keeps the bytes it had.
 //
 // And the marks are written in one order, so a mark the next text still carries is closed and
 // opened again inside that text's other marks wherever the order puts it after them: bold inside
@@ -110,8 +109,9 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
 	held := delimitersInText(nodes)
 	bareURL := writesBareURL(nodes, context.tableCell)
+	colons, ats := writesAddressSyntax(nodes)
 	flanking := delimiterBesidePunctuation(nodes, context.tableCell)
-	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused && !flanking {
+	if r.err != nil || held == delimitersAsRuled && !bareURL && !colons && !ats && !fused && !flanking {
 		return
 	}
 	firstReadsBack := r.runReadsBack(from, prefix, nodes, inlineMarkdown)
@@ -119,9 +119,9 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		return
 	}
 	written := string(r.b.Bytes()[from:])
-	spellings := respellings(held, bareURL, false)
+	spellings := respellings(held, bareURL, colons, ats, false)
 	if fused {
-		spellings = append(spellings, respellings(held, bareURL, true)...)
+		spellings = append(spellings, respellings(held, bareURL, colons, ats, true)...)
 	}
 	if flanking {
 		flanked := []runSpelling{{flanking: true}}
@@ -149,25 +149,25 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 }
 
 // runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
-// text it escapes, whether it escapes the character after each bare URL goldmark's parser reads
-// (endsBareURL), whether it writes each bare URL the tokenizer reads (literalLength) as an autolink
-// (`<href>`, whose text both parsers read as written and whose `>` ends it), whether a mark the
+// text it escapes, whether it writes each bare URL (isBareURLLink) as an autolink (`<href>`, whose
+// text both readers read as written and whose `>` ends it), whether it escapes the colons of URL
+// schemes and the `@`s in text outside a link (escapeContext.schemeColons, ats), whether a mark the
 // next text still carries stays open around that text's other marks (keepingOpen), and whether a
 // letter beside a delimiter run that punctuation stands inside is a character reference
 // (flanking).
 type runSpelling struct {
-	escapes      delimiterEscapes
-	afterBareURL bool
-	angleURLs    bool
-	keepOpen     bool
-	flanking     bool
+	escapes                      delimiterEscapes
+	angleURLs, schemeColons, ats bool
+	keepOpen                     bool
+	flanking                     bool
 }
 
 // respellings is every spelling, open marks kept open or not, that inlineWithEscapes writes a run
 // in after its first writing, in the order it tries them: the delimiter escapes from the fewest,
-// then each again with the character after a bare URL escaped, then each with every bare URL the
-// tokenizer reads written as an autolink.
-func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
+// then each with every bare URL written as an autolink where the run writes one (bareURL), then
+// each with the colons of URL schemes escaped, the `@`s, and both, where its text holds them
+// (colons, ats).
+func respellings(held delimiterEscapes, bareURL, colons, ats, keepOpen bool) []runSpelling {
 	escapes := []delimiterEscapes{delimitersAsRuled}
 	if held != delimitersAsRuled {
 		for next := held; next <= delimitersAll; next++ {
@@ -175,12 +175,13 @@ func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
 		}
 	}
 	var spellings []runSpelling
-	for _, url := range []runSpelling{{}, {afterBareURL: true}, {angleURLs: true}} {
-		if url != (runSpelling{}) && !bareURL {
+	for _, url := range []runSpelling{{}, {angleURLs: true}, {schemeColons: true}, {ats: true}, {schemeColons: true, ats: true}} {
+		if url.angleURLs && !bareURL || url.schemeColons && !colons || url.ats && !ats {
 			continue
 		}
 		for _, delimiters := range escapes {
-			spelling := runSpelling{escapes: delimiters, afterBareURL: url.afterBareURL, angleURLs: url.angleURLs, keepOpen: keepOpen}
+			spelling := url
+			spelling.escapes, spelling.keepOpen = delimiters, keepOpen
 			if spelling != (runSpelling{}) {
 				spellings = append(spellings, spelling)
 			}
@@ -211,7 +212,7 @@ func keepingOpen(active, marks, following []Mark) []Mark {
 }
 
 // writesBareURL reports whether nodes write a link as its bare URL (isBareURLLink, isBareWWWLink),
-// which linkify reads again from the text alone.
+// which the readers read again from the text alone.
 func writesBareURL(nodes []*Node, escapePipes bool) bool {
 	for _, node := range nodes {
 		if node.Type != "text" {
@@ -224,16 +225,19 @@ func writesBareURL(nodes []*Node, escapePipes bool) bool {
 	return false
 }
 
-// followsBareURL reports whether nodes[index] is text outside any link written right after a bare
-// URL (isBareURLLink) that goldmark's parser reads, since the tokenizer refuses it
-// (literalLength): goldmark ends a URL at a backslash, where the tokenizer reads one into it.
-func followsBareURL(nodes []*Node, index int, escapePipes bool) bool {
-	if index == 0 || nodes[index].Type != "text" || nodeHasMark(nodes[index], "link") {
-		return false
+// writesAddressSyntax reports whether text outside a link or code among nodes holds a URL scheme's
+// colon (urlSchemeColon) and an `@`, where the readers may read an address from plain text.
+func writesAddressSyntax(nodes []*Node) (colons, ats bool) {
+	for _, node := range nodes {
+		if node.Type != "text" || nodeHasMark(node, "inlineCode") || containsMark(visibleMarks(node.Marks), "link") {
+			continue
+		}
+		for offset := range len(node.Text) {
+			colons = colons || node.Text[offset] == ':' && urlSchemeColon(node.Text, offset)
+			ats = ats || node.Text[offset] == '@'
+		}
 	}
-	previous := nodes[index-1]
-	return previous.Type == "text" && nodeHasMark(previous, "link") && isBareURLLink(previous, visibleMarks(previous.Marks), escapePipes) &&
-		literalLength(previous.Text) == 0
+	return colons, ats
 }
 
 // runReadsBack reports whether the inline markdown written since from reads back as nodes by
@@ -321,13 +325,29 @@ func opensBeforePunctuation(nodes []*Node, index int, next, following []Mark) bo
 	return flankingNeutral(firstRune(nodes[index+1].Text))
 }
 
-// wwwMayFollow reports whether the markdown written so far ends where the browser editor's
-// tokenizer begins a www URL, and Go's guard reads one (literalURLFollows): at a line's head, or
-// after a space, a tab, `(`, `*`, `_`, `[`, `]` or `~`. After any other character the editor reads
-// a www URL by another rule than Go's, so a www link is written as an explicit link there.
+// opensLabel reports whether a `[` is written right after a text written under marks, the node
+// after it, after, written under following: a footnote reference's after a text no mark closes
+// after, or a link's opened before any other mark of following with none of marks closed.
+func opensLabel(marks, following []Mark, after *Node) bool {
+	if after.Type == "footnote_reference" {
+		return len(marks) == 0
+	}
+	shared := sharedMarks(marks, following)
+	return shared == len(marks) && shared < len(following) && following[shared].Type == "link"
+}
+
+// wwwMayFollow reports whether the markdown written so far ends where the browser editor's engine,
+// and Go with it, reads a www URL from bare text: at a line's head or after whitespace,
+// punctuation or a symbol, where its tokenizer begins one (literalURLFollows) or its transform finds
+// one in the decoded text (transformPrevious). After a letter or a digit neither reads one, so a www
+// link is written as an explicit link there.
 func (r *renderer) wwwMayFollow() bool {
 	written := r.b.Bytes()
-	return len(written) == 0 || strings.IndexByte("\n \t(*_[]~", written[len(written)-1]) >= 0
+	if len(written) == 0 {
+		return true
+	}
+	char, _ := utf8.DecodeLastRune(written)
+	return literalEnd(char) || literalPunctuation(char)
 }
 
 // writeInlineRun writes nodes in spelling, reporting whether it fused two delimiter runs: closed a
@@ -346,10 +366,9 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			wwwBare := !spelling.angleURLs
 			// A www link is written bare only where the character written before it is one a www
 			// URL may follow (wwwMayFollow); elsewhere its marks are written again with the link.
-			// The rollback restores everything closing and opening marks changes: the bytes, the
-			// open marks, the position, and the renderer's open code fence and link label verdict.
-			before, beforeActive, beforePosition, beforeFused := r.b.Len(), active, position, fused
-			beforeFence, beforePadded, beforeLabel := r.inlineCodeFence, r.inlineCodePadded, r.labelBrackets
+			// Every delimiter a mark closes or opens with ends in punctuation, a symbol or a space,
+			// which a www URL may follow, so the link is written again only where no mark closed or
+			// opened before it: the first writing wrote nothing and changed no state to take back.
 			bareHere := wwwBare
 			var next, following []Mark
 			var common int
@@ -389,14 +408,12 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				if !bareHere || !isBareWWWLink(n, visibleMarks(n.Marks), escapePipes) || r.wwwMayFollow() {
 					break
 				}
-				r.b.Truncate(before)
-				active, position, fused, bareHere = beforeActive, beforePosition, beforeFused, false
-				r.inlineCodeFence, r.inlineCodePadded, r.labelBrackets = beforeFence, beforePadded, beforeLabel
+				bareHere = false
 			}
 			hasLink := containsMark(visibleMarks(n.Marks), "link")
 			active = next
 			marks := visibleMarks(n.Marks)
-			if isAngleURLLink(n, marks, escapePipes) || spelling.angleURLs && isBareURLLink(n, marks, escapePipes) && literalLength(n.Text) != 0 {
+			if isAngleURLLink(n, marks, escapePipes) || spelling.angleURLs && isBareURLLink(n, marks, escapePipes) {
 				// An autolink's text is literal to both parsers, so it takes no escape.
 				r.writeSyntax("<" + n.Text + ">")
 				position.atLineStart, position.atTextStart, position.afterMarker = false, false, false
@@ -421,11 +438,12 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			r.writeInlineText(n, &position, prefix, escapeContext{
 				footnoteLabels: r.footnoteLabels,
 				tableCell:      escapePipes,
-				urlSchemes:     !hasLink,
+				schemeColons:   spelling.schemeColons && !hasLink,
+				ats:            spelling.ats && !hasLink,
 				label:          label,
 				followed:       index+1 < len(nodes) || len(next) > 0,
+				beforeLabel:    index+1 < len(nodes) && opensLabel(next, following, nodes[index+1]),
 				delimiters:     spelling.escapes,
-				afterBareURL:   spelling.afterBareURL && followsBareURL(nodes, index, escapePipes),
 				heading:        context.heading,
 				marked:         len(next) > 0,
 				opener:         adjacentDelimiter(next[common:]),
@@ -693,7 +711,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 			segmentStart = byteOffset + width
 		} else if escape {
 			r.writeText(value[segmentStart:byteOffset])
-			r.writeSyntax(textEscape(char, endsBareURL(byteOffset, char, context)))
+			r.writeSyntax(textEscape(char))
 			segmentStart = byteOffset + width
 		}
 		lineEnd := char == '\n'

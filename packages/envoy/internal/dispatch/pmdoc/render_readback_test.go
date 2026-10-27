@@ -274,11 +274,15 @@ func TestBareURLMarkdownComesBackFromAWriteAsWritten(t *testing.T) {
 	}
 }
 
-// A www link is written as its bare text only where the browser editor's tokenizer and Go's guard
-// both read it from that text: right after a line's head, a space, a tab, `(`, `*`, `_`, `[`, `]`
-// or `~`, and only when its text opens with no email address. Anywhere else - after a quote, a code
-// span, inline HTML or a link - it is written as an explicit link, which both parsers read back as
-// the tree, where the bare text would read in the editor as a longer link or an email.
+// A www link is written as its bare text wherever the browser editor's engine and Go both read it
+// back from that text: after a line's head, whitespace, punctuation or a symbol
+// (renderer.wwwMayFollow) - a quote, a code span's fence and inline HTML among them - where its
+// text opens no email and the text written after it does not run on into it. It is written as an
+// explicit link, which both read back as the tree, after a letter or a digit, where neither reads a
+// www URL; where its text opens with an email, which the tokenizer tries first (isBareWWWLink); and
+// in a run whose bare writing does not read back as written, because what follows it continues it -
+// a letter outside ASCII, a backslash, another www link's label - where the run is written again
+// with every www link explicit (runSpelling.angleURLs).
 func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
 	link := func(text string) *Node {
 		return &Node{Type: "text", Text: text, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "http://" + text, "title": nil}}}}
@@ -291,15 +295,17 @@ func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
 		inline []*Node
 		want   string
 	}{
-		{"after a quote, and after a space", []*Node{text(`see "`), link("www.a.test"), text(`" and `), link("Www.b.test"), text(".")},
-			"see \"[www.a.test](http://www.a.test)\" and Www.b.test.\n"},
+		{"after a quote and after a space, both bare", []*Node{text(`see "`), link("www.a.test"), text(`" and `), link("Www.b.test"), text(".")},
+			"see \"www.a.test\" and Www.b.test.\n"},
+		{"after a letter", []*Node{text("ab"), link("www.a.test"), text(" c")},
+			"ab[www.a.test](http://www.a.test) c\n"},
 		{"text opening with an email", []*Node{text("see "), link("www.x@y.com"), text(" b")},
 			"see [www.x@y.com](http://www.x@y.com) b\n"},
-		{"after inline HTML, before a letter outside ASCII", []*Node{html("<b>"), link("www.a.test"), text("é")},
+		{"after inline HTML, before a letter outside ASCII it runs on into", []*Node{html("<b>"), link("www.a.test"), text("é")},
 			"<b>[www.a.test](http://www.a.test)é\n"},
-		{"after a code span, before a backslash", []*Node{code("c"), link("www.a.test"), text(`\b`)},
+		{"after a code span, before a backslash it runs on into", []*Node{code("c"), link("www.a.test"), text(`\b`)},
 			"`c`[www.a.test](http://www.a.test)\\b\n"},
-		{"after a link", []*Node{link("www.a.test"), link("www.b.test"), text("|x")},
+		{"before another www link's label it runs on into", []*Node{link("www.a.test"), link("www.b.test"), text("|x")},
 			"[www.a.test](http://www.a.test)[www.b.test](http://www.b.test)|x\n"},
 	}
 	rendered := make([]string, len(tests))
@@ -323,21 +329,6 @@ func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
 			engine, _ := readings[index].JSON()
 			t.Errorf("%s: %q reads back in Go as %s (%v), in the engine as %s", test.name, rendered[index], got, err, engine)
 		}
-	}
-}
-
-// The first spelling of a run, the one inlineWithEscapes falls back to when no respelling reads
-// back, closes a code span before a www link it writes as an explicit link: rolling back the bare
-// writing of the link restores the open code fence its marks closed.
-func TestTheFirstSpellingClosesACodeSpanBeforeAWWWLinkAfterIt(t *testing.T) {
-	nodes := []*Node{
-		{Type: "text", Text: "c", Marks: []Mark{{Type: "inlineCode"}}},
-		{Type: "text", Text: "www.a.test", Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "http://www.a.test", "title": nil}}}},
-	}
-	r := &renderer{}
-	r.writeInlineRun(nodes, "", inlineContext{startsLine: true}, runSpelling{})
-	if got, want := r.b.String(), "`c`[www.a.test](http://www.a.test)"; got != want {
-		t.Fatalf("writeInlineRun = %q, want %q", got, want)
 	}
 }
 

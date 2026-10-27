@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
@@ -34,9 +33,13 @@ type escapeContext struct {
 	textLineStart int
 	// tableCell reports whether pipes are cell syntax here.
 	tableCell bool
-	// urlSchemes reports whether a URL scheme's colon would autolink: outside a link, and not in
-	// a bare URL, which must stay as written for the parser to linkify it again.
-	urlSchemes bool
+	// schemeColons and ats report whether the colon after each `http` or `https`, in any case,
+	// and each `@` are escaped in text outside a link, because the run does not read back with them
+	// as written (inlineWithEscapes): an address only the tokenizer reads - a URL whose host has no
+	// dot, such as `http://localhost`, an email after a letter outside ASCII - or one an escape the
+	// rules write makes, as `a@b.test\_` ends its domain before the `\`, then reads as text to both
+	// readers.
+	schemeColons, ats bool
 	// label is the verdict on the brackets of the link label the text belongs to.
 	label labelBrackets
 	// followed reports whether something follows the text in its block, so that a trailing
@@ -44,13 +47,12 @@ type escapeContext struct {
 	// link's `]`, a hard break's backslash, the next node's first character. A block-final
 	// backslash reads back as itself and is left as written.
 	followed bool
+	// beforeLabel reports whether a `[` is written right after the text, a link's or a footnote
+	// reference's, which a `!` ending the text would open an image with.
+	beforeLabel bool
 	// delimiters is which of the text's delimiter characters are escaped beyond the rules, because
 	// the run they are in does not read back with them as written (inlineWithEscapes).
 	delimiters delimiterEscapes
-	// afterBareURL reports whether the text is written right after a bare URL, which linkify would
-	// continue into its first character, because the run does not read back with that character
-	// as written (inlineWithEscapes).
-	afterBareURL bool
 	// heading reports whether the text is a heading's.
 	heading bool
 	// marked reports whether the text is written inside a mark's syntax, where the parser keeps
@@ -67,18 +69,9 @@ type escapeContext struct {
 	flankFirst, flankLast bool
 }
 
-// endsBareURL reports whether the character is ASCII punctuation opening text written right after
-// a bare URL, which linkify would continue the URL into unless a backslash stops it.
-func endsBareURL(offset int, char rune, context escapeContext) bool {
-	return offset == 0 && context.afterBareURL && char < utf8.RuneSelf && isASCIIPunctuation(byte(char))
-}
-
 // needsInlineEscape decides one character from the text alone.
 func needsInlineEscape(value string, offset int, char rune, context escapeContext) bool {
 	textLineStart := context.textLineStart
-	if endsBareURL(offset, char, context) {
-		return true
-	}
 	switch char {
 	case '\\':
 		// Before whitespace written as a reference, a backslash would escape its `&`; before a
@@ -98,6 +91,8 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 		return true
 	case '~':
 		return context.delimiters >= delimitersTildes
+	case '!':
+		return offset+1 == len(value) && context.beforeLabel
 	case '[':
 		// A label whose brackets cannot pair as written escapes them all: a stray `]` closes it
 		// early, and a `[` left raw would then pair with its own closer.
@@ -121,7 +116,9 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 	case '|':
 		return context.tableCell
 	case ':':
-		return context.urlSchemes && urlSchemeColon(value, offset)
+		return context.schemeColons && urlSchemeColon(value, offset)
+	case '@':
+		return context.ats
 	case ' ', '\t':
 		// The parser trims whitespace that begins a line of a textblock's text, ends one before a
 		// line ending (where two spaces are a hard break) or ends the textblock, and a delimiter
@@ -157,13 +154,8 @@ func escaped(char rune) string {
 
 // textEscape is how the text writer spells an escaped character: a tilde as its numeric
 // reference, since the strikethrough parser refuses a delimiter run right after a tilde even when
-// a backslash escapes it, and anything else as escaped spells it - except the character that ends
-// a bare URL (endsBareURL), which is always a backslash, since linkify continues a URL through the
-// `&` that opens either reference.
-func textEscape(char rune, endsBareURL bool) string {
-	if endsBareURL {
-		return "\\" + string(char)
-	}
+// a backslash escapes it, and anything else as escaped spells it.
+func textEscape(char rune) string {
 	if char == '~' {
 		return numericEntity(char)
 	}
@@ -763,8 +755,10 @@ func entityReference(value string, offset int) bool {
 	return end < len(value) && value[end] == ';'
 }
 
+// urlSchemeColon reports whether the colon at offset ends `http` or `https`, in any case.
 func urlSchemeColon(value string, offset int) bool {
-	return strings.HasSuffix(value[:offset], "http") || strings.HasSuffix(value[:offset], "https")
+	return offset >= len("http") && strings.EqualFold(value[offset-len("http"):offset], "http") ||
+		offset >= len("https") && strings.EqualFold(value[offset-len("https"):offset], "https")
 }
 
 func isASCIIAlphaNumeric(value byte) bool {
