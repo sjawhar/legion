@@ -2,56 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-10-27T17:20:00Z",
-  "testedHead": "63e0500890c1f641c2b553fde67655176271bf27",
+  "completed": "2026-10-27T18:10:00Z",
+  "round": 2,
+  "testedHead": "3d0b23c8008ab95bdd9e0c9caca8ab85a724219d",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran the implementer's commands again at 63e05008 on this pod's Postgres 17: the whole multiprocess package (ok, 521.779 s; kill take-over 5.133 s, NATS cut 3.004 s, silent cut 7.256 s, SIGSTOP 5.746 s with nothing sent on resume, 200 comments once and in order, role event N+1 published 3.5 ms after the receipt for N), and the outbox, duty, bus and roles packages (all ok). Also drove two real envoy-dispatch binaries by hand against a real nats-server."
+    "how": "Ran the implementer's commands again at 3d0b23c8 on this pod's Postgres 17. The tester's red test TestAStandbyDoesNotTryTheHoldForEveryEventTheHolderWrites is unchanged since 6ebf4be0 (jj diff empty) and passes: 'the standby sent 0 takes of the hold and 0 reads of its lapse'. The outbox and duty packages pass (outbox 202.2 s). The whole multiprocess package passes (822.5 s). I measured the standby on real processes myself with pg_stat_statements; that is independent of the implementer's log_statement count."
   },
-  "failures": [
-    {
-      "criterion": "No periodic poll: a standby takes the publisher hold only when the hold is released, when the timer to its lapse fires, or when its own NATS connection changes (plan decision 8 and the plan's Run loop; lease.go's Run comment says the same)",
-      "evidence": "Red test TestAStandbyDoesNotTryTheHoldForEveryEventTheHolderWrites (packages/envoy/internal/dispatch/outbox/lease_test.go, commit 6ebf4be0). `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<pg> go test -count=1 -run TestAStandbyDoesNotTryTheHoldForEveryEventTheHolderWrites ./internal/dispatch/outbox/` fails at 63e05008 with 'the standby sent 98 takes of the publisher hold and 98 reads of its lapse while the holder wrote 100 events, want at most 3 of each'. Cause: the outbox has one wake channel. listen() signals it on every dispatch_events NOTIFY and wakeOnCommits on every commit, and standby() selects on that same channel, so each event makes each standby send takeHold (insert into duty_holds ... on conflict, which locks the holder's row) and holdExpiry. Measured on real processes with pg_stat_statements (two envoy-dispatch processes, 40 comments/s for 10 s): 601 takes and 601 lapse reads from the standby, against 1 of each in 10 s idle. A throwaway fix in a scratch copy (a second wake channel for the standby, fed only by the release NOTIFY, OnConnected and the NATS change) makes the test pass with 0 and 0, and the five lease rows still pass."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Exactly one process publishes at a time; /healthz carries boolean outbox_publisher",
-      "surface": "three real envoy-dispatch binaries built from 63e05008 on one Postgres and a real nats-server -js (A and B with NATS, C with DISPATCH_NATS_DISABLED=1); GET /healthz",
-      "command": "curl -s http://127.0.0.1:{18801,18802,18803}/healthz; comments POSTed through C's /api/v1/issues/TST-1/comments; psql read of events.published_at",
-      "observed": "A {\"outbox_publisher\":true}, B false, C false; A published all 7 events, including those written through C (A logged one 'published batch' per event)",
-      "headSha": "63e0500890c1f641c2b553fde67655176271bf27",
-      "negativeControl": "C, started with NATS disabled, reports outbox_publisher false and never takes the hold"
+      "criterion": "No periodic poll: a standby tries the publisher hold only on the hold's release, its lapse timer, a new LISTEN connection or a NATS change, never once per event",
+      "surface": "two real envoy-dispatch binaries built from 3d0b23c8 (multiprocess harness) on a Postgres 17 with pg_stat_statements; comments written at 40/s through both processes",
+      "command": "GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg with pg_stat_statements> go test -tags multiprocess -count=1 -run TestProbeStandbyStatements -v ./cmd/dispatch (throwaway probe in a scratch copy): pg_stat_statements_reset(), 10 s at 40 comments/s, then read the calls of every duty_holds statement in the test database",
+      "observed": "365 comments in 10 s: insert into duty_holds 1, holdExpiry read 1, renewals 5, the record's hold check 365 (one per batch, holder only); every comment delivered once and in order",
+      "headSha": "3d0b23c8008ab95bdd9e0c9caca8ab85a724219d",
+      "negativeControl": "The same probe at 63e05008 (round 1, before the fix): 601 takes and 601 lapse reads in 10 s at 40/s"
     },
     {
-      "criterion": "A publisher that stops is replaced within 10 s; one that cannot reach NATS releases the hold",
-      "surface": "the same real binaries; SIGTERM to the holder; SIGSTOP of nats-server while a comment is written",
-      "command": "kill -TERM <A pid>; then kill -STOP <nats-server pid>, POST 2 comments through C, curl B /healthz every 3 s, kill -CONT",
-      "observed": "SIGTERM at 16:59:55.228: A logged 'released the publisher hold reason=stopping' at .258, and B logged 'took the publisher hold' at .306 and published comments 8-10. NATS frozen: B's send of event 11 timed out, the probe failed, and B released the hold ('NATS lost') 7.1 s after the send. Event 12 (same issue) was held behind 11. B's /healthz false from about 9 s. After SIGCONT B took the hold again and published 11 then 12, attempt_count 0",
-      "headSha": "63e0500890c1f641c2b553fde67655176271bf27",
-      "negativeControl": "Holder whose Postgres connections go silent (frozen TCP proxy, throwaway multiprocess probe): the other process took the hold in 5.696 s; the frozen one logged 'lost the publisher hold' and published no batch after it; once its database came back it stood by (A false, B true)"
+      "criterion": "A standby still takes a free hold promptly by every remaining wake: the release NOTIFY, a new LISTEN connection, and its NATS connection coming back",
+      "surface": "real envoy-dispatch binaries; the standby's database or its NATS behind a cuttable TCP proxy",
+      "command": "GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -run 'TestProbeSIGTERMHolderHandsOverAtOnce|TestProbeStandbyMissesTheReleaseNotify|TestProbeStandbyWhoseNATSComesBackTakesTheFreeHold' -v ./cmd/dispatch (throwaway probes)",
+      "observed": "SIGTERM to the holder: the standby took the hold 19 ms after the signal. Standby's database cut while the holder released (it missed the NOTIFY): it took the hold 317 ms after its database came back. Standby's NATS cut while the holder released: it took the hold 507 ms after its NATS came back. In all three, every comment was delivered once and in order",
+      "headSha": "3d0b23c8008ab95bdd9e0c9caca8ab85a724219d",
+      "negativeControl": "While its NATS was cut, the standby did not take the free hold: 8 s after the holder exited, its /healthz still showed outbox_publisher false"
     },
     {
-      "criterion": "Order per (owner, destination) and the hold fences are pinned by tests",
-      "surface": "outbox package on real Postgres and NATS, under mutations made in a scratch copy of packages/envoy",
-      "command": "GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -count=1 -v ./internal/dispatch/outbox/ under each of four mutations; go test -tags multiprocess -run TestAFrozenPublisherSendsNothingWhenItResumes ./cmd/dispatch",
-      "observed": "One chain per send: 4 tests fail. A not-due event holding nothing back: 2 fail ([2 3 1]). recordBatch hold guard removed: TestARecordFromAProcessThatLostTheHoldWritesNoBackOff fails. Per-send fence removed: TestABatchPastThePublisherHoldsDeadlineSendsAndRecordsNothingMore fails. Under the last two, the multiprocess frozen-publisher row still passes (the deadline check before the record stops a frozen process first), so the unit tests alone pin those two guards",
-      "headSha": "63e0500890c1f641c2b553fde67655176271bf27",
-      "negativeControl": "each mutation is itself the deliberately broken input; every one turned at least one test red"
-    },
-    {
-      "criterion": "Before and after numbers at 4 and 40 events/s, one and two processes",
-      "surface": "committed harness TestTheOutboxLoadSteps (real processes, HTTP writes, NATS reads)",
-      "command": "cd packages/envoy && GOWORK=off DISPATCH_OUTBOX_LOAD_STEPS=1 DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -timeout 30m -run TestTheOutboxLoadSteps -v ./cmd/dispatch",
-      "observed": "At 63e05008 every written event was delivered. 4/s p50/p99: 8.8/40.8 ms (1 process), 9.3/35.9 ms (2 processes). 40/s: 39.99/s published, p99 1,153.8 ms (1 process) and 1,106.0 ms (2 processes). Burst of 100 on one issue drained in 1,729 ms (1 process) and 732 ms (2). THROUGHPUT.md's 'after' row for 1 process at 40/s (p99 530.4 ms, measured at 891e854b) was not reproduced; its 'before' is 1,063.3 ms",
-      "headSha": "63e0500890c1f641c2b553fde67655176271bf27",
-      "negativeControl": "the harness fails a step when any written event is not delivered within 60 s; no step failed"
+      "criterion": "Exactly one publisher; a killed, cut, silently cut or frozen publisher is replaced within 10 s; each session takes each event once and in order; a role event waits for the holder's receipt",
+      "surface": "the repository's multiprocess harness: two real envoy-dispatch processes, one Postgres, one NATS, a per-process NATS proxy",
+      "command": "cd packages/envoy && GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
+      "observed": "ok, 822.528 s. Take-over: SIGKILL 4.681 s, NATS cut 3.005 s, silent cut 7.248 s, SIGSTOP 5.711 s, and the resumed process logged the hold lost 0 s after resume. 200 comments: watcher 200, role holder 80, author 60, each once and in order. Killed mid-batch and restarted: comment 1 at stream sequence 3, comment 2 at 4. Role event N with the receipt withheld was published 3 ms after the receipt",
+      "headSha": "3d0b23c8008ab95bdd9e0c9caca8ab85a724219d",
+      "negativeControl": "TestAFrozenPublisherSendsNothingWhenItResumes: the SIGSTOPped holder, once resumed, logged no batch started after it was stopped"
     }
   ],
   "observations": [
-    "CI at 63e05008: Tests/test red on packages/daemon TestTheSameDeployRunDeliveredTwiceWakesOneLook ('timed out waiting for the look's start row resuming the implementer'). This PR does not change packages/daemon, and the base 2df3353c passed Tests. This pod cannot run that test because it needs Docker. lint, typecheck and build passed; envoy-go, envoy-go-race and dispatch-multiprocess were still queued when read.",
-    "A holder with a serving port (role.go:154-163): the outbox counts the stream's acknowledgement of the stored copy as the receipt. The listener routes that copy by its envelope topic, a role topic, to roleTopicDelivery, which ACKs a roleForwardDedupePrefix frame without delivering it (cmd/listener/delivery.go:427). So such a holder does not get the event until dispatch://INFRA-594 (todo) lands. On main the listener's core forward to such a holder (delivery.go:491) seems to end in receipt_timeout as well, so this does not look like a new loss; spec departure 2 was accepted on that basis. This is an inference from the code; I did not run it.",
-    "The batch log 'dispatch outbox: published batch events=1' is also written for a batch whose sends were released for NATS loss (17:01:00.134 in the manual run). It counts sends, not publishes."
+    "CI at 3d0b23c8: every check was queued when read (build, changes, lint, test, typecheck). The 63e05008 lanes were cancelled by this push.",
+    "Round 1's notes still apply: role events to a serving-port holder depend on dispatch://INFRA-594, the daemon test that was red on CI is outside this diff, and THROUGHPUT.md now says the 40/s p99 varies from run to run."
   ]
 }
