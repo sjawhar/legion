@@ -1,6 +1,13 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { createComment, createIssue, createProject, editArtifact, getIssue } from "./api";
+import {
+  createComment,
+  createIssue,
+  createIssueArtifact,
+  createProject,
+  editArtifact,
+  getIssue,
+} from "./api";
 import { documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -186,6 +193,132 @@ test("a reply under a document's decision keeps the lists of the typed blocks it
     await expect(thread.getByText("step two", { exact: true })).toBeVisible();
     // The malformed decision's source list shows: it has no rows to stand in for it.
     await expect(thread.getByText("Fine: ok", { exact: true })).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+// A decision drawn inside a reply sits in a card of its own, so its question and its last line
+// sit flush with the card's edges as a document's decision does. The reply sits in the footer of
+// the document's decision, whose `prose-sm` spacing for the reply's paragraphs and lists must not
+// reach the nested card's first and last lines.
+test("a decision in a reply under a document's decision sits flush in its card", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "## Specification\n\nContext.\n",
+    title: "Nested decision in a reply",
+  });
+  await editArtifact(
+    issue.primary_artifact_id,
+    {
+      ops: [
+        {
+          after: "end",
+          markdown:
+            ':::ask{#storage urgency="high" multiple="false" state="open"}\nWhich engine?\n\n- Postgres: reuse\n- SQLite: one file\n:::\n',
+          op: "insert",
+        },
+      ],
+    },
+    { as: "agent" }
+  );
+  await expect.poll(async () => (await getIssue(issue.key)).open_asks.length).toBe(1);
+  const [storage] = (await getIssue(issue.key)).open_asks;
+  if (storage === undefined) {
+    throw new Error("the storage decision was not indexed");
+  }
+  await createComment(
+    issue.key,
+    {
+      ask_id: storage.id,
+      body:
+        ":::ask\nNested question?\n\n- A: a\n- B: b\n:::\n\n" +
+        ":::ask\nBroken nested?\n\n- Fine: ok\n- : blank\n:::\n",
+    },
+    agent
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    const decision = documentEditor(page).locator('[data-dispatch-ask-block="storage"]');
+    const thread = decision.getByTestId(`thread-${storage.id}`);
+    const nested = thread.locator('section[data-proof-block-type="ask"]');
+
+    // The well-formed nested decision's question sits flush under its card's header.
+    const wellFormedQuestion = nested
+      .filter({ hasText: "Nested question?" })
+      .locator(":scope > [data-proof-block-content] > :first-child");
+    await expect(wellFormedQuestion).toHaveText("Nested question?");
+    await expect(wellFormedQuestion).toBeVisible();
+    await expect(wellFormedQuestion).toHaveCSS("margin-top", "0px");
+
+    // The malformed one shows its source list; question and list sit flush in the card.
+    const brokenHole = nested
+      .filter({ hasText: "Broken nested?" })
+      .locator(":scope > [data-proof-block-content]");
+    const brokenQuestion = brokenHole.locator(":scope > :first-child");
+    await expect(brokenQuestion).toHaveText("Broken nested?");
+    await expect(brokenQuestion).toBeVisible();
+    await expect(brokenQuestion).toHaveCSS("margin-top", "0px");
+    const brokenList = brokenHole.locator(":scope > :last-child");
+    await expect(brokenList).toHaveJSProperty("tagName", "UL");
+    await expect(brokenList).toBeVisible();
+    await expect(brokenList).toHaveCSS("margin-bottom", "0px");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A malformed decision shows its source list, the only place its options show. A blank item in
+// that list is no option at all, so it shows no bullet: the document hides it, and a text body,
+// whose tight list items carry no paragraph, hides it the same way.
+test("a malformed decision's blank option shows no bullet in a body, as in the document", async ({
+  browser,
+}) => {
+  const source = ':::ask{#blank urgency="high"}\nWhich one?\n\n- A: first\n-\n:::\n';
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "## Specification\n\nContext.\n",
+    title: "Blank option",
+  });
+  // Edits to the issue's own document refuse a malformed decision, so it is filed as one of the
+  // issue's documents.
+  const created = await createIssueArtifact(
+    issue.key,
+    { content: source, name: "blank.md" },
+    { as: "agent" }
+  );
+  const comment = await createComment(issue.key, { body: source }, agent);
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = await openCommentThread(page, comment.id);
+    const bodyDecision = thread.locator('section[data-proof-block-type="ask"]');
+    await expect(bodyDecision).toHaveAttribute("data-dispatch-ask-malformed", "true");
+    await expect(
+      bodyDecision.locator("[data-proof-block-content] li").filter({ hasText: "A: first" })
+    ).toBeVisible();
+    const bodyBlank = bodyDecision.locator("[data-proof-block-content] li:empty");
+    await expect(bodyBlank).toHaveCount(1);
+    await expect(bodyBlank).toHaveCSS("display", "none");
+
+    await page.goto(`/issues/${issue.key}/artifacts/${created.artifact.slug}`);
+    const docDecision = documentEditor(page).locator('[data-dispatch-ask-block="blank"]');
+    await expect(docDecision).toHaveAttribute("data-dispatch-ask-malformed", "true");
+    const docItems = docDecision.locator("[data-proof-block-content] > ul > li");
+    await expect(docItems).toHaveCount(2);
+    await expect(docItems.filter({ hasText: "A: first" })).toBeVisible();
+    const docBlank = docItems.nth(1);
+    await expect(docBlank).toHaveText("");
+    await expect(docBlank).toBeHidden();
   } finally {
     await alice.close();
   }

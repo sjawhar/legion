@@ -362,17 +362,23 @@ a {
 }
 
 /* A decision block is a card inside prose. Its first/last child would otherwise carry the
-   prose paragraph margins into the card (a 20px gap under a 12px header). */
+   prose paragraph margins into the card (a 20px gap under a 12px header). The repeated attribute
+   selector lifts these rules to (0,5,0): a decision inside a reply drawn in another decision's
+   footer thread is also matched by the footer's `prose-sm` rules below — `[data-dispatch-ask-footer]
+   .dispatch-markdown :is(p, ul, ol, blockquote, pre)` (0,4,1) and `[data-dispatch-ask-footer] li
+   .dispatch-markdown :is(ul, ol)` (0,4,2) — and these must outrank both so the nested card's
+   question and source list sit flush too. They touch only a hole's own first/last child, so a
+   reply's own paragraphs and lists keep the footer's spacing. */
 :is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask
-  > [data-proof-block-content]
+  > [data-proof-block-content][data-proof-block-content]
   > :first-child {
   margin-top: 0;
 }
 
 :is(.dispatch-doc, .dispatch-markdown)
   .proof-typed-block-ask
-  > [data-proof-block-content]
+  > [data-proof-block-content][data-proof-block-content]
   > :last-child {
   margin-bottom: 0;
 }
