@@ -1370,9 +1370,9 @@ func TestSetRoleRollsBackWhenInterestUpsertFails(t *testing.T) {
 	}
 
 	useKV(t, reg, &failingKeyValue{
-		KeyValue:  kv,
-		failPutAt: 1,
-		err:       errors.New("injected interest write failure"),
+		KeyValue:     kv,
+		failCreateAt: 1,
+		err:          errors.New("injected interest write failure"),
 	})
 	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed interest upsert")
@@ -1461,9 +1461,9 @@ func TestSetRoleReturnsErrorAfterOldHolderCleanupFails(t *testing.T) {
 	}
 
 	useKV(t, reg, &failingKeyValue{
-		KeyValue:  kv,
-		failPutAt: 2,
-		err:       errors.New("injected old-holder cleanup failure"),
+		KeyValue:     kv,
+		failUpdateAt: 1,
+		err:          errors.New("injected old-holder cleanup failure"),
 	})
 	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed old-holder cleanup")
@@ -1543,21 +1543,11 @@ func useKV(t *testing.T, r *Registry, kv natsgo.KeyValue) {
 type failingKeyValue struct {
 	natsgo.KeyValue
 
-	failPutAt    int
 	failCreateAt int
 	failUpdateAt int
-	puts         int
 	creates      int
 	updates      int
 	err          error
-}
-
-func (kv *failingKeyValue) Put(key string, value []byte) (uint64, error) {
-	kv.puts++
-	if kv.failPutAt == kv.puts {
-		return 0, kv.err
-	}
-	return kv.KeyValue.Put(key, value)
 }
 
 func (kv *failingKeyValue) Create(key string, value []byte) (uint64, error) {
@@ -1809,9 +1799,9 @@ func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 	pollMatch(t, reg, machineID, "notifications.a", 1, 5*time.Second)
 
 	interestKV := reg.watcher.KV()
-	useKV(t, reg, &interleavingPutKeyValue{
+	useKV(t, reg, &interleavingWriteKeyValue{
 		KeyValue: interestKV,
-		afterFirstPut: func() {
+		afterFirstWrite: func() {
 			putInterest(t, interestKV, Interest{
 				SessionID: sessionID,
 				MachineID: machineID,
@@ -1867,23 +1857,36 @@ func (kv *racingDeleteKeyValue) Delete(key string, opts ...natsgo.DeleteOpt) err
 	return kv.KeyValue.Delete(key, opts...)
 }
 
-type interleavingPutKeyValue struct {
+// interleavingWriteKeyValue runs afterFirstWrite once the first write through it (Put, Create or
+// Update) has landed, before the registry applies its write-through.
+type interleavingWriteKeyValue struct {
 	natsgo.KeyValue
 
-	puts          int
-	afterFirstPut func()
+	writes          int
+	afterFirstWrite func()
 }
 
-func (kv *interleavingPutKeyValue) Put(key string, value []byte) (uint64, error) {
-	kv.puts++
-	revision, err := kv.KeyValue.Put(key, value)
+func (kv *interleavingWriteKeyValue) wrote(revision uint64, err error) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if kv.puts == 1 {
-		kv.afterFirstPut()
+	kv.writes++
+	if kv.writes == 1 {
+		kv.afterFirstWrite()
 	}
 	return revision, nil
+}
+
+func (kv *interleavingWriteKeyValue) Put(key string, value []byte) (uint64, error) {
+	return kv.wrote(kv.KeyValue.Put(key, value))
+}
+
+func (kv *interleavingWriteKeyValue) Create(key string, value []byte) (uint64, error) {
+	return kv.wrote(kv.KeyValue.Create(key, value))
+}
+
+func (kv *interleavingWriteKeyValue) Update(key string, value []byte, last uint64) (uint64, error) {
+	return kv.wrote(kv.KeyValue.Update(key, value, last))
 }
 
 func TestDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *testing.T) {

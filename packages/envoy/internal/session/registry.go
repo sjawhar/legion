@@ -7,7 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +18,14 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 )
+
+// writeAttempts bounds the compare-and-set attempts of one registration write (SessionRegistry.write).
+const writeAttempts = 5
+
+// ErrWriteConflict is a registration write whose compare-and-set lost to another writer on each of
+// its writeAttempts: every time it wrote, the stored revision had moved since it read. Nothing was
+// written; the caller may retry, and the listener answers it as a 503 with Retry-After.
+var ErrWriteConflict = errors.New("the session registration changed under every write attempt")
 
 type SessionEntry struct {
 	Port         int      `json:"port"`
@@ -45,6 +56,72 @@ type SessionEntry struct {
 	// through it, else to MachineID, and HostOrMachine falls back to MachineID so every display
 	// caller sees a populated value.
 	Host string `json:"host,omitempty"`
+
+	// unknown holds the JSON of every key a stored registration carries that SessionEntry does not
+	// name: a field a newer build writes. encodeSessionEntry writes it back beside the known fields,
+	// so a heartbeat through this build keeps it while pods of two builds take turns writing one
+	// session during a roll. It is never modified once decoded, so copies of an entry may share it.
+	unknown map[string]json.RawMessage
+}
+
+// sessionEntryKeys are SessionEntry's JSON keys; any other key of a stored registration is kept in
+// SessionEntry.unknown.
+var sessionEntryKeys = jsonKeys(reflect.TypeFor[SessionEntry]())
+
+// jsonKeys are the object keys encoding/json writes for t's exported fields.
+func jsonKeys(t reflect.Type) []string {
+	keys := make([]string, 0, t.NumField())
+	for i := range t.NumField() {
+		field := t.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		switch name {
+		case "-":
+			continue
+		case "":
+			name = field.Name
+		}
+		keys = append(keys, name)
+	}
+	return keys
+}
+
+// decodeSessionEntry reads a stored registration: the fields SessionEntry names, and every other key
+// into its unknown map.
+func decodeSessionEntry(data []byte) (SessionEntry, error) {
+	var entry SessionEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		return SessionEntry{}, err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return SessionEntry{}, err
+	}
+	for _, key := range sessionEntryKeys {
+		delete(all, key)
+	}
+	if len(all) > 0 {
+		entry.unknown = all
+	}
+	return entry, nil
+}
+
+// encodeSessionEntry writes entry for the bucket: its known fields, and the unknown keys it was
+// decoded with.
+func encodeSessionEntry(entry SessionEntry) ([]byte, error) {
+	known, err := json.Marshal(entry)
+	if err != nil || len(entry.unknown) == 0 {
+		return known, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(known, &fields); err != nil {
+		return nil, err
+	}
+	all := maps.Clone(entry.unknown)
+	maps.Copy(all, fields)
+	return json.Marshal(all)
 }
 
 // HostOrMachine is the session's real machine for display: Host when the registering plugin
@@ -207,8 +284,8 @@ func (r *SessionRegistry) applyWatched(entry nats.KeyValueEntry) {
 	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
 		r.evictCachedSessionLocked(entry.Key(), entry.Revision())
 	} else {
-		var item SessionEntry
-		if err := json.Unmarshal(entry.Value(), &item); err != nil {
+		item, err := decodeSessionEntry(entry.Value())
+		if err != nil {
 			r.evictCachedSessionLocked(entry.Key(), entry.Revision())
 			r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key()), slog.Uint64("revision", entry.Revision()), slog.String("error", err.Error()))
 		} else {
@@ -278,27 +355,108 @@ func (r *SessionRegistry) WatchErr() error {
 	return r.watcher.Err()
 }
 
+// Put writes entry as sessionID's registration. Several live processes can hold the same session
+// (shared on-disk state), and blind last-writer-wins routed deliveries to whichever heartbeated last,
+// including processes not driving the session: mergeForClaim arbitrates between entry and the stored
+// registration, and the merge is written by compare-and-set (write), so the registration it ran on
+// is the one replaced.
 func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
-	// Several live processes can hold the same session (shared on-disk state), and
-	// blind last-writer-wins routed deliveries to whichever heartbeated last —
-	// including processes not driving the session. mergeForClaim arbitrates.
-	cur, curErr := r.Get(sessionID)
-	entry, err := mergeForClaim(cur, curErr, entry, time.Now().UnixMilli())
-	if err != nil {
-		return err
+	return r.write(sessionID, func(cur SessionEntry, curErr error, now int64) (SessionEntry, error) {
+		return mergeForClaim(cur, curErr, entry, now)
+	})
+}
+
+// Amend applies change to sessionID's stored registration and writes the result as Put writes it, so
+// a change made on a listener whose cache trails the bucket lands on what another listener wrote
+// since, not on its own stale copy. base is the registration change applies to when the bucket holds
+// none (the caller's earlier read, which an expiry or a delete has overtaken), so the write registers
+// the session again.
+func (r *SessionRegistry) Amend(sessionID string, base SessionEntry, change func(*SessionEntry)) error {
+	return r.write(sessionID, func(cur SessionEntry, curErr error, now int64) (SessionEntry, error) {
+		next := base
+		if curErr == nil {
+			next = cur
+		}
+		change(&next)
+		return mergeForClaim(cur, curErr, next, now)
+	})
+}
+
+// write writes sessionID's registration by compare-and-set on its KV revision, so a write another
+// listener made between this one's read and its write is never overwritten. merge computes the value
+// to write from the stored registration (curErr nats.ErrKeyNotFound when there is none) and the time.
+// The first attempt merges onto the cache. A cache miss, or a write the bucket refuses because the
+// revision moved (another listener wrote, or MaxAge removed the key under a cached revision), reads
+// the bucket entry and merges onto that: Update at its revision, or Create when there is none. After
+// writeAttempts refused writes it returns ErrWriteConflict, having written nothing.
+func (r *SessionRegistry) write(sessionID string, merge func(cur SessionEntry, curErr error, now int64) (SessionEntry, error)) error {
+	kv := r.watcher.KV()
+	cur, revision, found := r.cachedEntry(sessionID)
+	read := !found
+	for range writeAttempts {
+		if read {
+			var err error
+			if cur, revision, found, err = r.readStored(kv, sessionID); err != nil {
+				return err
+			}
+		}
+		read = true
+		var curErr error
+		if !found {
+			curErr = nats.ErrKeyNotFound
+		}
+		entry, err := merge(cur, curErr, time.Now().UnixMilli())
+		if err != nil {
+			return err
+		}
+		buf, err := encodeSessionEntry(entry)
+		if err != nil {
+			return err
+		}
+		var written uint64
+		if revision == 0 {
+			written, err = kv.Create(sessionID, buf)
+		} else {
+			written, err = kv.Update(sessionID, buf, revision)
+		}
+		if errors.Is(err, nats.ErrKeyExists) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		r.mu.Lock()
+		r.cacheSessionLocked(sessionID, entry, r.expiryFor(time.Time{}, entry.UpdatedAt), written)
+		r.mu.Unlock()
+		return nil
 	}
-	buf, err := json.Marshal(entry)
-	if err != nil {
-		return err
-	}
-	revision, err := r.watcher.KV().Put(sessionID, buf)
-	if err != nil {
-		return err
-	}
+	return fmt.Errorf("%w: session %s", ErrWriteConflict, sessionID)
+}
+
+// cachedEntry is sessionID's live cached registration and the revision the cache holds for it.
+func (r *SessionRegistry) cachedEntry(sessionID string) (SessionEntry, uint64, bool) {
 	r.mu.Lock()
-	r.cacheSessionLocked(sessionID, entry, r.expiryFor(time.Time{}, entry.UpdatedAt), revision)
-	r.mu.Unlock()
-	return nil
+	defer r.mu.Unlock()
+	r.pruneLocked(time.Now())
+	cs, ok := r.cache[sessionID]
+	return cs.entry, r.cacheRevisions[sessionID], ok
+}
+
+// readStored reads sessionID's registration from the bucket for a write, and applies it to the cache
+// as the watcher would. revision is the one to write at, 0 when the bucket holds no value. A value
+// that does not decode is found false, as the cache, which evicts it, sees no registration either,
+// and the write replaces it at its revision.
+func (r *SessionRegistry) readStored(kv bus.KeyValue, sessionID string) (entry SessionEntry, revision uint64, found bool, err error) {
+	stored, err := kv.Get(sessionID)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return SessionEntry{}, 0, false, nil
+	}
+	if err != nil {
+		return SessionEntry{}, 0, false, err
+	}
+	r.applyWatched(stored)
+	entry, err = decodeSessionEntry(stored.Value())
+	return entry, stored.Revision(), err == nil, nil
 }
 
 func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
@@ -381,8 +539,8 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 			r.evictCachedSessionLocked(sessionID, latest.Revision())
 			return nil
 		}
-		var item SessionEntry
-		if err := json.Unmarshal(latest.Value(), &item); err != nil {
+		item, err := decodeSessionEntry(latest.Value())
+		if err != nil {
 			r.evictCachedSessionLocked(sessionID, latest.Revision())
 			r.logger().Warn("session registry cache evicted malformed value",
 				slog.String("key", latest.Key()),

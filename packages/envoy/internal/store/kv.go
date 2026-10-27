@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -19,6 +21,14 @@ import (
 	"github.com/sjawhar/envoy/internal/routing"
 )
 
+// writeAttempts bounds the compare-and-set attempts of one interest write (Registry.writeInterest).
+const writeAttempts = 5
+
+// ErrWriteConflict is an interest write whose compare-and-set lost to another writer on each of its
+// writeAttempts: every time it wrote, the stored revision had moved since it read. Nothing was
+// written; the caller may retry, and the listener answers it as a 503 with Retry-After.
+var ErrWriteConflict = errors.New("the interest changed under every write attempt")
+
 // RoleClaim is the durable ownership record for a role lane. Role claims are
 // independent of interest records: a listener restart can temporarily age an
 // interest out before its still-running holder re-registers.
@@ -26,6 +36,87 @@ type RoleClaim struct {
 	HolderSessionID   string `json:"holder_session_id"`
 	ClaimedAt         int64  `json:"claimed_at"`
 	PreviousSessionID string `json:"previous_session_id"`
+
+	// unknown holds the JSON of every key a stored claim carries that RoleClaim does not name: a
+	// field a newer build writes, which a role claim through this build writes back. It is never
+	// modified once decoded, so copies of a claim may share it.
+	unknown map[string]json.RawMessage
+}
+
+// interestKeys and roleClaimKeys are Interest's and RoleClaim's JSON keys; any other key of a stored
+// value is kept in its unknown map, and written back by every rewrite of the value, so pods of two
+// builds taking turns at one record during a roll do not drop each other's fields.
+var (
+	interestKeys  = jsonKeys(reflect.TypeFor[Interest]())
+	roleClaimKeys = jsonKeys(reflect.TypeFor[RoleClaim]())
+)
+
+// jsonKeys are the object keys encoding/json writes for t's exported fields.
+func jsonKeys(t reflect.Type) []string {
+	keys := make([]string, 0, t.NumField())
+	for i := range t.NumField() {
+		field := t.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		switch name {
+		case "-":
+			continue
+		case "":
+			name = field.Name
+		}
+		keys = append(keys, name)
+	}
+	return keys
+}
+
+// decodeKeeping reads data into value, the fields value's type names, and returns the JSON of every
+// other key of the object, or nil when there is none.
+func decodeKeeping(data []byte, value any, known []string) (map[string]json.RawMessage, error) {
+	if err := json.Unmarshal(data, value); err != nil {
+		return nil, err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, err
+	}
+	for _, key := range known {
+		delete(all, key)
+	}
+	if len(all) == 0 {
+		return nil, nil
+	}
+	return all, nil
+}
+
+// encodeKeeping writes value's fields and the unknown keys it was decoded with as one object.
+func encodeKeeping(value any, unknown map[string]json.RawMessage) ([]byte, error) {
+	known, err := json.Marshal(value)
+	if err != nil || len(unknown) == 0 {
+		return known, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(known, &fields); err != nil {
+		return nil, err
+	}
+	all := maps.Clone(unknown)
+	maps.Copy(all, fields)
+	return json.Marshal(all)
+}
+
+func decodeInterest(data []byte) (Interest, error) {
+	var item Interest
+	unknown, err := decodeKeeping(data, &item, interestKeys)
+	if err != nil {
+		return Interest{}, err
+	}
+	item.unknown = unknown
+	return item, nil
+}
+
+func encodeInterest(item Interest) ([]byte, error) {
+	return encodeKeeping(item, item.unknown)
 }
 
 // ExpiredRoleClaimRelease reports the conditional-delete outcome for an
@@ -238,13 +329,29 @@ func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) 
 
 // deleteInterest deletes sessionID's interest at the revision it reads (bus.KeyValue.DeleteAtRead).
 func (r *Registry) deleteInterest(sessionID string) error {
-	revision := r.cachedRevision(sessionID)
+	cached := r.cachedRevision(sessionID)
 	read, err := r.interests().DeleteAtRead(sessionID)
 	if err != nil {
 		return err
 	}
-	revision = max(revision, read)
+	r.applyDelete(sessionID, max(cached, read))
+	return nil
+}
 
+// deleteInterestAt deletes sessionID's interest only while revision is its latest; a write since
+// fails the delete with nats.ErrKeyExists.
+func (r *Registry) deleteInterestAt(sessionID string, revision uint64) error {
+	cached := r.cachedRevision(sessionID)
+	if err := r.interests().Delete(sessionID, nats.LastRevision(revision)); err != nil {
+		return err
+	}
+	r.applyDelete(sessionID, max(cached, revision))
+	return nil
+}
+
+// applyDelete brings the cache up to a delete of sessionID's interest, the delete of a value no
+// newer than revision, which the cache held or the delete read before it was sent.
+func (r *Registry) applyDelete(sessionID string, revision uint64) {
 	entries, err := r.interests().History(sessionID)
 	if err == nil && len(entries) > 0 {
 		latest := entries[len(entries)-1]
@@ -252,11 +359,11 @@ func (r *Registry) deleteInterest(sessionID string) error {
 			r.mu.Lock()
 			r.evictCachedInterestLocked(sessionID, latest.Revision())
 			r.mu.Unlock()
-			return nil
+			return
 		}
 
-		var item Interest
-		if err := json.Unmarshal(latest.Value(), &item); err != nil {
+		item, err := decodeInterest(latest.Value())
+		if err != nil {
 			r.mu.Lock()
 			r.evictCachedInterestLocked(sessionID, latest.Revision())
 			r.mu.Unlock()
@@ -265,12 +372,12 @@ func (r *Registry) deleteInterest(sessionID string) error {
 				slog.Uint64("revision", latest.Revision()),
 				slog.String("error", err.Error()),
 			)
-			return nil
+			return
 		}
 		r.mu.Lock()
 		r.cacheInterestLocked(sessionID, item, latest.Revision())
 		r.mu.Unlock()
-		return nil
+		return
 	}
 
 	// KeyValue.Delete does not return its revision. A successful delete must
@@ -279,7 +386,6 @@ func (r *Registry) deleteInterest(sessionID string) error {
 	r.mu.Lock()
 	r.evictCachedInterestLocked(sessionID, revision+1)
 	r.mu.Unlock()
-	return nil
 }
 
 // Rewatch reopens both buckets on conn and replaces the cache's watcher with one there
@@ -327,8 +433,8 @@ func (r *Registry) applyWatched(entry nats.KeyValueEntry) {
 		return
 	}
 
-	var item Interest
-	if err := json.Unmarshal(entry.Value(), &item); err != nil {
+	item, err := decodeInterest(entry.Value())
+	if err != nil {
 		r.mu.Lock()
 		r.evictCachedInterestLocked(entry.Key(), entry.Revision())
 		r.mu.Unlock()
@@ -352,24 +458,95 @@ func (r *Registry) WaitForCacheReady(ctx context.Context) error {
 	return r.watcher.WaitReady(ctx)
 }
 
+// Upsert adds topics to item.SessionID's interest, merged onto the stored one (mergeForUpsert) and
+// written by compare-and-set (writeInterest).
 func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
-	cur, getErr := r.Get(item.SessionID)
-	merged, err := mergeForUpsert(cur, getErr, item, topics, r.now().UnixMilli())
-	if err != nil {
-		return Interest{}, err
+	return r.writeInterest(item.SessionID, func(cur Interest, curErr error) (Interest, bool, error) {
+		merged, err := mergeForUpsert(cur, curErr, item, topics, r.now().UnixMilli())
+		return merged, false, err
+	})
+}
+
+// writeInterest writes sessionID's interest by compare-and-set on its KV revision, so a write another
+// listener made between this one's read and its write is never overwritten. change computes the
+// interest to write from the stored one and the error reading it (nats.ErrKeyNotFound when there is
+// none), or remove to delete it. The first attempt changes the cached interest. A cache miss, or a
+// write the bucket refuses because the revision moved, reads the bucket entry and changes that: an
+// Update or a delete at its revision, or a Create when there is none. After writeAttempts refused
+// writes it returns ErrWriteConflict, having written nothing.
+func (r *Registry) writeInterest(sessionID string, change func(cur Interest, curErr error) (next Interest, remove bool, err error)) (Interest, error) {
+	r.mu.RLock()
+	cur, found := r.cache[sessionID]
+	revision := r.cacheRevisions[sessionID]
+	r.mu.RUnlock()
+	var curErr error
+	read := !found
+	for range writeAttempts {
+		if read {
+			cur, revision, curErr = r.readInterest(sessionID)
+		}
+		read = true
+		next, remove, err := change(cur, curErr)
+		if err != nil {
+			return Interest{}, err
+		}
+		switch {
+		case remove && revision == 0:
+			return next, nil
+		case remove:
+			err = r.deleteInterestAt(sessionID, revision)
+		default:
+			err = r.putInterestAt(sessionID, next, revision)
+		}
+		if errors.Is(err, nats.ErrKeyExists) {
+			continue
+		}
+		if err != nil {
+			return Interest{}, err
+		}
+		return next, nil
 	}
-	buf, err := json.Marshal(merged)
+	return Interest{}, fmt.Errorf("%w: %s", ErrWriteConflict, sessionID)
+}
+
+// putInterestAt writes item as sessionID's interest while revision is its latest (0: while it has
+// none), and applies the write to the cache.
+func (r *Registry) putInterestAt(sessionID string, item Interest, revision uint64) error {
+	buf, err := encodeInterest(item)
 	if err != nil {
-		return Interest{}, err
+		return err
 	}
-	revision, err := r.interests().Put(merged.SessionID, buf)
+	var written uint64
+	if revision == 0 {
+		written, err = r.interests().Create(sessionID, buf)
+	} else {
+		written, err = r.interests().Update(sessionID, buf, revision)
+	}
 	if err != nil {
-		return Interest{}, err
+		return err
 	}
 	r.mu.Lock()
-	r.cacheInterestLocked(merged.SessionID, merged, revision)
+	r.cacheInterestLocked(sessionID, item, written)
 	r.mu.Unlock()
-	return merged, nil
+	return nil
+}
+
+// readInterest reads sessionID's interest from the bucket, applies it to the cache, and returns it
+// with its revision. A key with no value is nats.ErrKeyNotFound at revision 0; a value that does not
+// decode is its decode error at its revision.
+func (r *Registry) readInterest(sessionID string) (Interest, uint64, error) {
+	entry, err := r.interests().Get(sessionID)
+	if err != nil {
+		return Interest{}, 0, err
+	}
+	item, err := decodeInterest(entry.Value())
+	if err != nil {
+		return Interest{}, entry.Revision(), err
+	}
+	r.mu.Lock()
+	r.cacheInterestLocked(sessionID, item, entry.Revision())
+	r.mu.Unlock()
+	return item, entry.Revision(), nil
 }
 
 // mergeForUpsert computes the Interest to persist by reconciling the requested
@@ -401,13 +578,16 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 	return item, nil
 }
 
+// decodeRoleClaim reads a stored claim: the fields RoleClaim names, every other key into its unknown
+// map, or a bare session id an earlier build stored.
 func decodeRoleClaim(value []byte) (RoleClaim, error) {
 	var claim RoleClaim
-	err := json.Unmarshal(value, &claim)
+	unknown, err := decodeKeeping(value, &claim, roleClaimKeys)
 	if err == nil {
 		if strings.TrimSpace(claim.HolderSessionID) == "" {
 			return RoleClaim{}, fmt.Errorf("role claim has no holder")
 		}
+		claim.unknown = unknown
 		return claim, nil
 	}
 	if json.Valid(value) {
@@ -548,32 +728,25 @@ func (r *Registry) Remove(sessionID string, topics []string) error {
 	return r.removeInterestTopics(sessionID, topics)
 }
 
+// removeInterestTopics removes topics from sessionID's stored interest by compare-and-set
+// (writeInterest), deleting the interest when none is left; no topics removes it whole.
 func (r *Registry) removeInterestTopics(sessionID string, topics []string) error {
 	// Empty topics = unsubscribe from everything (delete the entry).
 	if len(topics) == 0 {
 		return r.deleteInterest(sessionID)
 	}
-	item, err := r.Get(sessionID)
-	if err != nil {
-		return err
-	}
-	item = Remove(item, topics)
-	if len(item.Topics) == 0 {
-		return r.deleteInterest(sessionID)
-	}
-	item.UpdatedAt = r.now().UnixMilli()
-	buf, err := json.Marshal(item)
-	if err != nil {
-		return err
-	}
-	revision, err := r.interests().Put(sessionID, buf)
-	if err != nil {
-		return err
-	}
-	r.mu.Lock()
-	r.cacheInterestLocked(sessionID, item, revision)
-	r.mu.Unlock()
-	return nil
+	_, err := r.writeInterest(sessionID, func(cur Interest, curErr error) (Interest, bool, error) {
+		if curErr != nil {
+			return Interest{}, false, curErr
+		}
+		item := Remove(cur, topics)
+		if len(item.Topics) == 0 {
+			return item, true, nil
+		}
+		item.UpdatedAt = r.now().UnixMilli()
+		return item, false, nil
+	})
+	return err
 }
 
 // ErrRoleHeld reports a soft claim that found the role held by another session.
@@ -619,15 +792,18 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 		return Interest{}, err
 	}
 
+	// The claim replaces the stored one at its revision, keeping the fields a newer build stored in
+	// it that this build does not know.
 	claim := RoleClaim{
 		HolderSessionID:   sessionID,
 		ClaimedAt:         r.now().UnixMilli(),
 		PreviousSessionID: "",
+		unknown:           oldClaim.unknown,
 	}
 	if soft {
 		claim.PreviousSessionID = previousSessionID
 	}
-	data, err := json.Marshal(claim)
+	data, err := encodeKeeping(claim, claim.unknown)
 	if err != nil {
 		return Interest{}, err
 	}
@@ -707,18 +883,8 @@ func (r *Registry) Get(sessionID string) (Interest, error) {
 	if ok {
 		return item, nil
 	}
-	entry, err := r.interests().Get(sessionID)
-	if err != nil {
-		return Interest{}, err
-	}
-	var fresh Interest
-	err = json.Unmarshal(entry.Value(), &fresh)
-	if err == nil {
-		r.mu.Lock()
-		r.cacheInterestLocked(sessionID, fresh, entry.Revision())
-		r.mu.Unlock()
-	}
-	return fresh, err
+	item, _, err := r.readInterest(sessionID)
+	return item, err
 }
 
 func (r *Registry) Match(machineID string, topic string) []Interest {
@@ -805,25 +971,33 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 // session TTL elapsed. It is intentionally separate from Reap: the interest
 // reaper must not tear down a role during a listener restart grace window. A
 // claim this build cannot read (bus.ErrRefused: one stored under a key NATS
-// refuses, too long or outside its key alphabet) no build can resolve or write
-// again, so it is deleted too; one it cannot delete either (a key outside the
-// alphabet) is skipped, and the sweep goes on.
+// refuses, too long or outside its key alphabet) no build can resolve, so it is
+// deleted too, at the revision the sweep's scan saw, which keeps a claim an
+// earlier build without the key check writes there in the meantime; one it
+// cannot delete either (a key outside the alphabet) is skipped, and the sweep
+// goes on.
 func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Duration) (int, error) {
-	roles, err := r.roles().Keys()
-	if errors.Is(err, nats.ErrNoKeysFound) {
-		return 0, nil
+	type stored struct {
+		role     string
+		revision uint64
 	}
-	if err != nil {
+	var claims []stored
+	if _, err := kvwatch.ScanExistingKeys(r.roles(), "role claim reaper", r.logger(), func(entry nats.KeyValueEntry) {
+		claims = append(claims, stored{role: entry.Key(), revision: entry.Revision()})
+	}); err != nil {
 		return 0, err
 	}
 	reaped := 0
-	for _, role := range roles {
+	for _, stored := range claims {
+		role := stored.role
 		claim, err := r.RoleClaim(role)
 		if errors.Is(err, bus.ErrRefused) {
-			switch err := r.roles().Delete(role); {
+			switch err := r.roles().Delete(role, nats.LastRevision(stored.revision)); {
 			case err == nil:
 				r.logger().Warn("role reaper deleted a claim it cannot read", slog.Int("key_bytes", len(role)))
 				reaped++
+			case errors.Is(err, nats.ErrKeyExists):
+				r.logger().Warn("role reaper kept a claim it cannot read, rewritten since its scan", slog.Int("key_bytes", len(role)))
 			case errors.Is(err, bus.ErrRefused):
 				r.logger().Warn("role reaper skipped a claim it cannot delete", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
 			default:

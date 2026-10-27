@@ -1,11 +1,18 @@
 package store
 
+import "encoding/json"
+
 type Interest struct {
 	SessionID string   `json:"session_id"`
 	MachineID string   `json:"machine_id"`
 	Dir       string   `json:"dir"`
 	Topics    []string `json:"topics"`
 	UpdatedAt int64    `json:"updated_at"`
+
+	// unknown holds the JSON of every key a stored interest carries that Interest does not name: a
+	// field a newer build writes, which encodeInterest writes back so a heartbeat through this build
+	// keeps it. It is never modified once decoded, so copies of an interest may share it.
+	unknown map[string]json.RawMessage
 }
 
 func Merge(item Interest, topics []string) Interest {

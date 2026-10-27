@@ -231,13 +231,18 @@ func writeJSONError(w http.ResponseWriter, status int, message string, expected 
 // take whole, or a session id or role whose KV key would make a subject too long (bus.ErrTooLarge),
 // is a 413, and any other refusal, a topic or key NATS does not accept in a subject
 // (bus.ErrInvalidSubject) or a key outside nats.go's key alphabet (bus.ErrInvalidKey: `ses:bad`), a
-// 400. Any other failure is status with message.
+// 400. A registration or interest write that lost its compare-and-set to other listeners' writes on
+// every attempt (session.ErrWriteConflict, store.ErrWriteConflict) wrote nothing and is a 503 with
+// Retry-After, whatever status the caller names. Any other failure is status with message.
 func writeNATSError(w http.ResponseWriter, err error, status int, message string) {
 	switch {
 	case errors.Is(err, bus.ErrTooLarge):
 		writeJSONError(w, http.StatusRequestEntityTooLarge, err.Error())
 	case errors.Is(err, bus.ErrRefused):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, session.ErrWriteConflict), errors.Is(err, store.ErrWriteConflict):
+		w.Header().Set("Retry-After", "1")
+		writeJSONError(w, http.StatusServiceUnavailable, err.Error())
 	default:
 		writeJSONError(w, status, message)
 	}
@@ -469,7 +474,11 @@ func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.Session
 }
 
 // sendHandler publishes a direct message only while the target session has a
-// live registry entry.
+// live registry entry. The entry is read through roleHolderSession, so a session
+// another listener registered a moment ago, in the bucket and not yet in this
+// listener's cache, is found; only the bucket's word that it holds no entry is
+// the 404 `no live session`, as on GET /v1/registry/<session_id>
+// (sessionEntryHandler).
 func sendHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -509,9 +518,18 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		target, err := d.sessions.Get(targetSession)
-		if err != nil {
+		target, err := roleHolderSession(d.sessions, targetSession, registered)
+		switch {
+		case errors.Is(err, bus.ErrRefused):
+			// Refresh reports a refused key as a missing one too, so this test comes first.
+			writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
+			return
+		case errors.Is(err, nats.ErrKeyNotFound):
 			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
+			return
+		case err != nil:
+			w.Header().Set("Retry-After", "1")
+			writeJSONError(w, http.StatusServiceUnavailable, "envoy: the message bus did not answer: "+err.Error())
 			return
 		}
 		var itemPayload *string
@@ -845,18 +863,28 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "role must match "+rolePatternString, "role")
 			return
 		}
-		entry, err := d.sessions.Get(body.SessionID)
-		if errors.Is(err, nats.ErrKeyNotFound) {
+		// The claimant's registration is read through roleHolderSession, so one another listener
+		// wrote a moment ago, in the bucket and not yet in this listener's cache, is found. It is
+		// rewritten as self-subscribed through this listener by Amend, which applies that change to
+		// what the bucket holds when this listener's copy is stale, so the newer port or host another
+		// listener stored is kept.
+		entry, err := roleHolderSession(d.sessions, body.SessionID, registered)
+		switch {
+		case errors.Is(err, bus.ErrRefused):
+			// Refresh reports a refused key as a missing one too, so this test comes first.
+			writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
+			return
+		case errors.Is(err, nats.ErrKeyNotFound):
 			writeJSONError(w, http.StatusNotFound, "session is not registered")
 			return
-		}
-		if err != nil {
+		case err != nil:
 			writeJSONError(w, http.StatusServiceUnavailable, "read session registration: "+err.Error())
 			return
 		}
-		entry.MachineID = machineID
-		entry.SelfSubscribed = true
-		if err := d.sessions.Put(body.SessionID, entry); err != nil {
+		if err := d.sessions.Amend(body.SessionID, entry, func(entry *session.SessionEntry) {
+			entry.MachineID = machineID
+			entry.SelfSubscribed = true
+		}); err != nil {
 			writeNATSError(w, err, http.StatusServiceUnavailable, "refresh role claimant registration: "+err.Error())
 			return
 		}

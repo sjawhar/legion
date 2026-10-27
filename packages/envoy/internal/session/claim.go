@@ -23,6 +23,9 @@ const ClaimStaleAfter = 5 * time.Minute
 //     driving claim beats an older one, which is a genuine re-home)
 //   - a non-driving claim cannot displace a live driving incumbent; it may take
 //     over only once that claim goes stale (process presumed gone)
+//
+// An accepted claim keeps the incumbent's fields this build does not know (SessionEntry.unknown): a
+// newer build's field is the session's, not the claiming process's, and survives its heartbeat.
 func mergeForClaim(cur SessionEntry, curErr error, next SessionEntry, now int64) (SessionEntry, error) {
 	if curErr != nil && !errors.Is(curErr, nats.ErrKeyNotFound) {
 		return SessionEntry{}, curErr
@@ -34,6 +37,9 @@ func mergeForClaim(cur SessionEntry, curErr error, next SessionEntry, now int64)
 		return cur, nil
 	}
 	next.UpdatedAt = now
+	if curErr == nil {
+		next.unknown = cur.unknown
+	}
 	return next, nil
 }
 
