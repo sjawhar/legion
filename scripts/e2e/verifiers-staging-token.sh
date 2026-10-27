@@ -198,13 +198,35 @@ expect_refusal "listener, audience without issuer" "$work/refusal-listener-pair.
   fail "the listener booted against an issuer that does not answer"
 expect_refusal "listener, issuer that does not answer" "$work/refusal-listener-issuer.log" "$absent_issuer"
 
+# Every boot below serves on a port the kernel chose, held from that choice until it serves on it
+# (lib/held-port.py, which writes the port to a file and becomes the binary).
+held_port=$root/scripts/e2e/lib/held-port.py
+# shellcheck source-path=SCRIPTDIR source=lib/port-file.sh
+. "$root/scripts/e2e/lib/port-file.sh"
+# port_of WHAT FILE PID VAR LOG reads the port held-port.py wrote to FILE into VAR, failing with
+# LOG the moment PID exits first (read_port_file, lib/port-file.sh).
+port_of() {
+  local rc=0
+  read_port_file "$2" "$3" "$4" || rc=$?
+  case $rc in
+    0) ;;
+    1) fail "$1 exited before it held a port" "$5" ;;
+    *) fail "$1 held no port within ${port_file_seconds}s" "$5" ;;
+  esac
+}
+
 echo "== dispatch serves against an issuer that does not answer"
 # INFRA-555: Dispatch reads no issuer at boot. It migrates, binds and serves, discovers the issuer
 # in the background, and until it has, /healthz reports service_tokens false and a JWT-shaped
 # bearer is 503 OIDC_ISSUER_UNAVAILABLE — never a 401, since the token was not judged.
-"${dispatch_env[@]}" DISPATCH_OIDC_ISSUER="$absent_issuer" DISPATCH_OIDC_AUDIENCE=dispatch \
+python3 "$held_port" exec --port-file "$work/dispatch-absent-issuer.port" --fd-env DISPATCH_LISTEN_FD -- \
+  "${dispatch_env[@]}" DISPATCH_LISTEN_FD=3 DISPATCH_PORT='{port}' \
+  DISPATCH_OIDC_ISSUER="$absent_issuer" DISPATCH_OIDC_AUDIENCE=dispatch \
   "$work/dispatch" >"$work/dispatch-absent-issuer.log" 2>&1 &
 dispatch_pid=$!
+dispatch_port=''
+port_of "dispatch against an issuer that does not answer" "$work/dispatch-absent-issuer.port" "$dispatch_pid" \
+  dispatch_port "$work/dispatch-absent-issuer.log"
 for i in $(seq 1 100); do
   curl -fs -o "$body" --max-time 5 "http://127.0.0.1:$dispatch_port/healthz" && break
   kill -0 "$dispatch_pid" 2>/dev/null ||
@@ -223,7 +245,7 @@ expect_status "a JWT-shaped bearer before the issuer is discovered" 503 "$status
 expect_body "a JWT-shaped bearer before the issuer is discovered" '.code == "OIDC_ISSUER_UNAVAILABLE"'
 echo "    body: $(redact <"$body")"
 # Stopped by its own pid, within the 30 s stopGrace it builds its shutdown for, and judged: a
-# SIGTERM is a clean stop, so any other exit status is a defect. The boot below reuses its port.
+# SIGTERM is a clean stop, so any other exit status is a defect.
 kill -TERM "$dispatch_pid"
 for i in $(seq 1 100); do
   kill -0 "$dispatch_pid" 2>/dev/null || break
@@ -259,20 +281,6 @@ echo "== boot both binaries against the staging issuer"
 # opens the socket on 127.0.0.1:0, writes its port and becomes the binary (lib/held-port.py).
 # `env -i` clears the descriptor's variable the helper sets, so each names its own: the helper
 # hands the socket over as descriptor 3.
-held_port=$root/scripts/e2e/lib/held-port.py
-# shellcheck source-path=SCRIPTDIR source=lib/port-file.sh
-. "$root/scripts/e2e/lib/port-file.sh"
-# port_of WHAT FILE PID VAR LOG reads the port held-port.py wrote to FILE into VAR, failing with
-# LOG the moment PID exits first (read_port_file, lib/port-file.sh).
-port_of() {
-  local rc=0
-  read_port_file "$2" "$3" "$4" || rc=$?
-  case $rc in
-    0) ;;
-    1) fail "$1 exited before it held a port" "$5" ;;
-    *) fail "$1 held no port within ${port_file_seconds}s" "$5" ;;
-  esac
-}
 python3 "$held_port" exec --port-file "$work/dispatch.port" --fd-env DISPATCH_LISTEN_FD -- \
   "${dispatch_env[@]}" DISPATCH_LISTEN_FD=3 DISPATCH_PORT='{port}' \
   DISPATCH_OIDC_ISSUER="$issuer" DISPATCH_OIDC_AUDIENCE=dispatch \
