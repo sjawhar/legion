@@ -130,6 +130,7 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		memoryTestServeEnv + "=1",
 		"DATABASE_URL=" + h.database.Pool.Config().ConnString(),
 		"DISPATCH_AGENT_TOKEN=" + memoryTestToken,
+		"DISPATCH_SIGNING_KEY=memory-test-signing-key",
 		"DISPATCH_IDENTITY=header:X-Dispatch-User",
 		"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
 		"DISPATCH_NATS_DISABLED=1",

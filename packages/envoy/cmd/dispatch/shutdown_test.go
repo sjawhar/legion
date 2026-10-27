@@ -530,7 +530,7 @@ type dispatchProcess struct {
 }
 
 // dispatchOptions is what a test varies about the Dispatch process it starts. Its zero value is
-// the shutdown tests' process: no NATS, no signing key of its own, the default settle delay.
+// the shutdown tests' process: no NATS, no DISPATCH_SIGNING_KEY, the default settle delay.
 type dispatchOptions struct {
 	// NATSURL is the NATS server the process publishes to and reads its durables from. Empty
 	// sets DISPATCH_NATS_DISABLED=1 instead, which is what every test but the multiprocess

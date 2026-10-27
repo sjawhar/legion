@@ -174,7 +174,9 @@ revokes no refresh token at the issuer: whoever holds a database backup and the 
 use the tokens sealed under it until they expire, so after a key leaks, sign people out at the
 issuer too.
 
-Spaces and line breaks separate the keys, so a key itself holds neither.
+Separate the keys with one space or one line feed. Every whitespace character separates two keys,
+so a key itself holds none, and two in a row, a CR LF among them, enclose an empty key, which
+Dispatch refuses to start with.
 
 ## Running it on your machine
 
@@ -291,8 +293,9 @@ balancer's or Kubernetes' readiness probe at it.
   have been reached, or `null` when that issuer is not set. Neither decides `ok` or the status.
 - `commit` is the source commit this server's image was built from, or `null` in a build that was
   not stamped.
-- `fleet_commit` is the commit every running server was last found serving, the one Dispatch
-  announced on NATS, or `null` before any was found. It can trail by a few seconds.
+- `fleet_commit` is the commit every running server was last found serving, the latest announced
+  build, or `null` before any was found. It is read from the database, so it is reported while NATS
+  is down too. It can trail by a few seconds.
 - `schema_version` is the newest database migration applied.
 
 A check that needs NATS, the bucket or sign-in asserts `nats: true`, `files: true` or `signin: true`

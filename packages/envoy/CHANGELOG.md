@@ -943,6 +943,12 @@
   connection, the outbox publishes what was written meanwhile, the webhook redelivery sweep opens
   its KV bucket on its first pass with NATS connected, and the agent conversation route answers
   `503 STREAM_UNAVAILABLE` until the relay connects (INFRA-555).
+- The Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) takes a new image as healthy only
+  once `/healthz` answers `200` with `nats` not `false` (`null`, NATS turned off, passes), within
+  the same 90 seconds. Dispatch now serves while its NATS connection fails, so a `200` alone would
+  keep an image whose NATS credential is refused; such an image is rolled back, as it was when it
+  exited at boot. A NATS outage fails the previous image's check too, so its rollback then reports
+  that it did not become healthy (INFRA-555).
 - Dispatch starts without its sign-in issuer or service-account token issuer. Each discovery
   document is read in the background from boot (retrying after one second, doubling to thirty,
   each attempt bounded at ten seconds and at least five seconds after a failed one, a failure

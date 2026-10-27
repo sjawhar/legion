@@ -528,9 +528,9 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}
 	// The budget covers the app's pods alone, by the label its Deployment and Service select on. It
 	// keeps the default unhealthyPodEvictionPolicy (IfHealthyBudget), so it also holds a pod that
-	// is not ready while the budget is not met: envoy-dispatch reports not ready whenever NATS or
-	// Postgres is briefly unreachable, the front door's own eviction in the same drain among the
-	// causes, and evicting the app then would turn a blip into a cold restart.
+	// is not ready while the budget is not met: envoy-dispatch reports not ready whenever Postgres
+	// is briefly unreachable (a Cloud SQL failover, the proxy sidecar restarting), and evicting the
+	// app then would turn a blip into a cold restart.
 	if s.appPDBMinAvailable > 0 {
 		if _, err := policyv1.NewPodDisruptionBudget(ctx, s.hostname, &policyv1.PodDisruptionBudgetArgs{
 			Metadata: metadata(s.hostname),

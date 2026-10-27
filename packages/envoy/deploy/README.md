@@ -90,13 +90,13 @@ Two releases of Dispatch never serve the database together in this compose deplo
 `docker compose up -d --no-deps dispatch` stops and removes the old container before it starts the
 new one, which boots and migrates. That order is this deployer's own, not a rule every deployment
 keeps: a deployment that rolls Dispatch instead, running two processes against one database while
-it rolls, is supported under the preconditions the server's own guidance names — one
-`DISPATCH_SIGNING_KEY` every process is given, which the server checks itself (a process whose
-keys a live process does not share refuses to start), and every migration written to leave the
-release before it able to read and write the schema (`../cmd/dispatch/README.md`, "Running more
-than one process" and "Database migrations"). What no deployment does is start an image older than its
-database's schema: migrations `0113` and `0117` are each deployed with no earlier release running,
-and none is started over either again.
+it rolls, is supported under the preconditions the server's own guidance names — the same keys
+in every process (`DISPATCH_SIGNING_KEY`, or one shared data directory), which the server checks
+itself (a process whose keys a live process does not share refuses to start), and every
+migration written to leave the release before it able to read and write the schema
+(`../cmd/dispatch/README.md`, "Running more than one process" and "Database migrations"). What
+no deployment does is start an image older than its database's schema: migrations `0113` and
+`0117` are each deployed with no earlier release running, and none is started over either again.
 
 Run it continuously in its supervised host service, or use one pass for a
 smoke check:
@@ -105,10 +105,16 @@ smoke check:
 cd packages/envoy/deploy
 scripts/autodeploy.sh --once
 ```
-After health succeeds, the deployer reads `DISPATCH_SERVER_URL` from
-`compose/.env` and checks that `/auth/start` emits exactly
-`$DISPATCH_SERVER_URL/auth/callback`. It persists the new `ENVOY_IMAGE_TAG`
-only after both checks. A pull that fails changes nothing; the previous image
+The health check waits, up to 90 seconds, for `/healthz` to answer `200` with
+NATS connected: `"nats": false` fails it, and `"nats": null` (NATS turned off)
+passes. Dispatch serves while NATS is down or refuses its credential, so a
+`200` alone would keep an image whose NATS connection fails; such an image is
+rolled back instead, as it was when Dispatch exited at boot without NATS. A
+NATS outage fails the check for the previous image too, so its rollback then
+reports that it did not become healthy. After health succeeds, the deployer
+reads `DISPATCH_SERVER_URL` from `compose/.env` and checks that `/auth/start`
+emits exactly `$DISPATCH_SERVER_URL/auth/callback`. It persists the new
+`ENVOY_IMAGE_TAG` only after both checks. A pull that fails changes nothing; the previous image
 keeps serving. A deploy that fails after the new image started restores the
 previous tag and restarts only `dispatch`, unless the failed image moved the
 database's schema. Before each deploy the deployer reads the schema version and
@@ -211,7 +217,7 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | `DATABASE_URL` | yes | The external Dispatch Postgres URL (production: the Aurora `dispatch` database), as `postgres://<user>:<password>@<host>:<port>/<database>?sslmode=require`, with the password percent-encoded. The auto-deployer accepts only that form, with `connect_timeout` and `application_name` the other query keys it allows, and refuses any other (Auto-deployer, above). The compose runs no Postgres of its own. |
 | `DISPATCH_SERVER_URL` | yes | Public browser origin and sign-in callback origin. It must be the URL humans type into their browser; Dispatch's client at the sign-in issuer (the sign-in pool's app client, or the Google web client) must list `<DISPATCH_SERVER_URL>/auth/callback`. |
 | `NATS_URLS` | yes | Comma-separated NATS URLs for Dispatch. |
-| `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The server owns the `ENVOY_NOTIFICATIONS` stream, so every start reconciles it; without this the start refuses a non-loopback NATS, naming the URL. `compose/dispatch.compose.yml` sets it. |
+| `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The server owns the `ENVOY_NOTIFICATIONS` stream, so it reconciles it on its first connection; without this the start refuses a non-loopback NATS, naming the URL. `compose/dispatch.compose.yml` sets it. |
 | `NATS_NKEY_SEED_FILE` | no | A file holding the NATS nkey user seed this process connects as (trimmed); wins over `NATS_NKEY_SEED`. A set but empty, missing, unreadable, blank or non-user-seed value refuses startup naming the variable and path. Neither set connects without a credential. |
 | `NATS_NKEY_SEED` | no | The NATS nkey user seed itself, when `NATS_NKEY_SEED_FILE` is unset. |
 | `ENVOY_NATS_SOCKS5_PROXY` | no | A SOCKS5 proxy, as `host:port`, every NATS connection Dispatch makes goes through (reconnects included), each server's host name handed to it unresolved. A value that is not `host:port`, or that holds an nkey seed, refuses startup naming the variable, without printing the value; a set proxy also needs `ENVOY_ALLOW_REMOTE_NATS=1`. Unset dials NATS directly. |
