@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -34,6 +35,12 @@ func Start(t testing.TB, bucket string) string {
 		testcontainers.WithCmd("server", "-s3", "-dir=/data", "-ip=0.0.0.0", "-s3.port=8333"),
 		testcontainers.WithExposedPorts("8333/tcp"),
 		testcontainers.WithWaitStrategy(wait.ForHTTP("/").WithPort("8333/tcp").WithStartupTimeout(90*time.Second)),
+		// One CPU and 1 GiB, as every container the repository's tests start is capped on a shared
+		// host: one process runs the master, volume, filer and S3 servers for a few small objects.
+		testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
+			hostConfig.NanoCPUs = 1_000_000_000
+			hostConfig.Memory = 1 << 30
+		}),
 	)
 	testcontainers.CleanupContainer(t, container)
 	if err != nil {
