@@ -2,81 +2,55 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-555",
-  "completed": "2026-10-27T15:46:55Z",
-  "round": 3,
-  "testedHead": "76483b143ad894e973ec8e537d9d4deab604fe0a",
-  "evidence": "https://github.com/sjawhar/legion/pull/2390#issuecomment-6446524382",
+  "completed": "2026-10-27T17:01:04Z",
+  "round": 4,
+  "testedHead": "62a8f2d1d58951bf39ab67a9a879669f423c53d3",
+  "evidence": "https://github.com/sjawhar/legion/pull/2390#issuecomment-6448233210",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surfaces independently at 76483b14, with the tester's own build, drivers and Postgres databases. The dev sign-in restart after SIGKILL started after the wait (15.6 s), and the control e1754f3c exited 1. The verifiers-staging-token.sh absent-issuer step was run locally with the script's own commands (held-port.py exec, an issuer path answering 404): 200 service_tokens:false, a JWT-shaped bearer 503 OIDC_ISSUER_UNAVAILABLE, SIGTERM exit 0, no token in the log. Freeze-resume, NATS-down, cross-process sign-in, refusals, the announcement roll and issuer-down boots all matched the implementer's observations."
+    "how": "Drove the same surfaces independently at 62a8f2d1 with the tester's own build, drivers and Postgres databases. A stop during the admission wait exits 0 with the INFO line, against round 3's head where it exited 1. NATS down then up: one announcement published once. The dev sign-in restart, freeze-resume, cross-process sign-in, issuer-down boot and announcement roll matched the implementer's observations."
   },
   "failures": [],
   "failed": 0,
-  "ci": "At 76483b14, read at 15:46Z: test, typecheck, lint, build (x2), changes and pr-title queued; one earlier pr-title run cancelled. Read as queued, not as a pass. GitHub reports the PR MERGEABLE.",
-  "censusDriven": {
-    "C1": "K9 beside a live pair: exit 1 after 20.8 s with the refusal, /healthz never answered; dev sign-in restart after SIGKILL serves after 15.6 s; SIGTERM during the wait exits at once; racing boots: one serves (3 of 3)",
-    "C2": "\"K1 K0\"/\"K0 K1\" pair, cross-process sign-in and refresh on both processes; an empty data-dir key file refused by name",
-    "C3": "NATS-down and issuer-down boots; the staging token proof's absent-issuer step run locally; autodeploy.sh wait_for_health rolls back on nats:false (rc 1 after 91.5 s) and passes nats:null (rc 0), where b08a56bc's function passed nats:false",
-    "C4": "/healthz fields at schema 135; dispatch-production-check.sh (agent-infra main) PASSES its /healthz assertion against a process with NATS down (its compare and page assertions need LEGION_GH_PATH and a web dist this run did not have)",
-    "C5": "server.started (c1,1) / none / none / (c2,2) / (c1,3) across a two-process roll and rollback",
-    "notDriven": "verifiers-staging-token.sh as a whole needs a staging cluster and docker, which this pod does not have (kubectl has no context); its changed step was driven with the script's own commands"
-  },
-  "observations": [
-    "The PR body's census rows C2 and C5 name migration 0130; the migration at this head is 0135_server_processes (wording only)."
-  ],
+  "ci": "At 62a8f2d1, read at 17:00Z: test, typecheck, lint, build (x2), changes and pr-title queued. At 76483b14, lint, typecheck, build and changes succeeded, and test and its matrix lanes were cancelled when the head was superseded. Read as queued, not as a pass. GitHub reports MERGEABLE.",
+  "notReached": "A publish already in flight when NATS freezes was not caught on the real surface in 3 trials: the silent-cut detection marked the bus disconnected before the announcer's pass, so the pass skipped the publish. The rows stayed unpublished while frozen and were published once (1 copy each) after the restore. The in-flight bound itself is TestAPublishThatOutlivesItsBoundIsAbandoned's (CI).",
   "proof": [
     {
-      "criterion": "Review round 1: a dev sign-in server restarted after a kill starts; a process refused beside a live peer still exits 1",
-      "surface": "the real envoy-dispatch binary at the head on Postgres 17.5: DISPATCH_DEV_SIGNIN=1 SIGKILLed and started again at once; a K9 process beside a live K0 / \"K0 K1\" pair",
-      "command": "tester's eval driver (evidence comment): kill -9 the dev sign-in server 6 s after it served, restart it, poll /healthz; start K9 beside the pair and poll its /healthz until it exits; SIGTERM a second K9 4 s into its wait",
-      "observed": "restarted dev server logged the waiting WARN and served 200 15.6 s after its start; K9 logged the WARN, never answered /healthz, and exited 1 after 20.8 s with 'register this server process ... signing key set does not match a live server process'; SIGTERM during the wait ended it at once",
-      "headSha": "76483b143ad894e973ec8e537d9d4deab604fe0a",
-      "negativeControl": "the dev sign-in restart against e1754f3c: exit 1 in 0.5 s with 'signing key set does not match a live server process'"
+      "criterion": "Review round 2: a stop during the admission wait is a clean stop; a refusal that stands still exits 1",
+      "surface": "the real envoy-dispatch binary at the head: a K9 process beside a live K0 / \"K0 K1\" pair on Postgres 17.5",
+      "command": "tester's eval driver (evidence comment): start K9, SIGTERM it 4 s into its wait; start K9 again and poll /healthz until it exits",
+      "observed": "SIGTERM: exit 0 at once with INFO 'dispatch: stopped while waiting for admission to the registry of live server processes'; unsignalled: exit 1 after 20.8 s with the refusal, /healthz never answered",
+      "headSha": "62a8f2d1d58951bf39ab67a9a879669f423c53d3",
+      "negativeControl": "SIGTERM 4 s into the wait on 76483b14: exit 1, ERROR 'register this server process: context canceled'"
     },
     {
-      "criterion": "Review round 1: the staging token proof drives Dispatch serving against an issuer that does not answer; an empty signing-key file is refused by name",
-      "surface": "the real binary started through scripts/e2e/lib/held-port.py exec as verifiers-staging-token.sh starts it, DISPATCH_OIDC_ISSUER at a path answering 404, natsd; a data dir with an empty signing-key file",
-      "command": "held-port.py exec --port-file <f> --fd-env DISPATCH_LISTEN_FD -- env -i ... DISPATCH_LISTEN_FD=3 DISPATCH_PORT={port} DISPATCH_OIDC_ISSUER=<absent> DISPATCH_OIDC_AUDIENCE=dispatch envoy-dispatch; curl /healthz; GET /api/v1/whoami with a JWT-shaped bearer; SIGTERM; then envoy-dispatch with the data dir's signing-key truncated",
-      "observed": "/healthz 200 service_tokens:false; whoami 503 OIDC_ISSUER_UNAVAILABLE; SIGTERM exit 0 in 0.3 s; no eyJ in the log; the empty key file: exit 1 'dispatch: load signing key ... the session signing key file ... is empty: put its key back, delete it ...'",
-      "headSha": "76483b143ad894e973ec8e537d9d4deab604fe0a",
-      "negativeControl": "half pair (issuer without audience) exit 1 'DISPATCH_OIDC_AUDIENCE is required when DISPATCH_OIDC_ISSUER is set'; empty key file on e1754f3c: 'panic: dispatch: the refresh-token seal needs a signing key'"
+      "criterion": "Review round 2: the announcer's publish is bounded by its context; an announcement reaches the stream once",
+      "surface": "the real binary on Postgres and natsd, NATS down at boot; and NATS behind a TCP proxy frozen (bytes held both ways) while an unpublished announcement row is inserted",
+      "command": "tester's eval driver: boot with NATS down, wait 12 s, start natsd, read server_build_announcements and the stream; 3 trials of freeze proxy, insert row, wait 16 s, restore, read row and stream",
+      "observed": "row unpublished while NATS was down with no ERROR line; nats:true 1.01 s after natsd started; row published, 1 envelope on the stream; each frozen trial: unpublished while frozen, published after the restore, 1 copy on the stream, process alive",
+      "headSha": "62a8f2d1d58951bf39ab67a9a879669f423c53d3",
+      "negativeControl": "b08a56bc with NATS down exits 1 at boot ('dispatch: connect NATS ... no servers available for connection'), so it publishes nothing (rounds 1-3, same binary)"
     },
     {
-      "criterion": "Census C3/C4: the auto-deployer keeps an image only once NATS connects (or NATS is off)",
-      "surface": "packages/envoy/deploy/scripts/autodeploy.sh's wait_for_health, extracted verbatim, against live envoy-dispatch processes at the head",
-      "command": "bash -c 'source wfh.sh; wait_for_health <port>' against a process with NATS disabled and one with NATS_URLS at a dead port",
-      "observed": "nats:null -> rc 0 after 3.1 s; nats:false -> rc 1 after 91.5 s",
-      "headSha": "76483b143ad894e973ec8e537d9d4deab604fe0a",
-      "negativeControl": "the wait_for_health of b08a56bc against the nats:false process: rc 0 after 3.0 s (would keep an image whose NATS is refused)"
+      "criterion": "Review round 1/2: the staging token proof drives Dispatch serving against an issuer that does not answer, through its wait_for_dispatch_healthz helper",
+      "surface": "the helper copied verbatim from scripts/e2e/verifiers-staging-token.sh into a local harness that starts the binary through scripts/e2e/lib/held-port.py exec with DISPATCH_OIDC_ISSUER at a path answering 404, and natsd",
+      "command": "bash /legion/scratch/tmp/infra555-test/stg4/run.sh <binary> <issuer>",
+      "observed": "head: helper returned on 200, service_tokens false, JWT-shaped bearer 503 OIDC_ISSUER_UNAVAILABLE, SIGTERM exit 0, no eyJ in the log, harness exit 0",
+      "headSha": "62a8f2d1d58951bf39ab67a9a879669f423c53d3",
+      "negativeControl": "the same harness on b08a56bc: 'FAIL: dispatch exited during boot against an issuer that does not answer', exit 1"
     },
     {
-      "criterion": "Spec item 2: a process whose key set the fleet does not share does not serve, including one resuming after a lapse",
-      "surface": "two real envoy-dispatch processes at the head: A on KX frozen (SIGSTOP) or cut from the database (TCP proxy) 17 s, B started meanwhile",
-      "command": "tester's eval driver: B=KY frozen, B=KY cut, B=KX frozen",
-      "observed": "B=KY: A exited 1 (0.3 s after SIGCONT; 2.8 s after the restore), B 200 with the only row; B=KX: both 200, both rows live",
-      "headSha": "76483b143ad894e973ec8e537d9d4deab604fe0a",
-      "negativeControl": "round 2's control at 0b7f2af5: after the resume both processes served with both rows live"
-    },
-    {
-      "criterion": "A process started while NATS is unreachable becomes healthy and serves an API read; once NATS is reachable it reports nats true and publishes",
-      "surface": "real envoy-dispatch stamped 76483b14, Postgres 17.5 (schema 135), natsd",
-      "command": "tester's eval driver: boot with NATS_URLS at an unused port, /healthz, GET /api/v1/projects, the agent stream route, start natsd, read the stream, SIGSTOP/SIGCONT natsd",
-      "observed": "/healthz 200 nats:false 1.0 s after start, API 200, stream route 503 STREAM_UNAVAILABLE; nats:true 0.25 s after natsd started; one envelope dispatch-server-started-76483b14...-1; silent cut shown in 2.28 s, back 1.27 s after SIGCONT",
-      "headSha": "76483b143ad894e973ec8e537d9d4deab604fe0a",
-      "negativeControl": "b08a56bc with NATS down: exit 1 'dispatch: connect NATS ... no servers available for connection' (round 1 and round 2 runs of the same binary)"
-    },
-    {
-      "criterion": "A sign-in started on A completes on B; a key rotation keeps people signed in; started-event contract; discovery unreachable at boot",
-      "surface": "two real envoy-dispatch processes (\"K1 K0\"/\"K0 K1\") with dev-oidc-issuer; c1/c2-stamped pair with natsd; a process whose issuers are SIGSTOPped",
-      "command": "tester's eval driver: A /auth/start -> issuer -> B callback, whoami on both, refresh on A then B; roll c1 -> c2 -> rollback reading the stream; boot with issuers frozen, then resume",
-      "observed": "B callback 302 and whoami 200 on both, refresh re-seals on both; envelopes (c1,1), none, none, (c2,2), (c1,3); issuers frozen: signin:false service_tokens:false, agent token 200, JWT 503 OIDC_ISSUER_UNAVAILABLE, /auth/start 503, recovered in 7 s and sign-in completed; refresh during an outage 503 SIGNIN_UNAVAILABLE then 200",
-      "headSha": "76483b143ad894e973ec8e537d9d4deab604fe0a",
-      "negativeControl": "b08a56bc: B answered the callback 400 'invalid or expired state'; with the issuer frozen the boot exited 1 'discover the sign-in issuer' (round 1, same binary)"
+      "criterion": "Spec acceptance (two processes): sign-in A to B, key rotation, refusal and resume refusal, NATS-down start, issuer-down start, started-event contract",
+      "surface": "real envoy-dispatch processes at the head with dev-oidc-issuer, natsd and a TCP proxy to Postgres",
+      "command": "tester's eval drivers, as in rounds 1-3",
+      "observed": "A (\"K1 K0\") -> B (\"K0 K1\") callback 302 and whoami 200 on both; tampered or missing state cookie 400; refresh on A then B re-seals; no key exits 1; dev sign-in restart after SIGKILL serves after 15.6 s; resume beside KY exits 1 (0.3 s after the freeze, 2.8 s after the database cut); NATS down 200 nats:false, silent cut shown in 2.28 s; issuers down signin:false service_tokens:false, JWT 503, recovered in 7 s; envelopes (c1,1), none, none, (c2,2), (c1,3)",
+      "headSha": "62a8f2d1d58951bf39ab67a9a879669f423c53d3",
+      "negativeControl": "b08a56bc: B answered the callback 400 'invalid or expired state', K9 started beside the pair, and the issuer-down boot exited 1; 0b7f2af5: a resumed process served beside a KY peer (earlier rounds, same binaries)"
     }
   ],
   "residualRisks": [
     "The state cookie can be replayed for its 10 minutes; only the issuer's single-use code stops a second callback.",
     "A request whose confirmation has lapsed waits for the refresh timeout (about 15 s) while the issuer does not answer, then answers 503.",
-    "A process refused at boot now holds its bound port without serving for up to about 20 s before it exits, and a process refused at resume exits 1. Under RollingUpdate a changed key crash-loops the new pod (the census's rollout note)."
+    "A process refused at boot holds its bound port without serving for up to about 20 s before it exits."
   ]
 }
