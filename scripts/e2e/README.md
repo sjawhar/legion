@@ -451,7 +451,7 @@ configured, there is none to audit. The scratch Dispatch runs with `HOME` and `X
 the run's work directory, so it reads no envoy.json of the operator's.
 
 It proves admission order and slotless children — the child is parked to `backlog` as soon as it
-is seen slotless, which is all it was filed for, so it holds up no acceptance above it — then
+is seen slotless, which is all it was filed for, so it holds up no close above it — then
 drives a root from `todo` through an
 architect's spec and gate registration, which the architect does on its own (the proof never
 prompts it: its first turn is the daemon's `catch-up` notice, and the root's primary document is

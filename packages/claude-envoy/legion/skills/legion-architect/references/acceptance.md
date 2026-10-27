@@ -31,7 +31,8 @@ legion({ op: "sign_off", issue: "LEGION-40" })
   (the daemon drops a notice to a failed architect, so a retried one learns of the wait from its
   catch-up alone). Accept it as above.
 - Nothing beneath the issue holds the acceptance: accept a parent's own reviewed head while its
-  children still run. Its close waits for them instead (*The close*, below).
+  children still run. A root's close waits for them instead (*The close*, below); a parent that is
+  not the root closes at its own merge, and its children carry on under the root.
 - `request_backward_move` names the issue, because your grant serves the tree; the daemon starts
   that phase's role with your reason in its task.
 - `handoff_complete` from you in `accepting` is refused `ACCEPTANCE_IS_SIGN_OFF`. CI red at the head
