@@ -14,10 +14,9 @@ import {
   secondaryButtonText,
   textMutedOnCanvas,
 } from "../../theme/classes";
-import { resolveAuthor } from "../conversation/authors";
-import { useAgents } from "../conversation/useAgents";
 import { writePin } from "../issue/pin-write";
 import { eventItemId, isPinnedEvent, stateForIssue } from "../issue/pins";
+import { AgentName, useAgentText } from "../refs/AgentName";
 import { Timestamp } from "../refs/Timestamp";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { ActivityLine } from "./ActivityLine";
@@ -26,8 +25,6 @@ import { buildActivityItems, dateKey } from "./activity-model";
 interface ActivityTabProps {
   issueKey: string;
   state: UserState | undefined;
-  /** Whether the tab's panel is the one on screen; the agent registry is read only while it is. */
-  visible: boolean;
 }
 
 /**
@@ -36,7 +33,7 @@ interface ActivityTabProps {
  * writer, so the watermark this draws has exactly one author - and it offers no composer and no
  * filters: this is the record, not a place to write.
  */
-export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): ReactNode {
+export function ActivityTab({ issueKey, state }: ActivityTabProps): ReactNode {
   const queryClient = useQueryClient();
   const log = useInfiniteQuery({
     initialPageParam: null as number | null,
@@ -59,19 +56,9 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
   });
   const issueState = stateForIssue(state, issueKey);
   const events = useMemo(() => log.data?.pages.flat() ?? [], [log.data]);
-  // Every row names its author, and a session's name is its live registry title, so the registry
-  // is read whenever a row this tab is showing was written by one. A claim line names a second
-  // session inside its own description, so it reads the registry too, whoever authored it.
-  // Nothing is fetched for a history no session touched.
-  const { titles } = useAgents(
-    visible &&
-      events.some(
-        (event) =>
-          event.actor.kind === "session" ||
-          event.type === "issue.claimed" ||
-          event.type === "issue.released"
-      )
-  );
+  // Each row's author is an `AgentName`, which reads the agent registry itself; the text form
+  // here names the author in the row's `title` from what that read has cached.
+  const agentText = useAgentText();
   // The day the reader is in, recomputed every render so a midnight rollover moves the `Today`
   // label; the model itself is rebuilt only when one of its inputs changes, since building it
   // copies, sorts, describes and re-walks the whole history.
@@ -81,10 +68,9 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
       buildActivityItems({
         events,
         lastReadSeq: issueState.last_read_seq,
-        titles,
         today,
       }),
-    [events, issueState.last_read_seq, titles, today]
+    [events, issueState.last_read_seq, today]
   );
 
   const togglePin = (eventId: number) =>
@@ -133,7 +119,7 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
             );
           }
 
-          const author = resolveAuthor(item.author, titles).label;
+          const author = agentText.label(item.author);
           const pinned = isPinnedEvent(issueState.dismissed, item.event.id);
           return (
             <li
@@ -148,7 +134,7 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
                   wraps as prose rather than one word per line. */}
               <span className="flex max-w-full min-w-0 shrink-0 items-baseline gap-x-2 whitespace-nowrap">
                 <span className="min-w-0 truncate font-medium" title={author}>
-                  {author}
+                  <AgentName actor={item.author} inline />
                 </span>
                 <span aria-hidden="true">·</span>
                 <Timestamp at={item.at} />

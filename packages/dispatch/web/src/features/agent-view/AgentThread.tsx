@@ -39,6 +39,7 @@ import {
 } from "../../theme/classes";
 import { PendingSendTurn } from "../conversation/PendingSendTurn";
 import type { SessionSends } from "../conversation/useSessionSends";
+import { AgentName } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { readDispatchMarks, turnKey } from "./dispatch-marks";
@@ -129,16 +130,27 @@ function UserMessage(): ReactNode {
   // (AgentRuntimeThread names them): it sits on the session's side of the thread with its author,
   // never styled as the viewer's own. Both are text a person or an agent wrote (a broadcast, a
   // targeted message, a reply), so both render as Markdown, as the session's own turns do.
-  const author = useAuiState((state) => readDispatchMarks(state.message.metadata.custom).author);
+  // Two selectors, for the reason `AssistantMessage` gives: the `author` mark is a new object on
+  // every rebuild of the transcript (each streamed frame), but its `actor` is the stored message's
+  // own author, which keeps its identity across frames, and its `issue` is a string.
+  const actor = useAuiState(
+    (state) => readDispatchMarks(state.message.metadata.custom).author?.actor
+  );
+  const issue = useAuiState(
+    (state) => readDispatchMarks(state.message.metadata.custom).author?.issue
+  );
   const turn = useTurnKey();
-  if (author !== undefined) {
+  if (actor !== undefined) {
     return (
       <div
         className={`mt-4 max-w-[80%] rounded-xl border px-3 py-2 text-sm ${borderDefault} ${textPrimaryOnCanvas}`}
         data-message-id={turn}
         data-testid="agent-message-other"
       >
-        <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>{author}</p>
+        <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>
+          <AgentName actor={actor} inline />
+          {issue === undefined ? null : ` · ${issue}`}
+        </p>
         <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
       </div>
     );

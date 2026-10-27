@@ -14,6 +14,7 @@ import { InboxDrawer } from "./features/inbox/InboxDrawer";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
 import { MarginProvider } from "./features/margin/margin-context";
+import { AgentRegistryPoller } from "./features/refs/agent-registry";
 import { RefPreviewHost } from "./features/refs/RefPreview";
 import {
   AGENT_ARTIFACT_PATH,
@@ -834,6 +835,7 @@ function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
   useEventFeed();
   return (
     <KeymapProvider>
+      <AgentRegistryPoller />
       <AppShell user={user} />
     </KeymapProvider>
   );

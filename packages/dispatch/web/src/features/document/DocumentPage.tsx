@@ -10,6 +10,7 @@ import { ArtifactBlobView, ArtifactHeader } from "../artifacts/ArtifactHeader";
 import { ArtifactQueryStates } from "../artifacts/ArtifactQueryStates";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { SubscribedAgents } from "../issue/SubscribedAgents";
+import { useAgentText } from "../refs/AgentName";
 import { ReferencedBy } from "../refs/ReferencedBy";
 import {
   buildDispatchReference,
@@ -47,8 +48,10 @@ export function DocumentPage(): ReactNode {
       return api.getArtifactSubscribers(artifact.data.id);
     },
   });
+  const agentText = useAgentText();
   const unsubscribe = useKeyedWrite({
-    label: (sessionId: string) => `${sessionId} unsubscribed from this document`,
+    label: (sessionId: string) =>
+      `${agentText.sessionText(sessionId, subscribers.data?.find((row) => row.session_id === sessionId)?.title)} unsubscribed from this document`,
     write: (sessionId: string, bounds) => {
       if (artifact.data === undefined) {
         throw new Error("Document unsubscribe requires an artifact.");

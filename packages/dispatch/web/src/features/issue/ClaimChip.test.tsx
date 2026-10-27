@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -118,7 +118,17 @@ test("a claimed issue names its holder and releases the claim from the header", 
     expect(await screen.findByTitle(/Claimed by Implementer/)).toBeDefined();
     // The chip is the only place a reader is told what a claim is.
     expect(await screen.findByTitle(/two agents never take the same work/)).toBeDefined();
-    expect(screen.getByText("Implementer")).toBeDefined();
+    // The holder is drawn by `AgentName`: its name links to its live conversation, and the
+    // registry lists it, so it reads as running and the chip adds nothing.
+    const chip = screen.getByTestId("issue-claim");
+    expect(within(chip).getByRole("link", { name: "Implementer" }).getAttribute("href")).toBe(
+      "/agents/session-one/live"
+    );
+    await waitFor(() =>
+      expect(
+        chip.querySelector('[data-agent-name="session-one"]')?.getAttribute("data-agent-state")
+      ).toBe("running")
+    );
     expect(screen.queryByText("not running")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Release the claim on CORE-1" }));
     await waitFor(() => expect(release).toHaveBeenCalledWith("CORE-1", keyedAttempt));
@@ -141,6 +151,11 @@ test("a holder the registry no longer lists reads as not running", async () => {
   try {
     expect(await screen.findByText("not running")).toBeDefined();
     expect(screen.getByTitle(/no longer running, so anyone may claim it/)).toBeDefined();
+    const chip = screen.getByTestId("issue-claim");
+    expect(
+      chip.querySelector('[data-agent-name="session-one"]')?.getAttribute("data-agent-state")
+    ).toBe("not-running");
+    expect(within(chip).getByRole("img", { name: "Not running" })).toBeDefined();
   } finally {
     view.unmount();
     agents.mockRestore();

@@ -9,16 +9,22 @@ import { type ReactNode, useLayoutEffect, useMemo, useRef } from "react";
 import type { Message, MessageRead } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 import type { SessionSends } from "../conversation/useSessionSends";
-import { actorName, isViewer } from "../refs/actor";
+import { isViewer } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
 import { type AgentConversation, dispatchTurns, toThreadMessages } from "./conversation";
-import { dispatchMetadata, type KeyedMessage, turnKey } from "./dispatch-marks";
+import {
+  type DispatchAuthor,
+  dispatchMetadata,
+  type KeyedMessage,
+  turnKey,
+} from "./dispatch-marks";
 
-/** Who wrote a stored message, when it was not the viewer: its author, and its issue if any. */
-function otherAuthor(message: Message, viewer: string | undefined): string | undefined {
+/** Who wrote a stored message, when it was not the viewer: its author as Dispatch recorded it
+ *  (a session's stamped title with it, for `AgentName` to name it by), and its issue if any. */
+function otherAuthor(message: Message, viewer: string | undefined): DispatchAuthor | undefined {
   return isViewer(message.author, viewer)
     ? undefined
-    : [actorName(message.author), message.issue_key].filter(Boolean).join(" · ");
+    : { actor: message.author, issue: message.issue_key ?? undefined };
 }
 
 /** The id a stored Dispatch message is rendered under, which a streamed turn that took that

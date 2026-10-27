@@ -64,6 +64,7 @@ import {
 } from "../../theme/classes";
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
+import { AgentName, type AgentText, useAgentText } from "../refs/AgentName";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import { composerReferences } from "../refs/routes";
 import { SendStoppedError } from "../writes/keyed-write";
@@ -107,8 +108,18 @@ interface Draft {
 
 interface MentionOption {
   readonly capabilities: readonly string[];
+  /** Where and when: the session's directory and when it was last seen. */
   readonly detail: string;
+  /** The name of the session the option is, or of the one holding its role, as `useAgentText`
+   *  gives it: the filter matches it, and a role option's detail tooltip names it. */
+  readonly holder: string;
+  /** The session the option is, or, for a role, the session holding it: `AgentName` draws it. */
+  readonly sessionId: string;
+  /** That session's title as the agent list gave it: its name when the registry cache has none. */
+  readonly sessionTitle: string;
   readonly target: string;
+  /** The text the mention inserts (`@Title`) and the option's accessible name: a role's name, or
+   *  the session's name as `useAgentText` gives it. */
   readonly title: string;
 }
 
@@ -142,7 +153,10 @@ function submittedAskOptions(options: readonly AskOptionDraft[]): AskOption[] {
   return submitted;
 }
 
-function roleOptions(agents: readonly Agent[]): MentionOption[] {
+function roleOptions(
+  agents: readonly Agent[],
+  text: Pick<AgentText, "sessionText">
+): MentionOption[] {
   const byRole = new Map<string, Agent>();
   for (const agent of agents) {
     for (const role of agent.roles) byRole.set(role, agent);
@@ -159,15 +173,21 @@ function roleOptions(agents: readonly Agent[]): MentionOption[] {
     })
     .map(([role, agent]) => ({
       capabilities: agent.capabilities,
-      detail: `${agent.title} · ${agent.dir} · ${new Date(agent.last_seen).toLocaleString()}`,
+      detail: `${agent.dir} · ${new Date(agent.last_seen).toLocaleString()}`,
+      holder: text.sessionText(agent.session_id, agent.title),
+      sessionId: agent.session_id,
+      sessionTitle: agent.title,
       target: `role:${role}`,
       title: role,
     }));
 }
 
-export function mentionOptions(agents: readonly Agent[]): MentionOption[] {
+export function mentionOptions(
+  agents: readonly Agent[],
+  text: Pick<AgentText, "sessionText">
+): MentionOption[] {
   return [
-    ...roleOptions(agents),
+    ...roleOptions(agents, text),
     ...[...agents]
       .sort(
         (left, right) => right.last_seen - left.last_seen || left.title.localeCompare(right.title)
@@ -175,8 +195,11 @@ export function mentionOptions(agents: readonly Agent[]): MentionOption[] {
       .map((agent) => ({
         capabilities: agent.capabilities,
         detail: `${agent.dir} · ${new Date(agent.last_seen).toLocaleString()}`,
+        holder: text.sessionText(agent.session_id, agent.title),
+        sessionId: agent.session_id,
+        sessionTitle: agent.title,
         target: `session:${agent.session_id}`,
-        title: agent.title === "" ? agent.session_id : agent.title,
+        title: text.sessionText(agent.session_id, agent.title),
       })),
   ];
 }
@@ -518,15 +541,18 @@ export function MentionComposer({
     autocompleteOpen
   );
   const agents = suppliedAgents ?? live.agents;
-  const options = useMemo(() => mentionOptions(agents), [agents]);
+  const text = useAgentText();
+  const options = useMemo(() => mentionOptions(agents, text), [agents, text]);
   const filteredOptions = useMemo(() => {
     if (autocomplete === undefined) return [];
     const query = autocomplete.query.toLocaleLowerCase();
+    // A role option matches its holder's name too, which its detail line shows.
     return options.filter(
       (option) =>
         query === "" ||
         option.target.toLocaleLowerCase().includes(query) ||
         option.title.toLocaleLowerCase().includes(query) ||
+        option.holder.toLocaleLowerCase().includes(query) ||
         option.detail.toLocaleLowerCase().includes(query)
     );
   }, [autocomplete, options]);
@@ -988,7 +1014,7 @@ export function MentionComposer({
       {replyTo === null ? null : (
         <div className="flex items-center gap-1">
           <ReplyQuote
-            author={replyTo.author}
+            author={replyTo.actor}
             className="min-w-0 flex-1"
             excerpt={replyTo.excerpt}
             to={replyTo.to}
@@ -1141,30 +1167,52 @@ export function MentionComposer({
           className={`max-h-52 overflow-y-auto rounded-lg border p-1 ${surfaceRecessedBg}`}
           role="listbox"
         >
-          {filteredOptions.map((option) => (
-            // Below `xl` every button is `inline-flex` with centred items (styles.css's touch
-            // rule, unlayered, so it beats `block`): the title and detail stack explicitly and
-            // each stretches to the row's width.
-            <button
-              aria-label={option.title}
-              className={`flex min-h-11 w-full flex-col rounded-lg px-3 py-2 text-left text-sm ${surfaceMutedHoverBg}`}
-              key={option.target}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => addMention(option)}
-              role="option"
-              type="button"
-            >
-              <span className={`self-stretch font-medium ${textPrimaryOnSurface}`}>
-                {option.title}
-              </span>
-              <TruncatedText
-                className={`self-stretch text-xs ${textMutedOnSurface}`}
-                title={option.detail}
+          {filteredOptions.map((option) => {
+            const isRole = option.target.startsWith("role:");
+            // Each suggestion is one option that inserts the mention; a listbox owns only
+            // options, so the agent in it is drawn by `AgentName` without a link (exclusion E2):
+            // a session option's name, and a role option's holder.
+            const agent = (
+              <AgentName
+                kind="static"
+                sessionId={option.sessionId}
+                storedTitle={option.sessionTitle}
+              />
+            );
+            return (
+              // Below `xl` every button is `inline-flex` with centred items (styles.css's touch
+              // rule, unlayered, so it beats `block`): the title and detail stack explicitly and
+              // each stretches to the row's width.
+              // A session option's full id is its tooltip and accessible description: its name
+              // can be the short form `session:<8>…`, which two sessions may share.
+              <button
+                aria-label={option.title}
+                className={`flex min-h-11 w-full flex-col rounded-lg px-3 py-2 text-left text-sm ${surfaceMutedHoverBg}`}
+                key={option.target}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => addMention(option)}
+                role="option"
+                title={isRole ? undefined : option.sessionId}
+                type="button"
               >
-                {option.detail}
-              </TruncatedText>
-            </button>
-          ))}
+                <span className={`self-stretch font-medium ${textPrimaryOnSurface}`}>
+                  {isRole ? option.title : agent}
+                </span>
+                <TruncatedText
+                  className={`self-stretch text-xs ${textMutedOnSurface}`}
+                  title={isRole ? `${option.holder} · ${option.detail}` : option.detail}
+                >
+                  {isRole ? (
+                    <>
+                      {agent} · {option.detail}
+                    </>
+                  ) : (
+                    option.detail
+                  )}
+                </TruncatedText>
+              </button>
+            );
+          })}
           {filteredOptions.length === 0 ? (
             <p className={`px-3 py-2 text-sm ${textMutedOnSurface}`}>No live agents match.</p>
           ) : null}

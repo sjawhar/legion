@@ -366,6 +366,18 @@ test("the live view attributes other people's messages to the session to their a
         }),
         replies: [],
       },
+      {
+        message: message("m4", "Reviewer: merged.", {
+          author: {
+            id: "reviewer-session-id",
+            kind: "session",
+            origin: { session_title: "Reviewer (stamped)" },
+          },
+          created_at: "2026-09-27T21:19:30Z",
+          issue_key: "CORE-2",
+        }),
+        replies: [],
+      },
     ],
     putAgentState: answerAgentStates().mockResolvedValue({ unread_replies: 0 }),
   });
@@ -378,7 +390,35 @@ test("the live view attributes other people's messages to the session to their a
   expect(others.map((node) => node.textContent)).toEqual([
     "aliceAlice here: status?",
     "bob · CORE-1Bob on the issue: ship it?",
+    "Reviewer (stamped) · CORE-2Reviewer: merged.",
   ]);
+  // Another agent is drawn by `AgentName`: named by the title it stamped (the registry does not
+  // list it), marked not running, and linked to its own live conversation.
+  const reviewer = others[2]?.querySelector('[data-agent-name="reviewer-session-id"]');
+  if (!(reviewer instanceof HTMLElement)) throw new Error("the reviewer is not an AgentName");
+  await waitFor(() => expect(reviewer.getAttribute("data-agent-state")).toBe("not-running"));
+  expect(
+    within(reviewer).getByRole("link", { name: "Reviewer (stamped)" }).getAttribute("href")
+  ).toBe("/agents/reviewer-session-id/live");
+});
+
+// The header is the agent's own live conversation (exclusion E3): `AgentName` names it by its
+// registry title and marks it running, with no link to the page it is on. The state mark adds no
+// text, so the heading reads exactly the agent's name, as the tab title does.
+test("the live view's header names the agent with its running state and no link", async () => {
+  renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+  });
+
+  const heading = await screen.findByRole("heading", { level: 1 });
+  await waitFor(() => expect(heading.textContent).toBe("Planner"));
+  const name = heading.querySelector(`[data-agent-name="${SESSION}"]`);
+  expect(name?.getAttribute("data-agent-state")).toBe("running");
+  expect(within(heading).getByRole("img", { name: "Running" })).toBeTruthy();
+  expect(heading.querySelector("a")).toBeNull();
+  await waitFor(() => expect(document.title).toContain("Planner"));
 });
 
 // Stored times carry microseconds, so two messages written within one millisecond still have an

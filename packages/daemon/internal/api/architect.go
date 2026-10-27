@@ -260,33 +260,81 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	if !ok || !s.rootArchitectOf(w, r, grant, recorded, gateRoute) {
 		return
 	}
-	if !s.documentOfIssue(w, r, artifactID, req.Issue) {
+	// The issue's event sequence is read before the approval, so every review that read does not
+	// show has a later sequence: a review the gate applies after this read places after it.
+	since, ok := s.issueSequence(w, r, req.Issue)
+	if !ok {
 		return
 	}
+	approval, ok := s.documentOfIssue(w, r, artifactID, req.Issue)
+	if !ok {
+		return
+	}
+	// The version registered is the caller's; only Dispatch's read says the document has it. A
+	// version Dispatch does not show would record a gate no person's review can open.
+	if req.Version > approval.LatestVersion {
+		writeFailure(w, http.StatusConflict, "VERSION_NOT_IN_DISPATCH", fmt.Sprintf(
+			"Dispatch shows %s at version %d, not %d; register the version you requested approval of", artifactID, approval.LatestVersion, req.Version))
+		return
+	}
+	// What this read found of the person's review travels with the registration, so a spec a person
+	// approved or asked changes of before the architect registered is applied at once: the gate
+	// opens, or closes with the architect told. The read's own start is its sequence alone: no time
+	// this read shows is the read's own (the latest review's time is that review's), and every act
+	// Dispatch records after the read carries a later sequence. The approval request the read found
+	// open, and whose turn it waits on, travel with it too, for the registration to mirror.
+	changes, reason := approval.ChangesRequestedLatest()
+	fact := intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
+		ChangesRequestedVersion: changes, ChangesReason: reason, DispatchVersion: approval.LatestVersion, Since: record.EventMark{Seq: since},
+		RequestAsk: approval.AskID, RequestWaitsOnAgent: approval.AskID != "" && approval.WaitingOn == "agent"}
+	review := record.EventMark{Seq: approval.Seq, At: approval.At}
+	if changes != 0 {
+		fact.ChangesRequestedMark = review
+	}
+	if fact.ApprovedVersion != 0 {
+		fact.ApprovedMark = review
+	}
 	// A re-admitted root's architect registers its spec again, often at the same version: each
-	// generation's registration is its own fact.
-	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%d", req.Issue, recorded.Generation, artifactID, req.Version),
-		intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version}, GateRegisterResponse{})
+	// generation's registration is its own fact. The fact's id names the read as well as the
+	// version: a second registration at one version carries what Dispatch showed when it ran, so a
+	// retry of one read stays one fact while a new read — a review or a version since — is a new
+	// fact the handlers see.
+	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%d:%d", req.Issue, recorded.Generation, artifactID, req.Version, since), fact, GateRegisterResponse{})
+}
+
+// issueSequence reads the issue's latest Dispatch event sequence. A failed read records nothing,
+// so the architect's register_gate retries.
+func (s *server) issueSequence(w http.ResponseWriter, r *http.Request, issue string) (int64, bool) {
+	if s.dispatch == nil {
+		writeFailure(w, http.StatusInternalServerError, "DISPATCH_UNAVAILABLE", "Dispatch is unavailable")
+		return 0, false
+	}
+	current, err := s.dispatch.GetIssue(r.Context(), issue)
+	if err != nil {
+		writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", fmt.Sprintf("Dispatch read of %s failed; retry register_gate", issue))
+		return 0, false
+	}
+	return current.LastSeq, true
 }
 
 // documentOfIssue refuses a gate document the issue does not carry, as the shipped daemon does: an
 // already-approved document of any other issue would otherwise open this gate. A failed read
-// records nothing, so the architect's register_gate retries.
-func (s *server) documentOfIssue(w http.ResponseWriter, r *http.Request, artifactID, issue string) bool {
+// records nothing, so the architect's register_gate retries. It returns the approval it read.
+func (s *server) documentOfIssue(w http.ResponseWriter, r *http.Request, artifactID, issue string) (dispatch.Approval, bool) {
 	if s.dispatch == nil {
 		writeFailure(w, http.StatusInternalServerError, "DISPATCH_UNAVAILABLE", "Dispatch is unavailable")
-		return false
+		return dispatch.Approval{}, false
 	}
 	approval, err := s.dispatch.Approval(r.Context(), artifactID)
 	switch {
 	case dispatch.Missing(err), err == nil && approval.IssueKey != issue:
 		writeFailure(w, http.StatusNotFound, "ARTIFACT_NOT_ON_ISSUE", fmt.Sprintf("%s is not a document of %s", artifactID, issue))
-		return false
+		return dispatch.Approval{}, false
 	case err != nil:
 		writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", fmt.Sprintf("Dispatch read of %s failed; retry register_gate", artifactID))
-		return false
+		return dispatch.Approval{}, false
 	}
-	return true
+	return approval, true
 }
 
 // releasableChild accepts an issue of the architect's tree that has not entered the workflow: a

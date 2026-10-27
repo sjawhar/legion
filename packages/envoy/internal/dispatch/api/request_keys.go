@@ -34,7 +34,7 @@ import (
 // draft; Google AIP-155): the dashboard mints one per press and the agents' client one per command,
 // and both retry a failed fetch, a timeout, a 5xx, a 429 and a 409 KEY_IN_FLIGHT under it, none of
 // which says whether the first attempt ran. keyedWrites, which register wraps around every POST and
-// PATCH route, makes that retry safe with one request_keys row per key (migration 0120):
+// PATCH route, makes that retry safe with one request_keys row per key (migration 0121):
 //
 //   - The row is inserted in flight, in a statement of its own, before the handler runs, and on a
 //     context the client's cancellation does not reach. A repeat that finds it answers from it
@@ -696,7 +696,7 @@ const (
 )
 
 // state is what held's row says, for a repeat judged by digest on a route that replays a recovery
-// point when replays. The row's constraints (migration 0120) keep an answered row's lease released
+// point when replays. The row's constraints (migration 0121) keep an answered row's lease released
 // and its response under its status.
 func (held heldRequestKey) state(digest string, replays bool) keyState {
 	switch {

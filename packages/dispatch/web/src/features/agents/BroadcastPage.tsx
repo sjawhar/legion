@@ -24,7 +24,6 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { resolveAuthor } from "../conversation/authors";
 import { MODE_LABELS, strandedRetryGuidance } from "../conversation/delivery";
 import {
   capabilitiesForTarget,
@@ -32,12 +31,13 @@ import {
   DeliveryStatus,
 } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
-import { sessionLabel } from "../refs/actor";
+import { AgentName, type AgentPart, AgentParts, useAgentText } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 import { deliveryAttempts } from "./attempts";
+import { excludedParts } from "./broadcast-plan";
 import { useMarkShownRepliesRead } from "./unread";
 
 /** How long the server leaves a delivery claim before another sender may take it
@@ -65,15 +65,17 @@ function BroadcastRecipientRow({
   delivery,
   liveAgents,
   recipient,
-  titles,
 }: {
   delivery: MessageDeliveryMode;
   liveAgents: readonly Agent[];
   recipient: BroadcastRecipient;
-  titles: ReadonlyMap<string, string>;
 }): ReactNode {
+  const text = useAgentText();
   const queryClient = useQueryClient();
-  const label = sessionLabel(recipient.session_id, titles.get(recipient.session_id) ?? "");
+  // The recipient is the session the broadcast addressed: `AgentName` draws it wherever the row
+  // names it, and the row's accessible name is the same name as text.
+  const recipientAgent: AgentPart = { sessionId: recipient.session_id, storedTitle: undefined };
+  const label = text.sessionText(recipient.session_id, undefined);
   const retry = useKeyedWrite({
     label: (mode: MessageDeliveryMode) => `Delivery to ${label} again, as ${MODE_LABELS[mode]}`,
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["broadcast"] }),
@@ -83,8 +85,8 @@ function BroadcastRecipientRow({
   // session's replies anywhere else, older or newer, stay unread until a view shows them.
   useMarkShownRepliesRead(recipient.session_id, recipient.replies);
   const answer = recipient.replies.find((reply) => reply.author.kind === "session");
-  const answeredBy = answer === undefined ? undefined : resolveAuthor(answer.author, titles).label;
-  const attempts = deliveryAttempts(recipient.message.deliveries, label);
+  const answeredBy = answer?.author;
+  const attempts = deliveryAttempts(recipient.message.deliveries, recipientAgent);
   const latest = attempts.at(-1);
   // A pending attempt nobody has come back to. The server frees a claim after a minute
   // (`claimLapsed`), and it judges the claim; this reads the attempt's own timestamp, which is
@@ -96,17 +98,25 @@ function BroadcastRecipientRow({
   const capabilities = capabilitiesForTarget(recipient.message.target, liveAgents);
   return (
     <article aria-label={label} className={`rounded-xl border p-3 ${card} ${borderDefault}`}>
-      <h3 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>{label}</h3>
+      <h3 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>
+        <AgentName
+          className="break-words"
+          sessionId={recipient.session_id}
+          storedTitle={undefined}
+        />
+      </h3>
       {latest === undefined ? (
         <p className={`mt-2 text-sm font-semibold ${dangerText}`}>
-          Not sent to {label}: no delivery attempt was recorded.
+          <AgentParts
+            parts={["Not sent to ", recipientAgent, ": no delivery attempt was recorded."]}
+          />
         </p>
       ) : (
         <DeliveryStatus
           answeredBy={answeredBy}
           deliveries={attempts}
           retryRow={answeredBy === undefined && latest.state === "failed"}
-          targetName={label}
+          targetName={recipientAgent}
         />
       )}
       {answeredBy !== undefined || latest?.state === "sent" ? null : latest?.state === "failed" ? (
@@ -119,7 +129,7 @@ function BroadcastRecipientRow({
           latest={latest}
           onRetry={retry.mutate}
           retrying={retry.isPending}
-          targetName={label}
+          targetName={recipientAgent}
         />
       ) : latest === undefined || stranded ? (
         // Outstanding, and nobody is carrying it. Only the attempt's own mode is offered: the
@@ -142,7 +152,7 @@ function BroadcastRecipientRow({
       {recipient.replies.map((reply) => (
         <div className={`mt-2 border-t pt-2 ${borderDefault}`} key={reply.id}>
           <p className={`flex items-baseline gap-2 text-xs ${textSecondaryOnCanvas}`}>
-            <span className="font-semibold">{resolveAuthor(reply.author, titles).label}</span>
+            <AgentName actor={reply.author} className="font-semibold" inline />
             <Timestamp at={reply.created_at} />
           </p>
           <div className={textPrimaryOnCanvas}>
@@ -159,7 +169,7 @@ export function BroadcastPage(): ReactNode {
   const { id = "" } = useParams<{ id: string }>();
   const location = useLocation();
   const excluded = exclusionsFromState(location.state);
-  const { agents, titles } = useAgents(true, true);
+  const { agents } = useAgents(true, true);
   const broadcast = useQuery({
     queryFn: () => api.getBroadcast(id),
     // Keyed under ["broadcast"], the prefix every issue-less message event invalidates, so a
@@ -190,7 +200,7 @@ export function BroadcastPage(): ReactNode {
         </h1>
         <p className={`mt-1 flex flex-wrap items-center gap-2 text-sm ${textMutedOnCanvas}`}>
           <LabelPill>{MODE_LABELS[sent.delivery]}</LabelPill>
-          <span>{resolveAuthor(sent.author, titles).label}</span>
+          <AgentName actor={sent.author} inline />
           <Timestamp at={sent.created_at} />
           <span>
             {answered} of {sent.recipients.length} answered
@@ -201,10 +211,15 @@ export function BroadcastPage(): ReactNode {
         </div>
         {excluded.length === 0 ? null : (
           <p className={`mt-2 text-sm ${dangerText}`}>
-            Excluded:{" "}
-            {excluded
-              .map((item) => `${sessionLabel(item.session_id, item.title)} (${item.reason})`)
-              .join(", ")}
+            <AgentParts
+              parts={excludedParts(
+                excluded.map((item) => ({
+                  reason: item.reason,
+                  sessionId: item.session_id,
+                  storedTitle: item.title,
+                }))
+              )}
+            />
             . Nothing was sent to them.
           </p>
         )}
@@ -219,7 +234,6 @@ export function BroadcastPage(): ReactNode {
               key={recipient.session_id}
               liveAgents={agents}
               recipient={recipient}
-              titles={titles}
             />
           ))}
         </div>

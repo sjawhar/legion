@@ -159,9 +159,8 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await expect(quietToggle).toHaveAttribute("aria-expanded", "true");
     await expect(shownTitles).toHaveText(["Planner", "Reviewer", "Silent"]);
     await expect(silentCard.getByText("No Dispatch activity", { exact: true })).toBeVisible();
-    await expect(
-      silentCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
-    ).toBeVisible();
+    // The row's state is the shared running state: the session is listed, so it is running.
+    await expect(silentCard.getByRole("img", { exact: true, name: "Running" })).toBeVisible();
     await quietToggle.click();
     await expect(silentCard).toHaveCount(1);
     await expect(silentCard).toBeHidden();
@@ -169,17 +168,21 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await inactiveToggle.click();
     await expect(inactiveToggle).toHaveAttribute("aria-expanded", "true");
     await expect(shownTitles).toHaveText(["Planner", "Reviewer", "Archivist"]);
-    await expect(
-      archivistCard.getByRole("status", { name: "Seen 10 minutes ago or longer" })
-    ).toBeVisible();
+    // Still listed, so still running: the fold says it has been quiet, and the mark's `title`
+    // says for how long.
+    const archivistState = archivistCard.getByRole("img", { exact: true, name: "Running" });
+    await expect(archivistState).toBeVisible();
+    await expect(archivistState).toHaveAttribute("title", /^Running · seen \d+ minutes ago$/);
     await archivistCard.getByRole("button", { exact: true, name: "Archivist" }).click();
     await expect(archivistCard.getByRole("textbox", { name: "Comment" })).toBeVisible();
     await inactiveToggle.click();
     await expect(archivistCard).toHaveCount(1);
     await expect(archivistCard).toBeHidden();
+    await expect(plannerCard.getByRole("img", { exact: true, name: "Running" })).toBeVisible();
+    // The row's live link, beside its toggle, opens the session's live conversation.
     await expect(
-      plannerCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
-    ).toBeVisible();
+      plannerCard.getByRole("link", { name: "Open live conversation with Planner" })
+    ).toHaveAttribute("href", `/agents/${planner.session_id}/live`);
 
     // Collapsed by default: no conversation or composer on screen until a card's title is
     // expanded. The Archivist's, opened above and folded away with its row, is kept - with any
@@ -1165,16 +1168,15 @@ test("with half the recipients unable to take the mode, the compact composer kee
       const last = await fixture.excludedLine.evaluate((element) => {
         const lastName = "Planner 40";
         const scrolls = element.scrollWidth > element.clientWidth;
-        const text = [...element.childNodes].find((node) => node.textContent?.includes(lastName));
-        if (text === undefined) return { scrolls, visible: false };
-        const range = document.createRange();
-        const start = text.textContent?.indexOf(lastName) ?? 0;
-        range.setStart(text, start);
-        range.setEnd(text, start + lastName.length);
+        // Each excluded agent is drawn by `AgentName`: its name is the text of its live link.
+        const link = [...element.querySelectorAll("[data-agent-name] a")].find(
+          (node) => node.textContent === lastName
+        );
+        if (link === undefined) return { scrolls, visible: false };
         // Scroll the line so the name's left edge meets the line's, then read both again.
         element.scrollLeft +=
-          range.getBoundingClientRect().left - element.getBoundingClientRect().left;
-        const [name, line] = [range.getBoundingClientRect(), element.getBoundingClientRect()];
+          link.getBoundingClientRect().left - element.getBoundingClientRect().left;
+        const [name, line] = [link.getBoundingClientRect(), element.getBoundingClientRect()];
         return {
           scrolls,
           visible: name.left >= line.left - 0.5 && name.right <= line.right + 0.5,
@@ -1612,15 +1614,24 @@ test("a mode no selected agent advertises leaves Send dead, and Send says so and
     await expect(mode).toHaveValue("btw");
 
     // The label refuses rather than counting, and the reason rides the button itself: the
-    // Excluded line, which names each agent, why, and the mode that would reach them.
+    // Excluded line, which names each agent, why, and the mode that would reach them. The line
+    // draws each agent through `AgentName`, so the description the button reads from it carries
+    // each agent's running state before its name; the `title` is the line as plain text.
     const dead = composer.getByRole("button", { name: "No recipient" });
     const why =
       "Excluded: Builder A (does not advertise BTW), Builder B (does not advertise BTW). Nothing is sent to them, and no other mode is substituted. Sending as Send would reach 2 of them.";
     await expect(dead).toBeDisabled();
-    await expect(dead).toHaveAccessibleDescription(why);
+    await expect(dead).toHaveAccessibleDescription(
+      "Excluded: Running Builder A (does not advertise BTW), Running Builder B (does not advertise BTW). Nothing is sent to them, and no other mode is substituted. Sending as Send would reach 2 of them."
+    );
     await expect(dead).toHaveAttribute("title", why);
-    // A keyboard reaches it, so the reason does too: Tab from the message lands on Send.
+    // A keyboard reaches it, so the reason does too: Tab from the message passes the line's two
+    // agent links and lands on Send.
     await message.press("Tab");
+    await expect(composer.getByRole("link", { exact: true, name: "Builder A" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(composer.getByRole("link", { exact: true, name: "Builder B" })).toBeFocused();
+    await page.keyboard.press("Tab");
     await expect(dead).toBeFocused();
     // Refused, not merely grey: pressing it anyway asks nothing of the server.
     await dead.click({ force: true });
@@ -1660,12 +1671,12 @@ test("with one of two selected agents gone from the registry, Send reaches the l
     await expect(composer.getByRole("button", { name: "Send to 2" })).toBeEnabled();
 
     // Bravo leaves; the page learns of it on its next agent poll, and names it by its ID since
-    // the registry no longer holds its title.
+    // the registry no longer holds its title, with its state - not running - before the name.
     await setSessionLive(bravo.session_id, false);
     const send = composer.getByRole("button", { name: "Send to 1" });
     await expect(send).toBeEnabled({ timeout: 30_000 });
     await expect(send).toHaveAccessibleDescription(
-      "Excluded: session:bravo-se… (no live session). Nothing is sent to them, and no other mode is substituted."
+      "Excluded: Not running session:bravo-se… (no live session). Nothing is sent to them, and no other mode is substituted."
     );
     await expect(
       composer.getByRole("button", { name: /^session:bravo-se… · no live session/ })

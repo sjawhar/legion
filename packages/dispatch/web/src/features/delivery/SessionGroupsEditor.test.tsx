@@ -6,7 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { seedDeliveryReads } from "../../__tests__/live-socket-harness";
 import { ApiError, api } from "../../api/client";
-import type { DeliverySessionGroup } from "../../api/types";
+import type { Agent, DeliverySessionGroup } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { SessionGroupsEditor } from "./SessionGroupsEditor";
 
@@ -26,11 +26,14 @@ const counts = { s1: 3, s2: 2, s3: 1 };
 function renderEditor(
   groups: readonly DeliverySessionGroup[] = [],
   values: {
+    agents?: readonly Agent[];
     titles?: Readonly<Record<string, string>>;
     counts?: Readonly<Record<string, number>>;
   } = {}
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // The agent registry, as the shell's poller last read it: none listed unless a test says so.
+  queryClient.setQueryData(["agents"], values.agents ?? []);
   render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
@@ -66,11 +69,47 @@ test("it lists the window's sessions busiest first, each with its title, count a
   }
 });
 
-test("sessions sharing a title carry their ids in their checkbox labels", () => {
-  renderEditor([], { titles: { s1: "Planner", s2: "Planner", s3: "Reviewer" } });
+// Each session is an agent: the checkbox's label keeps its name, and its live link sits beside
+// the label, outside it.
+test("each session's checkbox is named by its agent, with its live link beside the label", () => {
+  renderEditor([]);
   try {
-    expect(screen.getByRole("checkbox", { name: "Planner (s1)" })).toBeDefined();
-    expect(screen.getByRole("checkbox", { name: "Planner (s2)" })).toBeDefined();
+    const checkbox = screen.getByRole("checkbox", { name: "Planner one" });
+    const label = checkbox.closest("label");
+    expect(label?.getAttribute("title")).toBe("s1");
+    const live = screen.getByRole("link", { name: "Open live conversation with Planner one" });
+    expect(live.getAttribute("href")).toBe("/agents/s1/live");
+    expect(label?.contains(live)).toBe(false);
+    expect(live.closest("[data-agent-name]")?.getAttribute("data-agent-name")).toBe("s1");
+  } finally {
+    cleanup();
+  }
+});
+
+// A session the registry lists reads by its current title, not the one the delivery read stored;
+// a session whose stored title is its own id has none, and reads by its short id.
+test("a session reads by its registry title, else its stored title, else its short id", () => {
+  renderEditor([], {
+    agents: [
+      {
+        capabilities: [],
+        dir: "/home/alice/legion",
+        host: "devbox-alice",
+        last_activity: null,
+        last_seen: 1,
+        machine_id: "devbox-alice",
+        open_asks: 0,
+        roles: [],
+        session_id: "s1",
+        title: "Planner renamed",
+      },
+    ],
+    titles: { s1: "Planner one", s2: "Planner two", s3: "s3" },
+  });
+  try {
+    expect(screen.getByRole("checkbox", { name: "Planner renamed" })).toBeDefined();
+    expect(screen.getByRole("checkbox", { name: "Planner two" })).toBeDefined();
+    expect(screen.getByRole("checkbox", { name: "session:s3…" })).toBeDefined();
   } finally {
     cleanup();
   }
@@ -81,8 +120,8 @@ test("create: two selected sessions and a name become a group; the live views he
   const queryClient = renderEditor();
   const reads = seedDeliveryReads(queryClient);
   try {
-    fireEvent.click(screen.getByRole("checkbox", { name: "Planner one (s1)" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer (s3)" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Planner one" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer" }));
     fireEvent.change(screen.getByLabelText("New group name"), {
       target: { value: "Release crew" },
     });
@@ -113,13 +152,13 @@ test("rename, add, remove and delete each write their one change", async () => {
       expect(update).toHaveBeenLastCalledWith(crew.id, { name: "Ship crew" }, keyedAttempt)
     );
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer (s3)" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer" }));
     fireEvent.click(within(group).getByRole("button", { name: "Add selected" }));
     await waitFor(() =>
       expect(update).toHaveBeenLastCalledWith(crew.id, { add: ["s3"] }, keyedAttempt)
     );
 
-    fireEvent.click(within(group).getByRole("button", { name: "Remove Planner two (s2)" }));
+    fireEvent.click(within(group).getByRole("button", { name: "Remove Planner two" }));
     await waitFor(() =>
       expect(update).toHaveBeenLastCalledWith(crew.id, { remove: ["s2"] }, keyedAttempt)
     );
@@ -142,14 +181,14 @@ test("group actions are disabled while a save is pending", async () => {
   renderEditor([crew]);
   try {
     const group = screen.getByRole("group", { name: "Release crew" });
-    fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer (s3)" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer" }));
     fireEvent.change(within(group).getByLabelText("Name"), { target: { value: "Ship crew" } });
     fireEvent.click(within(group).getByRole("button", { name: "Rename" }));
     await waitFor(() =>
       expect(update).toHaveBeenCalledWith(crew.id, { name: "Ship crew" }, keyedAttempt)
     );
 
-    for (const name of ["Rename", "Add selected", "Remove Planner two (s2)", "Delete group"]) {
+    for (const name of ["Rename", "Add selected", "Remove Planner two", "Delete group"]) {
       expect((within(group).getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(
         true
       );
@@ -161,11 +200,19 @@ test("group actions are disabled while a save is pending", async () => {
   }
 });
 
-test("a member no pull request of the window names shows by its id", () => {
+// Each member is an agent linked to its live conversation; one no pull request of the window
+// names has no stored title, so it reads by its short id.
+test("group members link to their live conversations, an untitled one by its short id", () => {
   renderEditor([crew]);
   try {
     const group = screen.getByRole("group", { name: "Release crew" });
-    expect(within(group).getByRole("button", { name: "Remove s9" })).toBeDefined();
+    expect(within(group).getByRole("link", { name: "Planner two" }).getAttribute("href")).toBe(
+      "/agents/s2/live"
+    );
+    expect(within(group).getByRole("link", { name: "session:s9…" }).getAttribute("href")).toBe(
+      "/agents/s9/live"
+    );
+    expect(within(group).getByRole("button", { name: "Remove session:s9…" })).toBeDefined();
   } finally {
     cleanup();
   }
@@ -180,7 +227,7 @@ test("a refusal shows as the server wrote it", async () => {
   );
   renderEditor();
   try {
-    fireEvent.click(screen.getByRole("checkbox", { name: "Planner two (s2)" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Planner two" }));
     fireEvent.change(screen.getByLabelText("New group name"), { target: { value: "Other" } });
     fireEvent.click(screen.getByRole("button", { name: "Create group" }));
     expect(
@@ -204,7 +251,7 @@ test("a group made with its answer lost clears the form and says so, and a secon
   const queryClient = renderEditor();
   const reads = seedDeliveryReads(queryClient);
   try {
-    fireEvent.click(screen.getByRole("checkbox", { name: "Planner one (s1)" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Planner one" }));
     fireEvent.change(screen.getByLabelText("New group name"), { target: { value: "Crew" } });
     fireEvent.click(screen.getByRole("button", { name: "Create group" }));
     const made = await screen.findByTestId("landed-without-answer");
@@ -214,7 +261,7 @@ test("a group made with its answer lost clears the form and says so, and a secon
     expect(screen.queryByRole("alert")).toBeNull();
     expect((screen.getByLabelText("New group name") as HTMLInputElement).value).toBe("");
     expect(
-      (screen.getByRole("checkbox", { name: "Planner one (s1)" }) as HTMLInputElement).checked
+      (screen.getByRole("checkbox", { name: "Planner one" }) as HTMLInputElement).checked
     ).toBe(false);
     expect(
       (screen.getByRole("button", { name: "Create group" }) as HTMLButtonElement).disabled

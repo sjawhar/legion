@@ -5,6 +5,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerAgentStates } from "../../__tests__/send-answers";
+import { wholeText } from "../../__tests__/whole-text";
 import { ApiError, api } from "../../api/client";
 import type {
   Agent,
@@ -228,7 +229,7 @@ test("a recipient whose send is still outstanding offers no retry at all", async
   const page = renderBroadcast(broadcast([attempt({})]));
   try {
     const row = await screen.findByRole("article", { name: "Planner" });
-    expect(within(row).getByText("Sending to Planner (Send)")).toBeTruthy();
+    expect(within(row).getByText(wholeText("Sending to Planner (Send)"))).toBeTruthy();
     // textContent, never the elements: a failed toEqual on DOM nodes serialises the whole tree
     // and can take minutes to report.
     expect(
@@ -310,7 +311,15 @@ test("a delivered recipient offers nothing", async () => {
   const page = renderBroadcast(broadcast([attempt({ envelope_id: "e1", state: "sent" })]));
   try {
     const row = await screen.findByRole("article", { name: "Planner" });
-    expect(within(row).getByText("Sent to Planner (Send)")).toBeTruthy();
+    expect(within(row).getByText(wholeText("Sent to Planner (Send)"))).toBeTruthy();
+    // The recipient is drawn by `AgentName`: its current name, its running state and a link to
+    // its live conversation.
+    const heading = within(row).getByRole("heading", { level: 3 });
+    const recipient = heading.querySelector('[data-agent-name="planner-session"]');
+    expect(recipient?.getAttribute("data-agent-state")).toBe("running");
+    expect(within(heading).getByRole("link", { name: "Planner" }).getAttribute("href")).toBe(
+      "/agents/planner-session/live"
+    );
     // textContent, never the elements: a failed toEqual on DOM nodes serialises the whole tree
     // and can take minutes to report.
     expect(

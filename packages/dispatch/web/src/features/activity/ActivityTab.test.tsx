@@ -46,7 +46,7 @@ function renderTab(state: UserState, queryClient: QueryClient = newQueryClient()
   return render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
-        <ActivityTab issueKey="CORE-1" state={state} visible />
+        <ActivityTab issueKey="CORE-1" state={state} />
       </QueryClientProvider>
     </MemoryRouter>
   );
@@ -123,7 +123,8 @@ function running(sessionId: string, title: string): Agent {
 
 // Every row names its author, and a session's name is its live registry title. The tab read the
 // registry only for a history that held a claim, so a row a session wrote on an issue nobody had
-// claimed read as the raw `session:<id>` - the registry was never fetched to resolve it.
+// claimed read as the raw `session:<id>` - the registry was never fetched to resolve it. The name
+// is the agent's `AgentName`: a link to its live conversation, with its label on the row's hover.
 test("ActivityTab names a session author by its registered title", async () => {
   const getIssueEvents = spyOn(api, "getIssueEvents").mockResolvedValue([
     message(1, { id: "e2e-long-title-session", kind: "session" }),
@@ -135,7 +136,9 @@ test("ActivityTab names a session author by its registered title", async () => {
 
   try {
     const list = await screen.findByRole("list", { name: "Issue activity" });
-    await waitFor(() => expect(within(list).getByText("Reviewing PR #1478")).toBeDefined());
+    const name = await within(list).findByRole("link", { name: "Reviewing PR #1478" });
+    expect(name.getAttribute("href")).toBe("/agents/e2e-long-title-session/live");
+    expect(name.closest("[title]")?.getAttribute("title")).toBe("Reviewing PR #1478");
     expect(within(list).queryByText(/^session:/)).toBeNull();
   } finally {
     view.unmount();

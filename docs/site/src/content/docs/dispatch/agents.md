@@ -1,6 +1,6 @@
 ---
 title: Agents
-description: The Agents page, messaging one agent, Send, Aside and BTW, broadcasts, unread replies, and the live view.
+description: The Agents page, messaging one agent, Send, Aside and BTW, broadcasts, unread replies, the live view, and how Dispatch shows an agent.
 sidebar:
   order: 4
 ---
@@ -14,15 +14,16 @@ Open it from the sidebar, or press `g` then `a`.
 
 Each row is one agent session. It shows:
 
-- a dot for how recently the session was seen: under two minutes, under ten, or longer,
-- the session's title and when it was last active in Dispatch,
+- its [running mark](#how-dispatch-shows-an-agent): a filled dot while Dispatch lists it as
+  running; point at the dot to see when the session was last seen,
+- the session's title and when it was last active in Dispatch, with a link beside the title,
+  **↗**, that opens its [live view](#the-live-view),
 - **Needs you N** when it has asks waiting on your answer — the ones on issues assigned to you —
   which opens your Inbox filtered to them,
 - **Waiting on agent N** when it has asks whose next move is its own, on anybody's issue; it
   opens the Inbox with the assignee filter cleared — that session's whole open list, both
   sides of the turn, so nothing it counted is hidden by who holds the issue,
 - a count of its replies you have not read,
-- **Open**, which opens the [live view](#the-live-view),
 - a pin, and a checkbox for [broadcasts](#broadcasts).
 
 Pinned agents come first. After them come the agents with asks waiting on you, then those with the
@@ -187,11 +188,12 @@ When an agent replies to a message you sent it, the reply counts as unread. The 
 marks those replies read, on every device you are signed in on.
 
 When an agent with unread replies disconnects, it moves to a **Replied, no longer connected** group
-at the end of the page, so you can still read what it said.
+at the end of the page, so you can still read what it said: its name opens its live view.
 
 ## The live view
 
-**Open** on an agent's row shows its conversation as it happens, at `/agents/<session>/live`.
+An agent's name, on its Agents row (**↗** beside the title) and everywhere else Dispatch names it,
+links to its conversation as it happens, at `/agents/<session>/live`.
 
 - The header shows whether the session is connected, and its machine and directory.
 - The header shows the model and thinking level the session runs now, as Oh My Pi's own `/model`
@@ -249,5 +251,29 @@ at the end of the page, so you can still read what it said.
 
 Some sessions cannot stream their conversation, such as Claude Code sessions. The live view says
 so, and still shows your messages and their replies.
+
+## How Dispatch shows an agent
+
+Wherever Dispatch names an agent — who claimed an issue, who asked, who wrote a comment or a
+message, who replied, who subscribes, a delivery's recipient, a credential request's session — it
+shows the same three things:
+
+- **Its name**: the session's current title while it is running, else the title it had when it
+  wrote, else a short form of its id, such as `session:01a0e090…`. A session working for a person
+  adds `(for <login>)`.
+- **Whether it is running**: a filled dot when it is running, a hollow ring when it is not, and a
+  dashed ring while Dispatch cannot tell (the list of running sessions has not loaded, or failed to
+  load). Running means Envoy lists the session as connected, not that its process is alive: a
+  session that stopped drops off a while after its last heartbeat.
+- **A link to its live view**: choose the name. Where the name is itself a button, such as an
+  agent's row on this page or the asker on an Inbox card, which shows the session's ID and title
+  to copy, the link is the **↗** beside it.
+
+The page stays current while it is open: Dispatch checks which sessions are running every 15
+seconds, so a renamed or stopped agent changes in place, without a reload.
+
+Three places show the name and the dot without a link: the preview card that appears when you
+point at a reference, the list of suggestions when you type `@` in a message, and the live view's
+own header.
 
 The [keyboard shortcuts](/legion/dispatch/keyboard/#agents) page lists the Agents page's keys.

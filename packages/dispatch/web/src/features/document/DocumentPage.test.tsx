@@ -168,6 +168,21 @@ test("shows Subscribed agents and unsubscribes after confirming the dialog", asy
       currentSubscribers = [];
     }
   );
+  // The subscriber's running state is the agent registry's, which lists it.
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([
+    {
+      capabilities: [],
+      dir: "/workspaces/legion",
+      host: "example-host-devbox",
+      last_activity: null,
+      last_seen: 1,
+      machine_id: "example-host-devbox",
+      open_asks: 0,
+      roles: [],
+      session_id: "0123456789abcdef",
+      title: "Planner (live)",
+    },
+  ]);
   const { runtime, view } = renderDocumentPage();
 
   try {
@@ -176,8 +191,15 @@ test("shows Subscribed agents and unsubscribes after confirming the dialog", asy
     runtime.sync();
 
     const subscribed = await screen.findByRole("region", { name: "Subscribed agents" });
-    await within(subscribed).findByText("Planner (live)");
-    expect(within(subscribed).getAllByTitle("Live")).toHaveLength(1);
+    const planner = await within(subscribed).findByRole("link", { name: "Planner (live)" });
+    expect(planner.getAttribute("href")).toBe("/agents/0123456789abcdef/live");
+    await waitFor(() =>
+      expect(
+        subscribed
+          .querySelector('[data-agent-name="0123456789abcdef"]')
+          ?.getAttribute("data-agent-state")
+      ).toBe("running")
+    );
 
     fireEvent.click(within(subscribed).getByRole("button", { name: "Unsubscribe" }));
     const dialog = await screen.findByRole("dialog");
@@ -199,6 +221,7 @@ test("shows Subscribed agents and unsubscribes after confirming the dialog", asy
   } finally {
     view.unmount();
     unsubscribeArtifactSession.mockRestore();
+    listAgents.mockRestore();
     getArtifactSubscribers.mockRestore();
     getArtifactText.mockRestore();
     getArtifact.mockRestore();

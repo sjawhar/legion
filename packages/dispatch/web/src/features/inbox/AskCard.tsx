@@ -39,7 +39,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
-import { actorLabel } from "../refs/actor";
+import { AgentName, useAgentText } from "../refs/AgentName";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
@@ -59,7 +59,7 @@ import { AskChoiceRow } from "./AskOptionRow";
 import { AskRecipients } from "./AskRecipients";
 import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
-import { askTurnLabel } from "./ask-turn";
+import { askTurnHolder } from "./ask-turn";
 import { URGENCY_LABELS } from "./ask-urgency";
 import { EarlierApproval } from "./EarlierApproval";
 import { clearReplyDraft } from "./reply-drafts";
@@ -280,14 +280,21 @@ export function AskCard({
     }
   });
   const submitHintId = `${answerFieldId}-hint`;
-  const authorLabel = actorLabel(displayedAsk.author);
+  const agentText = useAgentText();
+  // The asker as its button's tooltip: a block ask the server indexed with no pending author
+  // has an empty label and reads as "asked". A session's tooltip also carries its full id, since
+  // the innermost title is the one a browser shows, and an untitled session's name is the short
+  // form `session:<8>…` that sessions started in the same minute share.
   const sessionAuthor = displayedAsk.author.kind === "session" ? displayedAsk.author : undefined;
+  const askerTitle =
+    displayedAsk.author.id === ""
+      ? "asked"
+      : sessionAuthor === undefined
+        ? agentText.label(displayedAsk.author)
+        : `${agentText.label(sessionAuthor)} · ${sessionAuthor.id}`;
+  // The copy handles' values: the title the session stamped, as the clipboard has always had it.
   const sessionTitle = sessionAuthor?.origin?.session_title?.trim();
   const tmuxTarget = sessionAuthor?.origin?.tmux;
-  const handleCount =
-    (sessionAuthor === undefined ? 0 : 1) +
-    (sessionTitle === undefined || sessionTitle === "" ? 0 : 1) +
-    (tmuxTarget === undefined ? 0 : 1);
   const hasUrgencyNotch =
     !inBlock && (displayedAsk.urgency === "blocking" || displayedAsk.urgency === "high");
   // The thread's own "still open?" wording must track the post-answer ask, not the possibly
@@ -302,7 +309,7 @@ export function AskCard({
   // The count comes from `displayedAsk`, never from `completed`: answering an ask does not move
   // a backlink count, and the answer response is the one ask shape that carries no count.
   const referencedByCount = displayedAsk.referenced_by_count ?? 0;
-  const turnLabel = askTurnLabel(currentAsk, threadQuery.data?.replies.at(-1));
+  const turnHolder = askTurnHolder(currentAsk, threadQuery.data?.replies.at(-1));
   // The thread's newest write the card shows, which the Replies mark watches and reads through:
   // the newest reply, unless the record's answer came after it (an answer is a write like a reply).
   const newestReply = threadQuery.data?.replies.at(-1);
@@ -545,50 +552,66 @@ export function AskCard({
             280 px margin, where a single row could not hold five copy controls without pushing
             the reference out of reach. */}
         <div
-          className={`mt-1.5 flex flex-wrap items-center gap-x-1.5 text-xs ${textMutedOnSurface}`}
+          className={`@container mt-1.5 flex flex-wrap items-center gap-x-1.5 text-xs ${textMutedOnSurface}`}
         >
-          {/* Turn, author and time are one unwrapped group whose author truncates: a separator
-              that wrapped left a line opening - or ending - on a bare "·", and the author is the
-              only part of the three that can give up width. A block ask the server indexed with
-              no pending author has an empty label and still says when it was asked. */}
-          <span className="flex min-w-0 items-center gap-x-1.5 whitespace-nowrap">
-            {turnLabel === null ? null : (
+          {/* Turn, author and time are one group whose names truncate: a separator that wrapped
+              left a line opening - or ending - on a bare "·", and the agents are the only parts
+              that can give up width ("Waiting on you" never does). Below 24rem of line (a phone,
+              a margin) the turn takes a line of its own with no separator after it, and the
+              asker and time share the next: beside the turn and the live link's 44 px touch box
+              the asker's name kept only two letters. A block ask the server indexed with no
+              pending author has an empty label and still says when it was asked. */}
+          <span className="flex min-w-0 items-center gap-x-1.5 whitespace-nowrap @max-sm:flex-wrap">
+            {turnHolder === null ? null : (
               <span
-                className={`shrink-0 font-semibold ${textSecondaryOnSurface}`}
+                className={`${turnHolder === "you" ? "shrink-0" : "min-w-0 truncate"} font-semibold @max-sm:basis-full ${textSecondaryOnSurface}`}
                 data-testid={`turn-${displayedAsk.id}`}
               >
-                {turnLabel}
+                Waiting on {turnHolder === "you" ? "you" : <AgentName actor={turnHolder} inline />}
               </span>
             )}
-            {turnLabel === null ? null : (
-              <span className="shrink-0" aria-hidden="true">
+            {turnHolder === null ? null : (
+              <span className="shrink-0 @max-sm:hidden" aria-hidden="true">
                 ·
               </span>
             )}
-            {handleCount === 0 ? (
-              <TruncatedText className="min-w-0" title={authorLabel === "" ? "asked" : authorLabel}>
-                {authorLabel === "" ? "asked" : authorLabel}
-              </TruncatedText>
-            ) : (
-              <button
-                aria-expanded={handlesOpen}
-                className={`flex min-w-0 items-center gap-1 ${textMutedHoverToSecondary}`}
-                onClick={() => setHandlesOpen((open) => !open)}
-                type="button"
-              >
-                <TruncatedText
-                  className="min-w-0"
-                  title={authorLabel === "" ? "asked" : authorLabel}
-                >
-                  {authorLabel === "" ? "asked" : authorLabel}
+            <span className="flex min-w-0 items-center gap-x-1.5">
+              {sessionAuthor === undefined ? (
+                <TruncatedText className="min-w-0" title={askerTitle}>
+                  {displayedAsk.author.id === "" ? (
+                    "asked"
+                  ) : (
+                    <AgentName actor={displayedAsk.author} />
+                  )}
                 </TruncatedText>
-                <ChevronIcon expanded={handlesOpen} />
-              </button>
-            )}
-            <span className="shrink-0" aria-hidden="true">
-              ·
+              ) : (
+                // The asker's button keeps its name and opens the session's copy handles; the
+                // component's live link sits beside it, outside the button. `whitespace-pre`
+                // keeps the space before an attribution suffix, which a flex item would drop.
+                <AgentName
+                  actor={sessionAuthor}
+                  className="flex min-w-0 items-center whitespace-pre"
+                  control={(name) => (
+                    <button
+                      aria-expanded={handlesOpen}
+                      className={`flex min-w-0 items-center gap-1 ${textMutedHoverToSecondary}`}
+                      onClick={() => setHandlesOpen((open) => !open)}
+                      type="button"
+                    >
+                      <TruncatedText className="min-w-0" title={askerTitle}>
+                        {name}
+                      </TruncatedText>
+                      <ChevronIcon expanded={handlesOpen} />
+                    </button>
+                  )}
+                  kind="control"
+                />
+              )}
+              <span className="shrink-0" aria-hidden="true">
+                ·
+              </span>
+              <Timestamp at={displayedAsk.created_at} />
             </span>
-            <Timestamp at={displayedAsk.created_at} />
           </span>
           {reference === undefined ? null : <CopyRefButton route={reference} />}
           {!handlesOpen ? null : (

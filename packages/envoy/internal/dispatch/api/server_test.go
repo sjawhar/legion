@@ -107,7 +107,7 @@ func headerIdentity(database *store.Store) identity.HeaderIdentity {
 }
 
 // seedPeople records emails as people who have signed in: the assignee picker's options.
-func seedPeople(t *testing.T, database *store.Store, emails ...string) {
+func seedPeople(t testing.TB, database *store.Store, emails ...string) {
 	t.Helper()
 	people := store.NewPgPeopleStore(database.Pool, "signing-key", nil)
 	for _, email := range emails {
@@ -138,7 +138,7 @@ func newTestHandlerWithDefaultProject(t *testing.T) (http.Handler, *store.Store)
 // dependencies it runs on, so a test that also calls a handler or a delivery step directly
 // (directServer) shares this server's broker and document service instead of standing up a
 // second pair.
-func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *store.Store, Deps) {
+func newTestServer(t testing.TB, options testServerOptions) (http.Handler, *store.Store, Deps) {
 	t.Helper()
 	handler, database, deps, _ := newRegisteredTestServer(t, options)
 	return handler, database, deps
@@ -146,7 +146,7 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 
 // newRegisteredTestServer is newTestServer, answering also the server Register mounted, whose
 // delivery hub and open sockets a socket test reads.
-func newRegisteredTestServer(t *testing.T, options testServerOptions) (http.Handler, *store.Store, Deps, *server) {
+func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Handler, *store.Store, Deps, *server) {
 	t.Helper()
 	settle := options.settle
 	if settle == 0 {

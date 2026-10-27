@@ -7,10 +7,9 @@ import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
 import { useIsHuman } from "../../hooks/useIsHuman";
 import { textMutedOnSurface } from "../../theme/classes";
-import { useAgents } from "../conversation/useAgents";
 import { UnsubscribeDialog } from "../issue/UnsubscribeDialog";
-import { sessionLabel } from "../refs/actor";
-import { LiveDot, sessionChipClassName, sessionRemoveButtonClassName } from "../refs/SessionChip";
+import { AgentName, useAgentText } from "../refs/AgentName";
+import { sessionChipClassName, sessionRemoveButtonClassName } from "../refs/SessionChip";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 const removeAskFollower = (askId: string, sessionId: string, bounds: WriteBounds): Promise<void> =>
@@ -75,13 +74,14 @@ type Confirming =
  * Every session the server routes this ask's answer and replies to, under `Reaches N`: the
  * ask's followers (every session that wrote to the ask, minus any that unfollowed), then
  * every session subscribed to the owner's topic family that is not already a follower,
- * under `via issue subscription` (or `via document subscription`). Each shows a live/offline
- * dot and its title (or shortened session id). A follower's Unfollow and a subscriber's
- * Unsubscribe each confirm first and then cut the route that actually delivers; a subscriber
- * whose only matching topic is wider than this owner (e.g. `notifications.dispatch.>`) names
- * that topic and has no control, as the header's Subscribed agents panel does. When the
- * subscribers fetch fails, the card says so with a retry instead of passing the follower count
- * off as the whole set.
+ * under `via issue subscription` (or `via document subscription`). Each is drawn by
+ * `AgentName`: its name, its running state from the agent registry (not the subscribers
+ * endpoint's `live`, a second snapshot taken at another time), and its live link. A follower's
+ * Unfollow and a subscriber's Unsubscribe each confirm first and then cut the route that
+ * actually delivers; a subscriber whose only matching topic is wider than this owner (e.g.
+ * `notifications.dispatch.>`) names that topic and has no control, as the header's Subscribed
+ * agents panel does. When the subscribers fetch fails, the card says so with a retry instead of
+ * passing the follower count off as the whole set.
  */
 export function AskRecipients({
   askId,
@@ -114,12 +114,12 @@ export function AskRecipients({
   const subscribers = subscriberRows.filter(
     (subscriber) => !followers.some((row) => row.session_id === subscriber.session_id)
   );
-  const { agents } = useAgents(followers.length > 0);
+  const text = useAgentText();
   const [confirming, setConfirming] = useState<Confirming | undefined>(undefined);
   const [open, setOpen] = useState(false);
   const unfollow = useKeyedWrite({
     write: (sessionId: string, bounds) => removeFollower(askId, sessionId, bounds),
-    label: (sessionId) => `${sessionId} taken off this ask`,
+    label: (sessionId) => `${text.sessionText(sessionId, undefined)} taken off this ask`,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ask-thread", askId] }),
   });
   const unsubscribe = useKeyedWrite({
@@ -129,7 +129,8 @@ export function AskRecipients({
       }
       return subscription.remove(sessionId, bounds);
     },
-    label: (sessionId) => `${sessionId} unsubscribed from ${subscription?.label ?? "this ask"}`,
+    label: (sessionId) =>
+      `${text.sessionText(sessionId, subscribers.find((row) => row.session_id === sessionId)?.title)} unsubscribed from ${subscription?.label ?? "this ask"}`,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["subscribers", subscription?.id] }),
   });
 
@@ -137,8 +138,8 @@ export function AskRecipients({
     return null;
   }
 
-  const followerLabel = (sessionId: string): string =>
-    sessionLabel(sessionId, agents.find((agent) => agent.session_id === sessionId)?.title);
+  // A follower carries no title of its own: it reads by its registry title, else its short id.
+  const followerLabel = (sessionId: string): string => text.sessionText(sessionId, undefined);
   const viaLabel = subscription === undefined ? "" : `via ${subscription.noun} subscription`;
 
   return (
@@ -153,25 +154,23 @@ export function AskRecipients({
         <>
           {followers.length === 0 ? null : (
             <ul aria-label="Followers" className="mt-1 flex flex-wrap gap-2">
-              {followers.map((follower) => {
-                const live = agents.some((agent) => agent.session_id === follower.session_id);
-                return (
-                  <li className={sessionChipClassName} key={follower.session_id}>
-                    <LiveDot live={live} />
-                    <span title={follower.session_id}>{followerLabel(follower.session_id)}</span>
-                    <button
-                      className={sessionRemoveButtonClassName}
-                      disabled={unfollow.isPending}
-                      onClick={() =>
-                        setConfirming({ kind: "follower", sessionId: follower.session_id })
-                      }
-                      type="button"
-                    >
-                      Unfollow
-                    </button>
-                  </li>
-                );
-              })}
+              {followers.map((follower) => (
+                <li className={sessionChipClassName} key={follower.session_id}>
+                  <span title={follower.session_id}>
+                    <AgentName sessionId={follower.session_id} storedTitle={undefined} />
+                  </span>
+                  <button
+                    className={sessionRemoveButtonClassName}
+                    disabled={unfollow.isPending}
+                    onClick={() =>
+                      setConfirming({ kind: "follower", sessionId: follower.session_id })
+                    }
+                    type="button"
+                  >
+                    Unfollow
+                  </button>
+                </li>
+              ))}
             </ul>
           )}
           {subscribers.length === 0 ? null : (
@@ -183,9 +182,8 @@ export function AskRecipients({
               >
                 {subscribers.map((subscriber) => (
                   <li className={sessionChipClassName} key={subscriber.session_id}>
-                    <LiveDot live={subscriber.live} />
                     <span title={subscriber.session_id}>
-                      {sessionLabel(subscriber.session_id, subscriber.title)}
+                      <AgentName sessionId={subscriber.session_id} storedTitle={subscriber.title} />
                     </span>
                     {subscriber.removable ? (
                       <button
@@ -259,7 +257,7 @@ export function AskRecipients({
         />
       ) : (
         <UnsubscribeDialog
-          message={`Unsubscribe ${sessionLabel(confirming.sessionId, subscribers.find((row) => row.session_id === confirming.sessionId)?.title)} from ${subscription?.label}? They will be told.`}
+          message={`Unsubscribe ${text.sessionText(confirming.sessionId, subscribers.find((row) => row.session_id === confirming.sessionId)?.title)} from ${subscription?.label}? They will be told.`}
           onCancel={() => setConfirming(undefined)}
           onConfirm={() => {
             unsubscribe.mutate(confirming.sessionId);

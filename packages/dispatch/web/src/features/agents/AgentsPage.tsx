@@ -41,15 +41,12 @@ import {
   borderDefault,
   card,
   checkboxAccent,
-  connectionDotConnecting,
   dangerText,
   disclosureButtonText,
   focusVisibleRing,
   inputClasses,
   linkHoverText,
   linkText,
-  liveDotBg,
-  offlineDotBg,
   secondaryButtonBorder,
   secondaryButtonHoverBorder,
   secondaryButtonText,
@@ -59,7 +56,6 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { resolveAuthor } from "../conversation/authors";
 import type { ReplyTarget } from "../conversation/composer-model";
 import {
   broadcastDelivery,
@@ -72,7 +68,7 @@ import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
-import { sessionLabel } from "../refs/actor";
+import { AgentName, type AgentPart, AgentParts, useAgentText } from "../refs/AgentName";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -110,7 +106,7 @@ const composerLineLayout =
   "mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-start-2 narrow-or-short:mt-0 narrow-or-short:min-w-0 narrow-or-short:overflow-x-auto narrow-or-short:text-xs narrow-or-short:whitespace-nowrap short:order-3 short:col-span-4 short:col-start-1";
 const composerLine = `${composerLineLayout} ${dangerText}`;
 
-/** The grey-dot rule: a session unseen for ten minutes folds under `Inactive (N)`. */
+/** The Inactive rule: a session unseen for ten minutes folds under `Inactive (N)`. */
 function isInactive(agent: Agent, now: number): boolean {
   return now - agent.last_seen >= INACTIVE_AFTER_MS;
 }
@@ -136,25 +132,6 @@ function tallyBySession(
 function hasDispatchSignal(agent: Agent, needsYou: NeedsYouBySession): boolean {
   return (
     agent.last_activity !== null || agent.open_asks > 0 || (needsYou.get(agent.session_id) ?? 0) > 0
-  );
-}
-
-function freshness(agent: Agent): { dot: string; label: string } {
-  const now = Date.now();
-  if (isInactive(agent, now)) return { dot: offlineDotBg, label: "Seen 10 minutes ago or longer" };
-  if (now - agent.last_seen < 2 * 60_000) {
-    return { dot: liveDotBg, label: "Seen less than 2 minutes ago" };
-  }
-  return { dot: connectionDotConnecting, label: "Seen less than 10 minutes ago" };
-}
-
-function FreshnessDot({ agent }: { agent: Agent }): ReactNode {
-  const status = freshness(agent);
-  return (
-    <span className="inline-flex shrink-0 items-center" role="status" title={status.label}>
-      <span aria-hidden className={`h-2.5 w-2.5 rounded-full ${status.dot}`} />
-      <span className="sr-only">{status.label}</span>
-    </span>
   );
 }
 
@@ -241,15 +218,14 @@ function exchangeDelivery(agent: Agent, read: MessageRead): NonNullable<ReplyTar
     delivery:
       last === undefined || (last.delivery === "steer" && !canSteer) ? fallback : last.delivery,
     target: `session:${agent.session_id}`,
-    title: sessionLabel(agent.session_id, agent.title),
   };
 }
 
-function agentReplyTo(agent: Agent, read: MessageRead, node: Message, author: string): AgentReply {
+function agentReplyTo(agent: Agent, read: MessageRead, node: Message): AgentReply {
   return {
     issueKey: read.message.issue_key,
     target: {
-      author,
+      actor: node.author,
       excerpt: node.body,
       id: node.id,
       parentKind: "message",
@@ -261,6 +237,12 @@ function agentReplyTo(agent: Agent, read: MessageRead, node: Message, author: st
   };
 }
 
+/** Who a row's messages go to, as the delivery lines draw it: the row's own session, through
+ *  `AgentName`, which names it by its current registry title. */
+function rowTarget(agent: Agent): AgentPart {
+  return { sessionId: agent.session_id, storedTitle: agent.title };
+}
+
 function AgentExchangeReply({
   agent,
   liveAgents,
@@ -268,7 +250,6 @@ function AgentExchangeReply({
   read,
   reply,
   replyDisabled,
-  titles,
 }: {
   agent: Agent;
   liveAgents: readonly Agent[];
@@ -276,10 +257,10 @@ function AgentExchangeReply({
   read: MessageRead;
   reply: Message;
   replyDisabled: boolean;
-  titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const label = sessionLabel(agent.session_id, agent.title);
+  const text = useAgentText();
+  const label = text.sessionText(agent.session_id, agent.title);
   const retry = useKeyedWrite({
     label: (delivery: MessageDeliveryMode) =>
       `Delivery to ${label} again, as ${MODE_LABELS[delivery]}`,
@@ -289,7 +270,6 @@ function AgentExchangeReply({
       }),
     write: (delivery, bounds) => api.createMessageDelivery(reply.id, delivery, bounds),
   });
-  const author = resolveAuthor(reply.author, titles);
   const parent = [read.message, ...read.replies].find((item) => item.id === reply.in_reply_to);
   const answer = read.replies.find(
     (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
@@ -298,7 +278,7 @@ function AgentExchangeReply({
   return (
     <ReplyTurn
       at={reply.created_at}
-      author={author}
+      author={reply.author}
       body={
         <div className={textPrimaryOnCanvas}>
           <MarkdownBody markdown={reply.body} />
@@ -308,9 +288,8 @@ function AgentExchangeReply({
         reply.deliveries.length === 0
           ? undefined
           : {
-              answeredBy:
-                answer === undefined ? undefined : resolveAuthor(answer.author, titles).label,
-              attempts: deliveryAttempts(reply.deliveries, label),
+              answeredBy: answer?.author,
+              attempts: deliveryAttempts(reply.deliveries, rowTarget(agent)),
               retry: {
                 canAside: capabilities?.includes("aside") !== false,
                 canBtw: capabilities?.includes("btw") !== false,
@@ -318,15 +297,15 @@ function AgentExchangeReply({
                 onRetry: retry.mutate,
                 retrying: retry.isPending,
               },
-              targetName: label,
+              targetName: rowTarget(agent),
             }
       }
-      onReply={() => onReply(agentReplyTo(agent, read, reply, author.label))}
+      onReply={() => onReply(agentReplyTo(agent, read, reply))}
       quote={
         parent === undefined
           ? undefined
           : {
-              author: resolveAuthor(parent.author, titles).label,
+              author: parent.author,
               excerpt: parent.body,
               ...(parent.issue_key === null
                 ? {}
@@ -355,7 +334,8 @@ function AgentTargetedMessage({
   replyDisabled: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const label = sessionLabel(agent.session_id, agent.title);
+  const text = useAgentText();
+  const label = text.sessionText(agent.session_id, agent.title);
   const retry = useKeyedWrite({
     label: (delivery: MessageDeliveryMode) =>
       `Delivery to ${label} again, as ${MODE_LABELS[delivery]}`,
@@ -365,19 +345,14 @@ function AgentTargetedMessage({
       }),
     write: (delivery, bounds) => api.createMessageDelivery(read.message.id, delivery, bounds),
   });
-  const titles = useMemo(
-    () => new Map([[agent.session_id, agent.title]]),
-    [agent.session_id, agent.title]
-  );
-  const asker = resolveAuthor(read.message.author, titles);
   const answer = read.replies.find((reply) => reply.author.kind === "session");
   return (
     <TargetedMessageCard
-      answeredBy={answer === undefined ? undefined : resolveAuthor(answer.author, titles).label}
+      answeredBy={answer?.author}
       body={
         <>
           <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnCanvas}`}>
-            <span className="font-semibold">{asker.label}</span>
+            <AgentName actor={read.message.author} className="font-semibold" inline />
             <Timestamp at={read.message.created_at} />
           </p>
           <div className={textPrimaryOnCanvas}>
@@ -388,14 +363,14 @@ function AgentTargetedMessage({
       canAside={capabilitiesForTarget(read.message.target, liveAgents)?.includes("aside") !== false}
       canBtw={capabilitiesForTarget(read.message.target, liveAgents)?.includes("btw") !== false}
       canSteer={capabilitiesForTarget(read.message.target, liveAgents)?.includes("steer") !== false}
-      deliveries={deliveryAttempts(read.message.deliveries, label)}
+      deliveries={deliveryAttempts(read.message.deliveries, rowTarget(agent))}
       header={null}
       isClosed={false}
-      onReply={() => onReply(agentReplyTo(agent, read, read.message, asker.label))}
+      onReply={() => onReply(agentReplyTo(agent, read, read.message))}
       onRetry={retry.mutate}
       replyDisabled={replyDisabled}
       retrying={retry.isPending}
-      targetName={label}
+      targetName={rowTarget(agent)}
       thread={
         read.replies.length === 0 ? null : (
           <ThreadReplies>
@@ -408,7 +383,6 @@ function AgentTargetedMessage({
                 read={read}
                 reply={reply}
                 replyDisabled={replyDisabled}
-                titles={titles}
               />
             ))}
           </ThreadReplies>
@@ -476,20 +450,21 @@ function AgentMessageList({
     agent.session_id,
     !open || messages.isPending || agentState.isPending ? undefined : rendered
   );
+  const text = useAgentText();
+  const label = text.sessionText(agent.session_id, agent.title);
   // The cutoff is the newest visible message's own timestamp, not the browser clock: both are
   // compared against `created_at` (the server's clock), so a slow browser clock would otherwise
   // make Clear a silent no-op. This hides exactly what the viewer saw.
   const clear = useKeyedWrite({
     write: (cutoff: string, bounds) =>
       api.putAgentState(agent.session_id, { cleared_before: cutoff }, bounds),
-    label: () => `Conversation with ${sessionLabel(agent.session_id, agent.title)} cleared`,
+    label: () => `Conversation with ${label} cleared`,
     // A landing with no answer to give has the store read every query again.
     onSuccess: (next) => {
       setShowCleared(false);
       if (next !== null) storeAgentState(queryClient, agent.session_id, next);
     },
   });
-  const label = sessionLabel(agent.session_id, agent.title);
   if (messages.isPending || agentState.isPending) return null;
   if (messages.isError || agentState.isError) {
     return <p className={`mt-3 text-sm ${dangerText}`}>Could not load this conversation.</p>;
@@ -645,7 +620,9 @@ function AgentRow({
    *  rather than as what is left of `open_asks`. */
   waitingOnAgent: number;
 }): ReactNode {
-  const label = sessionLabel(agent.session_id, agent.title);
+  const text = useAgentText();
+  // The row's attributes name the session as its `AgentName` does: by its current registry title.
+  const label = text.sessionText(agent.session_id, agent.title);
   const machineAndDir = `${agent.host} · ${agent.dir}`;
   // The name takes the row's width, so from `md` - where the span's own `md:` classes truncate
   // it - the directory gives its own up and keeps the segment that names the session's work,
@@ -695,34 +672,37 @@ function AgentRow({
             onChange={(event) => onSelect(event.target.checked)}
             type="checkbox"
           />
-          <FreshnessDot agent={agent} />
           {/* A person finds a session by its name, so the name is never cut: the heading shrinks
               with the row instead of holding a width of its own, and its text wraps - mid-word
               where the name has nothing else to break on - so a long name makes a taller row
-              rather than a shortened one or a page wider than the screen. */}
-          <h2 className={`min-w-0 text-sm font-semibold ${textPrimaryOnCanvas}`}>
-            <button
-              aria-controls={detailsId}
-              aria-expanded={expanded}
-              className={`flex min-h-11 max-w-full items-center gap-1 text-left md:min-h-8 ${textPrimaryOnCanvas}`}
-              data-agent-toggle=""
-              onClick={() => setExpanded((open) => !open)}
-              title={label}
-              type="button"
-            >
-              <span className="min-w-0 break-words">{label}</span>
-              <span className={disclosureButtonText}>
-                <ChevronIcon expanded={expanded} />
-              </span>
-            </button>
-          </h2>
-          <Link
-            className={`min-h-11 rounded-lg border px-2 text-xs font-medium whitespace-nowrap md:min-h-7 md:leading-7 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-            title={`Watch ${label}'s conversation live`}
-            to={`/agents/${encodeURIComponent(agent.session_id)}/live`}
-          >
-            Open
-          </Link>
+              rather than a shortened one or a page wider than the screen. The row's toggle keeps
+              the name; `AgentName` draws the running state before it and the live link after it,
+              outside the heading, so the heading's text is the name alone. `contents` keeps each
+              of them a flex item of the row, as the heading is. */}
+          <AgentName
+            className="contents"
+            control={(name) => (
+              <h2 className={`min-w-0 text-sm font-semibold ${textPrimaryOnCanvas}`}>
+                <button
+                  aria-controls={detailsId}
+                  aria-expanded={expanded}
+                  className={`flex min-h-11 max-w-full items-center gap-1 text-left md:min-h-8 ${textPrimaryOnCanvas}`}
+                  data-agent-toggle=""
+                  onClick={() => setExpanded((open) => !open)}
+                  title={label}
+                  type="button"
+                >
+                  <span className="min-w-0 break-words">{name}</span>
+                  <span className={disclosureButtonText}>
+                    <ChevronIcon expanded={expanded} />
+                  </span>
+                </button>
+              </h2>
+            )}
+            kind="control"
+            sessionId={agent.session_id}
+            storedTitle={agent.title}
+          />
           <CopyButton value={agent.session_id} what="session ID">
             ID
           </CopyButton>
@@ -1086,11 +1066,23 @@ function BroadcastComposer({
             !agent.capabilities.includes("btw")
         )
       : [];
+  const asideLine: AgentPart[] = [
+    "Sending as Aside: ",
+    ...asideOnly.flatMap((agent, index): AgentPart[] => [
+      ...(index === 0 ? [] : [" and "]),
+      { sessionId: agent.session_id, storedTitle: agent.title },
+    ]),
+    ` ${asideOnly.length > 1 ? "do" : "does"} not advertise BTW.`,
+  ];
+  const text = useAgentText();
   // The server counts the `session_ids` it is sent - these recipients - against the shared limit
   // and refuses a send over it; saying so before Send saves the round trip. The notice line is
   // Send's reason when it refuses for the limit or for nobody to reach; otherwise it still bears
   // on the send, so Send is described by it.
   const sendState = broadcastSendState(plan, delivery, body);
+  // The button carries its refusal as text (its `title`, and its own hidden reason line where no
+  // line on screen shows it), so a refusal naming agents names them as `AgentName` does.
+  const refusal = sendState.refusal === null ? null : sendState.refusal.map(text.part).join("");
   const noticeId = useId();
 
   // On a narrow or short screen (`narrow-or-short`, styles.css) the composer is a compact grid,
@@ -1117,19 +1109,27 @@ function BroadcastComposer({
       >
         {[...selected].map((sessionID) => {
           const agent = agents.find((candidate) => candidate.session_id === sessionID);
-          const label = sessionLabel(sessionID, agent?.title ?? "");
           const left = excluded.find((item) => item.sessionID === sessionID);
           return (
             <li className="narrow-or-short:shrink-0" key={sessionID}>
-              <button
-                className={`min-h-8 rounded-full border px-2 py-1 text-xs narrow-or-short:min-h-11 narrow-or-short:whitespace-nowrap ${secondaryButtonBorder} ${left === undefined ? secondaryButtonText : dangerText} ${secondaryButtonHoverBorder}`}
-                onClick={() => onDeselect(sessionID)}
-                title={`Remove ${label} from this broadcast`}
-                type="button"
-              >
-                {label}
-                {left === undefined ? "" : ` · ${left.reason}`} ✕
-              </button>
+              {/* The deselect button keeps the name; the agent's live link sits beside it. */}
+              <AgentName
+                className="flex items-center"
+                control={(name) => (
+                  <button
+                    className={`min-h-8 rounded-full border px-2 py-1 text-xs narrow-or-short:min-h-11 narrow-or-short:whitespace-nowrap ${secondaryButtonBorder} ${left === undefined ? secondaryButtonText : dangerText} ${secondaryButtonHoverBorder}`}
+                    onClick={() => onDeselect(sessionID)}
+                    title={`Remove ${text.sessionText(sessionID, agent?.title)} from this broadcast`}
+                    type="button"
+                  >
+                    {name}
+                    {left === undefined ? "" : ` · ${left.reason}`} ✕
+                  </button>
+                )}
+                kind="control"
+                sessionId={sessionID}
+                storedTitle={agent?.title}
+              />
             </li>
           );
         })}
@@ -1158,13 +1158,11 @@ function BroadcastComposer({
       />
       {sendState.notice !== null ? (
         <p className={composerLine} id={noticeId}>
-          {sendState.notice}
+          <AgentParts parts={sendState.notice} />
         </p>
       ) : asideOnly.length > 0 ? (
         <p className={`${composerLineLayout} ${textMutedOnSurface}`}>
-          Sending as Aside:{" "}
-          {asideOnly.map((agent) => sessionLabel(agent.session_id, agent.title)).join(" and ")}{" "}
-          {asideOnly.length > 1 ? "do" : "does"} not advertise BTW.
+          <AgentParts parts={asideLine} />
         </p>
       ) : null}
       <RefusableButton
@@ -1178,7 +1176,7 @@ function BroadcastComposer({
             selected: [...selected],
           })
         }
-        refusal={sendState.refusal}
+        refusal={refusal}
         refusalShownBy={sendState.refusalOnNotice ? noticeId : undefined}
       >
         {sendState.label}
@@ -1265,9 +1263,9 @@ export function AgentsPage(): ReactNode {
     ? "Restore draft would replace the broadcast you have started. Send it, or clear its message and selection, first."
     : null;
   const showComposer = selected.size > 0 && agents.length > 0;
-  // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
-  // and is recomputed on every render of this page. Every listed session is split, the ones the
-  // filters exclude included: their rows stay mounted, hidden, like a closed fold's.
+  // Not memoised: the split is a function of the clock, and is recomputed on every render of
+  // this page. Every listed session is split, the ones the filters exclude included: their rows
+  // stay mounted, hidden, like a closed fold's.
   const { active, quiet, inactive } = partitionAgents(
     agents,
     pinned,

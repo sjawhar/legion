@@ -259,7 +259,7 @@ function renderAdvice(
         ? "1 typed-block opening in this document is text, not a block"
         : `${unparsed.count} typed-block openings in this document are text, not blocks`;
     lines.push(
-      `${subject}: ${quoted}. An opening like \`:::ask{…}\` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the \`dispatch\` skill, "Decision blocks".`
+      `${subject}: ${quoted}. An opening like \`:::ask{…}\` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the \`dispatch-writing-specs\` skill, "Questions".`
     );
   }
   if (
@@ -268,7 +268,7 @@ function renderAdvice(
     (tool === "dispatch_issue" || tool === "dispatch_artifact")
   ) {
     lines.push(
-      'This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
+      "This spec holds no ask blocks. A person does not watch your chat. They see that you need them only through an open ask or a spec that waits for their approval. If the design needs a person's choice, add an ask block. If it does not, request approval with `dispatch request-approval`."
     );
   }
 
@@ -1748,7 +1748,8 @@ function routeHeldBySession(issue: RoutedIssue): boolean {
 /**
  * An issue's route as every agent surface reads it: where its messages go and whether that
  * reaches anyone, from the `route_status` the server resolved on this read. A route to a role
- * nobody holds, or to a session that is not running, reaches nobody at the moment of the read,
+ * nobody holds, or to a session that is not running, reaches nobody as of the server's copy of
+ * the listener's session list, at most 5 s old,
  * so it says so - and says "right now", because a restarting session is absent for minutes.
  */
 function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): string {
@@ -2004,9 +2005,27 @@ function actorText(actor: Actor): string {
   return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
 }
 
+/** The `dispatch://` reference of the message, comment or ask an issue event carries, so a log
+ *  line names what `dispatch read --ref` reads and a spec links: the log shows no other id. */
+function eventRef(event: Event): string | undefined {
+  const payload: unknown = event.payload;
+  const id =
+    typeof payload === "object" && payload !== null && "id" in payload ? payload.id : undefined;
+  if (typeof id !== "string" || id === "" || event.issue_key === null) return undefined;
+  const kind = event.type.startsWith("message.")
+    ? "message"
+    : event.type.startsWith("comment.") || event.type.startsWith("suggestion.")
+      ? "comment"
+      : event.type.startsWith("ask.")
+        ? "ask"
+        : undefined;
+  return kind === undefined ? undefined : `dispatch://${event.issue_key}/${kind}/${id}`;
+}
+
 function eventLine(event: Event): string {
   const head = eventHead(event);
-  return `- #${event.seq} ${event.type} · ${actorText(event.actor)} · ${event.created_at}${head === undefined || head === "" ? "" : ` · ${head}`}`;
+  const ref = eventRef(event);
+  return `- #${event.seq} ${event.type}${ref === undefined ? "" : ` ${ref}`} · ${actorText(event.actor)} · ${event.created_at}${head === undefined || head === "" ? "" : ` · ${head}`}`;
 }
 
 function childrenSummary(issue: IssueDetails): string {

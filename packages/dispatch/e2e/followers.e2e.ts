@@ -58,7 +58,7 @@ test("the ask card lists every session that wrote to the ask and a human can unf
     await followers.getByRole("button", { name: /^Reaches/ }).click();
     await expect(followers.getByText("Asker (e2e)", { exact: true })).toBeVisible();
     await expect(followers.getByText("Replier (e2e)", { exact: true })).toBeVisible();
-    await expect(followers.locator("[title='Live']")).toHaveCount(2);
+    await expect(followers.getByRole("img", { exact: true, name: "Running" })).toHaveCount(2);
     await expect(followers.locator(`[title='${asker.id}']`)).toHaveCount(1);
     await expect(followers.locator(`[title='${replier.id}']`)).toHaveCount(1);
 

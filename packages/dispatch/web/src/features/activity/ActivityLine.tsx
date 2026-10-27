@@ -5,33 +5,45 @@ import { Link } from "react-router-dom";
 import { issueQuery } from "../../api/queries";
 import type { Artifact, Event } from "../../api/types";
 import { linkText } from "../../theme/classes";
+import { type AgentPart, AgentParts } from "../refs/AgentName";
 import { buildIssuePath, buildReferencePath, documentRoute } from "../refs/routes";
 
 type ArtifactVersionEvent = Extract<Event, { type: "artifact.version" }>;
 
 /** The activity text with the artifact's name turned into a link, so the reader opens the
  *  upload from the Conversation instead of hunting for it on the Artifacts tab. The text itself
- *  comes from `activityDescription`, which names the artifact once. */
+ *  comes from `activityDescription`, which names the artifact once, in a text part; an agent
+ *  part is never searched for it. */
 function LinkedName({
   description,
   name,
   to,
 }: {
-  description: string;
+  description: readonly AgentPart[];
   name: string;
   to: string;
 }): ReactNode {
-  const at = description.indexOf(name);
-  if (at === -1) {
-    return <span>{description}</span>;
-  }
+  const linked = description.findIndex((part) => typeof part === "string" && part.includes(name));
   return (
     <span>
-      {description.slice(0, at)}
-      <Link className={`dispatch-inline-link underline ${linkText}`} to={to}>
-        {name}
-      </Link>
-      {description.slice(at + name.length)}
+      <AgentParts
+        parts={description}
+        text={(part, index) => {
+          if (index !== linked) {
+            return part;
+          }
+          const at = part.indexOf(name);
+          return (
+            <>
+              {part.slice(0, at)}
+              <Link className={`dispatch-inline-link underline ${linkText}`} to={to}>
+                {name}
+              </Link>
+              {part.slice(at + name.length)}
+            </>
+          );
+        }}
+      />
     </span>
   );
 }
@@ -43,7 +55,7 @@ function SavedVersionLine({
   event,
   issueKey,
 }: {
-  description: string;
+  description: readonly AgentPart[];
   event: ArtifactVersionEvent;
   issueKey: string;
 }): ReactNode {
@@ -52,7 +64,11 @@ function SavedVersionLine({
     ({ id }) => id === event.payload.artifact_id
   );
   if (artifact === undefined) {
-    return <span>{description}</span>;
+    return (
+      <span>
+        <AgentParts parts={description} />
+      </span>
+    );
   }
   return (
     <LinkedName
@@ -68,7 +84,7 @@ export function ActivityLine({
   event,
   issueKey,
 }: {
-  description: string;
+  description: readonly AgentPart[];
   event: Event;
   issueKey: string;
 }): ReactNode {
@@ -86,7 +102,9 @@ export function ActivityLine({
     case "comment.created":
       return (
         <>
-          <span>{description}</span>
+          <span>
+            <AgentParts parts={description} />
+          </span>
           <Link
             className={`dispatch-inline-link underline ${linkText}`}
             to={buildIssuePath({ id: event.payload.id, key: issueKey, kind: "comment" })}
@@ -96,6 +114,10 @@ export function ActivityLine({
         </>
       );
     default:
-      return <span>{description}</span>;
+      return (
+        <span>
+          <AgentParts parts={description} />
+        </span>
+      );
   }
 }
