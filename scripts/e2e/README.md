@@ -1099,7 +1099,7 @@ under `bridge` `prerequisites` resolves both App keys on the devbox, once, throu
 owner-only (0600) files of a directory of the run's own,
 `$XDG_RUNTIME_DIR/legion-e2eccs-app-keys.<pid>.<random>`
 ([`resolve_app_keys`](#libgithub-appssh)), and each App's `private_key_command` in `legion.yaml` is
-`cat -- '<that directory>/<key name>.pem'`, the block `check_github_apps` proves against GitHub's
+`cat -- '<that directory>/<key name>.pem'` (`write_github_apps --key-dir`), the block `check_github_apps` proves against GitHub's
 `GET /app`. The two App keys exist as owner-only files on the devbox user's tmpfs for the run's
 lifetime alone: `prerequisites` refuses, by name and before the run reads a tool, an
 `XDG_RUNTIME_DIR` that is unset, not the devbox user's own, not of mode 0700, or not a tmpfs (by
@@ -1288,10 +1288,11 @@ optional, defaulting to the default pair, and each refused by name when it is se
 malformed). Stage 4a acts as the implement App alone, so it reads no
 review App input. `prerequisites` proves the key is that id's App (`check_github_apps implement`:
 GitHub's `GET /app` under the key's JWT must answer that id and `contents: write`) before the run writes anything. The
-harness runs the key runner the script hands it (`LEGION_E2E_APP_KEY_RUNNER`, [`lib/github-apps.sh`](#libgithub-appssh)),
-by default `agent-secrets <KEY> --reason=legion-live-proof-github-app-key -- sh -c 'printf %s "$<KEY>"'`: the `agent-secrets` client
-fetches the key from the broker and puts it in the environment of that one `sh` child, which prints it to a pipe
-the harness reads into memory. The harness decodes it there and mints the implement App's
+harness runs, with `sh -c`, the implement App's key command the script hands it
+(`LEGION_E2E_IMPLEMENT_APP_KEY_COMMAND`, the lib's own `app_key_command`, [`lib/github-apps.sh`](#libgithub-appssh)), by default
+`agent-secrets <KEY> --reason=legion-live-proof-github-app-key -- sh -c …`: the `agent-secrets` client
+fetches the key from the broker and puts it in the environment of that one `sh` child, which decodes it to PEM on a pipe
+the harness reads into memory. The harness mints the implement App's
 installation token in process. The key is written to no file, appears in no argv, and reaches no
 other process; only the installation token enters each claim's Secret. `previous-layout`'s
 harness, an older commit's, reads the key with `secrets <KEY> -- …` instead; the script runs it
@@ -3798,20 +3799,20 @@ unset, and fails naming the input that is set but malformed: an id that is not a
 12 digits, or a key name that is not letters, digits and underscores of at most 64 (so it is safe
 in a shell command and as a variable name, and a pasted key is refused by its length). A refusal
 never prints the value. With both roles read it also refuses one id or one key
-name for both Apps. `write_github_apps ROLE...` writes `$work/github-apps.yaml`, the `github_apps`
-block a run's `legion.yaml` includes as it is: each App's `app_id` and a `private_key_command` that
-runs `<runner> <name> -- sh -c …` (`agent-secrets <name> --reason=legion-live-proof-github-app-key -- sh -c …`
-by default) to decode the store's Node-style base64 into the PEM on stdout. It
+name for both Apps. `app_key_command NAME` prints the key runner's command for the store key
+`NAME`, `<runner> <NAME> -- sh -c …` (`agent-secrets <NAME> --reason=legion-live-proof-github-app-key -- sh -c …`
+by default), which decodes the store's Node-style base64 into the PEM on stdout; it depends on
+nothing but `NAME` and the runner. `write_github_apps [--key-dir DIR] ROLE...` writes `$work/github-apps.yaml`, the `github_apps`
+block a run's `legion.yaml` includes as it is: each App's `app_id` and a `private_key_command`,
+`app_key_command`'s, or, given `--key-dir DIR`, `cat -- '<DIR>/<key name>.pem'`. It
 refuses, writing nothing, a role the last `require_app_inputs` did not read.
 `resolve_app_keys DIR ROLE...` is for a daemon that cannot run the key runner itself (the Claude
 Code sandbox proof's container under `bridge`): it runs each role's key command once, on the
-devbox, with its stdout going straight to `DIR/<key name>.pem`, created owner-only (0600), and then
-sets `app_key_dir`, after which `write_github_apps` writes each `private_key_command` as
-`cat -- '<DIR>/<key name>.pem'`, so `check_github_apps` proves exactly those files. A runner that
-fails or prints nothing leaves no file of that key and fails the run, naming the App by its role and
-id and never the key; a `DIR` holding anything but letters, digits and `_ . / -` is refused, since
-the key commands carry it in their shell text. With `app_key_dir` unset, as it is when the lib is
-sourced, every command the lib prints is the runner's.
+devbox, with its stdout going straight to `DIR/<key name>.pem`, created owner-only (0600); its
+caller then runs `write_github_apps --key-dir DIR`, so `check_github_apps` proves exactly those
+files. A runner that fails or prints nothing leaves no file of that key and fails the run, naming
+the App by its role and id and never the key; a `DIR` holding anything but letters, digits and
+`_ . / -` is refused, by both functions, since the key commands carry it in their shell text.
 `check_github_apps ROLE...` runs [`lib/app-logins.ts`](#libworkflowsh) `--roles` over `$work/github-apps.yaml` and
 fails the check unless GitHub's `GET /app`, under a JWT each key signs with its id as issuer,
 answers that id and the write permission the role's work needs (the implement role's `contents`,
@@ -3829,19 +3830,21 @@ this lib and run its `require_app_inputs`, `app_key_command` and `check_github_a
 `liveProofApps` and `proveLiveProofApps` in `packages/daemon/internal/api/real_github_test.go`;
 `proveLiveProofApps` checks the very block the proofs act with), so they hold no copy of the pair,
 its checks or its key command (the key runner included), and they prove both Apps as the stage
-proofs do before they act. Stage 4a hands its Go harness the key runner beside the implement App's pair.
+proofs do before they act. Stage 4a hands its Go harness the implement App's pair and that App's
+`app_key_command`, which the harness runs with `sh -c`, so it holds no copy of the key command either.
 The checks run in the C locale whatever the caller's, so a UTF-8 locale does not admit fullwidth
 digits or accented letters. `require_app_inputs` also fills `app_key_unsets`, the
 `env` argument list (`-u NAME` …) every proof passes to a process it starts, which strips each
 role's key name, the default pair's two, and every exported variable whose name holds
 `PRIVATE_KEY`, the proof human's App key included. `lib/app-logins.test.ts` drives the
 functions under a stage script's shell options against a stand-in GitHub: an unset input taking its
-default, a malformed one refused by name with its value unprinted, `write_github_apps` refusing an
+default, a malformed one refused by name with its value unprinted, `app_key_command` printing the
+runner's command (the reason only for an `agent-secrets` runner), `write_github_apps` refusing an
 unread role, `app_key_unsets` leaving no App key in a child's environment, an answer naming another
 App id refused naming both ids, a role's missing write permission refused, and a match accepted;
-and `resolve_app_keys` writing each key as a 0600 file holding the exact PEM, the block reading
-those files alone and proved with the runner broken after them, a runner that fails after printing
-the key or prints nothing leaving no file, and a key directory unsafe in shell text refused.
+and `resolve_app_keys` writing each key as a 0600 file holding the exact PEM, `write_github_apps --key-dir`'s
+block reading those files alone and proved with the runner broken after them, a runner that fails
+after printing the key or prints nothing leaving no file, and a key directory unsafe in shell text refused.
 
 ## lib/namespace-rig.sh
 

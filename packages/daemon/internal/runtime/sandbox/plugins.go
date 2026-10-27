@@ -350,9 +350,12 @@ if (got.split(/\s+/)[0] !== want) {
 // install prints the failure line and exits 1, and a failed check prints its own; either exits
 // the subshell non-zero, which `set -e` makes the wrapper's own exit.
 //
-// npm's cache is the issue's, `$XDG_CACHE_HOME/legion-claude-code` on the issue's volume, so the
-// pod's other Claude roles and its later pods reuse the tarballs one already fetched, and neither
-// the cache nor the install is charged to the roles container's ephemeral storage. XDG_CACHE_HOME
+// npm's cache is `$XDG_CACHE_HOME/legion-claude-code` on the issue's disk, which is the pod's own
+// ephemeral volume and dies with it (roleEnvironment), so the cache is shared only by the Claude
+// roles of one pod: every pod starts with it cold, so its Claude launches fetch the release again
+// (about 279 MB a role, 13-26 s), and only a role launched after a sibling of the same pod filled
+// the cache reuses its tarballs. Neither the cache
+// nor the install is charged to the roles container's ephemeral storage. XDG_CACHE_HOME
 // is read with no default, as installBlock reads BUN_INSTALL_CACHE_DIR: the runtime tells it to
 // every role (roleEnvironment) and owns it (runtimeOwned), and its absence is a broken
 // invariant `set -u` should announce. The install takes /usr/bin/flock on that directory with
@@ -360,8 +363,8 @@ if (got.split(/\s+/)[0] !== want) {
 // exists, and so a stalled holder fails the launch by the failure branch while the daemon is
 // still watching rather than being retired by the registration deadline. `mkdir -p` comes first
 // and alone: it succeeds on a directory another process has just made, which the recovery below
-// must never be asked to decide. The pod's Claude roles share this cache, so on a cold one — a new
-// volume, or one just lost — two of them start together and both find it missing; a `[ -d ]` test
+// must never be asked to decide. The pod's Claude roles share this cache, so on a cold one — every
+// pod's, at its first Claude launch — two of them start together and both find it missing; a `[ -d ]` test
 // in front of the recovery would send both down it, and whichever reached the rm second would fail
 // it on the directory the first had made, ending that launch under `set -e` before npm and before
 // this block's own failure line. Only when the one `mkdir -p` fails does the recovery run: that is

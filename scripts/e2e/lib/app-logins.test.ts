@@ -583,6 +583,31 @@ env "\${app_key_unsets[@]}" sh -c "echo \\"left \\$(env | grep -c -E '^($names)=
     }
   });
 
+  test("app_key_command prints the runner's command, with the broker's reason for an agent-secrets runner alone", async () => {
+    for (const [runner, prefix] of [
+      [
+        undefined,
+        "agent-secrets IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c '",
+      ],
+      [
+        "/x/agent-secrets",
+        "/x/agent-secrets IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c '",
+      ],
+      ["secrets", "secrets IMPLEMENT_KEY -- sh -c '"],
+    ] as const) {
+      const { code, stdout, stderr } = await githubApps(
+        { ...appInputs, LEGION_E2E_APP_KEY_RUNNER: runner },
+        `require_app_inputs implement review
+printf 'command %s\\n' "$(app_key_command "$implement_app_key_name")"`
+      );
+      expect(stderr).toBe("");
+      expect(code).toBe(0);
+      const command = stdout.split("\n").find((line) => line.startsWith("command ")) ?? "";
+      expect(command.slice("command ".length)).toStartWith(prefix);
+      expect(command).toContain("${IMPLEMENT_KEY}");
+    }
+  });
+
   test("one role proves that App alone, as Stage 4a runs it", async () => {
     const { code, stdout, stderr } = await githubApps(
       { LEGION_E2E_IMPLEMENT_APP_ID: "101", LEGION_E2E_IMPLEMENT_APP_KEY_NAME: "IMPLEMENT_KEY" },
@@ -601,7 +626,7 @@ echo "logins $github_app_logins"`
   // key commands then read those files alone.
   const resolveBoth = `require_app_inputs implement review
 resolve_app_keys "$KEY_DIR" implement review
-write_github_apps implement review
+write_github_apps --key-dir "$KEY_DIR" implement review
 echo "wrote the block"`;
   // A runner for the failure cases: `body` runs with the key's name in $name and the command after
   // `--` in "$@", the key in the store as ${store}/$name.
@@ -626,7 +651,7 @@ echo "wrote the block"`;
       `require_app_inputs implement review
 resolve_app_keys "$KEY_DIR" implement review
 PATH="$BROKEN_BIN:$PATH"
-write_github_apps implement review
+write_github_apps --key-dir "$KEY_DIR" implement review
 check_github_apps implement review
 echo "logins $github_app_logins"`
     );
@@ -650,6 +675,31 @@ echo "logins $github_app_logins"`
       expect(readFileSync(file, "utf8")).toBe(apps[id].key.privateKey);
     }
     expect(stdout).not.toContain("PRIVATE KEY");
+  });
+
+  test("resolving the keys leaves app_key_command and a write with no key directory the runner's", async () => {
+    const keyDir = mkdtempSync(join(dir, "keys."));
+    const { code, stdout, stderr, work } = await githubApps(
+      { ...appInputs, KEY_DIR: keyDir },
+      `require_app_inputs implement review
+printf 'before %s\\n' "$(app_key_command "$implement_app_key_name")"
+resolve_app_keys "$KEY_DIR" implement review
+printf 'after %s\\n' "$(app_key_command "$implement_app_key_name")"
+write_github_apps implement review`
+    );
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    const line = (prefix: string) =>
+      (stdout.split("\n").find((l) => l.startsWith(prefix)) ?? "").slice(prefix.length);
+    expect(line("before ")).toStartWith(
+      "agent-secrets IMPLEMENT_KEY --reason=legion-live-proof-github-app-key -- sh -c '"
+    );
+    expect(line("after ")).toBe(line("before "));
+    const sources = appKeySources(readFileSync(join(work, "github-apps.yaml"), "utf8"));
+    expect(sources.implement?.privateKeyCommand).toBe(line("before "));
+    expect(sources.review?.privateKeyCommand).toStartWith(
+      "agent-secrets REVIEW_KEY --reason=legion-live-proof-github-app-key -- sh -c '"
+    );
   });
 
   test("a runner that fails leaves no file of the key, naming the App by role and id and never the key", async () => {
@@ -690,15 +740,24 @@ echo "logins $github_app_logins"`
     for (const name of ["keys 'x", "keys$x", "keys;x"]) {
       const keyDir = join(mkdtempSync(join(dir, "keys.")), name);
       mkdirSync(keyDir);
-      const { code, stdout, stderr, work } = await githubApps(
-        { ...appInputs, KEY_DIR: keyDir },
-        resolveBoth
-      );
-      expect(code).toBe(1);
-      expect(stdout).not.toContain("wrote the block");
-      expect(stderr).toContain("holds a character other than letters, digits and _ . / -");
-      expect(readdirSync(keyDir)).toEqual([]);
-      expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
+      // resolve_app_keys refuses it before any key is resolved, and write_github_apps --key-dir
+      // refuses it before the block is written.
+      for (const script of [
+        resolveBoth,
+        `require_app_inputs implement review
+write_github_apps --key-dir "$KEY_DIR" implement review
+echo "wrote the block"`,
+      ]) {
+        const { code, stdout, stderr, work } = await githubApps(
+          { ...appInputs, KEY_DIR: keyDir },
+          script
+        );
+        expect(code).toBe(1);
+        expect(stdout).not.toContain("wrote the block");
+        expect(stderr).toContain("holds a character other than letters, digits and _ . / -");
+        expect(readdirSync(keyDir)).toEqual([]);
+        expect(existsSync(join(work, "github-apps.yaml"))).toBe(false);
+      }
     }
   });
 });

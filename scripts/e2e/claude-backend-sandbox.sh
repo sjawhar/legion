@@ -141,8 +141,9 @@
 # Legion's role Apps resolve as the tmux proof's do (lib/github-apps.sh): under aws-private-ip the
 # daemon runs each App's private_key_command, `<runner> <key name> -- …`, never this shell; under
 # bridge prerequisites runs those commands once on the devbox into owner-only files on the user's
-# tmpfs (resolve_app_keys), and each App's private_key_command is `cat` of its file, which the
-# daemon's container mounts read-only, for the run's lifetime alone. Either way prerequisites proves
+# tmpfs (resolve_app_keys), and each App's private_key_command is `cat` of its file
+# (write_github_apps --key-dir), which the daemon's container mounts read-only, for the run's
+# lifetime alone. Either way prerequisites proves
 # each key is its id's App against GitHub's GET /app (lib/app-logins.ts) before the run writes
 # anything; legion.yaml's github_apps is the block proved. The proof human is the devbox's ordinary
 # gh acting as sjawhar-agent[bot] (require_proof_human), so run it from the operator's own Oh My Pi
@@ -221,7 +222,7 @@ daemon_log=$evidence/logs/daemon.log
 # refuse_leftovers reads as it reads the other containers', and its image, busybox pinned by digest
 # and pulled through the mirror (AGENTS.md). The daemon is a static binary and needs nothing of an
 # image; the image is there for the `sh` and `cat` each App's private_key_command runs under bridge
-# (lib/github-apps.sh's app_key_command once resolve_app_keys has run).
+# (lib/github-apps.sh's write_github_apps --key-dir, after resolve_app_keys).
 daemon_container="legion-e2eccs-daemon-$$"
 daemon_image=mirror.gcr.io/library/busybox:1.37@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
 # app_keys_dir is the directory under XDG_RUNTIME_DIR that prerequisites resolves the two App keys
@@ -1083,7 +1084,7 @@ cleanup() {
   # Teardown is best effort: a failing command here is a warning about the teardown, never a check's
   # FAIL line, and the run's exit status stays the one the checks set.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
-  rm -f "$work/claude-model-key" "$work/claude-key-header"
+  rm -f "$work/claude-model-key" "$work/claude-key-header" "$work/auth-plugin.env" "$work/auth-plugin.stderr"
   # The daemon goes first: a live one would launch the Sandboxes the teardown is deleting.
   collect_transcripts
   stop_pid "$daemon_pid"
@@ -1235,8 +1236,10 @@ if [ "$pod_reachability" = bridge ]; then
   note "resolving the implement and review App keys through $app_key_runner into owner-only files of $app_keys_dir (a key whose store asks a person's approval waits for it)"
   resolve_app_keys "$app_keys_dir" implement review
   note "the App key files, which cleanup removes: $(stat -c '%n (mode %a)' -- "$app_keys_dir"/*.pem | paste -sd' ' -), on $(stat -f -c %T -- "$app_keys_dir")"
+  write_github_apps --key-dir "$app_keys_dir" implement review
+else
+  write_github_apps implement review
 fi
-write_github_apps implement review
 read_app_logins
 require_proof_human
 gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
