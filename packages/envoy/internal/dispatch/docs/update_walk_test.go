@@ -13,7 +13,7 @@ import (
 	"github.com/reearth/ygo/encoding"
 )
 
-// ygoDecodeStructsV1 is ygo's own V1 struct decoder (sjawhar/ygo v1.51.3-sami.5,
+// ygoDecodeStructsV1 is ygo's own V1 struct decoder (sjawhar/ygo v1.51.3-sami.6,
 // crdt/merge.go:24-81), unexported, reached here as the independent count the walk is checked
 // against: it decodes every struct of an update into an Item, in the update's order for each
 // client, through the same decodeItem the room's apply runs, and drops only skips. ygo exports
@@ -374,7 +374,7 @@ func TestTheUpdateWalkHoldsYgosBoundsAtTheirEdges(t *testing.T) {
 
 // ContentJSON's two encodings are read where ygo's decoder reads them. A JSON text of 116 to 127
 // bytes starts with a byte that is also a lib0 Any tag; ygo tries JSON text for every value and
-// lib0 Any only when that fails (crdt/update.go:1000-1031), and a walk that chose otherwise would
+// lib0 Any only when that fails (crdt/update.go:1051-1082), and a walk that chose otherwise would
 // end the item somewhere else and misread every struct after it. Each case is followed by a struct
 // the walk must still read as ygo does.
 func TestTheUpdateWalkReadsJSONWhereYgoDoes(t *testing.T) {
@@ -798,7 +798,7 @@ func gcFrame(n int) []byte {
 }
 
 // kindOfItem is the struct kind of an item ygo's decoder returned: a GC run decodes to deleted
-// content on an item already marked deleted, where deleted content is not (crdt/update.go:820-831).
+// content on an item already marked deleted, where deleted content is not (crdt/update.go:871-882).
 func kindOfItem(item *crdt.Item) structKind {
 	switch item.Content.(type) {
 	case *crdt.ContentDeleted:

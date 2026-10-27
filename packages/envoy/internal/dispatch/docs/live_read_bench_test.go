@@ -86,9 +86,9 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 // is everything the peer's read loop runs for it before that broadcast: the peer update hook
 // (Service.weighPeerUpdate, ygo's Server.OnPeerUpdate), the apply the hook is handed, which is
 // ygo's own, crdt.ApplyUpdateV1 of the update into the room's document (sjawhar/ygo
-// v1.51.3-sami.5, provider/websocket/peer_update.go:84-94), and the observer's whole turn with the
+// v1.51.3-sami.6, provider/websocket/peer_update.go:84-94), and the observer's whole turn with the
 // replica (renderedReplica.observe), which ygo fires inside that apply once its transaction
-// commits (crdt/doc.go:698-703): the drain of the room's update log, the content each drained
+// commits (crdt/doc.go:723-728): the drain of the room's update log, the content each drained
 // update added charged to the room budget (chargeAdded), the update applied to the replica, and
 // the render (renderDocumentForUpdate), which skips pmdoc.Read's copy since the tree it renders
 // never outlives the call. 120 keystrokes 20 ms apart on a 524 KiB document; each run reports the

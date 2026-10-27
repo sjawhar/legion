@@ -259,7 +259,7 @@ type budgetedRoom struct {
 // retirement a minute after its last use, and the compaction that folds its updates as it
 // closes, reclaim them. The structure part over-charges what merges back: ygo squashes a run of
 // typed characters into one item and re-merges a split nothing came between (sjawhar/ygo
-// v1.51.3-sami.5, crdt/transaction.go:23-31), while each struct is charged as one of its own with
+// v1.51.3-sami.6, crdt/transaction.go:23-31), while each struct is charged as one of its own with
 // both its splits; and it charges every struct at the heaviest kind's price, rendered or not, so
 // a rendered struct is charged here beside its count's price of the elements it makes.
 //
@@ -295,13 +295,13 @@ type roomCharge struct {
 // merged: the room's whole delete set at its load (seed, crdt.DeleteSetFromDoc), and every range of
 // every update the peer hook admitted since with the GC runs and deleted items it integrated
 // (record). A delete range it covers whole is one the room holds deleted already. ygo's apply
-// still splits the items at the range's two ends (sjawhar/ygo v1.51.3-sami.5,
-// crdt/delete_set.go:169-171), but nothing comes between the halves, and the commit merges them
+// still splits the items at the range's two ends (sjawhar/ygo v1.51.3-sami.6,
+// crdt/delete_set.go:170-172), but nothing comes between the halves, and the commit merges them
 // back (crdt/transaction.go:26-31, :355-383), so such a range adds no struct and the structure part
 // charges it nothing (peerWeighing.newDeletes). Without it the structure part, which no count
 // clears, would charge the room's whole delete set again on every browser's sync, whose whole-state
 // handoff carries it, and on every update of a client that encodes its whole delete set with each
-// transaction, as ygo's own update observer does (crdt/doc.go:501-516): an edited room held open
+// transaction, as ygo's own update observer does (crdt/doc.go:526-541): an edited room held open
 // across reconnects would grow its charge with nothing added to its heap.
 //
 // A range the server's own writes deleted is listed only once a browser's update carries it, so it
@@ -331,7 +331,7 @@ func (d *deletedRuns) seed(set *crdt.IDSet) {
 }
 
 // covers reports whether the room is known to hold clocks [clock, clock+length) of client deleted
-// already. A range of no clocks splits nothing (crdt/delete_set.go:169), and is covered. Nil, a
+// already. A range of no clocks splits nothing (crdt/delete_set.go:170), and is covered. Nil, a
 // room no load charged, covers nothing.
 func (d *deletedRuns) covers(client, clock, length uint64) bool {
 	if length == 0 {
@@ -942,7 +942,7 @@ func (b *roomBudget) reweighLocked(charge *roomCharge) {
 // contentAdded is the bytes of content update, one transaction's update as the room's update
 // observer is handed it, added that a rendering can show: the content of each struct it carries,
 // every one of them new to the room, since ygo encodes a transaction's update from the state
-// before it (sjawhar/ygo v1.51.3-sami.5, buildPhase2, crdt/doc.go:501-516), whoever wrote it - a
+// before it (sjawhar/ygo v1.51.3-sami.6, buildPhase2, crdt/doc.go:526-541), whoever wrote it - a
 // browser's update the peer hook admitted, or the server's own write. Its delete set, which ygo
 // fills with every deleted item of the room on every transaction, adds nothing and is not counted:
 // charging the update's bytes, as the budget did, charged a heavily edited room its whole delete
@@ -1201,7 +1201,7 @@ func (s *Service) chargeLoadedRoom(room string, live *crdt.Doc, replica *rendere
 // update its persistence has not appended. A room still loading is not closed either: its load
 // has not returned, and the opener waiting on it would find it gone. The close's unload returns
 // the room's charge (releaseUnloadedRoom), and ygo's CloseRoom fires that unload before it returns
-// wherever it is the one that removed the room (sjawhar/ygo v1.51.3-sami.5,
+// wherever it is the one that removed the room (sjawhar/ygo v1.51.3-sami.6,
 // provider/websocket/inject.go:611-643), so the next look at the budget sees the charge gone. Each
 // close is logged with the budget's own figures before and after it, which is how an operator, or
 // a test of the real process, tells a room the budget closed from one that retired on its own.

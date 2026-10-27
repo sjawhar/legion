@@ -74,7 +74,7 @@ const (
 )
 
 // One browser's update is bounded by bytes, over a real document socket of a real server
-// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:275-468): an update that would
+// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:275-471): an update that would
 // take a document past the bound is refused with 4413 and DOC_TOO_LARGE, and the document is kept;
 // small updates carry a document over the bound only by the creep they are allowed; a document at
 // or over the bound can be opened, handed back whole, edited and shortened; an edit under it
@@ -344,7 +344,7 @@ const (
 	tangledChainClient = 1_000
 	// tangledScanClient is the client of scanFrame's items, above every client of the chain, so
 	// each of its items wins the tie-break against each item of the chain and scans on past it
-	// (sjawhar/ygo v1.51.3-sami.5, crdt/item.go:161-170).
+	// (sjawhar/ygo v1.51.3-sami.6, crdt/item.go:161-170).
 	tangledScanClient = 4_000_000
 )
 
@@ -1063,7 +1063,7 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 	const growers, markID, commentMark = 4, "memory-unrecorded-mark", "proofComment"
 	// A hundred shrinks are one browser's four cuts of fifty bytes each, sent to twenty-five
 	// documents in the order it made them: ygo's update observer encodes a transaction's structs
-	// beside the document's whole delete set (sjawhar/ygo v1.51.3-sami.5, crdt/doc.go:501-516), so
+	// beside the document's whole delete set (sjawhar/ygo v1.51.3-sami.6, crdt/doc.go:526-541), so
 	// each carries the deletes of the cuts before it too, which a document that has taken them
 	// holds.
 	const shrunk, cutsEach, cutBytes = 25, 4, 50

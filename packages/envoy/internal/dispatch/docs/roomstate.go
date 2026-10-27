@@ -33,7 +33,7 @@ type roomState struct {
 	connected map[uint64]model.Actor
 	// departed is the browsers connected when ygo reported the room's last browser gone
 	// (settleLastPeer), each until its handler forgets it (removeConnection). ygo makes that report
-	// on the leaving browser's own socket (sjawhar/ygo v1.51.3-sami.5,
+	// on the leaving browser's own socket (sjawhar/ygo v1.51.3-sami.6,
 	// provider/websocket/peer.go:619-625), before the handler that registered the browser returns
 	// and removes it from connected (ServeHTTP), and the settlement it owes runs there first, which
 	// takes seconds for a mebibyte; meanwhile connected still names browsers that have gone. The
@@ -240,7 +240,7 @@ func (s *Service) forgetLocked(room string, state *roomState) {
 // registered in its place. The record has to go: it carries the failure, which every holder of it
 // still reads (failure) and no later access may (roomFailure, which refuses a load and a connect).
 //
-// ygo takes the closed room out of its map before CloseRoom returns (sjawhar/ygo v1.51.3-sami.5,
+// ygo takes the closed room out of its map before CloseRoom returns (sjawhar/ygo v1.51.3-sami.6,
 // provider/websocket/inject.go), and a browser registers as it is authorized, before its room is
 // loaded or joined (authorize), so a browser that opened the document while the eviction ran is on
 // this record. Dropping it outright loses that browser, and with it the credit for the person's

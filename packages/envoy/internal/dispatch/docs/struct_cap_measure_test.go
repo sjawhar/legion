@@ -225,7 +225,7 @@ func longEditedState(tb testing.TB) []byte {
 // state carries the history of its million keystrokes: more than ten structs for each byte its
 // text renders (93 measured), since ygo keeps each character taken back one keystroke at a time a
 // struct of its own (gcTxnDeleteSet replaces a deleted item's content and merges nothing,
-// sjawhar/ygo v1.51.3-sami.5, crdt/snapshot.go:284-313).
+// sjawhar/ygo v1.51.3-sami.6, crdt/snapshot.go:284-313).
 func TestTheLongEditedFixtureIsAFiveKiBDocumentCarryingItsHistory(t *testing.T) {
 	room := newDocumentCopy()
 	state := longEditedState(t)
@@ -451,7 +451,7 @@ func agentRewrittenState(t *testing.T) ([]byte, error) {
 
 // structsAndRendering is state's struct total as a room loaded from it counts it, what it renders,
 // and the struct total ygo's RunGC would leave it, which merges each run of adjacent deleted items
-// one client wrote in order into one (sjawhar/ygo v1.51.3-sami.5, crdt/snapshot.go:315-392), as
+// one client wrote in order into one (sjawhar/ygo v1.51.3-sami.6, crdt/snapshot.go:315-392), as
 // Yjs merges them at each transaction's end; no room runs it.
 func structsAndRendering(t *testing.T, state []byte) (structs uint64, rendered int, merged uint64) {
 	t.Helper()

@@ -462,7 +462,7 @@ func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 
 // The tags of the document socket's frames this harness reads and writes: Hocuspocus's framing,
 // which Dispatch's rooms speak (internal/dispatch/docs/service.go:610), puts the room's name before
-// each (sjawhar/ygo v1.51.3-sami.5, provider/websocket/server.go:66-80).
+// each (sjawhar/ygo v1.51.3-sami.6, provider/websocket/server.go:66-80).
 const (
 	frameSync       = 0
 	frameSyncStatus = 8
@@ -544,8 +544,8 @@ func (p *memoryServer) openBrowser(t *testing.T, artifactID string) *browser {
 
 // tryOpenBrowser connects to the document's room and waits for the room's whole state, which ygo
 // sends a peer once the room has loaded and the peer is registered in it
-// (provider/websocket/server.go:2101-2107), then sends a Ping and waits for its Pong: a first frame
-// lifts ygo's handshake deadline (server.go:2115-2138), so a socket held open without an edit is
+// (provider/websocket/server.go:2108-2114), then sends a Ping and waits for its Pong: a first frame
+// lifts ygo's handshake deadline (server.go:2122-2145), so a socket held open without an edit is
 // not closed thirty seconds in. A socket the server closes before any of that - the room budget's
 // refusal, which completes the upgrade only to close it (refuseOverRoomBudget,
 // internal/dispatch/docs/websocket.go:197-200) - returns the *gws.CloseError it was closed with.

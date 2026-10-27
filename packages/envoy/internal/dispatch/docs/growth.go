@@ -55,7 +55,7 @@ import (
 // clear the write is the document counted (leavesPastDecodeCap gives the steps). The sum clears
 // nothing past the cap, because it counts characters and the cap counts structs: ygo's state
 // vector is each client's last item's clock plus that item's length (crdt/store.go:190-200 in
-// sjawhar/ygo v1.51.3-sami.5), a string's length is its UTF-16 length (crdt/content.go:109), and
+// sjawhar/ygo v1.51.3-sami.6), a string's length is its UTF-16 length (crdt/content.go:109), and
 // one struct holds a whole run of typing. Measured on 2026-10-25, the shape room_heap_test.go
 // builds, typed over as benchmarkLiveDocument types, sums to 52,575 clocks at 51 KiB, 538,306 at
 // 524 KiB and 1,050,470 at a mebibyte, past the 1,048,576 cap, where it holds 77,600 structs
@@ -361,7 +361,7 @@ func elements(size pmdoc.DocumentSize) string {
 //
 // The fork cannot answer for the room. It is a decode of the room's state, and ygo merges into
 // one struct each run of typing a decode delivers at once (squashRuns, crdt/transaction.go:149-304
-// in sjawhar/ygo v1.51.3-sami.5), which the room took keystroke by keystroke and holds a struct a
+// in sjawhar/ygo v1.51.3-sami.6), which the room took keystroke by keystroke and holds a struct a
 // keystroke - a thousand one-character transactions counted 1,000 structs on the document they
 // were typed into and 1 on its copy - so a fork can count far below the room it was forked from,
 // and a write the fork's count clears could carry the room past the cap once published. The room
@@ -450,7 +450,7 @@ func updatesAdd(updates [][]byte) (uint64, bool) {
 // clockSum is the sum of doc's state vector. It bounds the structs doc has integrated from above,
 // since every one takes at least one clock, and says nothing past that: a struct of typed text
 // takes a clock for each character (crdt/store.go:190-200, crdt/content.go:109 in sjawhar/ygo
-// v1.51.3-sami.5).
+// v1.51.3-sami.6).
 func clockSum(doc *crdt.Doc) uint64 {
 	var clocks uint64
 	for _, clock := range doc.StateVector() {
@@ -465,11 +465,11 @@ func clockSum(doc *crdt.Doc) uint64 {
 // can still cause. Of those structs, every one doc has integrated takes at least one clock of the
 // state vector (clockSum), but a parked one takes none: the state vector stops at the gap a parked
 // struct waits behind, and the encoded state carries each parked struct, with at most a skip over
-// the gap before it (withParked, crdt/update.go:86-113 in sjawhar/ygo v1.51.3-sami.5). So the
+// the gap before it (withParked, crdt/update.go:86-113 in sjawhar/ygo v1.51.3-sami.6). So the
 // encoded state holds at most the clock sum and two structs for each parked one, and the splits
 // are splitsAStructCanCause for each parked struct and each parked delete range
-// (crdt.Doc.PendingStats, crdt/doc.go:1044-1063). A room may park up to maxUpdateItems structs
-// (Server.MaxPendingItems, service.go:620), none of which the clock sum sees.
+// (crdt.Doc.PendingStats, crdt/doc.go:1069-1088). A room may park up to maxUpdateItems structs
+// (Server.MaxPendingItems, service.go:624), none of which the clock sum sees.
 func structCeiling(doc *crdt.Doc) uint64 {
 	parked := doc.PendingStats()
 	items, ranges := uint64(parked.Items), uint64(parked.DeleteRanges)

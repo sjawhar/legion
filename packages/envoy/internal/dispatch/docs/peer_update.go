@@ -194,9 +194,9 @@ const frameRecheck = heaviestHandoffBound / 64
 
 // jsonReencodeGrowth is the most a byte of JSON content can grow to once ygo writes it into the
 // room's state again. ygo keeps a JSON item's, a format's and an embed's values decoded and encodes
-// each again as JSON text with encoding/json (fmtValToJSON, sjawhar/ygo v1.51.3-sami.5,
-// crdt/update.go:400-417 and :1276-1297). A JSON item whose values read only as lib0 Any, as ygo
-// up to 1.51.0 wrote them (decodeContent's wireJSON case, :1000-1031), grows the most: each false,
+// each again as JSON text with encoding/json (fmtValToJSON, sjawhar/ygo v1.51.3-sami.6,
+// crdt/update.go:400-417 and :1327-1348). A JSON item whose values read only as lib0 Any, as ygo
+// up to 1.51.0 wrote them (decodeContent's wireJSON case, :1051-1082), grows the most: each false,
 // one byte, is written as the five of false with its length prefix, six bytes a byte. A JSON text
 // grows less: encoding/json writes a number below 10^21 in full, so the four bytes of 1e20, five
 // with their length prefix, become the twenty-one of 100000000000000000000, twenty-two with
@@ -204,7 +204,7 @@ const frameRecheck = heaviestHandoffBound / 64
 const jsonReencodeGrowth = 6
 
 // maxMessageBytes is the most one websocket message a browser sends may carry, ygo's
-// Server.MaxMessageBytes, whose own default is 64 MiB (sjawhar/ygo v1.51.3-sami.5,
+// Server.MaxMessageBytes, whose own default is 64 MiB (sjawhar/ygo v1.51.3-sami.6,
 // provider/websocket/server.go:1020-1028). It is a floor against a client that is not the editor at
 // all, never the bound on a document: the bound is weighPeerUpdate's, which walks a frame without
 // decoding it (walkUpdate) and refuses an oversized one before anything decodes it, so a frame at
@@ -226,14 +226,14 @@ const jsonReencodeGrowth = 6
 const maxMessageBytes = 54 << 20
 
 // integrateScanBound is the most items the conflict scans of one remote update may pass in a
-// room's document, ygo's integrate-scan bound (sjawhar/ygo v1.51.3-sami.5, crdt/doc.go:116-142).
+// room's document, ygo's integrate-scan bound (sjawhar/ygo v1.51.3-sami.6, crdt/doc.go:141-167).
 // Integrating an item scans the items between its left and right origins; one the editor sends
 // scans only what other people inserted concurrently at the same place, but an item naming a left
 // origin early in a list and no right origin scans to the list's end, so an update of n such items
 // scans n times the list: ygo's release notes record 2,000 of them against a list of 20,000 taking
 // 20.8 s and 2,365,640,192 bytes, about 0.52 µs and 59 bytes an item scanned. A bounded document
 // refuses an update whose scans pass the bound with crdt.ErrIntegrateScanBudget and takes it back
-// out whole, so the room is left as it was and no observer fires (crdt/apply_rollback.go:9-45).
+// out whole, so the room is left as it was and no observer fires (crdt/apply_rollback.go:9-57).
 //
 // The bound is four times the most items an honest remote update was measured to scan
 // (TestTheIntegrateScanBoundHoldsEveryHonestUpdateFourTimesOver, which fails once any of its
@@ -265,8 +265,8 @@ const integrateScanBound = 28_640
 // never bounded. What decodes a document the server already holds stays unbounded: a write's fork,
 // the fold, growth's and a cold load's copies, the measurer's copies (structsAfter),
 // validateUpdate, snapshotDocument and the room's replica integrate state no browser chose, and a
-// bounded document's apply copies its parked queue and pending deletes (beginRemoteApply,
-// crdt/apply_rollback.go:99-122) where theirs need not.
+// bounded document's apply keeps a journal to take itself back out (beginRemoteApply,
+// crdt/apply_rollback.go:114-139) where theirs need not.
 func boundRoomDocument(doc *crdt.Doc) *crdt.Doc {
 	doc.SetMaxIntegrateScan(integrateScanBound)
 	return doc
@@ -274,7 +274,7 @@ func boundRoomDocument(doc *crdt.Doc) *crdt.Doc {
 
 // weighPeerUpdate is ygo's Server.OnPeerUpdate: the room hands it every update and whole-state
 // message a read-write browser sends, with the apply that would put it in the room, and a read-only
-// browser never reaches it (sjawhar/ygo v1.51.3-sami.5, provider/websocket/peer_update.go:68-110).
+// browser never reaches it (sjawhar/ygo v1.51.3-sami.6, provider/websocket/peer_update.go:68-110).
 // An update it does not apply is neither stored nor relayed to the room's other browsers, and the
 // *websocket.PeerClose it refuses with closes that one browser with that code and reason.
 //
@@ -361,9 +361,12 @@ func boundRoomDocument(doc *crdt.Doc) *crdt.Doc {
 // which wraps crdt.ErrInvalidUpdate as every apply error does) is refused with
 // DocumentTooLargeCloseCode and DocumentTooTangledCloseReason: permanent, as the document's other
 // refusals are, so the editor drops the edit, since the same frame would be refused again on every
-// reconnect. Any other error the apply returns - one that overflows the room's parked-item queue
-// (MaxPendingItems) - is returned as it is, so ygo answers that browser SyncStatus(0) and leaves it
-// connected, exactly as a room without this hook does.
+// reconnect. Any other error the apply returns - one that would park structs or delete ranges past
+// the room's pending cap (MaxPendingItems, which the room holds from the end of its load,
+// TestAPeerApplyIsHeldToTheRoomsPendingCapAfterTheLoad) - is returned as it is, so ygo answers that
+// browser SyncStatus(0) and leaves it connected, exactly as a room without this hook does. The
+// struct total refuses such an update first: it counts each parked struct and parked delete range
+// splitsAStructCanCause times within maxUpdateItems, the cap itself.
 func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() error) error {
 	replica := s.liveReplica(info.Doc)
 	charge := replica.roomCharge()
@@ -400,7 +403,7 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	if !measured {
 		bytes = 0
 	}
-	heap := weighed.applyHeap(len(info.Update), structs.roomStructs(info.Doc), structs.parkedCopyHeap(info.Doc))
+	heap := weighed.applyHeap(len(info.Update), structs.roomStructs(info.Doc))
 	if heap > applyHeapBound {
 		return fmt.Errorf("%w: its apply is estimated to allocate %d bytes, past the %d bytes the pod lets every apply hold at once",
 			errApplyTooHeavy, heap, uint64(applyHeapBound))
@@ -608,9 +611,9 @@ func (w *peerWeighing) walkedDelete(client, clock, length uint64) {
 // splitsAStructCanCause is the most structs integrating one struct can add to a store beyond
 // itself, and the most applying one delete range can: each splits at most the item it starts in
 // and the item it ends in (an item's integrate splits the items holding its origin and its right
-// origin, sjawhar/ygo v1.51.3-sami.5, crdt/update.go:679-681 and crdt/item.go:83-106, through
+// origin, sjawhar/ygo v1.51.3-sami.6, crdt/update.go:682-684 and crdt/item.go:83-106, through
 // crdt/store.go:91-140; a delete range splits the items at its two ends,
-// crdt/delete_set.go:170-171).
+// crdt/delete_set.go:171-172).
 const splitsAStructCanCause = 2
 
 // added is what the walked update can add to the room's struct total: each new struct with the
@@ -761,7 +764,7 @@ const structTotalRecheck = maxUpdateItems / 64
 //
 // The total is an exact count plus what the hook admitted since it. The count walks the room's
 // encoded state (countRoomStructs), which carries parked structs and parked delete ranges
-// (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.51.3-sami.5, crdt/update.go:87-109). It is taken at
+// (crdt.EncodeStateAsUpdateV1, sjawhar/ygo v1.51.3-sami.6, crdt/update.go:87-109). It is taken at
 // the room's load, beside the load's rendering (keepReplica), with each count the service's
 // measurer makes of the room (elementMeasurer.count), and by the hook to confirm a total near or
 // past the cap. What the hook admits after it is each update's addition (peerWeighing.added): its
@@ -789,7 +792,7 @@ const structTotalRecheck = maxUpdateItems / 64
 // their own way (refuseUndecodable, leavesPastDecodeCap) and are bounded there, not here. The one
 // place that sees each of them, whoever wrote it, is the document's update observer: ygo fires it
 // for every transaction it commits, even one that writes nothing, with the transaction's origin
-// (crdt/doc.go:510-512, :592-607), on the committing goroutine. So the total registers an
+// (crdt/doc.go:535-537, :617-632), on the committing goroutine. So the total registers an
 // observer of its own (observed), and the hook names the origin of each apply it is running while
 // it runs it (applying): ygo's peer, the origin ygo applies a browser's update with
 // (provider/websocket/peer_update.go:84-97). Several browsers' applies can run at once, each its
@@ -801,7 +804,7 @@ const structTotalRecheck = maxUpdateItems / 64
 //
 // The hook reserves an update's addition before its apply and holds no lock across the apply:
 // ygo fires a transaction's update observers after it has released the document's lock, on the
-// committing goroutine (crdt/doc.go:699-702), so a lock held from the check through the apply
+// committing goroutine (crdt/doc.go:724-727), so a lock held from the check through the apply
 // would hold every other browser of the room while one apply sat in an observer
 // (TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth holds one there). Under a
 // short lock (admissions) the hook checks the running total, which counts every reservation in
@@ -852,16 +855,13 @@ type structTotal struct {
 	inflightFrame, admittedFrame           atomic.Uint64
 
 	// mu guards the last count - counted, with the admissions and writes as they were read before
-	// it, and the parked structs and parked delete ranges the room held then (parkedCopyHeap) -
-	// and the hook's last confirmation: whether one was taken and the admissions when it was.
-	mu                   sync.Mutex
-	counted              roomCount
-	countedAdmitted      roomCount
-	countedWrites        uint64
-	countedParkedStructs uint64
-	countedParkedRanges  uint64
-	confirmed            bool
-	confirmedAdmitted    roomCount
+	// it - and the hook's last confirmation: whether one was taken and the admissions when it was.
+	mu                sync.Mutex
+	counted           roomCount
+	countedAdmitted   roomCount
+	countedWrites     uint64
+	confirmed         bool
+	confirmedAdmitted roomCount
 }
 
 // newStructTotal is live's totals, counted once now, at the room's load, with the clients live's
@@ -899,7 +899,7 @@ func retiredClientsOf(doc *crdt.Doc) map[crdt.ClientID]uint64 {
 
 // retiredClock reads a retired client's clock as ygo decodes the int64 a rebuild wrote: lib0 Any
 // writes an integer within 32 bits as a varint, which decodes as an int64, and a larger one within
-// 2^53 as a float64 (sjawhar/ygo v1.51.3-sami.5, encoding/encoder.go:283-299,
+// 2^53 as a float64 (sjawhar/ygo v1.51.3-sami.6, encoding/encoder.go:283-299,
 // internal/anycodec/decoder.go:276-296). A clock of zero retires nothing.
 func retiredClock(value any) (uint64, bool) {
 	switch value := value.(type) {
@@ -1104,26 +1104,6 @@ func (t *structTotal) roomStructs(doc *crdt.Doc) uint64 {
 	return total
 }
 
-// parkedCopyHeap is what a room's bounded document copies of its parked queue at every remote
-// apply (peerWeighing.applyHeap): the parked structs and parked delete ranges its last count found,
-// and everything the hook has admitted or has in flight since, as if all of it were parked, each
-// unit of it at the dearer of the two prices a unit, a delete range's applyHeapPerParkedDeleteRange
-// over the splitsAStructCanCause units it counts for. Parked state a server write leaves is left
-// out until the next count, as the total leaves out what such a write adds. A nil total, a room no
-// load listed, reads the room's parked queue afresh.
-func (t *structTotal) parkedCopyHeap(doc *crdt.Doc) uint64 {
-	if t == nil {
-		pending := doc.PendingStats()
-		return applyHeapPerParkedStruct*uint64(pending.Items) + applyHeapPerParkedDeleteRange*uint64(pending.DeleteRanges)
-	}
-	t.mu.Lock()
-	structs, ranges, countedAdmitted := t.countedParkedStructs, t.countedParkedRanges, t.countedAdmitted.structs
-	t.mu.Unlock()
-	since := t.inflight.Load() + t.admitted.Load() - countedAdmitted
-	return applyHeapPerParkedStruct*structs + applyHeapPerParkedDeleteRange*ranges +
-		applyHeapPerParkedDeleteRange/splitsAStructCanCause*since
-}
-
 // admits reports whether doc, the room's live document, can take added within the decode cap,
 // when added carries unrendered bytes within maxUnrenderedBytes, and when it carries frame bytes
 // within heaviestHandoffBound (fitsBounds), beside every reservation in flight, which the running
@@ -1201,11 +1181,9 @@ func (t *structTotal) recountLive() {
 func (t *structTotal) recount(doc *crdt.Doc) roomCount {
 	admitted := roomCount{structs: t.admitted.Load(), unrendered: t.admittedUnrendered.Load(), frame: t.admittedFrame.Load()}
 	writes := t.writes.Load()
-	pending := doc.PendingStats()
 	counted := t.count(doc)
 	t.mu.Lock()
 	t.counted, t.countedAdmitted, t.countedWrites = counted, admitted, writes
-	t.countedParkedStructs, t.countedParkedRanges = uint64(pending.Items), uint64(pending.DeleteRanges)
 	t.mu.Unlock()
 	return admitted
 }
@@ -1273,8 +1251,8 @@ const goMemoryLimitBytes = 4 << 30 * 9 / 10
 // It is not in the spec: it is the plan's departure 8, large applies taking turns, weighed by each
 // apply's estimate rather than counted in slots. Every browser's first sync hands over its whole
 // state, and ygo's apply decodes every struct of it, and every value of each, before decodeAndPark
-// drops what the room already holds (sjawhar/ygo v1.51.3-sami.5, crdt/update.go:591-613, the
-// values at :1087-1101), so fifty browsers reconnecting at once to rooms of heavy documents would
+// drops what the room already holds (sjawhar/ygo v1.51.3-sami.6, crdt/update.go:594-616, the
+// values at :1138-1152), so fifty browsers reconnecting at once to rooms of heavy documents would
 // otherwise decode fifty handoffs at the same moment. A count of slots sized for the heaviest
 // handoff could not bound an update the editor never sends, whose apply allocates in proportion
 // to the values it carries whatever the room holds: 25,165,779 bytes of null values in one struct
@@ -1328,31 +1306,35 @@ func (h *applyHeaps) hold(heap uint64) (release func()) {
 }
 
 // applyHeap is the estimate of what ygo's apply of the walked update allocates, frame its bytes,
-// into a room of roomStructs structs (structTotal.roomStructs) whose parked queue a bounded apply
-// copies parkedCopy bytes of (structTotal.parkedCopyHeap): an upper bound, every factor below set
-// from TestEveryApplysTransientHeapIsWithinItsEstimate's measurement of ygo's apply at scale
+// into a room of roomStructs structs (structTotal.roomStructs): an upper bound, every factor below
+// set from TestEveryApplysTransientHeapIsWithinItsEstimate's measurement of ygo's apply at scale
 // (runtime.MemStats.TotalAlloc across one apply, which bounds what the apply holds at its peak
 // from above), into a room's bounded document (boundRoomDocument) with an update observer, as
 // every room is. It is the update's own share (ownApplyHeap) and the room's:
 //
 //   - the room's state vector, which ygo's apply copies into maps before it reads a struct
-//     (crdt/update.go:516) and its transaction twice more (crdt/doc.go:646, :722), each a slot
+//     (crdt/update.go:516) and its transaction twice more (crdt/doc.go:671, :747), each a slot
 //     for every client the room holds;
 //   - the update the transaction made, which ygo encodes for the room's update observers at every
-//     commit, one that changed nothing included (buildPhase2, crdt/doc.go:501-516, called at
-//     :676), by walking the room's whole store and building the delete set of all of it, a range
+//     commit, one that changed nothing included (buildPhase2, crdt/doc.go:526-541, called at
+//     :701), by walking the room's whole store and building the delete set of all of it, a range
 //     for every deleted item before it compacts them (encodeV1Locked and buildDeleteSet,
 //     crdt/update.go:195-235 and :466-479): a price for every deleted item of the room, of which
 //     it holds no more than its structs and the structs the update can add (peerWeighing.added).
 //     875,008 bytes measured for a one-character keystroke into a string of 10,000 deleted items
-//     among 10,000 live ones, against 2,328 into one of 20,000 live items and none deleted;
-//   - the room's parked queue, which a bounded document's apply copies so that it can put it back
-//     should the apply fail: the slice of its parked structs, and its parked delete ranges twice
-//     (beginRemoteApply and drainParked, crdt/apply_rollback.go:99-160). Measured on 2026-10-26
-//     for a keystroke into a room holding the most parked structs its struct total admits,
-//     349,517: 2,806,176 bytes against 2,880 into the same room unbounded; and into one holding the
-//     most parked delete ranges, 524,280: 25,171,104 bytes against 8,391,872 unbounded, whose drain
-//     already copies every parked range once (crdt/update.go:739-744, delete_set.go:150-158).
+//     among 10,000 live ones, against 2,328 into one of 20,000 live items and none deleted.
+//
+// The room's parked queue costs an apply nothing in proportion to it unless the apply reaches it:
+// a bounded document's apply keeps the parked structs and parked delete ranges by reference rather
+// than copying them (beginRemoteApply, crdt/apply_rollback.go:114-139), and a client's parked
+// delete ranges are retried only once an apply moves that client's clock past the first of them
+// (retryParkedDeletes, crdt/delete_set.go:221-257). Measured on 2026-10-27, a keystroke allocates
+// 4,240 bytes into a room holding the most parked structs its struct total admits, 349,517, and
+// 4,240 into one holding the most parked delete ranges, 524,280. A retry an apply does start
+// re-parks what it cannot apply yet, a copy of that client's parked ranges: 44,739,304 bytes for
+// the first character of the client whose 524,280 ranges the room holds parked, 85.3 a range.
+// Each parked range is splitsAStructCanCause structs of the room's struct total, which the room's
+// share prices at applyHeapPerRoomStruct each, 512 bytes a range, so no term of its own prices it.
 //
 // What it leaves out is what depends on the shape of the room's lists, which no walk of the update
 // can see: an item naming an origin inside a run and no right origin makes ygo's integrate scan the
@@ -1360,9 +1342,9 @@ func (h *applyHeaps) hold(heap uint64) (release func()) {
 // bounded document stops at integrateScanBound items, about 1.7 MB of marks; and an item or a
 // delete range splitting a room's Any or JSON item copies the values right of the split
 // (ContentAny.Splice, crdt/content.go:170-174).
-func (w *peerWeighing) applyHeap(frame int, roomStructs, parkedCopy uint64) uint64 {
+func (w *peerWeighing) applyHeap(frame int, roomStructs uint64) uint64 {
 	return w.ownApplyHeap(frame) + applyHeapPerRoomClient*uint64(len(w.held)) +
-		applyHeapPerRoomStruct*(roomStructs+w.added()) + parkedCopy
+		applyHeapPerRoomStruct*(roomStructs+w.added())
 }
 
 // ownApplyHeap is the update's own share of applyHeap, what it costs whatever room it reaches:
@@ -1384,8 +1366,8 @@ func (w *peerWeighing) ownApplyHeap(frame int) uint64 {
 // TestEveryApplysTransientHeapIsWithinItsEstimate measures (2026-10-26: bytes one apply allocates
 // into a document with an update observer, per struct of a frame of 20,000 unless said, decode
 // and integration together unless said); that test holds the estimate over every measurement.
-// What each covers is what ygo's decode allocates (decodeItem, crdt/update.go:814-989;
-// decodeContent, :991-1133; decodeTypeContent, :1135-1200; decodeDeleteSet, :1202-1240), and
+// What each covers is what ygo's decode allocates (decodeItem, crdt/update.go:865-1040;
+// decodeContent, :1042-1184; decodeTypeContent, :1186-1251; decodeDeleteSet, :1253-1291), and
 // what integrating and encoding again for the room's observers allocates (encodeItem, :249-389).
 const (
 	// applyHeapPerApply is the transaction, the decode's own state and the observers' encode of a
@@ -1403,15 +1385,6 @@ const (
 	// holds, at every apply: 875,008 bytes measured for a keystroke into a string of 10,000
 	// deleted items among 10,000 live ones, 88 a deleted item.
 	applyHeapPerRoomStruct = 256
-	// applyHeapPerParkedStruct is each struct the room holds parked, whose pointer a bounded
-	// document's apply copies (beginRemoteApply): 2,803,296 bytes measured beyond the unbounded
-	// apply's for a keystroke into a room of 349,517 parked GC structs, 8.0 a struct.
-	applyHeapPerParkedStruct = 16
-	// applyHeapPerParkedDeleteRange is each delete range the room holds parked, which a bounded
-	// document's apply copies twice (beginRemoteApply, drainParked) beside the copy every apply's
-	// drain makes: 25,171,104 bytes measured for a keystroke into a room of 524,280 parked ranges,
-	// 48.0 a range, 32.0 of it the bounded apply's own.
-	applyHeapPerParkedDeleteRange = 64
 	// applyHeapPerFrameByte is each byte of the frame: a string ygo copies out of it is one
 	// allocation of its bytes rounded up to a size class, at most twice them for a short one (a
 	// string of 9 bytes takes 16), and JSON text is copied twice more (applyHeapPerJSONByte).
@@ -1435,7 +1408,7 @@ const (
 	// its name.
 	applyHeapPerType = 192
 	// applyHeapPerNewStruct is a struct the update integrates: its place in the store and its
-	// parent, the splits of the items its origins fall inside (crdt/update.go:679-681,
+	// parent, the splits of the items its origins fall inside (crdt/update.go:682-684,
 	// crdt/item.go:83-106), and the observers' encode of it. 218 bytes measured for a GC struct,
 	// 327 for a one-character string naming both origins, 563 for one splitting the room's string
 	// at both, 526 for a margin entry of one null value.
@@ -1473,7 +1446,7 @@ const (
 	applyHeapPerJSONText = 64
 	// applyHeapPerNewJSONText is each JSON value of an integrated item, which the observers'
 	// encode writes as JSON text again with an encoder of its own (fmtValToJSON,
-	// crdt/update.go:1276-1297). 298 bytes measured for a number, 705 for a map read from legacy
+	// crdt/update.go:1327-1348). 298 bytes measured for a number, 705 for a map read from legacy
 	// lib0 Any.
 	applyHeapPerNewJSONText = 384
 	// applyHeapPerJSONContainer is each JSON object or array: an object's map with its first
@@ -1489,7 +1462,7 @@ const (
 	applyHeapPerNewJSONMember = 128
 	// applyHeapPerJSONByte is each byte of JSON text beyond applyHeapPerFrameByte: ygo copies the
 	// text into a string and again into the bytes encoding/json reads (fmtValFromJSON,
-	// crdt/update.go:1329-1338), and the strings it decodes copy it once more.
+	// crdt/update.go:1380-1389), and the strings it decodes copy it once more.
 	applyHeapPerJSONByte = 2
 	// applyHeapPerNewJSONByte is each byte of an integrated JSON text beyond
 	// applyHeapPerIntegratedFrameByte, which the observers' encode escapes and copies again. 11.4
@@ -1543,7 +1516,7 @@ func structApplyHeap(walked updateStruct) applyCost {
 
 // jsonContentApplyHeap is the applyCost of a ContentJSON item's content. ygo reads its values as
 // JSON text, and when the first starts with a lib0 Any tag and some text does not read, reads them
-// all again as lib0 Any (decodeContent's wireJSON case, crdt/update.go:1000-1031), so such an item
+// all again as lib0 Any (decodeContent's wireJSON case, crdt/update.go:1051-1082), so such an item
 // is charged both readings, the values slice the failed reading made included; integrated, every
 // value is written as JSON text again, taken at four bytes of text for each byte of lib0 Any.
 func jsonContentApplyHeap(content []byte) applyCost {

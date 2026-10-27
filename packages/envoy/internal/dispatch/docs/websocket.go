@@ -385,7 +385,7 @@ func (s *Service) refuseIfRebuilding(room string) error {
 // allowInject decides whether ygo may apply an injection to a room. Its issue read goes
 // through the shared pool for a caller that need hold no connection of its own (the
 // settlement warm-up in settleRoom), and that is outside the pool's deadlock cycle only
-// because ygo runs OnInject before getOrCreateRoom (sjawhar/ygo v1.51.3-sami.5,
+// because ygo runs OnInject before getOrCreateRoom (sjawhar/ygo v1.51.3-sami.6,
 // provider/websocket/inject.go:321-330): an injection refused here has published no room
 // placeholder for a connection-holder to park on, so nothing holding a connection is waiting
 // on this read. A vendored reordering of those two calls puts it back in the cycle.
@@ -417,7 +417,7 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 
 func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
 	// A load never waits for its own room's recovery. That recovery's eviction waits in ygo's
-	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.5,
+	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.6,
 	// provider/websocket/inject.go:521-529) and closes the channel awaitRoomRecovery waits on
 	// only once CloseRoom has returned (failRoomLocked), so a wait here is a cycle: the load
 	// holds the eviction, and the eviction holds the load. No deadline breaks it either -
@@ -454,7 +454,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		return err
 	}
 	// The room is still loading: ygo hands its document to no peer or caller until this hook
-	// returns (sjawhar/ygo v1.51.3-sami.5, provider/websocket/server.go:1765-1853: loadRoom closes
+	// returns (sjawhar/ygo v1.51.3-sami.6, provider/websocket/server.go:1765-1860: loadRoom closes
 	// the room's ready barrier after it), so nothing writes the tree while this walks it.
 	tree, err := treeOf(doc)
 	var markdown string
@@ -514,6 +514,10 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	s.unlockState(room, state)
 	// The room takes peer updates only once this hook returns, and every one of them under the
 	// integrate-scan bound: the state the load decoded is the server's own and went in unbounded.
+	// ygo decoded it with the pending cap lifted too, and set the room's cap, maxUpdateItems,
+	// before it ran this hook (sjawhar/ygo v1.51.3-sami.6, provider/websocket/server.go:1766-1773),
+	// so this hook's applies and every peer's are capped
+	// (TestAPeerApplyIsHeldToTheRoomsPendingCapAfterTheLoad).
 	boundRoomDocument(doc)
 	// The log is opened before the observer is registered and before ygo hands the room to anyone
 	// (above), so it holds every transaction the room commits from here on, in commit order.

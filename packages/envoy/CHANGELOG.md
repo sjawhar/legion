@@ -1370,6 +1370,22 @@
   "Reconnecting…" and skipped the refresh a reconnect owes every view. `GET /api/v1/events` now
   sends an SSE comment, `: open`, with its headers, so the stream opens at once in every browser.
 
+- The ygo pin moves from `v1.51.3-sami.5` to `v1.51.3-sami.6` (commit `32e09873`), which carries
+  every member of `v1.51.3-sami.5` unchanged and three more (INFRA-179). A bounded document's
+  remote apply keeps the parked structs and parked delete ranges by reference rather than copying
+  them, so a keystroke into a room holding the most its struct total admits, 349,517 parked structs
+  or 524,280 parked delete ranges, allocates 4,240 bytes where it allocated 2,806,176 and
+  25,171,104, and the peer update hook's apply-heap estimate drops the term that priced that copy.
+  Parked delete ranges are retried only once the structs they name can have arrived, and the
+  pending cap (`Server.MaxPendingItems`, 1,048,576 in Dispatch) now caps them too, apart from
+  parked structs: a decode that would park more delete ranges than the cap is refused, so a stored
+  history holding more than 1,048,576 parked delete ranges, which no room's struct total admits, no
+  longer loads and is rebuilt as any history that does not load is. ygo's websocket server decodes
+  a room's stored state with the cap lifted and sets the cap before `OnLoadDocument`, so the load's
+  own applies and every peer's are held to it. And the items a remote update defers integrate in
+  dependency order: ygo's release notes record the state of a 400-paragraph document after 240
+  versions, each written by a fresh client id, decoding in 143 ms where it took 433 ms.
+
 - The ygo pin moves from `v1.51.3-sami.4` to `v1.51.3-sami.5` (commit `e0a2f4ff`), which carries
   every member of `v1.51.3-sami.4` unchanged and two more (INFRA-179). reearth/ygo#304, which
   `v1.51.3-sami.2` carried and `v1.51.3-sami.3` and `v1.51.3-sami.4` left out, is carried again:
@@ -1866,7 +1882,7 @@
 - A table whose rows hold an escaped pipe in a code span parsed in time quadratic in its size: goldmark's table transformer checked every code span's text against every escaped pipe in the document, and 1 MiB of such rows took over two minutes. Dispatch takes the backslash out of those pipes itself, in one pass, and 1 MiB parses in about two seconds (LEGION-465).
 - An id outside nats.go's key alphabet (`ses:bad`) failed whatever met it in the interest and role buckets, since nats.go refuses such a key on every read, write and delete and the stores took that refusal for a failure. A role claim over such a holder, which an earlier build's bare-string claim or a direct bucket write can leave in the role bucket, wrote the claim and then answered 500. A caller could cause the same 500 itself: a session subscribed to a role topic outside the alphabet (`notifications.role.bad:role`, which subscribe accepts) got it on every unsubscribe of that topic, every unsubscribe of all its topics and every `DELETE /v1/interests/<id>`, and its interest stayed. An interest or claim stored under such a key, which only a direct bucket write makes, stopped the interest reaper or the role reaper at that key every five minutes, logging `reaper cycle failed` or `role claim reaper cycle failed` at ERROR. The handle every bucket opens through now names nats.go's refusal as the refusal it is (`bus.ErrInvalidKey`, naming the key), so each of these skips the key as it already skipped one past the key bound: the claim and the unsubscribe answer 200, and the reapers go on, with a WARN naming the key they cannot delete, which an operator removes by hand (`packages/envoy/AGENTS.md`). A `/v1` route given a session id or role outside the alphabet answers 400 naming it, where it answered 500 (503 on subscribe, 404 reading the interests of a session it holds none for), and Dispatch reads a 400 or 413 from `GET /v1/interests/<id>` as no interest, as it reads a 404 (LEGION-456).
 - Marking or unmarking a document's text, and checking whether a concurrent change removed the text a write inserted, walked the live tree one stack frame per level with no bound, where an authenticated peer can grow the tree through any number of small websocket updates. Each now refuses a node more than 1,000 levels deep, text included, as the document's reads do, and a peer's update that deepens the tree between a write's read and its transaction is answered `500 DOC_SCHEMA` rather than `500 INTERNAL` (LEGION-465).
-- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork (at `v1.51.3-sami.5` since the entries above), which walks the deleted children iteratively and carries the transactional GC fix, both open upstream as reearth/ygo#263 and #262 (LEGION-465).
+- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork (at `v1.51.3-sami.6` since the entries above), which walks the deleted children iteratively and carries the transactional GC fix, both open upstream as reearth/ygo#263 and #262 (LEGION-465).
 - Dispatch pinned `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.51.3-sami.1` (commit
   `e5c1aacf`): upstream v1.51.2 and seven fixes, each open upstream as a reearth/ygo pull
   request - #258 (carried as the fork's own #262), #260, #263, #266, #268, #269 and #291

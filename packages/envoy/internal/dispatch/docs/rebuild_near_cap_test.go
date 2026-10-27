@@ -415,7 +415,7 @@ func tangledHistory(t *testing.T, chain, scanners int) []byte {
 // (roomScanTotal, honestHandoffScans) is near the scan total, which leaves every larger merge
 // refused, and a rebuild takes it: the rebuilt history re-scans fewer items than one honest
 // handoff and reads the same text. It needs a count of a re-scan's items (historyScans), which
-// sjawhar/ygo v1.51.3-sami.5 does not report.
+// sjawhar/ygo v1.51.3-sami.6 does not report.
 func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadingTheSame(t *testing.T) {
 	state := tangledHistory(t, 2_000, 250)
 	history, err := decodeHistory(state)
@@ -424,7 +424,7 @@ func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadin
 	}
 	scans, counted := historyScans(history)
 	if !counted {
-		t.Skip("historyScans cannot count a re-scan's items at sjawhar/ygo v1.51.3-sami.5, which reports no scan count; this runs once it reads one from the re-scan's transaction")
+		t.Skip("historyScans cannot count a re-scan's items at sjawhar/ygo v1.51.3-sami.6, which reports no scan count; this runs once it reads one from the re-scan's transaction")
 	}
 	if scans+honestHandoffScans < roomScanTotal {
 		t.Fatalf("the tangled history re-scans %d items, want it within %d of the %d scan total: tangle it further", scans, honestHandoffScans, roomScanTotal)

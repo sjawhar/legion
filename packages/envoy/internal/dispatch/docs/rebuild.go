@@ -47,8 +47,8 @@ const honestHandoffScans = 35_800
 
 // historyScans is how many items a re-scan of history's state scans - its encoded state applied
 // into a fresh document in one transaction - and whether that could be counted. ygo
-// v1.51.3-sami.5 reports no such count: it bounds the scans of a remote apply
-// (SetMaxIntegrateScan, sjawhar/ygo v1.51.3-sami.5, crdt/doc.go:116-142) and reports only whether
+// v1.51.3-sami.6 reports no such count: it bounds the scans of a remote apply
+// (SetMaxIntegrateScan, sjawhar/ygo v1.51.3-sami.6, crdt/doc.go:141-167) and reports only whether
 // an apply passed the bound, so a count would take a fresh decode of the whole history for each
 // bound tried. So no history is counted, and nearACap never finds one near the scan total.
 func historyScans(_ *crdt.Doc) (uint64, bool) {

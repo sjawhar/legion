@@ -132,25 +132,33 @@ require (
 )
 
 // The sjawhar/ygo fork is upstream ygo v1.51.2 plus fixes Dispatch depends on while each waits in
-// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291, #304, #331, #332;
-// the fork carries #258's fix as its own closed duplicate, #262): an iterative delete cascade and
-// nested reads, so the stack a delete or read needs does not grow with a tree a peer nested; the
-// transactional GC range search; a whole document state resolves its own dependencies before the
-// pending cap, through a dependency worklist rather than a re-scan per step; items merge only when
-// their right origins match, so a re-encoded document keeps its text order; the bundled stores
-// keep a large incremental update, and BroadcastUpdate and the cluster relay check one with the
-// stores' check rather than refusing it past a pending cap; Apply stamps a room with no peer idle
-// when it returns, so the idle sweep evicts a room only the API touched; a Hocuspocus-framed
-// connection is answered one SyncStatus for each SyncStep2 or Update it sends, so the browser's
-// provider learns which of its edits the room took; Server.OnPeerUpdate (#304) runs in place of
-// the room's own apply of a read-write peer's SyncStep2 or Update, so the server can refuse one
-// before it reaches the room or any other peer, or hold a lock of its own across the apply;
-// CloseRoom (#331) closes a browser that connects while it runs, which it used to leave on the
-// room it removed, where no later edit reached it; Doc.OpenUpdateLog (#332) logs each committed
-// transaction's update in commit order under the document's own lock, so the room's update
-// observer measures each update against the room the commit before it left; and a document can
-// bound the items one remote update's integration scans (SetMaxIntegrateScan), refusing an update
-// that scans past it with ErrIntegrateScanBudget and leaving the document as it was, while split
-// runs of one item merge back in one linear pass rather than a pass per run. A merged update's
-// skip parking the items after it (reearth/ygo#257) is upstream since v1.51.0.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.5
+// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291, #304, #331, #332,
+// #333, and three still to be opened; the fork carries #258's fix as its own closed duplicate,
+// #262): an iterative delete cascade and nested reads, so the stack a delete or read needs does not
+// grow with a tree a peer nested; the transactional GC range search; a whole document state
+// resolves its own dependencies before the pending cap, through a dependency worklist rather than a
+// re-scan per step; items merge only when their right origins match, so a re-encoded document
+// keeps its text order; the bundled stores keep a large incremental update, and BroadcastUpdate and
+// the cluster relay check one with the stores' check rather than refusing it past a pending cap;
+// Apply stamps a room with no peer idle when it returns, so the idle sweep evicts a room only the
+// API touched; a Hocuspocus-framed connection is answered one SyncStatus for each SyncStep2 or
+// Update it sends, so the browser's provider learns which of its edits the room took;
+// Server.OnPeerUpdate (#304) runs in place of the room's own apply of a read-write peer's SyncStep2
+// or Update, so the server can refuse one before it reaches the room or any other peer, or hold a
+// lock of its own across the apply; CloseRoom (#331) closes a browser that connects while it runs,
+// which it used to leave on the room it removed, where no later edit reached it;
+// Doc.OpenUpdateLog (#332) logs each committed transaction's update in commit order under the
+// document's own lock, so the room's update observer measures each update against the room the
+// commit before it left; a document can bound the items one remote update's integration scans
+// (SetMaxIntegrateScan, #333), refusing an update that scans past it with ErrIntegrateScanBudget
+// and leaving the document as it was, while split runs of one item merge back in one linear pass
+// rather than a pass per run; a bounded document's remote apply keeps what earlier updates parked
+// by reference rather than copying it, so an apply costs nothing in proportion to the parked queue;
+// parked delete ranges are retried only once the structs they name can have arrived, and the
+// pending cap (WithMaxPendingItems, Doc.SetMaxPendingItems, Server.MaxPendingItems) caps them
+// apart from parked items, while the websocket server decodes a room's stored state with the cap
+// lifted and sets the cap before OnLoadDocument and any peer's update; and the items a remote
+// update defers integrate in dependency order, each retried only once what it waits on arrives,
+// rather than all of them in a pass per link. A merged update's skip parking the items after it
+// (reearth/ygo#257) is upstream since v1.51.0.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.6
