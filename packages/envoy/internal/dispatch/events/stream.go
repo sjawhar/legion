@@ -20,10 +20,12 @@ const streamBuffer = 64
 // The reader's live feed is a Stream of its own, held by the event stream relay
 // (api/event_stream_relay.go) and published into only by that relay, from the rows it reads back
 // out of Postgres once they have committed. Nothing at a write site publishes into it, so an open
-// SSE connection sees exactly the rows the database holds, in the id order the commit-order lock
-// gives them (Broker.Append) — including the events another envoy-dispatch process committed,
-// which no in-process fan-out can carry. Broker holds a Stream of its own for the subscribers
-// that do want this process's own writes: the outbox's local wake and the delivery hub's intake.
+// SSE connection sees exactly the rows the database holds, including the events another
+// envoy-dispatch process committed, which no in-process fan-out can carry. Writes to different
+// owners can commit out of id order (Broker.Append), so the relay reads only up to the safe
+// horizon (Horizon), below which every event is final, and publishes in id order. Broker holds a
+// Stream of its own for the subscribers that do want this process's own writes: the outbox's
+// local wake and the delivery hub's intake.
 type Stream struct {
 	mu          sync.Mutex
 	nextID      uint64

@@ -378,3 +378,195 @@ func TestConcurrentAppendsKeepOwnerSequencesDense(t *testing.T) {
 		})
 	}
 }
+
+// seedEventOwners creates one of every kind of event owner: project PP, issues PP-1 and PP-2,
+// and an unlinked artifact of PP, whose id it returns.
+func seedEventOwners(t *testing.T, database *store.Store) string {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('PP', 'Project');
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values
+			('PP-1', 'PP', 1, 'One', '{"kind":"user","id":"alice"}', 'U'),
+			('PP-2', 'PP', 2, 'Two', '{"kind":"user","id":"alice"}', 'V');
+	`); err != nil {
+		t.Fatalf("seed project and issues: %v", err)
+	}
+	var artifactID string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into artifacts (project_key, slug, name, kind, created_by)
+		values ('PP', 'notes-md', 'notes.md', 'doc', '{"kind":"user","id":"alice"}')
+		returning id::text
+	`).Scan(&artifactID); err != nil {
+		t.Fatalf("create unlinked artifact: %v", err)
+	}
+	return artifactID
+}
+
+func issueUpdated(key string) model.Event {
+	return model.Event{
+		IssueKey: new(key), Type: "issue.updated", Actor: model.Actor{Kind: "user", ID: "alice"}, Payload: map[string]any{},
+	}
+}
+
+// A write on one issue must never wait for an open write on another. Append once took one
+// database-wide lock until commit as well as the owner's row, so a single slow write anywhere
+// held up every other write in Dispatch; it now locks only the owner's row. The second write
+// here must commit while the first is still open, with no backend ever seen waiting on a lock.
+func TestAppendsOnDifferentIssuesDoNotWaitForEachOther(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	seedEventOwners(t, database)
+	broker := NewBroker()
+
+	open, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the open write: %v", err)
+	}
+	defer open.Rollback(context.Background())
+	first, err := broker.Append(ctx, open, issueUpdated("PP-1"))
+	if err != nil {
+		t.Fatalf("append on PP-1: %v", err)
+	}
+
+	// The deadline is a ceiling on a hang, not a measure of speed: a write that waits for the
+	// open one waits until that one ends, which is only after this test gives up on it.
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	written := make(chan error, 1)
+	var second model.Event
+	go func() {
+		tx, err := database.Pool.Begin(writeCtx)
+		if err != nil {
+			written <- err
+			return
+		}
+		defer tx.Rollback(context.Background())
+		if second, err = broker.Append(writeCtx, tx, issueUpdated("PP-2")); err != nil {
+			written <- err
+			return
+		}
+		written <- tx.Commit(writeCtx)
+	}()
+
+	// Lock waits are counted for as long as the second write runs, while the first stays open:
+	// a write that queued behind any lock of the first's would show here even if it then got
+	// through before the deadline.
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	waits := 0
+	for running := true; running; {
+		select {
+		case err := <-written:
+			if err != nil {
+				t.Fatalf("append on PP-2 while PP-1's write is open: %v (backends seen waiting on a lock: %d)", err, waits)
+			}
+			running = false
+		case <-poll.C:
+			count, err := storetest.CountLockWaits(ctx, database, "%")
+			if err != nil {
+				t.Fatal(err)
+			}
+			waits = max(waits, count)
+		}
+	}
+	if waits != 0 {
+		t.Fatalf("append on PP-2 committed, but %d backend(s) waited on a lock while PP-1's write was open", waits)
+	}
+	var visible bool
+	if err := database.Pool.QueryRow(ctx, `select exists (select 1 from events where id = $1)`, second.ID).Scan(&visible); err != nil {
+		t.Fatalf("read PP-2's event: %v", err)
+	}
+	if !visible {
+		t.Fatalf("PP-2's event %d is not visible after its commit", second.ID)
+	}
+	if second.ID <= first.ID {
+		t.Fatalf("PP-2's event id %d is not above the open PP-1 event's %d", second.ID, first.ID)
+	}
+}
+
+// One owner's events must commit in id order, and its sequence with them: a reader of one
+// issue's (or document's, or project's) events compares them by id and by seq, and the outbox
+// publishes them to the owner's subject in id order. With no database-wide lock, that order
+// rests on the owner row alone: a second write on the owner must wait for the first to commit,
+// and only then draw its id.
+func TestAppendsOnOneOwnerCommitInIDOrder(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := seedEventOwners(t, database)
+	broker := NewBroker()
+	actor := model.Actor{Kind: "user", ID: "alice"}
+	for _, owner := range []struct {
+		name  string
+		event model.Event
+	}{
+		{name: "issue", event: issueUpdated("PP-1")},
+		{name: "unlinked artifact", event: model.Event{
+			ArtifactID: new(artifactID), Type: "comment.created", Actor: actor, Payload: map[string]any{},
+		}},
+		{name: "project", event: model.Event{
+			ProjectKey: new("PP"), Type: "project.updated", Actor: actor, Payload: map[string]any{},
+		}},
+	} {
+		t.Run(owner.name, func(t *testing.T) {
+			// A ceiling on a hang, not a measure of speed.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			open, err := database.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin the first write: %v", err)
+			}
+			defer open.Rollback(context.Background())
+			first, err := broker.Append(ctx, open, owner.event)
+			if err != nil {
+				t.Fatalf("first append: %v", err)
+			}
+
+			written := make(chan error, 1)
+			var second model.Event
+			go func() {
+				tx, err := database.Pool.Begin(ctx)
+				if err != nil {
+					written <- err
+					return
+				}
+				defer tx.Rollback(context.Background())
+				if second, err = broker.Append(ctx, tx, owner.event); err != nil {
+					written <- err
+					return
+				}
+				written <- tx.Commit(ctx)
+			}()
+			if waiting := storetest.WaitForLockWaiters(t, open, 1, 10*time.Second); waiting < 1 {
+				t.Fatalf("the second write on the %s did not wait for the first's open transaction", owner.name)
+			}
+			if err := open.Commit(ctx); err != nil {
+				t.Fatalf("commit the first write: %v", err)
+			}
+			if err := <-written; err != nil {
+				t.Fatalf("second append: %v", err)
+			}
+			if second.ID <= first.ID || second.Seq != first.Seq+1 {
+				t.Fatalf("second write = id %d seq %d, first = id %d seq %d; want a higher id and the next seq",
+					second.ID, second.Seq, first.ID, first.Seq)
+			}
+		})
+	}
+}
+
+// The safe horizon's proof (horizon.go) needs nextval to hand event ids out in time order across
+// every backend, which holds only while events_id_seq caches one value: with a larger cache each
+// backend draws from a block of its own, a later write can hold a lower id, and a reader capped at
+// the horizon could pass an id that is still open and never read it.
+func TestEventIDSequenceCachesOneValue(t *testing.T) {
+	database := storetest.Open(t)
+	var cache int64
+	if err := database.Pool.QueryRow(context.Background(), `
+		select seqcache from pg_sequence where seqrelid = pg_get_serial_sequence('events', 'id')::regclass
+	`).Scan(&cache); err != nil {
+		t.Fatalf("read events_id_seq's cache: %v", err)
+	}
+	if cache != 1 {
+		t.Fatalf("events_id_seq caches %d values, want 1", cache)
+	}
+}
