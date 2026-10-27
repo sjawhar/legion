@@ -36,8 +36,8 @@
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-work=$(mktemp -d "/tmp/legion-e2ecc.$$.XXXXXXXX")
-evidence=${CLAUDE_E2E_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2ecc-evidence.XXXXXXXX)}
+work=$(mktemp -d "${TMPDIR:-/tmp}/legion-e2ecc.$$.XXXXXXXX")
+evidence=${CLAUDE_E2E_EVIDENCE_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/legion-e2ecc-evidence.XXXXXXXX")}
 if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
   echo "FAIL setup: $reason" >&2
   rmdir "$work"

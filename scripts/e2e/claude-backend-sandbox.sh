@@ -157,8 +157,8 @@
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-work=$(mktemp -d "/tmp/legion-e2eccs.$$.XXXXXXXX")
-evidence=${CLAUDE_SANDBOX_E2E_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2eccs-evidence.XXXXXXXX)}
+work=$(mktemp -d "${TMPDIR:-/tmp}/legion-e2eccs.$$.XXXXXXXX")
+evidence=${CLAUDE_SANDBOX_E2E_EVIDENCE_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/legion-e2eccs-evidence.XXXXXXXX")}
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 # shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
 . "$root/scripts/e2e/lib/transcript.sh"
