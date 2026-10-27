@@ -188,14 +188,21 @@ func dispatchListenerEnv(hostname, socks5Proxy, listenerSecret, url string) (cor
 		}
 		return nil, core.InputErrorf("natsUrl", "%s", strings.ReplaceAll(err.Error(), "natsUrls[0]", "natsUrl"))
 	}
-	values := make(corev1.EnvVarArray, 0, len(env)+2)
+	values := envVars(env)
+	values = append(values, valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"))
+	values = append(values, secretEnv("ENVOY_API_TOKEN", listenerSecret, "ENVOY_API_TOKEN"))
+	return values, nil
+}
+
+// envVars is env, core.ListenerConfig's NAME=value rendering, as a container's environment, in
+// its order.
+func envVars(env []string) corev1.EnvVarArray {
+	values := make(corev1.EnvVarArray, 0, len(env))
 	for _, item := range env {
 		name, value, _ := strings.Cut(item, "=")
 		values = append(values, valueEnv(name, value))
 	}
-	values = append(values, valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"))
-	values = append(values, secretEnv("ENVOY_API_TOKEN", listenerSecret, "ENVOY_API_TOKEN"))
-	return values, nil
+	return values
 }
 
 func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, args *DispatchArgs, s dispatchSettings, cloud *dispatchCloud) (*dispatchKubernetes, error) {
@@ -219,7 +226,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}
 	child := []pulumi.ResourceOption{pulumi.Parent(comp), pulumi.Provider(provider), pulumi.DependsOn([]pulumi.Resource{cloud.cluster})}
 	metadata := func(name string) *metav1.ObjectMetaArgs {
-		return &metav1.ObjectMetaArgs{Name: pulumi.String(name), Namespace: pulumi.String(s.namespace)}
+		return objectMeta(name, s.namespace)
 	}
 	if !s.existingNamespace {
 		if _, err := corev1.NewNamespace(ctx, s.namespace, &corev1.NamespaceArgs{Metadata: &metav1.ObjectMetaArgs{Name: pulumi.String(s.namespace)}}, child...); err != nil {
@@ -609,7 +616,7 @@ func ingressFrom(port int, peers networkingv1.NetworkPolicyPeerArray) networking
 // pods' labels, admitting what ingress names and nothing else.
 func networkPolicy(ctx *pulumi.Context, name, namespace string, pods map[string]string, ingress networkingv1.NetworkPolicyIngressRuleArray, opts ...pulumi.ResourceOption) error {
 	_, err := networkingv1.NewNetworkPolicy(ctx, name, &networkingv1.NetworkPolicyArgs{
-		Metadata: &metav1.ObjectMetaArgs{Name: pulumi.String(name), Namespace: pulumi.String(namespace)},
+		Metadata: objectMeta(name, namespace),
 		Spec: &networkingv1.NetworkPolicySpecArgs{
 			PodSelector: &metav1.LabelSelectorArgs{MatchLabels: pulumi.ToStringMap(pods)},
 			PolicyTypes: pulumi.StringArray{pulumi.String("Ingress")},
@@ -617,4 +624,9 @@ func networkPolicy(ctx *pulumi.Context, name, namespace string, pods map[string]
 		},
 	}, opts...)
 	return err
+}
+
+// objectMeta is the metadata of the object name in namespace.
+func objectMeta(name, namespace string) *metav1.ObjectMetaArgs {
+	return &metav1.ObjectMetaArgs{Name: pulumi.String(name), Namespace: pulumi.String(namespace)}
 }

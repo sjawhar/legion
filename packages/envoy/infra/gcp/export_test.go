@@ -1,10 +1,6 @@
 package gcp
 
-import (
-	"strconv"
-
-	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
-)
+import "strconv"
 
 // CloudConfig is the hub VM's cloud-config document, for the tests outside the package.
 type CloudConfig = cloudConfig
@@ -95,12 +91,8 @@ func ResolveClusteredNatsHub(args *ClusteredNatsHubArgs) (ClusteredNatsHubSettin
 	return settings, nil
 }
 
-// RefuseClusteredHubSecret is value, gcp:ClusteredNatsHub's secret Input input (kubeconfig or
-// tailnetAuthKey), as the hub named name reads it once it resolves: blank and seed refused by the
-// rule gcp:Dispatch's credentials run, refuseDispatchSeedInSecret.
-func RefuseClusteredHubSecret(value pulumi.StringInput, name, input string) pulumi.StringOutput {
-	return refuseDispatchSeedInSecret(value, clusteredHubType+" "+name, input)
-}
+// RefuseClusteredHubSecret is gcp:ClusteredNatsHub's check of a secret Input once it resolves.
+var RefuseClusteredHubSecret = refuseClusteredHubSecret
 
 // ProtectClusteredHubStatefulSet is gcp:ClusteredNatsHub's chart transform, for the test that
 // calls it directly: chart children are not registered under the mocks.

@@ -287,7 +287,7 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 	}
 	var hubListener *listenerUser
 	if args.Listener != nil {
-		hubListener = &listenerUser{machineID: args.Hostname, nkey: args.Listener.NKey, input: "listener.nkey"}
+		hubListener = &listenerUser{machineID: args.Hostname, nkey: args.Listener.NKey}
 	}
 	auth, err := authorization(args.Users, hubListener, args.SessionUser)
 	if err != nil {
@@ -478,12 +478,10 @@ func selectedUserKind(where string, u NATSUserArgs) (userKind, error) {
 }
 
 // listenerUser is the Envoy listener a hub renders a NATS user for: the listener's machine id,
-// which names the user and its grant, the public key of its seed, and the input that key came
-// from, which a refusal names.
+// which names the user and its grant, and the public key of its seed.
 type listenerUser struct {
 	machineID string
 	nkey      string
-	input     string
 }
 
 // authorization maps a hub's users onto core's, for both hubs, gcp:NatsHub and
@@ -539,7 +537,7 @@ func authorization(users []NATSUserArgs, l *listenerUser, session *SessionUserAr
 	}
 	if l != nil {
 		if l.nkey == "" {
-			return core.Authorization{}, fmt.Errorf("%s is required", l.input)
+			return core.Authorization{}, errors.New("listener.nkey is required")
 		}
 		perms := core.ListenerPermissions(l.machineID)
 		auth.Users = append(auth.Users, core.User{

@@ -286,28 +286,23 @@ func clusteredHubSeededInput(args *ClusteredNatsHubArgs) (string, bool) {
 		{"namespace", args.Namespace}, {"name", args.Name}, {"serviceName", args.ServiceName},
 		{"natsImage", args.NatsImage}, {"reloaderImage", args.ReloaderImage}, {"exporterImage", args.ExporterImage},
 	}
-	for _, f := range []struct {
-		path  string
-		value *string
-	}{
-		{"storageClassName", args.StorageClassName}, {"natsCpu", args.NatsCpu}, {"natsMemory", args.NatsMemory},
-		{"priorityClassName", args.PriorityClassName},
-	} {
-		if f.value != nil {
-			fields = append(fields, field{f.path, *f.value})
+	opt := func(path string, value *string) {
+		if value != nil {
+			fields = append(fields, field{path, *value})
 		}
 	}
-	for _, list := range []struct {
-		input  string
-		values []string
-	}{
-		{"clientNamespaces", args.ClientNamespaces}, {"monitorNamespaces", args.MonitorNamespaces},
-		{"metricsNamespaces", args.MetricsNamespaces},
-	} {
-		for i, value := range list.values {
-			fields = append(fields, field{fmt.Sprintf("%s[%d]", list.input, i), value})
+	list := func(input string, values []string) {
+		for i, value := range values {
+			fields = append(fields, field{fmt.Sprintf("%s[%d]", input, i), value})
 		}
 	}
+	opt("storageClassName", args.StorageClassName)
+	opt("natsCpu", args.NatsCpu)
+	opt("natsMemory", args.NatsMemory)
+	opt("priorityClassName", args.PriorityClassName)
+	list("clientNamespaces", args.ClientNamespaces)
+	list("monitorNamespaces", args.MonitorNamespaces)
+	list("metricsNamespaces", args.MetricsNamespaces)
 	for i, u := range args.Users {
 		for _, kind := range userKinds(u) {
 			if kind.id != nil {
@@ -318,25 +313,14 @@ func clusteredHubSeededInput(args *ClusteredNatsHubArgs) (string, bool) {
 	if t := args.Tailnet; t != nil {
 		fields = append(fields, field{"tailnet.serviceName", t.ServiceName}, field{"tailnet.tailnetDnsName", t.TailnetDnsName},
 			field{"tailnet.tailscaleImage", t.TailscaleImage})
-		for i, tag := range t.Tags {
-			fields = append(fields, field{fmt.Sprintf("tailnet.tags[%d]", i), tag})
-		}
+		list("tailnet.tags", t.Tags)
 		if l := t.Listener; l != nil {
 			fields = append(fields, field{"tailnet.listener.image", l.Image},
 				field{"tailnet.listener.seedSecretName", l.SeedSecretName}, field{"tailnet.listener.seedSecretKey", l.SeedSecretKey})
-			for _, f := range []struct {
-				path  string
-				value *string
-			}{
-				{"tailnet.listener.machineId", l.MachineID}, {"tailnet.listener.cpu", l.Cpu}, {"tailnet.listener.memory", l.Memory},
-			} {
-				if f.value != nil {
-					fields = append(fields, field{f.path, *f.value})
-				}
-			}
-			for i, entry := range l.AllowedHosts {
-				fields = append(fields, field{fmt.Sprintf("tailnet.listener.allowedHosts[%d]", i), entry})
-			}
+			opt("tailnet.listener.machineId", l.MachineID)
+			opt("tailnet.listener.cpu", l.Cpu)
+			opt("tailnet.listener.memory", l.Memory)
+			list("tailnet.listener.allowedHosts", l.AllowedHosts)
 		}
 	}
 	for _, f := range fields {
@@ -462,14 +446,15 @@ func newClusteredHubSettings(args *ClusteredNatsHubArgs) (clusteredHubSettings, 
 //     streamMaxBytes.
 func hubSizing(args *ClusteredNatsHubArgs) (clusteredHubSize, error) {
 	defaultMemoryGi := int64(defaultClusteredHubNatsMemoryGi)
-	var storeGiB, memoryFloor *big.Rat // S in GiB and F in bytes; nil without streamMaxBytes
-	var storeGb int                    // ⌈S⌉
+	var limit, storeGiB, memoryFloor, memoryFloorGiB *big.Rat // streamMaxBytes, S in GiB, F in bytes and in GiB; nil without streamMaxBytes
+	var storeGb int                                           // ⌈S⌉
 	if args.StreamMaxBytes != nil {
-		limit := new(big.Rat).SetInt64(int64(*args.StreamMaxBytes))
+		limit = new(big.Rat).SetInt64(int64(*args.StreamMaxBytes))
 		storeGiB = new(big.Rat).Quo(clusteredHubStoreBytes(limit), gibibyte)
 		storeGb = int(ceilRat(storeGiB).Int64())
 		memoryFloor = clusteredHubMemoryFloor(limit)
-		defaultMemoryGi = max(defaultMemoryGi, ceilRat(new(big.Rat).Quo(memoryFloor, gibibyte)).Int64())
+		memoryFloorGiB = new(big.Rat).Quo(memoryFloor, gibibyte)
+		defaultMemoryGi = max(defaultMemoryGi, ceilRat(memoryFloorGiB).Int64())
 	}
 	size := clusteredHubSize{diskSizeGb: defaultClusteredHubDiskSizeGb}
 	if args.DiskSizeGb != nil {
@@ -512,9 +497,9 @@ func hubSizing(args *ClusteredNatsHubArgs) (clusteredHubSize, error) {
 	}
 	memory, _ := quantityValue(size.natsMemory) // a quantity: autopilotPodSize has read it
 	if memoryFloor != nil && memory.Cmp(memoryFloor) < 0 {
-		messages := new(big.Rat).Quo(new(big.Rat).SetInt64(int64(*args.StreamMaxBytes)), clusteredHubMeanMessageBytes)
+		messages := new(big.Rat).Quo(limit, clusteredHubMeanMessageBytes)
 		return clusteredHubSize{}, core.InputErrorf("natsMemory", "natsMemory %q is below the %s GiB that streamMaxBytes %d needs: nats-server holds the id of each of the stream's %s messages at that limit for its duplicate window, %s B each, beside its idle memory, and runs with GOMEMLIMIT at 80%% of natsMemory; leave it unset for %dGi",
-			size.natsMemory, ceilDecimals(new(big.Rat).Quo(memoryFloor, gibibyte), 2), *args.StreamMaxBytes,
+			size.natsMemory, ceilDecimals(memoryFloorGiB, 2), *args.StreamMaxBytes,
 			messages.FloatString(0), clusteredHubMessageIDBytes.FloatString(1), defaultMemoryGi)
 	}
 	size.goMemLimit = clusteredHubGoMemLimit(memory)
@@ -739,7 +724,7 @@ func newClusteredHubTailnet(args *ClusteredNatsHubArgs, s clusteredHubSettings) 
 	tailnet.listener = listener
 	tailnet.natsURL = fmt.Sprintf("nats://%s:%d", host, natsPort)
 	tailnet.envoyURL = fmt.Sprintf("http://%s:%d", host, core.DefaultListenerPort)
-	return tailnet, &listenerUser{machineID: machineID, nkey: l.NKey, input: "tailnet.listener.nkey"}, nil
+	return tailnet, &listenerUser{machineID: machineID, nkey: l.NKey}, nil
 }
 
 // authorizationRefusal is a refusal of the users' rendering as a core.InputError: one that already

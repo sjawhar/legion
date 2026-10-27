@@ -732,7 +732,7 @@ func autopilotPodSize(pod autopilotPod) (cpu, memory string, err error) {
 			pod.memoryInput, memory, mebibytes(new(big.Rat).Sub(autopilotPodMaxMemory, sidecarMemory)), with(memoryOf), pod.name)
 	}
 	gibPerCPU := new(big.Rat).Quo(podMemory, podCPU)
-	gibPerCPU.Quo(gibPerCPU, new(big.Rat).SetInt64(1<<30))
+	gibPerCPU.Quo(gibPerCPU, gibibyte)
 	if gibPerCPU.Cmp(autopilotMinGiBPerCPU) >= 0 && gibPerCPU.Cmp(autopilotMaxGiBPerCPU) <= 0 {
 		return cpu, memory, nil
 	}

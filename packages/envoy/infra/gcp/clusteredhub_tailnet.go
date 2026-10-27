@@ -3,7 +3,6 @@ package gcp
 import (
 	"fmt"
 	"strconv"
-	"strings"
 
 	appsv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/apps/v1"
 	corev1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/core/v1"
@@ -61,6 +60,10 @@ const (
 	clusteredHubAdvertiserMemory = "64Mi"
 )
 
+// clusteredHubListenerHealthURL is the session listener's /healthz on the tailnet host pod's
+// loopback, which the advertiser and the listener's own probe read.
+var clusteredHubListenerHealthURL = fmt.Sprintf("http://127.0.0.1:%d/healthz", core.DefaultListenerPort)
+
 // clusteredHubTailnetHost is the tailnet hosts' Tailscale Service host: svc:<tailnet.serviceName>,
 // joined with the component's auth key and the tags, serving the TCP serve config mounted from
 // ConfigMap <name>-tailnet, and advertised only while the pod's own session listener answers 200
@@ -69,12 +72,12 @@ func clusteredHubTailnetHost(s clusteredHubSettings) tailnetServiceHost {
 	return tailnetServiceHost{
 		paths:         tailnetServicePaths{mount: clusteredHubTailnetStateMount},
 		name:          s.tailnet.serviceName,
-		authKeySecret: s.name + "-tailnet-authkey",
+		authKeySecret: clusteredHubTailnetName(s.name) + "-authkey",
 		authKeyKey:    clusteredHubTailnetAuthKeyKey,
 		tags:          s.tailnet.tags,
 		serveConfig:   clusteredHubTailnetServeMount + "/" + clusteredHubTailnetServeFile,
 		graceSeconds:  clusteredHubTailnetGraceSeconds,
-		health:        fmt.Sprintf("http://127.0.0.1:%d/healthz", core.DefaultListenerPort),
+		health:        clusteredHubListenerHealthURL,
 	}
 }
 
@@ -102,7 +105,7 @@ func clusteredHubListenerProbe(periodSeconds, failureThreshold int) *corev1.Prob
 	return &corev1.ProbeArgs{
 		Exec: &corev1.ExecActionArgs{Command: pulumi.ToStringArray([]string{
 			"curl", "-sS", "-o", "/dev/null", "--max-time", strconv.Itoa(tailnetHealthTimeoutSeconds),
-			fmt.Sprintf("http://127.0.0.1:%d/healthz", core.DefaultListenerPort),
+			clusteredHubListenerHealthURL,
 		})},
 		PeriodSeconds:    pulumi.Int(periodSeconds),
 		TimeoutSeconds:   pulumi.Int(tailnetHealthTimeoutSeconds + 1),
@@ -114,12 +117,7 @@ func clusteredHubListenerProbe(periodSeconds, failureThreshold int) *corev1.Prob
 // core.ListenerConfig, in its order, and the seed file mounted from the operator's Secret. No
 // ENVOY_API_TOKEN: the listener serves /v1 on loopback alone, where it takes no bearer.
 func clusteredHubListenerEnv(l clusteredHubListener) corev1.EnvVarArray {
-	env := make(corev1.EnvVarArray, 0, len(l.env)+1)
-	for _, entry := range l.env {
-		name, value, _ := strings.Cut(entry, "=")
-		env = append(env, valueEnv(name, value))
-	}
-	return append(env, valueEnv("NATS_NKEY_SEED_FILE", clusteredHubListenerSeedMount+"/"+clusteredHubListenerSeedFile))
+	return append(envVars(l.env), valueEnv("NATS_NKEY_SEED_FILE", clusteredHubListenerSeedMount+"/"+clusteredHubListenerSeedFile))
 }
 
 // clusteredHubTailnetPod is a tailnet host's pod: the tailscale container serving the Service,
@@ -129,7 +127,7 @@ func clusteredHubListenerEnv(l clusteredHubListener) corev1.EnvVarArray {
 func clusteredHubTailnetPod(s clusteredHubSettings) corev1.PodSpecArgs {
 	t := s.tailnet
 	host := clusteredHubTailnetHost(s)
-	name := s.name + "-tailnet"
+	name := clusteredHubTailnetName(s.name)
 	hosts := clusteredHubTailnetSelector(s.name)
 	stateMount := corev1.VolumeMountArgs{Name: pulumi.String("state"), MountPath: pulumi.String(host.paths.mount)}
 	spread := func(key string) corev1.TopologySpreadConstraintArgs {
@@ -225,27 +223,24 @@ func clusteredHubTailnetPod(s clusteredHubSettings) corev1.PodSpecArgs {
 // class read, when there is one.
 func newClusteredHubTailnetHosts(ctx *pulumi.Context, name string, authKey pulumi.StringInput, s clusteredHubSettings, classRead []pulumi.Resource, opts ...pulumi.ResourceOption) error {
 	t := s.tailnet
-	tailnetName := s.name + "-tailnet"
+	tailnetName := clusteredHubTailnetName(s.name)
 	host := clusteredHubTailnetHost(s)
-	metadata := func(name string) *metav1.ObjectMetaArgs {
-		return &metav1.ObjectMetaArgs{Name: pulumi.String(name), Namespace: pulumi.String(s.namespace)}
-	}
 	secret, err := corev1.NewSecret(ctx, host.authKeySecret, &corev1.SecretArgs{
-		Metadata:   metadata(host.authKeySecret),
-		StringData: pulumi.StringMap{host.authKeyKey: refuseDispatchSeedInSecret(authKey, clusteredHubType+" "+name, "tailnetAuthKey")},
+		Metadata:   objectMeta(host.authKeySecret, s.namespace),
+		StringData: pulumi.StringMap{host.authKeyKey: refuseClusteredHubSecret(authKey, name, "tailnetAuthKey")},
 	}, opts...)
 	if err != nil {
 		return err
 	}
 	serve, err := corev1.NewConfigMap(ctx, tailnetName, &corev1.ConfigMapArgs{
-		Metadata: metadata(tailnetName),
+		Metadata: objectMeta(tailnetName, s.namespace),
 		Data:     pulumi.StringMap{clusteredHubTailnetServeFile: pulumi.String(clusteredHubServeConfig(s))},
 	}, opts...)
 	if err != nil {
 		return err
 	}
 	account, err := corev1.NewServiceAccount(ctx, tailnetName, &corev1.ServiceAccountArgs{
-		Metadata:                     metadata(tailnetName),
+		Metadata:                     objectMeta(tailnetName, s.namespace),
 		AutomountServiceAccountToken: pulumi.Bool(false),
 	}, opts...)
 	if err != nil {
@@ -255,7 +250,7 @@ func newClusteredHubTailnetHosts(ctx *pulumi.Context, name string, authKey pulum
 	// A new host is surged in and an old one stopped only once the new one serves the tailnet,
 	// so a rollout never takes a serving host away first.
 	if _, err := appsv1.NewDeployment(ctx, tailnetName, &appsv1.DeploymentArgs{
-		Metadata: metadata(tailnetName),
+		Metadata: objectMeta(tailnetName, s.namespace),
 		Spec: appsv1.DeploymentSpecArgs{
 			Replicas: pulumi.Int(t.replicas),
 			Strategy: deploymentStrategy(dispatchStrategy{
@@ -273,7 +268,7 @@ func newClusteredHubTailnetHosts(ctx *pulumi.Context, name string, authKey pulum
 	}
 	// A voluntary eviction takes one host at a time, and only while every other host serves.
 	_, err = policyv1.NewPodDisruptionBudget(ctx, tailnetName, &policyv1.PodDisruptionBudgetArgs{
-		Metadata: metadata(tailnetName),
+		Metadata: objectMeta(tailnetName, s.namespace),
 		Spec: &policyv1.PodDisruptionBudgetSpecArgs{
 			MaxUnavailable: pulumi.Int(1),
 			Selector:       &metav1.LabelSelectorArgs{MatchLabels: pods},

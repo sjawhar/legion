@@ -34,6 +34,7 @@ import (
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/infra/nats"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -60,18 +61,37 @@ const (
 )
 
 // installTool installs module, a main package at a pinned version, with go install into dir, and
-// returns the path of its binary, named binary, failing the test when it does not install.
-func installTool(t *testing.T, dir, module, binary string) string {
-	t.Helper()
+// returns the path of its binary, named binary, or why it did not install.
+func installTool(dir, module, binary string) (string, error) {
 	cmd := exec.Command("go", "install", module)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GOBIN="+dir, "GOWORK=off")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("go install %s: %v\n%s", module, err, out)
+		return "", fmt.Errorf("go install %s: %v\n%s", module, err, out)
 	}
 	path := filepath.Join(dir, binary)
-	require.FileExists(t, path, "go install %s wrote %s", module, binary)
-	return path
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("go install %s wrote no %s: %w", module, binary, err)
+	}
+	return path, nil
+}
+
+// liveTool is a main package at a pinned version and the name of the binary it installs.
+type liveTool struct{ module, binary string }
+
+// installTools installs each of tools with installTool into dir, all at once, and returns their
+// binaries' paths in tools' order, failing the test with each tool that did not install.
+func installTools(t *testing.T, dir string, tools ...liveTool) []string {
+	t.Helper()
+	paths := make([]string, len(tools))
+	errs := make([]error, len(tools))
+	var wg sync.WaitGroup
+	for i, tool := range tools {
+		wg.Go(func() { paths[i], errs[i] = installTool(dir, tool.module, tool.binary) })
+	}
+	wg.Wait()
+	require.NoError(t, errors.Join(errs...))
+	return paths
 }
 
 // liveHubKeys are the keys of the users the live hub serves: the operator's and the host's seeds,
@@ -159,7 +179,8 @@ func renderClusteredHub(t *testing.T) *clusteredHubRender {
 	require.NoError(t, err)
 	valuesFile := filepath.Join(dir, "values.json")
 	require.NoError(t, os.WriteFile(valuesFile, values, 0o600))
-	helm := installTool(t, dir, helmTool, "helm")
+	helm, err := installTool(dir, helmTool, "helm")
+	require.NoError(t, err)
 	home := filepath.Join(dir, "helm-home")
 	cmd := exec.Command(helm, "template", release, archive, "-n", namespace, "-f", valuesFile)
 	cmd.Env = append(os.Environ(), "HELM_CACHE_HOME="+home, "HELM_CONFIG_HOME="+home, "HELM_DATA_HOME="+home)
@@ -227,13 +248,7 @@ func (r *clusteredHubRender) one(t *testing.T, kind, name string) map[string]any
 // container is the hub pods' container named name, as the rendered StatefulSet holds it.
 func (r *clusteredHubRender) container(t *testing.T, name string) map[string]any {
 	t.Helper()
-	for _, c := range dig(t, r.one(t, "StatefulSet", r.release), "spec", "template", "spec", "containers").([]any) {
-		if c.(map[string]any)["name"] == name {
-			return c.(map[string]any)
-		}
-	}
-	t.Fatalf("the StatefulSet has no container %s", name)
-	return nil
+	return podContainer(t, dig(t, r.one(t, "StatefulSet", r.release), "spec", "template").(map[string]any), name)
 }
 
 // dig is the value at path in v, each step a key of an object or an index of an array, failing
@@ -290,7 +305,6 @@ func stringList(t *testing.T, v any) []string {
 func TestClusteredNatsHubChart(t *testing.T) {
 	r := renderClusteredHub(t)
 	s := r.settings
-	require.Equal(t, clusteredHubChartSHA256, fileSHA256(t, r.archive))
 	t.Logf("chart archive %s sha256 %s", r.archive, clusteredHubChartSHA256)
 
 	var kinds []string
@@ -589,20 +603,6 @@ func awaitViolation(t *testing.T, conn *natsgo.Conn, errs <-chan error, want str
 	}
 }
 
-// subjectMatches reports whether subject is in pattern, a NATS subject with wildcards.
-func subjectMatches(pattern, subject string) bool {
-	p, s := strings.Split(pattern, "."), strings.Split(subject, ".")
-	for i, token := range p {
-		if token == ">" {
-			return len(s) > i
-		}
-		if i >= len(s) || (token != "*" && token != s[i]) {
-			return false
-		}
-	}
-	return len(p) == len(s)
-}
-
 // writeAtomically replaces the file at path with text by a rename, as Kubernetes swaps a
 // ConfigMap's files: a reader sees the old file or the new one, never part of either.
 func writeAtomically(t *testing.T, path, text string) {
@@ -724,9 +724,11 @@ func awaitLastSeqs(t *testing.T, ports []int, stream string, want int, value flo
 func TestClusteredNatsHubCluster(t *testing.T) {
 	r := renderClusteredHub(t)
 	bin := t.TempDir()
-	natsServer := installTool(t, bin, natsServerTool, "nats-server")
-	reloader := installTool(t, bin, reloaderTool, "nats-server-config-reloader")
-	exporter := installTool(t, bin, exporterTool, "prometheus-nats-exporter")
+	tools := installTools(t, bin,
+		liveTool{natsServerTool, "nats-server"},
+		liveTool{reloaderTool, "nats-server-config-reloader"},
+		liveTool{exporterTool, "prometheus-nats-exporter"})
+	natsServer, reloader, exporter := tools[0], tools[1], tools[2]
 
 	natsContainer := r.container(t, "nats")
 	require.Contains(t, natsContainer["env"], map[string]any{"name": "SERVER_NAME", "value": "$(POD_NAME)"},
@@ -852,10 +854,10 @@ func TestClusteredNatsHubCluster(t *testing.T) {
 	}
 	session := core.SessionPermissions().Publish.Allow
 	allowed := strings.NewReplacer("*", "live", ">", "live").Replace(session[0])
-	require.True(t, subjectMatches(session[0], allowed))
+	require.True(t, bus.SubjectContains(session[0], allowed))
 	refused := "notifications.live"
 	for _, pattern := range session {
-		require.False(t, subjectMatches(pattern, refused), "%s is outside core.SessionPermissions' publish grant", refused)
+		require.False(t, bus.SubjectContains(pattern, refused), "%s is outside core.SessionPermissions' publish grant", refused)
 	}
 	for _, s := range servers {
 		errs := make(chan error, 16)

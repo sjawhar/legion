@@ -7,7 +7,6 @@ import (
 	kubernetes "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes"
 	apiextensions "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/apiextensions"
 	helmv4 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/helm/v4"
-	metav1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/meta/v1"
 	networkingv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/networking/v1"
 	schedulingv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/scheduling/v1"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -55,6 +54,19 @@ func clusteredHubTailnetSelector(release string) map[string]string {
 	}
 }
 
+// clusteredHubTailnetName is the name of the hub's tailnet hosts' Deployment, ConfigMap,
+// ServiceAccount and PodDisruptionBudget, and the stem of their auth key Secret's.
+func clusteredHubTailnetName(release string) string {
+	return release + "-tailnet"
+}
+
+// refuseClusteredHubSecret is value, gcp:ClusteredNatsHub's secret Input input (kubeconfig or
+// tailnetAuthKey), as the hub named name reads it once it resolves: blank and seed refused by the
+// rule gcp:Dispatch's credentials run, refuseDispatchSeedInSecret.
+func refuseClusteredHubSecret(value pulumi.StringInput, name, input string) pulumi.StringOutput {
+	return refuseDispatchSeedInSecret(value, clusteredHubType+" "+name, input)
+}
+
 // newClusteredHubKubernetes registers the hub's Kubernetes children, each the component's child
 // on the Kubernetes provider it builds from kubeconfig: the priority class read, the nats chart,
 // the hub pods' NetworkPolicy and their PodMonitoring and, with tailnet, the tailnet hosts
@@ -64,7 +76,7 @@ func newClusteredHubKubernetes(ctx *pulumi.Context, comp *ClusteredNatsHub, name
 	// replaces a ConfigMap whose data changes otherwise, deleting it first, and a hub pod
 	// scheduled in that window fails to mount its configuration.
 	provider, err := kubernetes.NewProvider(ctx, s.name+"-kubernetes", &kubernetes.ProviderArgs{
-		Kubeconfig:             refuseDispatchSeedInSecret(args.Kubeconfig, clusteredHubType+" "+name, "kubeconfig"),
+		Kubeconfig:             refuseClusteredHubSecret(args.Kubeconfig, name, "kubeconfig"),
 		EnableServerSideApply:  pulumi.Bool(true),
 		EnableConfigMapMutable: pulumi.Bool(true),
 	}, pulumi.Parent(comp))
@@ -105,7 +117,7 @@ func newClusteredHubKubernetes(ctx *pulumi.Context, comp *ClusteredNatsHub, name
 	}
 	_, err = apiextensions.NewCustomResource(ctx, s.name, &apiextensions.CustomResourceArgs{
 		ApiVersion: pulumi.String("monitoring.googleapis.com/v1"), Kind: pulumi.String("PodMonitoring"),
-		Metadata: &metav1.ObjectMetaArgs{Name: pulumi.String(s.name), Namespace: pulumi.String(s.namespace)},
+		Metadata: objectMeta(s.name, s.namespace),
 		OtherFields: kubernetes.UntypedArgs{"spec": pulumi.Map{
 			"selector": pulumi.Map{"matchLabels": pulumi.ToStringMap(hubPods)},
 			"endpoints": pulumi.Array{pulumi.Map{

@@ -115,12 +115,6 @@ func TestClusteredNatsHubInstallsThePinnedChart(t *testing.T) {
 	}, chart)
 }
 
-// clusteredResources is a container's resources as chart values: request and limit equal.
-func clusteredResources(cpu, memory string) map[string]any {
-	size := map[string]any{"cpu": cpu, "memory": memory}
-	return map[string]any{"requests": size, "limits": size}
-}
-
 // wantChartValues is the chart's values for clusteredArgs, given no storage class, no priority
 // class and its session user: three clustered servers that advertise no pod address, JetStream
 // on a 10Gi claim holding at most 9Gi, no memory store, monitoring on 8222, auth.conf included
@@ -148,18 +142,18 @@ func wantChartValues(authConf string) map[string]any {
 		"configMap": map[string]any{"merge": map[string]any{"data": map[string]any{"auth.conf": authConf}}},
 		"container": map[string]any{
 			"image":     map[string]any{"fullImageName": natsImage},
-			"resources": clusteredResources("1", "2Gi"),
+			"resources": appResources("1", "2Gi"),
 			"env":       map[string]any{"GOMEMLIMIT": "1638MiB"},
 		},
 		"reloader": map[string]any{
 			"image": map[string]any{"fullImageName": reloaderImage},
-			"merge": map[string]any{"resources": clusteredResources("50m", "64Mi")},
+			"merge": map[string]any{"resources": appResources("50m", "64Mi")},
 		},
 		"promExporter": map[string]any{
 			"enabled":    true,
 			"image":      map[string]any{"fullImageName": exporterImage},
 			"podMonitor": map[string]any{"enabled": false},
-			"merge":      map[string]any{"resources": clusteredResources("50m", "128Mi")},
+			"merge":      map[string]any{"resources": appResources("50m", "128Mi")},
 		},
 		"service": map[string]any{"enabled": true, "name": "envoy-nats", "ports": ports},
 		"podTemplate": map[string]any{
@@ -204,7 +198,7 @@ func TestClusteredNatsHubChartValuesFollowTheSizes(t *testing.T) {
 	want["config"].(map[string]any)["jetstream"].(map[string]any)["fileStore"] = map[string]any{
 		"pvc": map[string]any{"size": "40Gi", "storageClassName": "premium-rwo"}, "maxSize": "30Gi",
 	}
-	want["container"].(map[string]any)["resources"] = clusteredResources("2", "4Gi")
+	want["container"].(map[string]any)["resources"] = appResources("2", "4Gi")
 	want["container"].(map[string]any)["env"] = map[string]any{"GOMEMLIMIT": "3276MiB"}
 	require.Equal(t, want, values)
 }
@@ -233,7 +227,7 @@ func TestClusteredNatsHubChartValuesFollowStreamMaxBytes(t *testing.T) {
 			want["config"].(map[string]any)["jetstream"].(map[string]any)["fileStore"] = map[string]any{
 				"pvc": map[string]any{"size": "53Gi"}, "maxSize": "47Gi",
 			}
-			want["container"].(map[string]any)["resources"] = clusteredResources("1", row.memory)
+			want["container"].(map[string]any)["resources"] = appResources("1", row.memory)
 			want["container"].(map[string]any)["env"] = map[string]any{"GOMEMLIMIT": row.goMemLimit}
 			require.Equal(t, want, chartValues(t, runClusteredHub(t, args)))
 		})
@@ -329,7 +323,7 @@ func TestClusteredNatsHubProtectsTheStatefulSetAlone(t *testing.T) {
 	require.Equal(t, []string{"example"}, got.Opts.IgnoreChanges, "the chart's own options stay")
 
 	for _, typ := range []string{
-		"kubernetes:core/v1:ConfigMap", "kubernetes:core/v1:Service", "kubernetes:policy/v1:PodDisruptionBudget", "kubernetes:apps/v1:Deployment",
+		configMapType, "kubernetes:core/v1:Service", podDisruptionBudgetType, deploymentType,
 	} {
 		require.Nil(t, gcp.ProtectClusteredHubStatefulSet(context.Background(), &pulumi.ResourceTransformArgs{
 			Custom: true, Type: typ, Name: "envoy-nats:envoy/envoy-nats", Props: props,
