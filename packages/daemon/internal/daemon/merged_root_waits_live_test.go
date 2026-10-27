@@ -1,10 +1,10 @@
 //go:build e2e
 
-// The live proof's driver for the two rules this change adds: an acceptance waits for the issues
-// beneath the issue being accepted (signOff's openBeneath), and a merged root's close waits for
-// the rest of its tree (closeMerged's openBeside, closeAwaitingRoot, and the boot's sweepMerged).
-// scripts/e2e/merged-root-waits.sh builds this driver with `-tags e2e` and owns the nats-server and
-// the PostgreSQL it runs against.
+// The live proof's driver for the rule that a merged root's close waits for the rest of its tree
+// (closeMerged's openBeside, closeAwaitingRoot, and the boot's sweepMerged), with the acceptance
+// that comes before it: nothing beneath the root holds its sign-off, since the close keeps the
+// tree's order. scripts/e2e/merged-root-waits.sh builds this driver with `-tags e2e` and owns the
+// nats-server and the PostgreSQL it runs against.
 //
 // The daemon is the whole daemon: run, the function `legion start` calls, through this package's
 // own whole-daemon harness (startDaemon), so the proof exercises the real configuration load, the
@@ -78,25 +78,21 @@ type mergedRootWaitsLive struct {
 	parentPR, childPR, openedPR int
 	// github is the REST and GraphQL root the daemon's workflow reads (mergedRootWaitsGitHub).
 	github string
-	// arch is the root's architect, the one session more than one step acts as: steps 1 and 6
-	// share its registration (architect).
+	// arch is the root's architect, the session step 1 accepts the root as (architect).
 	arch *mergedRootWaitsClaimant
 	// seq is the Dispatch sequence the next envelope the driver publishes carries.
 	seq int64
 }
 
-// TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive drives the seven steps of the proof against one
-// booted daemon, in the order each step's state follows from the last: the acceptance refused
-// while the child runs and accepted once it is out (the plan's steps 1 and 6, the second the
-// first's control, with the park the refusal itself names between them), then the root's merge
-// and its wait, the restart that must leave that wait as it was, the child's completion in the
-// wait — as the session the restart's own relaunch gave it — then a pull request opened from the
-// waiting root's branch, which must leave the merge the root waits on, and last the child's merge,
-// which closes the root on that merge.
+// TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive drives the six steps of the proof against one
+// booted daemon, in the order each step's state follows from the last: the root accepted while its
+// child runs, then the root's merge and its wait, the restart that must leave that wait as it was,
+// the child's completion in the wait — as the session the restart's own relaunch gave it — then a
+// pull request opened from the waiting root's branch, which must leave the merge the root waits
+// on, and last the child's merge, which closes the root on that merge.
 func TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive(t *testing.T) {
 	r := newMergedRootWaitsLive(t)
-	r.step("step1-the-acceptance-waits-for-the-child", r.acceptanceRefused)
-	r.step("step6-the-acceptance-lands-once-the-child-is-out", r.acceptanceAccepted)
+	r.step("step1-the-acceptance-lands-while-the-child-runs", r.acceptanceAccepted)
 	r.step("step2-the-merged-root-waits-for-its-child", r.rootMergeWaits)
 	r.step("step5-a-restart-leaves-the-wait-and-tells-no-one-again", r.restartLeavesTheWait)
 	r.step("step3-the-waiting-roots-child-completes-its-phase", r.childCompletesItsPhase)
@@ -356,54 +352,25 @@ func (r *mergedRootWaitsLive) waitFor(what, key string, want func(api.Issue) boo
 	return last
 }
 
-// Step 1. The architect accepts the root while the child is still in the workflow: the daemon
-// refuses 409 SIGNOFF_CHILD_IN_WORKFLOW, names the child and the way out, and writes nothing — the
-// root is still in accepting.
-func (r *mergedRootWaitsLive) acceptanceRefused() {
-	t := r.t
-	architect := r.architect()
-	status, body := r.d.request(http.MethodPost, "/legion/v1/signoff", api.SignOffRequest{GrantID: architect.grant(), Issue: r.parent}, false)
-	r.note("drove POST /legion/v1/signoff of %s with the architect's grant while %s implements", r.parent, r.child)
-	var failure api.Failure
-	if err := json.Unmarshal(body, &failure); err != nil {
-		t.Fatalf("decode the sign-off's answer %s: %v", body, err)
-	}
-	if status != http.StatusConflict || failure.Code != "SIGNOFF_CHILD_IN_WORKFLOW" {
-		t.Fatalf("the sign-off = %d %s, want 409 SIGNOFF_CHILD_IN_WORKFLOW", status, body)
-	}
-	for _, want := range []string{r.child, "park_child"} {
-		if !strings.Contains(failure.Error, want) {
-			t.Fatalf("the refusal %q does not name %q", failure.Error, want)
-		}
-	}
-	r.note("read back: %d %s — %s", status, failure.Code, failure.Error)
-	if got := r.issue(r.parent); got.Phase != phase.Accepting {
-		t.Fatalf("%s is in %s after the refused sign-off, want accepting", r.parent, got.Phase)
-	}
-	r.note("read back: %s is still in accepting in GET /legion/v1/state", r.parent)
-}
-
-// Step 6. The architect takes the child out of the workflow the way the refusal names — the park a
-// person makes from the Dispatch dashboard, relayed as the issue's own Dispatch event — and the
-// same sign-off is the acceptance it always was: the root reaches retro.
+// Step 1. The architect accepts the root while the child is still in the workflow: nothing beneath
+// the root holds its acceptance, so the sign-off answers 200 and the root reaches retro.
 func (r *mergedRootWaitsLive) acceptanceAccepted() {
 	t := r.t
-	r.publishChildPark("backlog")
-	r.note("drove the child's park: a notifications.dispatch.issue.%s.issue.updated envelope moving it to backlog", r.child)
-	r.waitFor("the child out of the workflow", r.child, func(got api.Issue) bool { return got.Status == "backlog" })
-	r.note("read back: %s is backlog in GET /legion/v1/state", r.child)
-
 	architect := r.architect()
 	status, body := r.d.request(http.MethodPost, "/legion/v1/signoff", api.SignOffRequest{GrantID: architect.grant(), Issue: r.parent}, false)
 	if status != http.StatusOK {
-		t.Fatalf("the sign-off with the child out = %d %s, want 200", status, body)
+		t.Fatalf("the sign-off while %s implements = %d %s, want 200", r.child, status, body)
 	}
-	r.note("drove POST /legion/v1/signoff of %s again: %d", r.parent, status)
+	r.note("drove POST /legion/v1/signoff of %s with the architect's grant while %s implements: %d", r.parent, r.child, status)
 	got := r.waitFor("the accepted root in retro", r.parent, func(got api.Issue) bool { return got.Phase == phase.Retro })
 	// The move's own Dispatch write is waited for here, so step 2's baseline of what the board has
 	// taken is not raced by the write this sign-off enqueued.
 	testwait.Eventually(t, "the sign-off's own retro status on the Dispatch stand-in", func() bool { return r.board.wrote(r.parent, "retro") })
 	r.note("read back: %s is in %s, status %s, and the Dispatch stand-in took its retro write", r.parent, got.Phase, got.Status)
+	if child := r.issue(r.child); child.Phase != phase.Implementing {
+		t.Fatalf("%s is in %s after its root's sign-off, want implementing: the acceptance changes nothing beneath it", r.child, child.Phase)
+	}
+	r.note("read back: %s still implements in GET /legion/v1/state", r.child)
 }
 
 // Step 2. The root's pull request merges while the child runs: the merge is recorded, the close
@@ -644,29 +611,4 @@ func (r *mergedRootWaitsLive) publishOpened(issue string, number int) string {
 	}
 	subject := "notifications.github." + r.subjectRepo() + ".pr." + fmt.Sprint(number)
 	return r.publish(subject, "github", fmt.Sprintf("pr-%d-opened", number), string(payload))
-}
-
-// publishChildPark publishes Dispatch's own issue.updated event moving the child to status, as a
-// person's move from the Dispatch dashboard makes one, on the next sequence the issue has seen.
-// Only the child is ever moved this way: the root's own moves are the daemon's.
-func (r *mergedRootWaitsLive) publishChildPark(status string) {
-	r.t.Helper()
-	key := r.child
-	// The event stands for a write already on Dispatch's board, so the board shows it first.
-	r.board.show(key, status)
-	r.seq++
-	parent := any(r.parent)
-	payload, err := json.Marshal(map[string]any{
-		"id": r.seq, "issue_key": key, "project": r.cfg.Project, "seq": r.seq, "type": "issue.updated",
-		"actor": map[string]string{"kind": "user", "id": "operator"}, "notify": true,
-		"created_at": time.Now().UTC().Format(time.RFC3339Nano),
-		"payload": map[string]any{
-			"key": key, "status": status, "title": "the child beneath it", "parent": parent, "rank": "V",
-			"labels": []string{}, "last_seq": r.seq, "project": r.cfg.Project, "resolved_repo": liveRepo,
-		},
-	})
-	if err != nil {
-		r.t.Fatalf("encode the Dispatch event: %v", err)
-	}
-	r.publish("notifications.dispatch.issue."+key+"."+"issue.updated", "dispatch", fmt.Sprintf("%s-%s-%d", key, status, r.seq), string(payload))
 }

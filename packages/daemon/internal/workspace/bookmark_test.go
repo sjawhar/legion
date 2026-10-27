@@ -156,7 +156,7 @@ func TestAForgottenMainsWayOutRunsAsPrintedFromAStateDirectoryHoldingASpace(t *t
 	run := newLocalRunner(t)
 	req := provisionRequest(t)
 	req.StateDir = filepath.Join(t.TempDir(), "legion state")
-	req.Source = FromGitHub("test-installation-token", req.StateDir)
+	req.Source = FromGitHub(staticToken("test-installation-token"), req.StateDir)
 	first, err := Provision(context.Background(), run, req)
 	if err != nil {
 		t.Fatalf("provision the shared clone: %v", err)
