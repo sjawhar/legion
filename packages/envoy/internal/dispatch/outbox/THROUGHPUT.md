@@ -67,10 +67,17 @@ through one process. Same file, same 2-core machine, 2026-10-27: "before" at the
 | Burst of 100 on one issue, drain | 1 | 981 ms (p50 9.7, p99 70.4) | | 863 ms (p50 16.7, p99 29.8) | |
 | Burst of 100 on one issue, drain | 2 | 728 ms (p50 10.1, p99 17.4) | | 1,462 ms (p50 17.7, p99 48.7) | |
 
-Every step delivered every written event, the role holder's included, before and after. The
-burst's drain time includes about one second of writing one comment after another. With NATS on
-the same host a chain's round trip is about a millisecond, so ordering per destination costs the
-steady steps nothing; the remote-latency rows above are where it costs.
+The tester ran the same harness at `63e05008` (the head after two merges of `main`) on the same
+kind of 2-core pod: 4 events/s p50 / p99 8.8 / 40.8 ms (one process) and 9.3 / 35.9 ms (two);
+40 events/s 39.99 published/s with p99 1,153.8 ms (one) and 1,106.0 ms (two); the burst drained in
+1,729 ms (one) and 732 ms (two). So the 40 events/s p99 moves between about 0.5 and 1.3 s from run
+to run on this machine, before and after, and these runs show no change in latency either way;
+the 530.4 ms reading above is one run, not an improvement.
+
+Every step delivered every written event, the role holder's included, before and after, in every
+run. The burst's drain time includes about one second of writing one comment after another. With
+NATS on the same host a chain's round trip is about a millisecond, so ordering per destination
+costs the steady steps nothing measurable; the remote-latency rows above are where it costs.
 
 ## Order and crash safety
 
