@@ -105,6 +105,9 @@
 #                                 anthropic-messages provider block in it to route through
 #                                 (install_provider_route); its apiKey is `!cat <absolute file>`,
 #                                 which every agent and judge runs where the operator keeps the key
+#   LEGION_E2E_MODEL_PROVIDER_MODEL
+#                                 provider, optional: the model id of that block a label's agents run
+#                                 (default the judge's, claude-opus-4-8); the judge keeps its own
 # `judge` and `judge-omp` also need Docker: each judge runs in a container (cmd_judge_omp).
 # Optional:
 #   SKILL_SCENARIOS_WORK      work directory, outside any checkout, and with no `.omp` in it or in
@@ -278,7 +281,7 @@ install_model_route() {
     }
     ;;
   provider)
-    install_provider_route "$profile" "$dir/home"
+    install_provider_route "$profile" "$dir/home" "${4:-$route_model_id}"
     ;;
   *)
     echo "LEGION_E2E_MODEL_ROUTE is '$LEGION_E2E_MODEL_ROUTE': it is gateway, key-file or provider" >&2
@@ -287,16 +290,17 @@ install_model_route() {
   esac
 }
 
-# install_provider_route PROFILE HOME writes the profile's models.yml and config.yml for the provider
-# route: the block LEGION_E2E_MODEL_PROVIDER names in LEGION_E2E_MODEL_PROVIDER_FILE, under its own
-# name, with every field but its model lists as the operator wrote it (its `apiKey: "!cat <file>"`
-# among them, so the key stays in the operator's file and no copy of it is written), and with one
-# model, the rig's, whose metadata Oh My Pi fills from its bundled catalog. Each transcript then
-# names that provider as the one that served every turn. The block must speak anthropic-messages
-# and read its key with `!cat` from an absolute path, which a judge's container mounts read-only.
-# models.yml is written as JSON, which YAML reads as it stands.
+# install_provider_route PROFILE HOME MODEL writes the profile's models.yml and config.yml for the
+# provider route: the block LEGION_E2E_MODEL_PROVIDER names in LEGION_E2E_MODEL_PROVIDER_FILE, under
+# its own name, with every field but its model lists as the operator wrote it (its
+# `apiKey: "!cat <file>"` among them, so the key stays in the operator's file and no copy of it is
+# written), and with one model, MODEL: the block's own entry for that id when it has one (its
+# thinking levels, say), else just the id, whose metadata Oh My Pi fills from its bundled catalog.
+# Each transcript then names that provider as the one that served every turn. The block must speak
+# anthropic-messages and read its key with `!cat` from an absolute path, which a judge's container
+# mounts read-only. models.yml is written as JSON, which YAML reads as it stands.
 install_provider_route() {
-  local profile=$1 home=$2 agent
+  local profile=$1 home=$2 model_id=$3 agent
   [ -n "${LEGION_E2E_MODEL_PROVIDER_FILE:-}" ] ||
     { echo "LEGION_E2E_MODEL_PROVIDER_FILE is unset: name the models.yml that holds the provider block" >&2 && return 1; }
   [ -n "${LEGION_E2E_MODEL_PROVIDER:-}" ] ||
@@ -315,11 +319,12 @@ install_provider_route() {
     if (typeof block.baseUrl !== "string" || block.baseUrl === "") fail(`provider ${name} has no baseUrl`);
     if (typeof block.apiKey !== "string" || !/^!cat \/\S+$/.test(block.apiKey))
       fail(`provider ${name} does not read its key as "!cat <absolute file>"`);
-    const { models: _m, modelOverrides: _o, discovery: _d, ...connection } = block;
-    const models = { providers: { [name]: { ...connection, models: [{ id: model }] } } };
+    const { models: listed, modelOverrides: _o, discovery: _d, ...connection } = block;
+    const entry = (Array.isArray(listed) ? listed : []).find((m) => m?.id === model) ?? { id: model };
+    const models = { providers: { [name]: { ...connection, models: [entry] } } };
     await Bun.write(out, `${JSON.stringify(models, null, 2)}\n`);
-  ' "$LEGION_E2E_MODEL_PROVIDER_FILE" "$LEGION_E2E_MODEL_PROVIDER" "$route_model_id" "$agent/models.yml" || return 1
-  local model=$LEGION_E2E_MODEL_PROVIDER/$route_model_id role
+  ' "$LEGION_E2E_MODEL_PROVIDER_FILE" "$LEGION_E2E_MODEL_PROVIDER" "$model_id" "$agent/models.yml" || return 1
+  local model=$LEGION_E2E_MODEL_PROVIDER/$model_id role
   {
     echo "# Written by rig.sh install_provider_route: $model is the one model, and no other provider"
     echo "# a session or a subagent could fall back to without a word is enabled."
@@ -395,8 +400,10 @@ cmd_profile() {
     fail "install-plugin-profile.sh --package pi-envoy failed; see $P/install.log"
   bash "$co/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$P/home" --dest "$P/pi-legion" >>"$P/install.log" 2>&1 ||
     fail "install-plugin-profile.sh --package pi-legion failed; see $P/install.log"
-  install_model_route "$co" "$profile" "$P" >>"$P/install.log" 2>&1 ||
+  install_model_route "$co" "$profile" "$P" "${LEGION_E2E_MODEL_PROVIDER_MODEL:-$route_model_id}" >>"$P/install.log" 2>&1 ||
     fail "the model route (${LEGION_E2E_MODEL_ROUTE:-gateway}) could not be installed; see $P/install.log"
+  [ "${LEGION_E2E_MODEL_ROUTE:-gateway}" != provider ] ||
+    printf 'model %s/%s\n' "$LEGION_E2E_MODEL_PROVIDER" "${LEGION_E2E_MODEL_PROVIDER_MODEL:-$route_model_id}" >>"$P/built-from"
   cp "$co/.omp-pin" "$P/pin"
   [ -z "${SKILL_SCENARIOS_SUPERPOWERS:-}" ] || install_superpowers "$P" "$profile" "$(<"$P/pin")"
   touch "$P/ready"

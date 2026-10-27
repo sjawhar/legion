@@ -51,15 +51,16 @@ function keyFile(mode: number): string {
   writeFileSync(file, "sk-ant-rig-test-0000000000000000\n", { mode });
   return file;
 }
-function route(dir: string, env: Record<string, string>) {
+function route(dir: string, env: Record<string, string>, model = "") {
   const result = Bun.spawnSync(
     [
       "bash",
       "-c",
-      `route_model_id=claude-opus-4-8\n${fn("install_model_route")}\n${fn("install_provider_route")}\ninstall_model_route "$1" skills-test "$2"`,
+      `route_model_id=claude-opus-4-8\n${fn("install_model_route")}\n${fn("install_provider_route")}\ninstall_model_route "$1" skills-test "$2" "$3"`,
       "-",
       root,
       dir,
+      model,
     ],
     { env: { ...childEnv, ...env } }
   );
@@ -122,6 +123,9 @@ describe("install_model_route", () => {
         "    authHeader: true",
         "    models:",
         "      - id: claude-opus-5-5",
+        "        thinking:",
+        "          mode: anthropic-adaptive",
+        "          efforts: [low, high]",
         "",
       ].join("\n")
     );
@@ -154,6 +158,30 @@ describe("install_model_route", () => {
     expect(config).toContain("  default: box-gateway/claude-opus-4-8\n");
     expect(config).toContain("  task: box-gateway/claude-opus-4-8\n");
     expect(existsSync(path.join(dir, "model-key"))).toBe(false);
+  });
+
+  test("provider with a model the block lists takes the block's own entry for it", () => {
+    const dir = profileDir();
+    const { code, stderr } = route(
+      dir,
+      {
+        LEGION_E2E_MODEL_ROUTE: "provider",
+        LEGION_E2E_MODEL_PROVIDER_FILE: providerFile("!cat /run/user/1000/box/gateway-key"),
+        LEGION_E2E_MODEL_PROVIDER: "box-gateway",
+      },
+      "claude-opus-5-5"
+    );
+    expect({ code, stderr: code === 0 ? "" : stderr }).toEqual({ code: 0, stderr: "" });
+    const agent = path.join(dir, "home/.omp/profiles/skills-test/agent");
+    expect(
+      JSON.parse(readFileSync(path.join(agent, "models.yml"), "utf8")).providers["box-gateway"]
+        .models
+    ).toEqual([
+      { id: "claude-opus-5-5", thinking: { mode: "anthropic-adaptive", efforts: ["low", "high"] } },
+    ]);
+    expect(readFileSync(path.join(agent, "config.yml"), "utf8")).toContain(
+      "  default: box-gateway/claude-opus-5-5\n"
+    );
   });
 
   test("provider without LEGION_E2E_MODEL_PROVIDER_FILE fails, naming the variable", () => {
