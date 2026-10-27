@@ -143,3 +143,31 @@ func TestAnUnchangedPointerIsNotRefusedWhenItsTargetIsRetyped(t *testing.T) {
 	}, "alice")
 	expectRefusal(t, "a new pointer to the retyped target", inserted, http.StatusBadRequest, "INVALID_OP", `"serves"`, `"callout"`, "requirement")
 }
+
+// A rebuild from supplied markdown writes that markdown, so a pointer it introduces to a block of
+// a type the attribute does not allow is refused before anything is written, and one to an
+// allowed block is rebuilt.
+func TestARebuildFromMarkdownRefusesABlockPointerToADisallowedType(t *testing.T) {
+	pmdoctest.UseBlockSchema(t, pmdoctest.BlockPointerSchema(nil))
+	handler, database, broken := newBrokenTestServer(t)
+	issue, _ := pointerSpec(t, handler)
+	if response := uploadChecks(t, handler, issue.Key, "Before.\n"); response.Code != http.StatusCreated {
+		t.Fatalf("upload checks.md: status=%d body=%s, want 201", response.Code, response.Body.String())
+	}
+	saved := readChecks(t, database, issue.Key)
+	rebuild := func(markdown string) *httptest.ResponseRecorder {
+		broken.failNextLoad(saved.ID)
+		return dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+saved.ID+"/rebuild", map[string]any{"markdown": markdown}, "alice")
+	}
+
+	k1 := "dispatch://" + issue.Key + "/spec#b-k1"
+	expectRefusal(t, "a rebuild pointing at a callout", rebuild(claimMarkdown("c1", k1)), http.StatusBadRequest, "INVALID_MARKDOWN", `"serves"`, k1, `"callout"`, "requirement")
+	if after := readChecks(t, database, issue.Key); !reflect.DeepEqual(after, saved) {
+		t.Fatalf("checks.md after a refused rebuild = %+v, want %+v unchanged", after, saved)
+	}
+
+	// The control: the same rebuild pointing at the requirement is written.
+	if rebuilt := rebuild(claimMarkdown("c1", "dispatch://"+issue.Key+"/spec#b-r1")); rebuilt.Code != http.StatusOK {
+		t.Fatalf("a rebuild pointing at a requirement: status=%d body=%s, want 200", rebuilt.Code, rebuilt.Body.String())
+	}
+}
