@@ -115,3 +115,33 @@ test("Conversation draws a message's lone-CR unknown block once, each line on it
     await alice.close();
   }
 });
+
+test("Conversation draws the unknown block of a message that starts with a byte-order mark", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Byte-order mark" });
+  // A message body is stored as sent, so a leading U+FEFF reaches the parser, which drops it
+  // before it counts offsets: the drawn fence lines must be cut from the same text.
+  await createMessage(
+    issue.key,
+    { body: "\ufeffLead **bold**\n\n:::a\nbody words\n:::\n\nAfter" },
+    agent
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+
+    const card = page.locator('[data-turn^="message:"]');
+    await expect(card).toHaveCount(1);
+    await expect(card.locator("strong").filter({ hasText: /^bold$/ })).toBeVisible();
+    for (const line of [":::a", "body words", ":::", "After"]) {
+      await expect(card.locator("p").filter({ hasText: new RegExp(`^${line}$`) })).toHaveCount(1);
+    }
+    await expect(card.locator("[data-markdown-fallback]")).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
