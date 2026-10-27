@@ -2,6 +2,7 @@ package supervise
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -184,6 +185,30 @@ func TestAnArchitectAndTheControllerAreNeverIdleSuspended(t *testing.T) {
 			h.wantState(StateIdle)
 			h.wantCalls("Suspend", 0)
 		})
+	}
+}
+
+// Which roles the idle suspend is for, in one place: the five phase workers, and nothing else.
+// The daemon reads the same answer when it decides whether a message that found no holder may
+// resume the worker it names (internal/daemon's wakeIdleSuspendedRole), so a role moved into or
+// out of the list moves both.
+func TestTheIdleSuspendIsForEveryPhaseWorkerAndNoOtherRole(t *testing.T) {
+	want := map[claim.Role]bool{
+		claim.RolePlanner:     true,
+		claim.RoleImplementer: true,
+		claim.RoleTester:      true,
+		claim.RoleReviewer:    true,
+		claim.RoleMerger:      true,
+		claim.RoleArchitect:   false,
+		claim.RoleController:  false,
+	}
+	for _, role := range append(slices.Clone(claim.Roles), claim.RoleController) {
+		if got := IdleSuspendable(role); got != want[role] {
+			t.Errorf("IdleSuspendable(%s) = %t, want %t", role, got, want[role])
+		}
+	}
+	if len(want) != len(claim.Roles)+1 {
+		t.Fatalf("%d roles are judged here, want every one of claim.Roles and the controller", len(want))
 	}
 }
 

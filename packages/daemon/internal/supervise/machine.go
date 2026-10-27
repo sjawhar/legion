@@ -1217,7 +1217,7 @@ func (m *Machine) armRegistration() {
 	m.arm(TimerRegistration, runtime.RegistrationDeadline(m.deps.Timeouts.Boot, m.deps.Timeouts.RegistrationIntervals, grace), "")
 }
 
-// idleSuspendable is whether the idle suspend is for a claim's role at all: a phase worker's,
+// IdleSuspendable is whether the idle suspend is for a claim's role at all: a phase worker's,
 // which runs its phase's turns and is handed its next task by the workflow, which resumes it by
 // rule wherever it left off. An architect's and the project controller's are not, and the reason
 // is the resume rather than the wait: nothing resumes an architect by rule — the boot's resume
@@ -1228,7 +1228,11 @@ func (m *Machine) armRegistration() {
 // its tree waiting for its own events, not a worker holding a process for nothing; so is the
 // controller, which the keeper, not a wait, decides the life of. A role added later is outside
 // the list until it is put in it on purpose.
-func idleSuspendable(role claim.Role) bool {
+//
+// It is exported because the daemon reads it too: a message that finds no holder on a role topic
+// is answered by resuming the worker only when the idle suspend is what took its process
+// (internal/daemon's wakeIdleSuspendedRole).
+func IdleSuspendable(role claim.Role) bool {
 	switch role {
 	case claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger:
 		return true
@@ -1249,9 +1253,9 @@ func idleSuspendable(role claim.Role) bool {
 // not postpone its suspension. A wait that is not running starts whole, so a worker always keeps
 // its process a full worker_idle_suspend_seconds after the last thing it had to do. A deployment
 // whose worker_idle_suspend_seconds is 0, and every claim whose role the suspend is not for
-// (idleSuspendable), arm nothing at all.
+// (IdleSuspendable), arm nothing at all.
 func (m *Machine) idleWait() {
-	if m.deps.Timeouts.IdleSuspend <= 0 || !idleSuspendable(m.claim.Role) {
+	if m.deps.Timeouts.IdleSuspend <= 0 || !IdleSuspendable(m.claim.Role) {
 		return
 	}
 	busy, _ := m.notIdle()
