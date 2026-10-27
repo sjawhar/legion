@@ -31,7 +31,7 @@ same step before and after its change, and compares the two rows.
 | `guard.go` | `stack.json`, the endpoint flags and the check that every endpoint is the stack's own |
 | `commit-trigger.sql` | The commit-time trigger for the delivery latency from commit |
 | `routes-2026-10-26-1719Z.txt` | The default route mix |
-| `stack.sh` | The local stack: `setup`, `start`, `seed`, `reset`, `stop`, `status`, `loadgen` |
+| `stack.sh` | The local stack: `setup`, `start`, `seed`, `reset`, `stop`, `status`, `build-info`, `loadgen` |
 | `run-step.sh` | The one command for a named step |
 | `run-series.sh` | The series of six steps, 0.25x to 10x |
 | `*_test.go` | Unit tests. They need no Postgres and no NATS: `cd packages/envoy && go test ./loadtest/` |
@@ -176,6 +176,7 @@ series directory.
 | `stack.sh reset [LOG]` | Resets the stack to the seed and starts Dispatch, with its log in `LOG` (default `$LOADTEST_ROOT/logs/dispatch.log`). `run-step.sh` does this before each step. |
 | `stack.sh stop [NAME...]` | Stops `dispatch`, `listener`, `nats`, `proxy` and `postgres`, or only the named ones. |
 | `stack.sh status` | Prints each process's pid and ports, and the seed's migration, build commit and counts. |
+| `stack.sh build-info` | Prints the checkout's commit and `true` or `false` for uncommitted changes in its tree, as `<commit> <dirty>`. `run-step.sh` records them in `meta.json`. |
 | `stack.sh loadgen ARGS...` | Runs `$LOADTEST_ROOT/bin/loadgen` with the stack's environment, from the root. `run-step.sh` and `run-series.sh` call `loadgen` this way. |
 
 The processes:
@@ -438,7 +439,10 @@ in `$LOADTEST_ROOT/pg/log`, the proxy log in `$LOADTEST_ROOT/logs/proxy.out`.
 
 `loadgen tables <step dir>...` renders the tables of one or more steps again. With one directory it
 writes `TABLES.md` in it. With more, it writes `TABLES.md` in the current directory, or the file
-that `-out` names. Under `stack.sh loadgen`, the current directory is `$LOADTEST_ROOT`.
+that `-out` names. Under `stack.sh loadgen`, the current directory is `$LOADTEST_ROOT`. It also
+writes `cpu.top.txt`, `cpu.cum.txt`, `heap.top.txt` and `goroutines.summary.txt` in each step
+directory. `-tops=false` does not write these files. `run-series.sh` uses `-tops=false` for the
+series `TABLES.md`, because `run-step.sh` already wrote them for each step.
 
 ## The tables
 

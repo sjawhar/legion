@@ -147,7 +147,6 @@ func (f endpointFlags) resolve() (endpoints, error) {
 		if !f.allowForeign || f.stack != "" || !errors.Is(err, fs.ErrNotExist) {
 			return endpoints{}, fmt.Errorf("read stack: %w", err)
 		}
-		st = nil
 	}
 	e, err := resolveEndpoints(f, st)
 	e.stack = path
@@ -207,13 +206,12 @@ func resolveEndpoints(f endpointFlags, st *stackFile) (endpoints, error) {
 	if f.natsServerName != "" && !f.allowForeign {
 		return endpoints{}, fmt.Errorf("-nats-server-name applies only with -allow-foreign; the stack's name is expected otherwise")
 	}
+	e.pids = map[string]int{}
 	if f.allowForeign {
 		e.natsServerName = f.natsServerName
-		e.pids = map[string]int{}
 		return e, nil
 	}
 	e.natsServerName = st.Name
-	e.pids = map[string]int{}
 	for name, pid := range map[string]int{
 		"postgres": st.PIDs.Postgres, "proxy": st.PIDs.Proxy, "nats": st.PIDs.NATS,
 		"listener": st.PIDs.Listener, "dispatch": st.PIDs.Dispatch,

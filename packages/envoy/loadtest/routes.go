@@ -3,9 +3,9 @@ package main
 import (
 	_ "embed"
 	"fmt"
-	"math"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -46,8 +46,9 @@ func (e *routeMixError) Error() string {
 	return fmt.Sprintf("route mix %s line %d: %s", e.Source, e.Line, e.Reason)
 }
 
-// routePlaceholders are the template placeholders a route may use.
-var routePlaceholders = map[string]bool{"key": true, "project": true, "artifact_id": true, "key_ref": true}
+// routePlaceholders are the template placeholders a route may use, in the order the refusal
+// lists them.
+var routePlaceholders = []string{"key", "project", "artifact_id", "key_ref"}
 
 // loadRouteMix reads path, or the committed default when path is empty.
 func loadRouteMix(path string) (routeMix, error) {
@@ -82,7 +83,7 @@ func parseRouteMix(source, text string) (routeMix, error) {
 			return fail("has %d fields, want 5: <weight> <caller> <person|agent> GET <path template>", len(f))
 		}
 		w, err := strconv.ParseFloat(f[0], 64)
-		if err != nil || math.IsNaN(w) || math.IsInf(w, 0) || w <= 0 {
+		if err != nil || !finite(w) || w <= 0 {
 			return fail("weight %q is not a positive number", f[0])
 		}
 		var person bool
@@ -131,8 +132,8 @@ func checkTemplate(t string) error {
 			return fmt.Errorf("path template %q has an unclosed {", t)
 		}
 		name := rest[open+1 : open+end]
-		if !routePlaceholders[name] {
-			return fmt.Errorf("unknown placeholder {%s}; placeholders are {key}, {project}, {artifact_id}, {key_ref}", name)
+		if !slices.Contains(routePlaceholders, name) {
+			return fmt.Errorf("unknown placeholder {%s}; placeholders are {%s}", name, strings.Join(routePlaceholders, "}, {"))
 		}
 		rest = rest[open+end+1:]
 	}

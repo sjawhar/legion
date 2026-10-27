@@ -79,7 +79,7 @@ func runSeriesSessions(args []string) error {
 		return fmt.Errorf("usage: loadgen series-sessions <factor>")
 	}
 	f, err := strconv.ParseFloat(args[0], 64)
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 {
+	if err != nil || !finite(f) || f <= 0 {
 		return fmt.Errorf("factor %q is not a positive number", args[0])
 	}
 	fmt.Println(seriesSessions(f))

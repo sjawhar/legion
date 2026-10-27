@@ -59,5 +59,6 @@ for step in "${steps[@]}"; do
     --sse "$sse" --out "$dir" "$@"
   dirs+=("$dir")
 done
-"$stack" loadgen tables -out "$series/TABLES.md" "${dirs[@]}"
+# Each step's run-step.sh already wrote its pprof tops and goroutine summary.
+"$stack" loadgen tables -tops=false -out "$series/TABLES.md" "${dirs[@]}"
 printf 'run-series.sh: series done: %s\n' "$series" >&2

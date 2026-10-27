@@ -15,24 +15,16 @@ type writeRec struct {
 	Marker int64
 	Kind   string
 	Issue  string
-	Human  bool
-	// Scheduled is the arrival the open-loop schedule drew; it decides whether the write is in
-	// the measured window. Start is when the client began the request; Arrival is when the
-	// whole request was in Dispatch's socket (httptrace WroteRequest), 0 when it never got
-	// there; Response is when the response was read.
-	Scheduled, Start, Arrival, Response int64
+	// Arrival is when the whole request was in Dispatch's socket (httptrace WroteRequest), or
+	// when the client began it if it never got there (callResult.arrival); Response is when the
+	// response was read.
+	Arrival, Response int64
 	// ConnWait is the client's own wait for a connection (GetConn to GotConn).
 	ConnWait     time.Duration
 	Status       int
 	TransportErr string
-	InWindow     bool
-}
-
-func (w writeRec) arrival() int64 {
-	if w.Arrival != 0 {
-		return w.Arrival
-	}
-	return w.Start
+	// InWindow is set when the arrival the open-loop schedule drew is in the measured window.
+	InWindow bool
 }
 
 // commitRow is one loadtest.event_commits row: an event that carries a marker, with the commit
@@ -132,7 +124,7 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 		case w.Status/100 != 2:
 			out.WriteErrors.Non2xx++
 		default:
-			writeMs[w.Kind] = append(writeMs[w.Kind], float64(w.Response-w.arrival())/1e6)
+			writeMs[w.Kind] = append(writeMs[w.Kind], float64(w.Response-w.Arrival)/1e6)
 		}
 		var first *commitRow
 		for j, c := range byMarker[w.Marker] {
@@ -174,7 +166,7 @@ func joinDelivery(writes []writeRec, commits []commitRow, receipts []receipt, wa
 			continue
 		}
 		out.IssueTopicReceipts++
-		arrival := t.w.arrival()
+		arrival := t.w.Arrival
 		ms := float64(r.Recv-arrival) / 1e6
 		fromArrival = append(fromArrival, ms)
 		kindArrival[t.w.Kind] = append(kindArrival[t.w.Kind], ms)

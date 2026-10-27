@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -62,7 +63,7 @@ func runLoad(args []string) error {
 	warmup := fs.Duration("warmup", 30*time.Second, "warm-up before the measured window")
 	duration := fs.Duration("duration", 180*time.Second, "measured window")
 	grace := fs.Duration("grace", 20*time.Second, "wait for late deliveries once the generators finish")
-	mixFlag := fs.String("event-mix", defaultEventMix, "event mix: a preset (production-2026-10-26, report-2026-10-27) or kind=weight,...")
+	mixFlag := fs.String("event-mix", defaultEventMix, "event mix: a preset ("+eventMixPresetNames()+") or kind=weight,...")
 	routeFlag := fs.String("route-mix", "", "route-mix file (default: the committed "+defaultRouteMixName+")")
 	human := fs.Float64("human", 0.1, "share of writes made by a person")
 	sse := fs.Int("sse", -1, "dashboard SSE streams (default max(1, round(requests/30)))")
@@ -92,7 +93,6 @@ func runLoad(args []string) error {
 	if err != nil {
 		return err
 	}
-	finite := func(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }
 	switch {
 	case *events < 0 || !finite(*events):
 		return fmt.Errorf("-events is required and must be 0 or more")
@@ -283,6 +283,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	receipts := make([]receipt, 0, 1<<16)
 	var sampleMu sync.Mutex
 	envelopes := map[string][]byte{}
+	marked := map[string]bool{} // whether each stored envelope carries a marker
 	var conns []*nats.Conn
 	defer func() {
 		for _, nc := range conns {
@@ -316,8 +317,10 @@ func execute(cfg runConfig, sf seedFile) error {
 			}
 			// Keep one envelope per type, preferring one whose payload carries a marker.
 			sampleMu.Lock()
-			if old, ok := envelopes[key]; !ok || (!markerPattern.Match(old) && markerPattern.MatchString(env.Payload)) {
-				envelopes[key] = append([]byte(nil), m.Data...)
+			if _, ok := envelopes[key]; !ok || (!marked[key] && markerPattern.MatchString(env.Payload)) {
+				data := append([]byte(nil), m.Data...)
+				envelopes[key] = data
+				marked[key] = markerPattern.Match(data)
 			}
 			sampleMu.Unlock()
 			recvMu.Lock()
@@ -346,16 +349,19 @@ func execute(cfg runConfig, sf seedFile) error {
 	lg.Printf("nats: %d subscriptions on %d connections", subs, len(conns))
 
 	// Listener registration as the pi plugin does it, and the 90 s heartbeat spread evenly
-	// (packages/envoy-client/src/envoy-settings.ts).
+	// (packages/envoy-client/src/envoy-settings.ts). Each session's body is the same every time.
 	lc := &http.Client{Timeout: 10 * time.Second}
-	register := func(s session) error {
+	regBodies := make([][]byte, len(sessions))
+	for i, s := range sessions {
 		topics := []string{}
 		for _, w := range s.watched {
 			topics = append(topics, issueTopic(w))
 		}
-		body, _ := json.Marshal(map[string]any{"session_id": s.id, "dir": "/work/" + s.id, "title": "load " + s.id,
+		regBodies[i], _ = json.Marshal(map[string]any{"session_id": s.id, "dir": "/work/" + s.id, "title": "load " + s.id,
 			"topics": topics, "port": 0, "self_subscribed": true, "driving": false, "capabilities": []string{}})
-		req, _ := http.NewRequestWithContext(ctx, "POST", cfg.ep.listener+"/v1/interests/subscribe", strings.NewReader(string(body)))
+	}
+	register := func(body []byte) error {
+		req, _ := http.NewRequestWithContext(ctx, "POST", cfg.ep.listener+"/v1/interests/subscribe", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+cfg.ep.listenerToken)
 		resp, err := lc.Do(req)
@@ -373,13 +379,13 @@ func execute(cfg runConfig, sf seedFile) error {
 	{
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, 16)
-		for _, s := range sessions {
+		for i, s := range sessions {
 			wg.Add(1)
 			sem <- struct{}{}
 			go func() {
 				defer wg.Done()
 				defer func() { <-sem }()
-				if err := register(s); err != nil {
+				if err := register(regBodies[i]); err != nil {
 					if regErr.Add(1) <= 5 {
 						lg.Printf("register %s: %v", s.id, err)
 					}
@@ -400,13 +406,13 @@ func execute(cfg runConfig, sf seedFile) error {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				go func(s session) {
-					if err := register(s); err != nil && ctx.Err() == nil {
+				go func(i int) {
+					if err := register(regBodies[i]); err != nil && ctx.Err() == nil {
 						if hbErr.Add(1) <= 5 {
-							lg.Printf("heartbeat %s: %v", s.id, err)
+							lg.Printf("heartbeat %s: %v", sessions[i].id, err)
 						}
 					}
-				}(sessions[i%len(sessions)])
+				}(i % len(sessions))
 			}
 		}
 	}()
@@ -460,7 +466,7 @@ func execute(cfg runConfig, sf seedFile) error {
 				return
 			}
 			marker++
-			p := planEvent(r, cfg, sessions, sf, marker, next)
+			p := planEvent(r, cfg, sessions, sf, marker)
 			if !sleepUntil(ctx, next) {
 				return
 			}
@@ -638,10 +644,10 @@ func execute(cfg runConfig, sf seedFile) error {
 
 // planEvent draws one write from the event stream: a session, one of its watched issues, a
 // person or the session as author, a kind, and the kind's quote or reply root.
-func planEvent(r *rand.Rand, cfg runConfig, sessions []session, sf seedFile, marker int64, at time.Time) eventPlan {
+func planEvent(r *rand.Rand, cfg runConfig, sessions []session, sf seedFile, marker int64) eventPlan {
 	sIdx := r.IntN(len(sessions))
 	s := sessions[sIdx]
-	p := eventPlan{marker: marker, session: sIdx, issue: s.watched[r.IntN(len(s.watched))], scheduled: at.UnixNano()}
+	p := eventPlan{marker: marker, session: sIdx, issue: s.watched[r.IntN(len(s.watched))]}
 	p.human = r.Float64() < cfg.human
 	p.kind = cfg.mix.pick(r.Float64())
 	is := sf.Issues[p.issue]
@@ -696,6 +702,9 @@ func summarizeRequests(reqs []reqRec, dropped int, target, durationS float64) re
 	out.BelowTarget = target > 0 && out.SentPerS < 0.95*target
 	return out
 }
+
+// finite is false for NaN and the infinities.
+func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }
 
 // sleepUntil waits for t; false when ctx ended first.
 func sleepUntil(ctx context.Context, t time.Time) bool {

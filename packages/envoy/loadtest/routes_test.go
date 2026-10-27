@@ -46,23 +46,21 @@ func TestRouteMixRendersEachPlaceholder(t *testing.T) {
 }
 
 func TestRouteMixRefusalsNameTheirLine(t *testing.T) {
-	cases := map[string]struct {
-		line string
-	}{
-		"method other than GET": {"1 cli agent POST /api/v1/issues/{key}/comments"},
-		"unknown placeholder":   {"1 cli agent GET /api/v1/issues/{issue}"},
-		"missing field":         {"1 cli agent GET"},
-		"zero weight":           {"0 cli agent GET /api/v1/projects"},
-		"negative weight":       {"-2 cli agent GET /api/v1/projects"},
-		"unknown identity":      {"1 cli robot GET /api/v1/projects"},
+	cases := map[string]string{
+		"method other than GET": "1 cli agent POST /api/v1/issues/{key}/comments",
+		"unknown placeholder":   "1 cli agent GET /api/v1/issues/{issue}",
+		"missing field":         "1 cli agent GET",
+		"zero weight":           "0 cli agent GET /api/v1/projects",
+		"negative weight":       "-2 cli agent GET /api/v1/projects",
+		"unknown identity":      "1 cli robot GET /api/v1/projects",
 	}
-	for name, c := range cases {
+	for name, line := range cases {
 		t.Run(name, func(t *testing.T) {
-			text := "# header\n1 other agent GET /api/v1/projects\n" + c.line + "\n2 cli agent GET /api/v1/agents\n"
+			text := "# header\n1 other agent GET /api/v1/projects\n" + line + "\n2 cli agent GET /api/v1/agents\n"
 			_, err := parseRouteMix("test", text)
 			var lineErr *routeMixError
 			if !errors.As(err, &lineErr) {
-				t.Fatalf("parse accepted %q or failed without a line: %v", c.line, err)
+				t.Fatalf("parse accepted %q or failed without a line: %v", line, err)
 			}
 			if lineErr.Line != 3 {
 				t.Fatalf("refusal names line %d, want 3", lineErr.Line)

@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -24,8 +26,9 @@ func runTables(args []string) error {
 	fs := flag.NewFlagSet("tables", flag.ExitOnError)
 	out := fs.String("out", "", "TABLES.md path (default: <dir>/TABLES.md for one step directory, ./TABLES.md for several)")
 	bin := fs.String("bin", filepath.Join(loadtestRoot(), "bin", "envoy-dispatch"), "Dispatch binary the profiles came from (omitted when absent)")
+	tops := fs.Bool("tops", true, "write each step directory's pprof tops and goroutines.summary.txt")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "usage: loadgen tables [-out TABLES.md] [-bin envoy-dispatch] <step dir>...")
+		fmt.Fprintln(fs.Output(), "usage: loadgen tables [-out TABLES.md] [-bin envoy-dispatch] [-tops=false] <step dir>...")
 		fs.PrintDefaults()
 	}
 	_ = fs.Parse(args)
@@ -41,6 +44,9 @@ func runTables(args []string) error {
 			return err
 		}
 		steps = append(steps, st)
+		if !*tops {
+			continue
+		}
 		pprofTops(dir, *bin)
 		if b, err := os.ReadFile(filepath.Join(dir, "goroutines.txt")); err == nil {
 			text := goroutineSummary(st.name, string(b))
@@ -86,7 +92,7 @@ func readStep(dir string) (stepData, error) {
 
 // num formats x with d decimals and thousands separators.
 func num(x float64, d int) string {
-	if math.IsNaN(x) || math.IsInf(x, 0) {
+	if !finite(x) {
 		return "-"
 	}
 	s := fmt.Sprintf("%.*f", d, math.Abs(x))
@@ -189,15 +195,16 @@ func renderTables(steps []stepData) string {
 	}
 
 	w("\n## Resources\n")
-	header("step", "Dispatch cores mean / peak 5 s", "Postgres cores", "listener cores", "NATS cores", "loadgen cores", "proxy cores",
+	resourceCells := []string{"step", "Dispatch cores mean / peak 5 s", "Postgres cores", "listener cores", "NATS cores", "loadgen cores", "proxy cores",
 		"box busy", "Dispatch RSS max MiB", "heap in use MiB p50 / max", "goroutines p50 / max",
 		"goroutines waiting for a pool connection p50 / max", "Postgres connections max", "connections waiting on a lock p50",
-		"Dispatch CPU-s per operation")
+		"Dispatch CPU-s per operation"}
+	header(resourceCells...)
 	for _, s := range steps {
 		r := s.sum.Resources
 		if r == nil {
 			cells := []string{s.name}
-			for range 14 {
+			for range len(resourceCells) - 1 {
 				cells = append(cells, "-")
 			}
 			row(cells...)
@@ -239,11 +246,16 @@ func renderTables(steps []stepData) string {
 
 	w("\n## Commit-order lock\n")
 	w("Sampled every 20 ms from 20 s into the window to its end.\n")
-	header("step", "time held", "waiters p50 / max", "hold ms p50 / p90 / p99", "holds seen", "what the holder was doing (share of held samples)")
+	lockCells := []string{"step", "time held", "waiters p50 / max", "hold ms p50 / p90 / p99", "holds seen", "what the holder was doing (share of held samples)"}
+	header(lockCells...)
 	for _, s := range steps {
 		l := s.sum.CommitOrderLock
 		if l.Samples == 0 {
-			row(s.name, "-", "-", "-", "-", "-")
+			cells := []string{s.name}
+			for range len(lockCells) - 1 {
+				cells = append(cells, "-")
+			}
+			row(cells...)
 			continue
 		}
 		holds := "-"
@@ -275,11 +287,7 @@ func renderTables(steps []stepData) string {
 		}
 	}
 	header(cells...)
-	names := make([]string, 0, len(routes))
-	for name := range routes {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(routes))
 	for _, name := range names {
 		cells := []string{strings.ReplaceAll(name, "|", `\|`)}
 		for _, s := range steps {
@@ -365,12 +373,13 @@ func goroutineSummary(step, dump string) string {
 			from, to = min(from, len(xs)), min(to, len(xs))
 			return strings.Join(xs[from:to], " <- ")
 		}
+		joined := strings.Join(mine, " ")
 		switch {
 		case strings.Contains(block, "Pool[...]).Acquire"):
 			acq[head(mine, 0, 4)]++
-		case strings.Contains(strings.Join(mine, " "), "events.(*Broker).Append"):
+		case strings.Contains(joined, "events.(*Broker).Append"):
 			lock["["+state+"] "+head(mine, 1, 4)]++
-		case strings.Contains(strings.Join(mine, " "), "api.") || strings.Contains(strings.Join(mine, " "), "docs."):
+		case strings.Contains(joined, "api.") || strings.Contains(joined, "docs."):
 			first := ""
 			if len(frames) > 0 {
 				first = frames[0]

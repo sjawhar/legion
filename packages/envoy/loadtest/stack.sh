@@ -16,6 +16,8 @@
 #                           and the listener, start Dispatch (its log to LOG) and wait for /healthz.
 #   stack.sh stop [NAME...] stop dispatch, listener, nats, proxy and postgres (or the named ones).
 #   stack.sh status         each process: pid, alive, port.
+#   stack.sh build-info     print this checkout's commit and whether its tree has uncommitted changes
+#                           ("<commit> <true|false>"; run-step.sh records them in meta.json).
 #   stack.sh loadgen ARGS   run $LOADTEST_ROOT/bin/loadgen under the stack's environment, from the
 #                           root (run-step.sh and run-series.sh call loadgen this way).
 #
@@ -46,8 +48,20 @@ STACK=$ROOT/stack.json
 SEED_META=$ROOT/seed.meta.json
 STACK_HOME=$ROOT/home
 PGSERVER_VERSION=0.1.4
-# Processes in stop order; start runs them in reverse (dispatch is started by seed and reset).
+# Processes in stop order, and in start order (dispatch is started by seed and reset).
 PROCESSES=(dispatch listener nats proxy postgres)
+START_ORDER=(postgres proxy nats listener dispatch)
+# The stack.json port keys in their order, each one's environment variable and its default.
+PORT_KEYS=(postgres proxy nats nats_monitor listener dispatch pprof)
+declare -A PORT_VAR=(
+  [postgres]=LOADTEST_PG_PORT [proxy]=LOADTEST_PROXY_PORT [nats]=LOADTEST_NATS_PORT
+  [nats_monitor]=LOADTEST_NATS_MONITOR_PORT [listener]=LOADTEST_LISTENER_PORT
+  [dispatch]=LOADTEST_DISPATCH_PORT [pprof]=LOADTEST_PPROF_PORT
+)
+declare -A PORT_DEFAULT=(
+  [postgres]=15432 [proxy]=15433 [nats]=14222 [nats_monitor]=18222 [listener]=19120
+  [dispatch]=18777 [pprof]=16061
+)
 
 note() { printf 'stack.sh: %s\n' "$*" >&2; }
 die() {
@@ -134,16 +148,12 @@ random_hex() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
 # write_stack_json writes stack.json on the first setup, and rewrites its ports from the environment
 # on a later one, keeping the name, tokens and pids; it refuses to move a port while the stack runs.
 write_stack_json() {
-  local ports
-  ports=$(jq -n \
-    --argjson postgres "${LOADTEST_PG_PORT:-15432}" \
-    --argjson proxy "${LOADTEST_PROXY_PORT:-15433}" \
-    --argjson nats "${LOADTEST_NATS_PORT:-14222}" \
-    --argjson nats_monitor "${LOADTEST_NATS_MONITOR_PORT:-18222}" \
-    --argjson listener "${LOADTEST_LISTENER_PORT:-19120}" \
-    --argjson dispatch "${LOADTEST_DISPATCH_PORT:-18777}" \
-    --argjson pprof "${LOADTEST_PPROF_PORT:-16061}" \
-    '{postgres: $postgres, proxy: $proxy, nats: $nats, nats_monitor: $nats_monitor, listener: $listener, dispatch: $dispatch, pprof: $pprof}')
+  local ports k var args=()
+  for k in "${PORT_KEYS[@]}"; do
+    var=${PORT_VAR[$k]}
+    args+=(--argjson "$k" "${!var:-${PORT_DEFAULT[$k]}}")
+  done
+  ports=$(jq -n "${args[@]}" '$ARGS.named')
   if [ ! -f "$STACK" ]; then
     (
       umask 077
@@ -273,17 +283,7 @@ check_port() {
   local name=$1 key=$2 p
   p=$(port "$key")
   if port_open "$p"; then
-    local var
-    case $key in
-      postgres) var=LOADTEST_PG_PORT ;;
-      proxy) var=LOADTEST_PROXY_PORT ;;
-      nats) var=LOADTEST_NATS_PORT ;;
-      nats_monitor) var=LOADTEST_NATS_MONITOR_PORT ;;
-      listener) var=LOADTEST_LISTENER_PORT ;;
-      dispatch) var=LOADTEST_DISPATCH_PORT ;;
-      pprof) var=LOADTEST_PPROF_PORT ;;
-    esac
-    die "port $p ($key, for $name) is already in use by a process that is not this stack's; free it or set $var and rerun stack.sh setup"
+    die "port $p ($key, for $name) is already in use by a process that is not this stack's; free it or set ${PORT_VAR[$key]} and rerun stack.sh setup"
   fi
 }
 
@@ -469,7 +469,7 @@ cmd_start() {
   [ -f "$PGDATA/PG_VERSION" ] || die "no Postgres data directory at $PGDATA; run stack.sh setup first"
   # Every port a stopped process needs is checked before anything starts.
   local p k
-  for p in postgres proxy nats listener dispatch; do
+  for p in "${START_ORDER[@]}"; do
     running "$p" && continue
     for k in $(ports_of "$p"); do check_port "$p" "$k"; done
   done
@@ -490,6 +490,8 @@ build_dirty() {
   }
   [ -n "$s" ] && echo true || echo false
 }
+
+cmd_build_info() { printf '%s %s\n' "$(build_commit)" "$(build_dirty)"; }
 
 db_exists() { [ "$(sql postgres "select count(*) from pg_database where datname = '$1'")" = 1 ]; }
 
@@ -581,7 +583,7 @@ cmd_status() {
   need_stack
   printf 'stack %s, root %s\n' "$(stack_name)" "$ROOT"
   local p k pid state
-  for p in postgres proxy nats listener dispatch; do
+  for p in "${START_ORDER[@]}"; do
     if pid=$(pid_of "$p"); then state="running pid $pid"; else state=stopped; fi
     local ports=()
     for k in $(ports_of "$p"); do
@@ -611,6 +613,7 @@ case ${1:-} in
   reset) cmd_reset "${@:2}" ;;
   stop) cmd_stop "${@:2}" ;;
   status) cmd_status ;;
+  build-info) cmd_build_info ;;
   loadgen) loadgen "${@:2}" ;;
   *) usage ;;
 esac

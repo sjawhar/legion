@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log"
-	"sort"
 	"strings"
 	"time"
 
@@ -28,15 +27,24 @@ type lockProbe struct {
 	samples []lockSample
 }
 
+// The commit-order lock's advisory key, split as pg_locks shows it.
+const (
+	commitOrderLockClassID uint32 = 1145656144
+	commitOrderLockObjID   uint32 = 1096041288
+)
+
+// lockProbeQuery reads pg_locks once per sample: $1 and $2 are the lock's classid and objid.
 const lockProbeQuery = `
+with l as materialized (
+  select pid, granted from pg_locks where locktype = 'advisory' and classid = $1 and objid = $2)
 select coalesce(h.pid, 0), coalesce(h.xact_start, 'epoch'::timestamptz), coalesce(h.state, ''),
        coalesce(h.wait_event_type || ':' || h.wait_event, ''), coalesce(left(regexp_replace(h.query, '\s+', ' ', 'g'), 90), ''),
-       (select count(*) from pg_locks w where w.locktype = 'advisory' and w.classid = 1145656144 and w.objid = 1096041288 and not w.granted)::int
+       (select count(*) from l where not l.granted)::int
 from (select 1) one
 left join (
   select a.pid, a.xact_start, a.state, a.wait_event_type, a.wait_event, a.query
-  from pg_locks l join pg_stat_activity a on a.pid = l.pid
-  where l.locktype = 'advisory' and l.classid = 1145656144 and l.objid = 1096041288 and l.granted
+  from l join pg_stat_activity a on a.pid = l.pid
+  where l.granted
   limit 1) h on true`
 
 // loop samples every 20 ms from from to to over a direct Postgres connection.
@@ -47,9 +55,7 @@ func (p *lockProbe) loop(ctx context.Context, url string, from, to time.Time, lg
 		return
 	}
 	defer conn.Close(context.Background())
-	select {
-	case <-time.After(time.Until(from)):
-	case <-ctx.Done():
+	if !sleepUntil(ctx, from) {
 		return
 	}
 	t := time.NewTicker(20 * time.Millisecond)
@@ -57,7 +63,7 @@ func (p *lockProbe) loop(ctx context.Context, url string, from, to time.Time, lg
 	for time.Now().Before(to) {
 		var s lockSample
 		s.at = time.Now()
-		if err := conn.QueryRow(ctx, lockProbeQuery).Scan(&s.pid, &s.xact, &s.state, &s.waitEv, &s.query, &s.waiters); err != nil {
+		if err := conn.QueryRow(ctx, lockProbeQuery, commitOrderLockClassID, commitOrderLockObjID).Scan(&s.pid, &s.xact, &s.state, &s.waitEv, &s.query, &s.waiters); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
@@ -133,15 +139,11 @@ func summarizeLock(samples []lockSample) lockSummary {
 	out.Waiters = mkStat(waiters)
 	out.HoldMs = mkStat(holds)
 	out.HoldsObserved = len(holds)
-	for k, v := range what {
-		out.HolderDoing = append(out.HolderDoing, holderDoing{What: k, Share: float64(v) / float64(held)})
-	}
-	sort.Slice(out.HolderDoing, func(i, j int) bool {
-		a, b := out.HolderDoing[i], out.HolderDoing[j]
-		return a.Share > b.Share || (a.Share == b.Share && a.What < b.What)
-	})
-	if len(out.HolderDoing) > 12 {
-		out.HolderDoing = out.HolderDoing[:12]
+	for i, kv := range byCount(what) {
+		if i == 12 {
+			break
+		}
+		out.HolderDoing = append(out.HolderDoing, holderDoing{What: kv.k, Share: float64(kv.v) / float64(held)})
 	}
 	return out
 }

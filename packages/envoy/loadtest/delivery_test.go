@@ -10,12 +10,12 @@ const msNs = int64(1e6)
 func TestJoinDelivery(t *testing.T) {
 	writes := []writeRec{
 		// A plain comment answered 201.
-		{Marker: 1, Kind: kindComment, Issue: "LGA-1", InWindow: true, Start: 990 * msNs, Arrival: 1000 * msNs, Response: 1100 * msNs, Status: 201},
+		{Marker: 1, Kind: kindComment, Issue: "LGA-1", InWindow: true, Arrival: 1000 * msNs, Response: 1100 * msNs, Status: 201},
 		// An edit that hit the client timeout, but committed.
-		{Marker: 2, Kind: kindEdit, Issue: "LGA-2", InWindow: true, Start: 2000 * msNs, Arrival: 2000 * msNs, Response: 32000 * msNs, TransportErr: "context deadline exceeded"},
+		{Marker: 2, Kind: kindEdit, Issue: "LGA-2", InWindow: true, Arrival: 2000 * msNs, Response: 32000 * msNs, TransportErr: "context deadline exceeded"},
 		// An anchored comment whose transaction also appended a document snapshot (id 30), and
 		// carried its marker on two comment.created rows (31, 32): 31 is the primary event.
-		{Marker: 3, Kind: kindAnchored, Issue: "LGA-1", InWindow: true, Start: 3000 * msNs, Arrival: 3000 * msNs, Response: 3400 * msNs, Status: 201},
+		{Marker: 3, Kind: kindAnchored, Issue: "LGA-1", InWindow: true, Arrival: 3000 * msNs, Response: 3400 * msNs, Status: 201},
 		// Before the window: neither offered nor timed.
 		{Marker: 4, Kind: kindComment, Issue: "LGA-1", InWindow: false, Arrival: 10 * msNs, Response: 20 * msNs, Status: 201},
 		// A reply refused with 500 that committed nothing.

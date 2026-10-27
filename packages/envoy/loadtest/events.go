@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
+	"maps"
 	"math/rand/v2"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,6 +57,11 @@ var eventMixPresets = map[string]string{
 
 const defaultEventMix = "production-2026-10-26"
 
+// eventMixPresetNames lists the presets, sorted, for help and error text.
+func eventMixPresetNames() string {
+	return strings.Join(slices.Sorted(maps.Keys(eventMixPresets)), ", ")
+}
+
 // eventMix is a resolved --event-mix: a weight per kind.
 type eventMix struct {
 	Name    string             `json:"name"`
@@ -82,7 +88,7 @@ func parseEventMix(s string) (eventMix, error) {
 	}
 	m := eventMix{Name: name, Weights: map[string]float64{}}
 	if strings.TrimSpace(s) == "" {
-		return m, fmt.Errorf("event mix is empty: name a preset (production-2026-10-26, report-2026-10-27) or give kind=weight,...")
+		return m, fmt.Errorf("event mix is empty: name a preset (%s) or give kind=weight,...", eventMixPresetNames())
 	}
 	for item := range strings.SplitSeq(s, ",") {
 		item = strings.TrimSpace(item)
@@ -91,18 +97,14 @@ func parseEventMix(s string) (eventMix, error) {
 			return m, &eventMixError{Kind: item, Reason: "is neither a preset nor kind=weight"}
 		}
 		kind = strings.TrimSpace(kind)
-		known := false
-		for _, k := range eventKinds {
-			known = known || k == kind
-		}
-		if !known {
+		if !slices.Contains(eventKinds, kind) {
 			return m, &eventMixError{Kind: kind, Reason: "is not a kind; kinds are " + strings.Join(eventKinds, ", ")}
 		}
 		if _, dup := m.Weights[kind]; dup {
 			return m, &eventMixError{Kind: kind, Reason: "is given twice"}
 		}
 		w, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
-		if err != nil || math.IsNaN(w) || math.IsInf(w, 0) {
+		if err != nil || !finite(w) {
 			return m, &eventMixError{Kind: kind, Reason: fmt.Sprintf("has weight %q, which is not a number", value)}
 		}
 		if w < 0 {
@@ -137,14 +139,13 @@ func (m eventMix) pick(x float64) string {
 
 // eventPlan is one write, fully decided by the event generator's RNG before it is sent.
 type eventPlan struct {
-	marker    int64
-	kind      string
-	issue     int // index into the seed's issues
-	session   int // index of the writing session
-	human     bool
-	scheduled int64 // Unix ns of the arrival the schedule drew
-	quote     string
-	replyTo   string
+	marker  int64
+	kind    string
+	issue   int // index into the seed's issues
+	session int // index of the writing session
+	human   bool
+	quote   string
+	replyTo string
 }
 
 func markerTag(marker int64) string { return fmt.Sprintf("lgm%dx", marker) }
@@ -185,7 +186,7 @@ func newWriter(a *api, sf seedFile, lg *log.Logger) *writer {
 // do sends one write and returns its record.
 func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 	is := w.sf.Issues[p.issue]
-	rec := writeRec{Marker: p.marker, Kind: p.kind, Issue: is.Key, Human: p.human, Scheduled: p.scheduled}
+	rec := writeRec{Marker: p.marker, Kind: p.kind, Issue: is.Key}
 	id := who{}
 	if p.human {
 		id.person = fmt.Sprintf("person-%d", p.session%7)
@@ -214,21 +215,15 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 	case kindUpload:
 		w.locks[p.issue].Lock()
 		defer w.locks[p.issue].Unlock()
-		text := w.a.call(ctx, "GET", "/api/v1/artifacts/"+is.ArtifactID+"/text", id, nil)
-		var doc struct {
-			Markdown string `json:"markdown"`
-		}
-		if text.ok() {
-			_ = json.Unmarshal(text.body, &doc)
-		}
-		old, found := currentRevision(doc.Markdown)
+		text, markdown := w.specText(ctx, p.issue, id)
+		old, found := currentRevision(markdown)
 		if !found {
-			rec.Start, rec.Response, rec.Status = text.start, text.end, text.status
+			rec.Arrival, rec.Response, rec.Status = text.start, text.end, text.status
 			rec.TransportErr = fmt.Sprintf("read %s before upload: status %d, revision token found %t, %v", specName, text.status, found, text.err)
 			w.lg.Printf("write %s %s: %s", p.kind, is.Key, rec.TransportErr)
 			return rec
 		}
-		content := strings.Replace(doc.Markdown, revisionToken(old), revisionToken(old+1), 1)
+		content := strings.Replace(markdown, revisionToken(old), revisionToken(old+1), 1)
 		path = "/api/v1/issues/" + is.Key + "/artifacts"
 		body = map[string]any{"name": specName, "content": content, "summary": fmt.Sprintf("%s upload revision %d", tag, old+1)}
 		w.revs[p.issue] = old
@@ -237,7 +232,7 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 		body["actor"] = sessionActor(sessionID(p.session))
 	}
 	res := w.a.call(ctx, "POST", path, id, body)
-	rec.Start, rec.Arrival, rec.Response, rec.Status, rec.ConnWait = res.start, res.wrote, res.end, res.status, res.connWait
+	rec.Arrival, rec.Response, rec.Status, rec.ConnWait = res.arrival(), res.end, res.status, res.connWait
 	if res.err != nil {
 		rec.TransportErr = res.err.Error()
 	}
@@ -254,20 +249,24 @@ func (w *writer) do(ctx context.Context, p eventPlan) writeRec {
 	return rec
 }
 
-// resync reads the spec's current revision token after an edit or upload whose outcome the
-// generator did not see (a client timeout on a write the server went on to commit).
-func (w *writer) resync(ctx context.Context, issue int) {
-	res := w.a.call(ctx, "GET", "/api/v1/artifacts/"+w.sf.Issues[issue].ArtifactID+"/text", who{}, nil)
-	if !res.ok() {
-		return
-	}
+// specText reads the issue's spec text: the GET's result and the document's markdown, "" when
+// the read failed or its body did not decode.
+func (w *writer) specText(ctx context.Context, issue int, id who) (callResult, string) {
+	res := w.a.call(ctx, "GET", "/api/v1/artifacts/"+w.sf.Issues[issue].ArtifactID+"/text", id, nil)
 	var doc struct {
 		Markdown string `json:"markdown"`
 	}
-	if json.Unmarshal(res.body, &doc) != nil {
-		return
+	if res.ok() {
+		_ = json.Unmarshal(res.body, &doc)
 	}
-	if n, ok := currentRevision(doc.Markdown); ok {
+	return res, doc.Markdown
+}
+
+// resync reads the spec's current revision token after an edit or upload whose outcome the
+// generator did not see (a client timeout on a write the server went on to commit).
+func (w *writer) resync(ctx context.Context, issue int) {
+	_, markdown := w.specText(ctx, issue, who{})
+	if n, ok := currentRevision(markdown); ok {
 		w.revs[issue] = n
 	}
 }
