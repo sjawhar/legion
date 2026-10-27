@@ -939,7 +939,8 @@ func TestInterestReaper(t *testing.T) {
 		t.Fatalf("Get ses_dead failed: %v", err)
 	}
 
-	// Reap with 0 grace window — all dead sessions should be reaped
+	// Reap with 0 grace window: a dead session's row older than InterestRefreshAge (this
+	// one is 10 minutes old) is reaped, and the live session's row is kept.
 	count, err := reg.Reap(func(sessionID string) bool {
 		return sessionID == "ses_alive"
 	}, 0)

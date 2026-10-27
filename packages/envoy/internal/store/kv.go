@@ -769,11 +769,10 @@ const (
 	// session's interest stays at least this long after its row's last write, plus
 	// InterestRefreshAge.
 	InterestReapGrace = 10 * time.Minute
-	// InterestRefreshAge is the age by which an unchanged interest row must be rewritten.
-	// Today every heartbeat rewrites the row; a later build will skip rewriting an unchanged
-	// row younger than this, so a row's UpdatedAt may lag the session's last heartbeat by up
-	// to this age. Reap adds it to the grace window so that lag never shortens the grace a
-	// paused session gets.
+	// InterestRefreshAge is the most an interest row's UpdatedAt may lag its session's last
+	// heartbeat: a writer may skip rewriting an unchanged row younger than this, and must
+	// rewrite it once it reaches this age. Reap adds it to the grace window, so a skipped
+	// rewrite never shortens the grace a paused session gets after its last heartbeat.
 	InterestRefreshAge = 5 * time.Minute
 )
 
