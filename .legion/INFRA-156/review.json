@@ -2,39 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-156",
-  "completed": "2026-10-27T11:15:00Z",
-  "decision": "changes_requested",
-  "headReviewed": "1d36a52ae0a9ea98968b70fd06464e5822ccf02a",
-  "codeHead": "f530ab46c931fee0b508f76dc5de05f83f86ebc7",
+  "completed": "2026-10-27T13:41:30Z",
+  "decision": "approved",
+  "round": 2,
+  "headReviewed": "f6f6d14d53841f39e80ba202916dedf18fb5b61b",
+  "codeHead": "bca854bac517802f180c9d295a99150c99ee695a",
+  "previousReview": "5666190909 (REQUEST_CHANGES at 946d77466aea)",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; no branch protection checks. CI head f530ab46 (compare to 1d36a52a: handoffsOnly true, 2 files). Every required check-run was still queued at 11:14Z; a request for changes does not wait on CI.",
-  "threads": "No review threads on the pull request (gh api graphql reviewThreads: empty).",
+  "important": 0,
+  "minor": 3,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection lists none. CI head 034a1b3c (compare to f6f6d14d: handoffsOnly true, 1 file). lint, typecheck, test and pr-title completed success at 13:40Z. Non-required envoy-go, dispatch and contracts were still queued (runner backlog); the reviewer ran locally at the head: go test pmdoc/text/refs/store (all ok except three wall-clock linearity tests in pmdoc, TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestBareURLShapesParseAndRenderLinearly and TestUpdateIsLinearInTheBlockCount, whose failures show a 10 ms clock and '0s' baselines on a shared gVisor pod and touch no code this PR changes), docs and api filtered to Pointer|BlockLink|Reference|Kind|Rebuild|Retype|Graph|Typed (ok), contracts dispatch-block-ref.test.ts (80 pass) and proof-editor bun test (132 pass).",
+  "threads": "Two threads, both the reviewer's, both fixed in bca854ba and answered by the reviewer (PRRT_kwDORFy7ds6wqJPu, PRRT_kwDORFy7ds6wqJP0); the implementer resolved both. No other threads.",
+  "census": "Re-ran all ten searches of the PR's Contract change census at the head. One hit was missing (useMarginItems.test.ts:626 under INVALID_OP), and one Plan-names bullet gave the old resolver signature. The implementer edited the body for both (no commit), and both are verified in the body. The rollout is immediate and unreachable: no shipped schema declares block[].",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 1d36a52a; Minor 1 (retype between two types sharing a block[] attribute name skips the target check) is promoted by the reviewer to a correctness finding, since it breaks the A3 write refusal its own doc comment promises; Minor 2 (one document_blocks query per introduced pointer) goes to the fast-follow.",
-    "codeQuality": "Verdict: CHANGES at 1d36a52a; four structural items (editor's re-derived pointer-value messages, pointers carried as raw strings and re-parsed, blockPairs' inlined pointer pass, block-pointers.ts re-writing findBlock), all duplication or structure that changes no behaviour, so they are the PR's named fast-follow."
+    "deepReview": "Verdict: APPROVE at f6f6d14d. Both round-1 fixes hold. findBlock returning the first holder of a repeated id matches the server's rule, and no shipped host calls retypeBlock or setBlockAttributes. Minor: stale body lines (fixed: risk bullet and Plan-names bullet); TS JSON.stringify versus Go %q quoting differ for non-printable characters in refusal text, though the comments say the two use the same words.",
+    "codeQuality": "Verdict: CHANGES at f6f6d14d. Two structural items that change no behaviour: the same-type held rule sits in retype's call site rather than in blockPointerRefusal, and parseBlockPointers repeats parseBlockPointerValue's one-line split. Both are on the fast-follow line."
   },
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/pointers.go",
-      "description": "CheckBlockPointers keys a held pointer by (block id, attribute, ref), not by the typed block's type, so retyping #c1 from a type whose serves has no targets (or wider targets) into one whose serves allows only requirement, keeping serves at a callout, is accepted. Reproduced with a throwaway package test: prior draft{#c1 serves=callout} (draft.serves block[], no targets), tree claim{#c1 serves=callout} -> nil; same tree with nil prior -> refused. The doc comment at :54-56 says a retype into a type declaring the attribute counts as introduced. The editor does the same (block-pointers.ts:87-93 with held = source.node.attrs from typed-block-commands.ts:154)."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "No `## Contract change census`, although the PR adds refusals at a process boundary (400 INVALID_MARKDOWN / INVALID_OP for block[] values and disallowed targets on upload, issue create, edits, rebuild), widens ?kind= and rewords INVALID_KIND, removes refs.Kinds/refs.KnownKind, adds a parameter to refs.IndexBlocks, and changes @legion/contracts types (BlockAttributeKind gains block[], GraphEdgeKind opened, BlockAttributeSchema.targets)."
+      "severity": "minor",
+      "file": "packages/proof-editor/src/typed-block-commands.ts",
+      "description": "Fast-follow: move the same-type held rule into blockPointerRefusal (pass the prior node) so it cannot be forgotten by a future command; Go keeps it inside CheckBlockPointers."
     },
     {
       "severity": "minor",
       "file": "packages/proof-editor/src/block-pointers.ts",
-      "description": "Fast-follow (code quality): the editor re-derives the pointer-value refusal messages beside contracts' parseBlockPointerValue; pointers travel as raw strings and are re-parsed in three readers; blockPairs inlines a second pass; block-pointers.ts re-writes findBlock."
+      "description": "Fast-follow: parseBlockPointers repeats contracts' parseBlockPointerValue split; call it and use blockPointerValueProblem only for the message."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/mutation.go",
-      "description": "Fast-follow (hardening): refuseBlockPointers runs one document_blocks query per introduced pointer to another document, repeated references included, inside the write's transaction; memoise per node id or batch with node_id = any($1)."
+      "file": "packages/contracts/src/dispatch-block-ref.ts",
+      "description": "Fast-follow: 'in the same words' comments overstate parity, since JSON.stringify and Go %q quote non-printable and non-ASCII characters differently; soften the comments or align the quoting."
     }
   ]
 }
