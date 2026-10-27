@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-596",
+  "completed": "2026-10-27T04:37:00Z",
+  "planDocument": "dispatch://INFRA-596/artifact/plan-md",
+  "summary": "Sami's BET-15 reply (comment 03207432, events 4314/4315) was a person's reply in a thread rooted by his own comment; Dispatch's outbox sends a reply only to the thread root's and direct parent's authors (both Sami, no topic), never to the claimant (01a14313) or the session that replied in the thread, so it went to the issue topic alone (publisher.go:562-836, logic unchanged since 8f2c390b 2026-10-11). The plan fixes the fan-out (claimant when unrouted, every session in the thread, the document's authors on a reply), makes doc-read print open threads with their text, commits the Dispatch-side SQL and the transcript-store queries plus a report that refuses counts that do not add up, and has one dev-box run read both production stores.",
+  "order": [
+    "W1 packages/envoy/internal/dispatch/deliveryaudit/{comments.sql,trace.sql,deliveryaudit.go,deliveryaudit_test.go}: Dispatch-side owed/addressed rows per person's comment and the one-comment trace, Go-tested on Dispatch's test Postgres with records written by the real handlers and outbox",
+    "W2 scripts/dispatch/comment-delivery/{received.sql,sessions.sql,report.ts} + scripts/dispatch/__tests__/comment-delivery.test.ts + scripts/dispatch/README.md: input-free transcript-store queries and the report with classes, precedence, counts, the identity check and the cause-to-fix table",
+    "W3 push W1/W2, then envoy_publish the dev-box run request (exact steps in plan.md W3) to notifications.role.legion-infra-infra-514-architect; continue W4/W5/W7 meanwhile",
+    "W4 outbox fan-out fix: claimant beside the route in scanPendingEvents; new outbox/recipients.go one query for thread session authors and the thread document's session authors; publishDestinations/publishAuthorRoutes per decision 2; comment_create.go suppressed_authors lists every mentioned session; outbox/publisher_comment_recipients_test.go; docs and changelogs. Message INFRA-590's implementer before editing.",
+    "W5 envoy-client dispatch-execute.ts openArtifactMarks + trailer: open anchored threads with root and reply text from an unfiltered comments read; tests in dispatch-execute.test.ts; dispatch_doc_read description; claude-envoy dist rebuilt in the same commit",
+    "W6 once the run's outputs are on INFRA-596: report.ts -> human-comment-delivery-2026-10.md uploaded to INFRA-514; fix any further fan-out/doc-read/plugin-drop cause here with a test; map last-hop rows to INFRA-594",
+    "W7 before/after: comment-reply case added to TestOutboxThroughputUnderRemoteLatency, main vs head on one machine, recorded in outbox/THROUGHPUT.md; INFRA-589's step too if it has merged"
+  ],
+  "acceptance": [
+    {
+      "criterion": "The BET-15 comment's path is traced from Dispatch's records (events, published_destinations, comment_deliveries, comment_mentions.resolved_session_id) to the cause, with the records quoted.",
+      "surface": "Dispatch API (agent token) and production database read-only in the dev-box run",
+      "command": "curl -H \"Authorization: Bearer $(cat $DISPATCH_TOKEN_FILE)\" \"$DISPATCH_URL/api/v1/comments/03207432-749f-4211-9607-e378dc636807\" and .../api/v1/issues/BET-15/events; psql with PGOPTIONS='-c default_transaction_read_only=on' -v comment=03207432-749f-4211-9607-e378dc636807 -f packages/envoy/internal/dispatch/deliveryaudit/trace.sql",
+      "negativeControl": "trace.sql for c1283587 (event 4260) shows notifications.agent.01a14313-f0d7-765d-91c1-f2e043218727 in published_destinations"
+    },
+    {
+      "criterion": "A committed query or command produces the October table from Dispatch's records; transcript query committed; unheld sessions unknown.",
+      "surface": "Dispatch's test Postgres; the run's attached outputs",
+      "command": "cd packages/envoy && go test ./internal/dispatch/deliveryaudit/ -count=1; bun test scripts/dispatch/__tests__/comment-delivery.test.ts; bun scripts/dispatch/comment-delivery/report.ts on the outputs attached to INFRA-596 reproduces the uploaded document byte for byte",
+      "negativeControl": "a fixture target the store does not hold is reported unknown, never delivered; a duplicated input row is refused"
+    },
+    {
+      "criterion": "Each cause found in Dispatch or Envoy is fixed with a test.",
+      "surface": "Dispatch server built from the head + local Postgres + local nats-server -js, observed with natstail; outbox Go tests",
+      "command": "cd packages/envoy && go test ./internal/dispatch/outbox/ ./internal/dispatch/api/ -count=1 (new tests fail at main); local Dispatch with DISPATCH_IDENTITY_HEADER_TRUSTED=1, go run ./cmd/natstail -subject 'notifications.agent.>', post BET-15's sequence and see the person's reply on the claimant's subject",
+      "negativeControl": "main's build: the reply appears only on notifications.dispatch.issue.<KEY>.comment.created"
+    },
+    {
+      "criterion": "dispatch doc-read shows open comments with their text, not only their id.",
+      "surface": "the dispatch CLI built from the head against the local Dispatch",
+      "command": "cd packages/pi-envoy && bun run build && DISPATCH_URL=<local> ./bin/dispatch doc-read --issue <KEY> --artifact spec; bun test packages/envoy-client/src/__tests__/dispatch-execute.test.ts",
+      "negativeControl": "main's CLI prints only `comment <id>`; a resolved thread is not printed"
+    },
+    {
+      "criterion": "The document's counts add up: total human comments, delivered, not delivered by cause, unknown.",
+      "surface": "report.ts",
+      "command": "bun scripts/dispatch/comment-delivery/report.ts --comments <csv> --received <tsv> --sessions <tsv>; the document's first lines print total = delivered + sum(not delivered by cause) + unknown with numbers",
+      "negativeControl": "a fixture comment in no class, or in two, makes report.ts exit 1 naming the rows"
+    }
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, the PR body, proofs with headSha and negative controls, findings outside the issue",
+      "dispatch: uploading the October document to INFRA-514 and reading Dispatch records; the skill text W4 rewrites",
+      "asd-ste100: the October document and the PR body are read by people who have not read the code"
+    ],
+    "test": [
+      "legion-worker: re-running every proof at the head with its negative control, and the proof object shape",
+      "dispatch: reading the API records and the artifacts attached to INFRA-596 and INFRA-514"
+    ],
+    "review": [
+      "legion-worker: the merge gate, review threads and the no-deferral rule, which W6's 'fix any further cause here' depends on",
+      "dispatch: the skill and tool-description text W4 and W5 change is the contract agents read"
+    ]
+  },
+  "decisions": [
+    "Owed = route holder when routed, else claimant session; ask followers (from follower events) and asker; mentioned sessions; route and claim as at published_at.",
+    "Fan-out fix for a person's comment.created/edited: claimant when unrouted; every session that wrote in the thread; the thread document's session authors on a reply; mentions suppress; comment.reopened/resolved unchanged.",
+    "Human comment = comments row authored by a person, ask-thread replies included; ask answers by button and direct messages excluded.",
+    "Window 2026-10-01T00:00Z (UTC) to run start minus 30 min.",
+    "Transcript queries are input-free and live in scripts/dispatch/comment-delivery/ in sjawhar/legion (architect may move to theorem-labs/agent-infra).",
+    "doc-read prints every open anchored thread in full, unbounded.",
+    "dispatch read's 120-character event line is not changed (it carries the dispatch:// reference); named for the architect."
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "published_destinations is in no API response and nothing shows a dev box can read production Postgres; the ask answered covers only the transcript store.", "answer": "Departure 1: the single dev-box run executes the committed Dispatch SQL read-only via a one-off postgres:16 pod in namespace dispatch with DATABASE_URL from Secret dispatch-dispatch, under the dev box's own credentials, which the goals sanction ('The dev box's login does what Sami would do', each use recorded on the issue). No Legion credential reaches it (kubectl auth can-i create pods/exec -n dispatch = no)."},
+      {"finding": "A mentioned claimant, thread replier or document author would get two frames: suppressed_authors on a reply lists only the root author, and mention and outbox dedupe keys differ.", "answer": "W4: comment_create.go suppressed_authors lists every mentioned session for replies too; a test asserts one frame for a mentioned claimant."},
+      {"finding": "skills/dispatch/SKILL.md:48 documents that a claim delivers no comments; envoy AGENTS.md:2295-2318 and the publishAuthorRoutes comment describe today's fan-out; changelogs.", "answer": "W4 docs list rewrites each; the agent's not routing is recorded in the trace as a contributing fact (guidance existed since 6b9f13f09, 2026-09-27)."},
+      {"finding": "The claimant for document events needs the document's issue, as the route does via coalesce(i.route, ai.route).", "answer": "W4 reads coalesce(i.claimed_by, ai.claimed_by) in the same scanPendingEvents select, no extra query."},
+      {"finding": "Replies carry no anchor or artifact, so commentedDocument returns empty for them.", "answer": "W4 recipients.go takes the document from the thread root's anchor."},
+      {"finding": "Keep the bounded thread walk (maxCommentThreadDepth).", "answer": "W4 recipients.go keeps the bound for legacy nested rows."},
+      {"finding": "Scope and noise: reopened/resolved/edited; a reply that reopens a thread would send each new recipient two frames.", "answer": "Decision 2: new recipients for comment.created and comment.edited only; reopened/resolved keep today's root-author rule; a test checks a reply's reopen goes only where it went before."},
+      {"finding": "'Route holder or claimant' read as fallback or both.", "answer": "Fallback: the route holder when routed, else the claimant; same rule in the table and the fix."},
+      {"finding": "Claimant at publish time vs write time differ under outbox lag; closed issues release the claim.", "answer": "One rule in both: route and claim as at published_at (created_at if unpublished); a comment on a closed, released, unrouted issue is owed to nobody."},
+      {"finding": "Receipts outside owed pairs (issue-topic subscribers) would be missed by a pair-driven query.", "answer": "Decision 6: received.sql lists every person's comment.created delivery in every held session; any receipt counts as delivered."},
+      {"finding": "A role target's miss must be unknown, not not-delivered.", "answer": "W2 report: a role target, or a session the store does not hold, makes the comment unknown when no receipt exists, and the row names it."},
+      {"finding": "No precedence rule; per-cause counts may not sum.", "answer": "W2 report: delivered > unknown > one ordered primary cause; refuses a comment in no class or two, an unknown naming no unheld target, a not-delivered with no cause, or a failed identity."},
+      {"finding": "Missing class 'addressed by Dispatch, not owed, not received'.", "answer": "W1 emits every addressed agent/role subject as target with reason addressed-only; W2 classifies its misses."},
+      {"finding": "Session ids move (fork/resume, '<id>@<host>:<hash>' copies).", "answer": "W2 sessions.sql takes the base id before '@' and parent_session; the report counts forks and resumes as the session."},
+      {"finding": "ask_followers is a current list.", "answer": "W1 rebuilds followers from ask.follower_added/ask.follower_removed events plus the asker."},
+      {"finding": "published_destinations also records a subject NATS refused as too large.", "answer": "Section 1 and the document say 'Dispatch recorded it published to', never 'NATS accepted'."},
+      {"finding": "Window ends before October does; RCA uses Pacific times.", "answer": "Decision 4 (UTC, to the run) and departure 2 for the architect."},
+      {"finding": "Matching on the comment id assumes every October pi-envoy rendering carried it.", "answer": "W2's first step reads renderInbound's October history and matches each form; the BET-15 control (event 4260 received by 01a14313) checks the match."},
+      {"finding": "The RCA's 'truncated event line (18658)' is unreconciled.", "answer": "W3 step 2 reads 01a14313's transcript lines 18650-18666 and 11301-11366; the trace quotes them. Decision 9 leaves dispatch read's 120-character line unchanged and names it for the architect."},
+      {"finding": "TestOutboxThroughputUnderRemoteLatency seeds message.created only, so it does not exercise D1.", "answer": "W7 adds a comment-reply case on claimed issues and measures main vs head; INFRA-589's step too if merged."},
+      {"finding": "getComments(issue, artifact) filters on the anchor so replies never return; output size at 25-47 open threads.", "answer": "W5 reads comments unfiltered and groups by thread root; decision 8 prints all, since hiding text is the defect."},
+      {"finding": "claude-envoy dist must be rebuilt in the same commit.", "answer": "W5 lists it."},
+      {"finding": "Transcript query placement versus the goals' agent-infra rule.", "answer": "Decision 7 keeps it in sjawhar/legion with the reason, and names it for the architect."},
+      {"finding": "Inlining thousands of pairs may exceed max_query_size.", "answer": "Decision 6: the transcript queries take no input."},
+      {"finding": "Merge order with INFRA-590.", "answer": "W4: message INFRA-590's implementer before editing; recipients.go isolates the change; whichever lands second rebases."},
+      {"finding": "Each-cause-fixed is open-ended until the run.", "answer": "W2's cause-to-fix table maps every class to a test or INFRA-594 and refuses an unmapped class; W6 fixes any new Dispatch/plugin class here."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Running system: 'Dispatch's API and database records read through Dispatch's own tools'; the child commits the transcript query and a dev-box session runs it.",
+      "plan": "The same single dev-box run also executes the committed Dispatch SQL (comments.sql, trace.sql) read-only against production's database.",
+      "evidence": "published_destinations is in no API route (routes_table.go; model.Event has no such field); kubectl auth can-i create pods/exec -n dispatch = no for Legion pods; theorem-labs/agent-infra declares no read-only Dispatch login. Sami's answer on dispatch://INFRA-514/spec ask 6f2884ec: 'A dev-box session runs the count once'.",
+      "outcome": {"kind": "unchanged"}
+    },
+    {
+      "spec": "Outcome and acceptance: 'each human comment in October 2026'.",
+      "plan": "The window is 2026-10-01T00:00Z to the run's start minus 30 minutes, because the run happens once and before the month ends; comments after it fall under the fix once it deploys.",
+      "evidence": "Today is 2026-10-27; the transcript store loads every 10 minutes (transcript-store README, Freshness).",
+      "outcome": {"kind": "changed", "acceptance": ["A committed query or command produces the October table: covers 2026-10-01T00:00Z to the run, not to 2026-10-31."]}
+    }
+  ]
+}
