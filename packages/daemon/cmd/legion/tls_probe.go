@@ -73,8 +73,8 @@ func verifyTLSPositiveControls(sites []tlsSite, probe func(tlsSite) tlsOutcome) 
 		}
 		negative := isolationTLSSite
 		negative.root = site.root
-		if outcome := probe(negative); outcome.status == tlsConnectionAccepted {
-			failures = append(failures, fmt.Sprintf("%s positive control is not isolated: its pinned root accepted %s", site.name, negative.url))
+		if outcome := probe(negative); outcome.status != tlsCertificateRefused {
+			failures = append(failures, fmt.Sprintf("%s positive control isolation endpoint %s was %s: %s", site.name, negative.url, outcome.status, outcome.detail))
 		}
 	}
 	if len(failures) > 0 {

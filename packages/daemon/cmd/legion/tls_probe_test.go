@@ -136,18 +136,18 @@ func TestImageTLSClientsCoverTheWorkerInventory(t *testing.T) {
 
 func TestTLSPositiveControlsRequireTheExpectedChain(t *testing.T) {
 	for _, testCase := range []struct {
-		name    string
-		outcome tlsOutcome
-		want    string
+		name, want       string
+		outcome, isolation tlsOutcome
 	}{
-		{name: "accepts pinned root", outcome: tlsOutcome{status: tlsConnectionAccepted}},
-		{name: "refuses pinned root", outcome: tlsOutcome{status: tlsCertificateRefused, detail: "certificate verify failed"}, want: "emSign positive control"},
-		{name: "cannot reach site", outcome: tlsOutcome{status: tlsNetworkUnavailable, detail: "network is unreachable"}, want: "emSign positive control"},
+		{name: "accepts pinned root", outcome: tlsOutcome{status: tlsConnectionAccepted}, isolation: tlsOutcome{status: tlsCertificateRefused}},
+		{name: "refuses pinned root", outcome: tlsOutcome{status: tlsCertificateRefused, detail: "certificate verify failed"}, isolation: tlsOutcome{status: tlsCertificateRefused}, want: "emSign positive control"},
+		{name: "cannot reach site", outcome: tlsOutcome{status: tlsNetworkUnavailable, detail: "network is unreachable"}, isolation: tlsOutcome{status: tlsCertificateRefused}, want: "emSign positive control"},
+		{name: "cannot reach isolation endpoint", outcome: tlsOutcome{status: tlsConnectionAccepted}, isolation: tlsOutcome{status: tlsNetworkUnavailable, detail: "network is unreachable"}, want: "isolation endpoint"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			err := verifyTLSPositiveControls([]tlsSite{emSignTLSSite}, func(site tlsSite) tlsOutcome {
-				if site.control {
-					return tlsOutcome{status: tlsCertificateRefused}
+				if site.url == isolationTLSSite.url {
+					return testCase.isolation
 				}
 				return testCase.outcome
 			})
