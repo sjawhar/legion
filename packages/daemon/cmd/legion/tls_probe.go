@@ -142,10 +142,10 @@ func (c tlsCommandClient) probe(ctx context.Context, site tlsSite) tlsOutcome {
 	message := tlsCommandMessage(err, string(output))
 	detail := trimTLSDetail(message)
 	switch {
-	case tlsCertificateError(message):
-		return tlsOutcome{status: tlsCertificateRefused, detail: detail}
 	case err == nil || c.applicationSeen != nil && c.applicationSeen(message):
 		return tlsOutcome{status: tlsConnectionAccepted, detail: detail}
+	case tlsCertificateError(message):
+		return tlsOutcome{status: tlsCertificateRefused, detail: detail}
 	default:
 		return tlsOutcome{status: tlsNetworkUnavailable, detail: detail}
 	}

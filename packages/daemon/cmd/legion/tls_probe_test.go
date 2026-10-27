@@ -161,3 +161,20 @@ func TestTLSPositiveControlsRequireTheExpectedChain(t *testing.T) {
 		})
 	}
 }
+
+
+func TestTLSCommandClientAcceptsSuccessfulCertificateMarkerBodies(t *testing.T) {
+	for _, name := range []string{"node", "chromium"} {
+		t.Run(name, func(t *testing.T) {
+			client := tlsCommandClient{
+				clientName: name,
+				command: func(tlsSite) (string, []string, []string) {
+					return "sh", []string{"-c", `printf %s "$1"`, "sh", "page body NET::ERR_CERT_AUTHORITY_INVALID"}, nil
+				},
+			}
+			if outcome := client.probe(context.Background(), controlTLSSite); outcome.status != tlsConnectionAccepted {
+				t.Fatalf("client.probe() = %+v, want accepted successful response", outcome)
+			}
+		})
+	}
+}
