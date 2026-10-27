@@ -2,63 +2,53 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-529",
-  "completed": "2026-10-27T03:30:00Z",
-  "round": 3,
+  "completed": "2026-10-27T04:20:00Z",
+  "round": 4,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2303",
-  "codeHead": "65158f49ef623a9dfe0077694f4984ce3dc084a8",
-  "answers": "Review round 1 at 94d9befd974d (changes requested): lone-CR line endings, the mark-wrapped child passing the content-rule check, a non-fence line drawn as a closing fence, and three cleanups. All six threads replied to and resolved.",
+  "codeHead": "0d5fff64e7ad941b54c4a297937dda9c21092703",
+  "answers": "Review round 2 at 000cbca96df5, narrowed by the architect: the leading byte-order mark finding plus the two named small items (read-only-directives.ts:159, AGENTS.md:46). Nothing else changed; the tester's round-1 red test is kept unchanged. Three threads replied to and resolved.",
   "proof": [
     {
-      "criterion": "A1: a comment with bold text and a :::note block shows the bold formatted and the note block's lines as text, and the same for a message and an ask",
-      "surface": "Dispatch Conversation tab, Chromium, real Go Dispatch server and Postgres 17 + pgvector in the issue pod (packages/dispatch/e2e, harness /legion/harness/setup.sh + env.sh, implementer lane port 18777, database dispatch_infra529)",
-      "command": "cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium",
-      "observed": "✓ 1 … :19:1 (4.1s); 3 passed (18.5s). Runs: https://github.com/sjawhar/legion/pull/2303#issuecomment-6432404432",
-      "headSha": "65158f49ef623a9dfe0077694f4984ce3dc084a8",
-      "negativeControl": "Row 1 on base 7f7edb8de3e3 with the SPA rebuilt there: strong 'bold' not found, the card one raw-text node 'Some **bold** text :::note A note with **inner** words :::' (https://github.com/sjawhar/legion/pull/2303#issuecomment-6431409111)."
+      "criterion": "Review finding (round 2): a body that starts with U+FEFF draws its unknown block's fence lines and loses no text",
+      "surface": "Dispatch Conversation tab, Chromium, real Go Dispatch server and Postgres 17 + pgvector in the issue pod; message bodies are stored as sent (harness /legion/harness/setup.sh + env.sh)",
+      "command": "cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium (implementer lane port 18777, database dispatch_infra529; and LEGION_ROLE=tester, port 28777, database dispatch_infra529_tester)",
+      "observed": "✓ 4 … :119:1 Conversation draws the unknown block of a message that starts with a byte-order mark (3.6s): ':::a', 'body words', ':::', 'After' each exactly one paragraph, strong 'bold', no fallback. Implementer lane 4 passed (22.1s); tester lane 4 passed (21.3s). Runs: https://github.com/sjawhar/legion/pull/2303#issuecomment-6433008305",
+      "headSha": "0d5fff64e7ad941b54c4a297937dda9c21092703",
+      "negativeControl": "Row 4 on the round-3 code head 65158f49 (SPA rebuilt there): 'locator(\\'p\\').filter({ hasText: /^:::a$/ }) Expected: 1 Received: 0', the fences cut one character early."
     },
     {
-      "criterion": "The read-only engine never drops text: a typed block whose content breaks its content rule is drawn as its literal lines",
-      "surface": "Dispatch Conversation tab, Chromium, real Go Dispatch server and Postgres (same lane)",
+      "criterion": "A1 and the earlier rows still hold: unknown directives drawn as text in comment, message and ask; typed blocks whose content breaks their rule keep every line; lone-CR bodies draw each line once",
+      "surface": "Dispatch Conversation tab, Chromium, real Go Dispatch server and Postgres (same lanes)",
       "command": "cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium",
-      "observed": "✓ 2 … :52:1 Conversation keeps every line of a typed block whose content breaks its rule, drawn as text (2.7s): '::::ask', 'Which option?', 'first', ':::note', 'A note line'; ':::ask{#a1}', 'A heading', 'Body text' all shown, no fallback.",
-      "headSha": "65158f49ef623a9dfe0077694f4984ce3dc084a8",
-      "negativeControl": "Row 2 on round-1 code head 0f615248: 'Expected substring: \"::::ask\" Received string: \"Ssession:e2e-dire…just nowLead bold\"'."
+      "observed": "✓ 1 … :19:1 (3.7s), ✓ 2 … :52:1 (2.6s), ✓ 3 … :89:1 (2.4s) at the head on both lanes.",
+      "headSha": "0d5fff64e7ad941b54c4a297937dda9c21092703",
+      "negativeControl": "Row 1 on base 7f7edb8de3e3 shows one raw-text node; row 2 on 0f615248 loses the ask's lines; row 3 on f213a0a6 runs the opening line past the lone CR (earlier rounds' runs linked on the PR)."
     },
     {
-      "criterion": "Review finding 1: a body with lone-CR line endings draws each line once, with output linear in the input",
-      "surface": "Dispatch Conversation tab, Chromium, real Go Dispatch server and Postgres (same lane); message bodies are stored without line-feed normalization",
-      "command": "cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium",
-      "observed": "✓ 3 … :89:1 Conversation draws a message's lone-CR unknown block once, each line on its own (2.2s): ':::a', 'body words', ':::', 'After' each exactly one paragraph. Engine: \":::a\\r:::\\r\".repeat(3555) (31,995 chars) draws 24,885 characters in 634 ms (was 44,245,530 in 1,558 ms).",
-      "headSha": "65158f49ef623a9dfe0077694f4984ce3dc084a8",
-      "negativeControl": "Row 3 on round-2 code head f213a0a6 (SPA rebuilt there): 'locator(\\'p\\').filter({ hasText: /^:::a$/ }) Expected: 1 Received: 0', the opening line run past the lone CR."
-    },
-    {
-      "criterion": "Review findings 2-4 and engine rows: mark-wrapped ask drawn with every word, non-fence lines never drawn as a fence, cleanups, default refusals unchanged",
+      "criterion": "Engine rows: BOM-led bodies, the reviewer's mark-span example, default refusals unchanged, tester's red test unchanged",
       "surface": "@legion/proof-editor headless engine with the real server schema (packages/envoy/internal/dispatch/pmdoc/schema/blocks.json)",
       "command": "cd packages/proof-editor && bun run test && bun run typecheck && bun run lint",
-      "observed": "125 pass, 0 fail across 19 files; tsc exit 0; biome 'Checked 29 files … No fixes applied.' The tester's round-1 red test is unchanged and passes.",
-      "headSha": "65158f49ef623a9dfe0077694f4984ce3dc084a8",
-      "negativeControl": "Each of the nine new rows failed on f213a0a6's transform: e.g. the mark-wrapped ask gave an empty doc with 'createNodeInParserFail … heading(dispatchAsk(\"Heading words\"))'; ':::note\\nbody\\n\\n[x]: mailto:' drew a ':' fence paragraph; '[x]: https://e.x/a:::' drew ':::'."
+      "observed": "128 pass, 0 fail across 19 files; tsc exit 0; biome 'Checked 29 files … No fixes applied.' jj diff --from 000cbca9 of the test file adds lines only.",
+      "headSha": "0d5fff64e7ad941b54c4a297937dda9c21092703",
+      "negativeControl": "On 65158f49's transform: '\\ufeff:::note\\nbody\\n:::\\n' drew '\\ufeff:::note' and lost ':::'; '\\ufeffHello **b**\\n\\n:::note…' drew an empty opening paragraph (RangeError: Empty text nodes are not allowed) and lost both fences."
     },
     {
       "criterion": "MarkdownBody and server parity unchanged",
       "surface": "MarkdownBody in happy-dom; pmdoc fixture generator (default engine)",
       "command": "cd packages/dispatch && bun test web/src/features/refs && bun run typecheck && bun run lint; cd packages/envoy/internal/dispatch/pmdoc/gen && bun run check",
       "observed": "195 pass, 0 fail; tsc exit 0; biome 'Checked 613 files … No fixes applied.'; 'fixtures up to date (84 documents, 43 splice cases)'",
-      "headSha": "65158f49ef623a9dfe0077694f4984ce3dc084a8",
+      "headSha": "0d5fff64e7ad941b54c4a297937dda9c21092703",
       "negativeControl": "With only readOnly: true reverted in markdown-engine.ts the MarkdownBody cases fail on data-markdown-fallback (round 1)."
     }
   ],
   "filesChanged": [
-    "packages/proof-editor/src/read-only-directives.ts (CR/LF line ends; CLOSING_FENCE /^[ \\t>]*(:{3,})[ \\t]*$/ with run >= opening run and past the last kept child; mark children checked in the mark's place; createAndFill called directly; schema required; isLabel; floor inside drawDirective, through position-less mark wrappers via sourceEnd)",
-    "packages/proof-editor/src/lib-headless.ts (readOnly doc comment)",
-    "packages/proof-editor/tests/read-only-directives.test.ts (nine rows; direct-call test given a schema)",
-    "packages/dispatch/e2e/unknown-directive.e2e.ts (lone-CR browser row)"
+    "packages/proof-editor/src/read-only-directives.ts (source without one leading U+FEFF; readOnlyChildren and the kept-directive branch return copies; colon run counted with a loop)",
+    "packages/proof-editor/tests/read-only-directives.test.ts (three rows added)",
+    "packages/proof-editor/AGENTS.md (row 46: 'with NodeType.createAndFill')",
+    "packages/dispatch/e2e/unknown-directive.e2e.ts (byte-order-mark browser row)"
   ],
-  "trickyParts": [
-    "The line-start scan walks back by hand: lastIndexOf('\\r') with no CR in the source scans to offset 0, which would be quadratic across many directives.",
-    "A dispatchMark wrapper has no position, so the floor takes the end of its last child (sourceEnd); without it a quote line ':::' inside a mark span was drawn twice."
+  "deviations": [
+    "Kept the `type === undefined` guard in fitsContentRule that the reviewer called dead: remarkReadOnlyDirectives is exported, and without it a block schema naming a type the ProseMirror schema lacks would throw instead of keeping the block; the architect narrowed the round to the named fixes."
   ],
-  "deviations": [],
   "openQuestions": []
 }
