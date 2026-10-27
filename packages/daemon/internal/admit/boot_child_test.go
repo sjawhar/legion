@@ -70,8 +70,8 @@ func echoed(t *testing.T, labelled bool) (record.Issue, record.Issue, []effect) 
 	return issue(t, pool, bootChild), issue(t, pool, bootGrandchild), effects(t, pool)
 }
 
-// A child its architect released to todo whose own todo event recorded nothing — the daemon stopped
-// before it applied the event, or Dispatch linked the child to its parent only after it — is
+// A child its architect released to todo that no event of it ever recorded — the event never
+// reached the daemon, or reached it while the child's parent had no record — is
 // recorded into its running tree by the boot read, from the parent the listing shows, exactly as
 // that event would have recorded it; so is its own todo child, whichever the listing shows first.
 // The boot read holds both while the Dispatch consumer is behind and records them on the release.

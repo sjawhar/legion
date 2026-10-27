@@ -192,11 +192,12 @@ issue (`skills/legion-worker/references/findings.md`).
 A root in `todo` without the label is never admitted, and a root in `triage` without it never wakes
 the controller. A child needs none: it runs under its tree's architect once its root is admitted,
 and its architect's `release_children` records it in the tree even when Dispatch already showed it
-`todo`. A `todo` child of a live tree that no event recorded — the child's `todo` event carried no
-parent, because Dispatch linked the child to its parent after that event, or the event is no longer
-on the notification stream for the daemon to consume — is recorded into the tree at the daemon's
-next boot, from the parent Dispatch's listing shows then, at any depth, as its own event would
-have. A child whose tree is not live is an orphan, admitted as a root of its own, so it needs the
+`todo`. A `todo` child of a live tree that no event of it ever recorded — the event never reached
+the daemon, since a durable consumer created fresh takes only what is published after it, or it
+reached the daemon while the child's parent had no record or its tree was not live — is recorded
+into the tree at the daemon's next boot, from the parent Dispatch's listing shows then, at any
+depth, as its own event would have. No later event brings such a child in: Dispatch already shows
+it `todo`. A child whose tree is not live is an orphan, admitted as a root of its own, so it needs the
 label as any root does. An issue is recorded on the repository Dispatch resolves for it (its own,
 else its nearest ancestor's, else the project's default) and keeps it: an issue whose repository
 resolves to none, or to one the daemon does not serve, is not admitted, and the daemon says why on
