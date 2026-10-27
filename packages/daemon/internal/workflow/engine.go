@@ -109,6 +109,10 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.dispatchArtifact(ctx, tx, fact)
 	case intake.GateAboveDispatch:
 		return e.gateAboveDispatch(ctx, tx, fact)
+	case intake.GateRequestFound:
+		return e.gateRequestFound(ctx, tx, fact)
+	case intake.CatchUpApplied:
+		return e.catchUpApplied(ctx, tx, fact)
 	case intake.DispatchAskOpened:
 		return e.dispatchAskOpened(ctx, tx, fact)
 	case intake.DispatchAskClosed:
