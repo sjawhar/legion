@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-511",
+  "completed": "2026-10-27T04:30:00Z",
+  "proof": [
+    {
+      "criterion": "A1: before the change, what the operator sees during the start turn is recorded",
+      "surface": "real interactive Oh My Pi 18.12.2 (.omp-pin) under a pseudo-terminal read through @xterm/headless, both plugins, stand-in daemon/listener/gateway with held Messages requests, real NATS",
+      "command": "at base fc2f956e (test files only restored onto it): cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:4222 bun test extensions/controller-start-omp.test.ts, with today's argv (no word) and with the word",
+      "observed": "A2, A3, A4 fail with both argvs: while the start turn's request is held the screen shows only the banner, the Envoy warning and an empty composer (no start message, no Working row); a probe on the same rig: typed text stays in the composer and Enter is not taken, Esc does nothing, the start message appears only after the turn ends",
+      "headSha": "fc2f956e24eb9ee67779646462c438ef56eeee21",
+      "negativeControl": "the same test at the head passes (entries below); the base failures are the before-record itself"
+    },
+    {
+      "criterion": "A2-A5 and the role-claim card case: the start turn runs after startup, is shown, takes typed text, is interrupted by Esc, is the first turn once, and a card or notice arriving as soon as the role is claimed comes after it",
+      "surface": "real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins of this branch, stand-ins, real NATS",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:4222 bun test ./extensions/controller-start-omp.test.ts",
+      "observed": "6 pass, 0 fail: start message and Working row on screen while held; typed text queued as a steer and carried after the start message; Esc gives stopReason aborted / Interrupted by user and no further request; the start message is the first user message, once, and /legion-controller-start is in no request or transcript line; a role-lane card published right after /v1/roles/set and a controller-topic notice come after the start message and both reach the model; a 403 claim refusal shows the warning on screen with no Messages request. Evidence: https://github.com/sjawhar/legion/pull/2300#issuecomment-6433966262",
+      "headSha": "73dd84ff6e4dad2155ac560d774cca15d4337df8",
+      "negativeControl": "pi-legion of the parent commit (claim at session_start): the role-claim card case fails 3/3 (expect(firstStart).toBeGreaterThanOrEqual(0), received -1): the card's turn runs first"
+    },
+    {
+      "criterion": "A12: the built legion controller start launches the controller whose first turn is the start message after startup; A8 skewed CLI/plugin refused before the mint; A9 non-terminal stdin refused before the probe and mint",
+      "surface": "legion built from the head + both plugins installed into an isolated Oh My Pi profile from the same tree, run under a pseudo-terminal against a stand-in daemon/listener/gateway, real NATS",
+      "command": "cd packages/daemon && go build -o <dir>/legion ./cmd/legion; <dir>/legion controller start --config <scratch controller.yaml> under Bun.Terminal (rig /legion/scratch/tmp/i511/smoke3/run.ts, loop.sh cold:1 warm:1 warm:2 refuse:1 c40:1)",
+      "observed": "argv ends /legion-controller-start (4 words, no --resume/--mode); probe passes at contract 41 (mint carries pluginContract 41); /v1/roles/set and the start turn after the first TUI frame (+93..+1445 ms); start message and Working row while held; first session turn's last message is the start message; settles after the reply; refusal run shows 'legion: the controller claim failed: POST /legion/v1/claims/register failed with 403: invalid controller capability. Run /legion-claim-controller ...' with 0 Messages requests and 0 role claims",
+      "headSha": "73dd84ff6e4dad2155ac560d774cca15d4337df8",
+      "negativeControl": "stdin </dev/null: exit 1, 'stdin is not a terminal: ...', 0 daemon requests; pi-legion declaring contract 40: exit 1, 'speaks daemon API contract 40; this daemon requires 41', no POST /legion/v1/controller/secret"
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/cmd/legion/controller.go, controller_test.go: positional word /legion-controller-start; stdin-not-a-terminal refusal (stdinIsTerminal seam)",
+    "packages/daemon/internal/daemon/controller.go: ControllerStartCommand constant and docs",
+    "packages/daemon/internal/api/version.go, packages/contracts/fixtures/daemon-api/version.json, packages/pi-legion/package.json, packages/claude-envoy/package.json, packages/claude-envoy/dist/envoy-channel.js: daemon API contract 41",
+    "packages/daemon/internal/daemon/promptreferences_omp_test.go: plugin interface version 4",
+    "packages/daemon/internal/prompts/roles/controller-root.md: when each launch claims",
+    "packages/pi-legion/src/controller-session.ts, extensions/legion.ts: operator controller claims from /legion-controller-start (start message before the role claim), refusal as a warning notice, startupTurn mark at the send and before claims/ready",
+    "packages/pi-shared/src/interface.ts (version 4, startupTurn), src/startup-turn.ts (accessors), src/pi-types.ts (CommandContext.isIdle, sendUserMessage followUp), package.json exports, devDependency @xterm/headless",
+    "packages/pi-shared/test/omp-harness.ts: spawnInteractive PTY runner, ompFlags/ompEnv",
+    "packages/pi-legion/extensions/legion.test.ts, controller-start-omp.test.ts; package.json test script runs the real-binary file in its own process",
+    ".github/workflows/envoy-and-contracts.yaml: NATS service (pinned by digest) and LEGION_TEST_NATS_URL for the pi-legion job",
+    "docs: root AGENTS.md, packages/pi-legion/AGENTS.md, packages/pi-shared/AGENTS.md, docs/kubernetes.md, docs/site troubleshooting, scripts/e2e/README.md and two script comments, pi-legion/pi-envoy/claude-envoy CHANGELOGs"
+  ],
+  "trickyParts": [
+    "Sending the start message after the Envoy role claim was flaky (4/30): the listener forwards a role-lane card as soon as it records the role, which can reach the session before claimEnvoyRole resolves; the send now happens right after claims/register, before the role claim and the subscription.",
+    "Oh My Pi's TUI render is throttled, so the claim's first daemon requests can precede the first painted frame by ~25 ms in some runs; the command still runs after Oh My Pi's startup code (startupComplete) and the start turn always comes after the first frame.",
+    "extensions/legion.test.ts mocks nats process-wide, so controller-start-omp.test.ts (real NATS) runs in its own process via the package test script."
+  ],
+  "deviations": [
+    "Worked from plan.md version 2 and spec version 3 (the architect's scope change on 2026-10-27): task 5 (pi-envoy deferral), A6 and A13 are not in this pull request; they are built and proven on branch legion/INFRA-511-startup-wait (on #2278's head) for INFRA-497's implementer to move into #2278.",
+    "Architect-approved design change: the operator controller's whole claim runs from /legion-controller-start instead of session_start, so LEGION-392's order holds on main's pi-envoy; the claim refusal is shown as a warning notice from the command.",
+    "Daemon API contract is 41, not 40: main released 40 for the awaiting_person change while this was open (collision note).",
+    "The plan's pi_legion path-filter edit was unnecessary: the filter already listed packages/pi-envoy/**."
+  ],
+  "openQuestions": [
+    "Residual race, recorded in the PR body: a message sent straight to the new session id between pi-envoy's registration (during startup) and the claim is an ordinary card on main's pi-envoy and can take the first turn."
+  ],
+  "discoveredComplexity": [
+    "Three internal/daemon tests fail in this sandbox at the base commit as well (TestATerminalAttemptLeavesLaterChildrenSIGTTOUsDefault, TestATerminalAttemptIgnoresSIGTSTP: gVisor /proc has no SigIgn; TestTmuxBootRewritesEveryOlderClonesCredentialHelper), plus Docker-only tests; scripts/skill-scenarios/rig.test.ts judge-omp cases need Docker."
+  ]
+}
