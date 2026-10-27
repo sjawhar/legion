@@ -2,53 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-546",
-  "completed": "2026-10-27T13:28:46Z",
-  "round": 4,
-  "headSha": "17296b86661b19cafcb4dca50b1418f44bb061b4",
-  "codeHeadSha": "e572c5be3cba2196811964240ccea603f040764b",
+  "completed": "2026-10-27T18:23:12Z",
+  "round": 5,
+  "headSha": "eb0cb4eb9b214d7940d236a5ba62c618798c747b",
+  "codeHeadSha": "7f536f31512aac649d3b262e8deda3046648c9a7",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546` at 17296b86: P1-P5 and every standalone refusal reproduced. Checked its Go-test proof of the duplicate fix (TestARetryOfAPublishTheFullClusterStreamRefusedFailsUntilTheStreamStoresIt) independently on the real surface: real binaries on a nats-server v2.10.29 cluster, with a build of 47228d56 as the negative control."
+    "how": "Re-ran `bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546` at eb0cb4eb: P1-P5 and every standalone refusal reproduced. Checked its Go-test proof of the republish (TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom) independently on the real surface: real listener and Dispatch on a nats-server v2.10.29 cluster, no step-down."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "A retry of a publish a full clustered stream refused is never acknowledged as stored when the server holds no copy: the GitHub webhook answers 503 until the message is stored (review round 2 finding 1)",
-      "surface": "Real envoy-listener (ENVOY_NATS_REPLICAS=3, ENVOY_STREAM_MAX_BYTES=20000, ENVOY_WEBHOOKS=github) on three nats-server v2.10.29 processes and on three v2.15.1 processes, signed GitHub push deliveries with curl",
-      "command": "bash /legion/scratch/tmp/t546/tX.sh <bindir> <nats-server> for {47228d56 build, head} x v2.10.29 and head x v2.15.1 (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6443095176)",
-      "observed": "v2.10.29, head: d1 to the full stream -> 503; redelivery -> 503 'stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold'; after raising max_bytes -> 503; after 'nats stream cluster step-down' -> 200 and stored (15 -> 16 msgs); further redelivery and fresh d2 twice -> 200, stored once each. v2.15.1, head: redelivery while full -> 503 'is full'; after the raise -> 200 and stored; duplicates -> 200, stored once.",
-      "headSha": "e572c5be3cba2196811964240ccea603f040764b",
-      "negativeControl": "The same steps with the listener built at 47228d56 on v2.10.29: the redelivery while full and the one after the raise each answered 200 'ok' while the stream stayed at 15 msgs (nothing stored)"
+      "criterion": "A GitHub delivery a full clustered nats-server 2.10 stream refused is stored once the stream has room, with no step-down; while still full the redelivery is an error (round 3 finding 1)",
+      "surface": "Real envoy-listener (ENVOY_NATS_REPLICAS=3, ENVOY_STREAM_MAX_BYTES=20000, ENVOY_WEBHOOKS=github) on three nats-server v2.10.29 processes and on three v2.15.1 processes; signed GitHub push deliveries with curl",
+      "command": "bash /legion/scratch/tmp/t546/tX.sh /legion/scratch/tmp/t546/bin <nats-server v2.10.29 | v2.15.1> (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6450209439)",
+      "observed": "v2.10.29: d1 to the full stream -> 503; redelivery while full -> 503 'acknowledged a duplicate of a message it does not hold, and its publish without its id failed: ... is full'; operator raised max_bytes to 200000, redelivery -> 200 and stored (15 -> 16) with no step-down; fresh d2 twice -> 200, stored once. v2.15.1: 503 while full, 200 and stored after the raise, d2 stored once.",
+      "headSha": "7f536f31512aac649d3b262e8deda3046648c9a7",
+      "negativeControl": "Round 4's head (e572c5be) on the same v2.10.29 steps answered 503 after the raise until 'nats stream cluster step-down' (https://github.com/sjawhar/legion/pull/2362#issuecomment-6443095176)"
     },
     {
-      "criterion": "Dispatch's outbox (async publish window) retries an event a full clustered stream refused until it is stored, never taking a sequence-0 duplicate as published",
+      "criterion": "Dispatch's outbox (async window) stores an event a full clustered 2.10 stream refused once the stream has room, with no step-down, and once only",
       "surface": "Real envoy-dispatch (Postgres 17, agent bearer) on three nats-server v2.10.29 processes with a full ENVOY_NOTIFICATIONS (limit 20000); project and issue created over POST /api/v1/projects and /api/v1/issues",
-      "command": "bash /legion/scratch/tmp/t546/tZ.sh /legion/scratch/tmp/t546/bin (and .../binold for the control) (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6443095176)",
-      "observed": "Head: the outbox logged 'publish event ... acknowledged a duplicate of a message it does not hold' for event_id 1 and 2, retrying every 5 s; after the operator raised the limit and stepped the stream leader down, notifications.dispatch.project.ZT.project.created and notifications.dispatch.issue.ZT-1.issue.created were each stored once (15 -> 17 msgs).",
-      "headSha": "e572c5be3cba2196811964240ccea603f040764b",
-      "negativeControl": "The Dispatch build of 47228d56 logged only the first 'stream ENVOY_NOTIFICATIONS is full' per event, then took both as published: after the raise and the step-down the stream held 15 msgs and no notifications.dispatch.> message"
+      "command": "bash /legion/scratch/tmp/t546/tZ.sh /legion/scratch/tmp/t546/bin (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6450209439)",
+      "observed": "While full, the outbox logged 'publish event ... acknowledged a duplicate of a message it does not hold, and its publish without its id failed' for event_id 1 and 2 every 5 s; 12 s after the operator raised the limit, 15 -> 17 msgs with notifications.dispatch.project.ZT.project.created and notifications.dispatch.issue.ZT-1.issue.created stored once each; still 17 after 20 s more.",
+      "headSha": "7f536f31512aac649d3b262e8deda3046648c9a7",
+      "negativeControl": "Round 4's head needed a step-down before the outbox's events were stored; the 47228d56 build stored neither event (round 4 log, https://github.com/sjawhar/legion/pull/2362#issuecomment-6443095176)"
     },
     {
-      "criterion": "No start or keeper lowers a deployed byte limit: an operator's raise stands, a lower limit is raised to the setting (review round 2 finding 2)",
-      "surface": "Real envoy-listener (ENVOY_STREAM_MAX_BYTES=20000) on three nats-server v2.15.1 processes, natscli stream edits, $JS.EVENT.ADVISORY.STREAM.UPDATED trace",
-      "command": "bash /legion/scratch/tmp/t546/tY.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6443095176)",
-      "observed": "An operator raise to 200000 was still 200000 40 s later, with no keeper line; after a further raise to 300000 and a listener restart it was still 300000. Four STREAM.UPDATED advisories over the run: three operator edits and one keeper restore, none from the start.",
-      "headSha": "e572c5be3cba2196811964240ccea603f040764b",
-      "negativeControl": "An operator lowering to 10000 -> 20000 within 35 s, keeper 'restored=\"max_bytes 10000 -> 20000\"'"
-    },
-    {
-      "criterion": "Earlier rounds' behaviour still holds at this head: the mixed-settings race ends at 3 copies, the limit, DiscardNew and the id; listener and Dispatch starts keep them; a full stream refuses and keeps what it holds",
+      "criterion": "Earlier rounds' behaviour holds at this head: mixed-settings race ends correct; listener and Dispatch starts keep copies, limit, DiscardNew and id; an operator's raise of the limit stands; a full stream refuses and keeps what it holds; settings refused at load after the forward merge",
       "surface": "Real envoy-listener and envoy-dispatch on three nats-server v2.15.1 processes and one standalone v2.15.1 server",
-      "command": "bash /legion/scratch/tmp/t546/race.sh <workspace> 4 40; bash /legion/scratch/tmp/p546b/proof.sh <workspace> (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6443095176)",
-      "observed": "race.sh: 8/8 pairs PASS (replicas 3, max_bytes 2000000, discard new, an id, buckets 3 3 3, both alive); 6 keeper restores of 'replicas 1 -> 3, max_bytes -1 -> 2000000'. proof.sh P1, P2, P3, P4, P5 reproduced.",
-      "headSha": "17296b86661b19cafcb4dca50b1418f44bb061b4",
-      "negativeControl": "Standalone v2.15.1: ENVOY_NATS_REPLICAS=3 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode'; ENVOY_NATS_REPLICAS=0 -> 'invalid ENVOY_NATS_REPLICAS \"0\": want a whole number of copies from 1 to 5'"
+      "command": "bash /legion/scratch/tmp/t546/race.sh <workspace> 4 40; bash /legion/scratch/tmp/p546b/proof.sh <workspace>; bash /legion/scratch/tmp/t546/tH.sh (log: https://github.com/sjawhar/legion/pull/2362#issuecomment-6450209439)",
+      "observed": "race.sh: 8/8 PASS (replicas 3, max_bytes 2000000, discard new, an id, buckets 3 3 3), 8 keeper restores. proof.sh P1-P5 reproduced (50 GiB raise stood 40 s). tH: Dispatch refuses ENVOY_NATS_REPLICAS 0/6/x/3.0 and ENVOY_STREAM_MAX_BYTES 0/-5/1GB/2^66; the listener accepts ' 3 ', +3, 03 and refuses 1e1, 1e9, 2^66.",
+      "headSha": "eb0cb4eb9b214d7940d236a5ba62c618798c747b",
+      "negativeControl": "Standalone v2.15.1: ENVOY_NATS_REPLICAS=3 -> exit 1 'ENVOY_NATS_REPLICAS=3: nats: replicas > 1 not supported in non-clustered mode'; ENVOY_STREAM_MAX_BYTES=44023414784 -> exit 1 'insufficient storage resources available'"
     }
   ],
   "observations": [
-    "On nats-server v2.10.29, a delivery refused while the stream was full stays refused (503 / outbox retries) after the limit is raised, until a stream leader step-down. This is documented with the operator step; the hub runs v2.15.1, which stores the message as soon as there is room.",
-    "Environment: another process in the pod ran a copy of the tester's harness on ports 16221-16223 during this round, which broke one race run (streams carried over between rounds, 'attempted to connect to route port'). The harness moved to 26221-26223 / 27221-27223 / 26230, and every result recorded above comes from runs on those ports or on 18221-18223 (v2.10.29).",
-    "CI at e572c5be, read 2026-10-27T13:27Z: lint, typecheck, test, build and changes queued. Read as queued, not waited for."
+    "The republish's measured cost on nats-server v2.10.29 (the trade-off the PR body's consumer list names): after a delivery was refused once, each later redelivery of that delivery stored another copy while the stream leader stayed the same (d1: 4 copies, seq 16-19, each with a new event_id and the same source_event_id d1 / dedupe_key github.d1); after a step-down further redeliveries were deduplicated again. With room, 30 deliveries each sent 4 times at once stored 35 msgs (5 doubled) on v2.10.29, and 30 (one each) on v2.15.1, where 14-17 of the 120 requests answered 503 'nats: duplicate message id is in process'. The sessions drop such a repeat by dedupe_key; the Legion daemon (event_id only) does not. The hub runs v2.15.1.",
+    "CI at 7f536f31, read 2026-10-27T18:22Z: lint, typecheck, test, build and changes queued. Read as queued, not waited for; the envoy-go-race fix (round 3 finding 2) is CI's to show at this head."
   ]
 }
