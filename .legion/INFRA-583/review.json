@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-583",
+  "completed": "2026-10-27T08:20:50Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "reviewedHead": "8072b2b5f6862309ae4a3e9850f2fb19c6c9d66f",
+  "ciAtCodeHead": "CI head 2bd2a886 (compare to 8072b2b5: 1 file, .legion/ only). Required: lint, typecheck, test, pr-title. lint success, typecheck success, pr-title success (run 40462044307), test in_progress (run 40462043412) at 08:06Z. Not waited for: this round requests changes.",
+  "verifiedIndependently": [
+    "go list -e -deps -test closures for each job's exact command and tags (memory 48 dirs, multiprocess 48, broker 29, race 70, infra 69 incl. root-workspace cmd/listener and cmd/dispatch) matched against the filters with a picomatch-style matcher: 0 unmatched for dispatch_memory, dispatch_multiprocess, broker_multiprocess, envoy_go_race; envoy_infra_go misses only the 5 testdata files of internal/dispatch/text and internal/webhook, which only _test.go files read and envoy-infra-go does not test those packages.",
+    "Probes: packages/contracts/src, contracts CHANGELOG, skills/dispatch*, skills/dispatch-writing-specs start none of the five; proof-editor, bun.lock, docs/site/package.json start only envoy_go_race; internal/pgmigrate starts all five.",
+    "Every filter pattern of the five is under on.push.paths and on.pull_request.paths.",
+    "No other job needs the five; none of the five is required; main moved 6 commits since b69f636f with no new closure member (settings_test.go adds a cmdtest import, already listed)."
+  ],
+  "thermonuclear": "deep-review and code-quality run once at 8072b2b5: both CHANGES on the keep-current rule (test-only wording) and unguarded drift with #2229's listenfd as the live case; minors on anchor reuse and comment wording.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "description": "Lines 154-157 and the five new AGENTS.md sentences (packages/envoy/AGENTS.md:622-625 and 4000-4002, packages/envoy/cmd/dispatch/AGENTS.md:593-595 and 609-611, packages/envoy/infra/AGENTS.md:351-353) say only 'a test that comes to import or read something new' updates the filter. The lists are closures of production code too (dispatch_server, listener_command are production-only; cmdtest.Build and permissions_live_test.go:298-299 build binaries), so a production import added to a listed package widens the closure, the job runs green on that PR, and later changes to the new package skip it silently. The rule must cover any change that makes the job's command, or a binary its tests build, compile a new package or read a new file; and the header's 'A Go job's filter' must say the five per-job filters (envoy, envoy_image, envoy_e2e_local are not closures)."
+    },
+    {
+      "severity": "important",
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "description": "Open #2229 (INFRA-253) adds packages/envoy/listenfd and imports it from cmd/dispatch/main.go, cmd/listener/main.go and internal/config/config.go; its workflow hunk adds listenfd only to the `dispatch` filter. Whichever lands second must add packages/envoy/listenfd/* to dispatch_server, listener_command and dispatch_command_tests, or dispatch-memory, dispatch-multiprocess and envoy-infra-go skip listenfd changes. Tell INFRA-253's tree (and INFRA-520's #2316, which carries the same lists) and record the drift on the PR body's risk line."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/workflows/envoy-and-contracts.yaml",
+      "description": "Line 1275: 'read their own Postgres variable' is no reason for a separate job (a step sets its own env); the closure-and-filter reason alone holds."
+    }
+  ],
+  "notAsked": "A committed CI coverage check of the filters: the spec's Scope limits this change to the filters and the five if: lines (the router, INFRA-520, replaces the file) and forbids hand-rolled logic, and the deployment instructions put a programmatic gate after a measured failure of instruction and review. The drift goes on the PR body's risk line instead.",
+  "fastFollow": "Deduplicate the anchors: bun_install reuses *bun_toolchain; dispatch_command_tests starts from *dispatch_server and lists only what the tests add."
+}
