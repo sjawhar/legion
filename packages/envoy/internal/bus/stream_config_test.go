@@ -697,3 +697,208 @@ func TestEnsureStreamWithConfigLogsNoReconciliationWhenTheUpdateFails(t *testing
 		}
 	}
 }
+
+// streamTestJetStream is a JetStream context in an account of the test's own, with no stream yet.
+func streamTestJetStream(t *testing.T) nats.JetStreamContext {
+	t.Helper()
+	conn := testnats.Connect(t, testnats.URL(t))
+	t.Cleanup(conn.Close)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	return js
+}
+
+func deployedStream(t *testing.T, js nats.JetStreamContext) *nats.StreamInfo {
+	t.Helper()
+	info, err := js.StreamInfo(Stream)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	return info
+}
+
+// A stream a start creates carries an id of its own: two streams, each in an account of its own,
+// get different ones.
+func TestEnsureStreamWithConfigCreatesTheStreamWithAFreshID(t *testing.T) {
+	var ids []string
+	for _, name := range []string{"first stream", "second stream"} {
+		t.Run(name, func(t *testing.T) {
+			js := streamTestJetStream(t)
+			if err := ensureStreamWithConfig(js, streamCfg); err != nil {
+				t.Fatalf("create stream: %v", err)
+			}
+			id := deployedStream(t, js).Config.Metadata[StreamIDMetadataKey]
+			if len(id) != 32 || strings.Trim(id, "0123456789abcdef") != "" {
+				t.Fatalf("stream id = %q, want 32 hex digits", id)
+			}
+			ids = append(ids, id)
+		})
+	}
+	if len(ids) == 2 && ids[0] == ids[1] {
+		t.Fatalf("both streams got id %q", ids[0])
+	}
+}
+
+// A deployed stream without an id gets one on the next start, even when nothing else about it
+// differs from the binary's configuration, and keeps the rest of its configuration and metadata.
+func TestEnsureStreamWithConfigGivesADeployedStreamWithoutAnIDOne(t *testing.T) {
+	js := streamTestJetStream(t)
+	deployed := *streamCfg
+	deployed.Metadata = map[string]string{"owner": "operations"}
+	if _, err := js.AddStream(&deployed); err != nil {
+		t.Fatalf("create the stream without an id: %v", err)
+	}
+
+	if err := ensureStreamWithConfig(js, streamCfg); err != nil {
+		t.Fatalf("ensure stream: %v", err)
+	}
+
+	info := deployedStream(t, js)
+	id := info.Config.Metadata[StreamIDMetadataKey]
+	if id == "" {
+		t.Fatalf("stream metadata = %v, want an id", info.Config.Metadata)
+	}
+	if info.Config.Metadata["owner"] != "operations" {
+		t.Fatalf("stream metadata = %v, want owner kept", info.Config.Metadata)
+	}
+	if !slices.Equal(info.Config.Subjects, streamCfg.Subjects) || info.Config.MaxAge != streamCfg.MaxAge || info.Config.Duplicates != streamCfg.Duplicates {
+		t.Fatalf("stream config = %+v, want subjects, retention and duplicate window unchanged", info.Config)
+	}
+	if err := ensureStreamWithConfig(js, streamCfg); err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+	if again := deployedStream(t, js).Config.Metadata[StreamIDMetadataKey]; again != id {
+		t.Fatalf("stream id = %q after a second start, want %q", again, id)
+	}
+}
+
+// A start that changes the deployed stream's subjects and retention writes the stream's whole
+// configuration, and keeps its id and the rest of its metadata in it.
+func TestEnsureStreamWithConfigKeepsTheIDAndMetadataWhenItReconcilesTheStream(t *testing.T) {
+	js := streamTestJetStream(t)
+	deployed := *streamCfg
+	deployed.MaxAge = time.Hour
+	deployed.Duplicates = time.Hour
+	deployed.Subjects = slices.DeleteFunc(slices.Clone(streamCfg.Subjects), func(subject string) bool {
+		return subject == "notifications.legion.>"
+	})
+	deployed.Metadata = map[string]string{StreamIDMetadataKey: "deployed-id", "owner": "operations"}
+	if _, err := js.AddStream(&deployed); err != nil {
+		t.Fatalf("create the deployed stream: %v", err)
+	}
+
+	if err := ensureStreamWithConfig(js, streamCfg); err != nil {
+		t.Fatalf("ensure stream: %v", err)
+	}
+
+	info := deployedStream(t, js)
+	if info.Config.MaxAge != streamCfg.MaxAge || !slices.Contains(info.Config.Subjects, "notifications.legion.>") {
+		t.Fatalf("stream config = %+v, want the binary's retention and subjects", info.Config)
+	}
+	if info.Config.Metadata[StreamIDMetadataKey] != "deployed-id" || info.Config.Metadata["owner"] != "operations" {
+		t.Fatalf("stream metadata = %v, want the id deployed-id and owner kept", info.Config.Metadata)
+	}
+}
+
+// The id a start gives the stream is never replaced: not by the same binary's next start, not by
+// another deployment's start that changes the stream's subjects, and not by a start that found no
+// stream and created it after another start already had.
+func TestEnsureStreamWithConfigNeverReplacesTheStreamsID(t *testing.T) {
+	uri := testnats.URL(t)
+	client, err := ConnectOwningStream([]string{uri})
+	if err != nil {
+		t.Fatalf("this binary connects: %v", err)
+	}
+	t.Cleanup(client.Close)
+	id := deployedStream(t, client.JS()).Config.Metadata[StreamIDMetadataKey]
+	if id == "" {
+		t.Fatal("the created stream has no id")
+	}
+
+	otherConn := testnats.Connect(t, uri)
+	t.Cleanup(otherConn.Close)
+	otherJS, err := otherConn.JetStream()
+	if err != nil {
+		t.Fatalf("open the other deployment's JetStream: %v", err)
+	}
+	other := *streamCfg
+	other.Subjects = append(slices.Clone(streamCfg.Subjects), "notifications.retired.>")
+	if err := ensureStreamWithConfig(otherJS, &other); err != nil {
+		t.Fatalf("the other deployment starts: %v", err)
+	}
+	if got := deployedStream(t, otherJS).Config.Metadata[StreamIDMetadataKey]; got != id {
+		t.Fatalf("stream id = %q after the other deployment's start, want %q", got, id)
+	}
+
+	restarted, err := ConnectOwningStream([]string{uri})
+	if err != nil {
+		t.Fatalf("this binary restarts: %v", err)
+	}
+	t.Cleanup(restarted.Close)
+	if got := deployedStream(t, restarted.JS()).Config.Metadata[StreamIDMetadataKey]; got != id {
+		t.Fatalf("stream id = %q after a restart, want %q", got, id)
+	}
+
+	if err := ensureStreamWithConfig(&createdMeanwhileJetStream{JetStreamContext: otherJS}, streamCfg); err != nil {
+		t.Fatalf("a start that found no stream before another created it: %v", err)
+	}
+	if got := deployedStream(t, otherJS).Config.Metadata[StreamIDMetadataKey]; got != id {
+		t.Fatalf("stream id = %q after a start that found no stream, want %q", got, id)
+	}
+}
+
+// createdMeanwhileJetStream answers its first StreamInfo with no stream, as a start sees it when
+// another start creates the stream between this one's read and its create.
+type createdMeanwhileJetStream struct {
+	nats.JetStreamContext
+	answered bool
+}
+
+func (js *createdMeanwhileJetStream) StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error) {
+	if !js.answered {
+		js.answered = true
+		return nil, nats.ErrStreamNotFound
+	}
+	return js.JetStreamContext.StreamInfo(stream, opts...)
+}
+
+// staleStreamInfoJetStream answers every StreamInfo with the stream as it stood before any update,
+// as two starts see it when both read the stream before either writes.
+type staleStreamInfoJetStream struct {
+	nats.JetStreamContext
+	read    nats.StreamInfo
+	updates []nats.StreamConfig
+}
+
+func (js *staleStreamInfoJetStream) StreamInfo(_ string, _ ...nats.JSOpt) (*nats.StreamInfo, error) {
+	info := js.read
+	return &info, nil
+}
+
+func (js *staleStreamInfoJetStream) UpdateStream(cfg *nats.StreamConfig, _ ...nats.JSOpt) (*nats.StreamInfo, error) {
+	js.updates = append(js.updates, *cfg)
+	return &nats.StreamInfo{Config: *cfg}, nil
+}
+
+// Two starts that both find the deployed stream without an id, before either writes one, write the
+// same id, so the later write does not replace the earlier one.
+func TestEnsureStreamWithConfigRacingStartsWriteOneID(t *testing.T) {
+	js := &staleStreamInfoJetStream{read: nats.StreamInfo{
+		Config:  *streamCfg,
+		Created: time.Date(2026, 10, 27, 9, 30, 0, 123456789, time.UTC),
+	}}
+	for _, start := range []string{"the listener", "Dispatch's server"} {
+		if err := ensureStreamWithConfig(js, streamCfg); err != nil {
+			t.Fatalf("%s starts: %v", start, err)
+		}
+	}
+	if len(js.updates) != 2 {
+		t.Fatalf("updates = %d, want one per start", len(js.updates))
+	}
+	first, second := js.updates[0].Metadata[StreamIDMetadataKey], js.updates[1].Metadata[StreamIDMetadataKey]
+	if first == "" || first != second {
+		t.Fatalf("racing starts wrote ids %q and %q, want one id", first, second)
+	}
+}

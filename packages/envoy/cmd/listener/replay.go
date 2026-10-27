@@ -45,7 +45,12 @@ type replayRequest struct {
 	MaxMessages *int                   `json:"max_messages"`
 }
 
+// replayStream is the stream the answer was read from. id is its bus.StreamIDMetadataKey, which a
+// backup and restore and a leader election keep; created is STREAM.INFO's Created, which either
+// can change, and which a cluster's servers report differently. id is omitted for a stream without
+// one.
 type replayStream struct {
+	ID       string `json:"id,omitempty"`
 	Created  string `json:"created"`
 	FirstSeq uint64 `json:"first_seq"`
 	LastSeq  uint64 `json:"last_seq"`
@@ -168,6 +173,7 @@ func replayHandler(d *listenerDeps) http.HandlerFunc {
 		watermark := info.State.LastSeq
 		response := replayResponse{
 			Stream: replayStream{
+				ID:       info.Config.Metadata[bus.StreamIDMetadataKey],
 				Created:  info.Created.UTC().Format(replayTimeLayout),
 				FirstSeq: info.State.FirstSeq,
 				LastSeq:  watermark,

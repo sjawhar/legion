@@ -17,13 +17,16 @@
   one shared subject such as `notifications.>`. Every subject of the stream is classified shared
   or private beside the stream's subject list, and a test fails on a new one left unclassified. An
   answered subject the deployed stream does not retain is `refused: "not_retained"`; a subject
-  without a cursor gets the stream's last sequence to start one. One answer holds at most 32
-  subjects, 500 messages (100 by default), 2 MiB and 5 s of reading, and says `more` for a subject
-  it cut short. NATS refusing the read is `503 {"code":"REPLAY_UNAVAILABLE"}` naming NATS's error;
-  a listener without the route answers 404, which a session reads as "does not replay". A
-  `session_id` that is not one literal NATS token (`.`, `*`, `>`, whitespace or a control
-  character) is a 400, so a wildcard cannot make `notifications.agent.>` its own subject and read
-  every session's inbox (INFRA-439).
+  without a cursor gets the stream's last sequence to start one. The answer's `stream` names the
+  stream's `id`, the `envoy_stream_id` metadata the listener and Dispatch's server set once (on the
+  stream they create, or on a deployed one without it, whose other metadata every start keeps),
+  which a backup and restore and a leader election keep where `created` changes. One answer holds
+  at most 32 subjects, 500 messages (100 by default), 2 MiB and 5 s of reading, and says `more` for
+  a subject it cut short. NATS refusing the read is `503 {"code":"REPLAY_UNAVAILABLE"}` naming
+  NATS's error; a listener without the route answers 404, which a session reads as "does not
+  replay". A `session_id` that is not one literal NATS token (`.`, `*`, `>`, whitespace or a
+  control character) is a 400, so a wildcard cannot make `notifications.agent.>` its own subject
+  and read every session's inbox (INFRA-439).
 - `envoy-infra`'s `ListenerPermissions`, and through it `HostPermissions` and
   `DispatchPermissions`, grant `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, the stored-message
   read `/v1/replay` makes; it reads one message at a time and can create, change or delete

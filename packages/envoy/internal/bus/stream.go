@@ -1,16 +1,29 @@
 package bus
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/id"
 )
 
 const Stream = "ENVOY_NOTIFICATIONS"
+
+// StreamIDMetadataKey is the stream configuration's metadata key holding the stream's identity:
+// set once, when the stream is created or when a start first finds it without one, and never
+// changed after. It lives in the configuration, so a backup and restore of the stream carries it,
+// and every server of a cluster reports the same value, which the stream's Created time does not:
+// a leader and its followers report different times, and a leader election or a restore changes
+// it. POST /v1/replay answers it as stream.id (cmd/listener/replay.go).
+const StreamIDMetadataKey = "envoy_stream_id"
 
 // The JetStream KV buckets Envoy's stores keep, each named for what it holds.
 const (
@@ -327,34 +340,70 @@ func (r streamReconciliation) log() {
 	}
 }
 
+// ensureStreamWithConfig creates the stream with cfg, under a fresh StreamIDMetadataKey, or
+// reconciles the deployed one towards cfg: subjects (reconcileSubjects), retention and duplicate
+// window. The deployed stream's metadata is kept as it is, its StreamIDMetadataKey included; a
+// stream without that key gets one (deployedStreamID).
+//
+// Every bus.ConnectOwningStream caller runs this on the one stream, and JetStream's stream update
+// has no compare-and-swap, so two starts can each read the stream before either writes. A stream
+// one of them creates first is reconciled by the other, keeping the id it was created with
+// (AddStream answers ErrStreamNameAlreadyInUse, as its config's id differs). Two that both find no
+// id write the same one, derived from what both read.
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
 	info, err := js.StreamInfo(Stream)
-	if err == nil {
-		reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
-		desired := *cfg
-		desired.Subjects = reconciliation.subjects
-		if info.Config.MaxAge == desired.MaxAge &&
-			info.Config.Duplicates == desired.Duplicates &&
-			slices.Equal(info.Config.Subjects, desired.Subjects) {
-			reconciliation.log()
-			return nil
+	if errors.Is(err, nats.ErrStreamNotFound) {
+		created := *cfg
+		created.Metadata = maps.Clone(cfg.Metadata)
+		if created.Metadata == nil {
+			created.Metadata = map[string]string{}
 		}
-		migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(desired.Subjects)
-		if err := migrateRoleLanesOffStream(js, &info.Config, &desired); err != nil {
+		created.Metadata[StreamIDMetadataKey] = id.New()
+		if _, err = js.AddStream(&created); !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
 			return err
 		}
-		if _, err = js.UpdateStream(&desired); err != nil {
-			return err
-		}
-		reconciliation.log()
-		if migratingRoleLanes {
-			return purgeLegacyRoleMessages(js)
-		}
-		return nil
+		info, err = js.StreamInfo(Stream)
 	}
-	if !errors.Is(err, nats.ErrStreamNotFound) {
+	if err != nil {
 		return err
 	}
-	_, err = js.AddStream(cfg)
-	return err
+	reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
+	desired := *cfg
+	desired.Subjects = reconciliation.subjects
+	desired.Metadata = maps.Clone(info.Config.Metadata)
+	identified := desired.Metadata[StreamIDMetadataKey] != ""
+	if !identified {
+		if desired.Metadata == nil {
+			desired.Metadata = map[string]string{}
+		}
+		desired.Metadata[StreamIDMetadataKey] = deployedStreamID(info.Created)
+	}
+	if identified &&
+		info.Config.MaxAge == desired.MaxAge &&
+		info.Config.Duplicates == desired.Duplicates &&
+		slices.Equal(info.Config.Subjects, desired.Subjects) {
+		reconciliation.log()
+		return nil
+	}
+	migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(desired.Subjects)
+	if err := migrateRoleLanesOffStream(js, &info.Config, &desired); err != nil {
+		return err
+	}
+	if _, err = js.UpdateStream(&desired); err != nil {
+		return err
+	}
+	reconciliation.log()
+	if migratingRoleLanes {
+		return purgeLegacyRoleMessages(js)
+	}
+	return nil
+}
+
+// deployedStreamID is the StreamIDMetadataKey a start gives a deployed stream that has none: 16
+// bytes of the SHA-256 of the stream's name and the Created time STREAM.INFO answered, in hex. Every
+// start that reads the stream from one leader before any of them writes derives the same id, so
+// writers racing to add it write one value, where a random id would leave the last writer's.
+func deployedStreamID(created time.Time) string {
+	sum := sha256.Sum256([]byte(Stream + "\x00" + created.UTC().Format(time.RFC3339Nano)))
+	return hex.EncodeToString(sum[:16])
 }

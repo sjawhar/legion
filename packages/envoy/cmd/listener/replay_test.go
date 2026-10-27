@@ -745,6 +745,43 @@ func TestReplayReportsARecreatedStream(t *testing.T) {
 	}
 }
 
+// The answer names the stream's id, its bus.StreamIDMetadataKey, which a backup and restore and a
+// leader election keep where they change created; a stream without one answers no id at all.
+func TestReplayAnswersTheStreamsID(t *testing.T) {
+	rig := newReplayRig(t)
+	agent := contracts.AgentSubject(replaySession)
+	rig.store(t, agent)
+	body := replayBody(t, []replaySubjectRequest{{Subject: agent}}, 0)
+	info, err := rig.js.StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read stream info: %v", err)
+	}
+	want := info.Config.Metadata[bus.StreamIDMetadataKey]
+	if want == "" {
+		t.Fatalf("stream metadata = %v, want the id the listener's start sets", info.Config.Metadata)
+	}
+
+	if got := replayOK(t, rig.mux, body).Stream.ID; got != want {
+		t.Fatalf("stream id = %q, want %q", got, want)
+	}
+
+	unidentified := info.Config
+	unidentified.Metadata = nil
+	if _, err := rig.js.UpdateStream(&unidentified); err != nil {
+		t.Fatalf("remove the stream's metadata: %v", err)
+	}
+	recorder := postReplay(t, rig.mux, body)
+	var answer struct {
+		Stream map[string]any `json:"stream"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode replay answer %s: %v", recorder.Body.String(), err)
+	}
+	if id, present := answer.Stream["id"]; present {
+		t.Fatalf("stream id = %v for a stream without one, want no id", id)
+	}
+}
+
 // A cursor below the stream's first sequence, after older messages were removed, still reads from
 // the first message the stream holds, and the answer names that first sequence.
 func TestReplayReadsFromTheFirstRetainedMessageWhenTheCursorIsBelowIt(t *testing.T) {
