@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T03:07:57Z",
+  "completed": "2026-10-27T03:51:04Z",
   "pinnedCommit": "ad909178a0cbc43e0deef1a528051bc499ce1fb0",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2272",
   "documents": [
@@ -15,8 +15,8 @@
       "criterion": "R4 settled in code: Go and the browser read a mid-row escaped pipe in a table row the same way",
       "surface": "Dispatch's browser suite (packages/dispatch/e2e) against the real server and SPA with a rootless Postgres in the issue pod",
       "command": "cd packages/dispatch && PLAYWRIGHT_BROWSERS_PATH=$TMPDIR/ms-playwright DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra172_head?sslmode=disable bun run e2e editor-paste -g \"two backslashes|row is empty, pasted into\"",
-      "observed": "'a pipe after two backslashes ends a table cell in Go as in the editor' passes in chromium and iphone; 18 passed ($TMPDIR/infra172/e2e-head-87fa023f.txt, main merged in)",
-      "headSha": "87fa023f9634e2c6b8d0cd7e1d593618e97990aa",
+      "observed": "'a pipe after two backslashes ends a table cell in Go as in the editor' passes in chromium and iphone; 18 passed ($TMPDIR/infra172/e2e-head-00428c9f.txt)",
+      "headSha": "00428c9ff32cfe89ddc6f8865b644bba411727d4",
       "negativeControl": "The same test against a server and SPA built from ad909178 fails both projects on the cell assertion: the editor shows [\"a \\\\| b\", \"\"] where [\"a \\\\\", \"b\"] is expected; 16 passed, 2 failed ($TMPDIR/infra172/e2e-C.txt)"
     },
     {
@@ -66,6 +66,14 @@
       "observed": "doc-edit help: 'In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has a backslash right before a | cannot be stored in a cell and is INVALID_OP, naming the cell.'; artifact help: 'In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused.'; check-dist: dist/ and legion/ match a fresh build; pmdoc ok; docs ok",
       "headSha": "87fa023f9634e2c6b8d0cd7e1d593618e97990aa",
       "negativeControl": "check-dist with the new description and the old bundle reported 'generated files are stale (dist/dispatch.js, dist/envoy-channel.js, dist/session-hook.js)'"
+    },
+    {
+      "criterion": "Round 5, review finding: an escaped closing pipe after a split at the row's last cell is the wide-row refusal, not a panic",
+      "surface": "pmdoc.Parse, the reader every upload, insert and stored-markdown read uses",
+      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc/ -run TestParseReadsASplitRowEndingInAnEscapedPipe; a throwaway test over 20,000 random rows under two columns",
+      "observed": "'| a | b \\\\| \\|' and two neighbours under two columns return ErrSchema 'a table row holding 3 cells where its table has 2'; four rows that fit read their cells; 20,000 random rows: panics=0 refused=3548 read=16452",
+      "headSha": "00428c9ff32cfe89ddc6f8865b644bba411727d4",
+      "negativeControl": "with the parent's table.go the first two cases return 'panic: reading markdown: runtime error: invalid memory address or nil pointer dereference' (ErrPanic); the base b6d8fa2a parses both with no error"
     }
   ],
   "filesChanged": [
@@ -132,5 +140,11 @@
     "The census's skill-line migration moved into the command help main's new skill points to (packages/contracts/src/dispatch-tools.ts: doc-edit and artifact descriptions), adding no words to the three Dispatch skills; claude-envoy dist rebuilt.",
     "PR retitled to 'fix(dispatch): Go reads an escaped pipe in a table cell as the browser does' (pr-title check).",
     "The pi-envoy skills-guard test 'the three Dispatch skills total fewer than 2,000 words' fails at the merged head with 2,057 words; main@origin alone measures 2,057 too (this PR changes no skill file there), so that red is main's."
+  ],
+  "round5": [
+    "Review finding (important): splitAtEvenEscapedPipes inserted a last cell with goldmark's InsertAfter, which counts it twice in ChildCount; keepEscapedClosingPipes then walked past the row. It now appends a last cell and inserts any other before the next sibling (21f5db10). Regression test TestParseReadsASplitRowEndingInAnEscapedPipe.",
+    "Review finding (minor): the dead split flag and TableCell.Alignment write removed; the loop only trims rows to the table's width (21f5db10).",
+    "Review finding (minor): the doc-edit help names an odd run of backslashes before a | (00428c9f); claude-envoy dist regenerated, check-dist passes.",
+    "Per the architect, nothing else changed. All three threads answered and resolved individually."
   ]
 }
