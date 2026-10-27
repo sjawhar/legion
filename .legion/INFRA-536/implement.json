@@ -2,23 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-536",
-  "completed": "2026-10-27T11:30:00Z",
+  "completed": "2026-10-27T15:15:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2361",
   "proof": [
     {
       "criterion": "A1 a document written through the API: the live editor shows `Plain \\&amp; end.` as the text `Plain &amp; end.`; A1 dispatch doc-read prints `Plain &amp;amp; end.` (read as `Plain &amp; end.`); the comment control shows `Plain &amp; end.`",
       "surface": "Dispatch browser suite: real Go server with real migrations on Postgres 17, production SPA bundle, live editor at /issues/<KEY>/spec in chromium and iphone, the Conversation, and the real packages/envoy-client/bin/dispatch.ts doc-read",
       "command": "cd packages/dispatch && bun run e2e doc.e2e.ts -g \"backslash before a character reference\" (in-pod stack: $TMPDIR/infra536/run-e2e.sh doc.e2e.ts -g \"backslash before a character reference\")",
-      "observed": "Review round 2 at 6c7efe72 (main merged forward at aac74fb5, fingerprint unchanged): 2 passed (chromium 6.6s, iphone 5.3s). Review round 1 at 6328064e: 2 passed. Round 2 at 738dbe90: 2 passed. Round 1 at b8d4616d: editor paragraphs [\"Plain &amp; end.\"], stored markdown \"Plain &amp;amp; end.\\n\" which engineParagraphs reads as [\"Plain &amp; end.\"], comment text \"Plain &amp; end.\", doc-read stdout \"Plain &amp;amp; end.\\n\\n\\nDocument token: sha256:…\\n\". https://github.com/sjawhar/legion/pull/2361#issuecomment-6434193464, https://github.com/sjawhar/legion/pull/2361#issuecomment-6436517515",
-      "headSha": "6c7efe727834",
+      "observed": "After the approval, main 452e4647 merged forward at 125828a5 (fingerprint e27cb169… unchanged, https://github.com/sjawhar/legion/pull/2361#issuecomment-6445648818): 2 passed (chromium 6.3s, iphone 6.4s). Review round 2 at 6c7efe72: 2 passed. Review round 1 at 6328064e: 2 passed. Round 2 at 738dbe90: 2 passed. Round 1 at b8d4616d: editor paragraphs [\"Plain &amp; end.\"], stored markdown \"Plain &amp;amp; end.\\n\" which engineParagraphs reads as [\"Plain &amp; end.\"], comment text \"Plain &amp; end.\", doc-read stdout \"Plain &amp;amp; end.\\n\\n\\nDocument token: sha256:…\\n\". https://github.com/sjawhar/legion/pull/2361#issuecomment-6434193464, https://github.com/sjawhar/legion/pull/2361#issuecomment-6436517515",
+      "headSha": "125828a5654f",
       "negativeControl": "The same test at base 4bbb2a9c with the head's five e2e files restored on top: 2 failed at doc.e2e.ts:723, the editor shows [\"Plain & end.\"] instead of [\"Plain &amp; end.\"]."
     },
     {
       "criterion": "A1 Go and headless engine: Go reads every escape and character reference as the engine reads it, at every decoded site; Go's text for `Plain \\&amp; end.` is exactly `Plain &amp; end.`",
       "surface": "pmdoc Parse (the read path of every API and CLI document write) against the fork's headless engine (gen/differential.ts)",
       "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc/ -count=1 -skip 'Linear|Linearly' (bun on PATH)",
-      "observed": "ok 197.314s at 6c7efe72; TestEveryEscapeAndReferenceReadsAsTheEngineReadsIt (268 markdowns), TestALineFeedAReferenceNamesReadsAsTheEngineReadsIt, TestGeneratedEscapesAndReferencesReadAsTheEngineReadsThem (2000 paragraphs), TestEveryNameTheEngineKnowsReadsAsTheEngineReadsIt (2125 names), TestReferencesInEveryValueRenderAndReadBackInBothParsers (83 trees), TestReferenceSpellingsThatReadBackRenderUnchanged, the footnote-label tests and the tester's TestAnImageAddressEndingInABackslashRendersAndReadsBack all pass; a throwaway check found characterReferenceLength and the deleted regex give the same length on 300,000 generated strings",
-      "headSha": "6c7efe727834",
+      "observed": "ok 210.073s at 125828a5 (go test -p 1); the entity, escape, email and linkify tests (TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine, TestEmailReadingsThatDifferAreRecorded, TestLinkifyGuard*, bare-URL render tests) ok 20.962s; gen check: fixtures up to date (84 documents, 43 splice cases). TestEveryEscapeAndReferenceReadsAsTheEngineReadsIt (268 markdowns), TestALineFeedAReferenceNamesReadsAsTheEngineReadsIt, TestGeneratedEscapesAndReferencesReadAsTheEngineReadsThem (2000 paragraphs), TestEveryNameTheEngineKnowsReadsAsTheEngineReadsIt (2125 names), TestReferencesInEveryValueRenderAndReadBackInBothParsers (83 trees), TestReferenceSpellingsThatReadBackRenderUnchanged, the footnote-label tests and the tester's TestAnImageAddressEndingInABackslashRendersAndReadsBack all pass; a throwaway check found characterReferenceLength and the deleted regex give the same length on 300,000 generated strings",
+      "headSha": "125828a5654f",
       "negativeControl": "The head's render_readback_test.go and gen/entity-names.ts at base 4bbb2a9c: five of the six fail (Go reads \"Plain \\\\&amp; end.\\n\" as \"Plain & end.\"; &nLt;/&nGt; undecoded; &#10; read as a line feed); only the byte-pinning guard passes. At 6328064e with escapeImageSource's final-backslash rule reverted, the image-address test fails 15 times."
     },
     {
