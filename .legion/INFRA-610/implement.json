@@ -2,11 +2,20 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-610",
-  "completed": "2026-10-27T08:46:50Z",
+  "completed": "2026-10-27T10:53:24Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2374",
-  "codeHead": "aad325eaca53275b6951992874006dca6e1dec8a",
+  "codeHead": "4671996e14fd57e551f0220ce9bde500fc5751e9",
+  "round3": "Conflict return: GitHub reported #2374 CONFLICTING against main. 4671996e merges main 2e8c68cd into ca51db66 (jj new legion/INFRA-610 main@origin, no rebase). Conflicts: kv_test.go TestReaperGraceWindow (kept this branch's test, adapted to main's Registry.Get(ctx, id) from #2167) and packages/envoy/AGENTS.md (kept main's two role-lane bullets and this branch's interest-reaper bullet). Fingerprint comment: https://github.com/sjawhar/legion/pull/2374#issuecomment-6440077544",
   "round2": "Architect send-back at acceptance: fix the two comments this change made stale (kv_test.go:942, InterestRefreshAge's doc in kv.go). Commit aad325ea changes comments only; the round-1 proofs below at 12da3a9bf280 cover the unchanged behaviour.",
   "proof": [
+    {
+      "criterion": "Round 3: the forward merge with main keeps the change whole, and the diff against main changes only where main's API forced it.",
+      "surface": "unchanged-diff fingerprint and Go tests, packages/envoy",
+      "command": "fingerprint (conflicts-and-rewrites.md) at ca51db66954f and 4671996e14fd, then diff of the two fingerprinted diffs; cd packages/envoy && CGO_ENABLED=1 go test -race -count=1 -run 'Reap|Reaper' ./internal/store/ ./internal/integration/ && CGO_ENABLED=1 go test -race -count=1 -run 'Upsert|Subscribe' ./internal/store/ ./cmd/listener/ && go vet ./internal/store/ ./internal/integration/ ./cmd/listener/; bunx biome check packages/pi-envoy/",
+      "observed": "fingerprint f614d3ee6720be0fa95ee367ac17d4163ae29143847a4af686f78a645f7251ba -> d697756c48a0d299a82380ca941365c06d5ec72d2bf89938900fad1bbe2f0fb3 (changed); the two fingerprinted diffs differ in exactly two lines, reg.Get(\"ses_recent\") -> reg.Get(context.Background(), \"ses_recent\") (removed side) and reg.Get(sid) -> reg.Get(context.Background(), sid) (added side). Tests ok: internal/store 2.520s, internal/integration 1.651s, internal/store 2.390s, cmd/listener 8.341s; vet ok; biome no fixes. GitHub reports MERGEABLE at 4671996e.",
+      "headSha": "4671996e14fd57e551f0220ce9bde500fc5751e9",
+      "negativeControl": "Before the context adaptation, the merged kv_test.go carried reg.Get(sid) against main's Get(ctx, id) and conflict markers; the grep for '<<<<<<<' found conflict 1 of 1 in kv_test.go and AGENTS.md, which jj status reported as 2-sided conflicts, and none remain at 4671996e."
+    },
     {
       "criterion": "Round 2: the two stale comments are reworded, comments only, and the reaper tests still pass.",
       "surface": "diff and Go tests, packages/envoy",
