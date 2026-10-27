@@ -426,7 +426,11 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
 
 - **`retry`** (a failed architect): retry it. The daemon relaunches it on the session it kept,
   with fresh budgets, and sends it a catch-up of its tree once it is ready, so the tree carries on
-  at the generation and phase it stands at:
+  at the generation and phase it stands at. The daemon drops every notice it could not deliver to
+  the failed architect, the reviewer's approval that moved an issue into `accepting` among them,
+  so the catch-up's reason names each issue of the tree waiting in `accepting` for the architect's
+  acceptance (nothing beneath it still in the workflow); no worker runs there, and nothing else
+  would wake the architect for it:
 
   ```sh
   legion claims retry --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-14-architect
