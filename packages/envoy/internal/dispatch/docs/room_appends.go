@@ -156,8 +156,9 @@ var errUpdateStored = errors.New("the update was stored by another append of its
 //  2. once the gate has passed, the append's writes (appendWrites) and commit;
 //  3. pg_advisory_unlock, once the commit's bookkeeping is done: each update's credit held at its
 //     version (UpdateCredit.held), afterAppendCommit, the room cursor ctx is marked with advanced
-//     once per version, and the room's side of the append (roomAppend.committed). Every stored
-//     update's credit lands before this, committed or not.
+//     once per version, the room's side of the append (roomAppend.committed), and the end of the
+//     write the head tracker has followed since the gate (beginOwnWrite), with the head it left.
+//     Every stored update's credit lands before this, committed or not.
 //
 // A room's own call marks ctx with its side of the append (withRoomAppend): the classes updates
 // were taken from, one per update. For it an update after the first that does not decode alone
@@ -223,6 +224,12 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 		end.Queue(`select pg_advisory_unlock(hashtext($1))`, room)
 		_ = send(context.Background(), end)
 	}()
+	// The head tracker follows the transaction as this process's write from its gate until the
+	// commit's bookkeeping is done, the cursor's advance among it, and before the session lock goes:
+	// this deferred call, registered after the one that releases the lock, runs before it.
+	write := p.heads.beginOwnWrite(room)
+	stored := int64(-1)
+	defer func() { write.end(stored >= 0, stored) }()
 
 	first := &pgx.Batch{}
 	first.Queue(`select pg_advisory_lock(hashtext($1))`, room)
@@ -255,7 +262,7 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 	if err := send(ctx, second); err != nil {
 		return 0, fmt.Errorf("commit document update: %w", err)
 	}
-	open = false
+	open, stored = false, int64(last)
 	for index, update := range updates {
 		update.Credit.held(persistence.Version(head + int64(index) + 1))
 	}

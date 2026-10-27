@@ -171,16 +171,24 @@ type preloadedDocument struct {
 
 // takePreload is the update a socket's admission check loaded for room, while the durable head is
 // still the one it loaded: every write that changes a document's stored state raises its head (an
-// append, a rebuild), and compaction keeps both the head and the state. A stale or absent preload
-// is no answer, and the caller loads the room itself.
+// append, a rebuild), and compaction keeps both the head and the state. The head is the head
+// tracker's when it trusts itself (headTracker.head), which costs no read, and otherwise read from
+// the store. A stale or absent preload is no answer, and the caller loads the room itself.
 func (s *Service) takePreload(room string) (persistence.LoadResult, bool) {
 	value, ok := s.preloads.LoadAndDelete(room)
 	if !ok {
 		return persistence.LoadResult{}, false
 	}
 	preload := value.(*preloadedDocument)
-	head, err := s.persistence.Head(context.Background(), room)
-	if err != nil || head != preload.loaded.Version {
+	head, trusted := s.heads.head(room)
+	if !trusted {
+		stored, err := s.persistence.Head(context.Background(), room)
+		if err != nil {
+			return persistence.LoadResult{}, false
+		}
+		head = int64(stored)
+	}
+	if head != int64(preload.loaded.Version) {
 		return persistence.LoadResult{}, false
 	}
 	return preload.loaded, true

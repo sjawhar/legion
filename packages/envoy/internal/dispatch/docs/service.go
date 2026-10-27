@@ -78,9 +78,11 @@ type Deps struct {
 // Load would fold up to now, which says whether a state loaded earlier is still the stored one.
 // DocumentStamp names the stored state a read of the document meets now, and LoadDocument is that
 // state decoded once with the stamp it was read under, which a read of a document no room holds
-// caches its rendering by (coldRead). setProcessID hands the store the Service's process id
-// (Service.ProcessID), which every append's head notification names (documentHeadNotice); a store
-// that wraps a PgVersioned by embedding it passes it on with no code of its own.
+// caches its rendering by (coldRead). setProcess hands the store the Service's process id
+// (Service.ProcessID), which every content-changing write's head notification names
+// (documentHeadNotice), and the Service's head tracker, which every such write reports itself to
+// (headTracker.beginOwnWrite); a store that wraps a PgVersioned by embedding it passes both on
+// with no code of its own.
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdatesWithCredit(ctx context.Context, room string, updates []BrowserUpdate) (first persistence.Version, err error)
@@ -89,7 +91,7 @@ type VersionedStore interface {
 	Head(ctx context.Context, room string) (persistence.Version, error)
 	DocumentStamp(ctx context.Context, room string) (DocumentStamp, error)
 	LoadDocument(ctx context.Context, room string) (LoadedDocument, error)
-	setProcessID(id string)
+	setProcess(id string, heads *headTracker)
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
@@ -100,7 +102,11 @@ type Service struct {
 	// processID names this Service among the processes serving one database: New makes it, one
 	// per Service, and every append's head notification carries it (documentHeadNotice), so a
 	// listener can tell this process's own writes from another's.
-	processID         string
+	processID string
+	// heads is what this process knows of each document's stored history without reading it
+	// (headTracker): the stale-room evictor's LISTEN feeds it, the persistence store reports this
+	// process's writes to it, and a cold read (coldRead) and a room's preload (takePreload) ask it.
+	heads             *headTracker
 	events            *events.Broker
 	identity          identity.Identity
 	agentTokens       *auth.SharedAgentTokens
@@ -610,12 +616,13 @@ func New(deps Deps) *Service {
 	if persist == nil {
 		persist = NewPgVersioned(deps.Store)
 	}
-	processID := uuid.NewString()
-	persist.setProcessID(processID)
+	processID, heads := uuid.NewString(), newHeadTracker()
+	persist.setProcess(processID, heads)
 	service := &Service{
 		store:             deps.Store,
 		persistence:       persist,
 		processID:         processID,
+		heads:             heads,
 		events:            deps.Events,
 		identity:          deps.Identity,
 		agentTokens:       deps.AgentTokens,

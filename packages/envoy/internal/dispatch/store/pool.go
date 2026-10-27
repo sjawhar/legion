@@ -565,34 +565,82 @@ func (p *Pool) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, erro
 // begin is the guarded body both transaction entry points share: guard runs in the exported
 // method, as it does in every exported method that hands out one of this pool's connections,
 // so a refusal records the caller that asked for the transaction rather than one of this
-// pool's own frames.
+// pool's own frames. Every transaction it opens is a trackedTx, whether or not ctx carries a hold
+// mark, so AfterCommit reaches each of them.
 func (p *Pool) begin(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
 	tx, err := p.pool.BeginTx(ctx, options)
 	if err != nil {
 		return nil, err
 	}
-	release := hold(ctx)
-	if release == nil {
-		return tx, nil
-	}
-	return &trackedTx{Tx: tx, release: release}, nil
+	return &trackedTx{Tx: tx, release: hold(ctx)}, nil
 }
 
-// trackedTx clears the caller's mark however the transaction ends. Callers commit and then run
-// a deferred rollback; the release absorbs that second call.
+// trackedTx is a transaction of this pool. It clears the caller's hold mark however the
+// transaction ends, when the caller's context carried one (release is nil for a context the pool
+// cannot see), and then runs what AfterCommit registered on it. Callers commit and then run a
+// deferred rollback: the first of the two ends the transaction, and the second ends nothing again.
 type trackedTx struct {
 	pgx.Tx
 	release func()
+	// mu guards ended and after: a transaction is used from one goroutine at a time, but nothing
+	// stops a caller from registering on one goroutine and ending it on another.
+	mu    sync.Mutex
+	ended bool
+	after []func(committed bool)
 }
 
 func (t *trackedTx) Commit(ctx context.Context) error {
-	defer t.release()
-	return t.Tx.Commit(ctx)
+	committed := false
+	defer func() { t.end(committed) }()
+	err := t.Tx.Commit(ctx)
+	committed = err == nil
+	return err
 }
 
 func (t *trackedTx) Rollback(ctx context.Context) error {
-	defer t.release()
+	defer t.end(false)
 	return t.Tx.Rollback(ctx)
+}
+
+// end runs once, at whichever of Commit and Rollback comes first: it clears the hold mark, then
+// runs each function AfterCommit registered, in the order registered, with whether the
+// transaction committed. A Commit that failed did not commit, whatever Postgres made of it.
+func (t *trackedTx) end(committed bool) {
+	t.mu.Lock()
+	if t.ended {
+		t.mu.Unlock()
+		return
+	}
+	t.ended = true
+	after := t.after
+	t.after = nil
+	t.mu.Unlock()
+	if t.release != nil {
+		t.release()
+	}
+	for _, fn := range after {
+		fn(committed)
+	}
+}
+
+// AfterCommit registers fn to run once tx ends, with whether it committed, and reports whether it
+// could: tx is a transaction of a Pool (Begin, BeginTx) that has not ended yet. fn runs inside the
+// Commit or Rollback that ends tx, after the hold mark is cleared and before that call returns, so
+// whatever the caller does once its commit returns - answer a request, read what it wrote - comes
+// after fn. A transaction the pool did not open (one begun on an acquired connection, a savepoint,
+// a test's own) answers false, and fn never runs.
+func AfterCommit(tx pgx.Tx, fn func(committed bool)) bool {
+	tracked, ok := tx.(*trackedTx)
+	if !ok {
+		return false
+	}
+	tracked.mu.Lock()
+	defer tracked.mu.Unlock()
+	if tracked.ended {
+		return false
+	}
+	tracked.after = append(tracked.after, fn)
+	return true
 }
 
 type errRow struct {

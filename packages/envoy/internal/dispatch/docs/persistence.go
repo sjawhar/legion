@@ -2,7 +2,6 @@ package docs
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -36,10 +35,13 @@ type PgVersioned struct {
 	// (TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow).
 	afterAppendCommit func(room string, version persistence.Version)
 	// processID is the id of the process whose Service was built on this store (Service.ProcessID),
-	// which every append's documentHeadChannel notification names, so a listener can tell this
-	// process's own writes from another's. New sets it (setProcessID) before the Service it builds
-	// runs anything; a store no Service was built on - a test's, a seed's - leaves it empty.
+	// which every content-changing write's documentHeadChannel notification names, so a listener
+	// can tell this process's own writes from another's. heads is that Service's head tracker,
+	// which every content-changing write of this store reports itself to (beginOwnWrite). New sets
+	// both (setProcess) before the Service it builds runs anything; a store no Service was built on
+	// - a test's, a seed's - leaves them empty, and its writes report to no tracker.
 	processID string
+	heads     *headTracker
 }
 
 // roomLock is one room's in-process lock and how many callers hold it or wait for it.
@@ -53,11 +55,11 @@ func NewPgVersioned(database *store.Store) *PgVersioned {
 	return &PgVersioned{store: database}
 }
 
-// setProcessID gives the store the id of the process whose Service was built on it
-// (Service.ProcessID). It is part of VersionedStore so that New reaches the PgVersioned under any
-// store that wraps one by embedding it.
-func (p *PgVersioned) setProcessID(id string) {
-	p.processID = id
+// setProcess gives the store the id of the process whose Service was built on it
+// (Service.ProcessID) and that Service's head tracker. It is part of VersionedStore so that New
+// reaches the PgVersioned under any store that wraps one by embedding it.
+func (p *PgVersioned) setProcess(id string, heads *headTracker) {
+	p.processID, p.heads = id, heads
 }
 
 // Load returns the room's state at its head (stateThrough), constrained by a pending prune
@@ -284,7 +286,8 @@ func (g *appendGate) throughUnderLock(through int64) {
 
 // appendUpdateTxClass appends one update inside tx under the gate: the document's advisory lock,
 // prune recovery, the gate (gateAppend) and the append's writes (appendWrites), each statement run
-// in tx in turn.
+// in tx in turn. From the gate on it is a write of this process the head tracker follows until tx
+// ends (headTracker.ownWriteIn).
 func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, kind appendKind) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -295,6 +298,7 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	if err := p.recoverPruneTx(ctx, tx, room); err != nil {
 		return 0, err
 	}
+	wrote := p.heads.ownWriteIn(tx, room)
 	head, err := gateAppend(ctx, tx, room, appendingThrough(ctx, room), kind)
 	if err != nil {
 		return 0, err
@@ -308,6 +312,7 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 			return 0, err
 		}
 	}
+	wrote(int64(version))
 	return version, nil
 }
 
@@ -318,9 +323,9 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 // documentHeadNotice naming the last version. One update or a room's whole batch, the transaction
 // spends one round trip under the document's advisory lock on its rows and its announcement, and
 // sends each notification once. Why the announcement belongs inside this transaction is
-// notifyDocumentChanged's doc comment, which still carries a rebuild's. The room is passed twice
-// because its two parameters are different types: doc_updates.artifact_id is a uuid, and
-// pg_notify takes text.
+// notifyDocumentChanged's doc comment, which carries a rebuild's, a prune's and a deletion's. The
+// room is passed twice because its two parameters are different types: doc_updates.artifact_id is
+// a uuid, and pg_notify takes text.
 const appendUpdatesStatement = `
 	with appended as (
 		insert into doc_updates (artifact_id, version, update, content_changed)
@@ -367,9 +372,9 @@ func (p *PgVersioned) appendWrites(room string, head int64, updates []BrowserUpd
 		}
 	}
 	last := versions[len(versions)-1]
-	notice, err := json.Marshal(documentHeadNotice{Room: room, Head: last, Process: p.processID})
+	notice, err := p.headNotice(room, last)
 	if err != nil {
-		return nil, 0, fmt.Errorf("encode the document's head notification: %w", err)
+		return nil, 0, err
 	}
 	owed, err := updateOwedStatement(room, credited, lastActor)
 	if err != nil {
@@ -377,7 +382,7 @@ func (p *PgVersioned) appendWrites(room string, head int64, updates []BrowserUpd
 	}
 	statements := []writeStatement{{
 		sql:  appendUpdatesStatement,
-		args: []any{room, versions, contents, classes, room, string(notice)},
+		args: []any{room, versions, contents, classes, room, notice},
 		what: "append document update",
 	}, owed}
 	if len(authors) > 0 {
@@ -590,7 +595,11 @@ func (p *PgVersioned) RestoreSnapshot(ctx context.Context, room, name string) ([
 }
 
 // PruneAfter makes target the visible head. Its checkpoint is committed before
-// deleting newer updates so a crash cannot make them visible again.
+// deleting newer updates so a crash cannot make them visible again. The checkpoint's transaction
+// is the write that changes the document's content - the head reads the checkpoint's ceiling from
+// its commit on (headVersion) - so it is the one that announces the change, with target as the
+// head (notifyDocumentChanged), and the head tracker follows it as this process's write from the
+// checkpoint to the end of the prune.
 func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persistence.Version, rolledBack []byte) error {
 	return p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
 		tx, err := conn.Begin(ctx)
@@ -601,6 +610,9 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 		if err := lockDocumentRoom(ctx, tx, room); err != nil {
 			return err
 		}
+		write := p.heads.beginOwnWrite(room)
+		checkpointed := false
+		defer func() { write.end(checkpointed, int64(target)) }()
 		var exists bool
 		if err := tx.QueryRow(ctx, `select exists(select 1 from doc_updates where artifact_id = $1)`, room).Scan(&exists); err != nil {
 			return fmt.Errorf("check document room: %w", err)
@@ -614,9 +626,13 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 		`, room, int64(target), rolledBack); err != nil {
 			return fmt.Errorf("checkpoint document prune: %w", err)
 		}
+		if err := p.notifyDocumentChanged(ctx, tx, room, int64(target)); err != nil {
+			return err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit checkpoint document prune: %w", err)
 		}
+		checkpointed = true
 
 		tx, err = conn.Begin(ctx)
 		if err != nil {
@@ -736,7 +752,9 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 
 // RebuildTx replaces a room's durable history with one fresh update at the next version, inside
 // tx, which holds the room's lock until it ends. Its caller has already proved that ygo cannot load
-// the old merged history; this method never makes that destructive decision itself.
+// the old merged history; this method never makes that destructive decision itself. It announces
+// the new head in tx (notifyDocumentChanged), and from the head's read on it is a write of this
+// process the head tracker follows until tx ends (headTracker.ownWriteIn).
 func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
 	if err := validateUpdate(seed); err != nil {
 		return RebuildReport{}, wrapUnlessTooLarge(itemCapError(seed, err), "validate rebuilt document seed")
@@ -747,6 +765,7 @@ func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, see
 	if err := p.recoverPruneTx(ctx, tx, room); err != nil {
 		return RebuildReport{}, err
 	}
+	wrote := p.heads.ownWriteIn(tx, room)
 	head, err := p.head(ctx, tx, room)
 	if err != nil {
 		return RebuildReport{}, err
@@ -773,13 +792,16 @@ func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, see
 	`, room, report.Head, seed); err != nil {
 		return RebuildReport{}, fmt.Errorf("seed rebuilt document: %w", err)
 	}
-	if err := notifyDocumentChanged(ctx, tx, room); err != nil {
+	if err := p.notifyDocumentChanged(ctx, tx, room, report.Head); err != nil {
 		return RebuildReport{}, err
 	}
+	wrote(report.Head)
 	return report, nil
 }
 
-// Delete removes all persisted Yjs data for a document room.
+// Delete removes all persisted Yjs data for a document room, and announces the head it leaves, 0,
+// in the same transaction (notifyDocumentChanged); the head tracker follows it as this process's
+// write until it has committed or rolled back.
 func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 	return p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
 		tx, err := conn.Begin(ctx)
@@ -790,6 +812,9 @@ func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 		if err := lockDocumentRoom(ctx, tx, room); err != nil {
 			return err
 		}
+		write := p.heads.beginOwnWrite(room)
+		deleted := false
+		defer func() { write.end(deleted, 0) }()
 		for _, query := range []string{
 			`delete from doc_snapshots where artifact_id = $1`,
 			`delete from doc_updates where artifact_id = $1`,
@@ -799,9 +824,13 @@ func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 				return fmt.Errorf("delete document data: %w", err)
 			}
 		}
+		if err := p.notifyDocumentChanged(ctx, tx, room, 0); err != nil {
+			return err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit delete document: %w", err)
 		}
+		deleted = true
 		return nil
 	})
 }
