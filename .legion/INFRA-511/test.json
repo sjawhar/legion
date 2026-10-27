@@ -2,32 +2,41 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-511",
-  "completed": "2026-10-27T13:18:00Z",
+  "completed": "2026-10-27T16:40:00Z",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 10 at PR head 7e583d0c (code bbc7410b): reclaimAfterSessionChange takes down a re-claim widget shown for another session when the switch lands back on the registered session (review finding: a widget from a /new's refused re-claim stayed after /resume back to the working controller session). I re-ran the committed real-binary file as it is: 9 pass, 0 fail (346 s, in this still-slow pod). I drove the fix on the real binary with my own probe (/legion/scratch/tmp/i511t/probe-r10.test.ts), with a negative control on the reviewed head's controller-session.ts."
+    "how": "Round 11 at PR head c4411ec8 (code ce61a779). The change is a docs revert answering the review: the three skill and role-prompt files go back to main's text, and their edits move to sjawhar/legion pull request #2420, following the operator's rule that skill changes merge in their own pull request. Between bbc7410b (round 10's tested code) and ce61a779 only those three files and .legion/ changed, so round 10's real-binary proof of the code stands. I checked the move on GitHub and in the tree, and ran the built CLI smoke at this head, because the controller's role prompt is embedded in the `legion` binary."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review finding (round 9 review): after a /new whose re-claim is refused before it registers, a /resume back to the registered controller session takes the refusal widget down, and that session keeps working",
-      "surface": "real interactive Oh My Pi 18.12.2 under a pseudo-terminal, both plugins of this head, a stand-in that gives each registration its own secret and refuses the second registration with 403, real NATS",
-      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test --timeout 900000 ./extensions/zz-tester-probe-r10.test.ts (copy of /legion/scratch/tmp/i511t/probe-r10.test.ts, removed after), case R10: start, then /new (re-claim refused), then `/resume <S1 id>` typed in the composer",
-      "observed": "1 pass. After /new: registrations 2, and the refusal widget '… re-claiming the controller for this session failed …' on screen. After /resume back to S1: still 2 registrations (no claim needed), S1's transcript on screen, and 'widget still on screen after resume: false'. A set_status in S1 then returned {} with grant secret-1, which was current (statusWrites 1).",
-      "headSha": "7e583d0cfccdcc64a507a31cab20142cd7f1b675",
-      "negativeControl": "The same probe with packages/pi-legion/src/controller-session.ts restored from the reviewed head ce943410 (`jj restore --from ce943410 …`, put back right after): 0 pass, 1 fail, with 'widget still on screen after resume: true'. The workspace was clean afterwards (`jj status`: no changes)."
+      "criterion": "Review finding (round 10 review): #2300 carries no skill or role-prompt edit; the three files match main, and their edits are carried, unchanged, by a separate pull request",
+      "surface": "the pull request's file list on GitHub, the files at the head, and #2420's branch",
+      "command": "gh pr view 2300 --repo sjawhar/legion --json files; jj diff --stat --from main@origin --to ce61a779 -- <each file>; gh pr view 2420 --repo sjawhar/legion --json files,state,headRefName; sha256 of each file at 3013244d (the reviewed head) and at legion/INFRA-511-skill-text@origin",
+      "observed": "#2300 lists 36 files, none under skills/, packages/daemon/internal/prompts/ or packages/claude-envoy/legion/. Each of the three files shows 0 changes against main@origin at ce61a779. #2420 (OPEN, branch legion/INFRA-511-skill-text, 'docs(legion-controller): the controller's role prompt and takeover note say when each launch claims') changes exactly those three files. Each file's text there is byte-identical to the edit the review saw: session.md 6c7fc316639b for both copies, controller-root.md 8624bfe1a7ac. No Go or TypeScript test references the moved text.",
+      "headSha": "c4411ec86a34948efb394cb3af2c6d30339151f1",
+      "negativeControl": "At the reviewed head 719564d2 the three files differed from main: the reviewer's finding, and this round's diff from 3013244d to ce61a779 shows 3 files, +6/−7."
     },
     {
-      "criterion": "The pull request's real-binary proof still passes on the slow host after the code change",
-      "surface": "the committed controller-start-omp.test.ts, unmodified",
-      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts",
-      "observed": "9 pass, 0 fail, 346.1 s",
-      "headSha": "7e583d0cfccdcc64a507a31cab20142cd7f1b675",
-      "negativeControl": "Round 6 at 9037d3c9: 0/9 at startup with 30 s deadlines. Round 8 at 5fd0f13e: the focused-subagent case failed 1 of 6."
+      "criterion": "The built `legion controller start` with the reverted embedded role prompt still launches the controller whose first turn is the start message after startup",
+      "surface": "legion built from this head (`go build -o /legion/scratch/tmp/i511t/legion ./cmd/legion`), both plugins re-packed and installed from this head with scripts/e2e/lib/install-plugin-profile.sh, my Bun.Terminal driver and stand-in, real NATS",
+      "command": "env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/legion bun /legion/scratch/tmp/i511t/drive.ts pos",
+      "observed": "SMOKE PASS. The argv ends --append-system-prompt <2415 chars> /legion-controller-start (2507 before the revert, 92 characters shorter). Order: register, then role claim, then the first turn; pluginContract 41. The start message and Working… are on screen while the turn is held. /legion-controller-start again says 'nothing to do' with 1 registration and 1 turn. The start message appears once. The prompt snapshot under the controller's state directory holds main's line 'claims the controller role during session startup'.",
+      "headSha": "c4411ec86a34948efb394cb3af2c6d30339151f1",
+      "negativeControl": "Round 1, same CLI code: stdin a pipe or /dev/null gave exit 1, 'stdin is not a terminal', 0 daemon requests. A pi-legion at contract 40 or 42 was refused before the mint."
+    },
+    {
+      "criterion": "The code's real-binary proof (no code change since round 10)",
+      "surface": "round 10 at 7e583d0c",
+      "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 bun test ./extensions/controller-start-omp.test.ts; /legion/scratch/tmp/i511t/probe-r10.test.ts",
+      "observed": "9 pass, 0 fail (346 s). /resume back to the registered session takes the refusal widget down, and set_status works there.",
+      "headSha": "c4411ec86a34948efb394cb3af2c6d30339151f1",
+      "negativeControl": "The reviewed head's controller-session.ts left the widget up after /resume (round 10)."
     }
   ],
   "observations": [
-    "CI at code head bbc7410b: build, changes, lint, typecheck, test and pr-title queued when read at 2026-10-27T13:17Z; not waited on. PR head 7e583d0c is handoff-only."
+    "Until #2420 merges, main's controller-root.md says the extension claims 'during session startup', while the operator-launched controller now claims from /legion-controller-start once startup is over. #2420 carries that correction, so I record it here rather than as a failure.",
+    "CI at code head ce61a779: build, changes, lint, typecheck, test and pr-title queued when read at 2026-10-27T16:32Z; not waited on. PR head c4411ec8 is handoff-only."
   ]
 }
