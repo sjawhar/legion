@@ -55,9 +55,13 @@ async function expectBackgroundColor(locator: Locator, swatch: Swatch): Promise<
   expect(normalizeComputedColor(actual)).toBe(expectedRgb(swatch));
 }
 
+/** Polls, since a link or button eases its `color` over 150ms (styles.css) after a scheme switch. */
 async function expectTextColor(locator: Locator, swatch: Swatch): Promise<void> {
-  const actual = await locator.first().evaluate((el) => getComputedStyle(el).color);
-  expect(normalizeComputedColor(actual)).toBe(expectedRgb(swatch));
+  await expect
+    .poll(async () =>
+      normalizeComputedColor(await locator.first().evaluate((el) => getComputedStyle(el).color))
+    )
+    .toBe(expectedRgb(swatch));
 }
 
 async function expectBorderColor(locator: Locator, swatch: Swatch): Promise<void> {
@@ -156,6 +160,51 @@ test("an issue's spec and Conversation tabs render the dark palette in dark mode
     await page.emulateMedia({ colorScheme: "dark" });
     await expectBackgroundColor(dock, C.SURFACE.dark);
     await attachScreenshot(page, testInfo, "issue-conversation-dark");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a link in a comment's Markdown body renders the app's link blue in dark mode and in light mode", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Roll out the new pipeline" });
+  const comment = await createComment(
+    issue.key,
+    { body: "See [the plan](https://example.com/plan)." },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const turn = page.locator(`[data-turn="comment:${comment.id}"]`);
+    // Collapsed, the turn shows the comment as a two-line `MarkdownPreview` with live links;
+    // expanded, it shows the full `MarkdownBody` (in place above the phone breakpoint, in a
+    // full-screen Thread dialog below it). Both are `.dispatch-markdown` bodies whose link is an
+    // `<a>` coloured by Typography's `--tw-prose-links`.
+    const previewLink = turn.locator(".dispatch-markdown").getByRole("link", { name: "the plan" });
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(previewLink).toBeVisible();
+    await expectTextColor(previewLink, C.LINK.light);
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expectTextColor(previewLink, C.LINK.dark);
+
+    await turn.getByRole("button", { name: "Expand thread" }).click();
+    const thread =
+      testInfo.project.name === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : turn;
+    const bodyLink = thread.locator(".dispatch-markdown").getByRole("link", { name: "the plan" });
+    await expect(bodyLink).toBeVisible();
+    await expectTextColor(bodyLink, C.LINK.dark);
+    await attachScreenshot(page, testInfo, "markdown-link-dark");
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await expectTextColor(bodyLink, C.LINK.light);
+    await attachScreenshot(page, testInfo, "markdown-link-light");
   } finally {
     await alice.close();
   }

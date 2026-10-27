@@ -449,7 +449,8 @@ a {
    `text-xs` metadata line like a resolution reason), so `.dispatch-markdown` overrides
    body/heading/bold/quote/lead/caption text and font size to inherit from the surrounding
    element and caps headings to a bold version of that inherited size; code keeps its own
-   accent color and links keep the app's link blue rather than prose's own near-black default. */
+   accent color and links keep the app's link blue (sky-700, sky-400 in dark) rather than
+   prose's own near-black default. */
 .dispatch-markdown {
   font-size: inherit;
   line-height: inherit;
@@ -467,6 +468,15 @@ a {
   --tw-prose-invert-quotes: inherit;
   --tw-prose-invert-captions: inherit;
   --tw-prose-invert-links: #00bcff; /* sky-400 */
+}
+
+/* `dark:prose-invert` would flip links by setting `--tw-prose-links` to the invert value, but it
+   does so inside a Tailwind cascade layer, and the unlayered rule above always beats a layered
+   one, so without this the links stay sky-700 on a dark card. */
+@media (prefers-color-scheme: dark) {
+  .dispatch-markdown {
+    --tw-prose-links: var(--tw-prose-invert-links);
+  }
 }
 
 .dispatch-markdown :where(h1, h2, h3, h4, h5, h6) {
@@ -496,10 +506,11 @@ a {
    The box is drawn here (`appearance: none`) rather than by the browser, which paints a disabled
    native box pale grey, so on a light card its tick was hard to see. It stays a native disabled
    checkbox (role, checked state, no tab stop); only its look changes. An unticked box is an empty
-   outline in a muted mix of the text colour; a ticked one is filled in the app's link blue with a
-   contrasting tick, per scheme: sky-700 with a white tick in light, sky-400 with a slate-900 tick
-   in dark. The tick is a background image, not a pseudo-element, since Firefox draws none on an
-   `input`; `opacity: 1` keeps any engine from dimming the disabled box. */
+   outline in a muted mix of the text colour; a ticked one is filled in the app's link blue
+   (`--tw-prose-links`, so it follows the scheme as the links do: sky-700 in light, sky-400 in
+   dark) with a contrasting tick, white in light and slate-900 in dark. The tick is a background
+   image, not a pseudo-element, since Firefox draws none on an `input`; `opacity: 1` keeps any
+   engine from dimming the disabled box. */
 .dispatch-markdown li[data-item-type="task"] {
   list-style: none;
 }
@@ -523,16 +534,14 @@ a {
 }
 
 .dispatch-markdown [data-markdown-task-checkbox]:checked {
-  background-color: #0069a8; /* sky-700 */
+  background-color: var(--tw-prose-links);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%23ffffff' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  border-color: #0069a8; /* sky-700 */
+  border-color: var(--tw-prose-links);
 }
 
 @media (prefers-color-scheme: dark) {
   .dispatch-markdown [data-markdown-task-checkbox]:checked {
-    background-color: #00bcff; /* sky-400 */
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='%230f172b' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-    border-color: #00bcff; /* sky-400 */
   }
 }
 
