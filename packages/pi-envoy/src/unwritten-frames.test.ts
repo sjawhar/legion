@@ -500,6 +500,32 @@ describe("a replay notice", () => {
       { session: "s1", id: "notice-1", handed: true },
     ]);
   });
+
+  test("held for a session, then requeued from a fork's copy of its entry, is handed once in the fork", () => {
+    const { frames, state, notices, noticeRecords } = harness();
+    state.settled = false;
+    frames.sendNotice("retention gap");
+    const id = noticeRecords[0]?.id ?? "";
+    // The fork's transcript copies the entry, id included.
+    const held = [{ id, content: "retention gap" }];
+
+    state.session = "s2";
+    frames.requeueNotices(held);
+    frames.requeueNotices(held);
+    frames.releaseOtherSessions("s2");
+    state.settled = true;
+    frames.handBackWithdrawn();
+    expect(notices).toEqual(["retention gap"]);
+    // A restore that reads the fork's transcript again, its handed mark unread, holds nothing.
+    frames.requeueNotices(held);
+    frames.handBackWithdrawn();
+
+    expect(notices).toEqual(["retention gap"]);
+    expect(noticeRecords).toEqual([
+      { session: "s1", id, content: "retention gap" },
+      { session: "s2", id, handed: true },
+    ]);
+  });
 });
 
 describe("a person's turn handed to the host", () => {

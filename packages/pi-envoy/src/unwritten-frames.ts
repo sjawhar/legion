@@ -159,8 +159,10 @@ export class UnwrittenFrames {
   // The replay notices not handed yet, in the order they were sent, each with the session it was
   // raised for, and whether the transcript records it held.
   #notices: HeldNotice[] = [];
-  // The notices recorded held that this process handed: a restore that reads a transcript whose
-  // mark of that failed to be written does not hold them again.
+  // The notices recorded held that this process handed, each by its session and id
+  // (`JSON.stringify([sessionID, id])`), as a fork's transcript copies the entries, ids included,
+  // of the session it forked from: a restore that reads a transcript of their session whose mark
+  // of that failed to be written does not hold them again.
   readonly #handedNotices = new Set<string>();
   // The moments the host had to queue or write a card handed before it: each heartbeat, and each
   // run that ended aborted (`handBackWithdrawn`, `runAborted`).
@@ -253,13 +255,21 @@ export class UnwrittenFrames {
   /**
    * Holds again, for the session this instance serves now, the notices its transcript records as
    * held and not handed (`heldReplayNotices`), after those held already, until the first settled
-   * moment hands them. They are recorded already; one held or handed by this process already is
-   * passed over, so a restore that reads the same transcript twice holds each once.
+   * moment hands them. They are recorded already; one held for this session already, or handed
+   * for it by this process, is passed over, so a restore that reads the same transcript twice
+   * holds each once. One held for another session is held for this one too: a fork's transcript
+   * copies the entries of the session it forked from, whose hold a session change drops
+   * (`releaseOtherSessions`).
    */
   requeueNotices(notices: readonly HeldReplayNotice[]): void {
     const sessionID = this.#host.sessionID();
     for (const { id, content } of notices) {
-      if (this.#handedNotices.has(id) || this.#notices.some((held) => held.id === id)) continue;
+      if (
+        this.#handedNotices.has(JSON.stringify([sessionID, id])) ||
+        this.#notices.some((held) => held.sessionID === sessionID && held.id === id)
+      ) {
+        continue;
+      }
       this.#notices.push({ id, sessionID, content, recorded: true });
     }
   }
@@ -434,7 +444,7 @@ export class UnwrittenFrames {
       }
       this.#notices.splice(index, 1);
       if (!notice.recorded) continue;
-      this.#handedNotices.add(notice.id);
+      this.#handedNotices.add(JSON.stringify([notice.sessionID, notice.id]));
       try {
         this.#host.noticeHanded(notice.id);
       } catch (error) {

@@ -203,9 +203,11 @@ which the listener allows only on a loopback address (`packages/envoy/cmd/listen
 the tailnet's policy for port 9020 is the only thing that decides who may call it, and a caller
 gets the whole API with no credential: it can publish to any topic outside the agent topics with
 a `source` of its choosing, under the listener's user's publish grant (Dispatch, GitHub, Slack,
-Legion and role notifications included), claim a role, list every session and delete one. That
-holds whether or not the hub has a `sessionUser`, so a hub without one still has an open bus for
-any device the policy lets reach 9020: grant 9020 only to devices that may act as any agent.
+Legion and role notifications included), claim a role, list every session and delete one, and
+read any session's stored inbox for the last 72 hours by naming its id (`POST /v1/replay`: the
+listener does not check that the session is live or that the caller is that session). That holds
+whether or not the hub has a `sessionUser`, so a hub without one still has an open bus for any
+device the policy lets reach 9020: grant 9020 only to devices that may act as any agent.
 
 Because the API takes no bearer, a web page open on any device the policy lets reach 9020 could
 otherwise post to it: a browser sends a cross-site form without asking. The listener refuses any
