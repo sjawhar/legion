@@ -162,9 +162,18 @@ select t.total, t.reachable, r.kind, case when r.owner_artifact_id is null then 
 //
 // Parameters: $1 q, $2 project (empty for every project), $3 limit, $4 firstTerm,
 // $5 headlineOptions, $6 offset, $7 contracts.SearchKindDepth, $8 searchFusionK.
-var searchQuery = `
+var searchQuery = searchQOpener + searchQueryBody
+
+// searchQOpener opens searchQuery and searchQueryMeaning: their q, the query text read as
+// websearch_to_tsquery, its first term ($4) for the snippet window, and the issue key the whole
+// text would be (own_key). The related-item check prefixes the same two bodies with its own q
+// (relatedQOpener), so its ranking is search's own.
+const searchQOpener = `
 with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key),
-kinds as (` + searchKeywordLegsSQL + `
+`
+
+// searchQueryBody is searchQuery after its q: every CTE it reads q from and the page.
+var searchQueryBody = `kinds as (` + searchKeywordLegsSQL + `
 ),
 ranked as (
   select *, row_number() over (partition by kind order by own desc, r desc, updated_at desc, id) as pos,
@@ -218,9 +227,10 @@ totals as (
 // Parameters: $1 q, $2 project, $3 limit, $4 firstTerm, $5 headlineOptions, $6 offset,
 // $7 contracts.SearchKindDepth, $8 searchFusionK, $9 the query's embedding (a vector literal),
 // $10 searchMeaningFloor, $11 the query embedder's identity.
-var searchQueryMeaning = `
-with q as (select websearch_to_tsquery('english', $1) as tsq, $4::text as term, upper(btrim($1)) as own_key),
-meaning_issue_candidates as (
+var searchQueryMeaning = searchQOpener + searchQueryMeaningBody
+
+// searchQueryMeaningBody is searchQueryMeaning after its q.
+var searchQueryMeaningBody = `meaning_issue_candidates as (
   select i.key as issue_key, i.key as id, i.title as issue_title, i.status as issue_status, i.updated_at,
          1 - (e.embedding <=> $9::vector) as r
     from embeddings e

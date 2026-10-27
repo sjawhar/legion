@@ -395,6 +395,9 @@ func main() {
 	go documentService.RunStaleRoomEviction(ctx)
 	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
 	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
+	// INFRA-568: the related-item check's keyword statistics (each project's df and N), rebuilt at
+	// boot and every ten minutes.
+	go api.RunSearchTermStatsRefresh(ctx, database.Pool, api.SearchTermStatsInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again, at start and on an interval, so their progress shows without anyone

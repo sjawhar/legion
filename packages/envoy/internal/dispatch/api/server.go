@@ -272,6 +272,9 @@ type server struct {
 	// names and apply step that it has warned about, until the configuration is fixed or the process
 	// restarts.
 	warnedUnmatchedRuns sync.Map
+	// termStats is the per-project term-statistics refreshes a related-item check started
+	// (ensureSearchTermStats), so a project's many checks start one.
+	termStats searchTermRefreshes
 }
 
 // warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured set of
