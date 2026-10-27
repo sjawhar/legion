@@ -154,7 +154,6 @@ jobs:
           {
             echo "built_sha=$BUILT_SHA"
             echo "short=$short"
-            echo "version_label=sha-$short"
             echo "tags=${IMAGE}:sha-${short}"
           } >> "$GITHUB_OUTPUT"
 
@@ -203,7 +202,7 @@ jobs:
           # org.opencontainers.image.source is the Dockerfile's LABEL (the in-repo convention).
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.built_sha }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version_label }}
+            org.opencontainers.image.version=sha-${{ steps.meta.outputs.short }}
           # The Go `legion` links the built commit (`legion version` names it); the build refuses without it.
           build-args: |
             LEGION_REVISION=${{ steps.meta.outputs.built_sha }}
@@ -216,7 +215,7 @@ jobs:
         id: record
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-          TAGS: ${{ steps.meta.outputs.tags }}
+          TAG: ${{ steps.meta.outputs.tags }}
         run: |
           test -n "$DIGEST"
           REF="${IMAGE}@${DIGEST}"
@@ -230,9 +229,7 @@ jobs:
             echo
             echo "\`$REF\`"
             echo
-            echo "Tags:"
-            # shellcheck disable=SC2016 # literal backticks and a sed `$` anchor, no expansion wanted
-            printf '%s\n' "$TAGS" | sed 's/^/- `/; s/$/`/'
+            echo "Tag: \`$TAG\`"
             echo
             echo "Pin \`runtime.kubernetes.image\` to the digest reference above; the daemon refuses a tag."
           } >> "$GITHUB_STEP_SUMMARY"

@@ -683,7 +683,7 @@ def unwrap(expression: str) -> str:
     return expression
 
 
-def gate_outputs(condition: str, modes: frozenset[str] = frozenset()) -> list[tuple[str, str]]:
+def gate_outputs(condition: str, modes: frozenset[str]) -> list[tuple[str, str]]:
     """(job, output) for each paths-filter output an `if:` is gated on.
 
     An allowlist, because unknown must mean refused and never ungated: a condition this check

@@ -196,18 +196,20 @@ jobs:
       - name: Resolve plugin versions for the smoke test and worker image
         id: plugin_versions
         run: |
+          # pair_member <version output> <package>: the version it releases, or its manifest's when it skips.
+          pair_member() {
+            if [ "$(sed -n 's/^skip=//p' <<<"$1")" = true ]; then
+              jq -r '.version // empty' "packages/$2/package.json"
+            else
+              sed -n 's/^version=//p' <<<"$1"
+            fi
+          }
           # shellcheck disable=SC2086 # $PI_ENVOY_VERSION_ARGS is the argument list, split on purpose
           envoy=$(.github/scripts/release-push.sh version pi-envoy-v $PI_ENVOY_VERSION_ARGS)
           # shellcheck disable=SC2086 # $PI_LEGION_VERSION_ARGS is the argument list, split on purpose
           legion=$(.github/scripts/release-push.sh version pi-legion-v $PI_LEGION_VERSION_ARGS)
-          envoy_version=$(sed -n 's/^version=//p' <<<"$envoy")
-          if [ "$(sed -n 's/^skip=//p' <<<"$envoy")" = true ]; then
-            envoy_version=$(jq -r '.version // empty' packages/pi-envoy/package.json)
-          fi
-          legion_version=$(sed -n 's/^version=//p' <<<"$legion")
-          if [ "$(sed -n 's/^skip=//p' <<<"$legion")" = true ]; then
-            legion_version=$(jq -r '.version // empty' packages/pi-legion/package.json)
-          fi
+          envoy_version=$(pair_member "$envoy" pi-envoy)
+          legion_version=$(pair_member "$legion" pi-legion)
           if [ -z "$legion_version" ]; then
             echo "::error::Could not resolve @sjawhar/pi-legion version"
             exit 1
@@ -545,7 +547,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Only the npm publishes use node.
       - id: setup_node
+        if: (needs.pi_envoy_build.result == 'success' && needs.pi_envoy_build.outputs.skip != 'true') || (needs.pi_legion_build.result == 'success' && needs.pi_legion_build.outputs.skip != 'true') || (needs.envoy_plugin_build.result == 'success' && needs.envoy_plugin_build.outputs.skip != 'true')
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"

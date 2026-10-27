@@ -428,7 +428,7 @@ run_check "$root"
 check "!= and any letter case read the same, as GitHub compares" "$(is "$status" 0)"
 
 echo "case: an inputs. term is refused where it is no call mode of the job's own workflow"
-# (b) A caller's own if: in a workflow with no workflow_call: there `inputs.` is whatever its
+# A caller's own if: in a workflow with no workflow_call: there `inputs.` is whatever its
 # own trigger supplies, which this check does not trace.
 root=$(fixture call-mode-in-caller)
 call_modes "$root" "if: inputs.mode == ''" "if: inputs.mode == ''"
@@ -447,21 +447,13 @@ run_check "$root"
 check "the same, though the caller's workflow_dispatch declares mode" "$(is "$status" 1)"
 check "  and quotes the term" "$(contains "$out" "jobs.build builds or calls an image, and its if: is narrowed by \`inputs.mode == ''\`")"
 
-# (c) In the called workflow, an input its workflow_call does not declare - a typo, or one only
+# In the called workflow, an input its workflow_call does not declare - a typo, or one only
 # workflow_dispatch supplies - is no call mode the callers pick.
 root=$(fixture call-mode-undeclared)
 call_modes "$root" "if: inputs.other == ''" ""
 run_check "$root"
 check "an input workflow_call does not declare is refused" "$(is "$status" 1)"
 check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.other == ''\`")"
-
-# A step's if: is not a job's, so no call mode is admitted there.
-root=$(fixture call-mode-step-if)
-call_modes "$root" "" ""
-sed -i "s|^      - uses: docker/build-push-action@v6$|&\n        if: inputs.mode == ''|" "$root/.github/workflows/image.yaml"
-run_check "$root"
-check "a call-mode term in the build step's own if: is refused" "$(is "$status" 1)"
-check "  and quotes the term" "$(contains "$out" "step 'an unnamed step' builds or calls an image, and its if: is narrowed by \`inputs.mode == ''\`")"
 
 # A declared input tested any way but a plain comparison with a literal.
 shape_index=0
@@ -784,6 +776,14 @@ gate_probe "$root" "$unchanged"
 step_if "$root" "false"
 run_check "$root"
 check "a step gate of false is refused too" "$(is "$status" 1)"
+
+# A step's if: is not a job's, so no call mode is admitted there.
+root=$(fixture call-mode-step-if)
+call_modes "$root" "" ""
+step_if "$root" "inputs.mode == ''"
+run_check "$root"
+check "a call-mode term in the build step's own if: is refused" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "step 'Build image' builds or calls an image, and its if: is narrowed by \`inputs.mode == ''\`")"
 
 # V5: an action that builds an image and is not the one this check reads.
 root=$(fixture tripwire-bake-action)

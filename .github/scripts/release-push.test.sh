@@ -91,11 +91,13 @@ setup() {
   identity "$dir/b"
 }
 
-# set_version <clone> <version>: rewrite the manifest's .version with jq, as
-# the workflow's "Set release version" step does.
+# set_version <clone> <version> [<package-dir>]: rewrite the manifest's .version
+# with jq, as the workflow's "Set release version" step does; <package-dir>
+# defaults to packages/pkg.
 set_version() {
-  jq --arg v "$2" '.version = $v' "$1/packages/pkg/package.json" > "$1/tmp.json" \
-    && mv "$1/tmp.json" "$1/packages/pkg/package.json"
+  local manifest=$1/${3:-packages/pkg}/package.json
+  jq --arg v "$2" '.version = $v' "$manifest" > "$1/tmp.json" \
+    && mv "$1/tmp.json" "$manifest"
 }
 
 # bump <clone> <version>: what the workflow's "Set release version" step and
@@ -134,27 +136,41 @@ HOOK
   chmod +x "$1/hooks/pre-receive"
 }
 
-# push_main <clone> <version> [summary-file] [VAR=value...]: runs the script
-# under test from <clone> with the deploy key, a fresh TMPDIR and the GitHub URL
-# rewritten to the case's origin, <clone>/../origin.git, so git pushes locally;
-# leaves its exit code in rc, its combined output in out, what a recording hook
-# saw in seen and what TMPDIR holds afterwards in left.
-push_main() {
-  local clone=$1 v=$2 summary=${3:-} dir
+# deploy_run <clone> [VAR=value...] -- <command> <arg>...: runs `release-push.sh
+# <command> <arg>...` from <clone> with the deploy key, a fresh TMPDIR and the
+# GitHub URL rewritten to the case's origin, <clone>/../origin.git, so git
+# pushes locally, each VAR=value set after those; leaves its exit code in rc,
+# its combined output in out, what a recording hook saw in seen (nothing when
+# no push reached origin) and what TMPDIR holds afterwards in left.
+deploy_run() {
+  local clone=$1 dir vars=()
   dir=$(dirname "$clone")
-  shift 2
-  [ $# -eq 0 ] || shift
+  shift
+  while [ "$1" != -- ]; do
+    vars+=("$1")
+    shift
+  done
+  shift
   rm -rf "$dir/tmp" && mkdir "$dir/tmp"
   : > "$dir/seen"
   set +e
-  out=$(cd "$clone" && env TMPDIR="$dir/tmp" PUSH_SEEN="$dir/seen" GITHUB_STEP_SUMMARY="$summary" \
+  out=$(cd "$clone" && env TMPDIR="$dir/tmp" PUSH_SEEN="$dir/seen" \
     GITHUB_REPOSITORY=example/repo DEPLOY_KEY="$(<"$work/deploy")" GIT_CONFIG_COUNT=1 \
     GIT_CONFIG_KEY_0="url.$dir/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
-    "$@" "$release_push" push-main packages/pkg "$v" 2>&1)
+    "${vars[@]}" "$release_push" "$@" 2>&1)
   rc=$?
   set -e
   seen=$(<"$dir/seen")
   left=$(find "$dir/tmp" -mindepth 1 | wc -l)
+}
+
+# push_main <clone> <version> [summary-file] [VAR=value...]: deploy_run's
+# `push-main packages/pkg <version>`, with the job summary in <summary-file>.
+push_main() {
+  local clone=$1 v=$2 summary=${3:-}
+  shift 2
+  [ $# -eq 0 ] || shift
+  deploy_run "$clone" GITHUB_STEP_SUMMARY="$summary" "$@" -- push-main packages/pkg "$v"
 }
 
 # tagged <clone> <tag-prefix> [<package-dir>]: runs the script under test's
@@ -795,14 +811,15 @@ check "an unknown option: exits 2 printing nothing, with the usage" "$(is "$rc|$
 
 echo
 echo "Case 10c: tag commits the bump and tags it locally, pushing nothing"
-# tag_run <clone> <version> <tag>: sets the manifest's version as the workflow
-# does before `tag`, then runs `release-push.sh tag` from <clone>; leaves its
-# exit code in rc and its combined output in out.
+# tag_run <clone> <version> <tag> [<package-dir> <name>]: sets the manifest's
+# version as the workflow does before `tag`, then runs `release-push.sh tag`
+# from <clone>; <package-dir> and <name> default to packages/pkg and pkg.
+# Leaves its exit code in rc and its combined output in out.
 tag_run() {
-  local clone=$1 v=$2 tag=$3
-  set_version "$clone" "$v"
+  local clone=$1 v=$2 tag=$3 package_dir=${4:-packages/pkg} name=${5:-pkg}
+  set_version "$clone" "$v" "$package_dir"
   set +e
-  out=$(cd "$clone" && "$release_push" tag packages/pkg "chore: release pkg v$v [skip ci]" "$tag" 2>&1)
+  out=$(cd "$clone" && "$release_push" tag "$package_dir" "chore: release $name v$v [skip ci]" "$tag" 2>&1)
   rc=$?
   set -e
 }
@@ -847,25 +864,6 @@ change "$pj/a" packages/other/index.js "fix: a bug in other"
 run=$(git -C "$pj/a" rev-parse HEAD)
 git -C "$pj/a" push -q --tags origin main
 record_hook "$pj/origin.git"
-# deploy_run <clone> <command> <arg>...: runs `release-push.sh <command> <arg>...` from <clone> as
-# push_main does, with the deploy key, a fresh TMPDIR and the GitHub URL rewritten to
-# <clone>/../origin.git; leaves its exit code in rc, its combined output in out and what a
-# recording hook saw in seen (nothing when no push reached origin).
-deploy_run() {
-  local clone=$1 dir
-  dir=$(dirname "$clone")
-  shift
-  rm -rf "$dir/tmp" && mkdir "$dir/tmp"
-  : > "$dir/seen"
-  set +e
-  out=$(cd "$clone" && env TMPDIR="$dir/tmp" PUSH_SEEN="$dir/seen" GITHUB_STEP_SUMMARY= \
-    GITHUB_REPOSITORY=example/repo DEPLOY_KEY="$(<"$work/deploy")" GIT_CONFIG_COUNT=1 \
-    GIT_CONFIG_KEY_0="url.$dir/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
-    "$release_push" "$@" 2>&1)
-  rc=$?
-  set -e
-  seen=$(<"$dir/seen")
-}
 # from_run <clone>: what each package's hand-over check does first, putting <clone> back on the
 # run's commit.
 from_run() {
@@ -880,18 +878,13 @@ from_run() {
 publish_package() {
   local clone=$1 package_dir=$2 name=$3 v=$4 tag=$5
   failed='' pushed=0
-  jq --arg v "$v" '.version = $v' "$clone/$package_dir/package.json" > "$clone/tmp.json" \
-    && mv "$clone/tmp.json" "$clone/$package_dir/package.json"
-  set +e
-  tag_out=$(cd "$clone" && "$release_push" tag "$package_dir" "chore: release $name v$v [skip ci]" "$tag" 2>&1)
-  rc=$?
-  set -e
-  out=$tag_out
+  tag_run "$clone" "$v" "$tag" "$package_dir" "$name"
+  tag_out=$out
   [ "$rc" = 0 ] || { failed=tag; return 0; }
-  deploy_run "$clone" push-tag "$tag"
+  deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-tag "$tag"
   [ -z "$seen" ] || pushed=$((pushed + 1))
   [ "$rc" = 0 ] || { failed=push-tag; return 0; }
-  deploy_run "$clone" push-main "$package_dir" "$v"
+  deploy_run "$clone" GITHUB_STEP_SUMMARY= -- push-main "$package_dir" "$v"
   [ -z "$seen" ] || pushed=$((pushed + 1))
   [ "$rc" = 0 ] || failed=push-main
 }
@@ -1222,23 +1215,11 @@ identity "$pt/a"
 git -C "$pt/a" commit -q --allow-empty -m seed
 git -C "$pt/a" tag pkg-v1.0.1
 record_hook "$pt/origin.git"
-# push_tag <tag> [VAR=value...]: runs `release-push.sh push-tag <tag>` in clone a with the deploy
-# key, a fresh TMPDIR and the rewrite to the local origin; leaves its exit code in rc, its output
-# in out, what the hook saw in seen and what TMPDIR holds afterwards in left.
+# push_tag <tag> [VAR=value...]: deploy_run's `push-tag <tag>` in clone a.
 push_tag() {
   local tag=$1
   shift
-  rm -rf "$pt/tmp" && mkdir "$pt/tmp"
-  : > "$pt/seen"
-  set +e
-  out=$(cd "$pt/a" && env TMPDIR="$pt/tmp" PUSH_SEEN="$pt/seen" GITHUB_REPOSITORY=example/repo \
-    DEPLOY_KEY="$(<"$work/deploy")" GIT_CONFIG_COUNT=1 \
-    GIT_CONFIG_KEY_0="url.$pt/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
-    "$@" "$release_push" push-tag "$tag" 2>&1)
-  rc=$?
-  set -e
-  seen=$(<"$pt/seen")
-  left=$(find "$pt/tmp" -mindepth 1 | wc -l)
+  deploy_run "$pt/a" "$@" -- push-tag "$tag"
 }
 push_tag pkg-v1.0.1
 check "pushes: exits 0" "$(is "$rc" 0)"
