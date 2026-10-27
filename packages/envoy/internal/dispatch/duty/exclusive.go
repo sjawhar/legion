@@ -20,6 +20,10 @@ const (
 	SuggestionOutcomeLease = "suggestion-outcomes"
 	// ReferenceExcerptLease is docs.RunReferenceExcerptReconciliation's.
 	ReferenceExcerptLease = "reference-excerpts"
+	// BlockIndexLease is docs.RunBlockIndexReconciliation's.
+	BlockIndexLease = "block-index"
+	// EditNoticeLease is docs.RunEditNotices': the sweep that sends each document's edit notice.
+	EditNoticeLease = "edit-notices"
 	// WebhookRedeliveryLease is redeliver's GitHub webhook redelivery sweep's.
 	WebhookRedeliveryLease = "webhook-redelivery"
 	// ArchitectureImportLease is architecture's import ticker's.
@@ -42,6 +46,8 @@ var leaseNames = [...]string{
 	DocumentCompactionLease,
 	SuggestionOutcomeLease,
 	ReferenceExcerptLease,
+	BlockIndexLease,
+	EditNoticeLease,
 	WebhookRedeliveryLease,
 	ArchitectureImportLease,
 	DeliveryReconcileLease,

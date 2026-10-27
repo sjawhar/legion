@@ -80,11 +80,13 @@ func shutdownContext() (context.Context, context.CancelFunc) {
 }
 
 // serveUntilStopped serves on listener until ctx ends, and returns then, with the error that ended
-// serving when serving failed, which cancels ctx. Stopping is the caller's (shutdown).
-func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener, addr string) error {
+// serving when serving failed, which cancels ctx. Stopping is the caller's (shutdown). It logs the
+// address listener is bound to, whether main bound it or inherited it (DISPATCH_LISTEN_FD), so the
+// line names the port a kernel chose.
+func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener) error {
 	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("dispatch: listening", "addr", addr)
+		slog.Info("dispatch: listening", "addr", listener.Addr().String())
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 			cancel()

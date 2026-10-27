@@ -604,6 +604,20 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   repository permission`, naming the installation's owner: the review App's installation cannot
   read the repository's collaborators, so until it can, no review but the review App's decides a
   round.
+- **A review round stuck on an approval of an earlier head.** The architect is told `the reviewer
+  approved <sha> on pull request #<n>, which does not approve head <sha>: a push since may have
+  changed code`. The approval counts at a later head only when everything above it changed only
+  the issue's own `.legion/<issue>/`; another issue's `.legion/` counts as code, as `READY` counts
+  it. The daemon learns that from each push's webhook, and every two minutes, while the round sits
+  so, it also asks GitHub's compare of the approved head with the head: when the head is built on
+  the approved head and only `.legion/<issue>/` changed between them, it applies that push and the
+  round ends, logged at warn as `workflow: only the issue's handoffs changed above the approved
+  head, and no recorded push says so; applying the push GitHub's compare shows`. Any other answer
+  is logged once at info as `workflow: the reviewer's approval stays set aside below the head; …`
+  with its `reason` (a path outside `.legion/<issue>/`; a head not built on the approved one; 300
+  or no changed files; an approved head GitHub does not know), and the remedy is the reviewer's
+  approval of the head itself, which ends the round once the record reaches that head, whether or
+  not its push webhook ever arrives.
 - **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
   anything above the reviewer's approved head but retro's notes under `docs/solutions/` and its
   removal of `.legion/<issue>/` (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
@@ -727,8 +741,11 @@ it, then look at what the row `waitsOn` names is doing.
   or `kubectl create token`'s `--duration`, to at most an hour), `TOKEN_LOGIN_OFF` (the broker
   trusts no Kubernetes token issuer), `read the ServiceAccount token` (the file is missing), a
   `404` from a broker too old to have the token route, or a network fault. `.agentSecretsLogin`
-  reads `"state": "failed"` until a login succeeds. Nothing needs restarting: the daemon retries
-  30 s after a failed login, doubling to at most 5 minutes, and no person is ever asked.
+  reads `"state": "failed"` until a login succeeds. Nothing needs restarting, and no person is ever
+  asked. When a login got no HTTP answer, or a 5xx answer from the broker or its front door (the
+  broker is down, out of reach, or cannot reach its database), the daemon retries 2 s later,
+  doubling to at most 10 s, so it logs in within about 10 s of the broker serving again. After
+  any other failure it retries 30 s later, doubling to at most 5 minutes.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin

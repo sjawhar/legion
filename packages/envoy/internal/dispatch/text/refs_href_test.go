@@ -3,6 +3,7 @@ package text
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +40,9 @@ func TestExtractMatchesTheSharedHrefTable(t *testing.T) {
 			}
 			if len(fromHref) != 1 {
 				t.Fatalf("%s is not a reference: %#v", row.Href, fromHref)
+			}
+			if fromRef[0].Kind == "block" && !strings.HasSuffix(row.Ref, blockFragment(fromRef[0])) {
+				t.Fatalf("%s parsed as %#v, whose fragment is %s", row.Ref, fromRef[0], blockFragment(fromRef[0]))
 			}
 			if fromHref[0] != fromRef[0] {
 				t.Errorf("%s extracted as %#v, %s as %#v", row.Href, fromHref[0], row.Ref, fromRef[0])

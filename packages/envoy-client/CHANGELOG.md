@@ -53,6 +53,35 @@
 
 ### Added
 
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. The line comes before
+  `Referenced by:` on the read of an issue, a document, a block, an ask, a comment and an issue
+  message:
+  `Node: <kind> <ref> · made by <actors> at <time> · changed by <actors> at <time> · part of <parent> (version <N>)`,
+  an empty actor list written `nobody recorded` and a null time, version or parent left out.
+  Against a Dispatch older than the facts, whose nodes carry no `made_by`, the read prints no
+  `Node:` line.
+- `renderInbound` renders an `artifact.human_edited` card as `edit: spec.md v4 to v7, edited by
+  person@example.com`, then the diff in a fenced `diff` block after the card, then `(diff cut at
+  4,096 bytes)` when Dispatch cut it; an issue's event log (`dispatch read dispatch://KEY/log`)
+  names the same line.
+- `dispatch read --ref` reads one block of a document: `dispatch://KEY/spec#b-<id>`,
+  `dispatch://KEY/artifact/<slug>#b-<id>` or `dispatch://PROJECT/artifact/<slug>#b-<id>`,
+  optionally pinned `@v<N>`, or a live document page's URL ending `#b-<id>`. It prints `Block:`,
+  `Document:`, `Changed in version:` and `Text:`, then, for a pinned reference, `Pinned to version:`,
+  whether the block is unchanged, changed or removed since, and `Text at version N:`, then
+  `Referenced by:` and `Links:`. An unpinned reference to a block the document no longer holds
+  exits 1 with `No block <id> in <document>.`; a pinned one to a removed block prints it and exits 0.
+  `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse a block reference, naming the
+  arguments for its document, and every read's reference row on a document ends
+  `(block <ref>)` when the graph names the document's block at that edge. `ParsedDispatchRef`
+  gains kind `"block"` with `block`, `document` and `pin`; `pin` is N's decimal digits, a string,
+  so a pin past 2^53 is never rounded. As the server reads it, a pin past 9223372036854775807 is
+  no reference. `parseDispatchRef` and `dispatchRefFromUrl` read a reference of any length, as the
+  server reads a request's (`text.ParseRef`): the 256-byte block-id and 2048-byte target-id bounds
+  decide only what text the server indexes, so a document of any name is read by its own
+  reference, and a block whose id is past 256 bytes, no graph node, reads as
+  `No block <id> in <document>.`
 - `dispatch issues --all` reads the whole filtered listing in one request. The client gains
   `listAllIssues`, which sends neither `limit` nor `offset` and takes the bare array Dispatch
   answers for that request, refusing any other shape by name: a page back from a request carrying

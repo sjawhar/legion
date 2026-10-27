@@ -31,6 +31,7 @@ import (
 	gws "github.com/gorilla/websocket"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
@@ -757,6 +758,50 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_PORT": "0"}, "DISPATCH_PORT")
 		},
+		"DISPATCH_LISTEN_FD": func(t *testing.T) {
+			descriptor, address := listeningFD(t, "tcp4", "127.0.0.1:0")
+			port := strconv.Itoa(address.Port)
+			// Unset, the server binds the address the other two settings build.
+			if boot := resolveWith(t, nil); boot.ListenSocket != nil {
+				t.Errorf("unset: ListenSocket = %v, want none", boot.ListenSocket)
+			}
+			// Set, the server serves on the socket at its own address, with neither other setting
+			// set, with both naming that address, or with both empty, which is unset: an empty
+			// DISPATCH_LISTEN_HOST does not ask for every interface of a socket on one address.
+			for _, overrides := range []map[string]string{
+				{"DISPATCH_LISTEN_FD": descriptor},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": "127.0.0.1", "DISPATCH_PORT": port},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": " [127.0.0.1] ", "DISPATCH_PORT": " " + port + " "},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": "", "DISPATCH_PORT": ""},
+				{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_LISTEN_HOST": " ", "DISPATCH_PORT": " "},
+			} {
+				boot := resolveWith(t, overrides)
+				if boot.ListenSocket == nil || boot.ListenAddr != address.String() || boot.ListenSocket.Addr().String() != address.String() {
+					t.Errorf("%v: ListenAddr = %q, ListenSocket = %v; want the socket on %s", overrides, boot.ListenAddr, boot.ListenSocket, address)
+				}
+			}
+			// A setting that names another address than the socket's is refused, naming the
+			// setting and the socket; so is port 0, which never names a socket's port.
+			otherPort := strconv.Itoa(address.Port%65535 + 1)
+			for name, value := range map[string]string{
+				"DISPATCH_PORT":        otherPort,
+				"DISPATCH_LISTEN_HOST": "127.0.0.2",
+			} {
+				_, err := resolveBootConfig(bootEnvironment(map[string]string{"DISPATCH_LISTEN_FD": descriptor, name: value}))
+				if err == nil || !strings.Contains(err.Error(), name+"="+value) || !strings.Contains(err.Error(), "DISPATCH_LISTEN_FD="+descriptor) {
+					t.Errorf("%s=%s with the socket on %s: err = %v, want a refusal naming both", name, value, address, err)
+				}
+			}
+			refusedWith(t, map[string]string{"DISPATCH_LISTEN_FD": descriptor, "DISPATCH_PORT": "0"}, "DISPATCH_PORT=0")
+			// A descriptor that is not a listening socket is refused, and nothing is bound in its
+			// place.
+			notASocket, err := os.Open(os.DevNull)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer notASocket.Close()
+			refusedWith(t, map[string]string{"DISPATCH_LISTEN_FD": strconv.Itoa(int(notASocket.Fd()))}, "DISPATCH_LISTEN_FD")
+		},
 		"DISPATCH_PPROF_PORT": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_PPROF_PORT": "6060"}); boot.PprofAddr != "127.0.0.1:6060" {
 				t.Errorf("PprofAddr = %q, want 127.0.0.1:6060", boot.PprofAddr)
@@ -1431,6 +1476,21 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_EDIT_NOTICE_QUIET": func(t *testing.T) {
+			const shortQuiet = 3 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":             "1",
+				"DISPATCH_TEST_EDIT_NOTICE_QUIET": shortQuiet.String(),
+			})
+			if boot.EditNoticeQuiet != shortQuiet {
+				t.Errorf("DISPATCH_TEST_EDIT_NOTICE_QUIET: EditNoticeQuiet = %v, want %v", boot.EditNoticeQuiet, shortQuiet)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_EDIT_NOTICE_QUIET": invalid},
+					fmt.Sprintf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_EDIT_NOTICE_QUIET": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 	}
 	for _, row := range settings {
 		test, ok := cases[row.Name]
@@ -1475,7 +1535,8 @@ func answersSharedToken(response *httptest.ResponseRecorder) bool {
 // setting does not list. A request that authenticates with a value after the first is logged once
 // per address and User-Agent, with the load balancer's address and never a token.
 func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
-	var logged bytes.Buffer
+	// The server's request goroutines write the log while the test reads it.
+	var logged cmdtest.LockedBuffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })

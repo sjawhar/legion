@@ -200,7 +200,7 @@ func TestAMutexProfileTakenWithPprofOnIsNotEmpty(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	bound, err := startPprof(ctx, net.JoinHostPort("127.0.0.1", strconv.Itoa(freeLoopbackPort(t))))
+	bound, err := startPprof(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

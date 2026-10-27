@@ -186,9 +186,9 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // median. The ceiling is picked here rather than derived from the task's CPU allotment or read
 // out of the DSN another repository's URL builder writes.
 //
-// It is 48 of one connection budget of 82 that every pool of a process shares, partitioned rather
+// It is 48 of one connection budget of 84 that every pool of a process shares, partitioned rather
 // than grown: requests 48, background 6 (Background), live 4 (Live), settlements 4 (Settlements),
-// rooms 4, health 1, listen 1 with the three connections it hands over, leases leasePoolSize (10)
+// rooms 4, health 1, listen 1 with the three connections it hands over, leases leasePoolSize (12)
 // and outbox 1. A write takes a connection per statement one after another, and a read pins one
 // for its whole length (PinConnection), so under load the API holds every connection of this pool;
 // the background loops, the live-update readers and the settlements wait on pools of their own, so
@@ -299,7 +299,7 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 
 // leaseNameCount is how many lease names duty.Exclusive accepts: the names of duty's lease list,
 // counted here because store cannot import duty, and held to that list by a test.
-const leaseNameCount = 8
+const leaseNameCount = 10
 
 // leasePoolSize bounds the pool a periodic maintenance loop takes its once-overall lease on
 // (duty.Exclusive): a connection for every lease name on duty's list, and two spare. A caller and
@@ -346,10 +346,10 @@ func (p *Pool) Outbox() (*Pool, error) {
 
 // backgroundPoolSize bounds the pool for work no request waits on: background loops such as the
 // embedding queue and its coverage pass, the suggestion sweep, the delivery reconcile and intakes,
-// the architecture importer's ticker, the documents' resumption query, task progress and
-// reference-excerpt reconciliation. Six is the background's share of the
-// budget sharedPoolSize describes; nobody waits on these loops, so they wait for each other here
-// (up to backgroundAcquireBound) instead of for the requests' connections.
+// the architecture importer's ticker, the documents' resumption query, task progress,
+// reference-excerpt and block-index reconciliation, and the edit-notice sweep. Six is the
+// background's share of the budget sharedPoolSize describes; nobody waits on these loops, so they
+// wait for each other here (up to backgroundAcquireBound) instead of for the requests' connections.
 const backgroundPoolSize = 6
 
 // Background is the pool for background loops, so that under load a request never queues behind a

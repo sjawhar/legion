@@ -64,6 +64,9 @@ type Deps struct {
 	Settle            time.Duration
 	MarkWait          time.Duration
 	UnrecordedMarkTTL time.Duration
+	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
+	// before its edit notice goes (recordEditNotice, RunEditNotices); zero means 30 s.
+	EditNoticeQuiet time.Duration
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
@@ -104,10 +107,16 @@ type Service struct {
 	settlements       *settlementSlots
 	markWait          time.Duration
 	unrecordedMarkTTL time.Duration
-	rooms             sync.Map
-	shutdownRooms     sync.Map
-	nextConnection    atomic.Uint64
-	stopping          atomic.Bool
+	// editNoticeQuiet is Deps.EditNoticeQuiet, with its default applied.
+	editNoticeQuiet time.Duration
+	// afterEditNoticeIDs runs once an edit-notice sweep has read its due ids, with no lock held,
+	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
+	// window.
+	afterEditNoticeIDs func(ids []string)
+	rooms              sync.Map
+	shutdownRooms      sync.Map
+	nextConnection     atomic.Uint64
+	stopping           atomic.Bool
 	// quiescing holds off every settlement while Quiesce empties the rooms, so a timer that
 	// fires mid-quiesce cannot re-arm the room Quiesce just closed.
 	quiescing atomic.Bool
@@ -585,6 +594,10 @@ func New(deps Deps) *Service {
 	if unrecordedMarkTTL <= 0 {
 		unrecordedMarkTTL = time.Minute
 	}
+	editNoticeQuiet := deps.EditNoticeQuiet
+	if editNoticeQuiet <= 0 {
+		editNoticeQuiet = defaultEditNoticeQuiet
+	}
 	if deps.Events == nil {
 		deps.Events = events.NewBroker()
 	}
@@ -606,6 +619,7 @@ func New(deps Deps) *Service {
 		now:               time.Now,
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
+		editNoticeQuiet:   editNoticeQuiet,
 		reads:             newDocumentReads(documentReadBudget),
 	}
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
@@ -1182,11 +1196,12 @@ type settlementTake struct {
 
 // settlementAuthors takes the authors a settlement's version lists: owed, the pending authors the
 // settlement read under the document's advisory lock, and the room's in-flight credits no committed
-// version has listed that take observed (captureAuthors). It names the actor its derived events
-// carry: the latest editor as of the take when the version lists them or lists no one, otherwise
-// SettlementActor. The caller holds state.mu.
-func settlementAuthors(state *roomState, owed map[string]model.Actor, take settlementTake) settlementVersionCredit {
-	capture := captureAuthors(state, owed, nil, nil, take.creditThrough)
+// version has listed that take observed (captureAuthors), with durableLatest, the document's latest
+// person sender the settlement read under that lock (readLastPerson), for the person its edit
+// notice names. It names the actor its derived events carry: the latest editor as of the take when
+// the version lists them or lists no one, otherwise SettlementActor. The caller holds state.mu.
+func settlementAuthors(state *roomState, owed map[string]model.Actor, durableLatest *model.Actor, take settlementTake) settlementVersionCredit {
+	capture := captureAuthors(state, owed, durableLatest, nil, nil, take.creditThrough)
 	credit := settlementVersionCredit{capture: capture, state: state, authors: actorSlice(capture.authors)}
 	if latest := take.lastActor; latest != nil {
 		if _, found := capture.authors[actorKey(*latest)]; found || len(credit.authors) == 0 {
@@ -1617,8 +1632,16 @@ func (s *Service) settlePass(parent context.Context, room string, state *roomSta
 		retry(err)
 		return settleDone
 	}
+	// The document's latest person sender as its stored updates and commits recorded it
+	// (readLastPerson), which names who edited last once the room holds no in-flight credit that
+	// decides (latestEditSource): every landed browser edit, in this process or another.
+	durableLatest, err := readLastPerson(ctx, tx, room)
+	if err != nil {
+		retry(err)
+		return settleDone
+	}
 	state.mu.Lock()
-	credit := settlementAuthors(state, owed, take)
+	credit := settlementAuthors(state, owed, durableLatest, take)
 	state.mu.Unlock()
 	if s.afterSettleRead != nil {
 		s.afterSettleRead(room)
@@ -1968,6 +1991,13 @@ func (s *Service) settlePass(parent context.Context, room string, state *roomSta
 				abandon(err)
 				return settleDone
 			}
+		}
+		// A person's version opens or moves on the document's edit notice, under the owner lock
+		// this settlement took first (lockArtifactOwner above): the sweep takes the two in that
+		// order too (sendEditNotice).
+		if err := s.recordEditNotice(ctx, tx, room, result.version.Number, credit.authors, credit.capture.latest); err != nil {
+			abandon(err)
+			return settleDone
 		}
 		published = append(published, ledger.events...)
 		// A document body cites nodes whose rows carry a backlink count, so the version event
