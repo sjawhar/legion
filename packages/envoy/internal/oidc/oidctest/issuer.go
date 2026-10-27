@@ -60,6 +60,7 @@ func NewKey(t TB, kid string) *Key {
 // Issuer serves a discovery document and a key set, both under the test's control.
 type Issuer struct {
 	server *httptest.Server
+	mux    *http.ServeMux
 
 	mu                sync.Mutex
 	issuerClaim       string
@@ -76,17 +77,19 @@ type Issuer struct {
 
 // codeFlow is the state of the authorization and token endpoints: the one
 // client they serve, the key ID tokens are signed with, the sign-ins queued for
-// the next authorization requests, and the codes and refresh tokens issued.
+// the next authorization requests and the one used when none is queued, and the
+// codes and refresh tokens issued.
 type codeFlow struct {
-	key          *Key
-	clientID     string
-	clientSecret string
-	queued       []map[string]any
-	codes        map[string]codeGrant
-	grants       map[string]*refreshGrant
-	refreshes    int
-	token        tokenFailure
-	revocation   revocation
+	key             *Key
+	clientID        string
+	clientSecret    string
+	queued          []map[string]any
+	signInByDefault map[string]any
+	codes           map[string]codeGrant
+	grants          map[string]*refreshGrant
+	refreshes       int
+	token           tokenFailure
+	revocation      revocation
 }
 
 // tokenFailure is how the token endpoint answers every grant instead of
@@ -128,8 +131,8 @@ type refreshGrant struct {
 // New starts an issuer serving no keys yet. The server is closed at cleanup.
 func New(t TB) *Issuer {
 	t.Helper()
-	issuer := &Issuer{}
-	mux := http.NewServeMux()
+	issuer := &Issuer{mux: http.NewServeMux()}
+	mux := issuer.mux
 	mux.HandleFunc("/.well-known/openid-configuration", issuer.handleDiscovery)
 	mux.HandleFunc("/keys", issuer.handleKeys)
 	mux.HandleFunc("GET /authorize", issuer.handleAuthorize)
@@ -144,6 +147,14 @@ func New(t TB) *Issuer {
 // URL is the issuer's base URL, which is also the `iss` it advertises and mints
 // until AdvertiseIssuer says otherwise.
 func (i *Issuer) URL() string { return i.server.URL }
+
+// Handle serves handler for pattern (an http.ServeMux pattern) alongside the
+// issuer's own endpoints, so a caller can add a route of its own at the
+// issuer's URL: cmd/dev-oidc-issuer's control route that queues the next
+// sign-in.
+func (i *Issuer) Handle(pattern string, handler http.Handler) {
+	i.mux.Handle(pattern, handler)
+}
 
 // PublishKey generates a key and serves it — the common case, for a test that
 // only needs one working signing key.
@@ -313,6 +324,15 @@ func (i *Issuer) SignInAs(claims map[string]any) {
 	i.codeFlow.queued = append(i.codeFlow.queued, maps.Clone(claims))
 }
 
+// SignInByDefault sets the claims an authorization request signs in with when
+// SignInAs has queued none, so every sign-in completes as that person until a
+// queued one takes a turn. Without it, such a request is refused.
+func (i *Issuer) SignInByDefault(claims map[string]any) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.signInByDefault = maps.Clone(claims)
+}
+
 // UpdateGrants changes the claims every refresh token issued so far answers
 // with, as a pool does when a user's groups change.
 func (i *Issuer) UpdateGrants(change func(claims map[string]any)) {
@@ -343,7 +363,8 @@ func (i *Issuer) Refreshes() int {
 
 // Authorize follows authURL the way a browser does through the identity
 // provider's sign-in, and returns the code and state the issuer redirects back
-// with. The person signed in is the one SignInAs queued.
+// with. The person signed in is the one SignInAs queued, or SignInByDefault set
+// when none is queued.
 func (i *Issuer) Authorize(t TB, authURL string) (code, state string) {
 	t.Helper()
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -448,12 +469,15 @@ func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	case query.Get("client_id") != flow.clientID || query.Get("response_type") != "code" || query.Get("redirect_uri") == "":
 		http.Error(w, "bad authorization request", http.StatusBadRequest)
 		return
-	case len(flow.queued) == 0:
-		http.Error(w, "no sign-in queued (SignInAs)", http.StatusBadRequest)
+	case len(flow.queued) == 0 && flow.signInByDefault == nil:
+		http.Error(w, "no sign-in queued (SignInAs) and no default (SignInByDefault)", http.StatusBadRequest)
 		return
 	}
-	claims := flow.queued[0]
-	flow.queued = flow.queued[1:]
+	claims := maps.Clone(flow.signInByDefault)
+	if len(flow.queued) > 0 {
+		claims = flow.queued[0]
+		flow.queued = flow.queued[1:]
+	}
 	code := randomValue()
 	flow.codes[code] = codeGrant{claims: claims, nonce: query.Get("nonce"), redirectURI: query.Get("redirect_uri")}
 	target, err := url.Parse(query.Get("redirect_uri"))
