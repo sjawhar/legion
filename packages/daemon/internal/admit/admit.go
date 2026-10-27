@@ -2,11 +2,13 @@
 package admit
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -345,7 +347,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 
 	caughtUp := position.Reached(target)
 	deferred := make(map[string]dispatch.IssueSummary)
-	for _, summary := range summaries {
+	for _, summary := range parentsFirst(summaries) {
 		stored, err := a.store.Issue(ctx, tx, summary.Key)
 		if err != nil {
 			return fmt.Errorf("read reconciled issue %s: %w", summary.Key, err)
@@ -383,6 +385,32 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		return err
 	}
 	return a.wakeForFreeSlot(ctx, tx, released)
+}
+
+// parentsFirst orders a Dispatch listing so that each issue comes after its parent whenever the
+// listing holds both, and keeps the listing's order otherwise. The workflow records a child only
+// under a recorded parent, so an unrecorded todo child under an unrecorded todo parent of a live
+// tree is recorded in the same pass as that parent, at any depth.
+func parentsFirst(summaries []dispatch.IssueSummary) []dispatch.IssueSummary {
+	parents := make(map[string]*string, len(summaries))
+	for _, summary := range summaries {
+		parents[summary.Key] = summary.Parent
+	}
+	depth := make(map[string]int, len(summaries))
+	for _, summary := range summaries {
+		// The bound stops a parent cycle Dispatch should never hold; such a cycle only orders late.
+		for parent, steps := summary.Parent, 0; parent != nil && steps < len(summaries); steps++ {
+			next, listed := parents[*parent]
+			if !listed {
+				break
+			}
+			depth[summary.Key]++
+			parent = next
+		}
+	}
+	ordered := slices.Clone(summaries)
+	slices.SortStableFunc(ordered, func(x, y dispatch.IssueSummary) int { return cmp.Compare(depth[x.Key], depth[y.Key]) })
+	return ordered
 }
 
 // putNewRoot records an unrecorded root or orphan handed to Legion in todo, on the repository its
@@ -436,7 +464,8 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 
 // applySummary applies one Dispatch boot-listing summary to admission's own record of the issue
 // it names, exactly as it would if nothing had ever deferred it: a still-unrecorded key is
-// admitted only when the summary itself shows it todo and handed to Legion, and a recorded key a
+// recorded only when the summary itself shows it todo — into its parent's live tree as the
+// workflow records a child, else as a root when it is handed to Legion — and a recorded key a
 // live event has already carried strictly past the summary's own sequence is left alone —
 // reapplying the summary would overwrite fresher information with stale. Both Reconcile,
 // immediately when the consumer is already caught up, and release, once the consumer catches up
@@ -452,11 +481,31 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		if summary.Status != "todo" {
 			return nil
 		}
+		listed := intake.ListedIssue(summary)
+		// An unrecorded todo child of a live tree is the workflow's to record, as its own todo event
+		// would (the engine's recordChildUnderLiveTree, which runs before admission on every live
+		// event), from the parent the listing shows now. Without this, a child whose event recorded
+		// nothing — the daemon stopped before it applied the event, or Dispatch linked the child to
+		// its parent only after the event — stays unrecorded under its running tree, since no later
+		// event of it may ever come. A child the workflow does not record (its tree is not live) is
+		// left to the root path below, as an orphan handed to Legion is.
+		if listed.Parent != "" {
+			if _, err := a.engine.Apply(ctx, tx, listed); err != nil {
+				return fmt.Errorf("record %s under its parent's tree: %w", summary.Key, err)
+			}
+			recorded, err := a.store.Issue(ctx, tx, summary.Key)
+			if err != nil {
+				return fmt.Errorf("re-read %s after recording it under its parent's tree: %w", summary.Key, err)
+			}
+			if recorded != nil {
+				return nil
+			}
+		}
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", summary.Key, "label", dispatch.LegionLabel)
 			return nil
 		}
-		return a.putNewRoot(ctx, tx, intake.ListedIssue(summary), false)
+		return a.putNewRoot(ctx, tx, listed, false)
 	}
 	if summary.LastSeq > 0 && summary.LastSeq < stored.LastDispatchSeq {
 		return nil
@@ -1071,7 +1120,8 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 		for _, slot := range slots {
 			slotted[slot.Issue] = struct{}{}
 		}
-		for _, summary := range releasing {
+		held := slices.SortedFunc(maps.Values(releasing), func(x, y dispatch.IssueSummary) int { return cmp.Compare(x.Key, y.Key) })
+		for _, summary := range parentsFirst(held) {
 			if err := a.applySummary(ctx, tx, summary, slotted); err != nil {
 				return nil, err
 			}
