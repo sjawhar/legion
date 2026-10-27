@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-593",
+  "completed": "2026-10-27T04:58:37Z",
+  "plan": "dispatch://INFRA-593/artifact/plan-md",
+  "evidence": "dispatch://INFRA-593/artifact/infra-593-load-probe-go-txt",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, the PR body and proofs (references/pr-body.md), conflicts-and-rewrites for rebasing over INFRA-605, INFRA-556, INFRA-590, INFRA-592 and INFRA-179, which edit the same files",
+      "ce-simplify-code: the simplify pass over the compaction, queue, sweep and load changes before the implement handoff",
+      "dispatch and dispatch-first: uploading the ygo patch as an INFRA-593 artifact and posting the before/after tables on the issue",
+      "envoy: the ygo release route (envoy_send to session 01a16640-8259-71ed-bb68-1e4927b77a01) and telling the INFRA-556 and INFRA-605 implementers the changed functions before the push",
+      "asd-ste100: every message to another agent or to the fork's maintainer session"
+    ],
+    "test": [
+      "legion-worker: re-running the implementer's proofs and writing test.json proof entries (references/pr-body.md#what-a-proof-is); references/tools.md for the pgserver Postgres and benchstat runner forms",
+      "dispatch: posting the harness and benchmark tables on INFRA-593"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md and references/review-threads.md for approving the head and checking each proof against plan acceptance 1-10",
+      "ce-simplify-code: judging whether the compaction, queue and load code is in its simplest form"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "F1: the 32-row half of INFRA-63's tail rule would keep deleted text for ever (LEGION-496, CHANGELOG.md:1920) and leave a 28-version document never compacted; history_memory_test's stored-bytes bound would fail.", "answer": "Raised with INFRA-63's architect, who dropped the 32-row half (2026-10-27T04:49Z): compaction folds only rows older than 2 minutes, on every path. LEGION-496's guarantee now holds within about 75 minutes (D3, departure 3). The memory tests backdate created_at before the deploy-style stop."},
+      {"finding": "F2: 'flat cost' across 1/30/240 versions is not machine-checkable and the planner's data says the state itself grows 150 KB to 1.18 MB.", "answer": "Departure 1: acceptance 6 replaces it with BenchmarkRoomLoad pass conditions (one row vs one row plus 15 young rows within 1.25x; 240/120 and 120/60 each at most 2.3x; 240-version load at least 3x cheaper than main), benchstat over -count 10, documents backdated and compacted."},
+      {"finding": "F3: the upload's 60% production cost is the room's own decode (loadRoom -> ApplyUpdateV1), which compaction does not move.", "answer": "Measured: 70% of decoding a 240-writer state is ygo resolveWithinUpdatePending; increasing client ids remove it (391 -> 120 ms). D6 fixes the decoder in the ygo fork (departure 2). Acceptance 7's profile splits upload CPU into fold, validateUpdate, ygo room decode and the rest."},
+      {"finding": "F4: merging rows for loads (MergeUpdatesV1) keeps deleted content (LEGION-496's 1,842 MiB failure), drops the read-back check, and dropping validateUpdate loses failRoom.", "answer": "D4 keeps the streaming fold and its read-back for loads; rows are buffered only up to 32 MiB, else streamed in the transaction as today. validateUpdate is skipped only when Load already read back the state, and kept for a single stored row, so failRoom still runs."},
+      {"finding": "F5: lock-free fold needs: cursor read in the write transaction, recoverPruneTx, (version, xmin) of every folded row, re-queue stop condition and backoff, negative cache for unfoldable logs, fold into the newest foldable row, stamp/preload comments and the stamp test.", "answer": "D1 step 3 and acceptance 4 cover each case (prune, stranded checkpoint, rebuild, delete, concurrent and older-build compaction, cursor advance, misread). Backoff 1 s to 1 min; negative cache keyed by the fold point's (version, xmin). D7 and the tests list fix the comments and read_cache_test:139-160."},
+      {"finding": "F6: appends during a burst are all younger than 2 minutes; benchmarks need backdating; shutdown and the failed-room path; dead CompactEvery.", "answer": "D2's queue re-checks a room when its oldest unfolded row turns 2 (or 15) minutes old. Tests and benchmarks backdate created_at in SQL. Shutdown stops the worker before pools close; room-close compaction stays inline on ygo's worker with the tail rule; one implementation, failed rooms only wait for the lock. CompactEvery=200 removed."},
+      {"finding": "F7: the sweep's candidate query, first tick, outbox dead code, and machine checks for restart and NATS-off.", "answer": "D3: listing by primary key only (no migration: the census refuses one on doc_updates, stale_room.go:41-45); first tick within 30 s; hourly duty.Exclusive; outbox compaction, Deps.Docs/Leases and docs.API.CompactAll deleted. Acceptance 2: restart test, NATS-disabled test, and the multiprocess lease test (tag multiprocess)."},
+      {"finding": "F8: which pool compaction uses; the lease pool has no headroom; INFRA-592 owns pool limits; the documented connection ceiling.", "answer": "D5: a 2-connection dispatch-compaction pool (agreed with INFRA-592's planner), lockRoom takes the pool as a parameter, the sweep keeps the existing document-compaction lease name, running-dispatch.md's 81-connection ceiling rises by 2."},
+      {"finding": "F9: the ygo patch depends on another session; ordering with INFRA-179's sami.5 pin; reuse pendingGroupWorklist; differential check; Dispatch-only alternatives.", "answer": "D6: patch first (task 2) so the tag overlaps the rest; the PR waits for it. Base on the newest tag so sami.5 is a subset. Reuse pendingGroupWorklist. Oracle test compares encoded state, state vector, PendingStats and delete set. Increasing client ids were measured (3x) but fix only new writes, so not chosen."},
+      {"finding": "F10: the harness seeds one-version specs and opens no websockets; 1x is lock-bound; before and after need one database snapshot.", "answer": "Acceptance 8: both runs from one copied Postgres data directory; room-load CPU defined as pprof seconds under loadRoom plus LoadDocument per profiled second; a history-seeded variant uploads 28 versions and 25 anchored comments per seeded spec first. The upload benchmark evicts the room each iteration."},
+      {"finding": "F11: 'version' means artifact version in the spec and doc_updates row in the tail rule and threshold.", "answer": "The plan counts versions as uploads through the upload path and rows as doc_updates rows; the thresholds (16 rows, 15 minutes, 2 minutes) are in rows and created_at; benchmarks report rows read and state bytes."},
+      {"finding": "F12: docs that must change, and the stale CompactAll line in AGENTS.md.", "answer": "D7 names dispatch-docs.md's new paragraph, AGENTS.md 262-300 and 1158, CHANGELOG, running-dispatch.md and five code comments; acceptance 10."},
+      {"finding": "F13: tests that encode today's one-row compaction, shutdown compaction and the 24 h ticker.", "answer": "The plan's 'Tests that encode today's behaviour and change' section lists each file and line and what it becomes."},
+      {"finding": "F14: unverified claims (push=false, fork tags, sami.5 probe, the 4-decode count, the 32 threshold, Envoy agreements).", "answer": "Verified by command this session: gh api repos/sjawhar/ygo reported push=false; tags v1.51.3-sami.1..5 listed; sami.5 probe 366-375 ms. The decode count is restated per path in D4. The row threshold is now 16, changeable only with a quoted benchmark. Each agreement is named with its counterpart in plan.md."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {
+      "spec": "Acceptance: a benchmark loads documents with 1, 30 and 240 versions and shows flat cost.",
+      "plan": "Acceptance 6: the cost no longer depends on the number of stored updates (one row vs one row plus 15 young rows within 1.25x) and grows at most linearly with writers (240/120 and 120/60 each at most 2.3x), with the 240-version load at least 3x cheaper than main and before/after numbers stated.",
+      "evidence": "Planner's probe (dispatch://INFRA-593/artifact/infra-593-load-probe-go-txt): the compacted state grows 150 KB to 1.18 MB over 240 versions (116,639 deleted clock units beside 108,629 live, as Yjs keeps them); a fresh 1.18 MB document decodes in 26 ms against 3.9 ms for 150 KB. Only discarding history would make it flat, which closes open editors and loses offline browser edits.",
+      "outcome": {"kind": "changed", "acceptance": ["The cost of loading a room no longer grows with the document's version count: a benchmark loads documents with 1, 30 and 240 versions (the LINUX specs written on 2026-10-26 had a median of 28 and a maximum of 237) and shows flat cost."]}
+    },
+    {
+      "spec": "The work is compaction and room loading in internal/dispatch/docs.",
+      "plan": "Adds D6: a patch to the sjawhar/ygo fork making the within-update dependency resolution linear, released through the fork's maintainer session and pinned in packages/envoy/go.mod.",
+      "evidence": "CPU profile of decoding the compacted 240-version state: 70% in ygo resolveWithinUpdatePending (crdt/update.go:685-720, fixed-point re-scan). The production upload cost is 60% loadRoom -> ApplyUpdateV1 (production profile, finding 2). Increasing client ids cut the decode from 391 to 120 ms, proving ordering is the cause.",
+      "outcome": {"kind": "changed", "scope": "Adds a change outside sjawhar/legion (the sjawhar/ygo fork) and a dependency on the fork maintainer session's signed tag before the pull request can reach testing."}
+    },
+    {
+      "spec": "Compaction runs on a schedule that survives restarts, driven by the log length since the last snapshot.",
+      "plan": "Compaction folds only rows older than 2 minutes, on every path (room close, failed room, shutdown, queue, hourly sweep), as INFRA-63's architect required for INFRA-556's cross-pod catch-up.",
+      "evidence": "INFRA-63 architect's Envoy replies of 2026-10-27T04:28Z and 04:49Z. CHANGELOG.md line 1920 records LEGION-496: compaction as a room closes, as the server shuts down and daily leaves doc_updates holding no deleted text.",
+      "outcome": {"kind": "changed", "settledDecisions": [{"decision": "LEGION-496 (the operator's decision): after compaction doc_updates and its backups hold no text a write deleted; compaction runs as a room closes, as the server shuts down and daily.", "detail": "Deleted text is folded within about 75 minutes of the write (2-minute tail, 15-minute age rule, hourly sweep) instead of at room close or shutdown."}]}
+    }
+  ]
+}
