@@ -464,12 +464,20 @@ path below is a field of the step's `summary.json`.
 | `issue-topic receipts got / expected` | count | The issue-topic receipts of primary events, then the expected number. | `events.issue_topic_receipts`, `events.expected_issue_topic_receipts` |
 | `req/s target / sent` | requests per second | The target rate, then the requests sent in the window divided by the window. `0` when the target is 0. The mark `(below 95%)` follows when the sent rate is below 95% of the target. | `config.requests_per_s`, `requests.sent_per_s`, `requests.below_target` |
 | `req 2xx` | percent | The share of sent requests that got a 2xx status. | `requests.ok_2xx` ÷ `requests.sent` |
-| `req ms p50 / p99` | ms | Request latency, from arrival (as for a write) to the end of the response body, over every sent request, failures included. | `requests.latency_ms` |
+| `req ms p50 / p99` | ms | Request latency, from arrival (as for a write) to the end of the response body, over every sent request, failures included. A failed request counts with the time it took to fail: about 30,000 for the client timeout, and about 5,000 for the 5 s connect timeout. A request that never connected has no arrival, so its time starts when the client began the request. | `requests.latency_ms` |
 | `requests dropped at the in-flight cap` | count | The requests scheduled in the window that the generator did not send, because 25,000 were in flight. | `requests.dropped_inflight_cap` |
 
 **The below-target mark.** `(below 95%)` in `req/s target / sent` means that the step sent fewer
 than 95% of its target requests per second. Its request columns then describe a lighter load than
 its name says. `TABLES.md` repeats this under the table when a row has the mark.
+
+**Connect timeouts above 1x.** At 10x on the 2-vCPU pod (series run of 2026-10-27, step
+`step-10x`), most requests and writes ended with `dial tcp …: i/o timeout` after 5 s, and
+`req ms p50` was about 5,000. During a second 10x run, a second client (`curl` to `/healthz` from
+another process) did not connect either, while about 3,200 connections to Dispatch's port waited
+in `SYN_SENT` (`/proc/net/tcp`). It connected again when the generators stopped. Thus new
+connections to Dispatch's port were not accepted on the box, and the cause is not the
+generator's own client. `run.log` lists each failed write with its error.
 
 ### Write latency by kind
 
