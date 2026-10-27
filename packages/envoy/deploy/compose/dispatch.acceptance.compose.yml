@@ -44,6 +44,7 @@ services:
       DISPATCH_NATS_DISABLED: "1"
       DISPATCH_SERVER_URL: http://127.0.0.1:${DISPATCH_ACCEPTANCE_PORT:-8767}
       DISPATCH_TEST_HOOKS: "1"
+      DISPATCH_TEST_ROSTER_UNCACHED: "1"
       ENVOY_URL: http://127.0.0.1:${FAKE_ENVOY_PORT:?set FAKE_ENVOY_PORT to the harness fake Envoy port; see packages/dispatch/README.md}
 volumes:
   dispatch-acceptance-pg:
