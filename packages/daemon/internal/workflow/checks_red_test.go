@@ -969,6 +969,97 @@ func TestAReopenedPullRequestJudgesItsNewHeadAsASynchronizeWould(t *testing.T) {
 	}
 }
 
+// A push whose head run's replay raises the count to the cap, with the red at the head then held,
+// reports the count as a settlement would: h2's red was planned, so neither h3 nor h4 counted as
+// they arrived, and h3's own push - the implementer's code - shows h3 cleared the planned mark, so
+// the replay counts h4, onto h3's red, and h4's red is held at the exhausted count.
+func TestAReplayThatLeavesARedHeldAtTheCapReportsTheCount(t *testing.T) {
+	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h2", CheckedHead: "h2", Failing: []string{required},
+		CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: 2, HeadCounted: "h2", PlannedRed: true})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	engine := readyEngine("merge-queue")
+	for _, fact := range []intake.Fact{syncedTo("h3"), settledAt("h3", required, 2, required), syncedTo("h4"), settledAt("h4", required, 3, required)} {
+		applyRefusingNothing(t, pool, engine, fact)
+	}
+	if kinds := noticeKinds(t, pool, "LEGION-208"); len(kinds) != 0 {
+		t.Fatalf("before h3's push the architect was told %v, want nothing: every red was planned", kinds)
+	}
+	applyRefusingNothing(t, pool, engine, pushedFromTo("h2", "h3", "src/widget.go", implementer))
+	if got := issuePhase(t, pool); got != phase.Testing {
+		t.Fatalf("after h3's push the issue is in %s, want testing: h4's red is held at the cap", got)
+	}
+	var attempts int
+	if err := pool.QueryRow(context.Background(), "select fix_attempts from pull_requests where issue = 'LEGION-208'").Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if kinds := noticeKinds(t, pool, "LEGION-208"); attempts != 3 || len(kinds) != 1 || kinds[0] != "pr-blocked" {
+		t.Fatalf("after h3's push fix attempts %d and notices %v, want 3 and one pr-blocked", attempts, kinds)
+	}
+}
+
+// Two heads that each arrive before their pushes - h3, then h4 - are judged as the pushes arriving
+// first judge them, whatever order the pushes arrive in: the head run the first opens replays once
+// they do. h4's red at the exhausted count is held while h3's count stands; two handoffs then take
+// the count back and send the work back, and the review App's red tests then a handoff take it
+// back and plan h4's red, which keeps the work in testing.
+func TestTwoHeadsAheadOfTheirPushesAreJudgedAsThePushesFirstJudgeThem(t *testing.T) {
+	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
+	const handoff, redTests = ".legion/LEGION-208/implement.json", "src/widget_test.go"
+	for _, tc := range []struct {
+		name          string
+		first, second intake.Fact
+		want          phase.Phase
+		planned       bool
+	}{
+		{"two handoffs", pushedFromTo("h2", "h3", handoff, implementer), pushedFromTo("h3", "h4", handoff, implementer), phase.Implementing, false},
+		{"the review App's red tests, then a handoff", pushedFromTo("h2", "h3", redTests, testReviewApp), pushedFromTo("h3", "h4", handoff, implementer),
+			phase.Testing, true},
+	} {
+		red := settledAt("h4", required, 2, required)
+		for _, order := range []struct {
+			name  string
+			facts []intake.Fact
+		}{
+			{"pushes first", []intake.Fact{tc.first, tc.second, syncedTo("h3"), syncedTo("h4"), red}},
+			{"both heads first, pushes in order", []intake.Fact{syncedTo("h3"), syncedTo("h4"), red, tc.first, tc.second}},
+			{"both heads first, pushes reversed", []intake.Fact{syncedTo("h3"), syncedTo("h4"), red, tc.second, tc.first}},
+			{"each head before its push", []intake.Fact{syncedTo("h3"), tc.first, syncedTo("h4"), red, tc.second}},
+		} {
+			t.Run(tc.name+", "+order.name, func(t *testing.T) {
+				pool := migratedPool(t)
+				seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+					Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+					Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h2", CheckedHead: "h2", Failing: []string{required},
+					CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Required: []string{required}, FixAttempts: 2, HeadCounted: "h2"})
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+				engine := readyEngine("merge-queue")
+				for _, fact := range order.facts {
+					applyRefusingNothing(t, pool, engine, fact)
+				}
+				if got := issuePhase(t, pool); got != tc.want {
+					t.Fatalf("after every fact the issue is in %s, want %s", got, tc.want)
+				}
+				var attempts int
+				var mark string
+				var planned, open bool
+				if err := pool.QueryRow(context.Background(), "select fix_attempts, head_counted, planned_red, head_run is not null from pull_requests where issue = 'LEGION-208'").
+					Scan(&attempts, &mark, &planned, &open); err != nil {
+					t.Fatalf("read the pull request: %v", err)
+				}
+				if attempts != 2 || mark != "h2" || planned != tc.planned || open {
+					t.Fatalf("fix attempts %d, counted head %q, planned red %v, head run open %v; want 2, \"h2\", %v and closed", attempts, mark, planned, open, tc.planned)
+				}
+			})
+		}
+	}
+}
+
 // A reopen past a head the daemon never recorded keeps the pushes recorded while the pull request
 // was closed, so a push that arrives after the reopen completes the chain the reopen's move took:
 // the review App's red tests h2..h3, pushed while closed, and the handoff h3..h4 after the reopen

@@ -806,7 +806,9 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	}
 	if orphan {
 		if pr != nil {
-			pr.Generation = int64(stored.Generation)
+			// The carried pull request starts the generation's fence; its head run goes, as with a
+			// new generation (record.ClearGeneration), since its replay would put the old fence back.
+			pr.Generation, pr.Run = int64(stored.Generation), nil
 			if err := a.store.PutPullRequest(ctx, tx, *pr); err != nil {
 				return fmt.Errorf("carry pull request to re-admitted orphan %s: %w", stored.Key, err)
 			}

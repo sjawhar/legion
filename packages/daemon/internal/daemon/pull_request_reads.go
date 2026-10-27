@@ -39,8 +39,8 @@ import (
 // backlog, and without it a reviewer's approval followed by its handoff push would read as not
 // covering the head (classify.ApprovalStands), a round stuck for nothing. A push that may change
 // code is left to its webhook, as when a synchronize beats its push: a code head with no known push
-// is judged as such, and the push's own handler settles what only the pusher decides
-// (classify.ApplyPush's planned mark and take-back).
+// is judged as such, and the push's own handler settles what only the push says, replaying the
+// head run the head opened (classify.ApplyPush).
 //
 // It returns the record as the pass goes on with it: as it stands when the head did not move, and
 // otherwise as the synchronize left it, so the mergeability, review and required-check reads after
@@ -120,7 +120,7 @@ const compareFilesCap = 300
 // a page: its status and file list cover the whole comparison whatever the page size. The push
 // names no pusher: the pusher decides only a code push's planned mark and whether a push spares a
 // fix attempt, which a handoff-only push spares whoever pushed it, on a chain from the head the
-// count moved from (classify.ApplyPush).
+// counted move started from (classify.sparedMove).
 func handoffPush(ctx context.Context, github githubrest.Client, pr record.PullRequest, from, to string) (intake.Push, string, error) {
 	var compare githubCompare
 	if err := github.Get(ctx, fmt.Sprintf("/compare/%s...%s?per_page=1", url.PathEscape(from), url.PathEscape(to)), &compare); err != nil {

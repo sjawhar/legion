@@ -25,17 +25,17 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	}
 	// A handoff push can start no CI of its own (GitHub's skip-checks trailer), so the settlement
 	// that stands for the head can be of the code head it replaced, arriving after it. A
-	// settlement is for the commit it names, never the head by default.
+	// settlement is for the commit it names, never the head by default. While a head run is open
+	// the settlement is recorded in it whether it stands or not (classify.ApplyCheckSettlement).
 	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Failing: fact.Failing, Cancelled: fact.Cancelled}
-	var stands bool
-	if *pr, stands = classify.SettlementFor(*pr, candidate); !stands {
-		return intake.Result{}, nil
-	}
-	var applied bool
-	*pr, applied = classify.ApplySettlement(*pr, candidate)
+	settled, applied := classify.ApplyCheckSettlement(*pr, candidate)
 	if !applied {
-		return intake.Result{}, nil
+		if pr.Run == nil {
+			return intake.Result{}, nil
+		}
+		return intake.Result{}, e.store.PutPullRequest(ctx, tx, settled)
 	}
+	*pr = settled
 	return intake.Result{}, e.decideChecks(ctx, tx, pr, false)
 }
 
@@ -51,9 +51,7 @@ func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.Requ
 	if err != nil || pr == nil || pr.RequiredReadUnchanged(fact.Names, fact.Workflows, fact.WorkflowsHead) {
 		return intake.Result{}, err
 	}
-	pr.Required = append([]string{}, fact.Names...)
-	pr.Workflows = append([]record.RequiredWorkflow{}, fact.Workflows...)
-	pr.WorkflowsHead = fact.WorkflowsHead
+	*pr = classify.ApplyRequiredRead(*pr, fact.Names, fact.Workflows, fact.WorkflowsHead)
 	return intake.Result{}, e.decideChecks(ctx, tx, pr, true)
 }
 
@@ -136,7 +134,7 @@ func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullReq
 		// change (record.RequiredReadUnchanged), so it withdraws the READY if the run is still red,
 		// and leaves it if the run passed; that read decides the count's report too.
 		if !requiredRead && classify.RedOnlyByWorkflows(*pr) {
-			pr.WorkflowsHead = ""
+			*pr = classify.ClearWorkflowsHead(*pr)
 			return e.store.PutPullRequest(ctx, tx, *pr)
 		}
 		if moved, err = e.sendBack(ctx, tx, *issue, pr); err != nil {
@@ -521,7 +519,7 @@ func (e *Engine) implementationReady(ctx context.Context, tx pgx.Tx, issue recor
 		return nil
 	}
 	if classify.RedOnlyByWorkflows(*pr) {
-		pr.WorkflowsHead = ""
+		*pr = classify.ClearWorkflowsHead(*pr)
 		return e.store.PutPullRequest(ctx, tx, *pr)
 	}
 	handed, err := e.store.Issue(ctx, tx, issue.Key)

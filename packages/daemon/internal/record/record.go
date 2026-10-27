@@ -402,25 +402,12 @@ type PullRequest struct {
 	// (classify.AdvancePullRequestHead); empty when no such attempt stands. The fix-attempt cap holds
 	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
-	// HeadCountedBefore is the mark HeadCounted held before the count that set it. A count made
-	// before its head's pushes arrived is taken back when they prove the move spares it
-	// (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
-	// which of the pushes and the head's arrival GitHub delivers first, while the counted head is
-	// still the recorded head (classify.AdvancePullRequestHead names the order it does not cover).
-	HeadCountedBefore string
-	// HeadCountedFrom is the recorded head (HeadSHA) that HeadCounted replaced when it was counted:
-	// the head the counted move started from. The count is taken back once the recorded pushes chain
-	// from this head to HeadCounted, each the review App's or an unforced handoff-only push
-	// (classify.ApplyPush); a push that reached the counted head from another head - the
-	// required-checks pass's compare from an approved head, say - is on no such chain. Empty when no
-	// count stands, and for a mark a take-back restored, which nothing takes back.
-	HeadCountedFrom string
-	// HeadArrivedFrom is the head HeadSHA replaced when it arrived (classify.AdvancePullRequestHead),
-	// set on every head move, empty before the first and after a new generation. The planned mark
-	// (PlannedRed) is the last push that may change code on the chain of recorded pushes from this
-	// head to HeadSHA, whichever of the pushes and the head arrives first (classify.ApplyPush), also
-	// when the daemon reached the head past heads it never recorded.
-	HeadArrivedFrom string
+	// Run is the head run: the pull request's judgement as it stood before the first head still
+	// waiting for a push of its move, and every head, settlement, required read, clearing of the
+	// head the required workflows were read at, and reopen applied since, replayed at each step and
+	// each push (classify.ApplyPush). Nil when no head waits for a push, and once a run is cut to
+	// its bound with none left waiting.
+	Run *HeadRun
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
@@ -457,6 +444,64 @@ type PullRequest struct {
 	// looks for it in a build): empty until the merge, and for a pull request merged before the
 	// column existed, whose check's first compare fills it from GitHub.
 	MergeSHA string
+}
+
+// HeadRun is a pull request's head run (PullRequest.Run): Anchor, the judgement before the run's
+// first step; Pushes, every push recorded since the anchor's pushes; and Steps, in the order they
+// were applied. Replaying the steps from the anchor with every push gives the judgement the facts
+// would have given had every push arrived before every head (classify.ApplyPush).
+type HeadRun struct {
+	Anchor Judgement        `json:"anchor"`
+	Pushes []ClassifiedPush `json:"pushes"`
+	Steps  []RunStep        `json:"steps"`
+}
+
+// Judgement is the part of a pull request a head run replays: its head, its fix-attempt count and
+// marks, its planned mark, its CI settlement, and what its base branch requires. BlockedAttempts
+// is what was reported, and is not replayed.
+type Judgement struct {
+	HeadSHA       string             `json:"headSha"`
+	FixAttempts   int                `json:"fixAttempts"`
+	HeadCounted   string             `json:"headCounted,omitempty"`
+	PlannedRed    bool               `json:"plannedRed,omitempty"`
+	CheckedHead   string             `json:"checkedHead,omitempty"`
+	Failing       []string           `json:"failing"`
+	Cancelled     []string           `json:"cancelled"`
+	CheckRuns     []AttemptRun       `json:"checkRuns"`
+	Generation    int64              `json:"generation,omitempty"`
+	Snapshot      string             `json:"snapshot,omitempty"`
+	Required      []string           `json:"required"`
+	Workflows     []RequiredWorkflow `json:"workflows"`
+	WorkflowsHead string             `json:"workflowsHead,omitempty"`
+}
+
+// RunStep is one fact a head run replays: exactly one of a head's arrival (Head), a CI settlement
+// (Settlement), a read of what the base branch requires (Required), the clearing of the head the
+// required workflows' runs were read at (WorkflowsCleared), or a reopen, which starts the CI
+// settlement afresh (Reopened).
+type RunStep struct {
+	Head             string        `json:"head,omitempty"`
+	Settlement       *Settlement   `json:"settlement,omitempty"`
+	Required         *RequiredRead `json:"required,omitempty"`
+	WorkflowsCleared bool          `json:"workflowsCleared,omitempty"`
+	Reopened         bool          `json:"reopened,omitempty"`
+}
+
+// Settlement is a CI settlement of Head as the listener reported it (classify.SettlementFor).
+type Settlement struct {
+	Head       string       `json:"head"`
+	CheckRuns  []AttemptRun `json:"checkRuns"`
+	Generation int64        `json:"generation"`
+	Snapshot   string       `json:"snapshot"`
+	Failing    []string     `json:"failing"`
+	Cancelled  []string     `json:"cancelled"`
+}
+
+// RequiredRead is a read of what the base branch requires (intake.RequiredChecks).
+type RequiredRead struct {
+	Names         []string           `json:"names"`
+	Workflows     []RequiredWorkflow `json:"workflows"`
+	WorkflowsHead string             `json:"workflowsHead,omitempty"`
 }
 
 // RequiredWorkflow is one workflow the base branch requires, named by its path, and the result of
