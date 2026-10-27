@@ -123,6 +123,31 @@ func TestSchemaVersionAdmissionCommunicatesReadOnlyScope(t *testing.T) {
 	}
 }
 
+// The page presents its schema in the socket's query as schema_version and schema_creatable, and
+// in its Hocuspocus token as the version alone. A page of this build that does so is writable on
+// an open issue, both when the socket is accepted and when the provider authenticates.
+func TestSchemaAdmissionAuthorizesAPagePresentingItsCreatableVersionReadWrite(t *testing.T) {
+	service, artifactID := newTestService(t)
+	version := strconv.Itoa(pmdoc.SchemaVersion())
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/ws/doc/"+artifactID+"?schema_creatable="+strconv.Itoa(pmdoc.SchemaCreatable())+"&schema_version="+version,
+		nil,
+	)
+	request.Header.Set("X-Dispatch-User", "alice")
+	request.SetPathValue("room", artifactID)
+	request = request.WithContext(context.WithValue(request.Context(), connectionContextKey{}, &connectionState{}))
+
+	accepted, ok := service.authorize(request)
+	if !ok || accepted.ReadOnly {
+		t.Fatalf("socket authorization = %#v, %t; want read-write acceptance", accepted, ok)
+	}
+	authenticated, err := service.authorizeSchemaVersion(artifactID, version)
+	if err != nil || authenticated.ReadOnly {
+		t.Fatalf("token authorization = %#v, %v; want read-write", authenticated, err)
+	}
+}
+
 func TestHocuspocusAuthenticationCommunicatesSchemaReadOnly(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")

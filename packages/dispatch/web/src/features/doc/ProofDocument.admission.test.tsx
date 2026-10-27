@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 
+import manifest from "../../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import {
   answerTextReadsWithTheSeededText,
@@ -486,5 +487,33 @@ test("ProofDocument makes a schema-read-only admission non-editable and reloadab
     expect(within(view.container).getByText("Reload to edit.")).toBeDefined();
   } finally {
     view.unmount();
+  }
+});
+
+// During a release the process that answers the page can be of the other build, and its schema
+// route names that build's manifest, not the one this page's editor builds. So the page presents
+// the manifest it was built with: its version, and the highest version that reads every element
+// it creates (each current element is read from version 1), and it asks no server for a schema.
+test("ProofDocument connects with the schema it was built with and reads none from the server", async () => {
+  const realFetch = globalThis.fetch;
+  const schemaReads: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = input.toString();
+    if (path.startsWith("/api/v1/schema/blocks")) {
+      schemaReads.push(path);
+      return Response.json({ ...manifest, version: manifest.version + 1 });
+    }
+    return realFetch(input, init);
+  }) as unknown as typeof fetch;
+  const { callbacks, connections, view } = renderProofDocument();
+
+  try {
+    await waitFor(() => expect(connections).toHaveLength(1));
+    expect(callbacks[0]?.schemaVersion).toBe(manifest.version);
+    expect(callbacks[0]?.schemaCreatable).toBe(1);
+    expect(schemaReads).toEqual([]);
+  } finally {
+    view.unmount();
+    globalThis.fetch = realFetch;
   }
 });

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as Y from "yjs";
 
 import { bindRemoteMarks, createEditor, editorAttributes, type StoredMark } from "./editor";
-import { blockSchemaCache } from "./schema";
+import { compiledBlockSchema } from "./schema";
 
 test("editorAttributes expose the editor as a multiline textbox", () => {
   expect(editorAttributes).toEqual({
@@ -46,10 +46,9 @@ function replaceSuggestion(status: "pending" | "accepted"): StoredMark {
 test("bindRemoteMarks keeps an accepted suggestion's text when its projection arrives in the same update", async () => {
   const { browser, server } = linkedDocs();
   const root = document.body.appendChild(document.createElement("div"));
-  const blockSchema = await blockSchemaCache.load(() => Promise.reject(new Error("no schema")));
   const handle = await createEditor(root, {
     awareness: null,
-    blockSchema,
+    blockSchema: compiledBlockSchema,
     user: { color: "#f59e0b", name: "alice" },
     ydoc: browser,
   });

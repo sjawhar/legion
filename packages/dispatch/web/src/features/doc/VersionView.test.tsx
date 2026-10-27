@@ -5,6 +5,7 @@ import { render, waitFor, within } from "@testing-library/react";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import type { CreateEditor } from "./editor";
 import { DocumentRuntime } from "./runtime";
+import { compiledBlockSchema } from "./schema";
 import { VersionView } from "./VersionView";
 
 function createQueryClient(): QueryClient {
@@ -39,17 +40,12 @@ function renderVersionView({
     number: 1,
     summary: null,
   });
-  const blockSchema = runtime.runtime.blockSchema;
-  if (blockSchema === undefined) {
-    throw new Error("VersionView test runtime must provide a block schema.");
-  }
   const view = render(
     <QueryClientProvider client={queryClient}>
       <DocumentRuntime.Provider value={runtime.runtime}>
         <VersionView
           artifactId="artifact-1"
           asks={[]}
-          blockSchema={blockSchema}
           createdAt="2026-09-09T00:00:00Z"
           highlight={highlight}
           owner={undefined}
@@ -58,7 +54,7 @@ function renderVersionView({
       </DocumentRuntime.Provider>
     </QueryClientProvider>
   );
-  return { ...runtime, blockSchema, view };
+  return { ...runtime, view };
 }
 
 test("VersionView renders the version read-only with the highlighted quote focused", async () => {
@@ -84,16 +80,16 @@ test("VersionView renders the version read-only with the highlighted quote focus
   }
 });
 
-test("VersionView renders a typed callout with the fetched block schema", async () => {
+test("VersionView renders a typed callout with the manifest the page was built with", async () => {
   const markdown = ':::callout{#callout-1 kind="warning" title="Read this"}\nBody text.\n:::\n';
-  const { blockSchema, editors, view } = renderVersionView({
+  const { editors, view } = renderVersionView({
     highlight: undefined,
     markdown,
   });
 
   try {
     await waitFor(() => expect(editors).toHaveLength(1));
-    expect(editors[0]?.options.blockSchema).toBe(blockSchema);
+    expect(editors[0]?.options.blockSchema).toBe(compiledBlockSchema);
     expect(editors[0]?.markdown).toBe(markdown);
   } finally {
     view.unmount();
