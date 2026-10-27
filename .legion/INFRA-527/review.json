@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-527",
+  "completed": "2026-10-27T04:32:00Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "89bf76b8ae03fe5ddf87c1a83c754fc3e3a9868a",
+  "critical": 0,
+  "important": 2,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/styles.css",
+      "description": "Under forced colors (Windows High Contrast) the appearance:none box shows a ticked and an unticked item the same: the browser forces the fill to the system background and keeps the url() tick, whose fixed colour (white in light, slate-900 in dark) then matches that background. Seen in Chromium with emulateMedia forcedColors 'active' in light and dark (throwaway probe of the head's CSS rules); adding '@media (forced-colors: active) { .dispatch-markdown [data-markdown-task-checkbox] { appearance: auto } }' made the native box draw a visible tick in the same probe. This is the issue's own defect for high-contrast readers."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/styles.css",
+      "description": "Lines 471 and 481 put two hand-written colours (%23ffffff, %230f172b) inside percent-encoded SVG data URIs. styles-css-pin.test.ts's exhaustiveness pattern /#[0-9a-fA-F]{6}\\b|rgb\\(...\\)/ does not see '%23', so the colours skip the pin gate that packages/dispatch/AGENTS.md (styles-css-pin.test.ts paragraph) and the test's own comment say every hand-written colour must pass."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/styles.css",
+      "description": "Line 535 pointer-events: none lost its explaining clause in 89bf76b8; every other unusual declaration in the block is explained."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/task-items.e2e.ts",
+      "description": "The ticked/unticked/disabled/list-style assertions repeat between the two rows, and the iphone Thread-dialog ternary now has three copies (task-items, theme, held-sends). Cleanup only."
+    }
+  ],
+  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title; branch protection off. CI head 89bf76b8ae03 (newest pull_request run); compare to 9eff5063 handoffsOnly true, 2 files. All checks queued at 04:11Z; not awaited, since this round requests changes.",
+  "thermonuclear": "Pair run at 89bf76b8ae03: deep-review approve with two minors (forced-colors, WebKit list semantics), code-quality changes (colour-pin bypass) with two minors.",
+  "threads": "0 review threads on the pull request."
+}
