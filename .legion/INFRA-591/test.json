@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-591",
+  "completed": "2026-10-27T11:22:30Z",
+  "headTested": "3d97fd8db22d84034e86622c4ad4cc038aa39da1",
+  "implementerProof": {
+    "verdict": "rejected",
+    "how": "Re-ran the implementer's smoke (plan 6.1, /legion/scratch/tmp/infra591/smoke.sh) on envoy-dispatch built by the tester from the head's code (48cb088a6556, identical to 3d97fd8d outside .legion/), on the harness stack (Postgres 16.2, 1 ms proxy, NATS, listener): with a cold SSE stream open and a psql transaction holding a lower event id 33261 on LGA-12, POST /api/v1/issues/LGA-22/comments answered 201 in 137 ms (id 33262); the stream sent nothing for 3 s; after commit it sent 33261 then 33262; a fresh stream with Last-Event-ID 33260 sent 33261 then 33262 (/legion/scratch/tmp/infra591/tester/smoke1/). That reproduces proof entry 2. The proof as a whole is rejected for two reasons: the head cannot merge (GitHub reports PR #2392 CONFLICTING, so no CI run exists at any commit of the branch and the head that merges will carry a code merge), and the 1x/2x load proof (entry 4) is biased by the harness's 20 ms lock sampler, as the implementer reported on Envoy at 2026-10-27T11:21Z and INFRA-514's architect confirmed."
+  },
+  "failures": [
+    {
+      "criterion": "The head that merges is the head tested, and CI is green on it.",
+      "evidence": "gh pr view 2392 --repo sjawhar/legion --json mergeable -> CONFLICTING at 3d97fd8db22d. gh api repos/sjawhar/legion/commits/<sha>/check-runs -> total_count 0 for 3d97fd8d (handoff-only, skip-checks), 48cb088a6556 and 9380c4a0b8ce: GitHub runs no pull-request workflow on a conflicting head, so no lane has ever run on this branch. git merge-tree --write-tree 3d97fd8d c892b97df887 (main@origin) conflicts in five files: packages/envoy/internal/dispatch/api/references.go, packages/envoy/internal/dispatch/refs/graph.go (Query.Through against main's WholeDocuments, and the source_seq <= Through clause against main's new order by other_kind, other_id, at_block), packages/envoy/internal/dispatch/api/routes_table.go, packages/envoy/cmd/dispatch/AGENTS.md and packages/envoy/cmd/dispatch/README.md. The conflicting main commit is b69f636f2ca1 (#2210, block nodes in the link graph). The Through bound must be applied to main's rewritten graph query, including its block edges, so GET /api/v1/references?since= (acceptance line 3, T7) is new code after the merge and must be proven again there. Fix: forward-merge main into legion/INFRA-591 (skill://legion-worker/references/conflicts-and-rewrites.md), resolve the five files, and prove T7 on the merged code."
+    },
+    {
+      "criterion": "Before and after on the committed load reproduction at tonight's step and twice it: lock hold samples, committed vs offered, write latency p50/p99, delivery latency from the write's arrival.",
+      "evidence": "The implementer reported (Envoy, 2026-10-27T11:21:30Z) and INFRA-514's architect confirmed (11:21:38Z) that the harness's 20 ms lock sampler loaded Postgres during the 1x and 2x runs, more on the base side (one pg_blocking_pids per waiter, 33-49 waiters before against 1-4 after; 630-1,271 probe samples before against 1,834-2,082 after, where an unloaded run collects about 3,000), so the 1x/2x rows of dispatch://INFRA-591/artifact/load-before-after-md and of the PR body (0.69 -> 3.07 events/s committed) are overstated by an unknown amount; the 0.5x rows and the smoke are unaffected. Required, as the architect directs: re-measure 1x and 2x on PR #2369's harness at a7b5f467 (1 s lock sampling), 3 runs per side, alone on the pod, and correct load-before-after-md and the PR body. Measure the after side at the merged head (failure 1), since that is the code that merges."
+    }
+  ],
+  "failed": 2,
+  "notStarted": [
+    "Adversarial real-surface round (stall by a transaction in another database and its warning, rollback of an open lower id, Last-Event-ID and since boundary inputs, full replay from 0 against the database, concurrent out-of-order writers with three streams and a mid-run resume, idle xid consumption, first stream on a fresh process while a transaction holds the horizon): the driver is ready at /legion/scratch/tmp/infra591/tester/adv.py but was not run, because the harness Postgres went down at 11:21Z and the architect asked the tester not to load the pod while the load is re-measured. It runs in the next round, at the merged head."
+  ]
+}
