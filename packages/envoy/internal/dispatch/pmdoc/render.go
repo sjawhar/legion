@@ -788,13 +788,62 @@ func escapeLinkDestination(href string, escapePipes bool) string {
 	return href
 }
 
+// escapeImageSource writes an image's address so that the browser editor's parser, which decodes
+// a destination's escapes and character references, reads it back: a backslash before ASCII
+// punctuation is doubled, an ampersand is escaped where it would open a character reference
+// (characterReferenceAt), and in a table a pipe is escaped as well. An address holding a space or
+// a parenthesis is then written in angle brackets.
+func escapeImageSource(src string, escapePipes bool) string {
+	if strings.ContainsAny(src, "\\&|") {
+		var written strings.Builder
+		written.Grow(len(src))
+		for index := range len(src) {
+			char := src[index]
+			switch {
+			case char == '\\' && index+1 < len(src) && isASCIIPunctuation(src[index+1]):
+				written.WriteByte('\\')
+			case char == '|' && escapePipes:
+				written.WriteByte('\\')
+			case char == '&':
+				if _, _, ok := characterReferenceAt(src, index); ok {
+					written.WriteByte('\\')
+				}
+			}
+			written.WriteByte(char)
+		}
+		src = written.String()
+	}
+	if strings.ContainsAny(src, " ()") {
+		return "<" + src + ">"
+	}
+	return src
+}
+
+// titleSuffix writes a link or image title, quoted, so that the browser editor's parser, which
+// decodes a title's escapes and character references, reads it back: a backslash and a quote are
+// escaped, an ampersand only where it would open a character reference (characterReferenceAt),
+// and in a table a pipe as well.
 func titleSuffix(title string, escapePipes bool) string {
 	if title == "" {
 		return ""
 	}
-	title = strings.ReplaceAll(title, "\\", "\\\\")
-	title = strings.ReplaceAll(title, "\"", "\\\"")
-	return " \"" + escapeTablePipes(title, escapePipes) + "\""
+	var written strings.Builder
+	written.Grow(len(title) + len(` ""`))
+	written.WriteString(` "`)
+	for index := range len(title) {
+		char := title[index]
+		switch {
+		case char == '\\' || char == '"' || char == '|' && escapePipes:
+			written.WriteByte('\\')
+		case char == '&':
+			if _, _, ok := characterReferenceAt(title, index); ok {
+				written.WriteByte('\\')
+			}
+		}
+		written.WriteByte(char)
+	}
+	written.WriteByte('"')
+	return written.String()
 }
 
 func escapeTablePipes(value string, escapePipes bool) string {

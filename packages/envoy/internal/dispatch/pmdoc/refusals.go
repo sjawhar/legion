@@ -7,7 +7,6 @@ import (
 
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
-	"github.com/yuin/goldmark/util"
 )
 
 // refuseBlocks refuses a document holding a block that cannot be stored as it reads (blockRefusal),
@@ -51,7 +50,7 @@ func blockRefusal(node ast.Node, source []byte, firstLine int) error {
 		// The browser editor's parser decodes backslash escapes and character references in the
 		// info string's first word, the language, where goldmark keeps them as written.
 		language := current.Language(source)
-		if !bytes.Equal(util.ResolveEntityNames(util.ResolveNumericReferences(util.UnescapePunctuations(language))), language) {
+		if decodeMarkdownText(language) != string(language) {
 			return refuse("a code block whose language holds a backslash escape or a character reference, which the browser editor's parser decodes and goldmark keeps as written")
 		}
 	case *ast.CodeBlock:

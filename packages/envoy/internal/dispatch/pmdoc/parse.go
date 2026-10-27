@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"html"
 	"reflect"
 	"regexp"
 	"slices"
@@ -660,7 +659,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string, depth in
 		if err != nil {
 			return nil, err
 		}
-		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": unescapeMarkdownText(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": decodeMarkdownText(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
 	case *typedDirective:
 		return parseTypedDirective(current, source, footnotes, depth)
 	case *extensionast.Table:
@@ -833,7 +832,7 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 		}
 	}
 	return &Node{Type: "image", Attrs: Attrs{
-		"src":   unescapeMarkdownText(image.Destination),
+		"src":   decodeMarkdownText(image.Destination),
 		"alt":   text.String(),
 		"title": titleOrNil(image.Title),
 	}}, nil
@@ -986,8 +985,8 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			// matches a reference to its definition by the label as written. Both labels are
 			// stored decoded and written from that, so one matching only as written, before
 			// decoding (`[^&AUML;]` beside `[^&auml;]: `), would not match once written.
-			decoded := unescapeMarkdownText([]byte(label))
-			if definition := unescapeMarkdownText([]byte(definitionLabel)); footnoteLabelKey(decoded) != footnoteLabelKey(definition) {
+			decoded := decodeMarkdownText([]byte(label))
+			if definition := decodeMarkdownText([]byte(definitionLabel)); footnoteLabelKey(decoded) != footnoteLabelKey(definition) {
 				return nil, nil, fmt.Errorf("%w: footnote reference %q matches its definition %q only as written, before their character references are decoded, which the document's markdown cannot keep", ErrSchema, decoded, definition)
 			}
 			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": decoded}})
@@ -1013,17 +1012,13 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 	return joinTexts(children), ended, nil
 }
 
-func unescapeMarkdownText(value []byte) string {
-	return html.UnescapeString(string(util.UnescapePunctuations(value)))
-}
-
 func parseTextValue(value []byte, marks []Mark) string {
 	for _, mark := range marks {
 		if mark.Type == "inlineCode" {
 			return string(value)
 		}
 	}
-	return unescapeMarkdownText(value)
+	return decodeMarkdownText(value)
 }
 
 func appendInline(target *[]*Node, nodes []*Node) {
@@ -1101,7 +1096,7 @@ func titleOrNil(title []byte) any {
 	if len(title) == 0 {
 		return nil
 	}
-	return unescapeMarkdownText(title)
+	return decodeMarkdownText(title)
 }
 
 func parseAnchorMark(value string) (Mark, bool) {
