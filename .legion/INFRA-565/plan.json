@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-565",
+  "completed": "2026-10-27T07:43:37Z",
+  "plan": "dispatch://INFRA-565/artifact/plan-md",
+  "base": "b08a56bc",
+  "summary": "Draw (not refuse): in the editor's default mode (headless engine without readOnly, and the live editor), an accepted typed block whose content breaks its ProseMirror content rule is drawn as its literal lines, as INFRA-529's read-only mode does, instead of Milkdown dropping it silently. Unknown types, refused attributes and paragraph-line directives still throw. INFRA-529's fit check, drawDirective and the innermost-first walk move into a new legion-owned packages/proof-editor/src/typed-block-drawing.ts with markdownSource(file) (one leading U+FEFF removed); remarkTypedBlocks reads its source through it; lib-headless default branch installs remarkUnfitTypedBlocks; lib.ts installs unfitTypedBlocksRemarkPlugin AFTER remarkDispatchMarksPlugin.",
+  "tasks": [
+    "1. packages/proof-editor/src/typed-block-drawing.ts (new, legion-owned, must not import block-schema.ts): MdastNode, isLabel, defaultAttrs, placeholders, fitsContentRule, sourceEnd, CLOSING_FENCE, drawDirective moved from read-only-directives.ts; markdownSource(file); decideTypedBlocks(nodes, {schema, source, accepts}); remarkUnfitTypedBlocks(schema); unfitTypedBlocksRemarkPlugin ($remark reading schemaCtx at transform time; moves into lib.ts if headless-no-dom.test.ts fails).",
+    "2. read-only-directives.ts: remarkReadOnlyDirectives built on decideTypedBlocks with accepts = typedBlockRefusal undefined; behaviour unchanged; tests/read-only-directives.test.ts unedited.",
+    "3. block-schema.ts (copied): remarkTypedBlocks passes markdownSource(file) to rejectUnsupportedDirectiveSyntax.",
+    "4. lib-headless.ts (copied): default branch installs remarkTypedBlocks then remarkUnfitTypedBlocks(schema); rewrite parseMarkdown and readOnly doc comments (default mode = what the browser editor imports).",
+    "5. lib.ts (copied): .use(opts.blockSchema ? unfitTypedBlocksRemarkPlugin : []) after .use(remarkDispatchMarksPlugin).",
+    "6. packages/proof-editor/tests/typed-block-drawing.test.ts: headless and live-editor (withMarksEditor + handlePaste, setMarkdown) rows with the server blocks.json, console.error stubbed; BOM rows; serialize round trip; valid mark-span ask stays an ask (ordering proof, negative control: .use moved before the mark plugins); both engines read A1 alike.",
+    "7. pmdoc/escape_test.go: add \":::ask{#a1}\" to TestRenderEscapesBlockMarkerLinesInsideParagraphs.",
+    "8. packages/dispatch/e2e/typed-block-content-rule.e2e.ts: paste the A1 body as plain text on an empty line after 'Intro text.'; heading visible, fence lines visible, exact stored markdown (from the first head run), open_asks [], no 'Cannot create node' console message; second test with the list-then-paragraph ask.",
+    "9. Docs: packages/proof-editor/AGENTS.md (new file row, Ten->Eleven, Sixteen->Seventeen with the INFRA-565 kind, Conventions list, read-only row); root biome.json exclude line for the new file; INFRA-529 solutions doc evidence lines; check packages/dispatch/AGENTS.md."
+  ],
+  "acceptance": [
+    {
+      "criterion": "A1: pasting an ask holding a heading into a live document keeps every word",
+      "surface": "Dispatch document editor in Chromium, real Go server and Postgres",
+      "command": "cd packages/dispatch && export DATABASE_URL=... <harness ports> && bun run build:web && bunx playwright test --config e2e/playwright.config.ts typed-block-content-rule.e2e.ts --project chromium",
+      "negativeControl": "same spec file on a tree of b08a56bc (git archive b08a56bc | tar -x -C $TMPDIR/infra565-base; bun install; rebuild SPA): fails on the heading and stored-markdown assertions. Both runs quoted on the PR."
+    },
+    {
+      "criterion": "Shared U+FEFF source helper (spec Change, second paragraph)",
+      "surface": "@legion/proof-editor headless engine",
+      "command": "cd packages/proof-editor && bun run test && bun run typecheck && bun run lint",
+      "negativeControl": "the U+FEFF rows fail at b08a56bc: \\ufeffhello\\n::a parses; \\ufeffx\\n\\n::: warning names line 4"
+    },
+    {
+      "criterion": "Default mode draws instead of dropping, in both editors, after the mark plugins",
+      "surface": "headless engine and real createProofEditor in happy-dom",
+      "command": "cd packages/proof-editor && bun run test",
+      "negativeControl": "drawing rows fail at b08a56bc; with the new .use moved before the mark plugins the valid mark-span ask row fails"
+    },
+    {
+      "criterion": "Server refusals and fixtures unchanged",
+      "surface": "pmdoc fixture generator and Go pmdoc tests",
+      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bun run check; cd packages/envoy && go test ./internal/dispatch/pmdoc/... (bun on PATH)",
+      "negativeControl": "none"
+    },
+    {
+      "criterion": "After the deploy",
+      "surface": "production Dispatch",
+      "command": "gh api \"repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main\" -H \"Accept: application/vnd.github.raw\" | bash -s -- --commit <merged sha> --page /issues/INFRA-565/spec --route /api/v1/schema/blocks",
+      "negativeControl": "none"
+    }
+  ],
+  "outOfScope": [
+    "Yjs/y-prosemirror drop of an ask a collaborative merge leaves holding another block (docs/ask_blocks.go:592-596): not a markdown parse; spec Summary scopes to markdown paths. Named to the architect.",
+    "What a person sees on an unknown-type paste (default mode still throws): unchanged, no claim.",
+    "Suggestion markdown via setDefaultMarkdownParser: reached in principle, not driven in Dispatch's margin mode; no claim.",
+    "The first drawn line joins the caret's paragraph on a plain-text paste (Slice.maxOpen): existing clipboard behaviour."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, the six-field proof, push and handoff, the simplify pass and PR body (references/pr-body.md)",
+      "dispatch: posting the production-check output on the issue after the deploy",
+      "ce-simplify-code: the simplify pass on the settled diff before the proof head"
+    ],
+    "test": [
+      "legion-worker: the tester's independent re-run of each named command and its negative control, proof format (references/pr-body.md)"
+    ],
+    "review": [
+      "legion-worker: review threads and the merge gate (references/review-threads.md, references/merge-gate.md)"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "F1: lib-headless.ts:81-82 says default mode keeps every refusal the document service applies; drawing a broken ask accepts what AskContentError refuses.", "answer": "Plan states default mode now means what the browser editor imports (the engine never applied AskContentError; it dropped), rewrites the parseMarkdown/readOnly doc comments, and makes pmdoc gen bun run check and go test ./internal/dispatch/pmdoc/... acceptance checks."},
+      {"finding": "F2: live-editor wiring is three copied-file edits (block-schema.ts, lib-headless.ts, lib.ts); the step must follow remarkDispatchMarksPlugin; AGENTS.md counts, table, Conventions and biome.json must change; helper module must not import block-schema.ts.", "answer": "Tasks 1-5 and 9 name each edit; new module typed-block-drawing.ts imports nothing from block-schema.ts; lib-remark-directive-plugin.ts untouched; schemaCtx read at transform time."},
+      {"finding": "F3: drawn paragraphs join the caret's paragraph on paste (Slice.maxOpen), so stored text is not three clean blocks.", "answer": "e2e presses Enter to paste on an empty line, pins the exact stored markdown from the first head run, asserts open_asks [] and no 'Cannot create node' console message; joining recorded as existing clipboard behaviour."},
+      {"finding": "F4: U+FEFF helper, setMarkdown path and headless/live parity had no machine check.", "answer": "Task 6 adds BOM rows, live-editor paste and setMarkdown rows via withMarksEditor, and a both-engines JSON equality row."},
+      {"finding": "F5: Yjs/y-prosemirror drop of a broken ask is a second loss path the spec does not settle.", "answer": "Out of scope per the spec Summary (markdown paths); named to the architect in the completion report."},
+      {"finding": "F6: suggestion-markdown reach is unverified; VersionView reachable only if a stored version holds a broken ask.", "answer": "Plan claims nothing about suggestions; setMarkdown covered by a unit row."},
+      {"finding": "F7: a refused paste is not 'nothing happens' on a real browser paste (preventDefault only after handlePaste returns true).", "answer": "Draw chosen; unknown-type refusals unchanged and no claim made about them."},
+      {"finding": "F8: stale docs: proof-editor AGENTS.md read-only row, lib-headless comments, INFRA-529 solutions doc.", "answer": "Task 9 updates each; packages/dispatch/AGENTS.md checked."},
+      {"finding": "F9: context claims confirmed (Milkdown logs and drops; HTML paste uses PM slice; CI runs pmdoc check; only render_readback_test invokes differential.ts).", "answer": "No change needed."},
+      {"finding": "F10: drawing is better than refusing (no message channel exists; matches INFRA-529).", "answer": "Draw chosen, reasons recorded in plan.md."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": []
+}
