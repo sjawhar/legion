@@ -1241,7 +1241,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
     ...(daemon === undefined ? [] : [legionToolDefinition(), phaseHookToolDefinition()]),
   ]
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }))
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     if (phaseHook !== undefined && request.params.name === PHASE_HOOK_TOOL_NAME) {
       return mcpResult(await phaseHook.handle(request.params.arguments))
     }
@@ -1251,7 +1251,9 @@ export async function runEnvoyChannelServer(): Promise<void> {
         claim: () => claim?.capability(),
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
       }
-      const answer = await executeLegionTool(legionRuntime, request.params.arguments)
+      // The request's signal aborts on the client's notifications/cancelled, which ends a wait
+      // for a restarting daemon.
+      const answer = await executeLegionTool(legionRuntime, request.params.arguments, extra.signal)
       // A call that returned without throwing: a completion, and a backward move, which hands the
       // issue to another phase. Either way this session's phase is no longer open, and the
       // reminder must stop — the same two operations the Oh My Pi host closes its phase on
