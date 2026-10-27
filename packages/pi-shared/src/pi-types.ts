@@ -71,6 +71,19 @@ export interface SessionContext {
     readonly promptText: string;
     readonly signal?: AbortSignal;
   }) => Promise<{ readonly replyText: string }>;
+  /**
+   * Whether the host runs no turn now (`!session.isStreaming`). Measured on Oh My Pi 18.8.9: true
+   * already in the `agent_end` of an aborted run; `pi.sendMessage` returns while it still reads
+   * true for an idle card, before the host starts the card's run.
+   */
+  readonly isIdle?: () => boolean;
+  /**
+   * Whether the host holds a queued message for its turn to take (`queuedMessageCount > 0`): a
+   * steered or follow-up card or user message. Measured on Oh My Pi 18.8.9: false once an
+   * interrupt (`clearQueue({ forInterrupt: true })`) withdrew the queue, true at the `agent_end` of
+   * a plain abort, whose queue the next run takes.
+   */
+  readonly hasPendingMessages?: () => boolean;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
   };
