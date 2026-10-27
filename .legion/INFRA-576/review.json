@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-576",
+  "completed": "2026-10-27T11:58:00Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "3658796672b90cc72192e8fcffd5574460c499f8",
+  "ci": "Required set (rulesets on main): lint, typecheck, test, pr-title. CI head 3658796672b9 (newest pull_request run): all four completed success; compare 3658796672b9...4244f8220fea handoffsOnly true, 2 files.",
+  "thermonuclear": "Both run at 4244f8220fea (code of 3658796672b9). Deep review: one Medium (call-mode admission), Minors, no release-path defect traced. Code quality: no blocking defect, cleanup only.",
+  "critical": 0,
+  "important": 3,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/scripts/check-image-trigger-paths.sh",
+      "description": "CALL_MODE (line 124) admits any inputs.<declared input> == / != '<literal>' as neutral, but only a term true for an unset input (== '' or != '<non-empty>') cannot narrow. Reproduced at this head with the test file's own fixture and call_modes helpers: build job gated on inputs.mode == 'attest' -> exit 0, inputs.mode != '' -> exit 0, if: false -> exit 1. Such a gate turns the image build off on every pull_request, workflow_dispatch and unset-input call, and the required lint check passes. Fix: admit only terms true when the input is unset; add refusal cases."
+    },
+    {
+      "severity": "important",
+      "file": ".github/workflows/worker-image.yaml",
+      "description": "Line 205: released images now carry org.opencontainers.image.version=sha-<12> instead of the legion version. theorem-labs/agent-infra .github/workflows/legion-worker.yaml:287 reads that label as 'the Legion release LEGION_WORKER carries' and labels worker-lean with it; the pinned LEGION_WORKER sha256:4ea28df5... carries 13.20.0 today. Keep the label naming the legion release when legion_build releases one, or record the change in the census with that consumer's disposition."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "No '## Contract change census' although the PR removes worker-image.yaml's legion_version input (workflow_call and workflow_dispatch; a dispatch passing it is now refused by GitHub) and changes the published image label value."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/docker/worker.Dockerfile",
+      "description": "Acceptance 5: line 4 still says the image is 'called from release.yaml after `legion`'; it now builds beside publish. Other comment prose describing the changed files is wrong: check-image-trigger-paths.sh:28 (build job 'skips on' attest_digest == '' - it runs on it), worker-image.yaml:4-8 and :22 (skip_attest is also the attest-only call's 'attest nothing' gate, and attest_digest is not named for what it turns off), worker-image.yaml:239-243 ('accepts a digest only when a run on main built it' - an attest-only call attests a digest it did not build; say what refuses another repository's call)."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/workflows/release.yaml",
+      "description": "Cleanup (fast-follow): legion_build's unused tag output (167), unused step ids checkout/setup_node (544, 551), the pair step's duplicated member logic (760-780) where legion_build has pair_member, legion_build's plugin version calls writing 'No release published' into legion_build's own step summary, and check-release-credentials.test.sh's write_green fixture still modelling pi_legion_publish needing pi_envoy_publish as the 'intended shape'."
+    }
+  ]
+}
