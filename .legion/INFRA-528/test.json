@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-528",
-  "completed": "2026-10-27T14:45:00Z",
-  "testedHead": "4db2471d08fde4237e6e98d9da1c2ad5317c1e1f (code head a45806be02b00460a36635bc9d732b3aadba1a1a, merge of main ae36683e)",
-  "rebaseCheck": "Fingerprint from my last verified head e5baa696 (5e380076…) to 4db2471d (c2f25b53faceb0e49f00206a303884d4b797838cba7d1397fb2056f9bcc0d244): changed. The only difference is one blank `+` line in MarkdownBody.test.tsx that moved from before the Mermaid block to after it (diff lines 330 and 864), so a full round. Main brought INFRA-527's task-item checkboxes into the same Markdown body paint and styles.css, and a new e2e runner (`bun e2e/run.ts -- …`). 4db2471d merges cleanly with the current main@origin.",
+  "completed": "2026-10-27T16:22:00Z",
+  "testedHead": "ec8f07227271c608fd8070b81c3cbbdadb65157d (code head bf7eb796259d3b997dc1e14221477edfa0340339, merge of main 2df3353c)",
+  "rebaseCheck": "Fingerprint from my last verified head 4db2471d (c2f25b53…) to ec8f0722 (b41f344dc4555d5b0dd2bc0627cd1f7497ec52e503031786d29df0b3b3862b4e): changed only in two lines of packages/proof-editor/AGENTS.md, the legion-own file count and the list that now also names main's typed-block-drawing.ts. That is still a full round. Main reworked the read-only drawing of typed blocks and directives (read-only-directives.ts into the new typed-block-drawing.ts, lib-headless.ts), which is the parse the open-fence probe re-runs. ec8f0722 merges cleanly with the current main@origin.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its commands through main's runner on the tester lane after `bun run build:web` at 4db2471d: `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox` -> 32 passed (2.7m); the same runner for e2e/text-typed-blocks.e2e.ts, e2e/unknown-directive.e2e.ts and e2e/task-items.e2e.ts across the four projects -> 24 passed (1.6m). Both match its counts."
+    "how": "Re-ran its commands through `bun e2e/run.ts` on the tester lane after `bun run build:web` at ec8f0722: four-project e2e/mermaid.e2e.ts -> 32 passed (2.6m); e2e/text-typed-blocks, unknown-directive, task-items and typed-block-content-rule across the four projects -> 28 passed (1.8m). Both match its counts."
   },
   "failed": 0,
   "failures": [],
@@ -16,18 +16,18 @@
       "criterion": "A1, the spec Summary rows and the time limit at the merged head: comment, Inbox ask, message, reply, refusal, too-large refusal with the page responsive, markup label, other-language guard",
       "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector, Desktop Chrome, iPhone 13, WebKit, Firefox",
       "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox",
-      "observed": "32 passed (2.7m)",
-      "headSha": "4db2471d08fde4237e6e98d9da1c2ad5317c1e1f",
+      "observed": "32 passed (2.6m)",
+      "headSha": "ec8f07227271c608fd8070b81c3cbbdadb65157d",
       "negativeControl": "Round 1: the same suite at the red commit ecc18ff3 -> 24 failed, 4 passed (9.1m)."
     },
     {
-      "criterion": "Main's task-item checkboxes (INFRA-527) and the mermaid drawing work together in one body",
+      "criterion": "Main's reworked typed-block and directive drawing and the mermaid drawing work together, open-fence check included",
       "surface": "Dispatch Conversation, chromium, real server, throwaway e2e through `bun e2e/run.ts` (deleted after the run)",
-      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/zz-tester-probe9.e2e.ts --project chromium",
-      "observed": "A diagram inside a task item (`- [ ] with a diagram` + an indented fence) draws, with 2 checkboxes beside it. A diagram after a task list draws, with 2 checkboxes. A fence still open inside a task item stays code, with 1 checkbox and no refusal. No checkbox appears inside any SVG, and there are no page errors.",
-      "headSha": "4db2471d08fde4237e6e98d9da1c2ad5317c1e1f",
-      "negativeControl": "The open fence inside the task item stays code while the closed one draws. A label holding brackets, `A[\"[x] not a task\"] --> B`, shows the renderer's refusal `Unable to render Mermaid diagram: Mermaid diagram includes connectors but no valid edges were parsed.` with its source open. The renderer itself refuses that source: `renderMermaidMarkup` (upstream renderProofMermaidSvg, the document editor's renderer) throws that message for it and for `A[\"[x]\"] --> B`, and draws `A[\"x not a task\"] --> B`. So Dispatch shows the editor's own verdict; this is not a defect of this change."
+      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/zz-tester-probe10.e2e.ts --project chromium",
+      "observed": "7/7 as expected, with no fallback body, no refusal line and no page error. Drawn: inside `:::note` … `:::`, inside a callout under its header, after an `:::ask` whose heading breaks its content rule (drawn as literal fences), inside an `:::ask` holding a code block (the ask drawn as literal fences, the diagram drawn), and after a table with an escaped pipe in a cell (main's #2272). Kept as code (0 images): a fence still open in an unclosed `:::note` and in an unclosed callout.",
+      "headSha": "ec8f07227271c608fd8070b81c3cbbdadb65157d",
+      "negativeControl": "The open fences in the unclosed `:::note` and callout stay code while the closed ones in the same containers draw."
     }
   ],
-  "ci": "At 4db2471d on GitHub when read (14:43Z): build x2, changes, lint, pr-title, test, typecheck queued (one earlier pr-title cancelled); no lane concluded. a45806be has no runs (pushed with the handoff)."
+  "ci": "At ec8f0722 on GitHub when read (16:20Z): build x2, changes, lint, pr-title, test, typecheck queued (one earlier pr-title cancelled); no lane concluded. bf7eb796 has no runs (pushed with the handoff)."
 }
