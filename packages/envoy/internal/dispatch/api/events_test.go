@@ -220,3 +220,91 @@ func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
 	}
 	checkServed("SSE replay", frames)
 }
+
+// TestAnsweredEventStoredWithNullSelectedServesEmptyLists: an ask.answered event written before
+// answers stored an empty list holds null in answer.selected and previous_answer.selected. The
+// issue event log, the stream's catch-up and its live frame all send [] there instead, the reading
+// model.AskAnswer gives an answer, so a client can read the list's length.
+func TestAnsweredEventStoredWithNullSelectedServesEmptyLists(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Null selected events", "A spec")
+	ask := createChangeableAsk(t, handler, issue.Key)
+	first := answerAskForChange(t, handler, ask.ID, "alice", "Ship", nil)
+	firstAt := timestampValue(first.Answer.At)
+	answerAskForChange(t, handler, ask.ID, "alice", "Hold", &firstAt)
+
+	ctx := context.Background()
+	var changedID int64
+	if err := database.Pool.QueryRow(ctx, `
+		update events
+		set payload = jsonb_set(jsonb_set(payload, '{answer,selected}', 'null'), '{previous_answer,selected}', 'null')
+		where type = 'ask.answered' and payload->>'id' = $1 and payload->'previous_answer' is not null
+		returning id
+	`, ask.ID).Scan(&changedID); err != nil {
+		t.Fatalf("store null selected on the changed answer's ask.answered event: %v", err)
+	}
+
+	requireBothSelectedEmpty := func(where string, payload json.RawMessage) {
+		t.Helper()
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &fields); err != nil {
+			t.Fatalf("%s: decode ask.answered payload %s: %v", where, payload, err)
+		}
+		requireEmptySelected(t, where+" answer", fields["answer"])
+		requireEmptySelected(t, where+" previous_answer", fields["previous_answer"])
+	}
+	type servedEvent struct {
+		ID      int64           `json:"id"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	frameEvent := func(frame []string) servedEvent {
+		t.Helper()
+		var event servedEvent
+		if len(frame) != 3 || json.Unmarshal([]byte(strings.TrimPrefix(frame[2], "data: ")), &event) != nil {
+			t.Fatalf("SSE frame = %#v, want id, event and a JSON event", frame)
+		}
+		return event
+	}
+
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("read issue events: status=%d body=%s", response.Code, response.Body.String())
+	}
+	logged := false
+	for _, event := range decodeBody[[]servedEvent](t, response) {
+		if event.ID == changedID {
+			requireBothSelectedEmpty("issue event log", event.Payload)
+			logged = true
+		}
+	}
+	if !logged {
+		t.Fatalf("issue event log = %s, want event %d", response.Body.String(), changedID)
+	}
+
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	replay := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, changedID-1))
+	replayed := frameEvent(readSSEFrameOfType(t, replay, "ask.answered"))
+	if replayed.ID != changedID {
+		t.Fatalf("SSE catch-up sent ask.answered %d first, want %d", replayed.ID, changedID)
+	}
+	requireBothSelectedEmpty("SSE catch-up", replayed.Payload)
+
+	// The live frame comes from the relay, which reads a row as it commits: a copy of the stored
+	// row, committed after the stream opened, is a null-selected event it reads live.
+	live := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, eventHead(t, database)))
+	var copiedID int64
+	if err := database.Pool.QueryRow(ctx, `
+		insert into events (issue_key, seq, type, actor, payload, notify)
+		select issue_key, (select max(seq) + 1 from events where issue_key = $2), type, actor, payload, false
+		from events where id = $1
+		returning id
+	`, changedID, issue.Key).Scan(&copiedID); err != nil {
+		t.Fatalf("copy the null-selected ask.answered event: %v", err)
+	}
+	streamed := frameEvent(readSSEFrameOfType(t, live, "ask.answered"))
+	if streamed.ID != copiedID {
+		t.Fatalf("live stream sent ask.answered %d, want %d", streamed.ID, copiedID)
+	}
+	requireBothSelectedEmpty("SSE live frame", streamed.Payload)
+}

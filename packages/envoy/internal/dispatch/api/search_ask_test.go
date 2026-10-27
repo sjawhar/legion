@@ -138,7 +138,7 @@ func TestSearchAskHitsCarryTheirAnswerState(t *testing.T) {
 	commentID := decodeBody[model.Comment](t, comment).ID
 
 	// (a) answered, then changed by its answerer to no selected option and other text. The
-	// change sends no selected at all, so the row stores it as null.
+	// change sends no selected at all, and the hit must send the changed answer's selected as [].
 	changed := createSearchAsk(t, handler, issue.Key, "Which orrery gear metal?", "Brass", "Copper")
 	first := answerSearchAsk(t, handler, changed, map[string]any{
 		"selected": []string{"Brass"}, "text": "Brass resists wear.",

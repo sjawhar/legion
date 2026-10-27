@@ -11,7 +11,7 @@ import type { SearchResponse, SearchResult, SearchResultsPage } from "../../api/
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap } from "../shell/keymap";
 import { SearchButton } from "./SearchButton";
-import { type PaletteMode, SearchPalette } from "./SearchPalette";
+import { ANSWER_PREVIEW_CHARS, type PaletteMode, SearchPalette } from "./SearchPalette";
 import { optionId } from "./search-model";
 
 const results: SearchResult[] = [
@@ -256,14 +256,16 @@ test("an ask hit shows only the start of a long answer, cut at a word with an el
     const option = screen.getByRole("option");
     await waitFor(() => expect(option.querySelector("strong")?.textContent).toBe("both"));
 
-    // 280 characters end inside the ninth sentence's second word, so the cut falls after its first.
+    // The source is cut at its last whitespace within ANSWER_PREVIEW_CHARS, so the answer shown
+    // ends at a whole word, with an ellipsis, and is no longer than the bound and the ellipsis.
     const shown = option.textContent ?? "";
+    const sourceHead = text.slice(0, ANSWER_PREVIEW_CHARS + 1).replace(/\s\S*$/u, "");
+    const shownAnswer = shown.slice(shown.indexOf("Keep both frames."));
     expect(text.length).toBeGreaterThan(2000);
+    expect(text.charAt(sourceHead.length)).toBe(" ");
     expect(shown).not.toContain("zenithward");
-    expect(
-      shown.endsWith(`Keep both frames. ${"The meridian ring stays level. ".repeat(8)}The…`)
-    ).toBe(true);
-    expect(shown.length).toBeLessThan(400);
+    expect(shownAnswer).toBe(`${sourceHead.replaceAll("**", "")}…`);
+    expect(shownAnswer.length).toBeLessThanOrEqual(ANSWER_PREVIEW_CHARS + 1);
   } finally {
     search.mockRestore();
     view.unmount();

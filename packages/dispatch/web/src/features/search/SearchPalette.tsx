@@ -246,7 +246,7 @@ function askStateLabel(ask: SearchAsk): string {
  *  on the scale of the excerpt's 24-word window. The three-line clamp is CSS only, so an answer
  *  left whole (up to 1 MiB) would sit inside the option, which a screen reader then reads as the
  *  option's name from start to end. */
-const ANSWER_PREVIEW_CHARS = 280;
+export const ANSWER_PREVIEW_CHARS = 280;
 
 /** Where an ask hit stands, under its excerpt: a badge for its state, who closed it and when,
  *  and its latest answer - who gave it, when, the options chosen and the start of its text

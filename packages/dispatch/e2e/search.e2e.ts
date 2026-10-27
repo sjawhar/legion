@@ -225,7 +225,7 @@ test("an ask hit says whether it is answered, and an answered one shows its late
     await expect(answeredHit).toContainText("Keep the steel one after all.");
     await expect(answeredHit).not.toContainText("zenithward");
     // The option's name is all its text: the excerpt, the status line and the answer's start
-    // (280 characters in `AskHitStatus`), well under the 2,000-character answer.
+    // (`ANSWER_PREVIEW_CHARS` in `AskHitStatus`), well under the 2,000-character answer.
     await expect(answeredHit).toHaveAccessibleName(/^ask /u);
     await expect(answeredHit).not.toHaveAccessibleName(/zenithward/u);
     await expect(answeredHit).toHaveAccessibleName(/^[\s\S]{1,600}$/u);

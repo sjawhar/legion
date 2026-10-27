@@ -1,10 +1,12 @@
 /**
- * A fragment the server cut out of a Markdown body before the client saw it: a search hit's
- * `ts_headline` snippet, the 24 words around the match. A cut can land inside a mark, and the
- * half it leaves renders as its characters. The balancer below drops exactly the delimiters
- * that CommonMark would have paired had the cut not happened and nothing else: a run the parser
- * would read as literal text anyway (`Use ** for bold`, `2 * 3`, `snake_case`) is the author's
- * and stays, and nothing inside a code span is ever a delimiter.
+ * A fragment cut out of a Markdown body: one the server cut before the client saw it (a search
+ * hit's `ts_headline` snippet, the 24 words around the match), or the start of a body
+ * `markdownHead` cuts here on the client, at the source's end (an ask hit's answer in the
+ * palette). A cut can land inside a mark, and the half it leaves renders as its characters. The
+ * balancer below drops exactly the delimiters that CommonMark would have paired had the cut not
+ * happened and nothing else: a run the parser would read as literal text anyway
+ * (`Use ** for bold`, `2 * 3`, `snake_case`) is the author's and stays, and nothing inside a
+ * code span is ever a delimiter.
  */
 
 import { classifyCharacter } from "micromark-util-classify-character";
