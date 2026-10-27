@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T03:26:15Z",
+  "completed": "2026-10-27T04:11:45Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2233",
-  "head": "86b33b75d8927336bbf994d6ab13023901655968",
+  "head": "5d17db145c276bdd38f259b024f3aa64c6635186",
   "proof": [
+    {
+      "criterion": "Twelfth forward merge leaves the change intact, the lease pool sized to the leased callers, and the pull request mergeable",
+      "surface": "the merged tree's builds and the store/duty Postgres suites; GitHub's mergeability",
+      "command": "go build ./... ; go vet store/api/docs; go test -count=1 ./internal/dispatch/store/ ./internal/dispatch/duty/; dispatch typecheck; claude-envoy check-dist; gh pr view 2233 --json mergeable",
+      "observed": "All pass; nine production duty.Exclusive callers on the merged tree and leasePoolSize = 9; MERGEABLE; fingerprint b9213970 unchanged (4e648533 -> 5d17db14)",
+      "headSha": "5d17db145c276bdd38f259b024f3aa64c6635186",
+      "negativeControl": "At 4e648533 GitHub reported CONFLICTING (pool.go, pi-legion CHANGELOG.md)"
+    },
     {
       "criterion": "Review round 7: no reconnect, close or reopen order makes the editor's own derived-attribute updates (heading id, list label/listType) count or be stored as an unsent edit; real typing still stored and restored",
       "surface": "the real Hocuspocus provider in ygo's frame order (connection.test.ts); Dispatch's browser suite (Playwright, chromium and iphone) on the real Go server, production SPA and Postgres",
@@ -184,6 +192,7 @@
     }
   ],
   "filesChanged": [
+    "round 11: twelfth forward merge 5d17db14 (pool.go leasePoolSize comment with main's wording and this branch's nine-caller count; pi-legion CHANGELOG.md both entries kept)",
     "round 10: pending-sync.ts (derived-only updates held, never counted or stored), connection.ts (admitted flag removed), connection.test.ts, pending-sync.test.ts, offline-edits.e2e.ts, packages/dispatch/AGENTS.md; docs/ask_lifecycle.go, docs/rebuild.go, api/issue_ask_lifecycle.go (WriteIssueAskStates logs, helper unexported); packages/envoy/CHANGELOG.md",
     "round 9: eleventh forward merge 83649d6a (packages/envoy/CHANGELOG.md, both sides kept)",
     "round 8: tenth forward merge 707b80e2; pending-sync.ts/connection.ts (held stamp removed, authenticated(readOnly) + synced(), provider's own isSynced/isAuthenticated), connection.test.ts (one real-provider harness, ygo order), pending-fixture.ts, offline-edits.e2e.ts (real-order case), e2e/editor.ts back to its pre-52159aaf form; docs.LogUnindexedAskBlocks shared by api and rebuild.go; issue_close_unloadable_test.go",
@@ -222,5 +231,5 @@
     "R7 local runs at 39c12172 (from a git archive of the head): api ok (1562 s), store ok, cmd/dispatch ok, -tags multiprocess cmd/dispatch ok (350 s); docs failed only TestAHealthyRoomUnderWritesIsNeverRefused ('too few to say anything' under load), which passes alone (ok 6.6 s) and is not in the diff; pmdoc failed only its timing tests and the differential tests that need the workspace's @legion/proof-editor link absent from the archive (pmdoc is not in the diff). bun test packages/contracts packages/envoy-client: one envoy-config timing test failed under load and passes alone. packages/dispatch: typecheck clean; bun test 2388 pass on the re-run (the first run under load had 2 failures not reproduced). biome check of contracts, dispatch, claude-envoy, envoy-client: no errors. claude-envoy check-dist passes. -race was not run locally (the pod has no C compiler); CI's envoy-go-race lane runs it."
   ],
   "openQuestions": [],
-  "round": 10
+  "round": 11
 }
