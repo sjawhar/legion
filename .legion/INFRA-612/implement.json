@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-612",
+  "completed": "2026-10-27T13:45:30Z",
+  "proof": [
+    {
+      "criterion": "A1 / C4: the browser specs text-typed-blocks.e2e.ts, ask-blocks.e2e.ts and typed-blocks.e2e.ts pass on desktop and phone, no existing case changed",
+      "surface": "Dispatch SPA (production build) on the real Go Dispatch server with Postgres 17 + pgvector, Playwright chromium and iphone projects (pod harness /legion/harness, implementer lane, database dispatch_implementer_e2e)",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts e2e/ask-blocks.e2e.ts e2e/typed-blocks.e2e.ts --project chromium --project iphone",
+      "observed": "80 passed (7.3m), 0 failed, 0 flaky; jj diff --from a9f5c529 of ask-blocks.e2e.ts and typed-blocks.e2e.ts is empty, text-typed-blocks.e2e.ts gains two cases and one import only",
+      "headSha": "5a2593b2e321",
+      "negativeControl": "Before-leg: base a9f5c529 with only the new text-typed-blocks.e2e.ts restored, -g \"sits flush|blank option\": 4 failed (both cases, both projects): line 258 margin-top Expected \"0px\" Received \"16px\"; line 311 display Expected \"none\" Received \"list-item\". Before-leg abandoned, never pushed."
+    },
+    {
+      "criterion": "C6: a decision in a reply under a document's decision sits flush in its card (question margin-top 0px; malformed nested source list margin-bottom 0px)",
+      "surface": "document page /issues/<KEY>, the document decision's reply thread, chromium and iphone",
+      "command": "new case 'a decision in a reply under a document's decision sits flush in its card' inside the C4 command",
+      "observed": "passes in both projects at the code head",
+      "headSha": "5a2593b2e321",
+      "negativeControl": "At base a9f5c529: margin-top Expected \"0px\" Received \"16px\" (both projects); with only the first-child rule raised (W3 worker run) margin-bottom Expected \"0px\" Received \"8.00001px\", the (0,4,2) nested-list rule"
+    },
+    {
+      "criterion": "C7: a malformed decision's blank option shows no bullet in a body, as in the document",
+      "surface": "conversation tab /issues/<KEY>/conversation (comment thread) and the issue's document page /issues/<KEY>/artifacts/<slug>, chromium and iphone",
+      "command": "new case 'a malformed decision's blank option shows no bullet in a body, as in the document' inside the C4 command",
+      "observed": "passes in both projects: the body's empty li has display none, 'A: first' is visible; in the document the blank item is hidden",
+      "headSha": "5a2593b2e321",
+      "negativeControl": "At base a9f5c529: display Expected \"none\" Received \"list-item\" (both projects)"
+    },
+    {
+      "criterion": "C9 / C8: the refactor changes nothing a reader sees, and the server-attribute drop now lives in the read-only transform",
+      "surface": "conversation tab, a comment with :::ask{urgency=\"high\" state=\"answered\" answered_by=\"sami\" answer=\"done\"} and two options, chromium and iphone (throwaway Playwright spec, deleted before commit)",
+      "command": "bun run e2e -- e2e/zz-infra612-smoke.e2e.ts --project chromium --project iphone",
+      "observed": "2 passed; the card reads {header: 'HIGH Decision', state: open, data-dispatch-ask-options: rows, rows: 2, source list hidden}, no 'Answered by'",
+      "headSha": "5a2593b2e321",
+      "negativeControl": "With clientAttributes bypassed in readOnlyDirective: header 'HIGH Decision · Answered by sami', state Expected \"open\" Received \"answered\". Unit mutation: refusal checked on the stripped attributes -> 'read-only still draws a typed block whose forged server attribute the schema refuses' fails (33 pass, 1 fail)"
+    },
+    {
+      "criterion": "A1 / C1-C3, C5: unit tests, typecheck and lint pass; one slot lookup, no AskShellHost, no engine-side reset",
+      "surface": "bun test, tsc, Biome, grep over packages/dispatch/web/src and packages/proof-editor/src",
+      "command": "cd packages/dispatch && bun run test && bun run typecheck; cd packages/proof-editor && bun run test && bun run typecheck; bunx biome check .; the two C5 greps from the plan",
+      "observed": "dispatch 2512 pass 0 fail; proof-editor 131 pass 0 fail; both typechecks exit 0; biome exit 0 (warnings only in untouched packages); first grep matches only askShellSlots (typed-block-drawing.ts:271-273); second grep prints nothing",
+      "headSha": "5a2593b2e321",
+      "negativeControl": "Drop disabled in readOnlyDirective (W1 worker run): proof-editor case (a) Expected \"open\" Received \"answered\" and MarkdownBody.test.tsx forged-attributes case fails (30 pass, 1 fail)"
+    }
+  ],
+  "filesChanged": [
+    "packages/proof-editor/src/read-only-directives.ts",
+    "packages/proof-editor/src/lib-headless.ts (readOnly doc comment only)",
+    "packages/proof-editor/AGENTS.md",
+    "packages/proof-editor/tests/read-only-directives.test.ts",
+    "packages/dispatch/web/src/features/refs/markdown-engine.ts",
+    "packages/dispatch/web/src/features/doc/typed-block-drawing.ts",
+    "packages/dispatch/web/src/features/doc/ask-block.ts",
+    "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx",
+    "packages/dispatch/web/src/styles.css",
+    "packages/dispatch/e2e/text-typed-blocks.e2e.ts",
+    "packages/dispatch/AGENTS.md",
+    "docs/solutions/dispatch-web/a-text-body-draws-typed-blocks-through-renderblock-and-reads-no-server-owned-attribute-INFRA-526.md",
+    "docs/solutions/dispatch-web/a-typed-block-that-can-nest-reaches-its-own-parts-only-through-child-selectors-INFRA-526.md"
+  ],
+  "trickyParts": [
+    "The server-attribute drop runs after typedBlockRefusal, so a forged server attribute with an invalid value (state=\"bogus\", selected='nope') is still refused and drawn as fence text.",
+    "AskBlockStamps' malformed key is always present (\"true\" | undefined); prosemirror-model's renderSpec skips an undefined attribute, so the static drawing is unchanged and applyAskBlockShell removes it in its one loop.",
+    "The hole first/last-child rules repeat [data-proof-block-content] to reach (0,5,0), above the footer's (0,4,1) paragraph rule and (0,4,2) nested-list rule."
+  ],
+  "deviations": [
+    "C7's document leg files the malformed decision as a separate document of the issue (createIssueArtifact, /issues/<KEY>/artifacts/<slug>), because an edit of the issue's own spec refuses any malformed decision: 400 INVALID_ASK_BLOCK 'ask block \"blank\" has an option without a label'. The same source is accepted unchanged there; reported to the architect as the plan asks.",
+    "Simplify pass (ce-simplify-code, three reviewers) applied four behaviour-preserving changes in 5a2593b2: AskBlockView reads the block id from the attribute (no second askBlockFacts pass), a duplicated comment removed, askBlockShell/AskBlockShell no longer exported (no importer left), collectAskHosts answers the shared NO_ASK_HOSTS and drops an always-false check."
+  ],
+  "openQuestions": []
+}
