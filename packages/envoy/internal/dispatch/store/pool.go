@@ -259,18 +259,19 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // (duty.Exclusive). One connection per caller that can be inside Exclusive at the same moment is
 // the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
 // connection before it learns whether the lease is held, so a pass that skips because the other
-// process holds the lease holds a connection for that round trip too. Nine names are leased: the
+// process holds the lease holds a connection for that round trip too. Ten names are leased - the
 // document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation, the
-// GitHub webhook redelivery sweep, the architecture import, the delivery reconcile,
-// the edit-notice sweep, and one per delivery durable for the consumers'
+// block-index reconciliation, the GitHub webhook redelivery sweep, the architecture import, the
+// delivery reconcile, the edit-notice sweep and one per delivery durable for the consumers'
 // reconciliation (delivery.consumerLease, a name each for delivery-events and delivery-jobs) -
-// taken by nine callers, since each delivery intake takes its own durable's name from a bind poll
-// of its own, so nine callers can be inside Exclusive at once. Nine connections are exactly those
-// nine: the headroom is zero, not one, and the next leased loop added here makes a tenth caller
-// that waits for a connection rather than failing, for as long as the longest pass then holding
-// one. They cannot come from the shared pool: a lease is held for the whole pass, which is
-// minutes for the compaction, and the shared pool's sharedPoolSize connections are what every
+// taken by ten callers, since each delivery intake takes its own durable's name from a bind poll
+// of its own, so ten callers can be inside Exclusive at once. Ten connections are exactly those
+// ten: the headroom is zero, not one, and the next leased loop added here makes an eleventh
+// caller that waits for a connection rather than failing, for as long as the longest pass then
+// holding one. They cannot come from the shared pool: a lease is held for the whole pass, which
+// is minutes for the compaction, and the shared pool's sharedPoolSize connections are what every
 // request reads through.
+const leasePoolSize = 10
 const leasePoolSize = 9
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that

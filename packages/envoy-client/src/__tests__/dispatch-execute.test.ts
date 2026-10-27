@@ -4734,7 +4734,10 @@ describe("executeDispatchTool", () => {
     expect(await read({ ref: "http://dispatch.test/issues/DSP-42/spec?q=workspace" })).toEqual(
       spec
     );
-    expect(await read({ ref: "http://dispatch.test/issues/DSP-42/spec#b-ship-it" })).toEqual(spec);
+    // A block's link on the Spec tab names that block, so the read is the block's, not the spec's.
+    expect(
+      (await read({ ref: "http://dispatch.test/issues/DSP-42/spec#b-ship-it" })).text
+    ).toStartWith("Block: ship-it\nDocument: dispatch://DSP-42/spec\n");
     expect(await read({ ref: "http://dispatch.test/issues/DSP-42/spec" })).toEqual(spec);
     expect(
       await read({ ref: "http://dispatch.test/issues/DSP-42/artifacts/notes-md?q=workspace" })
@@ -4746,6 +4749,328 @@ describe("executeDispatchTool", () => {
     expect(requests).toContain(
       `/api/v1/references?to=${encodeURIComponent("dispatch://DSP-42/artifact/notes-md")}`
     );
+  });
+
+  describe("a block reference", () => {
+    const blockRef = "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1";
+    const blockNode = {
+      kind: "block",
+      id: "CORE-1/spec#décision:1",
+      block_id: "décision:1",
+      issue_key: "CORE-1",
+      project: "CORE",
+      ref: blockRef,
+      document: "dispatch://CORE-1/spec",
+    };
+    const notFound = (error: string) => response({ error, code: "NOT_FOUND" }, 404);
+    /** A read of `ref` against a server whose references route answers `to` and `from`: the
+     *  pending result, and the requests it sends. */
+    const readBlock = (
+      ref: string,
+      to: () => Response,
+      from: () => Response = () => response({ node: blockNode, edges: [] })
+    ) => {
+      const requests: string[] = [];
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        requests.push(target.pathname + target.search);
+        if (target.pathname === "/api/v1/references" && target.searchParams.get("to") === ref) {
+          return to();
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.get("from") === ref) {
+          return from();
+        }
+        throw new Error(`unexpected request: ${target.pathname}${target.search}`);
+      };
+      const result = executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return { result, requests };
+    };
+
+    test("reads the block: its document, the version its text last changed in, its text and its links", async () => {
+      const commentRef = "dispatch://CORE-1/comment/cccccccc-0000-4000-8000-000000000042";
+      const { result, requests } = readBlock(
+        blockRef,
+        () =>
+          response({
+            node: {
+              ...blockNode,
+              changed_version: 3,
+              changed_at: "2026-10-20T00:00:00Z",
+              text: "We ship on Friday.\n\nThe release waits for OPS-1.",
+            },
+            edges: [
+              {
+                kind: "mentions",
+                direction: "in",
+                node: {
+                  kind: "comment",
+                  id: "cccccccc-0000-4000-8000-000000000042",
+                  ref: commentRef,
+                },
+                excerpt: { text: "See the decision." },
+                created_at: "2026-10-21T00:00:00Z",
+                source_seq: 7,
+              },
+            ],
+          }),
+        () =>
+          response({
+            node: blockNode,
+            edges: [
+              {
+                kind: "mentions",
+                direction: "out",
+                node: { kind: "issue", id: "OPS-1", ref: "dispatch://OPS-1" },
+                created_at: "2026-10-20T00:00:00Z",
+                source_seq: 5,
+              },
+              {
+                kind: "part_of",
+                direction: "out",
+                node: {
+                  kind: "artifact",
+                  id: "artifact-1",
+                  ref: "dispatch://CORE-1/artifact/spec",
+                },
+                created_at: "2026-10-19T00:00:00Z",
+                source_seq: null,
+              },
+            ],
+          })
+      );
+
+      expect(await result).toEqual({
+        text: [
+          "Block: décision:1",
+          "Document: dispatch://CORE-1/spec",
+          "Changed in version: 3",
+          "Text:",
+          "We ship on Friday.\n\nThe release waits for OPS-1.",
+          "Referenced by:",
+          `- mentions comment ${commentRef} (See the decision. · 2026-10-21T00:00:00Z)`,
+          "Links:",
+          "- mentions issue dispatch://OPS-1 (2026-10-20T00:00:00Z)",
+          "- part_of artifact dispatch://CORE-1/artifact/spec (2026-10-19T00:00:00Z)",
+        ].join("\n"),
+        details: { issue: "CORE-1", block: "décision:1" },
+      });
+      // The block's own node, both ways, and nothing of the issue or the document.
+      expect(requests.sort()).toEqual([
+        `/api/v1/references?from=${encodeURIComponent(blockRef)}`,
+        `/api/v1/references?to=${encodeURIComponent(blockRef)}`,
+      ]);
+    });
+
+    test("a pinned block says how it stands against its version and shows that version's text", async () => {
+      const pinned = "dispatch://CORE-1/spec#b-ship%5Fit@v1";
+      const node = {
+        ...blockNode,
+        id: "CORE-1/spec#ship_it",
+        block_id: "ship_it",
+        ref: "dispatch://CORE-1/spec#b-ship%5Fit",
+        changed_version: 2,
+        changed_at: "2026-10-22T00:00:00Z",
+        text: "Ship on Monday.",
+      };
+      const pinRead = (state: "changed" | "unchanged", text: string) =>
+        readBlock(pinned, () =>
+          response({
+            node: { ...node, pin: { version: 1, ref: pinned, text, state } },
+            edges: [],
+          })
+        ).result;
+      const head = [
+        "Block: ship_it",
+        "Document: dispatch://CORE-1/spec",
+        "Changed in version: 2",
+        "Text:",
+        "Ship on Monday.",
+        "Pinned to version: 1",
+      ];
+      const sections = ["Referenced by:", "- none", "Links:", "- none"];
+
+      expect((await pinRead("changed", "Ship on Friday.")).text).toBe(
+        [
+          ...head,
+          "Changed since version 1; last changed in version 2.",
+          "Text at version 1:",
+          "Ship on Friday.",
+          ...sections,
+        ].join("\n")
+      );
+      expect((await pinRead("unchanged", "Ship on Monday.")).text).toBe(
+        [
+          ...head,
+          "Unchanged since version 1.",
+          "Text at version 1:",
+          "Ship on Monday.",
+          ...sections,
+        ].join("\n")
+      );
+    });
+
+    test("a pinned block that was removed shows its version's text and no links, and the read succeeds", async () => {
+      const pinned = `${blockRef}@v2`;
+      const { result } = readBlock(pinned, () =>
+        response({
+          node: {
+            ...blockNode,
+            pin: {
+              version: 2,
+              ref: pinned,
+              text: "We ship on Friday.",
+              state: "removed",
+              removed_version: 3,
+            },
+          },
+          edges: [],
+        })
+      );
+
+      expect((await result).text).toBe(
+        [
+          "Block: décision:1",
+          "Document: dispatch://CORE-1/spec",
+          "Pinned to version: 2",
+          "Removed in version 3.",
+          "Text at version 2:",
+          "We ship on Friday.",
+          "Referenced by:",
+          "- none",
+          "Links:",
+          "- none",
+        ].join("\n")
+      );
+    });
+
+    test("a block no current version holds is an error naming the block and its document", async () => {
+      const absent = () => notFound('no block "décision:1" in dispatch://CORE-1/spec');
+      const { result } = readBlock(blockRef, absent, absent);
+
+      await expect(result).rejects.toThrow(
+        new Error("No block décision:1 in dispatch://CORE-1/spec.")
+      );
+      // A pinned ref's 404 says which of the version, its record or the block is missing.
+      const pinned = `${blockRef}@v9`;
+      const noVersion = () => notFound("no version 9 of dispatch://CORE-1/spec");
+      await expect(readBlock(pinned, noVersion, noVersion).result).rejects.toThrow(
+        "no version 9 of dispatch://CORE-1/spec"
+      );
+    });
+
+    test("a tool that would act on the block's owner refuses it before any request", async () => {
+      const problemsOf = (tool: string, args: Record<string, unknown>) =>
+        executeDispatchTool({
+          tool,
+          args,
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: (() => {
+            throw new Error("network must not be called");
+          }) as unknown as typeof fetch,
+        }).then(
+          () => {
+            throw new Error(`${tool} was not refused`);
+          },
+          (error: unknown) => {
+            if (!(error instanceof ToolInputError)) throw error;
+            return error.problems;
+          }
+        );
+
+      expect(
+        await problemsOf("dispatch_comment", { ref: "dispatch://CORE-1/spec#b-x", body: "Agreed." })
+      ).toEqual([
+        "ref dispatch://CORE-1/spec#b-x names block x on CORE-1; dispatch comment would act on CORE-1 and drop the block: read it with dispatch read, or name CORE-1 with issue CORE-1",
+      ]);
+      // A document tool acts on the issue's primary document unless named, so the hint names
+      // the block's own document.
+      const notesBlock = "dispatch://CORE-1/artifact/notes-md#b-x@v2";
+      expect(
+        await problemsOf("dispatch_doc_edit", {
+          ref: notesBlock,
+          ops: [{ op: "replace", find: "old line", with: "new line" }],
+        })
+      ).toEqual([
+        `ref ${notesBlock} names block x on CORE-1; dispatch doc-edit would act on CORE-1 and drop the block: read it with dispatch read, or name CORE-1 with issue CORE-1 and artifact notes-md`,
+      ]);
+      const handbookBlock = "dispatch://CORE/artifact/handbook-md#b-x";
+      expect(await problemsOf("dispatch_doc_read", { ref: handbookBlock })).toEqual([
+        `ref ${handbookBlock} names block x on CORE/handbook-md; dispatch doc-read would act on CORE/handbook-md and drop the block: read it with dispatch read, or name CORE/handbook-md with project CORE and artifact handbook-md`,
+      ]);
+      // A read of the block names its document, so another document beside it is refused.
+      expect(
+        await problemsOf("dispatch_read", {
+          ref: "dispatch://CORE-1/spec#b-x",
+          artifact: "notes-md",
+        })
+      ).toEqual([
+        "artifact notes-md and ref dispatch://CORE-1/spec#b-x name two documents; --ref dispatch://CORE-1/spec#b-x alone names spec, and --issue CORE-1 --artifact notes-md names notes-md",
+      ]);
+    });
+
+    test("a document read names the document's block each link is at", async () => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/projects/CORE/artifacts/handbook-md") {
+          return response({
+            id: "artifact-7",
+            slug: "handbook-md",
+            name: "handbook.md",
+            project: "CORE",
+            versions: [{ version: 1 }],
+          });
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
+          return response({
+            node: { kind: "artifact", id: "CORE/artifact/handbook-md" },
+            edges: [
+              {
+                kind: "mentions",
+                direction: "in",
+                node: { kind: "issue", id: "OPS-1", ref: "dispatch://OPS-1" },
+                block: {
+                  kind: "block",
+                  id: "CORE/artifact/handbook-md#ship-it",
+                  ref: "dispatch://CORE/artifact/handbook-md#b-ship-it",
+                },
+                created_at: "2026-10-21T00:00:00Z",
+                source_seq: 9,
+              },
+            ],
+          });
+        }
+        if (target.pathname === "/api/v1/references") return response(emptyGraph("artifact"));
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref: "dispatch://CORE/artifact/handbook-md" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+      expect(result.text).toContain(
+        "Referenced by:\n- mentions issue dispatch://OPS-1 (2026-10-21T00:00:00Z) (block dispatch://CORE/artifact/handbook-md#b-ship-it)\nLinks:"
+      );
+    });
   });
 
   test("reads a named artifact version from a singular dispatch URI", async () => {
@@ -5023,7 +5348,11 @@ describe("executeDispatchTool", () => {
       "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
         "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
         "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " +
-        "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " +
+        "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " +
+        "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " +
+        "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " +
+        "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " +
+        "dispatch read), or " +
         "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " +
         "for dispatch doc-read)"
     );
