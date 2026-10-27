@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-536",
+  "completed": "2026-10-27T09:50:16Z",
+  "round": 1,
+  "codeHead": "738dbe90b13bb47cf622f6b2e38e9a4fc677faf2",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 0,
+  "minor": 3,
+  "ci": "CI head 738dbe90 (newest pull_request run); required lint, typecheck, test, pr-title all completed success; compare 738dbe90...c6d965e8 handoffsOnly true (2 files). Non-required envoy-go, dispatch and the other heavy jobs still queued.",
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at 738dbe90. Decoder matches micromark's numeric and named rules (2,125 names diffed against Go's table: only nLt/nGt differ, special-cased); 6,000 random writer round trips and 3,000 decode comparisons find no defect in this diff; linear time measured; two Minors (stale test comment, two reference-shape rules).",
+    "codeQuality": "Verdict: CHANGES at 738dbe90. Two reference-shape definitions (characterReferenceAt scanner and the characterReference regex); escape loop copied in titleSuffix and escapeImageSource; named lookup via html.UnescapeString; copied render/read-back test loops."
+  },
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/references.go",
+      "description": "The reference shape is defined twice: characterReferenceAt's scanner (references.go:48-82) and the regex characterReference (render.go:907), which escapes() (elements.go:200) and escapeFootnoteLabel (render.go:894) still use. Keep one shape scanner in references.go, used by all three, and delete the regex; bytes stay the same."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/render_readback_test.go",
+      "description": "render_readback_test.go:697-702 describes the fixed bug as current behaviour (escapeImageSource writes the address as it stands, the write is refused); the test asserts the opposite."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/render_readback_test.go",
+      "description": "The render-then-read-back-in-both-parsers loop is copied at 657-679 and 712-744 (and exists at 200-221); TestEveryEscapeAndReferenceReadsAsTheEngineReadsIt (489-505) re-inlines parseAsTheEngine and checks the `Plain \\&amp; end.` row inside the loop. One helper, parseAsTheEngine in the escape test, the A1 assertion once."
+    }
+  ],
+  "declined": [
+    "One escape helper for titleSuffix and escapeImageSource (quality finding 2): the sites reserve different bytes and treat a backslash differently (a title escapes every backslash, an address only before punctuation or at its end); a predicate-driven helper is abstraction over distinct rules.",
+    "Named lookup through goldmark's table (quality finding 3): the plan's recorded decision; goldmark lacks Abreve, so one special case stays either way; the deep review diffed Go's html table against the engine's 2,125 names.",
+    "doc-read's exact bytes before the trailer (doc.e2e.ts:752): the plan's T4 asks for those exact bytes."
+  ],
+  "deferrals": "None: the operator's instructions allow no follow-up, so the three cleanups are requested in this round."
+}
