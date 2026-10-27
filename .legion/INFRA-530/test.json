@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-530",
+  "completed": "2026-10-27T02:28:32Z",
+  "verdict": "fail",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its two commands in the pod harness (tester lane): Go 'go test ./internal/dispatch/pmdoc -run TestLinkifyGuardLinksWhatGoldmarkLinks|TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine|TestEmailReadingsThatDifferAreRecorded|TestRenderKeepsStoredMarkdownThatReadsBack -count=1 -v' 4 PASS with the engine compared (no skip); 'bun run e2e -- email-links.e2e.ts' 2 passed (chromium, iphone). With parse.go restored from 5158fd92 (main + tests): Go AutoLink and linkify tests FAIL naming href a@b.test against the engine's mailto:a@b.test, and e2e 2 failed on the stored-markdown assertion."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "The base branch's required checks can pass at the head: required check pr-title",
+      "evidence": "Required check 'pr-title' (main's ruleset requires lint, typecheck, test, pr-title) concluded failure at code head 8a431a763f9e9cb8a99b9cea2383a626a453671e, run 40434368969: 'PR title must be a conventional commit subject (type(scope): summary)'. The title is 'Dispatch stores an email address written into a document as a mailto: link'. Fix: gh pr edit 2307 --repo sjawhar/legion --title 'fix(dispatch): <summary>' (squash subject and release versioning read it). Command: gh api repos/sjawhar/legion/commits/8a431a763f9e9cb8a99b9cea2383a626a453671e/check-runs."
+    },
+    {
+      "criterion": "The pull request can merge and run CI: no conflict with main",
+      "evidence": "gh api repos/sjawhar/legion/pulls/2307 --jq '.mergeable, .mergeable_state' prints 'false dirty' (gh pr view: CONFLICTING) against main@origin 08c345f7f145; main moved since base 7f7edb8de and touches packages/envoy/CHANGELOG.md, which this PR edits. GitHub computes no merge ref and runs no checks on a conflicting head (handoff head 9ad1a1f9 has 0 check runs). The implementer brings main in (real conflict, skill://legion-worker/references/conflicts-and-rewrites.md); the tester then compares the unchanged-diff fingerprint."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "A1 stores: a bare email written through the API is stored as a mailto: link",
+      "surface": "The agent's dispatch CLI (packages/envoy-client/bin/dispatch.ts, its own process) against the real Go Dispatch server + Postgres 17/pgvector in the pod harness",
+      "command": "throwaway Playwright spec spawning the real dispatch entry: dispatch doc-edit --issue CORE-1 --ops-json '[{\"op\":\"insert\",\"after\":\"end\",\"markdown\":\"Angle <ang@b.test>, code `code@b.test`, explicit [old@b.test](old@b.test).\\n\\n| who |\\n| --- |\\n| cell@b.test |\\n\\nBelow the table.\"}]'; dispatch doc-read --issue CORE-1 --no-blocks; dispatch artifact --project CORE --name contacts.md --content 'Write to proj@b.test.'; dispatch doc-read --project CORE --artifact contacts.md. Evidence: https://github.com/sjawhar/legion/pull/2307#issuecomment-6432238516",
+      "observed": "doc-read: 'Angle [ang@b.test](mailto:ang@b.test), code `code@b.test`, explicit [old@b.test](old@b.test).' and '| [cell@b.test](mailto:cell@b.test) |'; project document: 'Write to [proj@b.test](mailto:proj@b.test).'",
+      "headSha": "8a431a763f9e9cb8a99b9cea2383a626a453671e",
+      "negativeControl": "same drive with parse.go restored from 5158fd92 (no fix): doc-read shows 'Angle [ang@b.test](ang@b.test)' and '| [cell@b.test](cell@b.test) |', 1 failed"
+    },
+    {
+      "criterion": "A1 renders and opens: the live editor shows a mailto: link and the link opener opens it",
+      "surface": "Dispatch spec page /issues/CORE-1/spec, live editor, real Chromium",
+      "command": "same throwaway spec: openSpec, documentEditor hrefs, Ctrl/Cmd click with window.open replaced by a recorder",
+      "observed": "cell@b.test (table cell) and ang@b.test (angle form) href mailto:<addr>; old@b.test keeps href old@b.test; code@b.test is no link; window.open received ['mailto:cell@b.test']; 1 passed",
+      "headSha": "8a431a763f9e9cb8a99b9cea2383a626a453671e",
+      "negativeControl": "at 5158fd92 the drive stops at the stored-markdown assertion ([cell@b.test](cell@b.test)); the implementer's e2e at 5158fd92 shows 2 failed"
+    },
+    {
+      "criterion": "No stored markdown is restamped",
+      "surface": "dispatch doc-read after a second dispatch doc-edit, and pmdoc Render over 32 email shapes compared to the editor's engine",
+      "command": "second doc-edit inserting 'Later.' then doc-read, comparing the bytes before 'Below the table.'; throwaway Go test over 32 shapes using engineReadings, mustRender, Parse",
+      "observed": "doc-read bytes of the earlier content identical after the second edit; for every shape where Go and the engine agree, Render(Parse(md)) reads back equal in Go and the engine and renders byte-identically a second time; no rendering holds mailto:mailto:; <mailto:a@b.test> and <MAILTO:a@b.test> keep their own scheme",
+      "headSha": "8a431a763f9e9cb8a99b9cea2383a626a453671e",
+      "negativeControl": "the implementer's TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine fails at 5158fd92 with Render = 'Mail [a@b.test](a@b.test) now.\\n'"
+    }
+  ],
+  "findingsSentToArchitect": [
+    "Five email shapes read differently in Go and the editor's engine at the head and identically so at main + tests (not caused by this change): '_a@b.test_', '\"a@b.test\"', 'a@-b.test', 'a\\\\@b.test', '\\\\<a@b.test>'. '_a@b.test_' and 'a\\\\@b.test' are also not stable through one Go Render (Go reads no link; the rendering '*a@b.test*' / 'a@b.test' reads back as a link). Same email-boundary class as D1 (INFRA-531).",
+    "/legion/harness/setup.sh guarded the Postgres start with pg_ctl status (the INFRA-95/INFRA-304 kill): the tester's run shut down the implementer's server. Changed in place on the issue volume to a pg_isready guard; verified it prints 'postgres already answers ... starting nothing' against the live server."
+  ],
+  "ciRead": "At 8a431a76 (read 02:26Z): pr-title failure (required); typecheck success; changes success; Docs success; test, lint, build, envoy-go, envoy-go-race, envoy-smoke, envoy-e2e-local, envoy-infra-go, dispatch, dispatch-memory, dispatch-multiprocess, broker-multiprocess queued or in progress. Handoff head 9ad1a1f9: 0 check runs (PR conflicting)."
+}
