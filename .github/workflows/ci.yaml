@@ -86,6 +86,9 @@ jobs:
       go_notices: ${{ steps.filter.outputs.go_notices }}
       ci_filters: ${{ steps.filter.outputs.ci_filters }}
     steps:
+      # Scratch INFRA-520: fail the selector on the run's first attempt only.
+      - name: Fail on the first attempt
+        run: test "$GITHUB_RUN_ATTEMPT" != 1
       # On pull_request dorny/paths-filter reads the file list from the API and never reads the
       # tree; push and merge_group diff with git and need the clone (a merge group diffs its
       # base_sha..head_sha, fetching what the clone lacks).
