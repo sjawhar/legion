@@ -79,6 +79,12 @@ func TestTildeRunsReadAsTheEngineReadsThem(t *testing.T) {
 		{`p *~~**a~~* q`, `paragraph: "p " | "**a" emphasis strike_through | " q"`, false},
 		{`*x ~~**b~~ y*`, `paragraph: "x " emphasis | "**b" emphasis strike_through | " y" emphasis`, false},
 		{`*[~~**é~~*`, `paragraph: "[" emphasis | "**é" emphasis strike_through`, false},
+		// A `*` run beside a `~` opens or closes toward it, as beside another `*` (micromark's
+		// attentionMarkers list `~`), so the rule of three keeps a `**` that can both open and
+		// close from a single `*`.
+		{`Plain b*~* text.`, `paragraph: "Plain b" | "~" emphasis | " text."`, false},
+		{`Plain ~**b<* end.`, `paragraph: "Plain ~**b<* end."`, false},
+		{`Plain *b**~~ end.`, `paragraph: "Plain *b**~~ end."`, false},
 	}
 	readers := []struct {
 		name  string
@@ -134,35 +140,6 @@ func TestTildeRunsReadAsTheEngineReadsThem(t *testing.T) {
 			}
 		}
 	})
-}
-
-// The engine judges whether a `*` run beside a `~` opens or closes by micromark's
-// attentionMarkers, which list `~`, and Go does not. Each row is markdown and whether Go and the
-// engine read it alike, so a change to either reading shows here: the rows recorded as differing
-// are dispatch://INFRA-535's, which flips them when Go reads them as the engine does.
-func TestTildeReadingsThatDifferAreRecorded(t *testing.T) {
-	tests := []struct {
-		markdown string
-		agree    bool
-	}{
-		{"Plain b*~* text.", false},
-		{"Plain ~**b<* end.", false},
-		{"Plain *b**~~ end.", false},
-	}
-	markdowns := make([]string, 0, len(tests))
-	for _, test := range tests {
-		markdowns = append(markdowns, test.markdown)
-	}
-	readings := engineReadings(t, markdowns)
-	for index, test := range tests {
-		doc, err := Parse(test.markdown)
-		if err != nil {
-			t.Fatalf("Parse(%q) = %v", test.markdown, err)
-		}
-		if got := readings[index] != nil && doc.Equal(readings[index]); got != test.agree {
-			t.Errorf("%q: Go reads %s, the engine %s; recorded as agreeing: %v", test.markdown, readingSummary(doc), readingSummary(readings[index]), test.agree)
-		}
-	}
 }
 
 // readingSummary is a document's reading, each textblock's inline nodes in document order

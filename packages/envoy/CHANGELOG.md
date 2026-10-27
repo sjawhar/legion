@@ -1441,7 +1441,9 @@
   browser misread, such as text `~~~x~~` stored as `\~~~x~~`, which the browser strikes, is written
   anew (`&#126;&#126;&#126;x&#126;&#126;`) when its document is next rendered, and no stored
   document is rewritten. An image inside an image's label now adds its own alt text to the outer
-  alt text, as the browser editor reads it (INFRA-534).
+  alt text, as the browser editor reads it. A `*` or `_` run beside a tilde now opens or closes
+  toward it as the browser editor reads it, so `*~~**b~~*` is emphasis around struck `**b`, and
+  `Plain b*~* text.` is emphasis `~` (INFRA-534).
 
 - Every `envoy-infra` component refuses a number in an integer input that is not a whole number
   within the 64-bit integer range, at any depth (an object type's property, an array element, a

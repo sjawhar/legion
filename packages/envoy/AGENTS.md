@@ -1539,8 +1539,8 @@ goldmark judged the lengths they were written with, so in `***a.****&#32;b*` the
 is text. A run of `*` or `_` can also open where another `*` or `_` follows it and close where one
 precedes it, as that parser's attention markers let it (`emphasisParser`), where goldmark's
 flanking rules alone decide, so in `b_*a**` the `*` can both open and close, the rule of three
-keeps it from the `**`, and the line is text. That parser counts `~` as such a marker too, and Go
-does not yet (INFRA-535). A run of `~` pairs only with a run of its own length, one or two, and a
+keeps it from the `**`, and the line is text. That parser counts `~` as such a marker too, and so
+does Go. A run of `~` pairs only with a run of its own length, one or two, and a
 run directly after a `~` is text unless a backslash escapes that `~` (`tildeParser`), as the
 browser editor's strikethrough reads them. pmdoc pairs the runs itself (`delimiterList`), never on
 goldmark's delimiter stack: `~` runs and `*`/`_` runs in separate passes, as that parser's two

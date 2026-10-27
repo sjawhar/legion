@@ -32,15 +32,18 @@ func inlineParsers(emphasis emphasisParser) []util.PrioritizedValue {
 
 // emphasisParser reads `*` and `_` delimiter runs as the browser editor's parser (micromark) does:
 // it judges whether a run can open or close by CommonMark's flanking rules, except that a run can
-// also open where another `*` or `_` follows it and close where one precedes it (micromark's
-// attentionMarkers), which goldmark's ScanDelimiter does not allow. In `b_*a**` the `*` can
-// therefore both open and close, so the rule of three keeps it from pairing with the `**`, and the
-// engine reads the line as text where goldmark read italic `a`. It pairs the runs as the browser
-// editor's parser does (emphasisDelimiters), apart from the `~` runs and in micromark's order
-// (delimiterList).
+// also open where another `*`, `_` or `~` follows it and close where one precedes it (micromark's
+// attentionMarkers, which GFM's strikethrough extends with `~`), which goldmark's ScanDelimiter
+// does not allow. In `b_*a**` the `*` can therefore both open and close, so the rule of three keeps
+// it from pairing with the `**`, and the engine reads the line as text where goldmark read italic
+// `a`. It pairs the runs as the browser editor's parser does (emphasisDelimiters), apart from the
+// `~` runs and in micromark's order (delimiterList).
 //
-// micromark counts GFM's `~` as such a marker too, and that half is not applied: a `*` or `_` run
-// beside a `~` is judged by the flanking rules alone (dispatch://INFRA-535).
+// Counting `~` as a marker changes only whether a `*` or `_` run beside it can open or close, never
+// what it pairs with: the `~` runs pair in a pass of their own, apart from the `*` and `_` runs, as
+// micromark's strikethrough pairs them apart from attention (delimiterList), so a run that opens
+// toward a `~` never takes a `~` run as its partner. In `*~~**b~~*` the outer `*` runs open and
+// close toward the `~~` and pair around the struck `**b`, as the engine reads it.
 //
 // goldmarkRules reads every delimiter run by goldmark's rules instead: a `*` or `_` run by the
 // flanking rules alone, a `~` run by goldmark's strikethrough (tildeParser), and all of them paired
@@ -76,8 +79,8 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 	canOpen := !afterIsSpace && (!afterIsPunct || beforeIsSpace || beforeIsPunct)
 	canClose := !beforeIsSpace && (!beforeIsPunct || afterIsSpace || afterIsPunct)
 	if !p.goldmarkRules {
-		canOpen = canOpen || after == '*' || after == '_'
-		canClose = canClose || before == '*' || before == '_'
+		canOpen = canOpen || after == '*' || after == '_' || after == '~'
+		canClose = canClose || before == '*' || before == '_' || before == '~'
 	}
 	if char == '_' {
 		canOpen, canClose = canOpen && (beforeIsSpace || beforeIsPunct || !canClose), canClose && (afterIsSpace || afterIsPunct || !canOpen)
