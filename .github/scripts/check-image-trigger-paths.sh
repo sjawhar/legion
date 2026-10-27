@@ -23,15 +23,19 @@
 #   * GATES are an ALLOWLIST: unknown means refused, never ungated. A gate resolves to
 #     `dorny/paths-filter` outputs tested `== 'true'` and joined by `||`, or to terms that
 #     cannot narrow by path, or it is refused. GitHub compares case-insensitively, so this
-#     check does too. One such term is a CALL MODE: `inputs.<name> == '<literal>'` (or `!=`)
-#     in a job's `if:`, in a workflow whose own `on.workflow_call.inputs` declares <name> -
-#     worker-image.yaml's build job skips on `inputs.attest_digest == ''` for release.yaml's
-#     attest-only call. The caller picks that value, not the change: a run the workflow's own
-#     path triggers start leaves the input unset, which compares as '', and every caller's
-#     triggers and gates are traced below as triggers of this workflow anyway. The one gap:
-#     this check does not read a caller's `with:`, so a caller passing a path-derived value
-#     (a paths-filter output, say) into such an input would narrow by path unseen. No caller
-#     does that today, and review holds it. Everywhere else an `inputs.` term is refused: in a
+#     check does too. One such term is a CALL MODE, in a job's `if:`, in a workflow whose own
+#     `on.workflow_call.inputs` declares <name>: `inputs.<name> == ''`, or `inputs.<name> !=
+#     '<literal>'` for a non-empty literal - a term TRUE while the input is unset, which GitHub
+#     compares as ''. worker-image.yaml's build job runs only on `inputs.attest_digest == ''`,
+#     so release.yaml's attest-only call, which sets attest_digest, skips it. The caller picks
+#     that value, not the change: a run the workflow's own path triggers start leaves the input
+#     unset, so the term holds and the build runs, and every caller's triggers and gates are
+#     traced below as triggers of this workflow anyway. `== '<non-empty>'` and `!= ''` are
+#     refused: false while the input is unset, they would skip the build on the workflow's own
+#     path triggers and on every call that leaves the input unset. The one gap: this check
+#     does not read a caller's `with:`, so a caller passing a path-derived value (a
+#     paths-filter output, say) into such an input would narrow by path unseen. No caller does
+#     that today, and review holds it. Everywhere else an `inputs.` term is refused: in a
 #     step's `if:`, in a workflow without `workflow_call` or whose `workflow_call` does not
 #     declare that input, and in any shape but a plain comparison with a literal.
 #   * A build in a `run:` step is DETECTED, and EVERY detection is refused - there is no
@@ -119,9 +123,10 @@ NEUTRAL = re.compile(
 )
 RESULT_TERM = re.compile(r"needs\.([\w-]+)\.result\s*(==|!=)\s*'([A-Za-z_]+)'", re.I)
 # A CALL MODE (the GATES paragraph above): a `workflow_call` input compared with a literal, in
-# which `''` is GitHub's escaped quote. Neutral only for the input names gate_outputs is handed,
-# which are the ones the job's own workflow declares under `on.workflow_call.inputs`.
-CALL_MODE = re.compile(r"inputs\.([\w-]+)\s*(?:==|!=)\s*'(?:[^']|'')*'", re.I)
+# which `''` is GitHub's escaped quote, so `''''` is the one-quote string, not the empty one.
+# Neutral only for the input names gate_outputs is handed, which are the ones the job's own
+# workflow declares under `on.workflow_call.inputs`, and only when true_unset holds.
+CALL_MODE = re.compile(r"inputs\.([\w-]+)\s*(==|!=)\s*'((?:[^']|'')*)'", re.I)
 INPUTS_TERM = re.compile(r"(?<![\w.])inputs\.", re.I)
 
 
@@ -135,14 +140,22 @@ def call_inputs(document: dict) -> frozenset[str]:
     return frozenset(str(name).lower() for name in declared)
 
 
+def true_unset(mode: re.Match) -> bool:
+    """True for a CALL_MODE match that holds while its input is unset, which GitHub compares as
+    '': `== ''`, or `!=` a non-empty literal. Any other is false on the workflow's own path
+    triggers and on every call that leaves the input unset, so it skips the build there."""
+    _, operator, literal = mode.groups()
+    return (literal == "") == (operator == "==")
+
+
 def neutral(term: str, modes: frozenset[str]) -> bool:
     """True for an `if:` term that cannot narrow which CHANGES reach a job: a NEUTRAL term, or
-    a CALL_MODE comparison on one of `modes`."""
+    a CALL_MODE comparison on one of `modes` that is true while the input is unset."""
     term = unwrap(term).strip()
     if NEUTRAL.fullmatch(term):
         return True
     mode = CALL_MODE.fullmatch(term)
-    return bool(mode) and mode.group(1).lower() in modes
+    return bool(mode) and mode.group(1).lower() in modes and true_unset(mode)
 
 
 def admits_skipped(term: str) -> bool:
@@ -693,9 +706,9 @@ def gate_outputs(condition: str, modes: frozenset[str]) -> list[tuple[str, str]]
     (`needs.<job>.outputs.<name> == 'true'` tests joined by `||`, at most one such conjunct;
     other `||` terms there only widen, so they are allowed), or made entirely of terms that do
     not narrow by path — `always()`, `success()`, `!cancelled()`, `needs.<job>.result`, and a
-    CALL_MODE comparison on one of `modes` — or it is refused, quoting the term. `modes` is
-    empty unless the `if:` is a job's, in a workflow that declares those `workflow_call`
-    inputs."""
+    CALL_MODE comparison on one of `modes` that is true while the input is unset — or it is
+    refused, quoting the term. `modes` is empty unless the `if:` is a job's, in a workflow that
+    declares those `workflow_call` inputs."""
     if not condition.strip():
         return []
     conjuncts = [unwrap(part) for part in split_top(unwrap(condition), "&&")]
@@ -705,12 +718,27 @@ def gate_outputs(condition: str, modes: frozenset[str]) -> list[tuple[str, str]]
             continue
         if all(neutral(term, modes) for term in split_top(part, "||")):
             continue
-        hint = (
-            "; an `inputs.<name> == '<literal>'` comparison is admitted only in a job's if:, "
-            "in a workflow whose on.workflow_call.inputs declares <name>"
-            if INPUTS_TERM.search(part)
-            else ""
-        )
+        modes_false_unset = [
+            mode
+            for term in split_top(part, "||")
+            for mode in [CALL_MODE.fullmatch(unwrap(term).strip())]
+            if mode and mode.group(1).lower() in modes and not true_unset(mode)
+        ]
+        if modes_false_unset:
+            hint = (
+                f"; `{' '.join(modes_false_unset[0].group(0).split())}` is false while the input "
+                f"is unset, which GitHub compares as '', so it would skip the build on the "
+                f"workflow's own path triggers and on every call that leaves the input unset: "
+                f"test `inputs.<name> == ''`, or `!=` a non-empty literal"
+            )
+        elif INPUTS_TERM.search(part):
+            hint = (
+                "; an `inputs.<name> == ''` or `inputs.<name> != '<non-empty literal>'` "
+                "comparison is admitted only in a job's if:, in a workflow whose "
+                "on.workflow_call.inputs declares <name>"
+            )
+        else:
+            hint = ""
         raise Unreadable(
             f"is narrowed by `{' '.join(part.split())}`, which this check cannot evaluate "
             f"against a path filter; express which CHANGES reach the job as a "

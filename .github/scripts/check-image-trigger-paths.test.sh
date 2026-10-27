@@ -427,6 +427,32 @@ call_modes "$root" "if: \"!cancelled() && Inputs.MODE != 'Attest'\"" ""
 run_check "$root"
 check "!= and any letter case read the same, as GitHub compares" "$(is "$status" 0)"
 
+# The input is unset - compared as '' - on the called workflow's own pull_request and on the
+# call that leaves it out, so a term false for '' would skip the build on both.
+root=$(fixture call-mode-equals-non-empty)
+call_modes "$root" "if: inputs.mode == 'attest'" ""
+run_check "$root"
+check "inputs.mode == 'attest', false while mode is unset, is refused" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.mode == 'attest'\`")"
+check "  and says why" "$(contains "$out" "\`inputs.mode == 'attest'\` is false while the input is unset, which GitHub compares as '', so it would skip the build on the workflow's own path triggers and on every call that leaves the input unset")"
+
+root=$(fixture call-mode-not-equals-empty)
+call_modes "$root" "if: inputs.mode != ''" ""
+run_check "$root"
+check "inputs.mode != '', false while mode is unset, is refused" "$(is "$status" 1)"
+check "  and quotes the term" "$(contains "$out" "jobs.docker builds or calls an image, and its if: is narrowed by \`inputs.mode != ''\`")"
+check "  and says why" "$(contains "$out" "\`inputs.mode != ''\` is false while the input is unset")"
+
+# '''' is GitHub's escaped quote: a one-quote literal, not the empty one.
+root=$(fixture call-mode-escaped-quote)
+call_modes "$root" "if: inputs.mode == ''''" ""
+run_check "$root"
+check "inputs.mode == '''' (one quote, not empty) is refused" "$(is "$status" 1)"
+root=$(fixture call-mode-not-escaped-quote)
+call_modes "$root" "if: inputs.mode != ''''" ""
+run_check "$root"
+check "inputs.mode != '''' (one quote, so true while unset) passes" "$(is "$status" 0)"
+
 echo "case: an inputs. term is refused where it is no call mode of the job's own workflow"
 # A caller's own if: in a workflow with no workflow_call: there `inputs.` is whatever its
 # own trigger supplies, which this check does not trace.
