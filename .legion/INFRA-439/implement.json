@@ -2,42 +2,55 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-439",
-  "completed": "2026-10-27T00:42:07Z",
+  "completed": "2026-10-27T02:43:09Z",
   "pr": 2228,
-  "round": "review round 5 (changes requested at b08c70f3): retention gap told twice when its sweep is cut short; fork requeue order; nats-hub.md replay read; conditional no-auth NATS user sentence",
+  "round": "review round 6 (changes requested at bd2ac274): stream identity by envoy_stream_id, untold notice persisted with its cursor change, wording minor",
   "proof": [
     {
-      "criterion": "A retention gap is told once when its sweep is cut short between the notice and the page's last frame",
-      "surface": "envoy-client bun test (replay.test.ts) and pi-envoy bun test (extensions/envoy.test.ts), cutting the sweep while a gapped page's frame is shown",
-      "command": "cd packages/envoy-client && bun test (911 pass; the 1 fail is envoy-config.test.ts 'still running after 10 s', untouched by this PR, failing alone in this pod); cd packages/pi-envoy && bun test (1015 pass, 0 fail)",
-      "observed": "one retention_gap across the cut engine and the engine restored from its last write; a later-page gap gives one notice in total; the pi-envoy session cut at the surviving frame's card shows one gap notice after the restart and the frame once",
-      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
-      "negativeControl": "against 6eba519f's replay.ts the engine test gives ['retention_gap','retention_gap'] and the new tests fail"
+      "criterion": "A stream backed up and restored into a cluster (INFRA-14's move) resets no session and loses no message; a leader stepdown that changes created resets nothing",
+      "surface": "standalone nats-server 2.15.1 -> nats stream backup -> nats stream restore --replicas 3 into a 3-node 2.15.1 cluster, the listener built from this head on each side, two real omp 18.12.2 sessions away during the move (/legion/scratch/tmp/infra439/restore/restore.sh)",
+      "command": "bash /legion/scratch/tmp/infra439/restore/restore.sh (all nine checks CHECK PASS; https://github.com/sjawhar/legion/pull/2228#issuecomment-6432416142)",
+      "observed": "head session: 0 notices, cursor {since 0, after 6} continued, the message published during the move shown once, 0 notices after stepdowns to n1/n2/n3; envoy_stream_id survived the restore; num_replicas stayed 3; /v1/replay stream.created changed between the restoring node (02:33:38.313960731) and the followers (02:33:38.205717744) while stream.id stayed the same",
+      "headSha": "067a15afdc167fd3a3ec8b021a944a645b1c83f4",
+      "negativeControl": "the old plugin (c95305504d29) in the same run: 'stream recreated' notice, cursor reset to {since 6, after 6}, the message published during the move skipped, and new notices after the stepdowns to n1 and n3"
     },
     {
-      "criterion": "Held replay notices still survive a kill and are told once live; the fork fix and gap fix leave the replay smoke green",
-      "surface": "the tester's notice4.sh and notice2.sh (unchanged) and packages/pi-envoy/scripts/smoke-replay.sh in local mode, on real omp 18.12.2",
-      "command": "bash /legion/scratch/tmp/adv/notice4.sh; bash /legion/scratch/tmp/adv/notice2.sh; bash packages/pi-envoy/scripts/smoke-replay.sh (https://github.com/sjawhar/legion/pull/2228#issuecomment-6430820579)",
-      "observed": "NOTICE4 RESULT: gap-a:PASS gap-b:PASS; NOTICE RESULT: N2-shown-after-resume:PASS N2-once:PASS; smoke exit 0, SMOKE REPLAY PASS",
-      "headSha": "c95305504d295746517ef9dbc9b21b36147d685d",
-      "negativeControl": "notice4 at 489fd64d gave gap-b:FAIL(0->2->2); the fork unit test fails against the id-only dedupe (notice never handed in the fork)"
+      "criterion": "An untold retention_gap or stream_recreated notice survives a session that ends during the async cursor write and is told once after the restart; same id with a changed created resets nothing; the upgrade adopts the id",
+      "surface": "envoy-client, claude-envoy and pi-envoy bun test; Go tests for the stream id",
+      "command": "cd packages/envoy-client && bun test (919 pass); cd packages/claude-envoy && bun test (215 pass); cd packages/pi-envoy && bun test (1015 pass, 1 fail: main's skills-guard word count); cd packages/envoy && go test ./internal/bus ./cmd/listener ./cmd/dispatch ./internal/store (ok)",
+      "observed": "engine: one notice across a cut engine and its restore, for both kinds; claude channel shut down during the gap write then started again tells the gap once; same id + changed created: no reset; changed id: reset; upgrade with cursors <= last_seq adopts, a cursor past last_seq resets; Go: id set once, kept across reconciles and racing starts, an id-only update keeps every other config field",
+      "headSha": "067a15afdc167fd3a3ec8b021a944a645b1c83f4",
+      "negativeControl": "against c95305504d29's replay.ts the six new engine tests fail and the claude test times out; with the pending.add moved after the write, both lost-notice tests fail; the id-only update test fails against 313374bb (description, limits and discard reset)"
     }
   ],
   "filesChanged": [
+    "packages/envoy/internal/bus/stream.go",
+    "packages/envoy/internal/bus/stream_config_test.go",
+    "packages/envoy/cmd/listener/replay.go",
+    "packages/envoy/cmd/listener/replay_test.go",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/CHANGELOG.md",
     "packages/envoy-client/src/replay.ts",
+    "packages/envoy-client/src/transport.ts",
     "packages/envoy-client/src/__tests__/replay.test.ts",
+    "packages/envoy-client/README.md",
     "packages/envoy-client/CHANGELOG.md",
+    "packages/claude-envoy/tests/envoy-channel-replay.test.ts",
     "packages/claude-envoy/dist/envoy-channel.js",
+    "packages/claude-envoy/dist/dispatch.js",
+    "packages/claude-envoy/CHANGELOG.md",
     "packages/pi-envoy/extensions/envoy.test.ts (test added only)",
-    "packages/pi-envoy/src/unwritten-frames.ts",
-    "packages/pi-envoy/src/unwritten-frames.test.ts",
-    "packages/envoy/infra/docs/nats-hub.md"
+    "packages/pi-envoy/src/missed-messages.ts (doc comment)",
+    "packages/pi-envoy/AGENTS.md",
+    "packages/pi-envoy/CHANGELOG.md (also forward-merge resolution)"
   ],
   "trickyParts": [
-    "Every subject gapped on a page is lifted to first_seq - 1 in both the sweep's reading and its cursor, written with flush(alive, true), and only then is the one notice per sweep raised; the page's frames (all at first_seq or later) are still handled.",
-    "Held and handed notices are keyed by (session, id): a fork's transcript copies its parent's held entry with the same id."
+    "An existing stream with no id gets a deterministic id (sha256 of the stream name and its Created) so two racing first starts write one value; a new stream gets a random one; an existing id is never replaced.",
+    "An id-only update writes the stream's own config with the id added, so replicas and limits are kept; a real reconcile keeps today's desired config (INFRA-546 owns its replica handling).",
+    "Pending notices are restored only for known kinds, so a state written by a later build still parses."
   ],
   "deviations": [
-    "The cut between a gap notice and the page-end write lasts milliseconds; it is proven by engine and pi-envoy tests, not by a live kill."
+    "Live, plain leader elections did not change created on nats-server 2.10.29 or 2.15.1; the created change the review describes comes from a clustered restore (the restoring node and the followers hold different times), which the live proof drives. Comments say so.",
+    "Forward merge of main because GitHub reported CONFLICTING: bd2ac274 -> d5ee78ec, fingerprint 26e3b41c... unchanged (https://github.com/sjawhar/legion/pull/2228#issuecomment-6431325759)."
   ]
 }
