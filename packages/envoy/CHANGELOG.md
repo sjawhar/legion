@@ -11,8 +11,25 @@
   block types it points at: an agent's or API write introducing a pointer to an existing block of
   another type is refused (`400 INVALID_MARKDOWN`, or `INVALID_OP` on `attributes` from
   `POST /edits`), a browser's edit never is, and every block-aware read lists a pointer's edge only
-  while its target has an allowed type (migration `0129_block_pointer_links`). No shipped block type
+  while its target has an allowed type (migration `0130_block_pointer_links`). No shipped block type
   declares one yet.
+- A person's browser edit of a document reaches the agent sessions that wrote it. Once the
+  document has been quiet for 30 seconds after a person's last settled version, Dispatch appends
+  one `artifact.human_edited` event: the person who edited last is its actor, and its payload
+  names the two versions the quiet window spans, each person who edited, and the unified diff of
+  the two versions, cut at its last line end within 4,096 bytes. It goes to the issue's route and
+  to each session the document credits, never to a person. The quiet window is a row of the new
+  table `document_edit_notices` (migration 0129), so a notice still pending when a process stops
+  is sent by the next sweep of either process; the sweep runs every 5 seconds under the
+  `edit-notices` lease, and the lease pool grows from nine connections to ten for it. A notice
+  on an issue closed inside its quiet window is dropped. The dashboard's issue log reads `Edited
+  spec.md v4 to v7`. `DISPATCH_TEST_EDIT_NOTICE_QUIET`, under `DISPATCH_TEST_HOOKS=1`, sets the
+  quiet time for an end-to-end test process. The actor is the sender of the latest edit a person
+  made, never a name picked from the people an edit credits: an agent's edit after a
+  person's still names the person, which the new column `doc_settlements_pending.last_person`
+  (same migration) keeps across processes; an edit made while two peers were connected names
+  nobody: an open window keeps its actor and takes the edit in, and with no window open the edit
+  holds the window until a later version names a person, whose notice covers both.
 - Each block of a Dispatch document is a node of the reference graph. A reference can name one
   block, `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
   `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and

@@ -1396,7 +1396,7 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_lin
 `attached_to` (`artifacts.issue_key`), `anchored_to` (ask/comment anchors), `owned_by`
 (project-document asks/comments), `replies_to` (comment and message threads), `followed_by`
 (`ask_followers`), and, since migration 0121, a block's `mentions` (`block_refs`) and its
-`part_of` edge to its document (`document_blocks`); since migration 0129 a typed block's
+`part_of` edge to its document (`document_blocks`); since migration 0130 a typed block's
 `block[]` attribute makes `block_refs` edges of a kind named by the attribute (below the typed
 block rules). An issue may wait only on issues in its own
 project through `blocked_by`.
@@ -1939,7 +1939,7 @@ while its target has an allowed type: each `block_refs` row a pointer writes car
 attribute's targets as `to_types` (null: no limit), and the `graph_edges` block arm,
 `readEdgeRows`' document `?from=` arm and `refs.BlockLinks` list a row only while
 `block_ref_listed(to_types, to_id)` holds, true when no current `document_blocks` row of the target
-has a type outside `to_types` (migration 0129). Retyping a target hides or shows the edge with no
+has a type outside `to_types` (migration 0130). Retyping a target hides or shows the edge with no
 rewrite of the citing document, a pinned pointer is limited by its target's current type, and the
 index refreshes `to_types` on every row it keeps, so a change of an attribute's targets reaches a
 document's rows at its next index (a version write, or `rebuild-refs`). The editor's typed-block
@@ -2569,6 +2569,23 @@ the synchronous listener call records the sent or failed attempt instead of blin
   has no delivery route, so the same author routes above are the only way an involved session
   learns about a human reply, resolution, reopening, or edit on its ask or comment thread, or a
   human's new comment on a document it wrote.
+- `artifact.human_edited` goes to the issue's route and to each session the document credits,
+  never to a person. Dispatch appends it once a document has been quiet for 30 seconds after a
+  person's last settled browser version (`document_edit_notices`, migration 0129, swept every 5 s
+  under the `edit-notices` lease by `docs.RunEditNotices`); its actor is the last person the
+  window knows edited, and its payload names the document, the two versions the quiet window spans, each person
+  who edited, and the unified diff of the two versions, cut at its last line end within 4,096
+  bytes (`ArtifactHumanEditedEventPayload` in `packages/contracts/src/dispatch-api.ts`). The
+  document is the payload's `artifact_id`, and its sessions are read as a comment's are
+  (`loadDocumentSessionAuthors`). That person is the sender of a version's latest edit
+  (`docs.latestEditSource`): the room's in-flight browser credits and the version's own write,
+  newest first, then `doc_settlements_pending.last_person`, which every landed append and commit
+  keeps by one rule (`docs.latestPersonOf`): a person sender sets it, a two-peer edit (no known
+  sender, a person credited) clears it, and an agent's edit leaves it. A version whose latest edit
+  names no person names nobody new (`docs.holdEditNotice`): an open window keeps its actor and
+  gains the version, its people and a new due time; with no window open the version holds a row
+  with no actor and no due time, and the next version that names a person sends one notice
+  covering both.
 - Dispatch project events use `notifications.dispatch.project.<PROJECT>.<type>` and are retained in JetStream. They have no issue route; project, repository-setting, and user-interface state consumers refresh from the event stream.
 - Direct agent topics use `notifications.agent.<session_id>`.
 - Role topics use `notifications.role.<role>` and are normally published to,

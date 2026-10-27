@@ -393,7 +393,7 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Seven periodic maintenance loops run once per period across the processes, not once per process.
+- Eight periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -866,7 +866,7 @@ is written. Its own migration, so its transaction holds `comments` alone: the dr
 `ACCESS EXCLUSIVE`, and every read and write of a comment waits while the one index builds. It
 refuses and rewrites no row; its census answers `0`.
 
-Migration `0129_block_pointer_links` gives `block_refs` a nullable `to_types text[]`, the types a
+Migration `0130_block_pointer_links` gives `block_refs` a nullable `to_types text[]`, the types a
 typed block's `block[]` pointer may point at (null: any), creates the function
 `block_ref_listed(to_types, to_id)`, true when `to_types` is null or no current `document_blocks`
 row of the target has a type outside it, and re-states `graph_edges` with `0121`'s arms, its
@@ -1063,7 +1063,7 @@ that introduced it), and creates the `graph_edges` view, which unions those ment
 structural relations already stored on the node tables (`child_of`, `attached_to`, `anchored_to`,
 `owned_by`, `replies_to`, `followed_by`). The name of a typed block's `block[]` attribute is an
 edge kind too: each block the attribute points at is an edge of that kind from the typed block
-(migration `0129`, Database migrations above). `GET /api/v1/references?to=<ref>` lists
+(migration `0130`, Database migrations above). `GET /api/v1/references?to=<ref>` lists
 everything that points at a node and `?from=<ref>` everything it points to, cross-project. A row
 whose other end is
 a node kind the running build does not know (a newer build's, read during a rolling deploy) is left

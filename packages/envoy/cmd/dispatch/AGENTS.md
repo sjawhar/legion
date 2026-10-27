@@ -237,7 +237,7 @@ document version carrying markdown, and a comment, ask or issue message whose te
 no command run (`packages/envoy/AGENTS.md`, "References form one graph"). `0127` and `0128`
 rebuild `asks_block_id_unique`, `asks_anchor_block_id_idx` and `comments_anchor_block_id_idx`
 over `block_id_key(id)`, the id's SHA-256, so an ask block or an anchor under a block id of any
-length is written. `0129_block_pointer_links` gives `block_refs` a nullable `to_types`, the types
+length is written. `0130_block_pointer_links` gives `block_refs` a nullable `to_types`, the types
 a typed block's `block[]` pointer may point at, creates `block_ref_listed(to_types, to_id)`, and
 re-states `graph_edges` with its `block_refs` arm listing a row only while that function holds,
 so a pointer's edge, whose kind is the attribute's name, is listed only while its target has an
