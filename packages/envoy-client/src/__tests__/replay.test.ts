@@ -588,6 +588,74 @@ describe("replay sweep", () => {
     expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
   });
 
+  test("a process killed while a gapped page's frame is shown tells the gap once after the restart", async () => {
+    const { stream, host, engine, make } = setup([AGENT, ISSUE]);
+    await engine.sweep();
+    stream.publish(AGENT, envelope());
+    stream.publish("notifications.dispatch.issue.INFRA-1.comment", envelope());
+    stream.expireBelow(3);
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+    // The process is killed while the page's first surviving frame is being shown.
+    host.deliverWith = () => {
+      host.session = undefined;
+      return "failed";
+    };
+
+    await engine.sweep();
+
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
+    expect(host.attempts.map((frame) => frame.seq)).toEqual([3]);
+
+    host.session = SESSION;
+    host.deliverWith = () => "shown";
+    const restarted = make();
+    restarted.restore(host.writes.at(-1)?.snapshot() ?? { ledger: [] });
+    await restarted.sweep();
+
+    // Both subjects' gaps were told by the one notice, and neither is found again.
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
+    expect(host.shown.map((frame) => frame.seq)).toEqual([3, 4]);
+  });
+
+  test("a gap found on a later page of the sweep raises no second notice, now or after a restart", async () => {
+    const { stream, host, engine, make } = setup([AGENT, ISSUE], { maxMessages: 1 });
+    stream.publish(AGENT, envelope());
+    stream.publish(AGENT, envelope());
+    stream.publish("notifications.dispatch.issue.INFRA-1.comment", envelope());
+    stream.publish(AGENT, envelope());
+    stream.expireBelow(2);
+    engine.restore({
+      state: {
+        stream_created: "2026-10-01T00:00:00Z",
+        subjects: { [AGENT]: { since: 0, after: 0 }, [ISSUE]: { since: 2, after: 2 } },
+      },
+      ledger: [],
+    });
+    host.deliverWith = (frame) => {
+      // Retention moves on while the first page is shown, past what the topic has not read yet.
+      if (frame.seq === 2) stream.expireBelow(4);
+      if (frame.seq !== 4) return "shown";
+      // The process is killed while the last page's frame is being shown.
+      host.session = undefined;
+      return "failed";
+    };
+
+    await engine.sweep();
+
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
+    expect(host.attempts.map((frame) => frame.seq)).toEqual([2, 4]);
+
+    host.session = SESSION;
+    host.deliverWith = () => "shown";
+    const restarted = make();
+    restarted.restore(host.writes.at(-1)?.snapshot() ?? { ledger: [] });
+    await restarted.sweep();
+
+    expect(host.notices.map((notice) => notice.kind)).toEqual(["retention_gap"]);
+    expect(host.shown.map((frame) => frame.seq)).toEqual([2, 4]);
+  });
+
   test("an unchanged sweep writes nothing; a changed one writes its records and state once", async () => {
     const { stream, host, engine } = setup();
     await engine.sweep();

@@ -53,12 +53,12 @@ export const REPLAY_FAILURES_BEFORE_NOTICE = 3;
 
 /**
  * How long a cursor that only followed the stream's end may go unwritten. A sweep that handled no
- * message and told no retention gap still moves every cursor to the stream's last sequence, which
- * other subjects' traffic moves; that alone is not written at once, only with the next write or
- * once the state last written is this old, so a restart's cursors lag the stream by no more than
- * this and its retention check (a cursor below the oldest message the stream holds) stays
- * accurate. A sweep that told a retention gap writes its cursors at once, so a resume neither
- * loses nor repeats that notice.
+ * message still moves every cursor to the stream's last sequence, which other subjects' traffic
+ * moves; that alone is not written at once, only with the next write or once the state last
+ * written is this old, so a restart's cursors lag the stream by no more than this and its
+ * retention check (a cursor below the oldest message the stream holds) stays accurate. A retention
+ * gap's cursor move is written before its notice is raised, so a resume neither repeats it nor
+ * finds it again.
  */
 export const REPLAY_STATE_REFRESH_MS = 60 * 60 * 1000;
 
@@ -209,8 +209,10 @@ export interface ReplayFailureNotice {
  * One persistence write. A host that appends entries appends one per `delivered` record and one
  * for `state` when it is present; a host that rewrites a file writes `snapshot()`. `state` is
  * present only when it differs from the last state written or restored. A sweep that handled no
- * message, told no retention gap, and changed nothing but where its cursors stand writes nothing
- * (see `REPLAY_STATE_REFRESH_MS`), so an unchanged sweep writes nothing at all.
+ * message, found no retention gap, and changed nothing but where its cursors stand writes nothing
+ * (see `REPLAY_STATE_REFRESH_MS`), so an unchanged sweep writes nothing at all. A retention gap's
+ * cursor move is written before its notice is raised, so a resume neither repeats it nor finds it
+ * again.
  */
 export interface ReplayChange {
   readonly delivered: readonly ReplayLedgerEntry[];
@@ -452,9 +454,10 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
 
   // Writes run one after another in call order, so a host that rewrites a file never has an older
   // snapshot land after a newer one. `atOnce`: the cursors moved past messages a sweep handled, or
-  // past a retention gap it told, which is a change written at once, so a resume neither loses nor
-  // repeats that notice; without it, a change of nothing but the `after`s is the stream's end
-  // moving, held until the state written is `REPLAY_STATE_REFRESH_MS` old.
+  // past a retention gap, which is a change written at once; a retention gap's cursor move is
+  // written before its notice is raised, so a resume neither repeats it nor finds it again.
+  // Without it, a change of nothing but the `after`s is the stream's end moving, held until the
+  // state written is `REPLAY_STATE_REFRESH_MS` old.
   const flush = (alive: () => boolean, atOnce = false): Promise<void> => {
     writes = writes.then(async () => {
       if (!alive()) return;
@@ -718,6 +721,35 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       streamCreated = stream.created;
 
       for (const [, reading] of asking) reading.more = false;
+      // Retention dropped messages below `first_seq` before a cursor read them. Nothing below it
+      // can be read on any subject, so each such cursor moves to just before it, skipping nothing,
+      // and that move is written before the notice is raised: a resume neither repeats the notice
+      // nor finds the gap again. One notice tells every gap a sweep finds; a gap found after it is
+      // still moved past and written.
+      let gapped = false;
+      for (const result of response.subjects) {
+        const reading = readings.get(result.subject);
+        if (reading?.read === undefined || result.refused !== undefined) continue;
+        if (reading.read >= stream.first_seq - 1) continue;
+        gapped = true;
+        reading.read = stream.first_seq - 1;
+        const cursor = cursors.get(result.subject);
+        if (cursor?.after !== undefined && cursor.after < reading.read) {
+          cursors.set(result.subject, { ...cursor, after: reading.read });
+        }
+      }
+      if (gapped) {
+        await flush(alive, true);
+        if (!alive()) return;
+        if (!gapNoticed) {
+          gapNoticed = true;
+          notify({
+            kind: "retention_gap",
+            message:
+              "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing.",
+          });
+        }
+      }
       for (const result of response.subjects) {
         const reading = readings.get(result.subject);
         if (reading === undefined || result.refused !== undefined) continue;
@@ -730,14 +762,6 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
           }
           reading.read = result.next_after;
           continue;
-        }
-        if (!gapNoticed && reading.read < stream.first_seq - 1) {
-          gapNoticed = true;
-          notify({
-            kind: "retention_gap",
-            message:
-              "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing.",
-          });
         }
         for (const message of result.messages) {
           if (message.seq <= reading.read) continue;
@@ -784,7 +808,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
         if (hole !== undefined) after = Math.min(after, hole - 1);
         if (after > cursor.after) cursors.set(subject, { ...cursor, after });
       }
-      await flush(alive, handledAny || gapNoticed);
+      await flush(alive, handledAny);
       if (![...readings.values()].some((reading) => reading.more)) break;
     }
   };

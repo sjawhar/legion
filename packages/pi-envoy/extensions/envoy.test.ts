@@ -15102,6 +15102,54 @@ describe("messages missed while the subscription was down", () => {
       expect(gapNotices(restarted)).toHaveLength(1);
     });
 
+    test("a retention gap on the followed topic held while the host's turn streams is told once after the process is killed showing its page", async () => {
+      const model = new StreamModel();
+      // The session file as it stood when the process was killed.
+      let killedWith: readonly unknown[] | undefined;
+      // Read by the host context at each call, so the turn can start mid-test.
+      const host: { turn: "idle" | "streaming"; readonly beforeSend: (content: string) => void } = {
+        turn: "idle",
+        beforeSend: (content) => {
+          // SIGKILL while the gapped page's surviving frame is being handed to the turn.
+          if (content.includes("dispatch-33")) killedWith ??= first.entries();
+        },
+      };
+      const first = await bootReplay("replay-issue-gap-sigkill-page-a", model, host);
+      await first.follow(ISSUE_TOPIC);
+      // A message shown and recorded: the session has written its replay state just now.
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 30));
+      await first.reconnect();
+      await first.tick();
+      expect(first.cards("dispatch-30")).toHaveLength(1);
+
+      // A turn streams; the stream drops two messages on the followed topic, and one stored after
+      // them is on the page the sweep finds the gap on.
+      host.turn = "streaming";
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 31));
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 32));
+      model.expireThrough(model.lastSeq);
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 33));
+      await first.tick();
+      const gap = "messages older than 72 hours may be missing";
+      expect(first.fixture.deliveries.filter(({ content }) => content.includes(gap))).toEqual([]);
+      expect(killedWith).toBeDefined();
+
+      // No session_shutdown runs; the session file holds what was appended before the kill.
+      const restarted = await bootReplay("replay-issue-gap-sigkill-page-b", model, {
+        entries: killedWith ?? [],
+        turn: "idle",
+      });
+      await restarted.tick();
+      await restarted.tick();
+
+      // One gap, told once: not once for the recorded held notice and again for the gap the
+      // restored cursor finds a second time. The frame the turn never took is shown after all.
+      expect(
+        restarted.fixture.deliveries.filter(({ content }) => content.includes(gap))
+      ).toHaveLength(1);
+      expect(restarted.cards("dispatch-33")).toHaveLength(1);
+    });
+
     test("a retention gap held while the host's turn streams is told once after the host switches away and back", async () => {
       const restartAt = Date.now();
       try {

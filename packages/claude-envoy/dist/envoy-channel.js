@@ -44169,6 +44169,32 @@ function createReplayEngine(options) {
       streamCreated = stream.created;
       for (const [, reading] of asking)
         reading.more = false;
+      let gapped = false;
+      for (const result of response.subjects) {
+        const reading = readings.get(result.subject);
+        if (reading?.read === undefined || result.refused !== undefined)
+          continue;
+        if (reading.read >= stream.first_seq - 1)
+          continue;
+        gapped = true;
+        reading.read = stream.first_seq - 1;
+        const cursor = cursors.get(result.subject);
+        if (cursor?.after !== undefined && cursor.after < reading.read) {
+          cursors.set(result.subject, { ...cursor, after: reading.read });
+        }
+      }
+      if (gapped) {
+        await flush(alive, true);
+        if (!alive())
+          return;
+        if (!gapNoticed) {
+          gapNoticed = true;
+          notify({
+            kind: "retention_gap",
+            message: "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing."
+          });
+        }
+      }
       for (const result of response.subjects) {
         const reading = readings.get(result.subject);
         if (reading === undefined || result.refused !== undefined)
@@ -44181,13 +44207,6 @@ function createReplayEngine(options) {
           }
           reading.read = result.next_after;
           continue;
-        }
-        if (!gapNoticed && reading.read < stream.first_seq - 1) {
-          gapNoticed = true;
-          notify({
-            kind: "retention_gap",
-            message: "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing."
-          });
         }
         for (const message of result.messages) {
           if (message.seq <= reading.read)
@@ -44240,7 +44259,7 @@ function createReplayEngine(options) {
         if (after > cursor.after)
           cursors.set(subject2, { ...cursor, after });
       }
-      await flush(alive, handledAny || gapNoticed);
+      await flush(alive, handledAny);
       if (![...readings.values()].some((reading) => reading.more))
         break;
     }
