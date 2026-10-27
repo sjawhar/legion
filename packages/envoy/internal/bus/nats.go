@@ -135,11 +135,13 @@ func WithReplicas(n int) ConnectOption {
 }
 
 // WithStreamMaxBytes sets the deployment's byte limit, StreamMaxBytesEnvVar, for the stream
-// ConnectOwningStream ensures: the stream's MaxBytes at create and at every reconcile, its oldest
-// messages discarded first once it is full, and put back by the client's keeper when it finds the
-// stream with another (keepStream). 0, the default, sets none: the stream is created with no byte
-// limit, and a deployed stream keeps the limit it has (ensureStreamWithConfig). Every program of a
-// deployment carries the same limit: two with different ones each put their own back every period.
+// ConnectOwningStream ensures: the stream's MaxBytes at create and at every reconcile, and put back
+// by the client's keeper when it finds the stream with another (keepStream). A full stream refuses
+// a new publish (ErrStreamFull) and keeps every stored message, which leaves only by age, so the
+// limit must sit above what the stream takes in its age. 0, the default, sets none: the stream is
+// created with no byte limit, and a deployed stream keeps the limit it has (ensureStreamWithConfig).
+// Every program of a deployment carries the same limit: two with different ones each put their own
+// back every period.
 func WithStreamMaxBytes(n int64) ConnectOption {
 	return func(o *connectOpts) { o.streamMaxBytes = n }
 }
@@ -924,6 +926,33 @@ var ErrInvalidSubject error = refusal("not a subject NATS accepts")
 // name one as its holder. Its error names the key, and still matches nats.ErrInvalidKey.
 var ErrInvalidKey error = refusal("not a key nats.go accepts")
 
+// ErrStreamFull is wrapped by the error of a JetStream publish the stream did not store because it
+// holds its byte limit (WithStreamMaxBytes): a full stream refuses new messages rather than drop
+// stored ones (streamCfg). It is not an ErrRefused: the same publish is taken once age has made
+// room or an operator raised the limit, so a caller retries it as any other failure, and the
+// webhook listener answers it 503, which GitHub redelivers. The error still matches nats-server's
+// *nats.APIError.
+var ErrStreamFull = errors.New("stream " + Stream + " is full")
+
+// jsStreamStoreFailed is nats-server's code for a message the stream did not store
+// (JSStreamStoreFailedF), and maxBytesExceeded its description when the store refused the message
+// because a DiscardNew stream holds its byte limit (nats-server's ErrMaxBytes). nats.go names
+// neither.
+const (
+	jsStreamStoreFailed = 10077
+	maxBytesExceeded    = "maximum bytes exceeded"
+)
+
+// streamFull names the server's answer to a JetStream publish that a full stream refused as the
+// ErrStreamFull it is, and returns any other error as it is.
+func streamFull(err error) error {
+	var apiErr *nats.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode == jsStreamStoreFailed && apiErr.Description == maxBytesExceeded {
+		return fmt.Errorf("%w: %w", ErrStreamFull, err)
+	}
+	return err
+}
+
 // maxSubjectBytes bounds a subject the bus publishes on, or a KV call builds from a key. The server
 // closes a connection whose protocol line runs past its max control line (4 KiB by default) and
 // nats.go does not check it, so a longer subject would close the connection every subscription and
@@ -1023,7 +1052,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 		ack, err = c.JS().Publish(item.Topic, data, options...)
 	}
 	if err != nil {
-		return false, c.refused(err, len(data))
+		return false, streamFull(c.refused(err, len(data)))
 	}
 	return ack.Duplicate, nil
 }

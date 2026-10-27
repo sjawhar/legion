@@ -209,16 +209,17 @@ func StreamCaptures(topic string) bool {
 // (WithReplicas) and byte limit (WithStreamMaxBytes). Its age equals the duplicate window by
 // construction: the dashboard promises a same-mode retry cannot deliver twice for exactly as long
 // as the stream can still recognise the repeat, and a deployment where the two differed would break
-// that promise. Once a byte limit binds, the stream discards its oldest messages first and may hold
-// less than the window: a repeat of a message it has already dropped may then be stored again,
-// since nats-server keeps a dropped message's id only in memory, which a server restart clears.
+// that promise. A full stream refuses a new message (DiscardNew) rather than drop a stored one, so a
+// stored message leaves only by age: the stream holds every message it took for the whole window,
+// byte limit or not, and the promise holds. The refused publish's sender gets ErrStreamFull, which
+// is not an ErrRefused: the same publish is taken once age has made room.
 var streamCfg = &nats.StreamConfig{
 	Name:       Stream,
 	Subjects:   streamSubjects,
 	Retention:  nats.LimitsPolicy,
 	MaxAge:     streamDuplicateWindow,
 	Duplicates: streamDuplicateWindow,
-	Discard:    nats.DiscardOld,
+	Discard:    nats.DiscardNew,
 	Storage:    nats.FileStorage,
 }
 
@@ -365,8 +366,8 @@ func (r streamReconciliation) log() {
 //
 // The update starts from the deployed configuration and sets only what this binary owns:
 //   - the subjects (reconcileSubjects);
-//   - the age and the duplicate window, cfg's, and discard, cfg's DiscardOld, so a full stream
-//     drops its oldest messages and still takes a publish;
+//   - the age and the duplicate window, cfg's, and discard, cfg's DiscardNew, so a full stream
+//     refuses a new message and keeps every stored one (a deployed DiscardOld stream is switched);
 //   - the replicas, the deployed count or cfg's when that is more: a start never writes fewer
 //     copies than it read, so a program whose setting is lower (an older setting, or one restarted
 //     before the others) leaves a raised stream it reads as it is, though not one raised after its
@@ -463,7 +464,7 @@ func keptStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig
 // it sets one and the deployed limit otherwise; the age, the duplicate window and discard, cfg's;
 // and the metadata with a StreamIDMetadataKey (identifiedMetadata). The age, the window and discard
 // are compiled into the binary, not deployment settings (streamCfg), and every release that runs a
-// keeper compiles the same three (72 hours, 72 hours, DiscardOld), so the keeper writing them puts
+// keeper compiles the same three (72 hours, 72 hours, DiscardNew), so the keeper writing them puts
 // back only what an operator changed. A release that changed one would have its keeper and an
 // older release's each put their own value back every period while both run.
 func ownedStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig {

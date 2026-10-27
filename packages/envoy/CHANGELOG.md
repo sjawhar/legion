@@ -850,23 +850,29 @@
   with one of three servers stopped creates a new stream at 3 copies, one offline peer assigned,
   and the start succeeds on nats-server v2.15.1; v2.10.29 refuses that create (INFRA-546).
 - `ENVOY_STREAM_MAX_BYTES`, new, read by the listener and by Dispatch's server (a new settings
-  table row): a positive whole number of bytes, the stream's byte limit, past which it discards its
-  oldest messages first (`DiscardOld`, now set on every start). Unset, the stream is created with
-  no byte limit and a start keeps a deployed limit. The limit stays put only when every program of
-  a deployment carries the same value, a clustered deployment setting it in every envoy-listener
-  and in the Dispatch server: a start that leaves it unset can still put back the limit it read
-  over another's (below), and programs with different limits each restore their own every 30
-  seconds. Removing a limit is an operator step that needs every program's setting removed first
-  (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=-1`). 0, a negative number or a non-integer is
-  refused at load naming the variable, and a limit above what the server can reserve is refused at
-  create or update, the start then stopping with an error naming `ENVOY_STREAM_MAX_BYTES=<n>`. The
-  stream's age still equals its 72-hour duplicate window, but once the limit binds it may hold
-  less than the window, and a repeat of a message it already dropped may be stored again
-  (INFRA-546).
+  table row): a positive whole number of bytes, the stream's byte limit. A full stream refuses a
+  new publish (`DiscardNew`, now set on every start and switching a deployed `DiscardOld` stream)
+  and keeps every stored message, which leaves only by age, so the stream still holds every
+  message it took for its whole 72-hour duplicate window and the limit drops none; size the limit
+  above the stream's 72-hour volume. The refused publish's sender gets
+  `bus.ErrStreamFull` (`stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`, the
+  server's error 10077 kept inside), which is not a `bus.ErrRefused` and so is retried: the webhook
+  listener answers GitHub 503 and Dispatch's redelivery sweep has GitHub redeliver it, Dispatch's
+  outbox retries the event on its backoff, the CI store settles again on a later tick, and
+  `/v1/messages/send` and `/v1/messages/publish` answer 500 naming the error. Unset, the stream is
+  created with no byte limit and a start keeps a deployed limit. The limit stays put only when
+  every program of a deployment carries the same value, a clustered deployment setting it in every
+  envoy-listener and in the Dispatch server: a start that leaves it unset can still put back the
+  limit it read over another's (below), and programs with different limits each restore their own
+  every 30 seconds. Removing a limit is an operator step that needs every program's setting
+  removed first (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=-1`). 0, a negative number or a
+  non-integer is refused at load naming the variable, and a limit above what the server can
+  reserve is refused at create or update, the start then stopping with an error naming
+  `ENVOY_STREAM_MAX_BYTES=<n>` (INFRA-546).
 - Every update of `ENVOY_NOTIFICATIONS` a start sends now starts from the deployed configuration
   and changes only what Envoy owns: the subjects (reconciled as before), the 72-hour age and
   duplicate window, the replicas (the deployed count or the setting, whichever is more), the byte
-  limit (the setting when set, else the deployed one) and `DiscardOld`. Every other deployed field
+  limit (the setting when set, else the deployed one) and `DiscardNew`. Every other deployed field
   (`MaxMsgsPerSubject`, `MaxMsgSize`, placement, compression and the rest) is kept beside the
   metadata, `envoy_stream_id` included, where an update that changed subjects, age or window wrote
   this binary's configuration over them, its replica count scaling a replicated stream down to the
@@ -878,7 +884,8 @@
   after it puts the old subjects, copies, byte limit and metadata back. Every 30 seconds each
   program's keeper reads the stream again and puts back copies below its `ENVOY_NATS_REPLICAS`, a
   byte limit other than its `ENVOY_STREAM_MAX_BYTES` (when set), a missing `envoy_stream_id`, the
-  72-hour age and duplicate window and `DiscardOld` (compiled into every release alike), and adds
+  72-hour age and duplicate window and `DiscardNew` (compiled into every release alike, logged as
+  `discard DiscardOld -> DiscardNew` when it puts it back), and adds
   back each subject its binary compiles that the stream lacks, unless it overlaps a subject the
   stream carries or captures a role lane, logging the WARN line
   `envoy nats keeper restored the stream` with, for example,

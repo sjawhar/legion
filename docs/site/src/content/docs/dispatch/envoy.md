@@ -10,13 +10,13 @@ Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions
 
 - **NATS JetStream** holds the events. Events are messages on subjects under `notifications.`;
   the `ENVOY_NOTIFICATIONS` stream keeps those of GitHub, Slack, Dispatch, Legion and each
-  session's inbox for 72 hours, or less once it reaches a size limit you set, while role messages
-  and team topics travel live and are not kept. Envoy also keeps its own state in JetStream
-  key-value buckets: which session is subscribed to what (`envoy_interests`), which sessions are
-  live (`envoy_sessions`), who holds each role (`envoy_roles`), and pull request check results
-  (`envoy_ci_state`). The stream and every bucket are kept in at least as many copies as the
-  deployment's `ENVOY_NATS_REPLICAS` says, when every Envoy program of the deployment carries the
-  same value ([Keeping the stream](#keeping-the-stream)).
+  session's inbox for 72 hours, while role messages and team topics travel live and are not kept.
+  Envoy also keeps its own state in JetStream key-value buckets: which session is subscribed to
+  what (`envoy_interests`), which sessions are live (`envoy_sessions`), who holds each role
+  (`envoy_roles`), and pull request check results (`envoy_ci_state`). The stream and every bucket
+  are kept in at least as many copies as the deployment's `ENVOY_NATS_REPLICAS` says, when every
+  Envoy program of the deployment carries the same value
+  ([Keeping the stream](#keeping-the-stream)).
 - **The listener** is an HTTP service in front of it. It takes webhooks in, publishes them as
   events, and delivers events to the agent sessions that subscribed to them. Agents and Legion
   call its `/v1` API to subscribe, publish, claim roles, and send messages, and a session that
@@ -152,13 +152,11 @@ connection was down.
 
 - **What comes back:** messages on the session's inbox topic, `notifications.agent.<session_id>`,
   and on the topics it follows that the stream keeps, such as an issue's
-  `notifications.dispatch.issue.<KEY>.>`, up to 72 hours old while the stream is under its size
-  limit.
+  `notifications.dispatch.issue.<KEY>.>`, up to 72 hours old.
 - **What does not:** role messages and team topics, which are live only; anything from before the
   session existed, before it followed the topic, or before it first ran a plugin version that
-  recovers; anything older than 72 hours, or dropped once the stream reached its size limit. When
-  the stream was recreated, or the session read it too late to find everything still there, it is
-  told once that messages may be missing.
+  recovers; anything older than 72 hours. When the stream was recreated, or the session read it too
+  late to find everything still there, it is told once that messages may be missing.
 - **Nothing runs late:** a person's Send or Aside, a Steer or a BTW that comes back this way is
   shown as a message only, since a person's input run late could act on an old instruction. The
   session does not take it as the person's turn and does not answer a BTW. A BTW that comes back
@@ -256,7 +254,7 @@ verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 | `ENVOY_HOST_BRIDGE` | Where the listener reaches a session on its own machine that registered a serve port: one registered through it, or one whose recorded host is the listener's own `ENVOY_MACHINE_ID` (letter case ignored), as a session that stayed on that machine and re-registered through another listener records. Unset, it uses the host the session registered with, then `host.docker.internal`. A session that re-registered through another listener and records another host is reached at that host, else that listener's machine id, never through the bridge. A listener delivers only to the sessions it owns: a session's owner is the listener its stored subscription names (the one it first subscribed through), else the one it last registered through; any other session is its owner's to deliver. |
 | `ENVOY_SUBSCRIBE_ALL_TOPICS` | Set to `1` to have the listener also deliver every topic the stream does not store, such as a team topic, to the sessions on its machine that registered a serve port. Only a NATS user allowed to subscribe to `notifications.>` (a host's own user) may set it; under any other the listener exits at start with an error naming the variable. |
 | `ENVOY_NATS_REPLICAS` | The deployment's replica count, a whole number from 1 to 5; default `1`. The listener creates the `ENVOY_NOTIFICATIONS` stream and its buckets with this many copies and raises one it finds with fewer, at start and every 30 seconds after ([Keeping the stream](#keeping-the-stream)). More than 1 needs a clustered NATS: a single server refuses it, and the listener then exits at start with an error naming the variable. Any other value refuses startup. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
-| `ENVOY_STREAM_MAX_BYTES` | The `ENVOY_NOTIFICATIONS` stream's size limit, a positive whole number of bytes: once the stream holds that much, it drops its oldest messages first, so it may keep less than 72 hours. Unset, the listener creates the stream with no limit and keeps a limit the stream already has; set, it puts its limit back every 30 seconds when it finds another. A limit larger than the NATS server can reserve makes the listener exit at start with an error naming the variable. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
+| `ENVOY_STREAM_MAX_BYTES` | The `ENVOY_NOTIFICATIONS` stream's size limit, a positive whole number of bytes. Once the stream holds that much it refuses every new message and keeps every one it holds, which leaves only when it is 72 hours old, and the sender gets an error it can retry: the listener answers a GitHub webhook `503`, which Dispatch's redelivery sweep has GitHub send again (five times, over about half an hour); Dispatch's outbox retries its event; an agent's send or publish fails with `stream ENVOY_NOTIFICATIONS is full`. Size the limit above what the stream takes in 72 hours at its busiest, with room to spare. Unset, the listener creates the stream with no limit and keeps a limit the stream already has; set, it puts its limit back every 30 seconds when it finds another. A limit larger than the NATS server can reserve makes the listener exit at start with an error naming the variable. Give every Envoy program of a deployment the same value: a clustered deployment sets it in every listener and in Dispatch's server. |
 | `ENVOY_WEBHOOKS` | Which webhook routes to mount, for example `github,slack`. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | Required with `github`: the webhook secret. |
 | `ENVOY_REVIEWER_APP_ID` | Required with `github`: the id of the GitHub App that posts reviews. |

@@ -345,8 +345,8 @@ not when the frames queued before it finished delivering. One card that starts n
 (`routeReplayNotice` sends this kind to a card, through `UnwrittenFrames.sendNotice`) says that
 the stream was recreated, so messages from before it may be lost, that it moved back, so messages
 may be shown again and any published between the backup and the restore are missing, or that a
-cursor fell behind the stream's oldest message, so messages past the stream's 72-hour age or its
-size limit may be missing. The stream is recreated
+cursor fell behind the stream's oldest message, so messages older than 72 hours may be missing.
+The stream is recreated
 when the listener's `stream.id` differs from the stored `stream_id`; a `created` that moved under
 the same id (a restore, or a leader election after a clustered restore) is the same stream, and
 an answer without an id is

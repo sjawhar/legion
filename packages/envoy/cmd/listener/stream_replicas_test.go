@@ -52,10 +52,10 @@ func startListenerStream(t *testing.T, cfg config.Service) *bus.Client {
 	return client
 }
 
-// On an existing three-copy stream with a byte limit and an id, a listener start whose settings
-// are the deployment's (ENVOY_NATS_REPLICAS=3 and the byte limit) and whose stream differs in its
-// subjects, its age or its duplicate window keeps the three copies, the byte limit, DiscardOld and
-// the id, and corrects the subjects, the age and the window.
+// On an existing three-copy stream with a byte limit, DiscardOld and an id, a listener start whose
+// settings are the deployment's (ENVOY_NATS_REPLICAS=3 and the byte limit) and whose stream differs
+// in its subjects, its age or its duplicate window keeps the three copies, the byte limit and the
+// id, and corrects the subjects, the age, the window and discard, to DiscardNew.
 func TestAListenerStartKeepsAThreeCopyStreamsCopiesByteLimitAndIDAsItCorrectsTheStream(t *testing.T) {
 	for _, drift := range []struct {
 		name   string

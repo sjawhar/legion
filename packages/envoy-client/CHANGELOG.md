@@ -60,8 +60,7 @@
   field; a recreated stream (a stored `stream_id` the listener's `stream.id` no longer matches, or,
   from a listener that answers no id, a changed `created`; a `created` that moved under the same
   id is no recreation, and a state stored before ids takes the answer's id), a stream that moved
-  back, a cursor older than the stream's oldest message (one the stream dropped at its 72-hour age
-  or at its size limit, a notice that names both),
+  back, a cursor older than the stream's oldest message,
   and a listener that does not replay (404) or cannot (503 `REPLAY_UNAVAILABLE`, 401, 403) are
   each told once. A stream that is not recreated has moved back when any cursor stands past its
   end (restored from a backup older than the cursor, or re-added empty from its exported

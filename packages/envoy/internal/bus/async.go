@@ -210,7 +210,7 @@ func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() err
 				errors.Is(err, nats.ErrNoResponders) {
 				return fmt.Errorf("bus: %w: %w", ErrUnavailable, err)
 			}
-			return err
+			return streamFull(err)
 		}
 	}, nil
 }

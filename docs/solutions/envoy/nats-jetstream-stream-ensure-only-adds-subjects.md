@@ -72,11 +72,13 @@ step below works from. Both lines are written only after the stream carries the 
 `MaxAge` and the duplicate window still take the starting binary's values. The rest of an update
 starts from the deployed configuration too: the replicas become the deployed count or
 `ENVOY_NATS_REPLICAS`, whichever is more; the byte limit becomes `ENVOY_STREAM_MAX_BYTES` when it
-is set and otherwise stays as deployed; discard is `DiscardOld`; and the metadata,
-`envoy_stream_id` included, and every field Envoy does not own (`MaxMsgsPerSubject`,
-`MaxMsgSize`, placement, compression and the rest) stay as they are. A start's own write
-therefore never lowers the copies or removes the limit it read, but the copies and the limit stay
-put only when every program of a deployment carries the same `ENVOY_NATS_REPLICAS` and
+is set and otherwise stays as deployed; discard is `DiscardNew`, so a full stream refuses a new
+publish (`bus.ErrStreamFull`, which its sender retries) and keeps every stored message until it is
+72 hours old; and the metadata, `envoy_stream_id` included, and every field Envoy does not own
+(`MaxMsgsPerSubject`, `MaxMsgSize`, placement, compression and the rest) stay as they are. A
+start's own write therefore never lowers the copies or removes the limit it read, but the copies
+and the limit stay put only when every program of a deployment carries the same
+`ENVOY_NATS_REPLICAS` and
 `ENVOY_STREAM_MAX_BYTES`, so a clustered deployment sets both in every envoy-listener and in the
 Dispatch server. JetStream's stream update has no compare-and-swap: a start with other or no
 settings, or another subject list, that reads the stream before another start's write and writes
@@ -85,7 +87,7 @@ after it puts the old subjects, copies, limit and metadata back.
 So every program that owns the stream runs a keeper (`internal/bus/keeper.go`): every 30 seconds
 it reads the stream again and writes it back (`keepStream`, `keptStream`) with copies below its
 `ENVOY_NATS_REPLICAS` raised, a byte limit other than its `ENVOY_STREAM_MAX_BYTES` (when set) set
-to it, a missing `envoy_stream_id` added, the 72-hour age and duplicate window and `DiscardOld`
+to it, a missing `envoy_stream_id` added, the 72-hour age and duplicate window and `DiscardNew`
 put back (constants every release compiles alike), and each subject its binary compiles that the
 stream lacks added, unless it overlaps a subject the stream carries or captures a role lane
 (`keptSubjects`). It logs `envoy nats keeper restored the stream` at WARN with, for example,

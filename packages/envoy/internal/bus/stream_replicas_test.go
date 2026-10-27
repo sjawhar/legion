@@ -1,6 +1,8 @@
 package bus
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -42,21 +45,24 @@ func startOnCluster(t *testing.T, cluster *testnats.Cluster, options ...ConnectO
 }
 
 // deployedClusterStream is the stream as a deployment with three copies and a byte limit holds it,
-// with limits this binary does not own and an id, changed by change.
+// with limits this binary does not own and an id, changed by change. It discards old messages, as
+// a stream an earlier build created does.
 func deployedClusterStream(change func(*nats.StreamConfig)) nats.StreamConfig {
 	deployed := *streamCfg
 	deployed.Replicas = 3
 	deployed.MaxBytes = testStreamMaxBytes
 	deployed.MaxMsgsPerSubject = 1_000
 	deployed.MaxMsgSize = 64 << 10
+	deployed.Discard = nats.DiscardOld
 	deployed.Metadata = map[string]string{StreamIDMetadataKey: "deployed-id", "owner": "operations"}
 	change(&deployed)
 	return deployed
 }
 
-// On an existing three-copy stream with a byte limit and an id, a start that changes its subjects,
-// its age or its duplicate window keeps the three copies, the byte limit, DiscardOld, the id and
-// every limit it does not own (MaxMsgsPerSubject, MaxMsgSize), and corrects the age and window.
+// On an existing three-copy stream with a byte limit, DiscardOld and an id, a start that changes
+// its subjects, its age or its duplicate window keeps the three copies, the byte limit, the id and
+// every limit it does not own (MaxMsgsPerSubject, MaxMsgSize), and corrects the age, the window and
+// discard, to DiscardNew.
 // That holds for a start whose settings match the deployment's and for one whose replica setting
 // is 1 with no byte limit set: a start never lowers the copies and never drops a deployed limit.
 func TestAReconcileOnTheClusterKeepsTheCopiesTheByteLimitTheIDAndTheLimitsItDoesNotOwn(t *testing.T) {
@@ -92,8 +98,8 @@ func TestAReconcileOnTheClusterKeepsTheCopiesTheByteLimitTheIDAndTheLimitsItDoes
 				if got.Replicas != 3 || testnats.Copies(info.Cluster) != 3 {
 					t.Errorf("stream replicas = %d with %d copies, want 3", got.Replicas, testnats.Copies(info.Cluster))
 				}
-				if got.MaxBytes != testStreamMaxBytes || got.Discard != nats.DiscardOld {
-					t.Errorf("stream byte limit = %d discarding %v, want %d discarding old", got.MaxBytes, got.Discard, testStreamMaxBytes)
+				if got.MaxBytes != testStreamMaxBytes || got.Discard != nats.DiscardNew {
+					t.Errorf("stream byte limit = %d discarding %v, want %d discarding new", got.MaxBytes, got.Discard, testStreamMaxBytes)
 				}
 				if got.MaxAge != streamDuplicateWindow || got.Duplicates != streamDuplicateWindow {
 					t.Errorf("stream age = %s and duplicate window = %s, want %s", got.MaxAge, got.Duplicates, streamDuplicateWindow)
@@ -223,14 +229,14 @@ func TestEnsureKeyValueRaisesAnR1BucketToThreeCopiesChangingNothingElse(t *testi
 	}
 }
 
-// A stream created with a byte limit has it and discards its oldest messages first; a later start
+// A stream created with a byte limit has it and refuses new messages once full; a later start
 // that sets no limit keeps the deployed one, and one that sets another writes that.
 func TestTheStreamTakesTheDeploymentsByteLimitAndKeepsADeployedOne(t *testing.T) {
 	cluster, js := startClusterJetStream(t)
 	startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(testStreamMaxBytes))
 	info := testnats.AwaitSettledStream(t, js, Stream)
-	if info.Config.MaxBytes != testStreamMaxBytes || info.Config.Discard != nats.DiscardOld || testnats.Copies(info.Cluster) != 3 {
-		t.Fatalf("created stream byte limit = %d discarding %v with %d copies, want %d discarding old with 3", info.Config.MaxBytes, info.Config.Discard, testnats.Copies(info.Cluster), testStreamMaxBytes)
+	if info.Config.MaxBytes != testStreamMaxBytes || info.Config.Discard != nats.DiscardNew || testnats.Copies(info.Cluster) != 3 {
+		t.Fatalf("created stream byte limit = %d discarding %v with %d copies, want %d discarding new with 3", info.Config.MaxBytes, info.Config.Discard, testnats.Copies(info.Cluster), testStreamMaxBytes)
 	}
 
 	startOnCluster(t, cluster, WithReplicas(3))
@@ -244,9 +250,10 @@ func TestTheStreamTakesTheDeploymentsByteLimitAndKeepsADeployedOne(t *testing.T)
 	}
 }
 
-// Publishing past the byte limit drops the oldest messages first, and every publish is still
-// taken (single server, small limit).
-func TestAFullStreamDropsItsOldestMessagesFirst(t *testing.T) {
+// A full stream refuses a publish with ErrStreamFull, which is no ErrRefused, through Publish and
+// through a window's send, and keeps every message it stored before it filled: the same count,
+// first and last sequence, bytes and contents (single server, small limit).
+func TestAFullStreamRefusesAPublishAndKeepsEveryStoredMessage(t *testing.T) {
 	const limit = 16 << 10
 	client, err := ConnectOwningStream([]string{testnats.URL(t)}, WithStreamMaxBytes(limit))
 	if err != nil {
@@ -254,22 +261,65 @@ func TestAFullStreamDropsItsOldestMessagesFirst(t *testing.T) {
 	}
 	t.Cleanup(client.Close)
 	js := client.JS()
-	payload := []byte(strings.Repeat("x", 1<<10))
-	const published = 64
-	for i := range published {
-		if _, err := js.Publish(fmt.Sprintf("notifications.agent.s%d", i), payload); err != nil {
-			t.Fatalf("publish %d past the limit: %v", i, err)
+	envelope := func(i int) contracts.Envelope {
+		return contracts.Envelope{
+			EventID:        fmt.Sprintf("event-%d", i),
+			Source:         "test",
+			Topic:          fmt.Sprintf("notifications.agent.s%d", i),
+			DedupeKey:      fmt.Sprintf("full.%d", i),
+			PayloadSummary: strings.Repeat("x", 1<<10),
 		}
 	}
-	info, err := js.StreamInfo(Stream)
+	const most = 64
+	stored := 0
+	var full error
+	for ; stored < most; stored++ {
+		if full = client.Publish(envelope(stored)); full != nil {
+			break
+		}
+	}
+	if stored == 0 || stored == most {
+		t.Fatalf("%d of %d publishes stored within %d bytes, want the stream to fill part way", stored, most, limit)
+	}
+	var apiErr *nats.APIError
+	if !errors.Is(full, ErrStreamFull) || errors.Is(full, ErrRefused) || !errors.As(full, &apiErr) {
+		t.Fatalf("publish %d into the full stream = %v, want ErrStreamFull matching the server's error and no ErrRefused", stored, full)
+	}
+	t.Logf("publish into the full stream: %v", full)
+	before, err := js.StreamInfo(Stream)
 	if err != nil {
 		t.Fatalf("read the stream: %v", err)
 	}
-	if info.State.Bytes > limit || info.State.LastSeq != published || info.State.FirstSeq <= 1 || info.State.Msgs != published-info.State.FirstSeq+1 {
-		t.Fatalf("stream state = %+v, want the newest messages within %d bytes, through sequence %d", info.State, limit, published)
+	if before.State.Msgs != uint64(stored) || before.State.FirstSeq != 1 || before.State.LastSeq != uint64(stored) {
+		t.Fatalf("stream state = %+v, want sequences 1 through %d", before.State, stored)
 	}
-	if _, err := js.GetMsg(Stream, 1); !errors.Is(err, nats.ErrMsgNotFound) {
-		t.Fatalf("read the first message = %v, want it dropped", err)
+
+	if err := <-client.Window().PublishAsync(envelope(stored)); !errors.Is(err, ErrStreamFull) || errors.Is(err, ErrRefused) {
+		t.Fatalf("a window's send into the full stream = %v, want ErrStreamFull and no ErrRefused", err)
+	}
+	if err := client.Publish(envelope(stored + 1)); !errors.Is(err, ErrStreamFull) {
+		t.Fatalf("a second publish into the full stream = %v, want ErrStreamFull", err)
+	}
+	after, err := js.StreamInfo(Stream)
+	if err != nil {
+		t.Fatalf("read the stream again: %v", err)
+	}
+	if after.State.Msgs != before.State.Msgs || after.State.FirstSeq != before.State.FirstSeq ||
+		after.State.LastSeq != before.State.LastSeq || after.State.Bytes != before.State.Bytes {
+		t.Fatalf("stream state after the refusals = %+v, want the state before them, %+v", after.State, before.State)
+	}
+	for i := range stored {
+		want, err := json.Marshal(envelope(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := js.GetMsg(Stream, uint64(i+1))
+		if err != nil {
+			t.Fatalf("read stored message %d: %v", i+1, err)
+		}
+		if msg.Subject != envelope(i).Topic || !bytes.Equal(msg.Data, want) {
+			t.Fatalf("stored message %d = %s %s, want %s %s", i+1, msg.Subject, msg.Data, envelope(i).Topic, want)
+		}
 	}
 }
 

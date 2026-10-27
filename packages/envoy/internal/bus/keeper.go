@@ -137,7 +137,7 @@ func keepStream(js nats.JetStreamContext, cfg *nats.StreamConfig) ([]string, err
 
 // restoredFields names each field kept differs in from deployed, with its old and new value:
 // `replicas 1 -> 3`, `max_bytes -1 -> 2000000`, `max_age 73h0m0s -> 72h0m0s`,
-// `duplicate_window 1m0s -> 72h0m0s`, `discard DiscardNew -> DiscardOld`,
+// `duplicate_window 1m0s -> 72h0m0s`, `discard DiscardOld -> DiscardNew`,
 // `envoy_stream_id added as <id>`, `subjects added notifications.x.>`. kept's subjects are
 // deployed's with the keeper's additions after them (keptSubjects).
 func restoredFields(deployed, kept *nats.StreamConfig) []string {

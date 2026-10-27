@@ -304,7 +304,7 @@ func TestTwoKeepersWithDifferentSubjectListsNeverSwitchTheStream(t *testing.T) {
 }
 
 // An operator update that lowers the stream to one copy, removes its byte limit, deletes its id,
-// lengthens its age, sets DiscardNew, removes one of this binary's subjects and adds a foreign one
+// lengthens its age, sets DiscardOld, removes one of this binary's subjects and adds a foreign one
 // is undone within a few periods by the keeper of a program whose settings are three copies and a
 // byte limit, which logs each field it restored. The id it restores is derived, and stays as it is
 // over the passes after. The removed subject comes back at the end of the list, and the foreign
@@ -323,7 +323,7 @@ func TestTheKeeperRestoresWhatAnOperatorTookAwayAndKeepsAForeignSubject(t *testi
 	delete(lowered.Metadata, StreamIDMetadataKey)
 	lowered.Subjects = append(slices.DeleteFunc(slices.Clone(info.Config.Subjects), func(subject string) bool { return subject == removed }), "operations.foreign.>")
 	lowered.MaxAge = info.Config.MaxAge + time.Hour
-	lowered.Discard = nats.DiscardNew
+	lowered.Discard = nats.DiscardOld
 	if _, err := js.UpdateStream(&lowered); err != nil {
 		t.Fatalf("operator update: %v", err)
 	}
@@ -332,8 +332,8 @@ func TestTheKeeperRestoresWhatAnOperatorTookAwayAndKeepsAForeignSubject(t *testi
 	if want := append(slices.Clone(lowered.Subjects), removed); !slices.Equal(restored.Config.Subjects, want) {
 		t.Fatalf("subjects after the keeper's restore = %v, want %v", restored.Config.Subjects, want)
 	}
-	if restored.Config.MaxAge != streamCfg.MaxAge || restored.Config.Discard != nats.DiscardOld {
-		t.Fatalf("age %s, discard %s after the keeper's restore; want %s, %s", restored.Config.MaxAge, restored.Config.Discard, streamCfg.MaxAge, nats.DiscardOld)
+	if restored.Config.MaxAge != streamCfg.MaxAge || restored.Config.Discard != nats.DiscardNew {
+		t.Fatalf("age %s, discard %s after the keeper's restore; want %s, %s", restored.Config.MaxAge, restored.Config.Discard, streamCfg.MaxAge, nats.DiscardNew)
 	}
 	id := restored.Config.Metadata[StreamIDMetadataKey]
 	if want := deployedStreamID(restored.Created); id != want {
@@ -348,7 +348,7 @@ func TestTheKeeperRestoresWhatAnOperatorTookAwayAndKeepsAForeignSubject(t *testi
 		"replicas 1 -> 3",
 		fmt.Sprintf("max_bytes -1 -> %d", keeperByteLimit),
 		fmt.Sprintf("max_age %s -> %s", lowered.MaxAge, streamCfg.MaxAge),
-		"discard DiscardNew -> DiscardOld",
+		"discard DiscardOld -> DiscardNew",
 		StreamIDMetadataKey + " added as " + id,
 		"subjects added " + removed,
 	} {

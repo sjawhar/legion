@@ -24,7 +24,8 @@ const (
 )
 
 // DeployedThreeCopyStream is the stream as a three-copy deployment with a byte limit
-// (StreamMaxBytes) and an id (DeployedStreamID) holds it, changed by change.
+// (StreamMaxBytes) and an id (DeployedStreamID) holds it, discarding old messages as a stream an
+// earlier build created does, changed by change.
 func DeployedThreeCopyStream(change func(*natsgo.StreamConfig)) natsgo.StreamConfig {
 	deployed := natsgo.StreamConfig{
 		Name:       bus.Stream,
@@ -43,17 +44,17 @@ func DeployedThreeCopyStream(change func(*natsgo.StreamConfig)) natsgo.StreamCon
 }
 
 // RequireKeptThreeCopyStream fails the test unless after, the DeployedThreeCopyStream after a
-// start, holds three copies, the byte limit with DiscardOld and before's metadata, its id among
-// it, with every subject this binary compiles in and its age and duplicate window corrected to the
-// binary's.
+// start, holds three copies, the byte limit and before's metadata, its id among it, with every
+// subject this binary compiles in and its age, its duplicate window and discard corrected to the
+// binary's: a full stream refuses new messages (DiscardNew).
 func RequireKeptThreeCopyStream(t testing.TB, before natsgo.StreamConfig, after *natsgo.StreamInfo) {
 	t.Helper()
 	got := after.Config
 	if got.Replicas != 3 || testnats.Copies(after.Cluster) != 3 {
 		t.Errorf("stream replicas = %d with %d copies, want 3", got.Replicas, testnats.Copies(after.Cluster))
 	}
-	if got.MaxBytes != StreamMaxBytes || got.Discard != natsgo.DiscardOld {
-		t.Errorf("stream byte limit = %d discarding %v, want %d discarding old", got.MaxBytes, got.Discard, StreamMaxBytes)
+	if got.MaxBytes != StreamMaxBytes || got.Discard != natsgo.DiscardNew {
+		t.Errorf("stream byte limit = %d discarding %v, want %d discarding new", got.MaxBytes, got.Discard, StreamMaxBytes)
 	}
 	if !maps.Equal(got.Metadata, before.Metadata) || got.Metadata[bus.StreamIDMetadataKey] != DeployedStreamID {
 		t.Errorf("stream metadata = %v, want the deployed %v", got.Metadata, before.Metadata)

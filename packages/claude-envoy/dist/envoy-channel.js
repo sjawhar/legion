@@ -43876,7 +43876,7 @@ var ReplayPendingNoticeSchema = exports_external.enum([
 var PENDING_NOTICE_MESSAGES = {
   stream_recreated: "Envoy's notification stream was recreated, so messages published to this session while its connection was down before that may be lost.",
   stream_moved_back: "Envoy's notification stream was restored to an earlier point, so messages published to this session while its connection was down may be shown again, and any published between that point and the restore are missing.",
-  retention_gap: "The notification stream no longer holds some messages published to this session while its connection was down: messages past the stream's 72-hour age or its size limit may be missing."
+  retention_gap: "The notification stream no longer holds some messages published to this session while its connection was down: messages older than 72 hours may be missing."
 };
 var ReplayStateSchema = exports_external.object({
   stream_id: exports_external.string().optional(),

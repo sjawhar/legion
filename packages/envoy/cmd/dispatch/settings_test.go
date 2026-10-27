@@ -896,15 +896,15 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				refusedWith(t, map[string]string{"ENVOY_STREAM_MAX_BYTES": value}, fmt.Sprintf("invalid ENVOY_STREAM_MAX_BYTES %q", value))
 			}
 			// Its reader: the stream main's publisher creates (dispatchStreamOptions) holds the
-			// limit and drops its oldest messages first.
+			// limit and refuses new messages once full.
 			_, url := testnats.Start(t)
 			client, err := startDispatchStream(t, []string{url}, map[string]string{"ENVOY_STREAM_MAX_BYTES": "1048576"})
 			if err != nil {
 				t.Fatalf("start the stream with ENVOY_STREAM_MAX_BYTES=1048576: %v", err)
 			}
 			info, err := client.JS().StreamInfo(bus.Stream)
-			if err != nil || info.Config.MaxBytes != 1<<20 || info.Config.Discard != natsgo.DiscardOld {
-				t.Errorf("stream = %+v, %v; want a byte limit of %d discarding old", info, err, 1<<20)
+			if err != nil || info.Config.MaxBytes != 1<<20 || info.Config.Discard != natsgo.DiscardNew {
+				t.Errorf("stream = %+v, %v; want a byte limit of %d discarding new", info, err, 1<<20)
 			}
 		},
 		"NATS_NKEY_SEED": func(t *testing.T) {

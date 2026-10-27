@@ -746,7 +746,7 @@ func TestEnsureStreamWithConfigCreatesTheStreamWithAFreshID(t *testing.T) {
 // differs from the binary's configuration, and keeps the rest of its configuration and metadata:
 // settings the binary's configuration does not choose (here the message limits and a description;
 // in a cluster, the stream's placement) stay as deployed, and so do the ones it would only keep (a
-// byte limit, with no limit of its own set) or already matches (DiscardOld, the replicas).
+// byte limit, with no limit of its own set) or already matches (DiscardNew, the replicas).
 func TestEnsureStreamWithConfigGivesADeployedStreamWithoutAnIDOne(t *testing.T) {
 	js := streamTestJetStream(t)
 	deployed := *streamCfg

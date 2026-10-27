@@ -55,11 +55,11 @@ func startDispatchNATS(t *testing.T, urls []string, overrides map[string]string)
 	return err
 }
 
-// On an existing three-copy stream with a byte limit and an id, a Dispatch start whose stream
-// differs in its subjects, its age or its duplicate window keeps the three copies, the byte limit,
-// DiscardOld and the id, and corrects the subjects, the age and the window: with the deployment's
-// settings (ENVOY_NATS_REPLICAS=3 and the byte limit), and with both settings unset, a replica
-// count of 1 and no byte limit, which neither lowers the copies nor drops the limit.
+// On an existing three-copy stream with a byte limit, DiscardOld and an id, a Dispatch start whose
+// stream differs in its subjects, its age or its duplicate window keeps the three copies, the byte
+// limit and the id, and corrects the subjects, the age, the window and discard, to DiscardNew: with
+// the deployment's settings (ENVOY_NATS_REPLICAS=3 and the byte limit), and with both settings
+// unset, a replica count of 1 and no byte limit, which neither lowers the copies nor drops the limit.
 func TestADispatchStartKeepsAThreeCopyStreamsCopiesByteLimitAndIDAsItCorrectsTheStream(t *testing.T) {
 	for _, drift := range []struct {
 		name   string
