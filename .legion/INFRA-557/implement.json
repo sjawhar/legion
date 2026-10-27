@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-557",
+  "completed": "2026-10-27T13:43:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
+  "codeHead": "24a88452c22fbe510853617a94557e865146df3d",
+  "proof": [
+    {
+      "criterion": "Tests with two listener processes for each item, failing before and passing after: two pods after a reconnect in place deliver each message once; SIGKILL of the active pod with a standby running delivers (architect Q2: in order, within 15 s); a message sent while the active pod is deleted reaches its session within 10 s, any repeat with the same id; /v1/sessions answers within 10 s of a take-over",
+      "surface": "real cmd/listener binaries (two per row) against one in-process nats-server 2.10.29, each behind a relay that cuts, freezes or slows its link; port sessions are HTTP servers counting prompt_async per event id",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 25m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener",
+      "observed": "all 20 rows PASS, ok 520.369s: ReconnectInPlace (each of ~145 messages prompted exactly once), ShortDrop, StartedTogether x20 (one active), SIGKILL and NodeLoss in per-session order within 15 s (slowest 11.9 s), GracefulStop within 10 s (slowest 3.0 s), StandbyWaitsPast140s (200 standby), ReadinessWaitsForNATS (503 starting then 200), SendThroughTheStandbyDuringATakeover (SIGTERM and SIGKILL: never 404), NATS restart without resubscribe ERROR, instance in JSON lines, ledger rows, exception id, send/role-set, CAS, pod-local address, role grace, last-seen, two builds. Output: https://github.com/sjawhar/legion/pull/2404#issuecomment-6443394041",
+      "headSha": "24a88452c22fbe510853617a94557e865146df3d",
+      "negativeControl": "the same 20 rows on base 819dc283 with only the test files and harness copied in (no shims): all 20 FAIL, e.g. '50 of 143 messages were not prompted exactly once' (reconnect in place), 'pod-b exited 2m15s into its standby', '200 map[status:starting], want 503 starting', 'send to ses_mp_takeover_000 through pod-b: 404 {\"error\":\"no live session ses_mp_takeover_000\"}', '2 of 32 messages never reached their session within 20s' (SIGKILL, 60 s ack wait)"
+    },
+    {
+      "criterion": "A two-build test: an old and a new listener build sharing one machine id skip no message on any subject",
+      "surface": "real binaries: the plain build and the build tagged envoy_twobuild (one stream subject more), and the real base 819dc283 binary as the old build, sharing machine id box-a, publishing on every stream subject, the extra subject and a live-lane topic",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -run TestTwoBuilds -v ./cmd/listener; ENVOY_LISTENER_OLD_BINARY=$TMPDIR/listener-base go test -tags multiprocess -count=1 -timeout 20m -run TestTwoBuilds -v ./cmd/listener (listener-base built from 819dc283)",
+      "observed": "PASS: plain->envoy_twobuild->plain through SIGTERM and SIGKILL: 617 messages over 10 subjects, each prompted exactly once; old 819dc283 build active, this build standby waiting on the pre-lease binding, SIGTERM old: new pod took over 973 ms later, 303 messages each prompted exactly once",
+      "headSha": "24a88452c22fbe510853617a94557e865146df3d",
+      "negativeControl": "on base 819dc283 (test and envoy_twobuild tag file applied): 'twobuild_test.go:163: 2 of 482 messages never reached their session within 30s: [evt-mp-0430 to ses_tb_twobuild evt-mp-0440 to ses_tb_twobuild]' (the plain build's filter skipped the new subject)"
+    },
+    {
+      "criterion": "Take-over on the real binary: kill -9 of the active pod with a standby running delivers a message sent through the standby (architect Q2 hard take-over bound 15 s)",
+      "surface": "two listener processes (cmd/listener built at head) for machine id box-smoke against a local nats-server 2.10.29 (go run), a port session served by a local HTTP server, driven with curl",
+      "command": "bash $TMPDIR/smoke/smoke.sh $TMPDIR/listener-head head (throwaway script: start pod-a and pod-b, curl /healthz, subscribe a port session via the active pod, send via the standby, kill -9 the active pod, send again via the standby, time the prompt)",
+      "observed": "healthz pod-a {role: active, status: healthy}, pod-b {role: standby, active_instance: pod-a}; after kill -9 pod-a the send via pod-b answered 200 and the port session received the prompt 12.37 s after the kill; pod-b healthz then role active",
+      "headSha": "24a88452c22fbe510853617a94557e865146df3d",
+      "negativeControl": "a send to an unregistered session through the surviving pod answered 404 {\"error\":\"no live session ses_never_registered\"}"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/cmd/listener/lease.go (new): per-machine lease in bucket envoy_listener, key lease.<durable>",
+    "packages/envoy/cmd/listener/receive.go (new): lease-driven core subscription on the durable's deliver subject, InProgress keep-alive, hold-and-sort after a hard take-over, shutdown grace, no-lease mode, holder-only loops",
+    "packages/envoy/cmd/listener/durable.go, main.go, delivery.go, api.go, apiauth.go, live_topics.go",
+    "packages/envoy/internal/dedupe (KV ledger + in-process fallback), internal/session (CAS, unknown fields, last-seen, accepted_host, cancellable prompt), internal/store (CAS, unknown fields, service_since grace), internal/bus (ListenerStateBucket, ReadStreamSubjects, SubjectsCapture, exception MsgId, SubSubject removed, envoy_twobuild file), internal/logging (instance), internal/cmdtest (build tags)",
+    "packages/envoy/infra/core/permissions.go (+ tests, gcp goldens), infra/aws/rendering/metricfilters.go (+ test)",
+    "tests: cmd/listener/multiprocess_test.go and twobuild_test.go (multiprocess tag), lease_test.go, receive_test.go, ledger_test.go, api_pods_test.go, pods_grace_test.go, pods_address_test.go, relay helpers, rewritten startup/shutdown/durable/live-lane tests",
+    ".github/workflows/envoy-and-contracts.yaml: job listener-multiprocess",
+    "docs: packages/envoy/cmd/listener/README.md (new), packages/envoy/AGENTS.md, CHANGELOG.md, docs/site envoy.md, infra/docs/nats-hub.md, infra/README.md, docs/solutions (3 files), scripts READMEs, packages/envoy/docs/architecture.md, .dispatch/architecture/envoy-listener.md"
+  ],
+  "trickyParts": [
+    "nats-server 2.10 accepts an update of a push durable's filter to EMPTY and then delivers nothing; the policy therefore sets FilterSubject '>' (regression test TestADurableFilteredOnTheStreamSubjectsDeliversEverySubjectOnceCorrected).",
+    "Node loss: the server keeps the dead connection's interest, so messages pushed to it in the last AckWait come back after newer ones. A one-AckWait wait before subscribing (architect Q2's wording) kept order only for SIGKILL; the new holder now subscribes at once, holds what it receives for AckWait + 1 s and delivers it sorted by stream sequence.",
+    "A renewal whose reply is lost but which landed made the next renewal conflict with the holder's own write; the lease now recognises its own boot and keeps the lease.",
+    "The lease runs on its own NATS connection; a ledger call cut by that connection's reconnect waits up to 5 s for it before the 30 s NAK (a 2 s blip had cost 25-30 s).",
+    "The standby's reconnect lines: tests count only the main client's reconnect (mainClientReconnects), since the lease connection logs the same message."
+  ],
+  "deviations": [
+    "Architect Q1 (2026-10-27): a listener without the envoy_listener grant does not exit; it logs one ERROR naming the bucket and grant, receives only while the durable is not push-bound by another subscriber (no lease), uses per-process ledger/last-seen/grace, and /healthz reports lease unavailable.",
+    "Architect Q2: a hard take-over (SIGKILL, node loss) keeps per-session order and takes about 12 s (test bound 15 s) instead of the spec's 10 s for SIGKILL; graceful within 10 s (observed 1-3 s). On a live node, base 819dc283 hands over a SIGKILL with nothing in hand in under 1 s (measured 0.69 s in the smoke), so this order guarantee costs about 11 s there.",
+    "Go's default logger gets no instance= prefix (plan 1.7 item 15): the deployed AWS text metric filters are positional and three alarms would stop matching. Pods are told apart by the instance field on every JSON line and the NATS client name (envoy-listener <instance>) on bus lines.",
+    "Durable filter is '>' rather than empty (nats-server 2.10 behaviour above).",
+    "The address-refusal exception keeps reason delivery_failed (the daemon reads reason as a fixed list); the text 'address not reachable from this listener pod' is in the error log line.",
+    "CI job listener-multiprocess runs -run '^Test(TwoPods|TwoBuilds)' so it needs no Postgres; envoy-go already runs the package's untagged tests.",
+    "Removed log line 'restored role claims' with the per-process role-revision snapshot it reported (CHANGELOG Removed)."
+  ],
+  "openQuestions": [
+    "Hard take-over margin: about 12 s against the 15 s test bound; a slow CI runner could approach it."
+  ],
+  "discoveredComplexity": [
+    "Environment-only failures in this pod, unrelated to the change and not depending on any changed package: internal/cmdtest TestFreeTCPPortsLieOutsideTheKernelsOwnPortRange (pod port range starts at 16000; fails on base too), cmd/agent-secrets, cmd/agent-secrets-helper, internal/broker/helper, internal/dispatch/files (needs Docker), internal/dispatch/pmdoc (differential.ts script). Postgres-backed suites ran against a cluster pgvector Job."
+  ]
+}
