@@ -63,7 +63,7 @@ func TestThePassCarriesAnApprovalAcrossCommitsThatChangeOnlyTheIssuesHandoffs(t 
 		return fmt.Sprintf(`{"status":%q,"ahead_by":1,"behind_by":0,"files":[%s]}`, status, strings.Join(files, ","))
 	}
 	review := file(".legion/CAPTURE-1/review.json")
-	// GitHub's compare lists at most 300 changed files (compareFilesCap).
+	// GitHub's compare lists at most 300 changed files (githubrest.CompareFilesLimit).
 	many := make([]string, 300)
 	for i := range many {
 		many[i] = file(fmt.Sprintf(".legion/CAPTURE-1/x%d.json", i))

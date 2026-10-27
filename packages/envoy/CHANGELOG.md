@@ -4,6 +4,40 @@
 
 ### Added
 
+- The listener answers `POST /v1/replay` with the messages `ENVOY_NOTIFICATIONS` stored for a
+  session after a cursor per subject, so a session that receives on its own NATS subscriptions
+  (pi-envoy, claude-envoy) reads back what it missed while they were down. It serves only the
+  session's own `notifications.agent.<session_id>`, exactly, and the topics registered as its
+  interests that lie inside a shared stream subject (`notifications.dispatch.>`,
+  `notifications.github.>`, `notifications.slack.>`, `notifications.ghostwispr.>`,
+  `notifications.whatsapp.>`), whose publishers never carry one session's private payload. Every
+  other subject is `refused: "not_followed"` even when the interest store holds it: another
+  session's agent subject or a wildcard over them, every exception lane (the session's own
+  included), the Legion controller's `notifications.legion.>` notices, and a wildcard wider than
+  one shared subject such as `notifications.>`. Every subject of the stream is classified shared
+  or private beside the stream's subject list, and a test fails on a new one left unclassified. An
+  answered subject the deployed stream does not retain is `refused: "not_retained"`; a subject
+  without a cursor gets the stream's last sequence to start one. The answer's `stream` names the
+  stream's `id`, the `envoy_stream_id` metadata the listener and Dispatch's server set once (on the
+  stream they create, or on a deployed one without it, whose other metadata every start keeps; a
+  deployed stream that needs no other change gets the id alone, its replicas and every other
+  setting kept as deployed), which a backup and restore, a reconcile and a leader election keep,
+  while a restore changes `created`, and after a clustered restore the servers can report
+  different `created` times, so a later leader election can change it too. One answer holds at
+  most 32 subjects, 500 messages (100 by default), 2 MiB and 5 s of reading, and says `more` for
+  a subject it cut short. NATS refusing the read is `503 {"code":"REPLAY_UNAVAILABLE"}` naming
+  NATS's error; a listener without the route answers 404, which a session reads as "does not
+  replay". A `session_id` that is not one literal NATS token (`.`, `*`, `>`, whitespace or a
+  control character) is a 400, so a wildcard cannot make `notifications.agent.>` its own subject
+  and read every session's inbox (INFRA-439).
+- `envoy-infra`'s `ListenerPermissions`, and through it `HostPermissions` and
+  `DispatchPermissions`, grant `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, the stored-message
+  read `/v1/replay` makes; it reads one message at a time and can create, change or delete
+  nothing, and `SessionPermissions` does not get it. The rendered users change, so moving a hub
+  with a `listener`, a `machineId` user or a `dispatchMachineId` user to this release replaces its
+  VM once, with NATS down until the new VM starts; a hub with none of them keeps its VM. A
+  listener whose NATS user lacks the read answers `/v1/replay` with `REPLAY_UNAVAILABLE`
+  (INFRA-439).
 - A person's browser edit of a document reaches the agent sessions that wrote it. Once the
   document has been quiet for 30 seconds after a person's last settled version, Dispatch appends
   one `artifact.human_edited` event: the person who edited last is its actor, and its payload
@@ -903,6 +937,25 @@
 
 ### Changed
 
+- `POST /v1/interests/subscribe` no longer stores a topic reaching a private stream subject other
+  than the session's own agent subject (`bus.ReachesPrivateStreamSubject`): another session's
+  `notifications.agent.<id>`, a failed-delivery lane
+  `notifications.envoy.exceptions.notifications.agent.<id>` (the session's own included), a
+  Legion daemon notice under `notifications.legion.>` (the controller lane
+  `notifications.legion.<project>.controller`), or a wildcard overlapping one
+  (`notifications.agent.*`, `notifications.agent.>`, `notifications.envoy.>`,
+  `notifications.>`, `notifications.*.<x>`), since the stored topics drive the listener's fan-out
+  to serve-port sessions and such a topic would hand one session another's inbox, a failed
+  delivery's payload or the controller's notices (`/v1/replay` refuses such a subject on its own).
+  The rest of the registration is stored and the answer stays 200, its `warnings` naming each
+  topic left out (`<topic> was not registered: …`), so a released pi-envoy, which registers a fork
+  parent's agent subject with the rest of what it follows, keeps registering. A row an earlier
+  build stored with such a topic is cleaned at the session's next registration: the registry drops
+  every such topic from the merged row, not only from the incoming topics, as do a role claim and
+  an unsubscribe that rewrite the row, so the fan-out stops reaching the session after its next
+  heartbeat. pi-envoy and claude-envoy no longer register or replay a topic reaching a private
+  stream subject other than their own agent subject (`reachesPrivateStreamSubject` in
+  `@legion/envoy-client/replay`, mirroring `bus.ReachesPrivateStreamSubject`) (INFRA-439).
 - A dead session's subscriptions now stay 5 minutes longer: the interest reaper deletes one only
   15 minutes after its row's last write, where it was 10, because it now adds
   `store.InterestRefreshAge` to its grace window. For that time the subscribers page and the
@@ -1705,6 +1758,24 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- A document now strikes tilde runs as a comment does. A run of `~` pairs only with a run of its
+  own length, so `Plain ~a~~ text.` and `Plain ~~a~ text.` keep their tildes where a document
+  written through the API struck `a`; a run directly after an escaped tilde may open or close, so
+  `Plain ~\~~ end.` strikes the tilde where a document showed `~~~`; and `~` runs pair apart from
+  `*` and `_` runs, in the browser editor's order, so `x* ~~a*b~~c*` is emphasis `b~~c` in both.
+  Reading a paragraph of mixed `~` and `*` runs is now linear in its length: a mebibyte of
+  `~~a ` then `a* ` took over a minute. So is a paragraph whose `*` runs the rule of three keeps
+  apart: 437 KiB of `**a ` then `a*a` took 100 seconds and now takes under one. A rendering stored
+  correctly keeps its bytes, an image's alt text included: the writer takes first a spelling that
+  reads back under the browser editor's rules and under both sets of rules Dispatch stored
+  markdown under, so the spelling it wrote before stays wherever the browser reads it back as
+  written. One the browser misread, such as text `~~~x~~` stored as `\~~~x~~`, which the browser
+  strikes, is written anew (`&#126;&#126;&#126;x&#126;&#126;`) when its document is next
+  rendered, and no stored document is rewritten. An image inside an image's label now adds its own
+  alt text to the outer alt text, as the browser editor reads it. A `*` or `_` run beside a tilde
+  now opens or closes toward it as the browser editor reads it, so `*~~**b~~*` is emphasis around
+  struck `**b`, and `Plain b*~* text.` is emphasis `~` (INFRA-534).
 
 - A bare email address, or one written `<a@b.test>`, in Markdown written to a document through the
   API is now stored and shown as a link to its `mailto:` URL, `[a@b.test](mailto:a@b.test)`, as a

@@ -14601,6 +14601,7 @@ function dedupeKeyNamesItsEvent(envelope) {
 // ../contracts/src/subject.ts
 var AGENT_TOPIC_PREFIX = "notifications.agent.";
 var ROLE_TOPIC_PREFIX = "notifications.role.";
+var LEGION_NOTICE_TOPIC_PREFIX = "notifications.legion.";
 var DISPATCH_TOPIC_PREFIX = "notifications.dispatch.";
 var DISPATCH_ISSUE_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}issue.`;
 var DISPATCH_DOCUMENT_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}document.`;
@@ -20014,6 +20015,8 @@ function sessionEnvoySettings(file, env, options) {
 // ../envoy-client/src/transport.ts
 var DEFAULT_TIMEOUT_MS = 5000;
 var RETRY_DELAY_MS = 250;
+var REPLAY_TIMEOUT_MS = 1e4;
+var REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
 var InterestWireSchema = object({
   session_id: string2(),
   machine_id: string2(),
@@ -20048,11 +20051,32 @@ var RoleHeldWireSchema = object({
 });
 var ErrorWireSchema = object({
   error: string2(),
+  code: string2().optional(),
   expected: array(string2()).optional()
 });
 var EnvelopeResponseSchema = EnvelopeSchema.extend({
   recipient: string2().optional(),
   holder: string2().optional()
+});
+var ReplayWireSchema = object({
+  stream: object({
+    id: string2().min(1).optional(),
+    created: string2(),
+    first_seq: number2().int().nonnegative(),
+    last_seq: number2().int().nonnegative()
+  }),
+  subjects: array(object({
+    subject: string2(),
+    messages: array(object({
+      seq: number2().int().positive(),
+      subject: string2(),
+      time: string2(),
+      data: string2()
+    })),
+    next_after: number2().int().nonnegative(),
+    more: boolean2(),
+    refused: string2().optional()
+  }))
 });
 function mergeInterestSources(registryTopics, liveTopics) {
   const interests = new Map;
@@ -20087,6 +20111,7 @@ class EnvoyApiError extends Error {
   details;
   name = "EnvoyApiError";
   expected;
+  code;
   constructor(details) {
     let parsed;
     try {
@@ -20097,16 +20122,18 @@ class EnvoyApiError extends Error {
     super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`);
     this.details = details;
     this.expected = parsed?.expected;
+    this.code = parsed?.code;
   }
 }
 function createEnvoyClient(config) {
   const baseUrl = normalizeEnvoyUrl(config.baseUrl);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const apiToken = config.token;
-  const request = async (path, init) => {
+  const request = async (path, init, options = {}) => {
     const url = `${baseUrl}${path}`;
     const attempts = config.retry === false ? 1 : 2;
-    for (let attempt = 0;attempt < attempts; attempt += 1) {
+    const tries = options.retry === false ? 1 : attempts;
+    for (let attempt = 0;attempt < tries; attempt += 1) {
       let response;
       try {
         const headers = new Headers(init.headers);
@@ -20115,10 +20142,10 @@ function createEnvoyClient(config) {
         response = await config.fetch(url, {
           ...init,
           headers,
-          signal: AbortSignal.timeout(timeoutMs)
+          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs)
         });
       } catch (error) {
-        if (attempt + 1 < attempts) {
+        if (attempt + 1 < tries) {
           await waitForRetry();
           continue;
         }
@@ -20133,7 +20160,7 @@ function createEnvoyClient(config) {
         status: response.status,
         responseBody
       });
-      if (response.status >= 500 && attempt + 1 < attempts) {
+      if (response.status >= 500 && attempt + 1 < tries) {
         await waitForRetry();
         continue;
       }
@@ -20141,11 +20168,11 @@ function createEnvoyClient(config) {
     }
     throw new Error("Envoy request exhausted retries");
   };
-  const post = (path, body) => request(path, {
+  const post = (path, body, options) => request(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
-  });
+  }, options);
   return {
     subscribe: async (input) => InterestWireSchema.parse(JSON.parse(await post("/v1/interests/subscribe", {
       session_id: input.sessionID,
@@ -20231,7 +20258,12 @@ function createEnvoyClient(config) {
         search.set("title", input.title);
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
-    }
+    },
+    replay: async (input) => ReplayWireSchema.parse(JSON.parse(await post("/v1/replay", {
+      session_id: input.sessionID,
+      subjects: input.subjects.map((cursor) => cursor.after === undefined ? { subject: cursor.subject } : { subject: cursor.subject, after: cursor.after }),
+      ...input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }
+    }, { timeoutMs: REPLAY_TIMEOUT_MS, retry: false })))
   };
 }
 function waitForRetry() {
