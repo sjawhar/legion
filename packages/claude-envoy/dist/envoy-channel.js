@@ -168,11 +168,11 @@ var require_nuid = __commonJS((exports) => {
 var require_core = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -188,7 +188,7 @@ var require_core = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -391,11 +391,11 @@ var require_core = __commonJS((exports) => {
 var require_util = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -411,7 +411,7 @@ var require_util = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -425,14 +425,14 @@ var require_util = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve, reject) {
-          v = o[n](v), settle(resolve, reject, v.done, v.value);
+        return new Promise(function(resolve2, reject) {
+          v = o[n](v), settle(resolve2, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve, reject, d, v) {
+    function settle(resolve2, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve({ value: v2, done: d });
+        resolve2({ value: v2, done: d });
       }, reject);
     }
   };
@@ -491,9 +491,9 @@ var require_util = __commonJS((exports) => {
   }
   function delay(ms = 0) {
     let methods;
-    const p = new Promise((resolve) => {
+    const p = new Promise((resolve2) => {
       const timer = setTimeout(() => {
-        resolve();
+        resolve2();
       }, ms);
       const cancel = () => {
         if (timer) {
@@ -512,18 +512,18 @@ var require_util = __commonJS((exports) => {
   }
   function deferred() {
     let methods = {};
-    const p = new Promise((resolve, reject) => {
-      methods = { resolve, reject };
+    const p = new Promise((resolve2, reject) => {
+      methods = { resolve: resolve2, reject };
     });
     return Object.assign(p, methods);
   }
   function debugDeferred() {
     let methods = {};
-    const p = new Promise((resolve, reject) => {
+    const p = new Promise((resolve2, reject) => {
       methods = {
         resolve: (v) => {
           console.trace("resolve", v);
-          resolve(v);
+          resolve2(v);
         },
         reject: (err) => {
           console.trace("reject");
@@ -1005,11 +1005,11 @@ var require_ipparser = __commonJS((exports) => {
 var require_servers = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -1025,7 +1025,7 @@ var require_servers = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -6434,11 +6434,11 @@ var require_options = __commonJS((exports) => {
 var require_protocol = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -6454,7 +6454,7 @@ var require_protocol = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -6468,14 +6468,14 @@ var require_protocol = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve, reject) {
-          v = o[n](v), settle(resolve, reject, v.done, v.value);
+        return new Promise(function(resolve2, reject) {
+          v = o[n](v), settle(resolve2, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve, reject, d, v) {
+    function settle(resolve2, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve({ value: v2, done: d });
+        resolve2({ value: v2, done: d });
       }, reject);
     }
   };
@@ -6886,12 +6886,12 @@ var require_protocol = __commonJS((exports) => {
     }
     _doDial(srv) {
       return __awaiter(this, undefined, undefined, function* () {
-        const { resolve } = this.options;
+        const { resolve: resolve2 } = this.options;
         const alts = yield srv.resolve({
           fn: (0, transport_1.getResolveFn)(),
           debug: this.options.debug,
           randomize: !this.options.noRandomize,
-          resolve
+          resolve: resolve2
         });
         let lastErr = null;
         for (const a of alts) {
@@ -7639,11 +7639,11 @@ var require_jsutil = __commonJS((exports) => {
 var require_jsbaseclient_api = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -7659,7 +7659,7 @@ var require_jsbaseclient_api = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -7767,11 +7767,11 @@ var require_jsbaseclient_api = __commonJS((exports) => {
 var require_jslister = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -7787,7 +7787,7 @@ var require_jslister = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -8264,11 +8264,11 @@ var require_types2 = __commonJS((exports) => {
 var require_jsmconsumer_api = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -8284,7 +8284,7 @@ var require_jsmconsumer_api = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -8533,11 +8533,11 @@ var require_mod2 = __commonJS((exports) => {
 var require_jsmsg = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -8553,7 +8553,7 @@ var require_jsmsg = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -8726,11 +8726,11 @@ var require_jsmsg = __commonJS((exports) => {
 var require_typedsub = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -8746,7 +8746,7 @@ var require_typedsub = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -9469,11 +9469,11 @@ var require_sha_digest_parser = __commonJS((exports) => {
 var require_objectstore = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -9489,7 +9489,7 @@ var require_objectstore = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -9503,14 +9503,14 @@ var require_objectstore = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve, reject) {
-          v = o[n](v), settle(resolve, reject, v.done, v.value);
+        return new Promise(function(resolve2, reject) {
+          v = o[n](v), settle(resolve2, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve, reject, d, v) {
+    function settle(resolve2, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve({ value: v2, done: d });
+        resolve2({ value: v2, done: d });
       }, reject);
     }
   };
@@ -10277,11 +10277,11 @@ var require_idleheartbeat_monitor = __commonJS((exports) => {
 var require_jsclient = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -10297,7 +10297,7 @@ var require_jsclient = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -11021,11 +11021,11 @@ var require_jsclient = __commonJS((exports) => {
 var require_kv = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -11041,7 +11041,7 @@ var require_kv = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -11055,14 +11055,14 @@ var require_kv = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve, reject) {
-          v = o[n](v), settle(resolve, reject, v.done, v.value);
+        return new Promise(function(resolve2, reject) {
+          v = o[n](v), settle(resolve2, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve, reject, d, v) {
+    function settle(resolve2, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve({ value: v2, done: d });
+        resolve2({ value: v2, done: d });
       }, reject);
     }
   };
@@ -12003,11 +12003,11 @@ var require_kv = __commonJS((exports) => {
 var require_consumer = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -12023,7 +12023,7 @@ var require_consumer = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -12037,14 +12037,14 @@ var require_consumer = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve, reject) {
-          v = o[n](v), settle(resolve, reject, v.done, v.value);
+        return new Promise(function(resolve2, reject) {
+          v = o[n](v), settle(resolve2, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve, reject, d, v) {
+    function settle(resolve2, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve({ value: v2, done: d });
+        resolve2({ value: v2, done: d });
       }, reject);
     }
   };
@@ -12896,11 +12896,11 @@ var require_consumer = __commonJS((exports) => {
 var require_jsmstream_api = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -12916,7 +12916,7 @@ var require_jsmstream_api = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -13367,11 +13367,11 @@ var require_jsmstream_api = __commonJS((exports) => {
 var require_jsm = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -13387,7 +13387,7 @@ var require_jsm = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -13401,14 +13401,14 @@ var require_jsm = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve, reject) {
-          v = o[n](v), settle(resolve, reject, v.done, v.value);
+        return new Promise(function(resolve2, reject) {
+          v = o[n](v), settle(resolve2, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve, reject, d, v) {
+    function settle(resolve2, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve({ value: v2, done: d });
+        resolve2({ value: v2, done: d });
       }, reject);
     }
   };
@@ -13598,11 +13598,11 @@ var require_jsm = __commonJS((exports) => {
 var require_service = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -13618,7 +13618,7 @@ var require_service = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -14086,11 +14086,11 @@ var require_service = __commonJS((exports) => {
 var require_serviceclient = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -14106,7 +14106,7 @@ var require_serviceclient = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -14120,14 +14120,14 @@ var require_serviceclient = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve, reject) {
-          v = o[n](v), settle(resolve, reject, v.done, v.value);
+        return new Promise(function(resolve2, reject) {
+          v = o[n](v), settle(resolve2, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve, reject, d, v) {
+    function settle(resolve2, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve({ value: v2, done: d });
+        resolve2({ value: v2, done: d });
       }, reject);
     }
   };
@@ -14208,11 +14208,11 @@ var require_serviceclient = __commonJS((exports) => {
 var require_nats = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -14228,7 +14228,7 @@ var require_nats = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -14242,14 +14242,14 @@ var require_nats = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve, reject) {
-          v = o[n](v), settle(resolve, reject, v.done, v.value);
+        return new Promise(function(resolve2, reject) {
+          v = o[n](v), settle(resolve2, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve, reject, d, v) {
+    function settle(resolve2, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve({ value: v2, done: d });
+        resolve2({ value: v2, done: d });
       }, reject);
     }
   };
@@ -14277,7 +14277,7 @@ var require_nats = __commonJS((exports) => {
       this.listeners = [];
     }
     static connect(opts = {}) {
-      return new Promise((resolve, reject) => {
+      return new Promise((resolve2, reject) => {
         const nc = new NatsConnectionImpl(opts);
         protocol_1.ProtocolHandler.connect(nc.options, nc).then((ph) => {
           nc.protocol = ph;
@@ -14306,7 +14306,7 @@ var require_nats = __commonJS((exports) => {
               }
             });
           })();
-          resolve(nc);
+          resolve2(nc);
         }).catch((err) => {
           reject(err);
         });
@@ -14697,11 +14697,11 @@ ${errCtx.stack}`;
 var require_bench = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve) {
-        resolve(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -14717,7 +14717,7 @@ var require_bench = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -14731,14 +14731,14 @@ var require_bench = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve, reject) {
-          v = o[n](v), settle(resolve, reject, v.done, v.value);
+        return new Promise(function(resolve2, reject) {
+          v = o[n](v), settle(resolve2, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve, reject, d, v) {
+    function settle(resolve2, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve({ value: v2, done: d });
+        resolve2({ value: v2, done: d });
       }, reject);
     }
   };
@@ -15489,11 +15489,11 @@ var require_nats_base_client = __commonJS((exports) => {
 var require_node_transport = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve3) {
+        resolve3(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve3, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -15509,7 +15509,7 @@ var require_node_transport = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve3(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -15568,8 +15568,8 @@ var require_node_transport = __commonJS((exports) => {
   var net_1 = __require("net");
   var util_1 = require_util();
   var tls_1 = __require("tls");
-  var { resolve } = __require("path");
-  var { readFile, existsSync } = __require("fs");
+  var { resolve: resolve2 } = __require("path");
+  var { readFile, existsSync: existsSync2 } = __require("fs");
   var dns = __require("dns");
   var VERSION = "2.29.3";
   var LANG = "nats.js";
@@ -15684,8 +15684,8 @@ var require_node_transport = __commonJS((exports) => {
       }
       const d = (0, nats_base_client_1.deferred)();
       try {
-        fn = resolve(fn);
-        if (!existsSync(fn)) {
+        fn = resolve2(fn);
+        if (!existsSync2(fn)) {
           d.reject(new Error(`${fn} doesn't exist`));
         }
         readFile(fn, (err, data) => {
@@ -39189,31 +39189,587 @@ function renderInbound(raw, sessionID, subject2) {
   };
 }
 
-// ../envoy-client/src/dispatch-session-state.ts
-import { createHash } from "crypto";
+// ../envoy-client/src/envoy-config.ts
 import {
-  appendFileSync,
+  chmodSync,
   closeSync,
-  fstatSync,
-  mkdirSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
   openSync,
-  readdirSync,
-  readFileSync,
-  readSync,
-  renameSync,
+  readFileSync as readFileSync2,
+  readlinkSync,
   rmSync,
-  statSync,
-  writeFileSync
+  statSync
 } from "fs";
-import { homedir } from "os";
-import { join } from "path";
+import { homedir, tmpdir } from "os";
+import * as path from "path";
 
-// ../envoy-client/src/dispatch-execute.ts
-import { resolve as resolvePath2 } from "path";
+// ../envoy-client/src/json-position.ts
+function jsonErrorPosition(text) {
+  let at = 0;
+  const fail = () => {
+    throw new RangeError("not JSON");
+  };
+  const space = () => {
+    while (at < text.length && ` 	
+\r`.includes(text.charAt(at)))
+      at += 1;
+  };
+  const expect = (char) => {
+    if (text.charAt(at) !== char)
+      fail();
+    at += 1;
+  };
+  const string4 = () => {
+    expect('"');
+    while (at < text.length) {
+      const char = text.charAt(at);
+      if (char === '"') {
+        at += 1;
+        return;
+      }
+      if (char < " ")
+        fail();
+      at += char === "\\" ? 2 : 1;
+    }
+    fail();
+  };
+  const value = () => {
+    space();
+    const char = text.charAt(at);
+    if (char === "{" || char === "[") {
+      const close = char === "{" ? "}" : "]";
+      at += 1;
+      space();
+      if (text.charAt(at) === close) {
+        at += 1;
+        return;
+      }
+      for (;; ) {
+        if (close === "}") {
+          space();
+          string4();
+          space();
+          expect(":");
+        }
+        value();
+        space();
+        if (text.charAt(at) === ",") {
+          at += 1;
+          continue;
+        }
+        expect(close);
+        return;
+      }
+    }
+    if (char === '"') {
+      string4();
+      return;
+    }
+    for (const word of ["true", "false", "null"]) {
+      if (text.startsWith(word, at)) {
+        at += word.length;
+        return;
+      }
+    }
+    const number4 = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/.exec(text.slice(at));
+    if (number4 === null)
+      fail();
+    at += number4?.[0].length ?? 0;
+  };
+  try {
+    value();
+    space();
+    if (at < text.length)
+      fail();
+    return;
+  } catch {
+    const before = text.slice(0, at).split(`
+`);
+    return `line ${before.length}, column ${(before.at(-1)?.length ?? 0) + 1}`;
+  }
+}
 
-// ../envoy-client/src/dispatch-cwd.ts
-import { execFile } from "child_process";
-import { promisify } from "util";
+// ../envoy-client/src/secret-file.ts
+import { readFileSync } from "fs";
+function sendable(value) {
+  return !/[\s\p{Cc}]/u.test(value);
+}
+function readSecretFile(variable, filePath) {
+  let contents;
+  try {
+    contents = readFileSync(filePath, "utf8");
+  } catch (error48) {
+    throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error48)}`);
+  }
+  const value = contents.trim();
+  if (value.length === 0)
+    throw new Error(`${variable} names ${filePath}, which is empty`);
+  if (!sendable(value)) {
+    throw new Error(`${variable} names ${filePath}, which holds whitespace or a control character`);
+  }
+  return value;
+}
+
+// ../envoy-client/src/envoy-config.ts
+var COMMAND_TIMEOUT_MS = 1e4;
+function nonEmpty(value) {
+  return value === undefined || value === "" ? undefined : value;
+}
+function absolute(name, value) {
+  if (value !== undefined && !path.isAbsolute(value)) {
+    throw new Error(`${name} is ${value}, which is not an absolute path`);
+  }
+  return value;
+}
+function neutralConfig(env) {
+  const xdgConfigHome = nonEmpty(env.XDG_CONFIG_HOME);
+  if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
+    return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
+  }
+  const configHome = xdgConfigHome ?? path.join(nonEmpty(env.HOME) ?? homedir(), ".config");
+  return { path: path.resolve(configHome, "legion", "envoy.json") };
+}
+var HARNESS_DIRECTORY_VARIABLE = {
+  omp: "PI_CODING_AGENT_DIR",
+  claude: "CLAUDE_CONFIG_DIR",
+  opencode: "OPENCODE_CONFIG_DIR"
+};
+var PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE);
+function namedDirectory(harness, env) {
+  if (harness === "omp") {
+    const profile = nonEmpty(env.OMP_PROFILE);
+    if (profile === undefined || profile === "default")
+      return;
+  }
+  return nonEmpty(env[HARNESS_DIRECTORY_VARIABLE[harness]]);
+}
+function harnessDirectory(harness, env) {
+  for (const plugin of harness === "command" ? PLUGIN_HARNESSES : [harness]) {
+    if (harness === "command" && plugin === "claude" && env.CLAUDE_CODE_CHILD_SESSION !== "1") {
+      continue;
+    }
+    const directory = namedDirectory(plugin, env);
+    if (directory !== undefined)
+      return absolute(HARNESS_DIRECTORY_VARIABLE[plugin], directory);
+  }
+  return;
+}
+function handedConfigPath(env) {
+  const handed = nonEmpty(env.ENVOY_CONFIG_FILE);
+  return handed === undefined ? undefined : path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
+}
+function envoyConfigPath(harness, env) {
+  const handedFirst = harness === "command" ? handedConfigPath(env) : undefined;
+  if (handedFirst !== undefined)
+    return handedFirst;
+  const directory = harnessDirectory(harness, env);
+  if (directory !== undefined)
+    return path.resolve(directory, "envoy.json");
+  const handed = handedConfigPath(env);
+  if (handed !== undefined)
+    return handed;
+  const neutral = neutralConfig(env);
+  if ("error" in neutral)
+    throw new Error(neutral.error);
+  return neutral.path;
+}
+var httpUrlSchema = exports_external.url({ protocol: /^https?$/, error: "must be an http or https URL" });
+var DispatchSectionSchema = exports_external.strictObject({
+  enabled: exports_external.boolean().optional(),
+  serverUrl: httpUrlSchema.optional(),
+  token: exports_external.string().optional()
+});
+var EnvoySectionSchema = exports_external.strictObject({
+  enabled: exports_external.boolean().optional(),
+  url: httpUrlSchema.optional(),
+  natsUrls: exports_external.array(exports_external.string().trim().min(1, "must not be empty")).optional(),
+  token: exports_external.string().optional(),
+  natsSeed: exports_external.string().optional()
+});
+var EnvoyFileSchema = exports_external.looseObject({
+  $schema: exports_external.string().optional(),
+  dispatch: DispatchSectionSchema.optional(),
+  envoy: EnvoySectionSchema.optional()
+});
+var CheckoutFileSchema = exports_external.looseObject({
+  $schema: exports_external.string().optional(),
+  dispatch: DispatchSectionSchema.optional()
+});
+function offWithNotice(notice) {
+  return { enabled: false, notice, error: null };
+}
+function offWithError(error48) {
+  return { enabled: false, notice: null, error: error48 };
+}
+function httpUrl2(value) {
+  let url2;
+  try {
+    url2 = new URL(value);
+  } catch {
+    return;
+  }
+  return url2.protocol === "http:" || url2.protocol === "https:" ? url2 : undefined;
+}
+function describeSchemaIssue(filePath, error48) {
+  const issue2 = error48.issues[0];
+  if (!issue2)
+    return `${filePath}: invalid envoy.json`;
+  if (issue2.code === "unrecognized_keys") {
+    const section = issue2.path.join(".");
+    const keys = issue2.keys.map((key) => `${section}.${key}`).join(", ");
+    return `${filePath}: unrecognized ${section} key(s): ${keys}`;
+  }
+  return `${filePath}: ${issue2.path.join(".")}: ${issue2.message}`;
+}
+function danglingLink(filePath) {
+  try {
+    return lstatSync(filePath).isSymbolicLink() ? readlinkSync(filePath) : null;
+  } catch {
+    return null;
+  }
+}
+function parseFile(filePath, schema, checkout) {
+  let raw;
+  try {
+    raw = readFileSync2(filePath, "utf-8");
+  } catch (error48) {
+    if (hasErrnoCode(error48, "ENOENT") || hasErrnoCode(error48, "ENOTDIR")) {
+      return { kind: "absent", link: danglingLink(filePath) };
+    }
+    return { kind: "invalid", reason: `${filePath}: could not be read (${messageFor(error48)})` };
+  }
+  let parsedJson;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    const position = jsonErrorPosition(raw);
+    return {
+      kind: "invalid",
+      reason: `${filePath}: invalid JSON${position === undefined ? "" : ` at ${position}`}`
+    };
+  }
+  if (typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
+    return {
+      kind: "invalid",
+      reason: checkout ? `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section` : `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
+    };
+  }
+  const parsed = schema.safeParse(parsedJson);
+  if (!parsed.success) {
+    return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
+  }
+  return { kind: "valid", settings: parsed.data };
+}
+var FAILURE_KEPT_MS = 60000;
+var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
+var processGlobal = globalThis;
+var commandOutcomes = processGlobal[COMMAND_OUTCOMES] ?? new Map;
+processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
+function runCommand(command, env, cwd) {
+  const childEnv = {};
+  for (const [name, variable] of Object.entries(env)) {
+    if (variable !== undefined)
+      childEnv[name] = variable;
+  }
+  const directory = mkdtempSync(path.join(tmpdir(), "envoy-command-"));
+  try {
+    chmodSync(directory, 448);
+    const output = path.join(directory, "stdout");
+    const fd = openSync(output, "wx", 384);
+    let result;
+    try {
+      result = Bun.spawnSync(["/bin/sh", "-c", command], {
+        cwd,
+        env: childEnv,
+        stdin: "ignore",
+        stdout: fd,
+        stderr: "ignore",
+        timeout: COMMAND_TIMEOUT_MS,
+        detached: true
+      });
+    } catch (error48) {
+      return { failure: `could not start: ${messageFor(error48)}`, timedOut: false };
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      process.kill(-result.pid, "SIGKILL");
+    } catch {}
+    if (result.exitedDueToTimeout) {
+      return {
+        failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s, and does not run again in this process`,
+        timedOut: true
+      };
+    }
+    if (!result.success) {
+      return {
+        failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}`,
+        timedOut: false
+      };
+    }
+    const value = readFileSync2(output, "utf-8").trim();
+    if (value.length === 0)
+      return { failure: "printed nothing", timedOut: false };
+    if (!sendable(value)) {
+      return {
+        failure: "printed more than one line, or whitespace inside its value",
+        timedOut: false
+      };
+    }
+    return { value };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+function fileValue(value, field, filePath, env) {
+  if (!value.startsWith("!")) {
+    if (!sendable(value)) {
+      throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
+    }
+    return value;
+  }
+  const command = value.slice(1);
+  const cwd = path.dirname(path.resolve(filePath));
+  const key = JSON.stringify([command, filePath, cwd]);
+  let outcome = commandOutcomes.get(key);
+  if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
+    outcome = { ...runCommand(command, env, cwd), at: Date.now() };
+    commandOutcomes.set(key, outcome);
+  }
+  if ("failure" in outcome)
+    throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
+  return outcome.value;
+}
+function statDevice(directory) {
+  try {
+    return statSync(directory).dev;
+  } catch {
+    return;
+  }
+}
+function moveNotice(oldFile, newFile, move, deviceOf) {
+  const oldDevice = deviceOf(path.dirname(oldFile));
+  let ancestor = path.dirname(newFile);
+  let newDevice = deviceOf(ancestor);
+  while (newDevice === undefined && path.dirname(ancestor) !== ancestor) {
+    ancestor = path.dirname(ancestor);
+    newDevice = deviceOf(ancestor);
+  }
+  if (oldDevice !== undefined && newDevice !== undefined && oldDevice !== newDevice) {
+    return `${oldFile} is not read, and is on another filesystem than ${newFile} (a mount): create ${newFile}, and move ${oldFile} on the machine that owns it`;
+  }
+  return `${oldFile} is not read: ${move}`;
+}
+function oldUserFileNotice(filePath, env, deviceOf) {
+  const home = nonEmpty(env.HOME) ?? homedir();
+  const old = path.join(home, ".config", "opencode", "envoy.json");
+  if (!existsSync(old))
+    return;
+  const selected = path.resolve(filePath);
+  const userFile = path.resolve(home, ".config", "legion", "envoy.json");
+  if (selected === userFile) {
+    return moveNotice(old, userFile, "mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/", deviceOf);
+  }
+  const profileFile = PLUGIN_HARNESSES.map((harness) => namedDirectory(harness, env)).some((directory) => directory !== undefined && path.isAbsolute(directory) && selected === path.resolve(directory, "envoy.json"));
+  if (profileFile) {
+    return `${old} is not read for this profile; copy or link it to ${filePath}, or write that file`;
+  }
+  const configHome = nonEmpty(env.XDG_CONFIG_HOME);
+  const neutral = neutralConfig(env);
+  if (configHome !== undefined && path.isAbsolute(configHome) && "path" in neutral && selected === neutral.path) {
+    return `${old} is not read under XDG_CONFIG_HOME=${configHome}`;
+  }
+  return;
+}
+function missingConfigNotice(filePath, missing, off) {
+  const link = missing.link === null ? "" : ` (a link to ${missing.link}, which does not exist)`;
+  const old = missing.oldUserFileNotice === undefined ? "" : `; ${missing.oldUserFileNotice}`;
+  return `no envoy.json at ${filePath}${link}: ${off}${old}`;
+}
+function readEnvoyConfig(filePath, env, options) {
+  const deviceOf = options.deviceOf ?? statDevice;
+  const chosen = parseFile(filePath, EnvoyFileSchema, false);
+  if (chosen.kind === "invalid")
+    return { kind: "failed", path: filePath, error: chosen.reason };
+  const resolvedChosen = path.resolve(filePath);
+  const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
+  const checkoutFile = checkoutPath === resolvedChosen ? { kind: "absent", link: null } : parseFile(checkoutPath, CheckoutFileSchema, true);
+  const own = chosen.kind === "valid" ? chosen.settings : {};
+  let checkout = null;
+  if (checkoutFile.kind === "invalid") {
+    checkout = { kind: "invalid", path: checkoutPath, error: checkoutFile.reason };
+  } else if (checkoutFile.kind === "valid") {
+    checkout = {
+      kind: "valid",
+      path: checkoutPath,
+      dispatch: checkoutFile.settings.dispatch ?? {},
+      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
+    };
+  }
+  const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
+  const warnings = oldCheckout !== resolvedChosen && !existsSync(checkoutPath) && existsSync(oldCheckout) ? [
+    moveNotice(oldCheckout, checkoutPath, `mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`, deviceOf)
+  ] : [];
+  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env, deviceOf) : undefined;
+  return {
+    kind: "read",
+    path: filePath,
+    dispatch: own.dispatch ?? {},
+    envoy: own.envoy ?? {},
+    checkout,
+    missing: chosen.kind === "absent" ? {
+      link: chosen.link,
+      ...unreadOldUserFile === undefined ? {} : { oldUserFileNotice: unreadOldUserFile }
+    } : null,
+    warnings
+  };
+}
+
+// ../envoy-client/src/bearer.ts
+function bearerSource(env, section, written) {
+  const pointer = nonEmpty(env[`${section}_TOKEN_FILE`]);
+  if (pointer !== undefined) {
+    return { kind: "variable", token: readSecretFile(`${section}_TOKEN_FILE`, pointer) };
+  }
+  const plain = nonEmpty(env[`${section}_TOKEN`]);
+  if (plain !== undefined) {
+    if (!sendable(plain)) {
+      throw new Error(`${section}_TOKEN holds whitespace or a control character`);
+    }
+    return { kind: "variable", token: plain };
+  }
+  const bearer = written();
+  return bearer === undefined ? { kind: "none" } : { kind: "file", ...bearer };
+}
+function fileBearer(bearer, url2, section, env) {
+  const named = httpUrl2(url2)?.origin;
+  const paired = httpUrl2(bearer.server)?.origin;
+  if (named !== paired) {
+    throw new Error(`${section}_URL names ${named}, but ${bearer.path}'s ${bearer.field} is for ${paired}; set ${section}_TOKEN or ${section}_TOKEN_FILE for it`);
+  }
+  if (bearer.checkout && bearer.token.startsWith("!")) {
+    throw new Error(`${bearer.path}: ${bearer.field} is a command, which a checkout's envoy.json cannot run`);
+  }
+  if (bearer.token === "") {
+    throw new Error(`${bearer.field} in ${bearer.path} must be a non-empty bearer token`);
+  }
+  return fileValue(bearer.token, bearer.field, bearer.path, env);
+}
+
+// ../envoy-client/src/envoy-settings.ts
+var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
+var DEFAULT_HEARTBEAT_MS = 90000;
+var MIN_PASS_DEADLINE_MS = 30000;
+var MIN_INTERVAL_MS = 25;
+var MAX_INTERVAL_MS = 2147483647;
+function namedInterval(raw) {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+function natsSeedFromEnvironment(env) {
+  const { NATS_NKEY_SEED_FILE: file2, NATS_NKEY_SEED: plain } = env;
+  if (file2 !== undefined) {
+    if (file2 === "")
+      throw new Error("NATS_NKEY_SEED_FILE is set but empty");
+    return {
+      value: readSecretFile("NATS_NKEY_SEED_FILE", file2),
+      source: `NATS_NKEY_SEED_FILE (${file2})`
+    };
+  }
+  if (plain === undefined)
+    return;
+  const value = plain.trim();
+  if (value.length === 0)
+    throw new Error("NATS_NKEY_SEED is set but empty");
+  return { value, source: "NATS_NKEY_SEED" };
+}
+var NO_NATS_SERVER = "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)";
+var NO_NATS_CONNECTION = "this session opens no NATS connection";
+function natsServerKey(url2) {
+  const match = /^([a-z][a-z0-9+.-]*):\/\/([^@/]*@)?(\[[^\]]*\]|[^:/]*)(?::(\d+))?(\/.*)?$/i.exec(url2);
+  if (match === null)
+    return url2;
+  const [, scheme = "", userinfo = "", host = "", port = "4222", rest = ""] = match;
+  return `${scheme.toLowerCase()}://${userinfo}${host.toLowerCase()}:${port}${rest.replace(/\/+$/, "")}`;
+}
+function natsCredential(env, section, namedNatsUrls, filePath) {
+  const fromEnvironment = natsSeedFromEnvironment(env);
+  if (fromEnvironment !== undefined || section.natsSeed === undefined)
+    return fromEnvironment;
+  if (namedNatsUrls.length > 0) {
+    const servers = new Set((section.natsUrls ?? []).map(natsServerKey));
+    const named = new Set(namedNatsUrls.map(natsServerKey));
+    if (named.size !== servers.size || ![...named].every((server) => servers.has(server))) {
+      throw new Error(`ENVOY_NATS_URL names other servers than ${filePath}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`);
+    }
+  }
+  return {
+    value: fileValue(section.natsSeed, "envoy.natsSeed", filePath, env),
+    source: `envoy.natsSeed in ${filePath}`
+  };
+}
+function envoySettings(env, config2, options = {}) {
+  if (config2.kind === "failed")
+    return offWithError(config2.error);
+  const section = config2.envoy;
+  if (section.enabled === false) {
+    return offWithNotice(`${config2.path} sets envoy.enabled to false: Envoy is off`);
+  }
+  const namedUrl = nonEmpty(env.ENVOY_URL);
+  const namedNatsUrls = (env.ENVOY_NATS_URL ?? "").split(",").map((url3) => url3.trim()).filter((url3) => url3.length > 0);
+  const addressed = namedUrl !== undefined || namedNatsUrls.length > 0 || section.url !== undefined || (section.natsUrls ?? []).length > 0 || section.enabled === true;
+  if (!addressed) {
+    return offWithNotice(config2.missing === null ? `${config2.path} names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off` : missingConfigNotice(config2.path, config2.missing, "Envoy is off"));
+  }
+  if (namedUrl !== undefined && httpUrl2(namedUrl) === undefined) {
+    return offWithError("ENVOY_URL must be an http or https URL");
+  }
+  const listener = section.url ?? DEFAULT_ENVOY_URL;
+  const url2 = namedUrl ?? listener;
+  let token;
+  try {
+    const source = bearerSource(env, "ENVOY", () => section.token === undefined ? undefined : {
+      token: section.token,
+      field: "envoy.token",
+      path: config2.path,
+      server: listener,
+      checkout: false
+    });
+    token = source.kind === "none" ? undefined : source.kind === "variable" ? source.token : fileBearer(source, url2, "ENVOY", env);
+  } catch (error48) {
+    return offWithError(messageFor(error48));
+  }
+  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
+  let inbound;
+  if (options.nats === false)
+    inbound = { off: NO_NATS_CONNECTION };
+  else if (natsUrls.length === 0)
+    inbound = { off: NO_NATS_SERVER };
+  else {
+    try {
+      inbound = { natsUrls, natsSeed: natsCredential(env, section, namedNatsUrls, config2.path) };
+    } catch (error48) {
+      inbound = { off: messageFor(error48) };
+    }
+  }
+  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
+  const heartbeatMs = namedHeartbeatMs === undefined ? DEFAULT_HEARTBEAT_MS : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
+  const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
+  return {
+    enabled: true,
+    url: normalizeEnvoyUrl(url2),
+    token,
+    inbound,
+    heartbeatMs,
+    passDeadlineMs: Math.min(Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs), MAX_INTERVAL_MS),
+    passDeadlineRaisedFrom: namedPassDeadlineMs !== undefined && namedPassDeadlineMs < heartbeatMs ? namedPassDeadlineMs : undefined
+  };
+}
+function normalizeEnvoyUrl(value) {
+  return value.replace(/\/+$/, "");
+}
 
 // ../envoy-client/src/machine.ts
 import { hostname as hostname3 } from "os";
@@ -39221,7 +39777,699 @@ function machineID() {
   return process.env["ENVOY_MACHINE_ID"] || hostname3();
 }
 
+// ../envoy-client/src/transport.ts
+var DEFAULT_TIMEOUT_MS = 5000;
+var RETRY_DELAY_MS = 250;
+var REPLAY_TIMEOUT_MS = 1e4;
+var REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
+var InterestWireSchema = exports_external.object({
+  session_id: exports_external.string(),
+  machine_id: exports_external.string(),
+  dir: exports_external.string(),
+  topics: exports_external.array(exports_external.string()),
+  updated_at: exports_external.number().int().optional(),
+  warnings: exports_external.array(exports_external.string()).optional()
+});
+var DeliveryAnswerWireSchema = exports_external.discriminatedUnion("mode", [
+  exports_external.object({
+    mode: exports_external.literal("consumer"),
+    subject: exports_external.string().min(1),
+    stream_id: exports_external.string(),
+    gap: exports_external.boolean()
+  }),
+  exports_external.object({ mode: exports_external.literal("core"), reason: exports_external.string() })
+]);
+var SessionWireSchema = exports_external.object({
+  session_id: exports_external.string(),
+  machine_id: exports_external.string(),
+  host: exports_external.string().optional(),
+  dir: exports_external.string(),
+  port: exports_external.number().int(),
+  title: exports_external.string(),
+  topics: exports_external.array(exports_external.string()),
+  roles: exports_external.array(exports_external.string()).optional(),
+  capabilities: exports_external.array(exports_external.string()).optional(),
+  self_subscribed: exports_external.boolean(),
+  last_seen: exports_external.number().int().optional()
+});
+var RoleWireSchema = exports_external.object({
+  role: exports_external.string(),
+  holder: exports_external.string(),
+  host: exports_external.string().optional(),
+  last_seen: exports_external.number().int()
+});
+var RoleHeldWireSchema = exports_external.object({
+  error: exports_external.string(),
+  role: exports_external.string(),
+  holder: exports_external.string()
+});
+var ErrorWireSchema = exports_external.object({
+  error: exports_external.string(),
+  code: exports_external.string().optional(),
+  expected: exports_external.array(exports_external.string()).optional()
+});
+var EnvelopeResponseSchema = EnvelopeSchema.extend({
+  recipient: exports_external.string().optional(),
+  holder: exports_external.string().optional()
+});
+var ReplayWireSchema = exports_external.object({
+  stream: exports_external.object({
+    id: exports_external.string().min(1).optional(),
+    created: exports_external.string(),
+    first_seq: exports_external.number().int().nonnegative(),
+    last_seq: exports_external.number().int().nonnegative()
+  }),
+  subjects: exports_external.array(exports_external.object({
+    subject: exports_external.string(),
+    messages: exports_external.array(exports_external.object({
+      seq: exports_external.number().int().positive(),
+      subject: exports_external.string(),
+      time: exports_external.string(),
+      data: exports_external.string()
+    })),
+    next_after: exports_external.number().int().nonnegative(),
+    more: exports_external.boolean(),
+    refused: exports_external.string().optional()
+  }))
+});
+var DELIVERY_NOT_ANSWERED = "not_answered";
+var DELIVERY_UNREADABLE = "unreadable_answer";
+function deliveryAnswerOf(result) {
+  return result.delivery ?? { mode: "core", reason: DELIVERY_NOT_ANSWERED };
+}
+function parseSubscribeAnswer(body) {
+  const interest = InterestWireSchema.parse(body);
+  const raw = typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
+  if (raw === undefined || raw === null)
+    return interest;
+  const delivery = DeliveryAnswerWireSchema.safeParse(raw);
+  return {
+    ...interest,
+    delivery: delivery.success ? delivery.data : { mode: "core", reason: DELIVERY_UNREADABLE }
+  };
+}
+function mergeInterestSources(registryTopics, liveTopics) {
+  const interests = new Map;
+  for (const topic of registryTopics) {
+    interests.set(topic, liveTopics.includes(topic) ? "both" : "registry");
+  }
+  for (const topic of liveTopics) {
+    if (!interests.has(topic))
+      interests.set(topic, "live");
+  }
+  return interests;
+}
+function expandSubscriptionTopics(topics) {
+  const expanded = new Set;
+  for (const topic of topics) {
+    const base = topic.endsWith(".>") ? topic.slice(0, -2) : undefined;
+    if (base === undefined || base.includes("*") || base.includes(">")) {
+      expanded.add(topic);
+      continue;
+    }
+    const segments = base.split(".");
+    if (segments.length < 2 || segments.some((segment) => segment.length === 0)) {
+      throw new TypeError(`cannot expand Envoy wildcard topic "${topic}": its concrete base must have at least two non-empty segments`);
+    }
+    expanded.add(base);
+    expanded.add(topic);
+  }
+  return [...expanded];
+}
+
+class EnvoyApiError extends Error {
+  details;
+  name = "EnvoyApiError";
+  expected;
+  code;
+  constructor(details) {
+    let parsed;
+    try {
+      const result = ErrorWireSchema.safeParse(JSON.parse(details.responseBody));
+      if (result.success)
+        parsed = result.data;
+    } catch {}
+    super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`);
+    this.details = details;
+    this.expected = parsed?.expected;
+    this.code = parsed?.code;
+  }
+}
+function createEnvoyClient(config2) {
+  const baseUrl = normalizeEnvoyUrl(config2.baseUrl);
+  const timeoutMs = config2.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const apiToken = config2.token;
+  const request = async (path2, init, options = {}) => {
+    const url2 = `${baseUrl}${path2}`;
+    const attempts = config2.retry === false ? 1 : 2;
+    const tries = options.retry === false ? 1 : attempts;
+    for (let attempt = 0;attempt < tries; attempt += 1) {
+      let response;
+      try {
+        const headers = new Headers(init.headers);
+        if (apiToken)
+          headers.set("Authorization", `Bearer ${apiToken}`);
+        response = await config2.fetch(url2, {
+          ...init,
+          headers,
+          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs)
+        });
+      } catch (error49) {
+        if (attempt + 1 < tries) {
+          await waitForRetry();
+          continue;
+        }
+        throw error49;
+      }
+      const responseBody = await response.text();
+      if (response.ok)
+        return responseBody;
+      const error48 = new EnvoyApiError({
+        method: init.method ?? "GET",
+        url: url2,
+        status: response.status,
+        responseBody
+      });
+      if (response.status >= 500 && attempt + 1 < tries) {
+        await waitForRetry();
+        continue;
+      }
+      throw error48;
+    }
+    throw new Error("Envoy request exhausted retries");
+  };
+  const post = (path2, body, options) => request(path2, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  }, options);
+  return {
+    subscribe: async (input) => parseSubscribeAnswer(JSON.parse(await post("/v1/interests/subscribe", {
+      session_id: input.sessionID,
+      dir: input.directory,
+      topics: expandSubscriptionTopics(input.topics),
+      port: input.port,
+      title: input.title,
+      ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
+      driving: input.driving,
+      ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
+      ...input.delivery === undefined ? {} : { delivery: input.delivery },
+      host: machineID()
+    }))),
+    unsubscribe: async (input) => {
+      await post("/v1/interests/unsubscribe", {
+        session_id: input.sessionID,
+        topics: expandSubscriptionTopics(input.topics)
+      });
+    },
+    getInterest: async (sessionID) => InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
+    send: async (input) => {
+      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
+      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/send", {
+        source: input.source ?? "agent",
+        ...sourceSession(input.sourceSessionID),
+        target_session: input.targetSessionID,
+        message: input.message,
+        idempotency_key: idempotencyKey,
+        ...messageMetadata(input)
+      })));
+      return {
+        envelope: response,
+        recipient: response.recipient ?? input.targetSessionID,
+        confirmed: response.recipient !== undefined
+      };
+    },
+    publish: async (input) => {
+      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
+      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/publish", {
+        source: input.source ?? "agent",
+        ...sourceSession(input.sourceSessionID),
+        topic: input.topic,
+        message: input.message,
+        ...input.payload === undefined ? {} : { payload: input.payload },
+        idempotency_key: idempotencyKey,
+        ...messageMetadata(input)
+      })));
+      return {
+        envelope: response,
+        ...response.holder === undefined ? {} : { holder: response.holder }
+      };
+    },
+    unregisterSession: async (sessionID) => {
+      await request(`/v1/sessions/${encodeURIComponent(sessionID)}`, { method: "DELETE" });
+    },
+    setRole: async (input) => {
+      const soft = input.soft === true;
+      const previous = soft ? input.previousSessionID ?? "" : "";
+      const body = {
+        session_id: input.sessionID,
+        role: input.role,
+        ...soft ? { soft: true } : {},
+        ...previous === "" ? {} : { previous_session_id: previous }
+      };
+      let raw;
+      try {
+        raw = await post("/v1/roles/set", body);
+      } catch (error48) {
+        if (error48 instanceof EnvoyApiError && error48.details.status === 409) {
+          const held = RoleHeldWireSchema.safeParse(JSON.parse(error48.details.responseBody));
+          if (held.success)
+            return { claimed: false, holder: held.data.holder };
+        }
+        throw error48;
+      }
+      return { claimed: true, interest: InterestWireSchema.parse(JSON.parse(raw)) };
+    },
+    getRole: async (role) => RoleWireSchema.parse(JSON.parse(await request(`/v1/roles/${encodeURIComponent(role)}`, { method: "GET" }))),
+    listSessions: async (input = {}) => {
+      const search = new URLSearchParams;
+      if (input.directory !== undefined)
+        search.set("dir", input.directory);
+      if (input.title !== undefined)
+        search.set("title", input.title);
+      const query = search.size === 0 ? "" : `?${search.toString()}`;
+      return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
+    },
+    replay: async (input) => ReplayWireSchema.parse(JSON.parse(await post("/v1/replay", {
+      session_id: input.sessionID,
+      subjects: input.subjects.map((cursor) => cursor.after === undefined ? { subject: cursor.subject } : { subject: cursor.subject, after: cursor.after }),
+      ...input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }
+    }, { timeoutMs: REPLAY_TIMEOUT_MS, retry: false })))
+  };
+}
+function waitForRetry() {
+  const { promise: promise2, resolve: resolve2 } = Promise.withResolvers();
+  setTimeout(resolve2, RETRY_DELAY_MS);
+  return promise2;
+}
+function messageMetadata(input) {
+  return {
+    ...input.inReplyTo === undefined ? {} : { in_reply_to: input.inReplyTo },
+    ...input.supersedes === undefined ? {} : { supersedes: input.supersedes },
+    ...input.urgency === undefined ? {} : { urgency: input.urgency },
+    ...input.expectsReply === undefined ? {} : { expects_reply: input.expectsReply },
+    ...input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }
+  };
+}
+function sourceSession(sessionID) {
+  return sessionID === undefined || sessionID === "" ? {} : { source_session: sessionID };
+}
+
+// ../envoy-client/src/consumer-delivery.ts
+var DELIVER_SUBJECT_PREFIX = "notifications.envoy.deliver.";
+function deliverSubject(sessionID) {
+  return `${DELIVER_SUBJECT_PREFIX}${sessionID}`;
+}
+var RelayHeader = {
+  subject: "Envoy-Subject",
+  streamSeq: "Envoy-Stream-Seq",
+  streamID: "Envoy-Stream-Id",
+  delivered: "Envoy-Delivered",
+  storedAt: "Envoy-Stored-At",
+  gap: "Envoy-Gap"
+};
+var RELAY_PROGRESS_INTERVAL_MS = 20000;
+var FOLLOW_CLOCK_ALLOWANCE_MS = 2000;
+var RELAY_ATTEMPTS_BEFORE_FAILED = 3;
+var decoder = new TextDecoder;
+var DECIMAL = /^[0-9]+$/;
+var RFC3339 = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/;
+function positiveInteger(text) {
+  if (text === null || text === undefined || !DECIMAL.test(text))
+    return;
+  const value = Number(text);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+function parseStoredAt(text) {
+  const match = RFC3339.exec(text);
+  if (match === null)
+    return;
+  const fraction = (match[2] ?? "").padEnd(3, "0").slice(0, 3);
+  const ms = Date.parse(`${match[1]}.${fraction}${match[3]}`);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+function decodeRelayFrame(message) {
+  const reply = message.reply ?? "";
+  if (reply === "")
+    return { error: "no reply subject" };
+  const headers = message.headers;
+  if (headers === undefined)
+    return { error: "no headers" };
+  const subject2 = headers.get(RelayHeader.subject) ?? "";
+  if (subject2 === "")
+    return { error: `no ${RelayHeader.subject}` };
+  const streamSeq = positiveInteger(headers.get(RelayHeader.streamSeq));
+  if (streamSeq === undefined)
+    return { error: `bad ${RelayHeader.streamSeq}` };
+  const streamID = headers.get(RelayHeader.streamID) ?? "";
+  if (streamID === "")
+    return { error: `no ${RelayHeader.streamID}` };
+  const delivered = positiveInteger(headers.get(RelayHeader.delivered));
+  if (delivered === undefined)
+    return { error: `bad ${RelayHeader.delivered}` };
+  const storedAt = headers.get(RelayHeader.storedAt) ?? "";
+  const storedAtMs = parseStoredAt(storedAt);
+  if (storedAtMs === undefined)
+    return { error: `bad ${RelayHeader.storedAt}` };
+  return {
+    frame: {
+      subject: subject2,
+      streamSeq,
+      streamID,
+      delivered,
+      storedAt,
+      storedAtMs,
+      gap: headers.get(RelayHeader.gap) === "true",
+      data: typeof message.data === "string" ? message.data : decoder.decode(message.data),
+      reply
+    }
+  };
+}
+function newEpoch() {
+  return crypto.randomUUID();
+}
+var GAP_MESSAGES = {
+  retention_gap: "The notification stream no longer holds some messages published to this session while it was away: messages older than 72 hours may be missing.",
+  stream_recreated: "Envoy's notification stream was recreated, so messages published to this session before that may be lost."
+};
+var ConsumerDeliverySnapshotSchema = exports_external.object({
+  resume: exports_external.object({ stream_id: exports_external.string().min(1), seq: exports_external.number().int().nonnegative() }).optional(),
+  follows: exports_external.record(exports_external.string(), exports_external.number()).default({})
+});
+function subjectMatches(pattern, subject2) {
+  const wanted = pattern.split(".");
+  const tokens = subject2.split(".");
+  for (let index = 0;index < wanted.length; index += 1) {
+    if (wanted[index] === ">")
+      return tokens.length > index;
+    if (index >= tokens.length)
+      return false;
+    if (wanted[index] !== "*" && wanted[index] !== tokens[index])
+      return false;
+  }
+  return wanted.length === tokens.length;
+}
+function parseIdentity(data) {
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return;
+  }
+  const identity = DedupeIdentitySchema.safeParse(parsed);
+  if (!identity.success)
+    return;
+  const { event_id, dedupe_key } = identity.data;
+  return event_id === undefined && dedupe_key === undefined ? undefined : identity.data;
+}
+function every(ms, callback) {
+  const timer = setInterval(callback, ms);
+  return () => clearInterval(timer);
+}
+function createConsumerDelivery(options) {
+  const { host, ledger, sessionID } = options;
+  const now = options.now ?? Date.now;
+  const repeat = options.every ?? every;
+  const ownSubject = agentSubject(sessionID);
+  let currentEpoch = { id: newEpoch(), startedAt: now() };
+  let follows = new Map;
+  let streamID;
+  let held = new Set;
+  let written;
+  let gapTold = false;
+  let closed = false;
+  const entries = new Map;
+  const queue = [];
+  let blocking;
+  let pumping = false;
+  const safely = (what, call) => {
+    try {
+      call();
+    } catch (error48) {
+      try {
+        host.log(`consumer delivery: ${what} failed`, error48);
+      } catch {}
+    }
+  };
+  const log = (message, error48) => safely("log", () => host.log(`consumer delivery: ${message}`, error48));
+  const send = (reply, body) => safely(`reply ${body}`, () => options.publish(reply, body));
+  const tellGap = (kind) => safely("gap notice", () => host.gap({ kind, message: GAP_MESSAGES[kind] }));
+  const switchStream = (id) => {
+    if (streamID === id)
+      return;
+    streamID = id;
+    held = new Set;
+    written = undefined;
+  };
+  const followedAt = (subject2) => {
+    if (subject2 === ownSubject)
+      return Number.NEGATIVE_INFINITY;
+    let earliest;
+    for (const [topic, at] of follows) {
+      if (!expandSubscriptionTopics([topic]).some((pattern) => subjectMatches(pattern, subject2))) {
+        continue;
+      }
+      if (earliest === undefined || at < earliest)
+        earliest = at;
+    }
+    return earliest;
+  };
+  const settle = (entry, body) => {
+    if (entry.settled)
+      return;
+    entry.settled = true;
+    entry.stopProgress();
+    entries.delete(entry.key);
+    for (const reply of entry.replies)
+      send(reply, body);
+    if (body === "done" && entry.frame.streamID === streamID) {
+      held.delete(entry.frame.streamSeq);
+      written = Math.max(written ?? 0, entry.frame.streamSeq);
+    }
+    release(entry);
+  };
+  const release = (entry) => {
+    if (blocking !== entry)
+      return;
+    blocking = undefined;
+    pump();
+  };
+  const duplicate = (frame) => {
+    const identity = parseIdentity(frame.data);
+    return identity !== undefined && ledger.delivered(identity);
+  };
+  const failed = (entry, handle, error48) => {
+    if (entry.settled)
+      return;
+    if (entry.frame.delivered < RELAY_ATTEMPTS_BEFORE_FAILED) {
+      log(`frame ${entry.frame.streamSeq} failed; it comes again`, error48);
+      settle(entry, "nak");
+      return;
+    }
+    safely("failure notice", () => host.failed(handle, error48));
+    settle(entry, "done");
+  };
+  const handOff = (entry) => {
+    const handle = {
+      ...entry.frame,
+      late: entry.late,
+      done: () => settle(entry, "done"),
+      nak: () => settle(entry, "nak"),
+      release: () => release(entry)
+    };
+    blocking = entry;
+    let result;
+    try {
+      result = host.deliver(handle);
+    } catch (error48) {
+      failed(entry, handle, error48);
+      release(entry);
+      return;
+    }
+    if (!(result instanceof Promise)) {
+      release(entry);
+      return;
+    }
+    result.then(() => release(entry), (error48) => {
+      failed(entry, handle, error48);
+      release(entry);
+    });
+  };
+  function pump() {
+    if (pumping)
+      return;
+    pumping = true;
+    try {
+      while (blocking === undefined && !closed) {
+        const entry = queue.shift();
+        if (entry === undefined)
+          return;
+        if (entry.settled)
+          continue;
+        if (duplicate(entry.frame)) {
+          settle(entry, "done");
+          continue;
+        }
+        handOff(entry);
+      }
+    } finally {
+      pumping = false;
+    }
+  }
+  const receive = (message) => {
+    const decoded = decodeRelayFrame(message);
+    if ("error" in decoded) {
+      log(`dropping an undecodable relay frame: ${decoded.error}`);
+      if (message.reply !== undefined && message.reply !== "")
+        send(message.reply, "done");
+      return;
+    }
+    const { frame } = decoded;
+    if (closed) {
+      send(frame.reply, "nak");
+      return;
+    }
+    send(frame.reply, "received");
+    if (frame.gap && !gapTold)
+      tellGap("retention_gap");
+    gapTold = false;
+    if (frame.streamID !== streamID) {
+      if (streamID !== undefined && (written !== undefined || held.size > 0)) {
+        tellGap("stream_recreated");
+      }
+      switchStream(frame.streamID);
+    }
+    const key = `${frame.streamID}:${frame.streamSeq}`;
+    const first = entries.get(key);
+    if (first !== undefined) {
+      first.replies.push(frame.reply);
+      return;
+    }
+    const since = followedAt(frame.subject);
+    if (since === undefined || frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS || duplicate(frame)) {
+      send(frame.reply, "done");
+      written = Math.max(written ?? 0, frame.streamSeq);
+      return;
+    }
+    held.add(frame.streamSeq);
+    const entry = {
+      frame,
+      late: frame.delivered > 1 || frame.storedAtMs < currentEpoch.startedAt,
+      replies: [frame.reply],
+      key,
+      stopProgress: () => {
+        return;
+      },
+      settled: false
+    };
+    entry.stopProgress = repeat(RELAY_PROGRESS_INTERVAL_MS, () => {
+      if (entry.settled)
+        return;
+      for (const reply of entry.replies)
+        send(reply, "progress");
+    });
+    entries.set(key, entry);
+    queue.push(entry);
+    pump();
+  };
+  const resumePoint = () => {
+    if (streamID === undefined)
+      return;
+    if (held.size > 0)
+      return { stream_id: streamID, seq: Math.min(...held) - 1 };
+    return written === undefined ? undefined : { stream_id: streamID, seq: written };
+  };
+  return {
+    subject: deliverSubject(sessionID),
+    receive,
+    epoch: () => currentEpoch,
+    beginEpoch() {
+      currentEpoch = { id: newEpoch(), startedAt: now() };
+      return currentEpoch;
+    },
+    registration() {
+      const resume = resumePoint();
+      return {
+        consumer: true,
+        epoch: currentEpoch.id,
+        ...resume === undefined ? {} : { resume }
+      };
+    },
+    answered(answer) {
+      if (answer.mode !== "consumer")
+        return answer.mode;
+      const resume = resumePoint();
+      if (answer.stream_id !== "" && answer.stream_id !== streamID) {
+        if (resume !== undefined)
+          tellGap("stream_recreated");
+        switchStream(answer.stream_id);
+      }
+      if (answer.gap) {
+        tellGap("retention_gap");
+        gapTold = true;
+      }
+      return answer.mode;
+    },
+    setFollowed(topics) {
+      const at = now();
+      const next = new Map;
+      for (const topic of topics)
+        next.set(topic, follows.get(topic) ?? at);
+      follows = next;
+    },
+    resumePoint,
+    snapshot() {
+      const resume = resumePoint();
+      return {
+        ...resume === undefined ? {} : { resume },
+        follows: Object.fromEntries(follows)
+      };
+    },
+    restore(snapshot) {
+      const restored = new Map(Object.entries(snapshot.follows));
+      for (const [topic, at] of follows)
+        if (!restored.has(topic))
+          restored.set(topic, at);
+      follows = restored;
+      streamID = snapshot.resume?.stream_id;
+      held = new Set;
+      written = snapshot.resume?.seq;
+    },
+    close() {
+      closed = true;
+      queue.length = 0;
+      for (const entry of [...entries.values()])
+        settle(entry, "nak");
+      blocking = undefined;
+    }
+  };
+}
+
+// ../envoy-client/src/dispatch-session-state.ts
+import { createHash } from "crypto";
+import {
+  appendFileSync,
+  closeSync as closeSync2,
+  fstatSync,
+  mkdirSync,
+  openSync as openSync2,
+  readdirSync,
+  readFileSync as readFileSync3,
+  readSync,
+  renameSync,
+  rmSync as rmSync2,
+  statSync as statSync2,
+  writeFileSync
+} from "fs";
+import { homedir as homedir2 } from "os";
+import { join as join2 } from "path";
+
+// ../envoy-client/src/dispatch-execute.ts
+import { resolve as resolvePath2 } from "path";
+
 // ../envoy-client/src/dispatch-cwd.ts
+import { execFile } from "child_process";
+import { promisify } from "util";
 var execFileAsync = promisify(execFile);
 var defaultExec = (file2, args, { cwd, signal }) => {
   const call = execFileAsync(file2, args, { cwd, signal });
@@ -39462,21 +40710,21 @@ class DispatchClient {
     return this.#resolveIssue(issueReference);
   }
   async listIssuePage(options, page) {
-    const path = ["api", "v1", "issues"];
+    const path2 = ["api", "v1", "issues"];
     const query = { ...options, limit: page.limit, offset: page.offset };
-    const answer = await this.#json("GET", path, undefined, query);
+    const answer = await this.#json("GET", path2, undefined, query);
     const refusal = whyNotAPage(answer);
     if (refusal === undefined)
       return answer;
-    throw new Error(`GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
+    throw new Error(`GET ${this.#url(path2, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
   }
   async listAllIssues(options) {
-    const path = ["api", "v1", "issues"];
+    const path2 = ["api", "v1", "issues"];
     const query = { ...options };
-    const answer = await this.#json("GET", path, undefined, query);
+    const answer = await this.#json("GET", path2, undefined, query);
     if (Array.isArray(answer))
       return answer;
-    throw new Error(`GET ${this.#url(path, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`);
+    throw new Error(`GET ${this.#url(path2, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`);
   }
   async listProjectArtifacts(project, unlinked = false) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
@@ -39782,17 +41030,17 @@ class DispatchClient {
       throw error48;
     }
   }
-  async#json(method, path, body, query) {
-    return (await this.#jsonAnswer(method, path, body, query)).payload;
+  async#json(method, path2, body, query) {
+    return (await this.#jsonAnswer(method, path2, body, query)).payload;
   }
-  async#jsonAnswer(method, path, body, query) {
+  async#jsonAnswer(method, path2, body, query) {
     const headers = {
       Accept: "application/json",
       Authorization: `Bearer ${this.token}`
     };
     if (body !== undefined)
       headers["Content-Type"] = "application/json";
-    const url2 = this.#url(path, query);
+    const url2 = this.#url(path2, query);
     const response = await this.fetchImpl(url2, {
       method,
       headers,
@@ -39801,9 +41049,9 @@ class DispatchClient {
     });
     return { status: response.status, payload: await this.#response(method, url2, response) };
   }
-  async#upload(path, input) {
+  async#upload(path2, input) {
     if ("content" in input)
-      return this.#json("POST", path, input);
+      return this.#json("POST", path2, input);
     const form = new FormData;
     form.set("name", input.name);
     if (input.summary !== undefined)
@@ -39811,10 +41059,10 @@ class DispatchClient {
     if (input.actor !== undefined)
       form.set("actor", JSON.stringify(input.actor));
     form.set("file", input.file, input.name);
-    return this.#form("POST", path, form);
+    return this.#form("POST", path2, form);
   }
-  async#form(method, path, body) {
-    const url2 = this.#url(path);
+  async#form(method, path2, body) {
+    const url2 = this.#url(path2);
     const response = await this.fetchImpl(url2, {
       method,
       headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
@@ -39823,8 +41071,8 @@ class DispatchClient {
     });
     return this.#response(method, url2, response);
   }
-  #url(path, query) {
-    const url2 = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
+  #url(path2, query) {
+    const url2 = new URL(`${path2.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
     if (query) {
       for (const [name, value] of Object.entries(query)) {
         if (typeof value === "string" || typeof value === "number") {
@@ -39920,9 +41168,9 @@ function shapeOf(schema) {
   const def = unwrapped.def;
   return def.type === "object" && "shape" in def ? def.shape : undefined;
 }
-function schemaAt(schema, path) {
+function schemaAt(schema, path2) {
   let current = schema;
-  for (const key of path) {
+  for (const key of path2) {
     const unwrapped = unwrap(current);
     if (unwrapped === undefined)
       return;
@@ -39969,10 +41217,10 @@ function describeExpected(expected, schema) {
       return `a ${expected}`;
   }
 }
-function pathText(path, cliTool) {
-  const [head, ...rest] = path.map(String);
+function pathText(path2, cliTool) {
+  const [head, ...rest] = path2.map(String);
   if (cliTool === undefined || head === undefined)
-    return path.map(String).join(".");
+    return path2.map(String).join(".");
   let flag = fieldFlag(cliTool, head);
   let index = 0;
   for (;index < rest.length && /^\d+$/.test(rest[index]); index++) {
@@ -39985,33 +41233,33 @@ function formatZodIssues(issues, schema, tool) {
   const cliTool = isDispatchTool(tool) ? tool : undefined;
   const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
   return issues.flatMap((issue2) => {
-    const path = pathText(issue2.path, cliTool);
+    const path2 = pathText(issue2.path, cliTool);
     switch (issue2.code) {
       case "invalid_type":
-        return issue2.input === undefined ? [`${path} is required (${issue2.expected})`] : [
-          `${path} must be ${describeExpected(issue2.expected, schemaAt(schema, issue2.path))}, not ${describeInput(issue2.input)}`
+        return issue2.input === undefined ? [`${path2} is required (${issue2.expected})`] : [
+          `${path2} must be ${describeExpected(issue2.expected, schemaAt(schema, issue2.path))}, not ${describeInput(issue2.input)}`
         ];
       case "unrecognized_keys": {
         if (cliTool !== undefined && issue2.path.length === 0) {
           return issue2.keys.map((key) => `unknown flag ${fieldFlag(cliTool, key)}`);
         }
         const here = Object.keys(shapeOf(schemaAt(schema, issue2.path)) ?? {}).join(", ") || allowed;
-        const where = path === "" ? "" : ` in ${path}`;
+        const where = path2 === "" ? "" : ` in ${path2}`;
         return issue2.keys.map((key) => `unknown field "${key}"${where}; allowed: ${here}`);
       }
       case "invalid_value":
         return [
-          `${path} must be one of ${issue2.values.map(String).join("|")}; got ${JSON.stringify(issue2.input)}`
+          `${path2} must be one of ${issue2.values.map(String).join("|")}; got ${JSON.stringify(issue2.input)}`
         ];
       case "too_big":
         if (issue2.origin === "array" && Array.isArray(issue2.input)) {
-          return [`${path} has ${issue2.input.length} items; the limit is ${issue2.maximum}`];
+          return [`${path2} has ${issue2.input.length} items; the limit is ${issue2.maximum}`];
         }
-        return [`${path} ${issue2.message}`];
+        return [`${path2} ${issue2.message}`];
       case "custom":
         return [issue2.message];
       default:
-        return [path === "" ? issue2.message : `${path}: ${issue2.message}`];
+        return [path2 === "" ? issue2.message : `${path2}: ${issue2.message}`];
     }
   });
 }
@@ -40021,7 +41269,7 @@ var PICTURE_TYPE_NAMES = "a PNG, JPEG, GIF or WebP";
 async function localPictures(images, cwd, problems) {
   if (!Array.isArray(images))
     return [];
-  const checked = await Promise.all(images.map((path) => localPicture(path, cwd)));
+  const checked = await Promise.all(images.map((path2) => localPicture(path2, cwd)));
   const pictures = [];
   for (const outcome of checked) {
     if (typeof outcome === "string")
@@ -40031,30 +41279,30 @@ async function localPictures(images, cwd, problems) {
   }
   return pictures;
 }
-async function localPicture(path, cwd) {
-  if (typeof path !== "string" || path === "")
+async function localPicture(path2, cwd) {
+  if (typeof path2 !== "string" || path2 === "")
     return;
-  const absolute = resolvePath(cwd, path);
-  const file2 = Bun.file(absolute);
+  const absolute2 = resolvePath(cwd, path2);
+  const file2 = Bun.file(absolute2);
   let size;
   let head;
   try {
     const stats = await file2.stat();
     if (!stats.isFile())
-      return `images: ${path} is not a file`;
+      return `images: ${path2} is not a file`;
     size = stats.size;
     head = new Uint8Array(await file2.slice(0, PICTURE_SNIFF_BYTES).arrayBuffer());
   } catch (error48) {
-    return `images: ${path} cannot be read: ${messageFor(error48)}`;
+    return `images: ${path2} cannot be read: ${messageFor(error48)}`;
   }
   if (size > PICTURE_UPLOAD_MAX_BYTES) {
-    return `images: ${path} is ${size.toLocaleString("en-US")} bytes, over the ${PICTURE_UPLOAD_MAX_BYTES / 1024 / 1024} MiB one Dispatch upload takes`;
+    return `images: ${path2} is ${size.toLocaleString("en-US")} bytes, over the ${PICTURE_UPLOAD_MAX_BYTES / 1024 / 1024} MiB one Dispatch upload takes`;
   }
   const type = sniffPictureType(head);
   if (type === undefined) {
-    return `images: ${path} is not ${PICTURE_TYPE_NAMES} picture (judged by its bytes, not its name)`;
+    return `images: ${path2} is not ${PICTURE_TYPE_NAMES} picture (judged by its bytes, not its name)`;
   }
-  return { path, name: basename(absolute), file: Bun.file(absolute, { type }) };
+  return { path: path2, name: basename(absolute2), file: Bun.file(absolute2, { type }) };
 }
 function uploadSlug(name) {
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -41642,11 +42890,11 @@ function anchorLines(record2) {
   ];
 }
 function positionText(block) {
-  const { table, path } = block;
-  const segments = path.map((entry) => `${entry.type}[${entry.index}]`);
+  const { table, path: path2 } = block;
+  const segments = path2.map((entry) => `${entry.type}[${entry.index}]`);
   if (table === undefined || table.row === null)
     return segments.join(" \u203A ");
-  const tableAt = path.findIndex((entry) => entry.type === "table");
+  const tableAt = path2.findIndex((entry) => entry.type === "table");
   const cells = table.cells ?? [];
   const label = (table.column === null ? cells : cells.slice(0, table.column)).map((cell) => cell.trim()).filter((cell) => cell !== "" && !/^\d+$/.test(cell)).join(" \xB7 ");
   const row = label === "" ? `row ${table.row}` : `row ${table.row} (${label})`;
@@ -41747,7 +42995,7 @@ async function listDocumentBlocks(client, artifact) {
     throw new Error(`${artifact.name} changed while dispatch doc-read --blocks read it, so the opening words could name the wrong text; nothing is listed. Run it again.`);
   }
   const bytes = new TextEncoder().encode(before.markdown);
-  const decoder = new TextDecoder;
+  const decoder2 = new TextDecoder;
   const lines = [
     `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`
   ];
@@ -41756,7 +43004,7 @@ async function listDocumentBlocks(client, artifact) {
     while (holders.length > 0 && block.from >= (holders.at(-1)?.to ?? 0))
       holders.pop();
     const indent = "  ".repeat(holders.length);
-    const flat = decoder.decode(bytes.subarray(block.from, block.to)).replace(/\s+/g, " ").trim();
+    const flat = decoder2.decode(bytes.subarray(block.from, block.to)).replace(/\s+/g, " ").trim();
     const points = Array.from(flat);
     const opening = points.length > BLOCK_OPENING_CHARS ? `${points.slice(0, BLOCK_OPENING_CHARS).join("")}\u2026` : flat;
     const { comments, asks } = block.references;
@@ -42959,44 +44207,44 @@ function sessionStateRoot(env) {
   const stateDir = env["DISPATCH_STATE_DIR"];
   if (stateDir)
     return stateDir;
-  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
+  return join2(env["XDG_STATE_HOME"] || join2(homedir2(), ".local", "state"), "dispatch");
 }
 function sessionDirectory(env, sessionId) {
   if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
     throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
   }
-  return join(sessionStateRoot(env), "sessions", sessionId);
+  return join2(sessionStateRoot(env), "sessions", sessionId);
 }
 function ensureDirectory(dir) {
   mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR });
 }
-function readIfPresent(path) {
+function readIfPresent(path2) {
   try {
-    return readFileSync(path, "utf-8");
+    return readFileSync3(path2, "utf-8");
   } catch (error48) {
     if (hasErrnoCode(error48, "ENOENT"))
       return;
     throw error48;
   }
 }
-function writeAtomically(path, text) {
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+function writeAtomically(path2, text) {
+  const temporary = `${path2}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(temporary, text, { mode: PRIVATE_FILE });
-  renameSync(temporary, path);
+  renameSync(temporary, path2);
 }
 function stringList(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
 function loadSessionMemory(dir, sessionId) {
-  const path = join(dir, "state.json");
-  const text = readIfPresent(path);
+  const path2 = join2(dir, "state.json");
+  const text = readIfPresent(path2);
   if (text === undefined)
     return new Set;
   let state;
   try {
     state = JSON.parse(text);
   } catch (error48) {
-    throw new Error(`the session state ${path} is not JSON (${error48.message}); remove it to start this session's memory over`);
+    throw new Error(`the session state ${path2} is not JSON (${error48.message}); remove it to start this session's memory over`);
   }
   const advice = adviceMemory();
   for (const key of stringList(state.advice))
@@ -43012,7 +44260,7 @@ function writeMemory(dir, sessionId, follows) {
     pictures: [...shownPictures(sessionId)],
     follows: [...follows]
   };
-  writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}
+  writeAtomically(join2(dir, "state.json"), `${JSON.stringify(state)}
 `);
 }
 function appendResult(dir, entry) {
@@ -43021,7 +44269,7 @@ function appendResult(dir, entry) {
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
-  appendFileSync(join(dir, "results.jsonl"), `${JSON.stringify(line)}
+  appendFileSync(join2(dir, "results.jsonl"), `${JSON.stringify(line)}
 `, { mode: PRIVATE_FILE });
 }
 function recordOutcome(dir, sessionId, follows, entry) {
@@ -43032,41 +44280,41 @@ function recordOutcome(dir, sessionId, follows, entry) {
 function writePicture(dir, image) {
   const bytes = Buffer.from(image.data, "base64");
   const name = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
-  const pictures = join(dir, "pictures");
-  const path = join(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
+  const pictures = join2(dir, "pictures");
+  const path2 = join2(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
   ensureDirectory(pictures);
   try {
-    writeFileSync(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
+    writeFileSync(path2, bytes, { mode: PRIVATE_FILE, flag: "wx" });
   } catch (error48) {
     if (!hasErrnoCode(error48, "EEXIST"))
       throw error48;
   }
-  return { path, bytes: bytes.length };
+  return { path: path2, bytes: bytes.length };
 }
 function writeLongOutput(dir, text) {
-  const out = join(dir, "out");
+  const out = join2(dir, "out");
   ensureDirectory(out);
-  const path = join(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
-  writeFileSync(path, text, { mode: PRIVATE_FILE });
-  return path;
+  const path2 = join2(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
+  writeFileSync(path2, text, { mode: PRIVATE_FILE });
+  return path2;
 }
 function writeSessionTitle(dir, title) {
   ensureDirectory(dir);
-  writeAtomically(join(dir, "title"), title);
+  writeAtomically(join2(dir, "title"), title);
 }
 function readSessionTitle(dir) {
-  return readIfPresent(join(dir, "title")) || undefined;
+  return readIfPresent(join2(dir, "title")) || undefined;
 }
 function pruneSessions(root, now) {
-  const stamp = join(root, PRUNED_STAMP);
+  const stamp = join2(root, PRUNED_STAMP);
   try {
-    if (now - statSync(stamp).mtimeMs < PRUNE_INTERVAL_MS)
+    if (now - statSync2(stamp).mtimeMs < PRUNE_INTERVAL_MS)
       return;
   } catch (error48) {
     if (!hasErrnoCode(error48, "ENOENT"))
       throw error48;
   }
-  const sessions = join(root, "sessions");
+  const sessions = join2(root, "sessions");
   let entries = [];
   try {
     entries = readdirSync(sessions, { withFileTypes: true });
@@ -43077,10 +44325,10 @@ function pruneSessions(root, now) {
   for (const entry of entries) {
     if (!entry.isDirectory())
       continue;
-    const dir = join(sessions, entry.name);
+    const dir = join2(sessions, entry.name);
     try {
-      if (now - statSync(dir).mtimeMs > IDLE_SESSION_MS) {
-        rmSync(dir, { recursive: true, force: true });
+      if (now - statSync2(dir).mtimeMs > IDLE_SESSION_MS) {
+        rmSync2(dir, { recursive: true, force: true });
       }
     } catch (error48) {
       if (!hasErrnoCode(error48, "ENOENT"))
@@ -43108,860 +44356,6 @@ function natsAuthOptions(seed) {
     throw new Error(`${seed.source} holds an nkey seed that is not a user's (public key ${publicKey})`);
   }
   return { authenticator: import_nats.nkeyAuthenticator(bytes) };
-}
-
-// ../envoy-client/src/envoy-config.ts
-import {
-  chmodSync,
-  closeSync as closeSync2,
-  existsSync,
-  lstatSync,
-  mkdtempSync,
-  openSync as openSync2,
-  readFileSync as readFileSync3,
-  readlinkSync,
-  rmSync as rmSync2,
-  statSync as statSync2
-} from "fs";
-import { homedir as homedir2, tmpdir } from "os";
-import * as path from "path";
-
-// ../envoy-client/src/json-position.ts
-function jsonErrorPosition(text) {
-  let at = 0;
-  const fail = () => {
-    throw new RangeError("not JSON");
-  };
-  const space = () => {
-    while (at < text.length && ` 	
-\r`.includes(text.charAt(at)))
-      at += 1;
-  };
-  const expect = (char) => {
-    if (text.charAt(at) !== char)
-      fail();
-    at += 1;
-  };
-  const string4 = () => {
-    expect('"');
-    while (at < text.length) {
-      const char = text.charAt(at);
-      if (char === '"') {
-        at += 1;
-        return;
-      }
-      if (char < " ")
-        fail();
-      at += char === "\\" ? 2 : 1;
-    }
-    fail();
-  };
-  const value = () => {
-    space();
-    const char = text.charAt(at);
-    if (char === "{" || char === "[") {
-      const close = char === "{" ? "}" : "]";
-      at += 1;
-      space();
-      if (text.charAt(at) === close) {
-        at += 1;
-        return;
-      }
-      for (;; ) {
-        if (close === "}") {
-          space();
-          string4();
-          space();
-          expect(":");
-        }
-        value();
-        space();
-        if (text.charAt(at) === ",") {
-          at += 1;
-          continue;
-        }
-        expect(close);
-        return;
-      }
-    }
-    if (char === '"') {
-      string4();
-      return;
-    }
-    for (const word of ["true", "false", "null"]) {
-      if (text.startsWith(word, at)) {
-        at += word.length;
-        return;
-      }
-    }
-    const number4 = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/.exec(text.slice(at));
-    if (number4 === null)
-      fail();
-    at += number4?.[0].length ?? 0;
-  };
-  try {
-    value();
-    space();
-    if (at < text.length)
-      fail();
-    return;
-  } catch {
-    const before = text.slice(0, at).split(`
-`);
-    return `line ${before.length}, column ${(before.at(-1)?.length ?? 0) + 1}`;
-  }
-}
-
-// ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync2 } from "fs";
-function sendable(value) {
-  return !/[\s\p{Cc}]/u.test(value);
-}
-function readSecretFile(variable, filePath) {
-  let contents;
-  try {
-    contents = readFileSync2(filePath, "utf8");
-  } catch (error48) {
-    throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error48)}`);
-  }
-  const value = contents.trim();
-  if (value.length === 0)
-    throw new Error(`${variable} names ${filePath}, which is empty`);
-  if (!sendable(value)) {
-    throw new Error(`${variable} names ${filePath}, which holds whitespace or a control character`);
-  }
-  return value;
-}
-
-// ../envoy-client/src/envoy-config.ts
-var COMMAND_TIMEOUT_MS = 1e4;
-function nonEmpty(value) {
-  return value === undefined || value === "" ? undefined : value;
-}
-function absolute(name, value) {
-  if (value !== undefined && !path.isAbsolute(value)) {
-    throw new Error(`${name} is ${value}, which is not an absolute path`);
-  }
-  return value;
-}
-function neutralConfig(env) {
-  const xdgConfigHome = nonEmpty(env.XDG_CONFIG_HOME);
-  if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
-    return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
-  }
-  const configHome = xdgConfigHome ?? path.join(nonEmpty(env.HOME) ?? homedir2(), ".config");
-  return { path: path.resolve(configHome, "legion", "envoy.json") };
-}
-var HARNESS_DIRECTORY_VARIABLE = {
-  omp: "PI_CODING_AGENT_DIR",
-  claude: "CLAUDE_CONFIG_DIR",
-  opencode: "OPENCODE_CONFIG_DIR"
-};
-var PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE);
-function namedDirectory(harness, env) {
-  if (harness === "omp") {
-    const profile = nonEmpty(env.OMP_PROFILE);
-    if (profile === undefined || profile === "default")
-      return;
-  }
-  return nonEmpty(env[HARNESS_DIRECTORY_VARIABLE[harness]]);
-}
-function harnessDirectory(harness, env) {
-  for (const plugin of harness === "command" ? PLUGIN_HARNESSES : [harness]) {
-    if (harness === "command" && plugin === "claude" && env.CLAUDE_CODE_CHILD_SESSION !== "1") {
-      continue;
-    }
-    const directory = namedDirectory(plugin, env);
-    if (directory !== undefined)
-      return absolute(HARNESS_DIRECTORY_VARIABLE[plugin], directory);
-  }
-  return;
-}
-function handedConfigPath(env) {
-  const handed = nonEmpty(env.ENVOY_CONFIG_FILE);
-  return handed === undefined ? undefined : path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
-}
-function envoyConfigPath(harness, env) {
-  const handedFirst = harness === "command" ? handedConfigPath(env) : undefined;
-  if (handedFirst !== undefined)
-    return handedFirst;
-  const directory = harnessDirectory(harness, env);
-  if (directory !== undefined)
-    return path.resolve(directory, "envoy.json");
-  const handed = handedConfigPath(env);
-  if (handed !== undefined)
-    return handed;
-  const neutral = neutralConfig(env);
-  if ("error" in neutral)
-    throw new Error(neutral.error);
-  return neutral.path;
-}
-var httpUrlSchema = exports_external.url({ protocol: /^https?$/, error: "must be an http or https URL" });
-var DispatchSectionSchema = exports_external.strictObject({
-  enabled: exports_external.boolean().optional(),
-  serverUrl: httpUrlSchema.optional(),
-  token: exports_external.string().optional()
-});
-var EnvoySectionSchema = exports_external.strictObject({
-  enabled: exports_external.boolean().optional(),
-  url: httpUrlSchema.optional(),
-  natsUrls: exports_external.array(exports_external.string().trim().min(1, "must not be empty")).optional(),
-  token: exports_external.string().optional(),
-  natsSeed: exports_external.string().optional()
-});
-var EnvoyFileSchema = exports_external.looseObject({
-  $schema: exports_external.string().optional(),
-  dispatch: DispatchSectionSchema.optional(),
-  envoy: EnvoySectionSchema.optional()
-});
-var CheckoutFileSchema = exports_external.looseObject({
-  $schema: exports_external.string().optional(),
-  dispatch: DispatchSectionSchema.optional()
-});
-function offWithNotice(notice) {
-  return { enabled: false, notice, error: null };
-}
-function offWithError(error48) {
-  return { enabled: false, notice: null, error: error48 };
-}
-function httpUrl2(value) {
-  let url2;
-  try {
-    url2 = new URL(value);
-  } catch {
-    return;
-  }
-  return url2.protocol === "http:" || url2.protocol === "https:" ? url2 : undefined;
-}
-function describeSchemaIssue(filePath, error48) {
-  const issue2 = error48.issues[0];
-  if (!issue2)
-    return `${filePath}: invalid envoy.json`;
-  if (issue2.code === "unrecognized_keys") {
-    const section = issue2.path.join(".");
-    const keys = issue2.keys.map((key) => `${section}.${key}`).join(", ");
-    return `${filePath}: unrecognized ${section} key(s): ${keys}`;
-  }
-  return `${filePath}: ${issue2.path.join(".")}: ${issue2.message}`;
-}
-function danglingLink(filePath) {
-  try {
-    return lstatSync(filePath).isSymbolicLink() ? readlinkSync(filePath) : null;
-  } catch {
-    return null;
-  }
-}
-function parseFile(filePath, schema, checkout) {
-  let raw;
-  try {
-    raw = readFileSync3(filePath, "utf-8");
-  } catch (error48) {
-    if (hasErrnoCode(error48, "ENOENT") || hasErrnoCode(error48, "ENOTDIR")) {
-      return { kind: "absent", link: danglingLink(filePath) };
-    }
-    return { kind: "invalid", reason: `${filePath}: could not be read (${messageFor(error48)})` };
-  }
-  let parsedJson;
-  try {
-    parsedJson = JSON.parse(raw);
-  } catch {
-    const position = jsonErrorPosition(raw);
-    return {
-      kind: "invalid",
-      reason: `${filePath}: invalid JSON${position === undefined ? "" : ` at ${position}`}`
-    };
-  }
-  if (typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
-    return {
-      kind: "invalid",
-      reason: checkout ? `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section` : `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
-    };
-  }
-  const parsed = schema.safeParse(parsedJson);
-  if (!parsed.success) {
-    return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
-  }
-  return { kind: "valid", settings: parsed.data };
-}
-var FAILURE_KEPT_MS = 60000;
-var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
-var processGlobal = globalThis;
-var commandOutcomes = processGlobal[COMMAND_OUTCOMES] ?? new Map;
-processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
-function runCommand(command, env, cwd) {
-  const childEnv = {};
-  for (const [name, variable] of Object.entries(env)) {
-    if (variable !== undefined)
-      childEnv[name] = variable;
-  }
-  const directory = mkdtempSync(path.join(tmpdir(), "envoy-command-"));
-  try {
-    chmodSync(directory, 448);
-    const output = path.join(directory, "stdout");
-    const fd = openSync2(output, "wx", 384);
-    let result;
-    try {
-      result = Bun.spawnSync(["/bin/sh", "-c", command], {
-        cwd,
-        env: childEnv,
-        stdin: "ignore",
-        stdout: fd,
-        stderr: "ignore",
-        timeout: COMMAND_TIMEOUT_MS,
-        detached: true
-      });
-    } catch (error48) {
-      return { failure: `could not start: ${messageFor(error48)}`, timedOut: false };
-    } finally {
-      closeSync2(fd);
-    }
-    try {
-      process.kill(-result.pid, "SIGKILL");
-    } catch {}
-    if (result.exitedDueToTimeout) {
-      return {
-        failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s, and does not run again in this process`,
-        timedOut: true
-      };
-    }
-    if (!result.success) {
-      return {
-        failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}`,
-        timedOut: false
-      };
-    }
-    const value = readFileSync3(output, "utf-8").trim();
-    if (value.length === 0)
-      return { failure: "printed nothing", timedOut: false };
-    if (!sendable(value)) {
-      return {
-        failure: "printed more than one line, or whitespace inside its value",
-        timedOut: false
-      };
-    }
-    return { value };
-  } finally {
-    rmSync2(directory, { recursive: true, force: true });
-  }
-}
-function fileValue(value, field, filePath, env) {
-  if (!value.startsWith("!")) {
-    if (!sendable(value)) {
-      throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
-    }
-    return value;
-  }
-  const command = value.slice(1);
-  const cwd = path.dirname(path.resolve(filePath));
-  const key = JSON.stringify([command, filePath, cwd]);
-  let outcome = commandOutcomes.get(key);
-  if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
-    outcome = { ...runCommand(command, env, cwd), at: Date.now() };
-    commandOutcomes.set(key, outcome);
-  }
-  if ("failure" in outcome)
-    throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
-  return outcome.value;
-}
-function statDevice(directory) {
-  try {
-    return statSync2(directory).dev;
-  } catch {
-    return;
-  }
-}
-function moveNotice(oldFile, newFile, move, deviceOf) {
-  const oldDevice = deviceOf(path.dirname(oldFile));
-  let ancestor = path.dirname(newFile);
-  let newDevice = deviceOf(ancestor);
-  while (newDevice === undefined && path.dirname(ancestor) !== ancestor) {
-    ancestor = path.dirname(ancestor);
-    newDevice = deviceOf(ancestor);
-  }
-  if (oldDevice !== undefined && newDevice !== undefined && oldDevice !== newDevice) {
-    return `${oldFile} is not read, and is on another filesystem than ${newFile} (a mount): create ${newFile}, and move ${oldFile} on the machine that owns it`;
-  }
-  return `${oldFile} is not read: ${move}`;
-}
-function oldUserFileNotice(filePath, env, deviceOf) {
-  const home = nonEmpty(env.HOME) ?? homedir2();
-  const old = path.join(home, ".config", "opencode", "envoy.json");
-  if (!existsSync(old))
-    return;
-  const selected = path.resolve(filePath);
-  const userFile = path.resolve(home, ".config", "legion", "envoy.json");
-  if (selected === userFile) {
-    return moveNotice(old, userFile, "mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/", deviceOf);
-  }
-  const profileFile = PLUGIN_HARNESSES.map((harness) => namedDirectory(harness, env)).some((directory) => directory !== undefined && path.isAbsolute(directory) && selected === path.resolve(directory, "envoy.json"));
-  if (profileFile) {
-    return `${old} is not read for this profile; copy or link it to ${filePath}, or write that file`;
-  }
-  const configHome = nonEmpty(env.XDG_CONFIG_HOME);
-  const neutral = neutralConfig(env);
-  if (configHome !== undefined && path.isAbsolute(configHome) && "path" in neutral && selected === neutral.path) {
-    return `${old} is not read under XDG_CONFIG_HOME=${configHome}`;
-  }
-  return;
-}
-function missingConfigNotice(filePath, missing, off) {
-  const link = missing.link === null ? "" : ` (a link to ${missing.link}, which does not exist)`;
-  const old = missing.oldUserFileNotice === undefined ? "" : `; ${missing.oldUserFileNotice}`;
-  return `no envoy.json at ${filePath}${link}: ${off}${old}`;
-}
-function readEnvoyConfig(filePath, env, options) {
-  const deviceOf = options.deviceOf ?? statDevice;
-  const chosen = parseFile(filePath, EnvoyFileSchema, false);
-  if (chosen.kind === "invalid")
-    return { kind: "failed", path: filePath, error: chosen.reason };
-  const resolvedChosen = path.resolve(filePath);
-  const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
-  const checkoutFile = checkoutPath === resolvedChosen ? { kind: "absent", link: null } : parseFile(checkoutPath, CheckoutFileSchema, true);
-  const own = chosen.kind === "valid" ? chosen.settings : {};
-  let checkout = null;
-  if (checkoutFile.kind === "invalid") {
-    checkout = { kind: "invalid", path: checkoutPath, error: checkoutFile.reason };
-  } else if (checkoutFile.kind === "valid") {
-    checkout = {
-      kind: "valid",
-      path: checkoutPath,
-      dispatch: checkoutFile.settings.dispatch ?? {},
-      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
-    };
-  }
-  const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
-  const warnings = oldCheckout !== resolvedChosen && !existsSync(checkoutPath) && existsSync(oldCheckout) ? [
-    moveNotice(oldCheckout, checkoutPath, `mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`, deviceOf)
-  ] : [];
-  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env, deviceOf) : undefined;
-  return {
-    kind: "read",
-    path: filePath,
-    dispatch: own.dispatch ?? {},
-    envoy: own.envoy ?? {},
-    checkout,
-    missing: chosen.kind === "absent" ? {
-      link: chosen.link,
-      ...unreadOldUserFile === undefined ? {} : { oldUserFileNotice: unreadOldUserFile }
-    } : null,
-    warnings
-  };
-}
-
-// ../envoy-client/src/bearer.ts
-function bearerSource(env, section, written) {
-  const pointer = nonEmpty(env[`${section}_TOKEN_FILE`]);
-  if (pointer !== undefined) {
-    return { kind: "variable", token: readSecretFile(`${section}_TOKEN_FILE`, pointer) };
-  }
-  const plain = nonEmpty(env[`${section}_TOKEN`]);
-  if (plain !== undefined) {
-    if (!sendable(plain)) {
-      throw new Error(`${section}_TOKEN holds whitespace or a control character`);
-    }
-    return { kind: "variable", token: plain };
-  }
-  const bearer = written();
-  return bearer === undefined ? { kind: "none" } : { kind: "file", ...bearer };
-}
-function fileBearer(bearer, url2, section, env) {
-  const named = httpUrl2(url2)?.origin;
-  const paired = httpUrl2(bearer.server)?.origin;
-  if (named !== paired) {
-    throw new Error(`${section}_URL names ${named}, but ${bearer.path}'s ${bearer.field} is for ${paired}; set ${section}_TOKEN or ${section}_TOKEN_FILE for it`);
-  }
-  if (bearer.checkout && bearer.token.startsWith("!")) {
-    throw new Error(`${bearer.path}: ${bearer.field} is a command, which a checkout's envoy.json cannot run`);
-  }
-  if (bearer.token === "") {
-    throw new Error(`${bearer.field} in ${bearer.path} must be a non-empty bearer token`);
-  }
-  return fileValue(bearer.token, bearer.field, bearer.path, env);
-}
-
-// ../envoy-client/src/envoy-settings.ts
-var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-var DEFAULT_HEARTBEAT_MS = 90000;
-var MIN_PASS_DEADLINE_MS = 30000;
-var MIN_INTERVAL_MS = 25;
-var MAX_INTERVAL_MS = 2147483647;
-function namedInterval(raw) {
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-}
-function natsSeedFromEnvironment(env) {
-  const { NATS_NKEY_SEED_FILE: file2, NATS_NKEY_SEED: plain } = env;
-  if (file2 !== undefined) {
-    if (file2 === "")
-      throw new Error("NATS_NKEY_SEED_FILE is set but empty");
-    return {
-      value: readSecretFile("NATS_NKEY_SEED_FILE", file2),
-      source: `NATS_NKEY_SEED_FILE (${file2})`
-    };
-  }
-  if (plain === undefined)
-    return;
-  const value = plain.trim();
-  if (value.length === 0)
-    throw new Error("NATS_NKEY_SEED is set but empty");
-  return { value, source: "NATS_NKEY_SEED" };
-}
-var NO_NATS_SERVER = "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)";
-var NO_NATS_CONNECTION = "this session opens no NATS connection";
-function natsServerKey(url2) {
-  const match = /^([a-z][a-z0-9+.-]*):\/\/([^@/]*@)?(\[[^\]]*\]|[^:/]*)(?::(\d+))?(\/.*)?$/i.exec(url2);
-  if (match === null)
-    return url2;
-  const [, scheme = "", userinfo = "", host = "", port = "4222", rest = ""] = match;
-  return `${scheme.toLowerCase()}://${userinfo}${host.toLowerCase()}:${port}${rest.replace(/\/+$/, "")}`;
-}
-function natsCredential(env, section, namedNatsUrls, filePath) {
-  const fromEnvironment = natsSeedFromEnvironment(env);
-  if (fromEnvironment !== undefined || section.natsSeed === undefined)
-    return fromEnvironment;
-  if (namedNatsUrls.length > 0) {
-    const servers = new Set((section.natsUrls ?? []).map(natsServerKey));
-    const named = new Set(namedNatsUrls.map(natsServerKey));
-    if (named.size !== servers.size || ![...named].every((server) => servers.has(server))) {
-      throw new Error(`ENVOY_NATS_URL names other servers than ${filePath}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`);
-    }
-  }
-  return {
-    value: fileValue(section.natsSeed, "envoy.natsSeed", filePath, env),
-    source: `envoy.natsSeed in ${filePath}`
-  };
-}
-function envoySettings(env, config2, options = {}) {
-  if (config2.kind === "failed")
-    return offWithError(config2.error);
-  const section = config2.envoy;
-  if (section.enabled === false) {
-    return offWithNotice(`${config2.path} sets envoy.enabled to false: Envoy is off`);
-  }
-  const namedUrl = nonEmpty(env.ENVOY_URL);
-  const namedNatsUrls = (env.ENVOY_NATS_URL ?? "").split(",").map((url3) => url3.trim()).filter((url3) => url3.length > 0);
-  const addressed = namedUrl !== undefined || namedNatsUrls.length > 0 || section.url !== undefined || (section.natsUrls ?? []).length > 0 || section.enabled === true;
-  if (!addressed) {
-    return offWithNotice(config2.missing === null ? `${config2.path} names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off` : missingConfigNotice(config2.path, config2.missing, "Envoy is off"));
-  }
-  if (namedUrl !== undefined && httpUrl2(namedUrl) === undefined) {
-    return offWithError("ENVOY_URL must be an http or https URL");
-  }
-  const listener = section.url ?? DEFAULT_ENVOY_URL;
-  const url2 = namedUrl ?? listener;
-  let token;
-  try {
-    const source = bearerSource(env, "ENVOY", () => section.token === undefined ? undefined : {
-      token: section.token,
-      field: "envoy.token",
-      path: config2.path,
-      server: listener,
-      checkout: false
-    });
-    token = source.kind === "none" ? undefined : source.kind === "variable" ? source.token : fileBearer(source, url2, "ENVOY", env);
-  } catch (error48) {
-    return offWithError(messageFor(error48));
-  }
-  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
-  let inbound;
-  if (options.nats === false)
-    inbound = { off: NO_NATS_CONNECTION };
-  else if (natsUrls.length === 0)
-    inbound = { off: NO_NATS_SERVER };
-  else {
-    try {
-      inbound = { natsUrls, natsSeed: natsCredential(env, section, namedNatsUrls, config2.path) };
-    } catch (error48) {
-      inbound = { off: messageFor(error48) };
-    }
-  }
-  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
-  const heartbeatMs = namedHeartbeatMs === undefined ? DEFAULT_HEARTBEAT_MS : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
-  const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
-  return {
-    enabled: true,
-    url: normalizeEnvoyUrl(url2),
-    token,
-    inbound,
-    heartbeatMs,
-    passDeadlineMs: Math.min(Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs), MAX_INTERVAL_MS),
-    passDeadlineRaisedFrom: namedPassDeadlineMs !== undefined && namedPassDeadlineMs < heartbeatMs ? namedPassDeadlineMs : undefined
-  };
-}
-function normalizeEnvoyUrl(value) {
-  return value.replace(/\/+$/, "");
-}
-
-// ../envoy-client/src/transport.ts
-var DEFAULT_TIMEOUT_MS = 5000;
-var RETRY_DELAY_MS = 250;
-var REPLAY_TIMEOUT_MS = 1e4;
-var REPLAY_UNAVAILABLE_CODE = "REPLAY_UNAVAILABLE";
-var InterestWireSchema = exports_external.object({
-  session_id: exports_external.string(),
-  machine_id: exports_external.string(),
-  dir: exports_external.string(),
-  topics: exports_external.array(exports_external.string()),
-  updated_at: exports_external.number().int().optional(),
-  warnings: exports_external.array(exports_external.string()).optional()
-});
-var SessionWireSchema = exports_external.object({
-  session_id: exports_external.string(),
-  machine_id: exports_external.string(),
-  host: exports_external.string().optional(),
-  dir: exports_external.string(),
-  port: exports_external.number().int(),
-  title: exports_external.string(),
-  topics: exports_external.array(exports_external.string()),
-  roles: exports_external.array(exports_external.string()).optional(),
-  capabilities: exports_external.array(exports_external.string()).optional(),
-  self_subscribed: exports_external.boolean(),
-  last_seen: exports_external.number().int().optional()
-});
-var RoleWireSchema = exports_external.object({
-  role: exports_external.string(),
-  holder: exports_external.string(),
-  host: exports_external.string().optional(),
-  last_seen: exports_external.number().int()
-});
-var RoleHeldWireSchema = exports_external.object({
-  error: exports_external.string(),
-  role: exports_external.string(),
-  holder: exports_external.string()
-});
-var ErrorWireSchema = exports_external.object({
-  error: exports_external.string(),
-  code: exports_external.string().optional(),
-  expected: exports_external.array(exports_external.string()).optional()
-});
-var EnvelopeResponseSchema = EnvelopeSchema.extend({
-  recipient: exports_external.string().optional(),
-  holder: exports_external.string().optional()
-});
-var ReplayWireSchema = exports_external.object({
-  stream: exports_external.object({
-    id: exports_external.string().min(1).optional(),
-    created: exports_external.string(),
-    first_seq: exports_external.number().int().nonnegative(),
-    last_seq: exports_external.number().int().nonnegative()
-  }),
-  subjects: exports_external.array(exports_external.object({
-    subject: exports_external.string(),
-    messages: exports_external.array(exports_external.object({
-      seq: exports_external.number().int().positive(),
-      subject: exports_external.string(),
-      time: exports_external.string(),
-      data: exports_external.string()
-    })),
-    next_after: exports_external.number().int().nonnegative(),
-    more: exports_external.boolean(),
-    refused: exports_external.string().optional()
-  }))
-});
-function mergeInterestSources(registryTopics, liveTopics) {
-  const interests = new Map;
-  for (const topic of registryTopics) {
-    interests.set(topic, liveTopics.includes(topic) ? "both" : "registry");
-  }
-  for (const topic of liveTopics) {
-    if (!interests.has(topic))
-      interests.set(topic, "live");
-  }
-  return interests;
-}
-function expandSubscriptionTopics(topics) {
-  const expanded = new Set;
-  for (const topic of topics) {
-    const base = topic.endsWith(".>") ? topic.slice(0, -2) : undefined;
-    if (base === undefined || base.includes("*") || base.includes(">")) {
-      expanded.add(topic);
-      continue;
-    }
-    const segments = base.split(".");
-    if (segments.length < 2 || segments.some((segment) => segment.length === 0)) {
-      throw new TypeError(`cannot expand Envoy wildcard topic "${topic}": its concrete base must have at least two non-empty segments`);
-    }
-    expanded.add(base);
-    expanded.add(topic);
-  }
-  return [...expanded];
-}
-
-class EnvoyApiError extends Error {
-  details;
-  name = "EnvoyApiError";
-  expected;
-  code;
-  constructor(details) {
-    let parsed;
-    try {
-      const result = ErrorWireSchema.safeParse(JSON.parse(details.responseBody));
-      if (result.success)
-        parsed = result.data;
-    } catch {}
-    super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`);
-    this.details = details;
-    this.expected = parsed?.expected;
-    this.code = parsed?.code;
-  }
-}
-function createEnvoyClient(config2) {
-  const baseUrl = normalizeEnvoyUrl(config2.baseUrl);
-  const timeoutMs = config2.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const apiToken = config2.token;
-  const request = async (path2, init, options = {}) => {
-    const url2 = `${baseUrl}${path2}`;
-    const attempts = config2.retry === false ? 1 : 2;
-    const tries = options.retry === false ? 1 : attempts;
-    for (let attempt = 0;attempt < tries; attempt += 1) {
-      let response;
-      try {
-        const headers = new Headers(init.headers);
-        if (apiToken)
-          headers.set("Authorization", `Bearer ${apiToken}`);
-        response = await config2.fetch(url2, {
-          ...init,
-          headers,
-          signal: AbortSignal.timeout(options.timeoutMs ?? timeoutMs)
-        });
-      } catch (error49) {
-        if (attempt + 1 < tries) {
-          await waitForRetry();
-          continue;
-        }
-        throw error49;
-      }
-      const responseBody = await response.text();
-      if (response.ok)
-        return responseBody;
-      const error48 = new EnvoyApiError({
-        method: init.method ?? "GET",
-        url: url2,
-        status: response.status,
-        responseBody
-      });
-      if (response.status >= 500 && attempt + 1 < tries) {
-        await waitForRetry();
-        continue;
-      }
-      throw error48;
-    }
-    throw new Error("Envoy request exhausted retries");
-  };
-  const post = (path2, body, options) => request(path2, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  }, options);
-  return {
-    subscribe: async (input) => InterestWireSchema.parse(JSON.parse(await post("/v1/interests/subscribe", {
-      session_id: input.sessionID,
-      dir: input.directory,
-      topics: expandSubscriptionTopics(input.topics),
-      port: input.port,
-      title: input.title,
-      ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
-      driving: input.driving,
-      ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
-      host: machineID()
-    }))),
-    unsubscribe: async (input) => {
-      await post("/v1/interests/unsubscribe", {
-        session_id: input.sessionID,
-        topics: expandSubscriptionTopics(input.topics)
-      });
-    },
-    getInterest: async (sessionID) => InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
-    send: async (input) => {
-      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
-      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/send", {
-        source: input.source ?? "agent",
-        ...sourceSession(input.sourceSessionID),
-        target_session: input.targetSessionID,
-        message: input.message,
-        idempotency_key: idempotencyKey,
-        ...messageMetadata(input)
-      })));
-      return {
-        envelope: response,
-        recipient: response.recipient ?? input.targetSessionID,
-        confirmed: response.recipient !== undefined
-      };
-    },
-    publish: async (input) => {
-      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
-      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/publish", {
-        source: input.source ?? "agent",
-        ...sourceSession(input.sourceSessionID),
-        topic: input.topic,
-        message: input.message,
-        ...input.payload === undefined ? {} : { payload: input.payload },
-        idempotency_key: idempotencyKey,
-        ...messageMetadata(input)
-      })));
-      return {
-        envelope: response,
-        ...response.holder === undefined ? {} : { holder: response.holder }
-      };
-    },
-    unregisterSession: async (sessionID) => {
-      await request(`/v1/sessions/${encodeURIComponent(sessionID)}`, { method: "DELETE" });
-    },
-    setRole: async (input) => {
-      const soft = input.soft === true;
-      const previous = soft ? input.previousSessionID ?? "" : "";
-      const body = {
-        session_id: input.sessionID,
-        role: input.role,
-        ...soft ? { soft: true } : {},
-        ...previous === "" ? {} : { previous_session_id: previous }
-      };
-      let raw;
-      try {
-        raw = await post("/v1/roles/set", body);
-      } catch (error48) {
-        if (error48 instanceof EnvoyApiError && error48.details.status === 409) {
-          const held = RoleHeldWireSchema.safeParse(JSON.parse(error48.details.responseBody));
-          if (held.success)
-            return { claimed: false, holder: held.data.holder };
-        }
-        throw error48;
-      }
-      return { claimed: true, interest: InterestWireSchema.parse(JSON.parse(raw)) };
-    },
-    getRole: async (role) => RoleWireSchema.parse(JSON.parse(await request(`/v1/roles/${encodeURIComponent(role)}`, { method: "GET" }))),
-    listSessions: async (input = {}) => {
-      const search = new URLSearchParams;
-      if (input.directory !== undefined)
-        search.set("dir", input.directory);
-      if (input.title !== undefined)
-        search.set("title", input.title);
-      const query = search.size === 0 ? "" : `?${search.toString()}`;
-      return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
-    },
-    replay: async (input) => ReplayWireSchema.parse(JSON.parse(await post("/v1/replay", {
-      session_id: input.sessionID,
-      subjects: input.subjects.map((cursor) => cursor.after === undefined ? { subject: cursor.subject } : { subject: cursor.subject, after: cursor.after }),
-      ...input.maxMessages === undefined ? {} : { max_messages: input.maxMessages }
-    }, { timeoutMs: REPLAY_TIMEOUT_MS, retry: false })))
-  };
-}
-function waitForRetry() {
-  const { promise: promise2, resolve: resolve2 } = Promise.withResolvers();
-  setTimeout(resolve2, RETRY_DELAY_MS);
-  return promise2;
-}
-function messageMetadata(input) {
-  return {
-    ...input.inReplyTo === undefined ? {} : { in_reply_to: input.inReplyTo },
-    ...input.supersedes === undefined ? {} : { supersedes: input.supersedes },
-    ...input.urgency === undefined ? {} : { urgency: input.urgency },
-    ...input.expectsReply === undefined ? {} : { expects_reply: input.expectsReply },
-    ...input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }
-  };
-}
-function sourceSession(sessionID) {
-  return sessionID === undefined || sessionID === "" ? {} : { source_session: sessionID };
 }
 
 // ../envoy-client/src/replay.ts
@@ -44021,6 +44415,7 @@ function createReplayEngine(options) {
   const answered = new Set;
   let running;
   let rerun;
+  let consumerMode = false;
   const safely = (what, call) => {
     try {
       call();
@@ -44279,6 +44674,8 @@ function createReplayEngine(options) {
       if (!alive())
         return;
     }
+    if (consumerMode)
+      return;
     for (let page = 0;page < REPLAY_PAGES_PER_SWEEP; page += 1) {
       let handledAny = false;
       const asking = [...readings].filter(([, reading]) => reading.more).sort(([, a], [, b]) => (a.read ?? -1) - (b.read ?? -1)).slice(0, REPLAY_MAX_SUBJECTS);
@@ -44470,6 +44867,9 @@ function createReplayEngine(options) {
   };
   return {
     sweep,
+    setConsumerMode(on) {
+      consumerMode = on;
+    },
     async followedChanged() {
       const alive = bind()?.alive;
       if (alive === undefined)
@@ -45154,8 +45554,24 @@ function allowedAPIURL(value) {
   return url2.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url2.hostname);
 }
 
+// ../envoy-client/src/stream-topics.ts
+var STREAM_SUBJECT_PREFIXES = [
+  AGENT_TOPIC_PREFIX,
+  "notifications.dispatch.",
+  "notifications.github.",
+  "notifications.slack.",
+  LEGION_NOTICE_TOPIC_PREFIX,
+  "notifications.ghostwispr.",
+  "notifications.whatsapp.",
+  `notifications.envoy.exceptions.${AGENT_TOPIC_PREFIX}`
+];
+function streamStores(topic) {
+  return STREAM_SUBJECT_PREFIXES.some((prefix) => topic.length > prefix.length && topic.startsWith(prefix));
+}
+
 // ../envoy-client/src/tool-contract.ts
 var DELIVERY_CONTRACT = "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
+var STORED_DELIVERY = "Stored topics (agent, dispatch, github, slack, legion, ghostwispr, whatsapp; a role message " + "reaches its holder as a stored copy on the holder's agent topic) reach each subscribed session " + "once, also one that was away or restarted, when its listener supports consumer delivery. Team " + "and other ad-hoc topics are live only.";
 var TOPIC_GUIDE = "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " + "(publish-to; holders claim via envoy_role_set). > matches one or more trailing tokens and does not " + "match the base subject. Envoy registers the concrete base when you subscribe to <subject>.>, so " + "the recommended default remains github.<owner>.<repo>.pr.<n>.>. <owner> and <repo> are one token " + "each, with every dot in the name written _ (sjawhar/.github is github.sjawhar._github; " + "acme/site.io is github.acme.site_io), and a topic spelled with the dot receives nothing. " + "Default PR subscription: " + "github.<owner>.<repo>.pr.<n>.> (it receives the quiet PR family): pr.<n> (lifecycle: " + "opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), " + "pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks (one settlement event per commit whose checks settle, the head or not, naming its sha: " + 'passed/failed/cancelled/skipped with failing names and URLs; re-fires with superseded_settlement: "true" ' + "when new runs appear for the same commit). Other GitHub: issue.<n>, issue.<n>.comment, " + "issue.<n>.mention, mention, push.branch.<name>, push.tag.<name>, workflow.<file>.<action> (only " + "runs without an associated PR); slack.<team>.<channel>.message|mention and " + "slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; " + "whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.";
 var URGENCY_VALUES = EnvelopeSchema.shape.urgency.unwrap().options;
 var EXPECTS_REPLY_VALUES = EnvelopeSchema.shape.expects_reply.unwrap().options;
@@ -45197,7 +45613,7 @@ var EnvoyToolOperation = {
 var envoyToolSpecs = [
   {
     name: "envoy_subscribe",
-    description: `Subscribe this session to Envoy notification topics. ${TOPIC_GUIDE}`,
+    description: `Subscribe this session to Envoy notification topics. ${STORED_DELIVERY} ${TOPIC_GUIDE}`,
     arguments: (schema) => ({
       topics: schema.array(schema.string()).describe("NATS-style topic patterns to subscribe to.")
     }),
@@ -45232,7 +45648,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) is live only: it reaches every session subscribed to it when you publish, and is not retained. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not retained. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },
@@ -48374,7 +48790,7 @@ var DeliveryIdentity = DedupeIdentitySchema.extend({
   source_event_id: DedupeIdentitySchema.shape.source_event_id.catch(undefined),
   topic: exports_external.string().min(1).optional().catch(undefined)
 });
-var decoder = new TextDecoder;
+var decoder2 = new TextDecoder;
 var DEFAULT_DRAIN_TIMEOUT_MS = 1000;
 function deliveryIdentity(raw) {
   let parsed;
@@ -48397,9 +48813,9 @@ function createChannelForwarder(connection, options) {
   const deliver = async (topic, subscription) => {
     try {
       for await (const { message, receivedAt } of readArrivals(subscription)) {
-        const raw = decoder.decode(message.data);
+        const raw = decoder2.decode(message.data);
         const identity = deliveryIdentity(raw);
-        let claim = dedupe.claim(identity);
+        let claim = options.relayed?.(topic) === true ? undefined : dedupe.claim(identity);
         if (claim !== undefined && identity !== undefined && options.ledger?.delivered(identity)) {
           claim.settle();
           claim = undefined;
@@ -49557,6 +49973,9 @@ async function executeLegionTool(runtime, input, signal) {
 // src/replay-state.ts
 import { readFile as readFile2 } from "fs/promises";
 import { join as join7 } from "path";
+var ReplayStateFileSchema = ReplaySnapshotSchema.extend({
+  consumer: ConsumerDeliverySnapshotSchema.optional()
+});
 function replayStateFile(stateDirectory, sessionId) {
   return join7(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
 }
@@ -49575,14 +49994,31 @@ async function readReplayState(file2) {
   } catch {
     throw new Error(`${file2} is not JSON`);
   }
-  const snapshot = ReplaySnapshotSchema.safeParse(parsed);
+  const snapshot = ReplayStateFileSchema.safeParse(parsed);
   if (!snapshot.success)
     throw new Error(`${file2} holds no replay state`);
   return snapshot.data;
 }
-async function writeReplayState(file2, snapshot) {
-  await writeAtomicStateFile(file2, `${JSON.stringify(snapshot)}
+async function writeReplayState(file2, state) {
+  await writeAtomicStateFile(file2, `${JSON.stringify(state)}
 `);
+}
+function replayStateWriter(file2, restored) {
+  let current = restored;
+  let writing = Promise.resolve();
+  const write = (next) => {
+    current = next;
+    const run = writing.then(() => writeReplayState(file2, current));
+    writing = run.catch(() => {
+      return;
+    });
+    return run;
+  };
+  return {
+    replay: (snapshot) => write(current.consumer === undefined ? snapshot : { ...snapshot, consumer: current.consumer }),
+    consumer: (snapshot) => write({ ...current, consumer: snapshot }),
+    idle: () => writing
+  };
 }
 
 // src/session-title.ts
@@ -49800,8 +50236,15 @@ function createChannelDelivery(input) {
       }
     });
   };
+  const passOverBtw = (rendered, how) => {
+    if (rendered.delivery?.mode !== "btw")
+      return false;
+    process.stderr.write(`envoy-channel: passing over ${how} BTW ${rendered.envelope?.event_id ?? "unknown"}: a BTW never starts a turn
+`);
+    return true;
+  };
   return {
-    enqueue({ subject: subject2, raw }) {
+    enqueue({ subject: subject2, raw, late }) {
       const rendered = renderInbound(raw, input.identity.id, subject2);
       if (rendered.skip)
         return tail.then(() => false);
@@ -49822,17 +50265,16 @@ function createChannelDelivery(input) {
 `);
         return tail.then(() => false);
       }
+      if (late === true && passOverBtw(rendered, "late"))
+        return tail.then(() => false);
       return show(rendered, subject2, rendered.content).then(() => true);
     },
     async replay(frame) {
       const rendered = renderInbound(frame.data, input.identity.id, frame.subject);
       if (replaySuppressed(rendered))
         return "suppressed";
-      if (rendered.delivery?.mode === "btw") {
-        process.stderr.write(`envoy-channel: passing over replayed BTW ${rendered.envelope?.event_id ?? "unknown"}: a BTW never starts a turn
-`);
+      if (passOverBtw(rendered, "replayed"))
         return "suppressed";
-      }
       await show(rendered, frame.subject, replayedText(rendered.content, frame.time));
       return "shown";
     },
@@ -49891,6 +50333,19 @@ async function startChannelSession(options) {
     });
     return delivery.replay(frame);
   };
+  const tellNotice = (notice) => {
+    routeReplayNotice(notice, {
+      warn: (message) => process.stderr.write(`envoy-channel: ${message}
+`),
+      card: (content) => {
+        delivery.notice(content).catch((error48) => {
+          process.stderr.write(`envoy-channel: ${notice.message} (the session could not be told \u2014 ${messageFor(error48)})
+`);
+        });
+      }
+    });
+  };
+  let stateWriter;
   const replay = createReplayEngine({
     host: {
       sessionID: () => shuttingDown || replayBound !== identity.id ? undefined : identity.id,
@@ -49901,35 +50356,27 @@ async function startChannelSession(options) {
         process.stderr.write(`envoy-channel: message ${notice.eventId} from ${notice.sender} was not shown, nor was the notice naming it \u2014 ${messageFor(error48)}
 `);
       },
-      notify: (notice) => {
-        routeReplayNotice(notice, {
-          warn: (message) => process.stderr.write(`envoy-channel: ${message}
-`),
-          card: (content) => {
-            delivery.notice(content).catch((error48) => {
-              process.stderr.write(`envoy-channel: ${notice.message} (the session could not be told \u2014 ${messageFor(error48)})
-`);
-            });
-          }
-        });
-      },
+      notify: tellNotice,
       log: (message, error48) => {
         process.stderr.write(`envoy-channel: ${message}${error48 === undefined ? "" : ` \u2014 ${messageFor(error48)}`}
 `);
       },
-      write: (change) => writeReplayState(replayStateFile(options.stateDirectory, identity.id), change.snapshot())
+      write: (change) => stateWriter?.replay(change.snapshot())
     },
     transport: options.client,
     dedupe
   });
   const restoreReplay = async () => {
     const sessionId = identity.id;
-    const snapshot = await readReplayState(replayStateFile(options.stateDirectory, sessionId)).catch((error48) => {
+    const file2 = replayStateFile(options.stateDirectory, sessionId);
+    const snapshot = await readReplayState(file2).catch((error48) => {
       process.stderr.write(`envoy-channel: could not read the replay state (${messageFor(error48)}); this session's replay starts over
 `);
       return { ledger: [] };
     });
     replay.restore(snapshot);
+    stateWriter = replayStateWriter(file2, snapshot);
+    openRelay(sessionId, stateWriter, snapshot.consumer);
     replayBound = sessionId;
     return rememberedTopics(snapshot.state);
   };
@@ -49937,21 +50384,161 @@ async function startChannelSession(options) {
     if (!shuttingDown)
       replay.sweep();
   };
+  const takeRemovals = (raw) => {
+    const removedTopics = subscriptionRemovedTopics(raw, identity.id);
+    if (removedTopics !== undefined && removedTopics.length > 0) {
+      for (const topic of removedTopics)
+        userTopics.delete(topic);
+      dropRemovedTopics(removedTopics);
+    }
+  };
+  let relay;
+  let relayed;
+  const relaysCoreTopic = (topic) => relayed !== undefined && relayed.sessionID === identity.id && relayed.topics.has(topic);
+  const persistRelay = (owner) => {
+    if (owner === undefined || relay !== owner)
+      return;
+    const snapshot = owner.delivery.snapshot();
+    const serialized2 = JSON.stringify(snapshot);
+    if (serialized2 === owner.persisted)
+      return;
+    owner.persisted = serialized2;
+    owner.state.consumer(snapshot).catch((error48) => {
+      process.stderr.write(`envoy-channel: could not persist the consumer delivery state \u2014 ${messageFor(error48)}
+`);
+    });
+  };
+  const deliverRelayed = async (owner, frame) => {
+    if (shuttingDown || relay !== owner || owner.sessionID !== identity.id) {
+      frame.nak();
+      return;
+    }
+    takeRemovals(frame.data);
+    const identityOf = deliveryIdentity(frame.data);
+    const claim = dedupe.claim(identityOf);
+    if (claim === undefined) {
+      frame.done();
+      return;
+    }
+    if (identityOf !== undefined && replay.delivered(identityOf)) {
+      claim.settle();
+      frame.done();
+      return;
+    }
+    let shown;
+    try {
+      const queued = delivery.enqueue({ subject: frame.subject, raw: frame.data, late: frame.late });
+      frame.release();
+      shown = await queued;
+    } catch (error48) {
+      claim.release();
+      throw error48;
+    }
+    if (!shown) {
+      claim.release();
+      frame.done();
+      return;
+    }
+    if (identityOf !== undefined)
+      await replay.recordDelivered(identityOf);
+    claim.settle();
+    frame.done();
+    persistRelay(owner);
+  };
+  const openRelay = (sessionID, state, restored) => {
+    closeRelay();
+    const consumer = createConsumerDelivery({
+      sessionID,
+      ledger: replay,
+      host: {
+        deliver: (frame) => deliverRelayed(owner, frame),
+        failed: (frame, error48) => {
+          const envelope2 = renderInbound(frame.data, sessionID, frame.subject).envelope;
+          if (envelope2 !== undefined) {
+            replay.liveFailed(frame.subject, envelope2, error48, Date.now());
+          }
+        },
+        gap: tellNotice,
+        log: (message, error48) => {
+          process.stderr.write(`envoy-channel: ${message}${error48 === undefined ? "" : ` \u2014 ${messageFor(error48)}`}
+`);
+        }
+      },
+      publish: (reply, body) => options.connection.publish(reply, new TextEncoder().encode(body))
+    });
+    if (restored !== undefined)
+      consumer.restore(restored);
+    const owner = {
+      sessionID,
+      delivery: consumer,
+      state,
+      subscription: undefined,
+      persisted: JSON.stringify(consumer.snapshot())
+    };
+    relay = owner;
+    const subscription = options.connection.subscribe(consumer.subject);
+    owner.subscription = subscription;
+    pumpRelay(owner, subscription);
+  };
+  const pumpRelay = async (owner, subscription) => {
+    try {
+      for await (const message of subscription) {
+        owner.delivery.receive({
+          data: message.data,
+          headers: message.headers,
+          reply: message.reply
+        });
+      }
+    } catch (error48) {
+      process.stderr.write(`envoy-channel: the relay subscription of ${owner.sessionID} stopped \u2014 ${messageFor(error48)}
+`);
+    }
+  };
+  function closeRelay() {
+    const owner = relay;
+    if (owner === undefined)
+      return;
+    relay = undefined;
+    relayed = undefined;
+    replay.setConsumerMode(false);
+    owner.delivery.close();
+    owner.subscription?.unsubscribe();
+    owner.subscription = undefined;
+  }
+  const renewRelayEpoch = () => {
+    if (shuttingDown || relay === undefined)
+      return;
+    relay.delivery.beginEpoch();
+    serialized(register).catch((error48) => {
+      process.stderr.write(`envoy-channel: could not register again after a reconnect (${messageFor(error48)}); the next heartbeat retries
+`);
+    });
+  };
+  const refollow = (owner, topics) => {
+    if (owner === undefined)
+      return;
+    owner.delivery.setFollowed(topics.filter((topic) => topic !== directSubject));
+    persistRelay(owner);
+  };
+  const takeDeliveryAnswer = (sessionID, topics, asked, result) => {
+    if (sessionID !== identity.id || relay !== asked)
+      return;
+    const mode = asked?.delivery.answered(deliveryAnswerOf(result)) ?? "core";
+    relayed = mode === "consumer" ? { sessionID, topics: new Set(topics.filter(streamStores)) } : undefined;
+    replay.setConsumerMode(mode === "consumer");
+    persistRelay(asked);
+  };
   const forwarder = createChannelForwarder(options.connection, {
     dedupe,
     ledger: replay,
+    relayed: relaysCoreTopic,
     failed: (message, topic, error48, receivedAt) => {
       const envelope2 = renderInbound(message.raw, identity.id, message.subject).envelope;
       if (envelope2 !== undefined)
         replay.liveFailed(topic, envelope2, error48, receivedAt);
     },
     deliver: async (message) => {
-      const removedTopics = subscriptionRemovedTopics(message.raw, identity.id);
-      if (removedTopics !== undefined && removedTopics.length > 0) {
-        for (const topic of removedTopics)
-          userTopics.delete(topic);
-        dropRemovedTopics(removedTopics);
-      }
+      takeRemovals(message.raw);
       return enqueueChannelMessage(delivery, options.connection, directSubject, message);
     }
   });
@@ -49971,10 +50558,15 @@ async function startChannelSession(options) {
     });
   }
   function dropFromForwarderAndRegistry(topics) {
+    const dropping = forwarder.unfollow(topics);
+    refollow(relay?.sessionID === identity.id ? relay : undefined, registeredTopics());
     return {
-      dropping: forwarder.unfollow(topics),
+      dropping,
       unsubscribing: serialized(() => options.client.unsubscribe({ sessionID: identity.id, topics }))
     };
+  }
+  function registeredTopics() {
+    return forwarder.topics().filter((topic) => !reachesPrivateStreamSubject(directSubject, topic));
   }
   let stampedTitle;
   let stampFailureReported = false;
@@ -49993,16 +50585,22 @@ async function startChannelSession(options) {
         }
       }
     }
-    await options.client.subscribe({
-      sessionID: identity.id,
+    const sessionID = identity.id;
+    const topics = registeredTopics();
+    const asking = relay?.sessionID === identity.id ? relay : undefined;
+    refollow(asking, topics);
+    const result = await options.client.subscribe({
+      sessionID,
       directory: identity.directory,
-      topics: forwarder.topics().filter((topic) => !reachesPrivateStreamSubject(directSubject, topic)),
+      topics,
       port: 0,
       title,
       capabilities: options.capabilities,
       driving: false,
-      selfSubscribed: true
+      selfSubscribed: true,
+      ...asking === undefined ? {} : { delivery: asking.delivery.registration() }
     });
+    takeDeliveryAnswer(sessionID, topics, asking, result);
   };
   const restoreRole = async (previousSessionID = identity.id) => {
     const previousFile = roleStateFile(options.stateDirectory, previousSessionID);
@@ -50112,6 +50710,10 @@ async function startChannelSession(options) {
     forwarder.unfollow([previousSubject]);
     await restoreReplay();
     roleTransferFrom ??= previous;
+    await withTimeout(options.connection.flush(), options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS, "flushing NATS").catch((error48) => {
+      process.stderr.write(`envoy-channel: could not confirm the relay subscription of ${next} \u2014 ${messageFor(error48)}
+`);
+    });
     await register();
     await transferRole();
     process.stderr.write(`envoy: session id changed ${previous} -> ${next}; re-registered
@@ -50233,8 +50835,10 @@ async function startChannelSession(options) {
   (async () => {
     try {
       for await (const status of options.connection.status()) {
-        if (status.type === "reconnect")
-          triggerReplay();
+        if (status.type !== "reconnect")
+          continue;
+        renewRelayEpoch();
+        triggerReplay();
       }
     } catch (error48) {
       process.stderr.write(`envoy-channel: the NATS connection's status reader failed \u2014 ${messageFor(error48)}
@@ -50291,11 +50895,13 @@ async function startChannelSession(options) {
       clearInterval(heartbeatTimer);
       if (handoffFile !== undefined)
         unwatchFile(handoffFile, requestHeartbeat);
+      closeRelay();
       await forwarder.close();
       await serialized(() => options.client.unregisterSession(identity.id)).catch((error48) => {
         process.stderr.write(`envoy-channel: session deregistration failed \u2014 ${messageFor(error48)}
 `);
       });
+      await stateWriter?.idle();
     }
   };
 }

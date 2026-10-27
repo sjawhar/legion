@@ -80,6 +80,7 @@ import {
   sessionSettings,
 } from "@legion/envoy-client/session-settings";
 import { postSlackReply } from "@legion/envoy-client/slack-post";
+import { streamStores } from "@legion/envoy-client/stream-topics";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -161,7 +162,6 @@ import {
 } from "../src/missed-messages";
 import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
-import { streamStores } from "../src/stream-topics";
 import { TypedPictures } from "../src/typed-pictures";
 import { type CardDelivery, UnwrittenFrames, unwrittenCardKeys } from "../src/unwritten-frames";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";

@@ -19947,6 +19947,15 @@ var InterestWireSchema = exports_external.object({
   updated_at: exports_external.number().int().optional(),
   warnings: exports_external.array(exports_external.string()).optional()
 });
+var DeliveryAnswerWireSchema = exports_external.discriminatedUnion("mode", [
+  exports_external.object({
+    mode: exports_external.literal("consumer"),
+    subject: exports_external.string().min(1),
+    stream_id: exports_external.string(),
+    gap: exports_external.boolean()
+  }),
+  exports_external.object({ mode: exports_external.literal("core"), reason: exports_external.string() })
+]);
 var SessionWireSchema = exports_external.object({
   session_id: exports_external.string(),
   machine_id: exports_external.string(),
@@ -20000,6 +20009,22 @@ var ReplayWireSchema = exports_external.object({
     refused: exports_external.string().optional()
   }))
 });
+var DELIVERY_NOT_ANSWERED = "not_answered";
+var DELIVERY_UNREADABLE = "unreadable_answer";
+function deliveryAnswerOf(result) {
+  return result.delivery ?? { mode: "core", reason: DELIVERY_NOT_ANSWERED };
+}
+function parseSubscribeAnswer(body) {
+  const interest = InterestWireSchema.parse(body);
+  const raw = typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
+  if (raw === undefined || raw === null)
+    return interest;
+  const delivery = DeliveryAnswerWireSchema.safeParse(raw);
+  return {
+    ...interest,
+    delivery: delivery.success ? delivery.data : { mode: "core", reason: DELIVERY_UNREADABLE }
+  };
+}
 function mergeInterestSources(registryTopics, liveTopics) {
   const interests = new Map;
   for (const topic of registryTopics) {
@@ -20096,7 +20121,7 @@ function createEnvoyClient(config2) {
     body: JSON.stringify(body)
   }, options);
   return {
-    subscribe: async (input) => InterestWireSchema.parse(JSON.parse(await post("/v1/interests/subscribe", {
+    subscribe: async (input) => parseSubscribeAnswer(JSON.parse(await post("/v1/interests/subscribe", {
       session_id: input.sessionID,
       dir: input.directory,
       topics: expandSubscriptionTopics(input.topics),
@@ -20105,6 +20130,7 @@ function createEnvoyClient(config2) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
+      ...input.delivery === undefined ? {} : { delivery: input.delivery },
       host: machineID()
     }))),
     unsubscribe: async (input) => {
