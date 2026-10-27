@@ -463,6 +463,19 @@ const rules: Record<string, Rule> = {
     refreshes: ["detail"],
     spares: ["inbox", "projectInbox"],
   },
+  "a blocker change refreshes the detail of each blocker it names, whose Referenced by count moved":
+    {
+      event: event(
+        "issue.updated",
+        issue({
+          ancestors: [],
+          changed: ["blocked_by"],
+          references_changed: [{ id: "CORE-9", kind: "issue" }],
+        })
+      ),
+      refreshes: ["detail", "unrelatedDetail"],
+      spares: ["parent", "grandparent", "summary"],
+    },
   "a new issue refreshes its ancestors' rollups and the pickers, not every detail or the project counts":
     {
       event: event(

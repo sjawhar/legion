@@ -1,4 +1,4 @@
-import { type QueryClient, queryOptions, useQuery } from "@tanstack/react-query";
+import { type QueryClient, type QueryStatus, queryOptions, useQuery } from "@tanstack/react-query";
 
 import { api, artifactVersionPath } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
@@ -32,11 +32,21 @@ import { referenceTargetKind } from "./target-id";
  * A reference to an issue or a document reads what it shows through a summary read, never the
  * full issue: an issue and its documents share `issueSummaryQuery`, a project document has
  * `documentSummaryQuery`. A reference to a block of a document reads the block's graph read
- * (`blockQuery`), which carries the block's text. A page can link a hundred of them, so a summary
- * or a block read is fetched again only by an event that can change it (`staleTime: Infinity`, no
- * refetch on window focus); the event refresh rules name these keys. An ask, comment or message
- * reference reads its own record alone.
+ * (`blockQuery`), which carries the block's text. A page can link a hundred of them, so a healthy
+ * summary or block read is fetched again only by an event that can change it (`staleTime:
+ * Infinity`); the event refresh rules name these keys. Only a read in error is fetched again on
+ * window focus (`refetchFailedOnFocus`). An ask, comment or message reference reads its own
+ * record alone.
  */
+
+/**
+ * Window focus fetches a summary or block read again only while it is in error, so a read that
+ * failed (a 503 past its retries) recovers on the open page while a healthy one stays quiet. It
+ * is fetched even over the data it holds, which an event's refetch that failed leaves fresh by
+ * age (`staleTime: Infinity`).
+ */
+const refetchFailedOnFocus = (query: { readonly state: { readonly status: QueryStatus } }) =>
+  query.state.status === "error" ? "always" : false;
 
 export interface ReferenceTarget {
   readonly title: string | undefined;
@@ -54,24 +64,25 @@ const TITLE_HEADLINE_MAX = 60;
 
 /** What a reference to an issue, or to one of its documents, shows: the issue's title and status
  *  and each document's name, kind, latest version and whether it is the spec
- *  (`GET /issues/{key}/summary`). Fetched again only by an event that can change it. */
+ *  (`GET /issues/{key}/summary`). Fetched again only by an event that can change it, or on focus
+ *  after it failed. */
 export const issueSummaryQuery = (key: string | undefined) =>
   queryOptions({
     queryKey: ["issue-summary", key],
     queryFn: () => api.getIssueSummary(key ?? ""),
     staleTime: Number.POSITIVE_INFINITY,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: refetchFailedOnFocus,
   });
 
 /** What a reference to a project document shows: its name, kind and latest version
  *  (`GET /projects/{key}/artifacts/{slug}/summary`). Fetched again only by an event that can
- *  change it. */
+ *  change it, or on focus after it failed. */
 export const documentSummaryQuery = (project: string | undefined, slug: string | undefined) =>
   queryOptions({
     queryKey: ["doc-summary", project, slug],
     queryFn: () => api.getProjectDocumentSummary(project ?? "", slug ?? ""),
     staleTime: Number.POSITIVE_INFINITY,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: refetchFailedOnFocus,
   });
 
 /** The full issue, under the key the issue page reads it by. Of the reference surfaces only the
@@ -131,13 +142,14 @@ export const referencesQuery = (reference: string | undefined) =>
 
 /** A block reference's graph read, under the Referenced by panel's key: its node carries the
  *  block's whole text and, for a pinned reference, its pin. A link to a block reads it as a link
- *  to an issue reads its summary, fetched again only by an event that can change it: a version of
- *  the block's document, or a citation of the block added or removed. */
+ *  to an issue reads its summary, fetched again only by an event that can change it (a version of
+ *  the block's document, or a citation of the block added or removed), or on focus after it
+ *  failed. */
 export const blockQuery = (reference: string | undefined) =>
   queryOptions({
     ...referencesQuery(reference),
     staleTime: Number.POSITIVE_INFINITY,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: refetchFailedOnFocus,
   });
 
 /** The document a reference names, as much of it as a reference shows: an issue summary's

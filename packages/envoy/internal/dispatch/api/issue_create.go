@@ -375,8 +375,14 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issue.LastSeq++
+	// A new issue's blocked_by edges move each blocker's count, beside what its spec cites.
+	blockerChanges, err := issueEdgeChanges(r.Context(), tx, unsetIssue, issue, false)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	// A new issue changed every field it holds a value in, measured from an issue with none.
-	payload, err := newIssueEventPayload(r.Context(), tx, issue, specChanges, issueChangedFields(unsetIssue, issue))
+	payload, err := newIssueEventPayload(r.Context(), tx, issue, refs.MergeChanges(specChanges, blockerChanges), issueChangedFields(unsetIssue, issue))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

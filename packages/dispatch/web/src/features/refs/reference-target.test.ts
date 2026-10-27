@@ -1,10 +1,17 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { QueryClient } from "@tanstack/react-query";
+import {
+  focusManager,
+  QueryClient,
+  type QueryKey,
+  QueryObserver,
+  type QueryObserverOptions,
+} from "@tanstack/react-query";
 import { waitFor } from "@testing-library/react";
 
 import { api } from "../../api/client";
 import type { IssueReferenceSummary } from "../../api/types";
 import {
+  blockQuery,
   documentSummaryQuery,
   issueSummaryQuery,
   messageQuery,
@@ -15,6 +22,7 @@ let restore = () => {};
 
 afterEach(() => {
   restore();
+  focusManager.setFocused(undefined);
 });
 
 /** Every api read a reference can make, spied so a test sees which ran and none reaches the
@@ -62,6 +70,10 @@ function spyReads() {
       project: "CORE",
       slug: "runbook-md",
     }),
+    getReferences: spyOn(api, "getReferences").mockResolvedValue({
+      edges: [],
+      node: { id: "CORE-1/spec#intro", kind: "block" },
+    } as never),
   };
   restore = () => {
     for (const spy of Object.values(spies)) {
@@ -84,10 +96,9 @@ async function expectKeys(queryClient: QueryClient, expected: unknown[][]): Prom
   );
 }
 
-test("summary reads are fetched again only by events, never by age or window focus", () => {
+test("summary reads are fetched again by events, never by age", () => {
   for (const options of [issueSummaryQuery("CORE-1"), documentSummaryQuery("CORE", "runbook")]) {
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
-    expect(options.refetchOnWindowFocus).toBe(false);
   }
   expect([...issueSummaryQuery("CORE-1").queryKey]).toEqual(["issue-summary", "CORE-1"]);
   expect([...documentSummaryQuery("CORE", "runbook").queryKey]).toEqual([
@@ -95,6 +106,72 @@ test("summary reads are fetched again only by events, never by age or window foc
     "CORE",
     "runbook",
   ]);
+});
+
+/**
+ * The person comes back to the tab. Resolves once the client has handled the focus: its focus
+ * listener awaits `resumePausedMutations` before it refetches, so awaiting the same call after it
+ * finds any refetch the focus starts already at its read.
+ */
+async function refocus(queryClient: QueryClient): Promise<void> {
+  focusManager.setFocused(false);
+  focusManager.setFocused(true);
+  await queryClient.resumePausedMutations();
+}
+
+/**
+ * Observes `options` as a mounted reference does, with `read` failing its first call: the failed
+ * read is fetched again on focus, a healthy one is not, and a refresh that fails over the data it
+ * held (an event's, which fetches the query directly) is fetched again on the next focus.
+ */
+async function expectFocusRecoversFailedRead<TData, TKey extends QueryKey>(
+  options: QueryObserverOptions<TData, Error, TData, TData, TKey>,
+  read: { mock: { calls: unknown[] }; mockRejectedValueOnce: (error: Error) => unknown }
+): Promise<void> {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.mount();
+  read.mockRejectedValueOnce(new Error("503 Service Unavailable"));
+  const observer = new QueryObserver(queryClient, options);
+  const unsubscribe = observer.subscribe(() => {});
+  try {
+    await waitFor(() => expect(observer.getCurrentResult().status).toBe("error"));
+    expect(read.mock.calls).toHaveLength(1);
+
+    await refocus(queryClient);
+    await waitFor(() => expect(observer.getCurrentResult().status).toBe("success"));
+    expect(read.mock.calls).toHaveLength(2);
+
+    await refocus(queryClient);
+    expect(read.mock.calls).toHaveLength(2);
+
+    read.mockRejectedValueOnce(new Error("503 Service Unavailable"));
+    await queryClient
+      .getQueryCache()
+      .find({ exact: true, queryKey: options.queryKey })
+      ?.fetch()
+      .catch(() => undefined);
+    await waitFor(() => expect(observer.getCurrentResult().status).toBe("error"));
+    expect(read.mock.calls).toHaveLength(3);
+    await refocus(queryClient);
+    await waitFor(() => expect(observer.getCurrentResult().status).toBe("success"));
+    expect(read.mock.calls).toHaveLength(4);
+  } finally {
+    unsubscribe();
+    queryClient.unmount();
+  }
+}
+
+test("a summary or block read that failed is fetched again when the window regains focus, and a healthy one is not", async () => {
+  const reads = spyReads();
+  await expectFocusRecoversFailedRead(issueSummaryQuery("CORE-1"), reads.getIssueSummary);
+  await expectFocusRecoversFailedRead(
+    documentSummaryQuery("CORE", "runbook-md"),
+    reads.getProjectDocumentSummary
+  );
+  await expectFocusRecoversFailedRead(
+    blockQuery("dispatch://CORE-1/spec#intro"),
+    reads.getReferences
+  );
 });
 
 test("a message reference's read sits outside the issue details' key", () => {

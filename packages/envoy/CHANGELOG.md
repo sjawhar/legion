@@ -922,15 +922,18 @@
   never-cancel rule. A reconnect whose replay the server calls complete refreshes nothing beyond
   what its events change, where every reconnect, a tab regaining focus among them, refetched every
   read. A `dispatch://` reference reads the new summary routes in place of the full issue, and an
-  inline link reads no document text.
+  inline link reads no document text. A reference's summary or block read is fetched again on a
+  window focus only after it failed, so a 503 past its retries recovers on the open page.
 - Dispatch's `references_changed` also names a cited document or file, as
   `{kind: "artifact", id, ref}` (its uuid and the `dispatch://` address its `Referenced by` panel
   is opened on), so that panel follows a citation made elsewhere. It also names a target whose
   edge the write kept but whose excerpt it moved, which the target's `Referenced by` panel shows:
   an edit of an ask's question or a comment's body that changes the head of its text names every
   target the text still cites, a document version names each target whose stored excerpt it
-  changed, and an issue retitle names the issue's parent and the issues it is blocked by
-  (INFRA-492).
+  changed, and an issue retitle names the issue's parent and the issues it is blocked by. An issue
+  write that adds or removes a `blocked_by` entry names each blocker it added or removed, and an
+  `issue.created` every blocker it holds, so the blocker's open page keeps its `Referenced by`
+  count current (INFRA-492).
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

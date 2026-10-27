@@ -681,3 +681,40 @@ func TestCountedChangesNamesCitedDocumentsWithinTheCap(t *testing.T) {
 		t.Fatalf("payload past the cap = %#v, want the truncated flag set", payload)
 	}
 }
+
+// Two counted parts of one write merge into what one CountedChanges over both would name: each
+// target once, a kind either part truncated named by neither, and the cap applied to the sum.
+func TestMergeChangesNamesEachTargetOnceWithinTheCap(t *testing.T) {
+	issue := func(key string) model.ChangedReference { return model.ChangedReference{Kind: "issue", ID: key} }
+	ask := model.ChangedReference{Kind: "ask", ID: "ask-1"}
+	merged := MergeChanges(
+		model.ReferenceChanges{Targets: []model.ChangedReference{issue("CORE-1"), ask}, TruncatedKinds: []string{"artifact"}},
+		model.ReferenceChanges{Targets: []model.ChangedReference{
+			issue("CORE-2"), issue("CORE-1"), {Kind: "artifact", ID: "doc"},
+		}},
+	)
+	want := model.ReferenceChanges{
+		Targets:        []model.ChangedReference{issue("CORE-1"), ask, issue("CORE-2")},
+		TruncatedKinds: []string{"artifact"},
+	}
+	if !reflect.DeepEqual(merged, want) {
+		t.Fatalf("merged = %#v, want %#v", merged, want)
+	}
+	if empty := MergeChanges(model.ReferenceChanges{}, model.ReferenceChanges{}); !reflect.DeepEqual(empty, model.ReferenceChanges{}) {
+		t.Fatalf("two empty parts merged = %#v, want nothing named", empty)
+	}
+
+	first, second := model.ReferenceChanges{}, model.ReferenceChanges{Targets: []model.ChangedReference{ask}}
+	for index := range CountedChangeLimit + 1 {
+		part := &first
+		if index%2 == 1 {
+			part = &second
+		}
+		part.Targets = append(part.Targets, issue("CORE-"+strconv.Itoa(index+10)))
+	}
+	if pastCap := MergeChanges(first, second); !reflect.DeepEqual(pastCap, model.ReferenceChanges{
+		Targets: []model.ChangedReference{ask}, TruncatedKinds: []string{"issue"},
+	}) {
+		t.Fatalf("%d issues over two parts merged = %#v, want the issue kind truncated and the ask named", CountedChangeLimit+1, pastCap)
+	}
+}

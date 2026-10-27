@@ -412,17 +412,15 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	after.LastSeq++
 	// What the write changed, the issue's ancestors, and, for a status move, whose Replies count
 	// it can move, all read in this transaction. A retitle keeps the issue's child_of and
-	// blocked_by edges but moves the excerpt they show, so it names their targets.
+	// blocked_by edges but moves the excerpt they show, so it names their targets; a blocked_by
+	// change moves the count of each blocker it added or removed, so it names those.
 	changedFields := issueChangedFields(before, after)
-	var titleChanges model.ReferenceChanges
-	if slices.Contains(changedFields, "title") {
-		titleChanges, err = titleExcerptChanges(r.Context(), tx, after)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+	edgeChanges, err := issueEdgeChanges(r.Context(), tx, before, after, slices.Contains(changedFields, "title"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
-	payload, err := newIssueEventPayload(r.Context(), tx, after, titleChanges, changedFields)
+	payload, err := newIssueEventPayload(r.Context(), tx, after, edgeChanges, changedFields)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

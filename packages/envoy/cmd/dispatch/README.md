@@ -1399,8 +1399,10 @@ body that changes the head of its text names every target the text still cites, 
 names each target whose stored excerpt it changed and each target a block it changed still cites,
 and a retitle names the issue's parent and the issues it is blocked by, whose panels show its
 title. A document version also names each block it changed or deleted that something cites, since
-every link to the block shows its text. Each field is absent from an event written before it
-existed.
+every link to the block shows its text. An issue write that adds or removes a `blocked_by` entry
+names each blocker it added or removed, whose `referenced_by_count` counts the edge, and an
+`issue.created` names every blocker the new issue holds. Each field is absent from an event
+written before it existed.
 
 ## Dispatch topics
 

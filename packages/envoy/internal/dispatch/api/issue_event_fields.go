@@ -98,16 +98,35 @@ func newIssueEventPayload(ctx context.Context, tx pgx.Tx, issue model.Issue, cha
 	return payload, nil
 }
 
-// titleExcerptChanges names the issues whose referenced-by panel shows issue's title: its parent
-// (the child_of edge) and the issues it is blocked by (its blocked_by edges), each an edge the
-// graph keeps across a retitle but whose excerpt (refs.Edges cuts it from an issue's title) moves.
-func titleExcerptChanges(ctx context.Context, tx pgx.Tx, issue model.Issue) (model.ReferenceChanges, error) {
-	targets := make([]refs.Target, 0, len(issue.BlockedBy)+1)
-	if issue.Parent != nil {
-		targets = append(targets, refs.Target{Kind: "issue", ID: *issue.Parent})
+// issueEdgeChanges names the issues whose reads an issue write moves through the issue's own
+// child_of and blocked_by edges. A retitle (retitled) names its parent and the issues it is blocked
+// by: the graph keeps those edges, but the excerpt they show (refs.Edges cuts it from an issue's
+// title) moves. Every issue the write added to or removed from blocked_by is named too, since its
+// referenced_by_count counts the edge. A create passes unsetIssue as before, which names every
+// blocker the new issue holds. CountedChanges names each target once, so a blocker both reasons
+// name appears once.
+func issueEdgeChanges(ctx context.Context, tx pgx.Tx, before, after model.Issue, retitled bool) (model.ReferenceChanges, error) {
+	targets := make([]refs.Target, 0, len(before.BlockedBy)+2*len(after.BlockedBy)+1)
+	name := func(key string) {
+		targets = append(targets, refs.Target{Kind: "issue", ID: key})
 	}
-	for _, blocker := range issue.BlockedBy {
-		targets = append(targets, refs.Target{Kind: "issue", ID: blocker})
+	if retitled {
+		if after.Parent != nil {
+			name(*after.Parent)
+		}
+		for _, blocker := range after.BlockedBy {
+			name(blocker)
+		}
+	}
+	for _, blocker := range before.BlockedBy {
+		if !slices.Contains(after.BlockedBy, blocker) {
+			name(blocker)
+		}
+	}
+	for _, blocker := range after.BlockedBy {
+		if !slices.Contains(before.BlockedBy, blocker) {
+			name(blocker)
+		}
 	}
 	return refs.CountedChanges(ctx, tx, targets)
 }

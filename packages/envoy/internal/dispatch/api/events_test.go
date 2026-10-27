@@ -338,6 +338,70 @@ func TestIssueEventsSayWhatTheWriteChanged(t *testing.T) {
 	}
 }
 
+// A blocker's referenced_by_count counts the blocked_by edges that point at it, so an issue event
+// names every blocker its write added or removed, and no other: a create every blocker it holds, a
+// PATCH the ones that came or went. A retitle that also moves blockers names each once.
+func TestIssueEventsNameTheBlockersTheyMove(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	create := func(title string, blockedBy []string) model.Issue {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			"project": "TEST", "title": title, "blocked_by": blockedBy, "force": true,
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Issue](t, response)
+	}
+	named := func(eventType, key string) []string {
+		t.Helper()
+		payload := newestEventPayload[issueEventFields](t, database, eventType, key)
+		keys := []string{}
+		for _, reference := range payload.ReferencesChanged {
+			if reference.Kind != "issue" {
+				t.Fatalf("%s of %s names %#v, want only issues", eventType, key, payload.ReferencesChanged)
+			}
+			keys = append(keys, reference.ID)
+		}
+		slices.Sort(keys)
+		return keys
+	}
+	sorted := func(keys ...string) []string {
+		slices.Sort(keys)
+		return keys
+	}
+	createTestProject(t, handler, "TEST")
+	kept := create("Kept blocker", nil)
+	dropped := create("Dropped blocker", nil)
+	added := create("Added blocker", nil)
+	dependent := create("Dependent", []string{kept.Key, dropped.Key})
+
+	if got, want := named("issue.created", dependent.Key), sorted(kept.Key, dropped.Key); !slices.Equal(got, want) {
+		t.Errorf("issue.created with blocked_by names %v, want its blockers %v", got, want)
+	}
+
+	patch := func(body map[string]any) issueEventFields {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+dependent.Key, body, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("patch %v: status=%d body=%s", body, response.Code, response.Body.String())
+		}
+		return newestEventPayload[issueEventFields](t, database, "issue.updated", dependent.Key)
+	}
+	if updated := patch(map[string]any{"blocked_by": []string{kept.Key, added.Key}}); !slices.Equal(updated.Changed, []string{"blocked_by"}) {
+		t.Fatalf("a blocked_by-only PATCH's changed = %v, want [blocked_by]", updated.Changed)
+	}
+	if got, want := named("issue.updated", dependent.Key), sorted(dropped.Key, added.Key); !slices.Equal(got, want) {
+		t.Errorf("a blocked_by-only PATCH names %v, want the removed and the added blocker %v", got, want)
+	}
+
+	// The retitle names every blocker it still holds, whose panels show the title; the blocker
+	// change names the one it adds back and the one it drops.
+	patch(map[string]any{"title": "Renamed dependent", "blocked_by": []string{kept.Key, dropped.Key}})
+	if got, want := named("issue.updated", dependent.Key), sorted(kept.Key, dropped.Key, added.Key); !slices.Equal(got, want) {
+		t.Errorf("a retitle that moves blockers names %v, want %v, each once", got, want)
+	}
+}
+
 // user_state.updated says which of pinned, last_read_seq and dismissed the write moved, so a tab
 // refreshes its pinned list for a pin and not for a read mark. It carries no issue key.
 func TestUserStateEventSaysWhichFieldsMoved(t *testing.T) {

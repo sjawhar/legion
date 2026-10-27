@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -324,6 +325,41 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 		}
 	}
 	return changes, nil
+}
+
+// MergeChanges is what two counted parts of one write moved, for an event that reports both: each
+// target once, first's before second's. A kind either part truncated stays truncated and names
+// none of its targets, and a kind whose merged targets pass CountedChangeLimit is truncated, as
+// CountedChanges would have left it.
+func MergeChanges(first, second model.ReferenceChanges) model.ReferenceChanges {
+	truncated := make(map[string]bool, len(countedKinds))
+	for _, kind := range slices.Concat(first.TruncatedKinds, second.TruncatedKinds) {
+		truncated[kind] = true
+	}
+	references := make([]model.ChangedReference, 0, len(first.Targets)+len(second.Targets))
+	seen := make(map[[2]string]struct{}, len(first.Targets)+len(second.Targets))
+	named := make(map[string]int, len(countedKinds))
+	for _, reference := range slices.Concat(first.Targets, second.Targets) {
+		key := [2]string{reference.Kind, reference.ID}
+		if _, duplicate := seen[key]; duplicate || truncated[reference.Kind] {
+			continue
+		}
+		seen[key] = struct{}{}
+		references = append(references, reference)
+		named[reference.Kind]++
+	}
+	merged := model.ReferenceChanges{}
+	for _, kind := range countedKinds {
+		if truncated[kind] || named[kind] > CountedChangeLimit {
+			merged.TruncatedKinds = append(merged.TruncatedKinds, kind)
+		}
+	}
+	for _, reference := range references {
+		if named[reference.Kind] <= CountedChangeLimit {
+			merged.Targets = append(merged.Targets, reference)
+		}
+	}
+	return merged
 }
 
 func resolveIssueTargets(ctx context.Context, q Queryer, keys []string) (map[string]struct{}, error) {
