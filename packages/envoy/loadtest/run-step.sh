@@ -30,15 +30,6 @@ stack=$here/stack.sh
 source "$here/common.sh"
 resolve_paths
 
-die() {
-  printf 'run-step.sh: %s\n' "$*" >&2
-  exit 1
-}
-usage() {
-  sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//' >&2
-  exit 2
-}
-
 [ $# -ge 1 ] || usage
 name=$1
 shift
@@ -77,7 +68,7 @@ $have_events || die "--events is required (0 sends no writes)"
 $have_sessions || die "--sessions is required"
 $have_requests || die "--requests is required (0 sends no requests)"
 
-lock_root "$ROOT" run-step.sh
+lock_root "$ROOT"
 
 out=$(realpath -m -- "$out")
 if [ -e "$out" ] && [ -n "$(ls -A -- "$out")" ]; then
@@ -91,7 +82,7 @@ if $LOCK_INHERITED && [ -n "${LOADTEST_SERIES_BUILD:-}" ]; then
   BUILD=$LOADTEST_SERIES_BUILD
 else
   unset LOADTEST_SERIES_BUILD
-  prepare_stack run-step.sh
+  prepare_stack
 fi
 read -r commit dirty <<<"$BUILD"
 

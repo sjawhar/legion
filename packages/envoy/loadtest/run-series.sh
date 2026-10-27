@@ -33,25 +33,17 @@ stack=$here/stack.sh
 source "$here/common.sh"
 resolve_paths
 
-die() {
-  printf 'run-series.sh: %s\n' "$*" >&2
-  exit 1
-}
-
 for arg in "$@"; do
   case $arg in
     --events | --sessions | --requests | --sse | --out) die "$arg is set by the series for each step; it cannot be passed through" ;;
-    -h | --help)
-      sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//' >&2
-      exit 2
-      ;;
+    -h | --help) usage ;;
   esac
 done
 
-lock_root "$ROOT" run-series.sh
+lock_root "$ROOT"
 
 # Setup and seed once, before the series directory exists, so a failed setup leaves no empty series.
-prepare_stack run-series.sh
+prepare_stack
 export LOADTEST_SERIES_BUILD=$BUILD
 
 series=$ROOT/runs/series-$(date -u +%Y%m%dT%H%M%SZ)

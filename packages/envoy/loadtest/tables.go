@@ -258,6 +258,7 @@ func resourcesTable(md *markdown, steps []stepData) {
 		"box busy", "box busy before", "Dispatch RSS max MiB", "heap in use MiB p50 / max", "goroutines p50 / max",
 		"goroutines waiting for a pool connection p50 / max", "Postgres connections max", "connections waiting on a lock p50",
 		"Dispatch CPU-s per operation")
+	marked := false
 	for _, s := range steps {
 		busyBefore := "-"
 		if s.meta != nil && s.meta.BoxBusyBefore != nil {
@@ -270,6 +271,7 @@ func resourcesTable(md *markdown, steps []stepData) {
 			md.row(s.label(), "-", "-", "-", "-", "-", "-", "-", busyBefore, "-", "-", "-", "-", "-", "-", "-")
 			continue
 		}
+		marked = marked || r.failedReads() > 0
 		cores := func(name string, d int) string {
 			v, ok := r.CPUCoresMean[name]
 			if !ok {
@@ -299,16 +301,19 @@ func resourcesTable(md *markdown, steps []stepData) {
 		if r.PGConnsTotal.N > 0 {
 			pgMax = num(r.PGConnsTotal.Max, 0)
 		}
-		md.row(s.label(), dispatch, cores("postgres", 2), cores("listener", 3), cores("nats", 3), cores("loadgen", 2), cores("proxy", 2),
+		md.row(s.probeLabel(r.failedReads()), dispatch, cores("postgres", 2), cores("listener", 3), cores("nats", 3), cores("loadgen", 2), cores("proxy", 2),
 			num(100*r.SysBusyFrac, 0)+"%", busyBefore, rss, pair(r.HeapInuseMiB, p50, smax, 0), pair(r.Goroutines, p50, smax, 0),
 			pair(r.PoolAcquireGoroutines, p50, smax, 0), pgMax, lockWait, perOp)
 	}
+	failedReadsNote(md, marked, "the 5 s sampler's reads of pg_stat_activity and of Dispatch's goroutine and heap profiles",
+		"`resources.pg_read_errors` and `resources.pprof_read_errors`")
 }
 
-// failedReadsNote defines the "(<n> failed reads)" mark under a probe's table, when a row has it.
-func failedReadsNote(md *markdown, marked bool, key string) {
+// failedReadsNote defines the "(<n> failed reads)" mark under a table, when a row has it: what
+// failed, and the summary.json keys that count the failures.
+func failedReadsNote(md *markdown, marked bool, what, keys string) {
 	if marked {
-		md.line("\n(<n> failed reads): the probe's read of pg_locks failed n times, a failed connect included (summary.json `%s.errors`), so its samples miss those reads; a row with no sample reads `-`, not 0.", key)
+		md.line("\n(<n> failed reads): %s failed n times, a failed connect included (summary.json %s); those reads enter no statistic, and a cell with no successful read shows `-`, not 0.", what, keys)
 	}
 }
 
@@ -342,7 +347,7 @@ func commitOrderLockTable(md *markdown, steps []stepData) {
 		}
 		md.row(s.probeLabel(l.Errors), num(100*l.HeldFraction, 0)+"%", pair(l.Waiters, p50, smax, 0), holds, num(float64(l.HoldsObserved), 0), strings.Join(doing, "; "))
 	}
-	failedReadsNote(md, marked, "commit_order_lock")
+	failedReadsNote(md, marked, "the probe's read of pg_locks", "`commit_order_lock.errors`")
 }
 
 func sseTable(md *markdown, steps []stepData) {
@@ -391,7 +396,7 @@ func ungrantedTable(md *markdown, steps []stepData) {
 		}
 		md.row(s.probeLabel(u.Errors), num(100*u.ShareWithAny, 0)+"%", lockText, pairText)
 	}
-	failedReadsNote(md, marked, "ungranted_locks")
+	failedReadsNote(md, marked, "the sampler's read of pg_locks", "`ungranted_locks.errors`")
 }
 
 func xidTable(md *markdown, steps []stepData) {

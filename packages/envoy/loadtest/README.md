@@ -29,7 +29,7 @@ same step before and after its change, and compares the two rows.
 | `sample.go` | The 5 s sampler: CPU, RSS, Postgres connections, goroutines, pool waiters, heap, NATS `/varz`. The transaction-id probe. |
 | `lockprobe.go` | The 20 ms sampler of the commit-order lock |
 | `locksampler.go` | The 1 s sampler of every ungranted lock in `pg_locks` |
-| `pgpoll.go` | The one poll loop of the Postgres probes, and its error policy: failed reads are counted, and the first three are logged |
+| `pgpoll.go` | The poll loop of the lock probes (`pollPG`), and the error policy of the probes' reads, which the 5 s sampler shares: failed reads are counted, the first three are logged, and so is their total past three |
 | `sse.go` | The parser of the dashboard SSE frames, and the SSE frame latencies |
 | `proxy.go` | The TCP latency proxy toward Postgres |
 | `tables.go` | `TABLES.md` from one or more `summary.json` files, the pprof tops and the goroutine summary |
@@ -43,7 +43,7 @@ same step before and after its change, and compares the two rows.
 | `common.sh` | What the three scripts share, sourced by each: the `LOADTEST_ROOT` and `LOADTEST_SRC` paths, the run lock (One run at a time, below), and the setup, start, seed and migration check before a step |
 | `*_test.go` | Unit tests. They need no Postgres and no NATS: `cd packages/envoy && go test ./loadtest/` |
 | `run-step.test.sh` | The test of the run lock. It fakes `go` and `uv` and needs no stack: `cd packages/envoy && bash loadtest/run-step.test.sh` |
-| `common.test.sh` | The test of `lock_root`: a series step keeps the lock after its parent dies, a refusal names the live holder, and a token without the holder's descriptor is refused. It needs no stack: `cd packages/envoy && bash loadtest/common.test.sh` |
+| `common.test.sh` | The test of `lock_root`: a series step keeps the lock after its parent dies, a refusal names the live holder, a token without the holder's descriptor is refused, a lock held by a process that this PID namespace cannot see is refused as held (never as free), and a caller takes the lock once its holder has ended. It needs no stack: `cd packages/envoy && bash loadtest/common.test.sh` |
 
 ## Requirements
 
@@ -178,11 +178,21 @@ failures.
 `run-step.sh` and `run-series.sh` take an exclusive `flock` on `$LOADTEST_ROOT/.run.lock`, on file
 descriptor 9, before they touch the stack. The lock lasts until every process that holds that
 descriptor has exited: the holder and the children that inherit it. Once locked, the holder empties
-the lock file and writes its pid, command, start time and a random token into it. Another run on
-the root is refused with status 1, and the refusal names the root and the live holder: the pid in
-the lock file, or, when that run has exited and its children still hold the lock, those
-processes. So are `stack.sh setup`, `start`, `seed`, `reset` and `stop`; `stack.sh status`,
-`build-info` and `loadgen` take no lock.
+the lock file and writes its pid, its PID namespace (`/proc/self/ns/pid`), command, start time and
+a random token into it. Another run on the root tries the lock for up to 3 s, and takes it when the
+holder ends in that time. Otherwise it is refused with status 1, and the refusal names the root and
+the holder that it can find:
+
+- the pid in the lock file, when that pid runs in the refused caller's PID namespace. The pid is
+  trusted only when the lock file names that namespace;
+- else, when that run has exited and its children still hold the lock, those processes;
+- else the lock file's pid, start time and command as that run's own. Then the holder is not
+  visible in this PID namespace: a run in another PID namespace, such as another Legion role in
+  this pod on a shared `LOADTEST_ROOT`. The refusal says not to remove `.run.lock`: that run still
+  holds the lock, and a run that locked a new file would reset the stack under it.
+
+So are `stack.sh setup`, `start`, `seed`, `reset` and `stop`; `stack.sh status`, `build-info` and
+`loadgen` take no lock.
 
 The holder's own children pass: the holder exports the token as `LOADTEST_LOCK_TOKEN`, and a caller
 whose token equals the lock file's and whose descriptor 9 is the holder's locked one keeps that
@@ -376,8 +386,7 @@ starts, then the write's counter in the run (1, 2, ...). `summary.json` (`config
 `meta.json` (`marker_nonce`) and the first line of `run.log` record the nonce. The run counts only
 the commit rows and SSE frames whose marker carries its own nonce, so a run on a database that
 earlier runs wrote to without a reset (`stack.sh loadgen run` resets nothing) still counts only its
-own writes. A seed whose trigger predates the nonce extracts the whole marker too: the trigger's
-pattern, `lgm[0-9]+x`, is unchanged.
+own writes.
 
 | Kind | Request | Primary event type | Marker field in the event |
 | --- | --- | --- | --- |
@@ -514,9 +523,9 @@ Every percentile in the harness is the lower nearest rank: the value at index
 | --- | --- |
 | `summary.json` | The step's results. Every table cell comes from it (The tables, below). `config.marker_nonce` is the run's marker nonce (Event kinds, above). `stack_exits` is there only when a stack process exited during the step: each entry's `name`, `pid` and `first_seen_gone`. Such a step failed. |
 | `TABLES.md` | The tables of this step. `loadgen tables` writes it. |
-| `meta.json` | The step name and arguments, `start`, `window_start`, `window_end`, `end`, `nproc`, CPU model, kernel, `box_busy_before` and `box_busy_before_window_s` (5), `GOMAXPROCS` of Dispatch (`unset` by default), the Postgres version, the build commit and `build_dirty`, the seed meta, the `stack.json` path, `pg_direct` (always `false` under `-allow-foreign`, which takes nothing about the target from `stack.json`), `allow_foreign`, the pids and `marker_nonce`. `box_busy_before` is the share of the box's CPU time, all CPUs, that was not idle or I/O wait over 5 s just before the step, from two `/proc/stat` reads: `run-step.sh` reads it with `loadgen box-busy` before its reset and passes it as `-box-busy-before`; a `loadgen run` without that flag reads it itself (Requirements, above). `null` when `/proc/stat` gave no ticks. |
-| `run.log` | `loadgen run`'s log: the configuration with the marker nonce, the guard, a warning when `box_busy_before` is above 10%, the sampler's pids, the NATS subscriptions, the registrations, the window, failed writes, the first three failed reads of each Postgres probe (and their total, past three), the result line, and the failure line when a stack process exited. |
-| `samples.json` | The 5 s samples: CPU ticks and RSS per process, `/proc/stat` ticks, Postgres connections by state, goroutines, pool waiters, heap (every 15 s), NATS `/varz`. |
+| `meta.json` | Mode 600 (owner only). The step name and arguments (`args`, with the values of `-token` and `-listener-token`, in every spelling that `loadgen run` accepts, replaced by `<redacted>`: no file of the step holds a token), `start`, `window_start`, `window_end`, `end`, `nproc`, CPU model, kernel, `box_busy_before` and `box_busy_before_window_s` (5), `GOMAXPROCS` of Dispatch (`unset` by default), the Postgres version, the build commit and `build_dirty`, the seed meta, the `stack.json` path, `pg_direct` (always `false` under `-allow-foreign`, which takes nothing about the target from `stack.json`), `allow_foreign`, the pids and `marker_nonce`. `box_busy_before` is the share of the box's CPU time, all CPUs, that was not idle or I/O wait over 5 s just before the step, from two `/proc/stat` reads: `run-step.sh` reads it with `loadgen box-busy` before its reset and passes it as `-box-busy-before`; a `loadgen run` without that flag reads it itself (Requirements, above). `null` when `/proc/stat` gave no ticks. |
+| `run.log` | `loadgen run`'s log: the configuration with the marker nonce, the guard, a warning when `box_busy_before` is above 10%, the sampler's pids, the NATS subscriptions, the registrations, the window, failed writes, the first three failed reads of each Postgres probe and of the 5 s sampler's Postgres and pprof reads (and each one's total, past three), the result line, and the failure line when a stack process exited. |
+| `samples.json` | The 5 s samples: CPU ticks and RSS per process, `/proc/stat` ticks, Postgres connections by state, goroutines, pool waiters, heap (every 15 s), NATS `/varz`. `failed_reads` names a sample's reads that failed (`postgres`, `goroutines`, `heap`); their values in that sample are 0 and enter no statistic. |
 | `cpu.pprof` | Dispatch's CPU profile over the whole window. |
 | `heap.pprof` | Dispatch's heap profile at the end of the window. |
 | `heap.txt` | The same heap profile as text (`/debug/pprof/heap?debug=1`), with the runtime's memory statistics. |
@@ -603,7 +612,7 @@ divided by 100 ticks per second and by the seconds between the two samples.
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
-| `step` | name | The step name. | `config.step` |
+| `step` | name | The step name, with the mark `(<n> failed reads)` when n of the sampler's Postgres and pprof reads in the window failed (below). | `config.step`, `resources.pg_read_errors`, `resources.pprof_read_errors` |
 | `Dispatch cores mean / peak 5 s` | cores | Dispatch's mean cores in the window, then its highest cores in one 5 s sample interval. | `resources.cpu_cores_mean.dispatch`, `resources.cpu_cores_peak_5s.dispatch` |
 | `Postgres cores` | cores | Mean cores of the stack's Postgres: the postmaster, its live children and the postmaster's time for children that exited. | `resources.cpu_cores_mean.postgres` |
 | `listener cores` | cores | Mean cores of the listener. | `resources.cpu_cores_mean.listener` |
@@ -623,6 +632,16 @@ divided by 100 ticks per second and by the seconds between the two samples.
 `resources` also holds every process's RSS, Postgres connections by state, and NATS messages in and
 out per second and slow consumers. Under `-allow-foreign`, `loadgen` has no stack pids, so only
 the `loadgen` cores have a value, and no stack process is checked for an exit.
+
+A sample's read of `pg_stat_activity` fails when the query fails or the sampler cannot connect;
+its read of Dispatch's goroutine or heap profile fails when the GET fails, answers other than 200,
+or holds no goroutine total (no `HeapInuse` for the heap). `resources.pg_read_errors` counts the
+in-window samples whose Postgres read failed, and `resources.pprof_read_errors` the in-window
+goroutine and heap reads that failed; the row carries the mark `(<n> failed reads)` with their sum,
+and `run.log` shows the first three of each and their total. A failed read enters no statistic, so
+the Postgres, goroutine, pool-waiter and heap columns are over the reads that worked, and a column
+with no read that worked shows `-`, not 0. `TABLES.md` repeats this under the table when a row has
+the mark.
 
 ### Commit-order lock
 

@@ -67,10 +67,6 @@ declare -A PORT_DEFAULT=(
 )
 
 note() { printf 'stack.sh: %s\n' "$*" >&2; }
-die() {
-  printf 'stack.sh: %s\n' "$*" >&2
-  exit 1
-}
 
 # base_env is every stack process's environment: a PATH and a HOME and XDG directories of the
 # stack's own, nothing inherited.
@@ -620,13 +616,8 @@ cmd_status() {
   fi
 }
 
-usage() {
-  sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//' >&2
-  exit 2
-}
-
 case ${1:-} in
-  setup | start | seed | reset | stop) lock_root "$ROOT" stack.sh ;;
+  setup | start | seed | reset | stop) lock_root "$ROOT" ;;
 esac
 case ${1:-} in
   setup) cmd_setup ;;

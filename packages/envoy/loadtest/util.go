@@ -55,16 +55,24 @@ func fetchTo(url, path string, timeout time.Duration, lg *log.Logger) {
 	}
 }
 
-// writeJSONFile writes v to path as indented JSON; a failure is logged, not returned.
-func writeJSONFile(path string, v any, lg *log.Logger) {
+// writeJSONFile writes v to path as indented JSON with the given mode, which it also sets on a
+// file that already exists; a failure is logged, not returned.
+func writeJSONFile(path string, v any, mode os.FileMode, lg *log.Logger) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err == nil {
-		err = os.WriteFile(path, append(b, '\n'), 0o644)
+		err = os.WriteFile(path, append(b, '\n'), mode)
+	}
+	if err == nil {
+		err = os.Chmod(path, mode)
 	}
 	if err != nil {
 		lg.Printf("write %s: %v", path, err)
 	}
 }
+
+// metaMode is meta.json's mode: owner only, since it records the step's command line and the
+// stack it ran against. Its token values are redacted all the same (redactArgs).
+const metaMode os.FileMode = 0o600
 
 // collector gathers the items that many goroutines record during a step.
 type collector[T any] struct {
