@@ -24,19 +24,16 @@ import (
 )
 
 // publishDeps is the harness's stores as main hands them to the /v1 routes, with the delivery
-// handlers' own dedupe cache, forward, logger and delivered counter, and a confirmation record of
-// the route's own, as main wires the publish route.
+// handlers' own config and a confirmation record of the route's own, as main wires the publish
+// route.
 func (h listenerDeliveryHarness) publishDeps(t *testing.T) *listenerDeps {
 	t.Helper()
 	return &listenerDeps{
-		client:            h.client,
-		registry:          h.registry,
-		sessions:          h.sessions,
-		dedupeCache:       h.config.dedupeCache,
-		confirmed:         newConfirmedRecord(t),
-		forward:           h.config.forwardRole,
-		logger:            h.config.logger,
-		messagesDelivered: h.config.messagesDelivered,
+		client:    h.client,
+		registry:  h.registry,
+		sessions:  h.sessions,
+		delivery:  &h.config,
+		confirmed: newConfirmedRecord(t),
 	}
 }
 
@@ -50,8 +47,8 @@ func newConfirmedRecord(t *testing.T) *dedupe.Cache {
 }
 
 // withPublishRoute gives d what the publish route needs beyond its stores, as main wires it: a
-// dedupe cache, a confirmation record, client.RequestCoreTo as the forward, a logger and a
-// delivered counter.
+// delivery config over d's stores with a dedupe cache, client.RequestCoreTo as the forward, a
+// logger and a delivered counter, and a confirmation record.
 func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 	t.Helper()
 	cache := dedupe.New(10 * time.Minute)
@@ -62,11 +59,16 @@ func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 			t.Logf("publish route log:\n%s", logs.String())
 		}
 	})
-	d.dedupeCache = cache
+	d.delivery = &listenerDeliveryHandlerConfig{
+		client:            d.client,
+		forwardRole:       d.client.RequestCoreTo,
+		registry:          d.registry,
+		sessions:          d.sessions,
+		dedupeCache:       cache,
+		logger:            logging.NewWithWriter("test", logs),
+		messagesDelivered: metrics.New().NewCounter("test_messages_delivered", "test"),
+	}
 	d.confirmed = newConfirmedRecord(t)
-	d.forward = d.client.RequestCoreTo
-	d.logger = logging.NewWithWriter("test", logs)
-	d.messagesDelivered = metrics.New().NewCounter("test_messages_delivered", "test")
 	return d
 }
 

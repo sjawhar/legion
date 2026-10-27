@@ -46,17 +46,16 @@ const (
 // role's holder, or tried to, and the holder's session did not confirm it within the listener's
 // delivery window (publishDeliveryWindow, packages/envoy/cmd/listener/confirmed.go). Reason is
 // ReasonReceiptTimeout or ReasonDeliveryFailed; Holder is the session the listener last resolved,
-// "" when it resolved none; EventID and DedupeKey name the envelope it forwarded. Only a listener
+// "" when it resolved none; EventID names the envelope it forwarded. Only a listener
 // that confirms a role message before it answers gives it. An earlier listener answers 200 once
 // the NATS server took the message and reports a forward that then fails as a role-lane exception
 // (notifications.envoy.exceptions.notifications.role.*), so a caller that acts on this answer
 // still has to hear those reports while such a listener runs. A 504 without one of the two
 // reasons is a plain refusal, never ErrNotDelivered.
 type ErrNotDelivered struct {
-	Reason    string
-	Holder    string
-	EventID   string
-	DedupeKey string
+	Reason  string
+	Holder  string
+	EventID string
 }
 
 func (e ErrNotDelivered) Error() string {
@@ -160,10 +159,9 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 		body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
 		refusal := fmt.Errorf("publish notice to %s: listener returned %s: %s", topic, response.Status, strings.TrimSpace(string(body)))
 		var answer struct {
-			Reason    string `json:"reason"`
-			Holder    string `json:"holder"`
-			EventID   string `json:"event_id"`
-			DedupeKey string `json:"dedupe_key"`
+			Reason  string `json:"reason"`
+			Holder  string `json:"holder"`
+			EventID string `json:"event_id"`
 		}
 		if json.Unmarshal(body, &answer) != nil {
 			return refusal
@@ -172,7 +170,7 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 		case response.StatusCode == http.StatusNotFound && slices.Contains(roleHolderReasons, answer.Reason):
 			return fmt.Errorf("%w: %w", refusal, ErrNoHolder)
 		case response.StatusCode == http.StatusGatewayTimeout && (answer.Reason == ReasonReceiptTimeout || answer.Reason == ReasonDeliveryFailed):
-			return fmt.Errorf("%w: %w", refusal, ErrNotDelivered{Reason: answer.Reason, Holder: answer.Holder, EventID: answer.EventID, DedupeKey: answer.DedupeKey})
+			return fmt.Errorf("%w: %w", refusal, ErrNotDelivered{Reason: answer.Reason, Holder: answer.Holder, EventID: answer.EventID})
 		case response.StatusCode == http.StatusForbidden && answer.Reason == "capability":
 			return fmt.Errorf("%w: %w", refusal, ErrRefusedByHolder{Holder: answer.Holder})
 		}

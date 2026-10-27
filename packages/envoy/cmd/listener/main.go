@@ -48,23 +48,18 @@ type listenerDeps struct {
 	consumer   string
 	streamName string
 	streamInfo streamInfoLookup
-	// dedupeCache is the delivery handlers' own cache (listenerDeliveryHandlerConfig.dedupeCache),
-	// the same instance: the publish route records there each session it confirms, so the handlers
-	// do not push that key to it again. The route never reads it, since the handlers also record a
-	// self-subscribed session whose push they skipped without hearing from it.
-	dedupeCache *dedupe.Cache
+	// delivery is the config main hands the delivery handlers (the role lane, the live lane and the
+	// durable), wired once, so the publish route forwards through its forwardRole, records each
+	// session it confirms in its dedupeCache (so the handlers do not push that key to it again), and
+	// writes its one line and delivery_status count through its logger and messagesDelivered,
+	// reading as the role lane's do. The route never reads that dedupeCache, since the handlers also
+	// record a self-subscribed session whose push they skipped without hearing from it.
+	delivery *listenerDeliveryHandlerConfig
 	// confirmed is the publish route's own record of each (dedupe key, session) whose receipt arrived
 	// through the route, which only the route writes. A send skips a holder or recipient recorded
 	// there, so envoy-client's retry of a send does not forward again to one the first attempt
 	// confirmed, and no one is counted as confirming a message without having sent its receipt.
 	confirmed *dedupe.Cache
-	// forward sends an envelope to an agent subject and waits for its recipient's empty receipt, as
-	// the role lane's forwardRole does; main wires client.RequestCoreTo, and a test substitutes it.
-	forward func(subject string, item contracts.Envelope, timeout time.Duration) error
-	// logger and messagesDelivered are the delivery handlers' own, so the publish route's one line
-	// and its delivery_status count read as the role lane's do.
-	logger            *logging.Logger
-	messagesDelivered *metrics.Counter
 }
 
 // kvCache is what the listener asks of each KV-backed cache it keeps.
@@ -834,19 +829,16 @@ func main() {
 	defer stop()
 
 	ready := &listenerDeps{
-		client:            client,
-		live:              live,
-		registry:          registry,
-		sessions:          sessions,
-		ciStore:           ciStore,
-		caches:            caches,
-		consumer:          consumer,
-		streamName:        bus.Stream,
-		dedupeCache:       dedupeCache,
-		confirmed:         dedupe.New(10 * time.Minute),
-		forward:           client.RequestCoreTo,
-		logger:            logger,
-		messagesDelivered: messagesDelivered,
+		client:     client,
+		live:       live,
+		registry:   registry,
+		sessions:   sessions,
+		ciStore:    ciStore,
+		caches:     caches,
+		consumer:   consumer,
+		streamName: bus.Stream,
+		delivery:   &deliveryConfig,
+		confirmed:  dedupe.New(10 * time.Minute),
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 

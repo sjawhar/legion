@@ -704,7 +704,7 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 	}
 }
 
-func TestResolveLiveRoleHolderReresolvesSupersededClaim(t *testing.T) {
+func TestResolveRoleHolderReresolvesSupersededClaim(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	if _, err := registry.SetRole("ses_lapsed", "test-machine", "reviewer", false); err != nil {
 		t.Fatalf("set lapsed holder: %v", err)
@@ -724,7 +724,7 @@ func TestResolveLiveRoleHolderReresolvesSupersededClaim(t *testing.T) {
 		},
 	}
 
-	result, err := resolveLiveRoleHolder(resolver, sessions, "reviewer")
+	result, err := resolveRoleHolder(resolver, sessions, "reviewer", registered)
 	if err != nil {
 		t.Fatalf("resolve superseded role holder: %v", err)
 	}
@@ -751,7 +751,7 @@ func TestRoleHolderLapsedResponseDoesNotClaimConcurrentRemoval(t *testing.T) {
 		},
 	}
 
-	result, err := resolveLiveRoleHolder(resolver, sessions, role)
+	result, err := resolveRoleHolder(resolver, sessions, role, registered)
 	if err != nil {
 		t.Fatalf("resolve concurrently removed role holder: %v", err)
 	}

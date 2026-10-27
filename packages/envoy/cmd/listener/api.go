@@ -49,6 +49,9 @@ const (
 	roleHolderLapsed    roleHolderState = "holder_lapsed"
 )
 
+// roleHolderResult is one resolution of a role's holder (resolveRoleHolder). holder names the
+// claim's holder whenever one was read; entry is set only for roleHolderLive; lastSeen,
+// lastSeenAvailable and claimRelease only for roleHolderLapsed.
 type roleHolderResult struct {
 	state             roleHolderState
 	holder            string
@@ -57,6 +60,45 @@ type roleHolderResult struct {
 	lastSeenAvailable bool
 	claimRelease      store.ExpiredRoleClaimRelease
 }
+
+// roleHolderStep names the read a role-holder resolution failed at, so a caller that reports the
+// failure in its own words (the role lane's log lines) can tell which read it was.
+type roleHolderStep uint8
+
+const (
+	// roleHolderClaimRead: the role claim could not be read.
+	roleHolderClaimRead roleHolderStep = iota
+	// roleHolderSessionRead: the holder's session entry could not be read.
+	roleHolderSessionRead
+	// roleHolderRelease: the lapsed holder's claim could not be released.
+	roleHolderRelease
+	// roleHolderChurn: every release found the claim superseded by a fresher one, past
+	// roleHolderResolutionAttempts.
+	roleHolderChurn
+)
+
+// roleHolderFailure is the error of a resolution that did not resolve. Its message is what an
+// HTTP lookup answers in its 500, so it names the step; cause is the read's own error, which the
+// role lane logs under a line of its own per step, and is nil for roleHolderChurn. It unwraps to
+// cause, so writeNATSError still maps a refused or oversized read as it maps the read's error.
+type roleHolderFailure struct {
+	step  roleHolderStep
+	cause error
+}
+
+func (f *roleHolderFailure) Error() string {
+	switch f.step {
+	case roleHolderSessionRead:
+		return "read role holder session: " + f.cause.Error()
+	case roleHolderRelease:
+		return "drop expired role claim: " + f.cause.Error()
+	case roleHolderChurn:
+		return "role holder changed while resolving"
+	}
+	return f.cause.Error()
+}
+
+func (f *roleHolderFailure) Unwrap() error { return f.cause }
 
 type roleHolderError struct {
 	Error         string          `json:"error"`
@@ -379,16 +421,14 @@ func senderStamp(registry *store.Registry, sessions *session.SessionRegistry, so
 
 const roleHolderResolutionAttempts = 2
 
-// releaseExpiredRoleClaim is the single point in the listener that
-// interprets store.ExpiredRoleClaimRelease's ExpiredRoleClaimSuperseded
-// outcome. Both resolveLiveRoleHolder (HTTP role lookups) and
-// resolveLaneRoleHolder (role delivery by the role lane and the publish route,
-// delivery.go) call it instead of registry.ReleaseExpiredRoleClaim directly,
-// so a claim that raced a fresh SetRole before the conditional delete landed
-// is reported as "must re-resolve" in exactly one place. A second, drifted
-// branch on ExpiredRoleClaimSuperseded is exactly how a live replacement
-// holder ends up reported as this call's stale verdict — the defect this
-// helper exists to make structurally impossible.
+// releaseExpiredRoleClaim is the single point in the listener that interprets
+// store.ExpiredRoleClaimRelease's ExpiredRoleClaimSuperseded outcome. resolveRoleHolder, the one
+// resolution behind HTTP role lookups and role delivery, calls it instead of
+// registry.ReleaseExpiredRoleClaim directly, so a claim that raced a fresh SetRole before the
+// conditional delete landed is reported as "must re-resolve" in exactly one place. A second,
+// drifted branch on ExpiredRoleClaimSuperseded is exactly how a live replacement holder ends up
+// reported as this call's stale verdict — the defect this helper exists to make structurally
+// impossible.
 func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string, sessionTTL time.Duration) (release store.ExpiredRoleClaimRelease, superseded bool, err error) {
 	release, err = registry.ReleaseExpiredRoleClaim(role, sessionID, sessionTTL)
 	if err != nil {
@@ -423,58 +463,117 @@ func roleHolderSession(sessions *session.SessionRegistry, sessionID string, live
 	return entry, err
 }
 
-// registered is the liveness a lookup, a soft claim and the reaper ask of a role holder: any entry.
+// registered is the liveness a lookup, a soft claim, the reaper and the publish route's first
+// resolution ask of a role holder: any entry.
 func registered(session.SessionEntry) bool { return true }
 
 // roleHolderReadTimeout bounds roleHolderSession's bucket read, well inside the listener's 10 s HTTP
 // write timeout (main.go) and the 10 s JetStream MaxWait the read would otherwise wait out.
 const roleHolderReadTimeout = 2 * time.Second
 
-func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
+// resolveRoleHolder resolves role's current holder: the claim's holder, live when live accepts its
+// session entry (roleHolderSession). A holder whose entry is gone or that live refuses has lapsed:
+// its claim is released through releaseExpiredRoleClaim, and when the release finds the claim
+// already superseded by a fresh one the role is resolved again, bounded to
+// roleHolderResolutionAttempts, so a claim raced by a live replacement resolves to that
+// replacement instead of reporting a session the fresh claim has already superseded.
+//
+// live is the one rule its callers differ on. An HTTP lookup (GET /v1/roles/<role>) and the
+// publish route's first resolution pass registered, any entry. Role delivery — the role lane
+// (resolveCoreRoleHolder) and the publish route's attempts — passes laneHolderFresh, which
+// distrusts a holder that has not heartbeated within session.ClaimStaleAfter even while its
+// registry cache entry has not expired, since a dropped delivery is costlier than an HTTP 404.
+//
+// An error is a *roleHolderFailure naming the read that failed; with it the result still names
+// the claim's holder when one was read, so the role lane's log line and the publish route's 504
+// can name it.
+func resolveRoleHolder(registry roleClaimResolver, sessions *session.SessionRegistry, role string, live func(session.SessionEntry) bool) (roleHolderResult, error) {
 	for range roleHolderResolutionAttempts {
 		claim, err := registry.RoleClaim(role)
 		if err != nil {
-			return roleHolderResult{}, err
+			return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: err}
 		}
-		if claim.HolderSessionID == "" {
+		holder := claim.HolderSessionID
+		if holder == "" {
 			return roleHolderResult{state: roleHolderUnclaimed}, nil
 		}
-		entry, err := roleHolderSession(sessions, claim.HolderSessionID, registered)
-		if errors.Is(err, nats.ErrKeyNotFound) {
-			lastSeen := sessions.LastSeen(claim.HolderSessionID)
-			release, superseded, err := releaseExpiredRoleClaim(registry, role, claim.HolderSessionID, sessions.TTL())
-			if err != nil {
-				return roleHolderResult{}, fmt.Errorf("drop expired role claim: %w", err)
-			}
-			if superseded {
-				continue
-			}
-			return roleHolderResult{
-				state:             roleHolderLapsed,
-				holder:            claim.HolderSessionID,
-				lastSeen:          lastSeen,
-				lastSeenAvailable: lastSeen != 0,
-				claimRelease:      release,
-			}, nil
+		entry, err := roleHolderSession(sessions, holder, live)
+		if err == nil {
+			return roleHolderResult{state: roleHolderLive, holder: holder, entry: entry}, nil
 		}
+		if !errors.Is(err, nats.ErrKeyNotFound) {
+			return roleHolderResult{holder: holder}, &roleHolderFailure{step: roleHolderSessionRead, cause: err}
+		}
+		lastSeen := sessions.LastSeen(holder)
+		release, superseded, err := releaseExpiredRoleClaim(registry, role, holder, sessions.TTL())
 		if err != nil {
-			return roleHolderResult{}, fmt.Errorf("read role holder session: %w", err)
+			return roleHolderResult{holder: holder}, &roleHolderFailure{step: roleHolderRelease, cause: err}
+		}
+		if superseded {
+			continue
 		}
 		return roleHolderResult{
-			state:  roleHolderLive,
-			holder: claim.HolderSessionID,
-			entry:  entry,
+			state:             roleHolderLapsed,
+			holder:            holder,
+			lastSeen:          lastSeen,
+			lastSeenAvailable: lastSeen != 0,
+			claimRelease:      release,
 		}, nil
 	}
-	return roleHolderResult{}, fmt.Errorf("role holder changed while resolving")
+	return roleHolderResult{}, &roleHolderFailure{step: roleHolderChurn}
 }
 
-// deliveryModeRefusal is the refusal of a message to sessionID, whose session entry is entry, by
-// its payload's delivery mode, read as the receiving client reads it (frameDeliveryMode): the mode
-// cannot be read unambiguously, or entry does not advertise it (hasCapability). It is "" when entry
-// can take the payload. sendHandler and a role send through the publish route
-// (roleSend.settledBeforeForward) both answer a refusal 403 with this text.
-func deliveryModeRefusal(sessionID string, entry session.SessionEntry, payload string) string {
+// forwardVerdictKind is how beforeForward judged a message to a holder.
+type forwardVerdictKind uint8
+
+const (
+	// forwardAllowed: nothing stops the forward.
+	forwardAllowed forwardVerdictKind = iota
+	// forwardEcho: the message's source session is the holder itself.
+	forwardEcho
+	// forwardRepeat: the holder already took a message under this dedupe key.
+	forwardRepeat
+	// forwardModeUnreadable: the payload's delivery mode cannot be read unambiguously.
+	forwardModeUnreadable
+	// forwardModeUnadvertised: the holder does not advertise the payload's delivery mode.
+	forwardModeUnadvertised
+)
+
+// forwardVerdict is beforeForward's judgement. mode is the payload's delivery mode, set for
+// forwardModeUnadvertised; refusal is the refusal's text, set for both mode verdicts, and is what
+// sendHandler and the publish route answer in their 403.
+type forwardVerdict struct {
+	kind    forwardVerdictKind
+	mode    string
+	refusal string
+}
+
+// beforeForward applies, to a message about to be forwarded to holder, whose session entry is
+// entry, the rules a role delivery applies before it forwards, in this order: the source session
+// holds the role (an echo, never forwarded back), seen reports the holder already took this dedupe
+// key (a repeat), and the holder cannot take the payload's delivery mode (deliveryModeVerdict). The
+// role lane (roleTopicDelivery) and the publish route (roleSend.settledBeforeForward) both judge by
+// it, each with the record it trusts as seen, so both refuse and skip the same messages. Guarding
+// after the dedupe check keeps a delivered repeat from being judged by the holder's current
+// capabilities, which can have changed since the original forward and would misreport a delivered
+// message as failed — a false signal the Legion daemon treats as cause to probe and potentially
+// resume the worker.
+func beforeForward(item contracts.Envelope, holder string, entry session.SessionEntry, seen func(key, sessionID string) bool) forwardVerdict {
+	if item.SourceSession != "" && item.SourceSession == holder {
+		return forwardVerdict{kind: forwardEcho}
+	}
+	if seen(item.DedupeKey, holder) {
+		return forwardVerdict{kind: forwardRepeat}
+	}
+	return deliveryModeVerdict(holder, entry, item.Payload)
+}
+
+// deliveryModeVerdict judges a message to sessionID, whose session entry is entry, by its
+// payload's delivery mode, read as the receiving client reads it (frameDeliveryMode): the mode
+// cannot be read unambiguously, or entry does not advertise it (hasCapability); otherwise the
+// message may be forwarded. sendHandler answers a refusal 403 with its text, as the publish route
+// does through beforeForward.
+func deliveryModeVerdict(sessionID string, entry session.SessionEntry, payload string) forwardVerdict {
 	var framed *string
 	if payload != "" {
 		framed = &payload
@@ -482,11 +581,18 @@ func deliveryModeRefusal(sessionID string, entry session.SessionEntry, payload s
 	mode, err := frameDeliveryMode(framed)
 	switch {
 	case err != nil:
-		return fmt.Sprintf("session %s (%s) sent a delivery mode that cannot be read unambiguously", sessionID, entry.Title)
+		return forwardVerdict{
+			kind:    forwardModeUnreadable,
+			refusal: fmt.Sprintf("session %s (%s) sent a delivery mode that cannot be read unambiguously", sessionID, entry.Title),
+		}
 	case mode != "" && !hasCapability(entry.Capabilities, mode):
-		return fmt.Sprintf("session %s (%s) does not advertise %s", sessionID, entry.Title, mode)
+		return forwardVerdict{
+			kind:    forwardModeUnadvertised,
+			mode:    mode,
+			refusal: fmt.Sprintf("session %s (%s) does not advertise %s", sessionID, entry.Title, mode),
+		}
 	}
-	return ""
+	return forwardVerdict{kind: forwardAllowed}
 }
 
 // sendHandler publishes a direct message only while the target session has a
@@ -535,8 +641,8 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
 			return
 		}
-		if refusal := deliveryModeRefusal(targetSession, target, item.Payload); refusal != "" {
-			writeJSONError(w, http.StatusForbidden, refusal)
+		if verdict := deliveryModeVerdict(targetSession, target, item.Payload); verdict.refusal != "" {
+			writeJSONError(w, http.StatusForbidden, verdict.refusal)
 			return
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
@@ -926,7 +1032,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "role is required", "role")
 			return
 		}
-		result, err := resolveLiveRoleHolder(d.registry, d.sessions, role)
+		result, err := resolveRoleHolder(d.registry, d.sessions, role, registered)
 		if err != nil {
 			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return

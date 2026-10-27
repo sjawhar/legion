@@ -128,10 +128,10 @@ func TestHTTPPublisherTellsTheConfirmedSendAnswersApart(t *testing.T) {
 	}{
 		{"the holder sent no receipt", http.StatusGatewayTimeout,
 			`{"error":"role legion-demo-architect: event evt-1 was not confirmed by its holder within 4s (receipt_timeout)","reason":"receipt_timeout","event_id":"evt-1","dedupe_key":"legion-outbox:9","holder":"ses_a","attempts":2}`,
-			&ErrNotDelivered{Reason: ReasonReceiptTimeout, Holder: "ses_a", EventID: "evt-1", DedupeKey: "legion-outbox:9"}, nil},
+			&ErrNotDelivered{Reason: ReasonReceiptTimeout, Holder: "ses_a", EventID: "evt-1"}, nil},
 		{"the forward never reached the server", http.StatusGatewayTimeout,
 			`{"error":"role legion-demo-architect: event evt-2 was not confirmed by its holder within 4s (delivery_failed)","reason":"delivery_failed","event_id":"evt-2","dedupe_key":"legion-outbox:9","holder":"","attempts":0}`,
-			&ErrNotDelivered{Reason: ReasonDeliveryFailed, EventID: "evt-2", DedupeKey: "legion-outbox:9"}, nil},
+			&ErrNotDelivered{Reason: ReasonDeliveryFailed, EventID: "evt-2"}, nil},
 		{"the holder does not advertise the delivery mode", http.StatusForbidden,
 			`{"error":"session ses_a (architect) does not advertise prompt","reason":"capability","holder":"ses_a"}`, nil, &ErrRefusedByHolder{Holder: "ses_a"}},
 		{"a gateway timeout that is not JSON", http.StatusGatewayTimeout, `upstream request timeout`, nil, nil},

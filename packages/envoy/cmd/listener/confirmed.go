@@ -135,19 +135,29 @@ func (o sendOutcome) deliveryStatus() string {
 // reads take no context (nats.go's KV read waits out the JetStream MaxWait, and roleHolderSession
 // gives its bucket read roleHolderReadTimeout), so a read a send's deadline cuts short is left to
 // finish on its own and its answer is dropped; what it changes meanwhile, such as a lapsed claim it
-// releases, is what the same read changes for any other caller.
-func readBefore[T any](ctx context.Context, read func() T) (T, error) {
-	var zero T
-	if err := ctx.Err(); err != nil {
-		return zero, err
+// releases, is what the same read changes for any other caller. ended is ctx's error when ctx ended
+// first; otherwise value and err are the read's own answer, so a caller tells a read that failed
+// from a send that ran out of time.
+func readBefore[T any](ctx context.Context, read func() (T, error)) (value T, err error, ended error) {
+	if ended := ctx.Err(); ended != nil {
+		return value, nil, ended
 	}
-	answered := make(chan T, 1)
-	go func() { answered <- read() }()
+	answered := make(chan struct {
+		value T
+		err   error
+	}, 1)
+	go func() {
+		value, err := read()
+		answered <- struct {
+			value T
+			err   error
+		}{value, err}
+	}()
 	select {
 	case got := <-answered:
-		return got, nil
+		return got.value, got.err, nil
 	case <-ctx.Done():
-		return zero, ctx.Err()
+		return value, nil, ctx.Err()
 	}
 }
 
@@ -188,7 +198,7 @@ func unconfirmedReason(lastForward error) sendOutcome {
 // delivery handlers' cache is told too, so they do not push the same key to it again.
 func (d *listenerDeps) confirm(dedupeKey, sessionID string) {
 	d.confirmed.Record(dedupeKey, sessionID)
-	d.dedupeCache.Record(dedupeKey, sessionID)
+	d.delivery.dedupeCache.Record(dedupeKey, sessionID)
 }
 
 // roleSend is one role message through the publish route. The route does not publish on the role
@@ -210,13 +220,13 @@ type roleSend struct {
 // It counts the label the role lane gives the same outcome.
 func (s *roleSend) settle(outcome sendOutcome) {
 	metricStatus := outcome.deliveryStatus()
-	s.d.messagesDelivered.Inc([2]string{"delivery_status", metricStatus})
+	s.d.delivery.messagesDelivered.Inc([2]string{"delivery_status", metricStatus})
 	level := slog.LevelWarn
 	switch metricStatus {
 	case string(sendDelivered), string(sendSkipped), string(sendDedupe):
 		level = slog.LevelInfo
 	}
-	s.d.logger.DeliveryLog(level, "listener publish role send", s.holder, s.item.Topic, s.item.EventID, string(outcome),
+	s.d.delivery.logger.DeliveryLog(level, "listener publish role send", s.holder, s.item.Topic, s.item.EventID, string(outcome),
 		slog.String("dedupe_key", s.item.DedupeKey),
 		slog.Int("attempts", s.attempts),
 		slog.String("elapsed", time.Since(s.arrived).String()))
@@ -261,96 +271,90 @@ func (s *roleSend) timedOut(lastForward error) {
 	s.settle(outcome)
 }
 
-// settledBeforeForward applies, to a holder the send has not checked yet, whose session entry is
-// entry, the rules the role lane applies before it forwards, in the lane's order, and reports
-// whether it answered: the source session holds the role (the lane's echo skip) or the holder
-// already confirmed this dedupe key through the route, both answered 200 with nothing forwarded;
-// the holder cannot take the payload's delivery mode (deliveryModeRefusal, sendHandler's refusal,
-// read as roleTopicDelivery reads it), answered 403. Guarding after the dedupe check keeps a
-// delivered repeat from being judged by the holder's current capabilities.
+// settledBeforeForward judges the message to a holder the send has not checked yet, whose session
+// entry is entry, by beforeForward, the rules the role lane applies before it forwards, and reports
+// whether it answered: an echo (the source session holds the role) or a holder that already
+// confirmed this dedupe key through the route, both answered 200 with nothing forwarded; a holder
+// that cannot take the payload's delivery mode, answered 403 with the refusal sendHandler gives.
 //
 // The dedupe check reads the route's own record (listenerDeps.confirmed), not the delivery
 // handlers' cache: agentSubjectDelivery and fanoutDelivery record a key there for a self-subscribed
 // session whose push they skipped, having heard nothing from it, so a role send under a key one of
 // them saw would be answered 200 for a holder that never confirmed it.
 func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
-	if s.item.SourceSession != "" && s.item.SourceSession == s.holder {
-		s.delivered(sendSkipped)
-		return true
-	}
-	if s.d.confirmed.Seen(s.item.DedupeKey, s.holder) {
-		s.delivered(sendDedupe)
-		return true
-	}
-	refusal := deliveryModeRefusal(s.holder, entry, s.item.Payload)
-	if refusal == "" {
+	verdict := beforeForward(s.item, s.holder, entry, s.d.confirmed.Seen)
+	switch verdict.kind {
+	case forwardAllowed:
 		return false
+	case forwardEcho:
+		s.delivered(sendSkipped)
+	case forwardRepeat:
+		s.delivered(sendDedupe)
+	default:
+		writeJSON(s.w, http.StatusForbidden, capabilityRefusal{
+			Error:  verdict.refusal,
+			Reason: sendCapability.reason(),
+			Holder: s.holder,
+		})
+		s.settle(sendCapability)
 	}
-	writeJSON(s.w, http.StatusForbidden, capabilityRefusal{
-		Error:  refusal,
-		Reason: sendCapability.reason(),
-		Holder: s.holder,
-	})
-	s.settle(sendCapability)
 	return true
 }
 
-// sendToRole delivers a role message through the publish route. The first resolution keeps
-// resolveLiveRoleHolder's rule and its answers (404 unclaimed or holder_lapsed, a read error's
-// 500). The first attempt forwards to that holder when its session entry passes the role lane's
-// freshness test (laneHolderFresh), without reading the claim again; every other attempt resolves
-// the holder again by the role lane's rule (resolveLaneRoleHolder), so a holder that relaunched
-// under a new session between attempts gets the next one. Each attempt forwards the same envelope,
-// under the role forward's dedupe key, with a receipt window of what is left of the send, at most
-// roleReceiptTimeout. Every forward carries the same Nats-Msg-Id (bus.Client.RequestCoreTo), so the
-// stream, which captures agent subjects, keeps one copy however many attempts there are.
+// sendToRole delivers a role message through the publish route. The first resolution reads the
+// holder as an HTTP lookup does (resolveRoleHolder with registered) and gives its answers: 404
+// unclaimed or holder_lapsed, a read error's 500, so a holder that exists but has not heartbeated
+// lately gets attempts rather than a 404. The first attempt forwards to that holder when its
+// session entry passes role delivery's freshness test (laneHolderFresh), without reading the claim
+// again; every other attempt resolves the holder again by role delivery's rule (resolveRoleHolder
+// with laneHolderFresh), so a holder that relaunched under a new session between attempts gets the
+// next one. On those attempts an unclaimed role, or a lapsed holder whose claim was released or
+// already absent, is answered 404 as the first resolution answers it; a lapsed holder whose claim
+// was retained, a read that failed and a claim that churned fail that attempt only. Each attempt
+// forwards the same envelope, under the role forward's dedupe key, with a receipt window of what is
+// left of the send, at most roleReceiptTimeout. Every forward carries the same Nats-Msg-Id
+// (bus.Client.RequestCoreTo), so the stream, which captures agent subjects, keeps one copy however
+// many attempts there are.
 func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time) {
 	send := &roleSend{w: w, d: d, item: item, role: role, arrived: arrived}
-	type liveResolution struct {
-		result roleHolderResult
-		err    error
-	}
-	first, err := readBefore(ctx, func() liveResolution {
-		result, err := resolveLiveRoleHolder(d.registry, d.sessions, role)
-		return liveResolution{result: result, err: err}
+	first, err, ended := readBefore(ctx, func() (roleHolderResult, error) {
+		return resolveRoleHolder(d.registry, d.sessions, role, registered)
 	})
-	if err != nil {
+	if ended != nil {
 		send.timedOut(nil)
 		return
 	}
-	if first.err != nil {
-		send.failed(first.err)
-		return
-	}
-	if first.result.state != roleHolderLive {
-		send.noHolder(first.result)
-		return
-	}
-	send.holder = first.result.holder
-	sender, err := readBefore(ctx, func() *contracts.EnvelopeSender {
-		return senderStamp(d.registry, d.sessions, item.SourceSession)
-	})
 	if err != nil {
+		send.failed(err)
+		return
+	}
+	if first.state != roleHolderLive {
+		send.noHolder(first)
+		return
+	}
+	send.holder = first.holder
+	sender, _, ended := readBefore(ctx, func() (*contracts.EnvelopeSender, error) {
+		return senderStamp(d.registry, d.sessions, item.SourceSession), nil
+	})
+	if ended != nil {
 		send.timedOut(nil)
 		return
 	}
 	send.item.Sender = sender
-	if send.settledBeforeForward(first.result.entry) {
+	if send.settledBeforeForward(first.entry) {
 		return
 	}
 	checked := send.holder
 	forwarded := send.item
 	forwarded.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
 	var lastForward error
+	resolved := first
 	for pass := 0; ; pass++ {
-		var resolved laneHolderResolution
-		if pass == 0 && laneHolderFresh(first.result.entry, time.Now().UnixMilli()) {
-			resolved = laneHolderResolution{outcome: laneHolderLive, holder: first.result.holder, entry: first.result.entry}
-		} else {
-			resolved, err = readBefore(ctx, func() laneHolderResolution {
-				return resolveLaneRoleHolder(d.registry, d.sessions, role)
+		if pass > 0 || !laneHolderFresh(first.entry) {
+			resolved, err, ended = readBefore(ctx, func() (roleHolderResult, error) {
+				return resolveRoleHolder(d.registry, d.sessions, role, laneHolderFresh)
 			})
-			if err != nil {
+			if ended != nil {
 				break
 			}
 		}
@@ -358,19 +362,15 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, ite
 			send.holder = resolved.holder
 		}
 		switch {
-		case resolved.outcome == laneHolderUnclaimed:
-			send.noHolder(roleHolderResult{state: roleHolderUnclaimed})
+		case err != nil:
+			// Retried below, as every resolution not answered here is.
+		case resolved.state == roleHolderUnclaimed:
+			send.noHolder(resolved)
 			return
-		case resolved.outcome == laneHolderNotLive && resolved.release != store.ExpiredRoleClaimRetained:
-			send.noHolder(roleHolderResult{
-				state:             roleHolderLapsed,
-				holder:            resolved.holder,
-				lastSeen:          resolved.lastSeen,
-				lastSeenAvailable: resolved.lastSeen != 0,
-				claimRelease:      resolved.release,
-			})
+		case resolved.state == roleHolderLapsed && resolved.claimRelease != store.ExpiredRoleClaimRetained:
+			send.noHolder(resolved)
 			return
-		case resolved.outcome == laneHolderLive:
+		case resolved.state == roleHolderLive:
 			if send.holder != checked {
 				checked = send.holder
 				if send.settledBeforeForward(resolved.entry) {
@@ -383,7 +383,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, ite
 				return
 			}
 			send.attempts++
-			err := d.forward(contracts.AgentSubject(send.holder), forwarded, window)
+			err := d.delivery.forwardRole(contracts.AgentSubject(send.holder), forwarded, window)
 			if err == nil {
 				d.confirm(item.DedupeKey, send.holder)
 				send.delivered(sendDelivered)
@@ -395,8 +395,9 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, ite
 			}
 			lastForward = err
 		}
-		// Any other resolution (a holder that has not heartbeated within session.ClaimStaleAfter
-		// and keeps its claim, a read that failed, a claim that churned) fails this attempt only.
+		// Any resolution not answered above (a holder that has not heartbeated within
+		// session.ClaimStaleAfter and keeps its claim, a read that failed, a claim that churned)
+		// fails this attempt only.
 		if !pauseBeforeRetry(ctx) {
 			break
 		}
@@ -445,13 +446,13 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 			if window <= 0 {
 				break
 			}
-			err := d.forward(contracts.AgentSubject(sessionID), item, window)
+			err := d.delivery.forwardRole(contracts.AgentSubject(sessionID), item, window)
 			if err == nil {
 				d.confirm(item.DedupeKey, sessionID)
 				return sendDelivered
 			}
 			if forwardRefused(err) {
-				d.logger.DeliveryLog(slog.LevelWarn, "listener publish topic forward refused", sessionID, item.Topic, item.EventID, string(sendFailed), slog.String("error", err.Error()))
+				d.delivery.logger.DeliveryLog(slog.LevelWarn, "listener publish topic forward refused", sessionID, item.Topic, item.EventID, string(sendFailed), slog.String("error", err.Error()))
 				return sendDeliveryFailed
 			}
 			lastForward = err
@@ -491,7 +492,7 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, it
 			slog.Any("undelivered", undelivered),
 			slog.String("elapsed", time.Since(arrived).String()),
 		}, attrs...)
-		d.logger.DeliveryLog(level, "listener publish topic send", "", item.Topic, item.EventID, string(outcome), attrs...)
+		d.delivery.logger.DeliveryLog(level, "listener publish topic send", "", item.Topic, item.EventID, string(outcome), attrs...)
 	}
 	notPublished := func(cause error) {
 		writeJSON(w, http.StatusGatewayTimeout, topicPublishFailure{
@@ -502,11 +503,11 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, it
 		})
 		settle(sendPublishFailed, nil, nil, slog.String("error", cause.Error()))
 	}
-	sender, err := readBefore(ctx, func() *contracts.EnvelopeSender {
-		return senderStamp(d.registry, d.sessions, item.SourceSession)
+	sender, _, ended := readBefore(ctx, func() (*contracts.EnvelopeSender, error) {
+		return senderStamp(d.registry, d.sessions, item.SourceSession), nil
 	})
-	if err != nil {
-		notPublished(fmt.Errorf("reading the sender's session: %w", err))
+	if ended != nil {
+		notPublished(fmt.Errorf("reading the sender's session: %w", ended))
 		return
 	}
 	item.Sender = sender
@@ -531,7 +532,7 @@ func sendToTopic(ctx context.Context, w http.ResponseWriter, d *listenerDeps, it
 	delivered := []string{}
 	undelivered := []undeliveredRecipient{}
 	for i, outcome := range outcomes {
-		d.messagesDelivered.Inc([2]string{"delivery_status", outcome.deliveryStatus()})
+		d.delivery.messagesDelivered.Inc([2]string{"delivery_status", outcome.deliveryStatus()})
 		switch outcome {
 		case sendDelivered, sendDedupe:
 			delivered = append(delivered, recipients[i])
