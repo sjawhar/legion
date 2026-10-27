@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -40,6 +41,7 @@ import (
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -1342,6 +1344,59 @@ func TestAProcessWhoseKeySetALivePeerDoesNotShareRefusesToStart(t *testing.T) {
 	if registered != 3 {
 		t.Errorf("%d server processes registered, want the pair and the process given the pair's key first", registered)
 	}
+}
+
+// A process whose heartbeat stops for longer than the registry's live window drops out of Live
+// while it still runs: a pod frozen by its node, or one cut from the database for that long. A
+// process started meanwhile with a key set the first does not share is not refused, since no live
+// row disagrees with it. Once the first process resumes, the two must not both serve: each refuses
+// the cookies the other mints, which signs people out of whichever one their next request reaches,
+// the very thing the boot refusal is there to prevent. Whichever of the two stops - exits, or stops
+// answering /healthz 200 so the Service takes it out - the pair must not stay serving side by side.
+func TestAProcessThatResumesBesideAPeerWhoseKeySetItDoesNotShareDoesNotServeBesideIt(t *testing.T) {
+	pair := newPair(t)
+	frozen := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: multiprocessSigningKey, OwnProcessGroup: true})
+	frozen.waitHealthy(t)
+	if err := frozen.Cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatalf("freeze the first process: %v", err)
+	}
+	resumed := false
+	t.Cleanup(func() {
+		if !resumed {
+			_ = frozen.Cmd.Process.Signal(syscall.SIGCONT)
+		}
+	})
+	time.Sleep(processes.LiveWindow + 2*time.Second)
+
+	other := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: "a-key-of-its-own"})
+	other.waitHealthy(t)
+	if err := frozen.Cmd.Process.Signal(syscall.SIGCONT); err != nil {
+		t.Fatalf("resume the first process: %v", err)
+	}
+	resumed = true
+
+	serving := func(p *dispatchProcess) bool {
+		select {
+		case <-p.Exited:
+			return false
+		default:
+		}
+		response, err := (&http.Client{Timeout: time.Second}).Get(p.url("/healthz"))
+		if err != nil {
+			return false
+		}
+		_ = response.Body.Close()
+		return response.StatusCode == http.StatusOK
+	}
+	deadline := time.Now().Add(3*processes.HeartbeatInterval + 5*time.Second)
+	for time.Now().Before(deadline) {
+		if !serving(frozen) || !serving(other) {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("a process that resumed beside a live peer whose key set it does not share still serves beside it %s after it resumed, and so does the peer: each refuses the other's cookies\nresumed process:\n%s\npeer:\n%s",
+		3*processes.HeartbeatInterval+5*time.Second, frozen.Output.String(), other.Output.String())
 }
 
 // requireRefusedToStart waits up to a minute for the process to exit, asking its /healthz all the

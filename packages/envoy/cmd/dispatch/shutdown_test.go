@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -548,6 +549,11 @@ type dispatchOptions struct {
 	// one here, and a name not here is added. It is how a test gives the process a GitHub App,
 	// a sign-in issuer or cookie identity without every other test growing those rows.
 	Env map[string]string
+	// OwnProcessGroup starts the process in a process group of its own, so a test can stop it
+	// with SIGSTOP and resume it without the stop reaching the test's own process group: a
+	// kernel that hangs up an orphaned process group holding a stopped process (gVisor does)
+	// would otherwise end the test with it.
+	OwnProcessGroup bool
 }
 
 // startDispatchProcess builds Dispatch and starts it on a free loopback port against databaseURL,
@@ -607,6 +613,9 @@ func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatch
 	// Sorted, so a failure's process listing and a test's own log read the same whichever run
 	// printed them: Go's map iteration order is not.
 	slices.Sort(cmd.Env)
+	if options.OwnProcessGroup {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 	return &dispatchProcess{Process: cmdtest.Start(t, "Dispatch", cmd), port: port}
 }
 
