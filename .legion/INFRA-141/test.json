@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-141",
+  "completed": "2026-10-27T04:15:00Z",
+  "generation": 4,
+  "round": "forward merge of main 9b92ac14 (#2302) after GitHub reported CONFLICTING, merge 7ce88c70, head a35cb9e8",
+  "verdictProvenance": "provider not verified: written in my own session, no subagent ran; the model in my configuration is the one requested, not one read from the run's transcript",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Recomputed the unchanged-diff fingerprint myself with conflicts-and-rewrites.md's command: 6c78c2e4871a3fa23e03e638b0032cd2af156995618ccd7ff06154d838202bc6 at my last verified head 118e2523, 4559281782646a4d203fd386447d149ef41f030eb7258817dbd08a162e2dd1a7 at a35cb9e8, matching its posted numbers. Changed, so I ran a full round: the merge site under -race and by mutation, and this PR's behaviour on the merged real binary."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The merge resolution keeps both sides: main's pipelined publish window (#2302) works over this branch's context-taking publishConfirmed",
+      "surface": "go test of internal/bus (in-process NATS) under -race and of internal/dispatch/outbox; go test -overlay mutation of the adapted line",
+      "command": "CGO_ENABLED=1 go test -race ./internal/bus -count=1 -run 'Async|Window|PublishConfirmed|Permission|EndedContext|SpentDeadline|Reconnect' -v; go test ./internal/dispatch/outbox/... -count=1; then window.republish's context made spent (WithTimeout(..., 0)) by overlay",
+      "observed": "internal/bus ok 92.918s, 29 --- PASS, 0 races (TestPublishAsyncKeepsSendOrder, TestAWindowWhoseConnectionIsLostAnswersUnavailableBeforeSending, TestAWindowWithSeveralDenialsConfirmsEveryGrantedSend among them); outbox ok 2.499s. Mutant: TestAWindowWithSeveralDenialsConfirmsEveryGrantedSend fails at core_permission_test.go:117 'denied send 0 was answered bus: window elapsed before the publish ... context deadline exceeded, want ErrPublishDenied'",
+      "headSha": "a35cb9e8d726225a96d422d1ab776b12b5ab00a9",
+      "negativeControl": "the mutant shows the adapted republish line is executed and checked by a test, so the pass is not vacuous"
+    },
+    {
+      "criterion": "This PR's listener behaviour holds on the merged binary (A1, A3, A5-A7, unreadable records, frozen-bus routes)",
+      "surface": "the real envoy-listener binary built at this head against a real NATS (internal/testnats/cmd/natsd), directly and through a TCP relay frozen with the connection open; curl",
+      "command": "the generation-4 roles driver, the frozen-bus driver, 300 cold-cache sends, unreadable interest and claim records, a send to an absent session",
+      "observed": "cold-cache sends 300/300 200; absent 404 'no live session ses_absent'; roster: ses_squatter roles [] despite role topics, ses_bare [planner] by claim only, take-over and back, unsubscribe releases the claim, straight bucket writes appear and go; unreadable interest 500 on registry and interests and listed with topics null, empty-holder claim 500, no Retry-After; frozen: send, publish (topic and role lane), GET /v1/roles, subscribe, roles/set, unsubscribe and both deletes 503 with Retry-After: 1 in 3.50 s, an uncached target in 1.0 s, /healthz 503 in 3.0 s",
+      "headSha": "a35cb9e8d726225a96d422d1ab776b12b5ab00a9",
+      "negativeControl": "every frozen-rig request answered 200 before the freeze; the absent session gets 404 where a stored one gets 200"
+    },
+    {
+      "criterion": "A3/A6' on the merged head through the real client",
+      "surface": "scripts/e2e-local.sh and out/e2e/",
+      "command": "cd packages/envoy && bash scripts/e2e-local.sh; the A6' jq",
+      "observed": "exit 0, both PASS lines, client EnvoyApiError 503; three WARN bus_unavailable records (03:58:51.171Z, 03:58:54.904Z, 03:58:58.662Z) after 'Initiating Shutdown...' at 03:58:47.631Z",
+      "headSha": "a35cb9e8d726225a96d422d1ab776b12b5ab00a9",
+      "negativeControl": "the e2e send answered 200 before NATS was stopped"
+    }
+  ],
+  "ci": "At the code head 7ce88c70 (a35cb9e8 adds only .legion/): Tests 40446717420, Legion Envoy and Contracts 40446717578, Docs 40446717702 and Worker Image 40446717554 queued when read, cited unsettled and not waited for. GitHub reports MERGEABLE (BLOCKED).",
+  "regressionLocksAdded": []
+}
