@@ -2,27 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-526",
-  "completed": "2026-10-27T03:23:33Z",
-  "round": 1,
-  "reviewedHead": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208 (code; handoff heads above it change only .legion/)",
+  "completed": "2026-10-27T05:07:54Z",
+  "round": 2,
+  "reviewedHead": "154d6cea2207c992c6cdccfdd5af633d446f33f7 (code; handoff heads above it change only .legion/)",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 0,
+  "minor": 2,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx:57-58",
-      "description": "collectAskHosts finds a shell's slots with shell.querySelector('[data-dispatch-ask-header]') / ('[data-dispatch-ask-footer]'), which search every descendant in document order. An ask block may sit inside an option of another ask block (list_item holds blocks), and the inner shell's footer comes before the outer shell's own footer, so the outer card mounts in the inner footer, the outer is marked data-dispatch-ask-options=rows and its source list (holding the inner block) is folded: the outer decision shows only its header, no options, and the inner decision is hidden. Reproduced by the reviewer in happy-dom at 9439f4a8 (throwaway test, deleted): shells 2, outer own footer empty, shell 1 footer text 'AfirstInner?X: xXx'. Fix: ':scope > [data-dispatch-ask-header]' and ':scope > [data-dispatch-ask-footer]' (and the same in ask-block.ts slot() to keep the two in step), plus a MarkdownBody.test.tsx case for a decision nested in an option."
+      "file": "CI: required check `test` (Tests workflow run 40447649770, job 122002633673)",
+      "description": "The required check `test` completed as failure at the CI head 154d6cea. The failures are in the Go daemon only (packages/daemon/internal/daemon and internal/api, 306 lines of 'list this project's slotted issues: ... number of field descriptions must equal number of destinations, got 20 and 31'). This PR changes no Go code: main broke in #2273/#2289, and main fixed it in #2317 (baadccdc, 'fix(daemon): the slotted-issue read selects every issue column again'). The pull_request run tests the merge with main as of the push at 04:03Z, which does not have #2317, and a re-run keeps that same merge commit. Until a run of this code against a main that has #2317 is green, the code head is red, so no approval. The Dispatch code itself has no correctness finding open."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/styles.css:366-371 vs :518-524",
+      "description": "Spacing only: in a reply shown in a document decision's footer, a nested decision card's question gets the footer's paragraph top margin, because the footer rule's specificity (0,4,1) is higher than the content hole's first-child rule (0,4,0). Not a defect: no behaviour changes and no content is hidden. Recorded under 'Not proven / risk' in the PR body."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/doc/typed-block-drawing.ts (askBlockShell contentClass)",
+      "description": "Cosmetic: in a body, paintBlock removes the <p> from tight list items, so the malformed class's li:has(>p:empty) selector does not hide a blank option, and an empty bullet shows. The malformed reason already names that option. Not a defect; recorded in the PR body."
     },
     {
       "severity": "cleanup",
-      "file": "packages/dispatch/web/src/features/doc/typed-block-drawing.ts (renderAskBlockShell); ask-block.ts:70-88 (applyShell); useRenderedMarkdown.tsx:64-68 (collectAskHosts)",
-      "description": "Fast-follow (no behaviour change): the shell's stamped attributes (urgency, state, malformed) and the fold rule (not malformed means data-dispatch-ask-options=rows) are written in renderAskBlockShell, AskBlockView.applyShell and collectAskHosts; askBlockShell could return the attribute record and the fold decision once, and the DOM write could leave collectAskHosts."
+      "file": "packages/dispatch/web/src/features/doc/typed-block-drawing.ts; ask-block.ts:70-90,127-135; useRenderedMarkdown.tsx:31-35,62-66,160-174",
+      "description": "Fast-follow (no behaviour change): one exported askShellSlots(frame) next to renderAskBlockShell in place of the two :scope slot lookups, and one exported frame writer that applies the stamps and the fold, so that neither caller names a data-dispatch-ask-* attribute and AskShellHost goes."
     }
   ],
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection: none. CI head 9439f4a8 (compare to cc8741b0: handoffsOnly true, 2 files). At 2026-10-27T03:17Z every check at 9439f4a8 was queued (127 runs queued repo-wide); this round requests changes, which does not wait on CI.",
-  "thermonuclear": "Both run at 9439f4a8. Deep review: one important finding (the nested-decision slot lookup above), no security bug; the server-attribute reset holds against every later pass. Code quality: one finding (the duplicated shell stamping), judged cleanup with no behaviour change and carried as the fast-follow.",
-  "threads": "No review threads and no prior reviews on #2310 at review time (gh api graphql).",
-  "verifiedLocally": "cd packages/dispatch && bun test web/src/features/refs web/src/features/doc: 350 pass, 0 fail at 9439f4a8."
+  "threads": "PRRT_kwDORFy7ds6wiYih (mine, round 1): the implementer fixed it in a1faafec and resolved it. I replied that I accept the fix (discussion_r4385090019). No other threads.",
+  "ci": "Required (rulesets): lint, typecheck, test, pr-title. CI head 154d6cea; compare to 861d69ea: handoffsOnly true, 2 files. At 05:07Z: lint success, test failure (main's red, above), typecheck queued, pr-title queued.",
+  "thermonuclear": "Both run at 154d6cea. Deep review: approve, no Medium or High finding; three Minors (the spacing and the empty bullet above, and the stale PR-body risk lines, which I have rewritten); security rows untrusted-input and agent-def hold. Code quality: three findings about the remaining shell-stamp and slot-lookup duplication. I judge them cleanup with no behaviour change; they are the fast-follow.",
+  "verifiedLocally": "cd packages/dispatch && bun test web/src/features/refs web/src/features/doc: 351 pass, 0 fail at 154d6cea."
 }
