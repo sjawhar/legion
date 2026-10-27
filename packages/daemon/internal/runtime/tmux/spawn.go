@@ -379,11 +379,11 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 // is refused, naming the key (paneOf). The session is resumed where it is: at its recorded path,
 // or, by its name, in another working directory's folder of the recorded path's sessions directory
 // or of the pane's own (sessionFileOf), where a session carried over from a pod lands. One found
-// nowhere starts nothing. A session this runtime takes over found nowhere wraps
-// runtime.ErrSessionFileMissing, which the claim's machine answers by forgetting the session and
-// spawning a fresh agent: the session was another runtime's, and the operator chose the takeover.
-// That is a resume over a foreign prev, and every session found nowhere while take_over is set
-// (takingOverSession), since neither the recorded path nor the previous incarnation tells the
+// nowhere starts nothing. While take_over is set (takingOverSession), a session found nowhere
+// wraps runtime.ErrSessionFileMissing, which the claim's machine answers by forgetting the session
+// and spawning a fresh agent: most such sessions are the taken-over runtime's, and the operator
+// chose that cost. It holds for a resume over a foreign prev and for every other resume alike,
+// since neither the recorded path nor the previous incarnation tells the
 // other runtime's sessions from this host's own. With the key off, a session found nowhere is a
 // refusal, never a fresh agent: the claim resumes the agent it recorded or none
 // (assertResumeSessionFile, runtime.ts), and the refusal is charged as any launch failure is.

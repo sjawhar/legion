@@ -65,8 +65,8 @@ func TestATakenOverResumeOfASessionFoundNowhereSpawnsAFreshSessionUncharged(t *t
 }
 
 // Any other refusal of a resume is a launch failure as before, charged, and the recorded session
-// kept for the next try: the refusal to start fresh over a session file missing where the claim's
-// own runtime recorded it (no takeover), and a refusal for another reason alike. Nothing is
+// kept for the next try: the refusal to start fresh over a session file found nowhere while the
+// takeover key is off, and a refusal for another reason alike. Nothing is
 // spawned in the session's place.
 func TestAResumeRefusedForAnyOtherReasonIsChargedAndKeepsTheSession(t *testing.T) {
 	for name, refusal := range map[string]error{

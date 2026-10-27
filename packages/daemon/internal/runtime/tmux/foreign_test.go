@@ -346,16 +346,20 @@ func TestWithoutTakeOverAMissingSessionIsRefused(t *testing.T) {
 func TestTheBootWarnsWhileTakeOverIsSet(t *testing.T) {
 	for name, tc := range map[string]struct {
 		takeOver string
-		want     bool
-	}{"set": {TakeOverKubernetes, true}, "unset": {"", false}} {
+		want     int
+	}{"set": {TakeOverKubernetes, 1}, "unset": {"", 0}} {
 		t.Run(name, func(t *testing.T) {
 			logs := &strings.Builder{}
 			log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			newFakeServerRuntimeWith(t, staticCredential, log, func(o *Options) { o.TakeOver = tc.takeOver })
-			line := strings.Contains(logs.String(), "runtime.tmux.take_over is set") &&
-				strings.Contains(logs.String(), "step 5")
-			if line != tc.want {
-				t.Fatalf("the boot's warning with take_over %q = %v, want %v; log: %s", tc.takeOver, line, tc.want, logs.String())
+			lines := 0
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if strings.Contains(line, "runtime.tmux.take_over is set") && strings.Contains(line, "step 5") {
+					lines++
+				}
+			}
+			if lines != tc.want {
+				t.Fatalf("the boot's warning with take_over %q = %d lines, want %d; log: %s", tc.takeOver, lines, tc.want, logs.String())
 			}
 		})
 	}
