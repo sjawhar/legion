@@ -4,6 +4,22 @@
 
 ### Added
 
+- Dispatch keeps Legion's phase handoffs as records on their issue (INFRA-177). Migration `0120`
+  adds the `handoffs` table: one row per write, its `phase` a lowercase slug
+  (`^[a-z][a-z0-9-]{0,31}$`), its `version` counting from 1 within the issue and phase, its `body`
+  the exact text written and its `author` the writing session; a new table, so the migration rolls.
+  `POST /api/v1/issues/{key}/handoffs/{phase}` records one, by a bearer naming its session alone (a
+  cookie caller is 403 `HANDOFF_FORBIDDEN`), its body one JSON object of at most 262144 bytes
+  (413 `CAP_EXCEEDED` above, 400 `HANDOFF_INPUT` for a body that is not one JSON object), as the
+  phase's next version; a closed issue is 409 `ISSUE_CLOSED`.
+  `GET /api/v1/issues/{key}/handoffs` lists an issue's handoffs newest first without their bodies,
+  and `GET /api/v1/issues/{key}/handoffs/{phase}/latest` and `GET /api/v1/handoffs/{id}` read one
+  with its body (404 `HANDOFF_NOT_FOUND` when there is none). A write appends `handoff.recorded`
+  (`handoff_id`, `phase`, `version`, never the body) in its own transaction, which notifies no
+  one. The dashboard's Conversation tab lists each handoff version as one entry that opens to its
+  fields, and Activity names a recorded handoff. The GitHub listener still sends `changed_paths`,
+  `changed_paths_truncated` and `forced` on a push envelope, which the Legion daemon no longer
+  reads.
 - Dispatch's meaning search embeds through AWS Bedrock (the default, unchanged) or Azure AI
   Foundry, chosen by `DISPATCH_EMBEDDER`. Azure takes `DISPATCH_AZURE_EMBED_ENDPOINT`,
   `DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE` (the deployment's quota, two thirds of which paces

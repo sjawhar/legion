@@ -4,6 +4,18 @@
 
 ### Added
 
+- Phase handoff records on a Dispatch issue (INFRA-177): `HandoffSummary` (`id`, `issue_key`,
+  `phase`, `version`, `author`, `created_at`), what `GET /api/v1/issues/{key}/handoffs` lists and
+  `POST /api/v1/issues/{key}/handoffs/{phase}` answers, and `Handoff`, the same with `body`, the
+  exact text the session wrote, as `GET /api/v1/issues/{key}/handoffs/{phase}/latest` and
+  `GET /api/v1/handoffs/{id}` answer it. The `handoff.recorded` event joins `DispatchEvent`, its
+  payload `HandoffRecordedPayload` (`handoff_id`, `phase`, `version`, strict, never the body).
+  `DISPATCH_HANDOFF_BODY_MAX` (262144) is the longest handoff body in UTF-8 bytes, generated into
+  Go as `contracts.DispatchHandoffBodyMax`, which the server enforces as `413 CAP_EXCEEDED`. Two
+  specs join `dispatch-tools.ts`: `dispatch_handoff_write` (`issue`, `phase`, `body`), which
+  refuses before sending a phase that is not a lowercase slug (`^[a-z][a-z0-9-]{0,31}$`) and a body
+  over the cap or not one JSON object, and `dispatch_handoff_read`, the newest handoff of a phase or
+  the version named.
 - `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of
   `GET /api/v1/search/coverage`: the configured embedder's identity, place (`bedrock` or `azure`)
   and model, and per kind and in total how many searchable items have a current vector, lack one or
@@ -149,6 +161,12 @@
 
 ### Changed
 
+- The `legion-api.ts` mirror and the daemon API fixtures are at contract 40 (INFRA-177).
+  `LegionHandoffCompleteRequest` takes `handoffId` and `handoffVersion`, the Dispatch handoff
+  record a planning, implementing, testing or reviewing completion names, and `commit` is
+  documented as the implementer's and the merger's alone. `PhaseView` carries `handoffRecord`
+  (`{id, version}`), the record its current phase's completion named, which `state.json` shows
+  in place of `handoffCommit`.
 - The daemon API fixtures (`fixtures/daemon-api/`) are at contract 39 (INFRA-208): `state.json`'s
   `settings.runtime.kubernetes.resources` is `{issue, controller}`, each pod's six reservation
   fields, in place of one entry per role, and the `resource-limits` capability row's detail names
@@ -351,6 +369,8 @@
 
 ### Removed
 
+- The `classifyPush` classification fixtures are removed with the daemon's handoff-only push
+  classifier, and no `reduceGithubEvent` fixture carries `handoffOnly` (INFRA-177).
 - Removed `LegionGitHubTokenResponse`, `LegionGitCredentialResponse`, `LegionGrantRequest.push` and
   `LegionGrantCredentialRequest`, with the `github-token.json`, `git-credential.json` and
   `provisioning-credential.json` fixtures: the Legion daemon's `POST /legion/v1/gh-token`,

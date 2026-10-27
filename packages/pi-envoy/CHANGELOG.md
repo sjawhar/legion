@@ -4,6 +4,13 @@
 
 ### Added
 
+- The `dispatch` command records and reads Legion phase handoffs on their Dispatch issue
+  (INFRA-177): `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <path>` records
+  the file's text, one JSON object of at most 262144 bytes, exactly as written, as this session's
+  next version of the phase's handoff, and `dispatch handoff-read --issue <KEY> --phase <phase>`
+  prints a line naming the record's version, id, session and time, then the body exactly as
+  stored; `--version <n>` reads an earlier version. The README says so, and to keep the file
+  outside the workspace, since jj snapshots every file in it.
 - The agent stream reports the model and thinking level the session runs now, so Dispatch's live
   view can show and switch them: a `settings` frame carrying the current model (`provider/id`),
   every model the session lists as available, the configured thinking level `/effort` reports

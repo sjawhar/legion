@@ -7,6 +7,28 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- **Breaking:** daemon API contract 40 (INFRA-177): a phase handoff is a record on the issue's
+  Dispatch issue, no longer a file committed under `.legion/<issue>/` on its branch. The `legion`
+  tool's `handoff_complete` for a planning, implementing, testing or reviewing phase reports the
+  phase's Dispatch handoff record, `handoffId` and `handoffVersion`: the newest record of the
+  phase's word (`plan`, `implement`, `test`, `review`), read from the Dispatch the pane's
+  `dispatch` command reaches, which the daemon reads back and holds to the issue, the phase, the
+  version and the claim's session. A phase with no record is refused naming
+  `dispatch handoff-write`, and a Dispatch that does not answer is refused with its answer. The
+  implementer also reports its pushed tip, the commit `legion/<issue>@origin` names, and is refused,
+  naming the push, when `@-` is not on that branch yet; retro and the merger's READY report `@-`.
+  No committed `.legion/` handoff file is looked up. Install this release with a `legion` built
+  from the same commit, in this order (docs/kubernetes.md, "Moving the handoffs onto their Dispatch
+  issues"): deploy the Dispatch server that carries the handoff routes first, then run
+  `legion handoffs import` while the old daemon still runs, then roll out the daemon and the
+  plugins, then run the import again, which catches a file an old worker pushed in between.
+- The skills this plugin ships teach the handoff record (INFRA-177): a worker writes its phase's
+  handoff with `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <file>` and reads
+  the previous role's with `dispatch handoff-read`, rather than committing and pushing
+  `.legion/<issue>/<phase>.json`. The `LEGION_WORKSPACE_RECREATED` notice tells a worker whose
+  workspace was recreated to re-read the last handoff recorded on its issue with
+  `dispatch handoff-read --issue <KEY> --phase <phase>`, since Dispatch keeps it whatever the
+  workspace lost.
 - Daemon API contract 38 (INFRA-225): Legion admits no root and starts no child while Dispatch
   shows it blocked by an issue that is not `done`, and says what it is waiting for. `legion state`
   and the controller's `read_state` carry `admission.blocked`, every root and child Legion is
@@ -635,6 +657,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Removed
 
+- The handoff commit checks go with the committed handoff (INFRA-177): `handoff_complete` no
+  longer requires that the commit carrying the handoff was authored by the identity the daemon
+  put on the pane, `JJ_USER`/`JJ_EMAIL` (the App-identity check). The skills drop the
+  `skip-checks: true` trailer a handoff-only commit carried, and retro's removal of
+  `.legion/<issue>/` from the branch; the `legion-worker` reference `skip-checks-trailer.md` is
+  deleted.
 - The extension's role gate — the architect's bash restriction to a single `legion` command, and
   the architect's, reviewer's and merger's refusal of `edit`, `write` and `apply_patch` — and the
   shell refusal of `legion handoff complete` are removed (LEGION-630). No role is refused a tool:

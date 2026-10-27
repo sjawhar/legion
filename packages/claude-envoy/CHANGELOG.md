@@ -4,6 +4,12 @@
 
 ### Added
 
+- The `dispatch` command (`dist/dispatch.js`) records and reads Legion phase handoffs on their
+  Dispatch issue (INFRA-177): `dispatch handoff-write --issue <KEY> --phase <phase> --body-file <path>`
+  records the file's text, one JSON object of at most 262144 bytes, as this session's next version
+  of the phase's handoff, and `dispatch handoff-read --issue <KEY> --phase <phase> [--version <n>]`
+  prints a line naming the record's version, id, session and time, then the body exactly as
+  stored. The bundled tool descriptions carry both.
 - The `dispatch` command (`dist/dispatch.js`) takes `dispatch issues --all`, which reads the whole
   filtered issue listing in one request rather than a page, for a caller that must not miss or
   repeat a row while the list changes under it. `--all` with `--limit` or `--offset` is a usage
@@ -26,6 +32,20 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-177): the `legion` MCP tool's `handoff_complete` reports the phase's Dispatch handoff
+  record, `handoffId` and `handoffVersion`, the newest record of the phase's word read from the
+  Dispatch this session's envoy.json names, and the implementer also its pushed tip
+  (`legion/<issue>@origin`), refused when `@-` is not pushed; retro and the merger's READY report
+  `@-`. No committed `.legion/` handoff file is looked up, and the check that the handoff commit was
+  authored by the pane's `JJ_USER`/`JJ_EMAIL` identity is gone. Install it with a `legion` built
+  from the same commit, in the cutover order pi-legion's changelog gives. Its `legion/` copies of
+  the Legion skills teach `dispatch handoff-write` and `dispatch handoff-read`, drop the
+  `skip-checks: true` trailer and retro's removal of `.legion/<issue>/`, and no longer carry the
+  `skip-checks-trailer.md` reference, since `dist/` and `legion/` were regenerated.
+- Under Claude Code the `dispatch` command acts as `ENVOY_SESSION_ID` (claude-envoy's QA
+  override), else `CLAUDE_CODE_SESSION_ID`: the session claude-envoy registers and claims under, so
+  a handoff it writes is the claim's session's, which the daemon requires (INFRA-177).
 - The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is
   waiting to start behind an unfinished Dispatch issue, each `{issue, blockedBy}`, and
