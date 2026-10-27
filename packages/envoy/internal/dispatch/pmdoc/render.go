@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -881,19 +882,149 @@ func hardBreaksAsSpaces(nodes []*Node) []*Node {
 }
 
 // asWritten is doc as its markdown writes it: without the marks the rendering does not write
-// (StripAnchorMarks), with each line break its textblocks hold in the one form markdown
-// carries, and with each U+0000 as U+FFFD (writeNulsAsReplacement). The browser editor holds two
-// more line breaks. A soft line break it keeps from a paste (a hard break with isInline) it draws
-// as a space, and one is written: both parsers read a soft break as one too. A line feed in text
-// outside code it draws as a line break (white-space: break-spaces), and a hard break is written,
-// which both parsers read back as the editor draws it, except where nothing but whitespace follows
-// it in its textblock: a hard break there reads back as a backslash, and a line feed as nothing,
-// as trailing whitespace does.
+// (renderedMarkTypes) and with adjacent text runs under equal marks merged, as StripAnchorMarks
+// gives it, with each line break its textblocks hold in the one form markdown carries, and with
+// each U+0000 as U+FFFD (withNulsWritten). The browser editor holds two more line breaks. A soft
+// line break it keeps from a paste (a hard break with isInline) it draws as a space, and one is
+// written: both parsers read a soft break as one too. A line feed in text outside code it draws as
+// a line break (white-space: break-spaces), and a hard break is written, which both parsers read
+// back as the editor draws it, except where nothing but whitespace follows it in its textblock: a
+// hard break there reads back as a backslash, and a line feed as nothing, as trailing whitespace
+// does.
+//
+// It never writes doc, and shares doc's nodes, their attributes and their marks wherever they are
+// written as they are: only a node written otherwise, and the nodes above it, is a copy, so a
+// document with no anchor mark, no line break to rewrite and no U+0000 is doc itself. What it
+// returns is only read.
 func asWritten(doc *Node) *Node {
-	out := StripAnchorMarks(doc)
-	writeLineBreaksIn(out)
-	writeNulsAsReplacement(out)
+	out := writtenTree(doc, true)
+	if holdsNul(out) {
+		out = withNulsWritten(out)
+	}
 	return out
+}
+
+// writtenTree is node as asWritten writes it but for a U+0000 in its own text and attributes,
+// which its parent writes once it has merged its children (childrenAsWritten); node itself where
+// nothing under it is written otherwise. lineBreaks is whether a paragraph or heading at or under
+// node has its line breaks written (writtenLineBreaks): not under a textblock or a code block.
+func writtenTree(node *Node, lineBreaks bool) *Node {
+	marks, marksKept := renderedMarks(node.Marks)
+	children, childrenKept := childrenAsWritten(node, lineBreaks)
+	if marksKept && childrenKept {
+		return node
+	}
+	return &Node{Type: node.Type, Attrs: node.Attrs, Text: node.Text, Marks: marks, Children: children}
+}
+
+// renderedMarks is marks without those the rendering does not write, in their order, and whether
+// that is marks itself: nil when none is written, a slice of its own when some are not.
+func renderedMarks(marks []Mark) ([]Mark, bool) {
+	rendered := 0
+	for _, mark := range marks {
+		if renderedMarkTypes[mark.Type] {
+			rendered++
+		}
+	}
+	switch rendered {
+	case len(marks):
+		return marks, true
+	case 0:
+		return nil, false
+	}
+	out := make([]Mark, 0, rendered)
+	for _, mark := range marks {
+		if renderedMarkTypes[mark.Type] {
+			out = append(out, mark)
+		}
+	}
+	return out, false
+}
+
+// childrenAsWritten is node's children as asWritten writes them, and whether that is node's own
+// slice. Each child is written (writtenTree), and adjacent text runs whose written marks are equal
+// merge into one that keeps the first's attributes. A paragraph or heading's children then have
+// their line breaks written where they hold one to rewrite (holdsLineBreakToWrite). Only after
+// those decisions is each child's own U+0000 written, so they are taken on the values as they are:
+// two runs whose links differ only in a U+0000 and a U+FFFD stay two runs.
+func childrenAsWritten(node *Node, lineBreaks bool) ([]*Node, bool) {
+	textblock := lineBreaks && (node.Type == "paragraph" || node.Type == "heading")
+	childLineBreaks := lineBreaks && !textblock && node.Type != "code_block"
+	children := node.Children
+	// out is nil while the children written so far are node's own; merged is whether its last
+	// node is a merge of runs this pass made, whose text a later run may extend.
+	var out []*Node
+	merged := false
+	for index, child := range children {
+		clean := writtenTree(child, childLineBreaks)
+		var previous *Node
+		if out != nil {
+			previous = out[len(out)-1]
+		} else if index > 0 {
+			previous = children[index-1]
+		}
+		if previous != nil && previous.Type == "text" && clean.Type == "text" && marksEqual(previous.Marks, clean.Marks) {
+			if merged {
+				previous.Text += clean.Text
+				continue
+			}
+			if out == nil {
+				out = make([]*Node, index, len(children))
+				copy(out, children[:index])
+			}
+			out[len(out)-1] = &Node{Type: "text", Attrs: previous.Attrs, Text: previous.Text + clean.Text, Marks: previous.Marks, Children: previous.Children}
+			merged = true
+			continue
+		}
+		merged = false
+		if out == nil && clean != child {
+			out = make([]*Node, index, len(children))
+			copy(out, children[:index])
+		}
+		if out != nil {
+			out = append(out, clean)
+		}
+	}
+	kept := out == nil
+	if kept {
+		out = children
+	}
+	if textblock && holdsLineBreakToWrite(out) {
+		out = writtenLineBreaks(out)
+		kept = false
+	}
+	for index, child := range out {
+		if !holdsNul(child) {
+			continue
+		}
+		if kept {
+			out = slices.Clone(out)
+			kept = false
+		}
+		out[index] = withNulsWritten(child)
+	}
+	return out, kept
+}
+
+// holdsLineBreakToWrite reports whether writtenLineBreaks gives nodes, a textblock's inline nodes
+// with no two adjacent text runs under equal marks (childrenAsWritten), back otherwise: a hard
+// break with isInline, a line feed in text outside code, or a text it does not keep as it is (an
+// empty one, or one with attributes or children).
+func holdsLineBreakToWrite(nodes []*Node) bool {
+	for _, node := range nodes {
+		switch node.Type {
+		case "hardbreak":
+			if node.Attrs["isInline"] == true {
+				return true
+			}
+		case "text":
+			if node.Text == "" || len(node.Attrs) > 0 || len(node.Children) > 0 ||
+				strings.IndexByte(node.Text, '\n') >= 0 && !nodeHasMark(node, "inlineCode") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // nulAsReplacement is text with each U+0000 written as U+FFFD, which is what CommonMark reads the
@@ -911,44 +1042,61 @@ func nulAsReplacement(text string) string {
 	return strings.ReplaceAll(text, "\x00", "\uFFFD")
 }
 
-// writeNulsAsReplacement writes each U+0000 under node that the rendering would write as it is -
-// in a node's text, in a string attribute a node or mark writes (a link's href, an image's alt, a
-// code block's language), or in a block's id - as U+FFFD (nulAsReplacement). node is the
-// rendering's own copy (StripAnchorMarks clones each node's and mark's attributes). A typed block's
-// other attributes are written quoted (renderTypedAttributes), U+0000 as the escape \x00 that its
-// parser unquotes back, so they keep it; its id is written bare, `#` and the id.
-func writeNulsAsReplacement(node *Node) {
-	node.Text = nulAsReplacement(node.Text)
-	if !IsTypedBlock(node.Type) {
-		writeNulsInAttrs(node.Attrs)
-	} else if id, ok := node.Attrs[BlockIDAttr].(string); ok && strings.IndexByte(id, 0) >= 0 {
-		node.Attrs[BlockIDAttr] = nulAsReplacement(id)
+// holdsNul reports whether node holds, in its own text or attributes, a U+0000 that
+// withNulsWritten writes.
+func holdsNul(node *Node) bool {
+	if strings.IndexByte(node.Text, 0) >= 0 {
+		return true
+	}
+	if attrsHoldNul(node.Attrs) {
+		if !IsTypedBlock(node.Type) {
+			return true
+		}
+		if id, _ := node.Attrs[BlockIDAttr].(string); strings.IndexByte(id, 0) >= 0 {
+			return true
+		}
 	}
 	for _, mark := range node.Marks {
+		if attrsHoldNul(mark.Attrs) {
+			return true
+		}
+	}
+	return false
+}
+
+func attrsHoldNul(attrs Attrs) bool {
+	for _, value := range attrs {
+		if text, ok := value.(string); ok && strings.IndexByte(text, 0) >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// withNulsWritten is a copy of node, which holds a U+0000 (holdsNul), with each U+0000 the
+// rendering would write as it is - in its text, in a string attribute a node or mark writes (a
+// link's href, an image's alt, a code block's language), or in a block's id - as U+FFFD
+// (nulAsReplacement). node may be asWritten's input, so the copy's attributes and marks are its
+// own before any is written. A typed block's other attributes are written quoted
+// (renderTypedAttributes), U+0000 as the escape \x00 that its parser unquotes back, so they keep
+// it; its id is written bare, `#` and the id.
+func withNulsWritten(node *Node) *Node {
+	out := &Node{Type: node.Type, Attrs: cloneAttrs(node.Attrs), Text: nulAsReplacement(node.Text), Marks: cloneMarks(node.Marks), Children: node.Children}
+	if !IsTypedBlock(out.Type) {
+		writeNulsInAttrs(out.Attrs)
+	} else if id, ok := out.Attrs[BlockIDAttr].(string); ok && strings.IndexByte(id, 0) >= 0 {
+		out.Attrs[BlockIDAttr] = nulAsReplacement(id)
+	}
+	for _, mark := range out.Marks {
 		writeNulsInAttrs(mark.Attrs)
 	}
-	for _, child := range node.Children {
-		writeNulsAsReplacement(child)
-	}
+	return out
 }
 
 func writeNulsInAttrs(attrs Attrs) {
 	for name, value := range attrs {
 		if text, ok := value.(string); ok && strings.IndexByte(text, 0) >= 0 {
 			attrs[name] = nulAsReplacement(text)
-		}
-	}
-}
-
-// writeLineBreaksIn gives every textblock under node its line breaks as asWritten writes them.
-func writeLineBreaksIn(node *Node) {
-	switch node.Type {
-	case "paragraph", "heading":
-		node.Children = writtenLineBreaks(node.Children)
-	case "code_block":
-	default:
-		for _, child := range node.Children {
-			writeLineBreaksIn(child)
 		}
 	}
 }
