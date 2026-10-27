@@ -237,9 +237,9 @@ func (p *listenerProcess) health(t *testing.T) map[string]any {
 }
 
 // waitHealth waits up to 30 s for /healthz to report "healthy" with every field of want, and
-// kills the listener and fails the test when it never does. /healthz answers 200 with "starting"
-// from the moment the port is bound, before NATS connects and before the listener installs its
-// SIGTERM handler, and a SIGTERM in that window kills the process without an ordered shutdown.
+// kills the listener and fails the test when it never does. /healthz answers 503 "starting" from
+// the moment the port is bound until the listener is ready, which it is only after it installs its
+// SIGTERM handler, and a SIGTERM before that kills the process without an ordered shutdown.
 func (p *listenerProcess) waitHealth(t *testing.T, what string, want map[string]any) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)

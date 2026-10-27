@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -66,16 +64,10 @@ func setupUnboundDurableFixture(t *testing.T, machineID string, handle durableHa
 	if err := sessions.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for session cache: %v", err)
 	}
+	subscribeRoleLane(t, client)
 	state := &atomic.Pointer[listenerDeps]{}
 	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: rig.receiver})
-	get := func() (int, map[string]any) {
-		recorder := httptest.NewRecorder()
-		healthzHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-		var body map[string]any
-		_ = json.Unmarshal(recorder.Body.Bytes(), &body)
-		return recorder.Code, body
-	}
-	return rig, get
+	return rig, func() (int, map[string]any) { return serveHealthz(state) }
 }
 
 // startUnboundDurableMonitor runs the self-health monitor over the rig's durable the way the

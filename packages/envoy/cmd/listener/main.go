@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -24,7 +26,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
-	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/webhook"
@@ -333,123 +334,148 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 	}
 }
 
-// healthzHandler is the listener's /healthz. It answers 200 "starting" until main publishes deps
-// once the stores are open and the receive loop has started; then 200 "healthy" once every
-// dependency answers, naming this pod's "role": "active" while it receives the durable (it holds
-// the lease and is subscribed, or it runs without a lease and receives), with the durable's lag
-// (num_pending, num_ack_pending), or "standby" otherwise, naming the holder in "active_instance"
-// when the lease record names one and, while it holds the lease but does not receive yet, what it
-// waits for in "receive". A standby is healthy: it serves /v1, the webhooks and the role lane, and
-// takes over delivery when the lease comes free. A listener without the lease's grant says so in
-// "lease" (listenerLeaseUnavailable). It answers 503 "unhealthy" when NATS is unavailable, a
-// cache's watcher has stopped, or on the active pod when its subscription is inactive, the durable
-// consumer is gone, or the durable consumer is "not bound to this listener's subscription"
-// because it was recreated server-side and now delivers elsewhere; and 200 "degraded" for a
-// transient KV failure the self-health monitor and the NATS reconnect retry, or an active pod's
-// durable lag that could not be read. A listener that mounts no GitHub webhook route keeps no CI
-// cache, and its answer carries "ci_cache": "not_applicable". "live_topics" says whether the live
-// topics lane is "subscribed" or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it
-// on, a live client that is not connected or holds no valid subscription is 503 "live
-// subscription inactive", since every topic the stream does not store then reaches no session.
-func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
+// healthzDeadline bounds one /healthz answer. A dependency that has not answered when it passes
+// makes the answer 503, so a readiness probe whose own timeout is longer always gets an answer.
+const healthzDeadline = 5 * time.Second
+
+// healthAnswer is one /healthz answer: its HTTP status and its JSON body.
+type healthAnswer struct {
+	code int
+	body map[string]interface{}
+}
+
+// healthzHandler is the listener's /healthz, the readiness answer of every pod of a machine id. It
+// answers 503 "starting" until main publishes deps, which it does once NATS is connected, the
+// webhook and /v1 gates are open over warm caches and the receive loop has started, and, on a
+// listener configured with an OIDC issuer, until the issuer's discovery has succeeded (verifier).
+// Then it answers 200 "healthy" once every dependency answers, naming this pod's "role": "active"
+// while it receives the durable (it holds the lease and is subscribed, or it runs without a lease
+// and receives), with the durable's lag (num_pending, num_ack_pending), or "standby" otherwise,
+// naming the holder in "active_instance" when the lease record names one and, while it holds the
+// lease but does not receive yet, what it waits for in "receive". A standby is ready: it serves
+// /v1, the webhooks and the role lane, and takes over delivery when the lease comes free. A
+// listener without the lease's grant says so in "lease" (listenerLeaseUnavailable). It answers 503
+// "unhealthy" when NATS is unavailable, the role lane's core subscription is not valid, a cache's
+// watcher has stopped, or on the active pod when its subscription is inactive, the durable consumer
+// is gone, or the durable consumer is "not bound to this listener's subscription" because it was
+// recreated server-side and now delivers elsewhere; and 200 "degraded" for a transient KV failure
+// the self-health monitor and the NATS reconnect retry, or an active pod's durable lag that could
+// not be read. A listener that mounts no GitHub webhook route keeps no CI cache, and its answer
+// carries "ci_cache": "not_applicable". "live_topics" says whether the live topics lane is
+// "subscribed" or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a live
+// client that is not connected or holds no valid subscription is 503 "live subscription inactive",
+// since every topic the stream does not store then reaches no session. The checks run under one
+// healthzDeadline, and an answer they have not reached by then is 503 "unhealthy".
+func healthzHandler(deps *atomic.Pointer[listenerDeps], verifier *apiVerifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), healthzDeadline)
+		defer cancel()
+		answered := make(chan healthAnswer, 1)
+		go func() { answered <- listenerHealth(ctx, deps.Load(), verifier) }()
+		var answer healthAnswer
+		select {
+		case answer = <-answered:
+		case <-ctx.Done():
+			answer = healthAnswer{http.StatusServiceUnavailable, map[string]interface{}{
+				"status": "unhealthy",
+				"error":  "health checks did not finish within " + healthzDeadline.String(),
+			}}
+		}
 		w.Header().Set("Content-Type", "application/json")
-		d := deps.Load()
-		if d == nil {
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "starting"})
-			return
-		}
-		if err := d.client.Conn.FlushTimeout(3 * time.Second); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "nats unavailable"})
-			return
-		}
-		if d.live != nil && (!d.live.Connected() || !d.live.CoreSubOK()) {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "live subscription inactive"})
-			return
-		}
-		for _, c := range d.caches {
-			if err := c.cache.WatchErr(); err != nil {
-				writeDependencyHealth(w, c.name+" KV watcher", err, true)
-				return
-			}
-		}
-		for _, c := range d.caches {
-			if err := c.cache.Ping(); err != nil {
-				writeDependencyHealth(w, c.name+" KV", err, c.cache.WatchErr() != nil || errors.Is(err, nats.ErrConnectionClosed))
-				return
-			}
-		}
-		response := map[string]interface{}{"status": "healthy"}
-		for k, v := range sessionHealthFields(d.sessions) {
-			response[k] = v
-		}
-		if d.ciStore == nil {
-			response["ci_cache"] = "not_applicable"
-		}
-		response["live_topics"] = "not_applicable"
-		if d.live != nil {
-			response["live_topics"] = "subscribed"
-		}
-		report := d.receiver.report()
-		if report.NoLease {
-			response["lease"] = listenerLeaseUnavailable
-		}
-		if report.State != receiveActive {
-			response["role"] = "standby"
-			if report.Lease.ActiveInstance != "" {
-				response["active_instance"] = report.Lease.ActiveInstance
-			}
-			if report.State != receiveStandby {
-				response["receive"] = report.State.String()
-			}
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(response)
-			return
-		}
-		response["role"] = "active"
-		if !report.SubscriptionValid {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "role": "active", "error": "subscription inactive"})
-			return
-		}
-		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.receiver.consumer, nats.Context(r.Context()))
-		switch {
-		case errors.Is(err, nats.ErrConsumerNotFound):
-			writeDependencyHealth(w, "durable consumer", err, true)
-			return
-		case err != nil:
-			response["status"] = "degraded"
-			response["error"] = "durable consumer unavailable: " + err.Error()
-		case consumerInfo.Config.DeliverSubject != report.Subject:
-			// One read and no confirming second one, unlike the self-health probe's: the endpoint
-			// reports the fault the moment a request finds it, and a request landing in a
-			// resubscribe's own gap simply answers 503 until the next one.
-			writeDependencyHealth(w, "durable consumer", errDurableUnbound, true)
-			return
-		default:
-			response["num_pending"] = consumerInfo.NumPending
-			response["num_ack_pending"] = consumerInfo.NumAckPending
-		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(response)
+		w.WriteHeader(answer.code)
+		_ = json.NewEncoder(w).Encode(answer.body)
 	}
 }
 
-func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, terminal bool) {
+// listenerHealth runs /healthz's checks over d, nil until main publishes it, within ctx.
+func listenerHealth(ctx context.Context, d *listenerDeps, verifier *apiVerifier) healthAnswer {
+	if d == nil || !verifier.ready() {
+		return healthAnswer{http.StatusServiceUnavailable, map[string]interface{}{"status": "starting"}}
+	}
+	unhealthy := func(body map[string]interface{}) healthAnswer {
+		body["status"] = "unhealthy"
+		return healthAnswer{http.StatusServiceUnavailable, body}
+	}
+	if err := d.client.Conn.FlushTimeout(3 * time.Second); err != nil {
+		return unhealthy(map[string]interface{}{"error": "nats unavailable"})
+	}
+	if !d.client.CoreSubOK() {
+		return unhealthy(map[string]interface{}{"error": "role subscription inactive"})
+	}
+	if d.live != nil && (!d.live.Connected() || !d.live.CoreSubOK()) {
+		return unhealthy(map[string]interface{}{"error": "live subscription inactive"})
+	}
+	for _, c := range d.caches {
+		if err := c.cache.WatchErr(); err != nil {
+			return dependencyHealth(c.name+" KV watcher", err, true)
+		}
+	}
+	for _, c := range d.caches {
+		if err := c.cache.Ping(); err != nil {
+			return dependencyHealth(c.name+" KV", err, c.cache.WatchErr() != nil || errors.Is(err, nats.ErrConnectionClosed))
+		}
+	}
+	response := map[string]interface{}{"status": "healthy"}
+	for k, v := range sessionHealthFields(d.sessions) {
+		response[k] = v
+	}
+	if d.ciStore == nil {
+		response["ci_cache"] = "not_applicable"
+	}
+	response["live_topics"] = "not_applicable"
+	if d.live != nil {
+		response["live_topics"] = "subscribed"
+	}
+	report := d.receiver.report()
+	if report.NoLease {
+		response["lease"] = listenerLeaseUnavailable
+	}
+	if report.State != receiveActive {
+		response["role"] = "standby"
+		if report.Lease.ActiveInstance != "" {
+			response["active_instance"] = report.Lease.ActiveInstance
+		}
+		if report.State != receiveStandby {
+			response["receive"] = report.State.String()
+		}
+		return healthAnswer{http.StatusOK, response}
+	}
+	response["role"] = "active"
+	if !report.SubscriptionValid {
+		return unhealthy(map[string]interface{}{"role": "active", "error": "subscription inactive"})
+	}
+	consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.receiver.consumer, nats.Context(ctx))
+	switch {
+	case errors.Is(err, nats.ErrConsumerNotFound):
+		return dependencyHealth("durable consumer", err, true)
+	case err != nil:
+		response["status"] = "degraded"
+		response["error"] = "durable consumer unavailable: " + err.Error()
+	case consumerInfo.Config.DeliverSubject != report.Subject:
+		// One read and no confirming second one, unlike the self-health probe's: the endpoint
+		// reports the fault the moment a request finds it, and a request landing in a
+		// resubscribe's own gap simply answers 503 until the next one.
+		return dependencyHealth("durable consumer", errDurableUnbound, true)
+	default:
+		response["num_pending"] = consumerInfo.NumPending
+		response["num_ack_pending"] = consumerInfo.NumAckPending
+	}
+	return healthAnswer{http.StatusOK, response}
+}
+
+// dependencyHealth is /healthz's answer for a dependency that failed with err: 503 "unhealthy"
+// when the failure is terminal, else 200 "degraded".
+func dependencyHealth(dependency string, err error, terminal bool) healthAnswer {
 	statusCode := http.StatusOK
 	status := "degraded"
 	if terminal {
 		statusCode = http.StatusServiceUnavailable
 		status = "unhealthy"
 	}
-	w.WriteHeader(statusCode)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	return healthAnswer{statusCode, map[string]interface{}{
 		"status": status,
 		"error":  dependency + " unavailable: " + err.Error(),
-	})
+	}}
 }
 
 // webhookRoute is one configured webhook path and the handler it serves over the only
@@ -566,16 +592,138 @@ func listenerInstance() (string, error) {
 	return hostname, nil
 }
 
-// listenerStateRetry is how long a start waits between attempts to open the listener state bucket
-// while NATS cannot answer.
-const listenerStateRetry = 2 * time.Second
+// startRetry is how long a start waits between attempts to reach NATS while it cannot answer: the
+// connect (connectListener), each store's buckets (openStartStore) and the listener state bucket
+// (openDeliveryLease). /healthz answers 503 "starting" meanwhile, and a SIGTERM or SIGINT ends the
+// process at once, since the start has installed no handler for either yet.
+const startRetry = 2 * time.Second
+
+// listenerGrant names the grant that gives the listener's NATS user its KV buckets, for the line
+// that reports a bucket the grant refuses.
+const listenerGrant = "infra/core ListenerPermissions"
+
+// natsConnectionError reports whether err is a failure to reach NATS, or to get an answer from it,
+// that a later attempt can get past: no server answered the dial or closed it during the
+// handshake, a request ran out of time or found no responder, the connection closed or is
+// reconnecting, or JetStream answered that it is not available yet. Any other error, a credential
+// or configuration the connect refuses before it dials among them, is not one.
+func natsConnectionError(err error) bool {
+	for _, transient := range []error{
+		io.EOF, io.ErrUnexpectedEOF, syscall.ECONNREFUSED, syscall.ECONNRESET, context.DeadlineExceeded,
+		nats.ErrNoServers, nats.ErrTimeout, nats.ErrNoResponders, nats.ErrNoStreamResponse,
+		nats.ErrConnectionClosed, nats.ErrDisconnected, nats.ErrConnectionReconnecting, nats.ErrStaleConnection,
+	} {
+		if errors.Is(err, transient) {
+			return true
+		}
+	}
+	if netErr := net.Error(nil); errors.As(err, &netErr) {
+		return true
+	}
+	var jsErr nats.JetStreamError
+	if errors.As(err, &jsErr) {
+		api := jsErr.APIError()
+		return api != nil && api.Code == http.StatusServiceUnavailable
+	}
+	return false
+}
+
+// connectListener connects to NATS and reconciles the stream the listener owns
+// (bus.ConnectOwningStream), as instance. A NATS that cannot be reached (natsConnectionError) is
+// tried again every startRetry for as long as it takes, so a listener started before its NATS
+// waits for it rather than exiting. Any other failure ends the process after one ERROR naming it.
+func connectListener(cfg config.Service, instance string, logger *logging.Logger) *bus.Client {
+	for {
+		client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas), bus.WithName("envoy-listener "+instance))
+		if err == nil {
+			return client
+		}
+		if !natsConnectionError(err) {
+			logger.Error("NATS connect failed", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		logger.Warn("NATS connect failed; retrying", slog.String("retry_in", startRetry.String()), slog.String("error", err.Error()))
+		time.Sleep(startRetry)
+	}
+}
+
+// openStartStore opens one of the listener's stores on client's connection with open, which opens
+// buckets, until it succeeds. An open that fails for want of NATS (natsConnectionError) is retried
+// every startRetry. An open the NATS user's grant refuses ends the process after one ERROR naming
+// the bucket and the grant it lacks: nats-server drops a refused request and reports the refusal
+// only as the connection's last error, so the open runs out of time, and a last error that changed
+// across the open to a refusal of one of buckets' subjects is that refusal (bucketRefusal). Any
+// other failure ends the process after one ERROR naming it.
+func openStartStore[T any](client *bus.Client, logger *logging.Logger, what string, buckets []string, open func(*nats.Conn) (T, error)) T {
+	for {
+		conn := client.Conn
+		before := conn.LastError()
+		store, err := open(conn)
+		if err == nil {
+			return store
+		}
+		if bucket, violation := bucketRefusal(buckets, err, before, conn.LastError()); violation != nil {
+			logger.Error("NATS refused KV bucket "+bucket+": the listener's NATS user lacks the grant for it",
+				slog.String("bucket", bucket),
+				slog.String("grant", listenerGrant),
+				slog.String("error", violation.Error()),
+			)
+			conn.Close()
+			os.Exit(1)
+		}
+		if !natsConnectionError(err) {
+			logger.Error(what+" open failed", slog.String("buckets", strings.Join(buckets, ",")), slog.String("error", err.Error()))
+			conn.Close()
+			os.Exit(1)
+		}
+		logger.Warn(what+" open failed; retrying",
+			slog.String("buckets", strings.Join(buckets, ",")),
+			slog.String("retry_in", startRetry.String()),
+			slog.String("error", err.Error()),
+		)
+		time.Sleep(startRetry)
+	}
+}
+
+// bucketRefusal returns the bucket of buckets whose subjects the server refused a failed open, and
+// the refusal: err when it is itself such a refusal, else after, the connection's last error once
+// the open failed, when it differs from before, the last error before it. nats.go keeps one last
+// error per connection, so a refusal another goroutine causes in between hides this one, and the
+// open reads as a connection error that is retried and refused again.
+func bucketRefusal(buckets []string, err, before, after error) (string, error) {
+	for _, bucket := range buckets {
+		if refusesBucket(err, bucket) {
+			return bucket, err
+		}
+		if !sameLastError(before, after) && refusesBucket(after, bucket) {
+			return bucket, after
+		}
+	}
+	return "", nil
+}
+
+// refusesBucket reports whether err is the server's refusal of a publish to a subject of KV bucket
+// bucket: a JetStream API call on its stream KV_<bucket>, or a write to one of its keys,
+// $KV.<bucket>.<key>.
+func refusesBucket(err error, bucket string) bool {
+	if err == nil || !errors.Is(err, nats.ErrPermissionViolation) {
+		return false
+	}
+	match := publishViolation.FindStringSubmatch(err.Error())
+	if match == nil {
+		return false
+	}
+	subject, stream := match[1], ".KV_"+bucket
+	return strings.HasSuffix(subject, stream) || strings.Contains(subject, stream+".") ||
+		strings.HasPrefix(subject, "$KV."+bucket+".")
+}
 
 // openDeliveryLease opens the listener state bucket and makes machineID's delivery lease over it
 // for this process, instance. The bucket is opened on a NATS connection of the lease's own
 // (bus.Dial, as the user and through the proxy the environment names), which nats.go reconnects in
 // place for the life of the process: the bus client replaces its connection after a close, and a
 // handle on the replaced one would never renew the lease again. An open that fails for want of a
-// connection is retried every listenerStateRetry, so a NATS that answers late does not end the
+// connection is retried every startRetry, so a NATS that answers late does not end the
 // start. An open the NATS user's grant refuses (errListenerStateRefused) returns nil after one
 // ERROR naming the bucket and the missing grant: the listener then delivers without a lease, as
 // the machine's one deliverer receiving only while no other subscriber holds the durable, and says
@@ -596,7 +744,7 @@ func openDeliveryLease(urls []string, replicas int, machineID, instance string, 
 		if errors.Is(err, errListenerStateRefused) {
 			logger.Error("listener lease unavailable: the NATS user lacks the grant for KV bucket "+bus.ListenerStateBucket+"; delivering without a lease",
 				slog.String("bucket", bus.ListenerStateBucket),
-				slog.String("grant", "infra/core ListenerPermissions"),
+				slog.String("grant", listenerGrant),
 				slog.String("error", err.Error()),
 			)
 			conn.Close()
@@ -604,10 +752,10 @@ func openDeliveryLease(urls []string, replicas int, machineID, instance string, 
 		}
 		logger.Warn("listener state bucket open failed; retrying",
 			slog.String("bucket", bus.ListenerStateBucket),
-			slog.String("retry_in", listenerStateRetry.String()),
+			slog.String("retry_in", startRetry.String()),
 			slog.String("error", err.Error()),
 		)
-		time.Sleep(listenerStateRetry)
+		time.Sleep(startRetry)
 	}
 }
 
@@ -632,15 +780,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	apiVerifier, err := oidc.Discover(context.Background(), oidcIssuer, oidcAudience, oidc.DiscoveryTimeout)
-	if err != nil {
-		log.Fatal(err)
-	}
+	// An issuer's discovery runs in the background until it succeeds (apiVerifier.discover): /v1
+	// answers 503 "service starting" and /healthz "starting" meanwhile, so an issuer that does not
+	// answer at start leaves the listener up and unready instead of ending it.
+	apiVerifier := newAPIVerifier(oidcIssuer, oidcAudience)
 	if err := validateListenerAPIAuth(cfg.ListenHost, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED"), apiVerifier); err != nil {
 		log.Fatal(err)
 	}
 	logger.Info("listener API auth: " + describeListenerAPIAuth(apiToken, oidcIssuer))
 	logger.Info("listener API hosts: " + describeListenerAPIHosts(apiToken, apiVerifier, cfg.AllowedHosts))
+	if apiVerifier != nil {
+		go apiVerifier.discover(context.Background(), logger)
+	}
 
 	// Load webhook config (fast — env var reads only).
 	webhookCfg, err := webhook.LoadWebhookConfig()
@@ -697,16 +848,18 @@ func main() {
 	// /metrics is always reachable — NOT gated by readiness.
 	mux.Handle("/metrics", met.Handler())
 
-	// /healthz is always reachable, before NATS setup as well as after it.
-	mux.HandleFunc("/healthz", healthzHandler(&deps))
+	// /healthz is always reachable, before NATS setup as well as after it, and answers 503
+	// "starting" until the listener is ready.
+	mux.HandleFunc("/healthz", healthzHandler(&deps, apiVerifier))
 
 	// GaugeFunc for consumer pending — queries NATS at scrape time
 
 	// The webhook and /v1 routes answer 503 "service starting" until their dependencies are open,
 	// each behind its own gate: the webhooks once NATS and, for the GitHub route, the CI store are
-	// (Phase 5), /v1 once the interest and session caches are too (Phase 6). Neither waits for the
-	// durable consumer, which only /healthz reads. The webhook paths reach their gate bare, /v1
-	// through apiAuth.
+	// (Phase 5), /v1 once the interest and session caches are too (Phase 6) and, with an OIDC
+	// issuer configured, its discovery has succeeded (apiAuth answers that wait itself). Neither
+	// waits for the durable consumer, which only /healthz reads. The webhook paths reach their gate
+	// bare, /v1 through apiAuth.
 	webhookGate, v1Gate := newStartingGate("webhook", logger), newStartingGate("v1", logger)
 	hooks := webhookRoutes(webhookCfg)
 	for _, hook := range hooks {
@@ -728,12 +881,9 @@ func main() {
 	listeningAt := time.Now()
 	logger.Info("envoy-listener listening", slog.String("addr", addr))
 
-	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener owns
+	// Phase 5: Connect to NATS, for as long as NATS takes to answer. The listener owns
 	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream).
-	client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas), bus.WithName("envoy-listener "+instance))
-	if err != nil {
-		log.Fatal(err)
-	}
+	client := connectListener(cfg, instance, logger)
 	consumer := bus.ListenerDurable(cfg.MachineID)
 	// The durable is checked here, before the cache warm-ups below (up to 30 s each), so a refused
 	// one ends the start within the NATS connect: no pod could receive from it, and nothing serves
@@ -761,10 +911,9 @@ func main() {
 	// stores below wait on past their 10 s deadline.
 	var ciStore *cistore.Store
 	if webhookCfg.GitHub != nil {
-		ciStore, err = cistore.Open(client.Conn, logger, cistore.WithReplicas(cfg.NATSReplicas), cistore.WithTTL(7*24*time.Hour))
-		if err != nil {
-			log.Fatal(err)
-		}
+		ciStore = openStartStore(client, logger, "CI store", []string{bus.CIStateBucket}, func(conn *nats.Conn) (*cistore.Store, error) {
+			return cistore.Open(conn, logger, cistore.WithReplicas(cfg.NATSReplicas), cistore.WithTTL(7*24*time.Hour))
+		})
 	} else {
 		logger.Info("CI store not opened: no GitHub webhook route, so this listener records and settles no checks")
 	}
@@ -774,10 +923,9 @@ func main() {
 	// The registry and its cache watcher log through the listener's own handler, so its role-restore
 	// count, its warm-up and its reaper cycles are JSON records with this machine's id. Never
 	// slog.SetDefault instead: see store.WithLogger for the CloudWatch filters that breaks.
-	registry, err := store.Open(client.Conn, store.WithReplicas(cfg.NATSReplicas), store.WithLogger(logger.Slog()))
-	if err != nil {
-		log.Fatal(err)
-	}
+	registry := openStartStore(client, logger, "interest registry", []string{bus.InterestBucket, bus.RoleClaimBucket}, func(conn *nats.Conn) (*store.Registry, error) {
+		return store.Open(conn, store.WithReplicas(cfg.NATSReplicas), store.WithLogger(logger.Slog()))
+	})
 
 	// Wait for the interest cache to finish its initial scan of existing KV
 	// entries before we start accepting NATS messages. Without this gate, real
@@ -794,14 +942,9 @@ func main() {
 	}
 	cacheReadyCancel()
 
-	sessions, err := session.OpenSessionRegistry(
-		client.Conn,
-		session.WithSessionReplicas(cfg.NATSReplicas),
-		session.WithSessionLogger(logger.Slog()),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
+	sessions := openStartStore(client, logger, "session registry", []string{bus.SessionBucket}, func(conn *nats.Conn) (*session.SessionRegistry, error) {
+		return session.OpenSessionRegistry(conn, session.WithSessionReplicas(cfg.NATSReplicas), session.WithSessionLogger(logger.Slog()))
+	})
 
 	// The margin between a client's registration refresh and this lifetime can only be checked
 	// against the defaults in the source, while the live value is whatever MaxAge the existing

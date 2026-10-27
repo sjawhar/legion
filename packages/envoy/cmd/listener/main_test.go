@@ -114,26 +114,129 @@ func TestStartingGateLogsEachRefusedRequest(t *testing.T) {
 	}
 }
 
-func TestHealthz_Starting_Returns200WithJSON(t *testing.T) {
+// /healthz answers 503 "starting" until main publishes the listener's dependencies, and on a
+// listener configured with an OIDC issuer until the issuer's discovery has succeeded, so a
+// readiness probe sends a pod no traffic before it can serve.
+func TestHealthzAnswersStartingUntilTheListenerIsReady(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deps     *listenerDeps
+		verifier *apiVerifier
+	}{
+		{name: "dependencies not published"},
+		{name: "OIDC discovery not succeeded", deps: &listenerDeps{}, verifier: newAPIVerifier("https://oidc.eks.example/id/CLUSTER", "envoy")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var state atomic.Pointer[listenerDeps]
+			state.Store(tc.deps)
+			rr := httptest.NewRecorder()
+			healthzHandler(&state, tc.verifier).ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d", rr.Code)
+			}
+			if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+				t.Fatalf("expected Content-Type application/json, got %q", ct)
+			}
+			var body map[string]string
+			if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode JSON: %v", err)
+			}
+			if body["status"] != "starting" {
+				t.Fatalf("expected status 'starting', got %q", body["status"])
+			}
+		})
+	}
+}
+
+// serveHealthz serves one /healthz request over state, on a listener with no OIDC issuer, and
+// returns its status and body.
+func serveHealthz(state *atomic.Pointer[listenerDeps]) (int, map[string]any) {
+	recorder := httptest.NewRecorder()
+	healthzHandler(state, nil).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	var body map[string]any
+	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
+	return recorder.Code, body
+}
+
+// subscribeRoleLane subscribes client's role lane as main does, so /healthz over client finds it.
+func subscribeRoleLane(t *testing.T, client *bus.Client) {
+	t.Helper()
+	if _, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", func(*natsgo.Msg) {}, bus.ListenerQueue("healthz")); err != nil {
+		t.Fatalf("subscribe the role lane: %v", err)
+	}
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the role lane: %v", err)
+	}
+}
+
+// The role lane is a core subscription every pod holds, active and standby alike, so /healthz
+// answers 503 while the client holds no valid one: role messages for this machine then reach no
+// pod of it.
+func TestHealthzAnswersUnhealthyWithoutTheRoleLane(t *testing.T) {
 	var state atomic.Pointer[listenerDeps]
-	handler := healthzHandler(&state)
+	state.Store(&listenerDeps{client: setupPublishTestClient(t)})
+	if code, body := serveHealthz(&state); code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || body["error"] != "role subscription inactive" {
+		t.Fatalf("/healthz without the role lane = %d %v, want 503 unhealthy with error \"role subscription inactive\"", code, body)
+	}
+}
 
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
+// hangingCache is a cache whose Ping does not answer until the test ends, as a KV request a
+// server never answers does not, and then fails.
+type hangingCache struct{ released <-chan struct{} }
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
+func (hangingCache) Rewatch(*natsgo.Conn) error { return nil }
+func (hangingCache) WatchErr() error            { return nil }
+func (c hangingCache) Ping() error {
+	<-c.released
+	return errors.New("the test ended")
+}
+func (hangingCache) StopWatch()               {}
+func (hangingCache) EndWatch(context.Context) {}
+
+// /healthz answers within healthzDeadline (5 s) whatever a dependency does: a check that has not
+// answered by then makes the answer 503, so a readiness probe never times out on it.
+func TestHealthzAnswers503WhenADependencyHangsPastTheDeadline(t *testing.T) {
+	client := setupPublishTestClient(t)
+	subscribeRoleLane(t, client)
+	released := make(chan struct{})
+	t.Cleanup(func() { close(released) })
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, caches: []listenerCache{{name: "hanging", cache: hangingCache{released}}}})
+	started := time.Now()
+	code, body := serveHealthz(&state)
+	elapsed := time.Since(started)
+	if code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || !strings.Contains(fmt.Sprint(body["error"]), "within 5s") {
+		t.Fatalf("/healthz over a hanging dependency = %d %v, want 503 unhealthy naming the 5s deadline", code, body)
 	}
-	ct := rr.Header().Get("Content-Type")
-	if ct != "application/json" {
-		t.Fatalf("expected Content-Type application/json, got %q", ct)
+	if elapsed < healthzDeadline-100*time.Millisecond || elapsed > healthzDeadline+time.Second {
+		t.Fatalf("/healthz over a hanging dependency answered after %s, want about %s", elapsed, healthzDeadline)
 	}
-	var body map[string]string
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
-		t.Fatalf("failed to decode JSON: %v", err)
-	}
-	if body["status"] != "starting" {
-		t.Fatalf("expected status 'starting', got %q", body["status"])
+}
+
+// The start retries what a later attempt can get past, NATS not answering or not ready yet, and
+// ends on anything else: a refused credential or a configuration the connect refuses before it
+// dials would fail every attempt the same way.
+func TestTheStartRetriesOnlyNATSConnectionErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		retry bool
+	}{
+		{name: "connection closed during the handshake", err: io.EOF, retry: true},
+		{name: "no server answered", err: natsgo.ErrNoServers, retry: true},
+		{name: "a request timed out", err: fmt.Errorf("open bucket: %w", natsgo.ErrTimeout), retry: true},
+		{name: "a JetStream request ran out of time", err: context.DeadlineExceeded, retry: true},
+		{name: "no responders", err: natsgo.ErrNoResponders, retry: true},
+		{name: "JetStream temporarily unavailable", err: &natsgo.APIError{Code: http.StatusServiceUnavailable, ErrorCode: 10008, Description: "JetStream system temporarily unavailable"}, retry: true},
+		{name: "a refused credential", err: natsgo.ErrAuthorization},
+		{name: "a remote NATS refused", err: fmt.Errorf("%w: nats.example.test", bus.ErrRemoteNATS)},
+		{name: "a JetStream refusal", err: &natsgo.APIError{Code: http.StatusBadRequest, ErrorCode: 10058, Description: "stream name already in use"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := natsConnectionError(tc.err); got != tc.retry {
+				t.Fatalf("natsConnectionError(%v) = %t, want %t", tc.err, got, tc.retry)
+			}
+		})
 	}
 }
 
@@ -148,17 +251,12 @@ func TestDependencyHealthStatus(t *testing.T) {
 		{name: "terminal watcher", terminal: true, statusCode: http.StatusServiceUnavailable, status: "unhealthy"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rr := httptest.NewRecorder()
-			writeDependencyHealth(rr, "session kv", errors.New("probe failed"), tc.terminal)
-			if rr.Code != tc.statusCode {
-				t.Fatalf("status code = %d, want %d", rr.Code, tc.statusCode)
+			answer := dependencyHealth("session kv", errors.New("probe failed"), tc.terminal)
+			if answer.code != tc.statusCode {
+				t.Fatalf("status code = %d, want %d", answer.code, tc.statusCode)
 			}
-			var body map[string]string
-			if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
-				t.Fatalf("decode response: %v", err)
-			}
-			if body["status"] != tc.status {
-				t.Fatalf("status = %q, want %q", body["status"], tc.status)
+			if answer.body["status"] != tc.status {
+				t.Fatalf("status = %q, want %q", answer.body["status"], tc.status)
 			}
 		})
 	}
@@ -169,15 +267,15 @@ func TestFullMux_StartingState(t *testing.T) {
 	var state atomic.Pointer[listenerDeps]
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthzHandler(&state))
+	mux.HandleFunc("/healthz", healthzHandler(&state, nil))
 
 	mux.Handle("/v1/", newStartingGate("v1", logging.NewWithWriter("test", io.Discard)))
 
-	t.Run("healthz returns 200 starting", func(t *testing.T) {
+	t.Run("healthz returns 503 starting", func(t *testing.T) {
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
-		if rr.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d", rr.Code)
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d", rr.Code)
 		}
 	})
 
@@ -4315,15 +4413,10 @@ func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 	if err := sessions.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for session cache: %v", err)
 	}
+	subscribeRoleLane(t, client)
 	var state atomic.Pointer[listenerDeps]
 	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: rig.receiver})
-	get := func() (int, map[string]any) {
-		recorder := httptest.NewRecorder()
-		healthzHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-		var body map[string]any
-		_ = json.Unmarshal(recorder.Body.Bytes(), &body)
-		return recorder.Code, body
-	}
+	get := func() (int, map[string]any) { return serveHealthz(&state) }
 	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
 		t.Fatalf("before the watcher ends: /healthz = %d %v, want 200 healthy", code, body)
 	}
@@ -4364,6 +4457,7 @@ func healthzWithLiveLane(t *testing.T, machineID string, lane bool) (*bus.Client
 	if err := sessions.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for session cache: %v", err)
 	}
+	subscribeRoleLane(t, client)
 	deps := &listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: rig.receiver}
 	var live *bus.Client
 	var liveSub *natsgo.Subscription
@@ -4383,13 +4477,7 @@ func healthzWithLiveLane(t *testing.T, machineID string, lane bool) (*bus.Client
 	}
 	var state atomic.Pointer[listenerDeps]
 	state.Store(deps)
-	return live, liveSub, func() (int, map[string]any) {
-		recorder := httptest.NewRecorder()
-		healthzHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-		var body map[string]any
-		_ = json.Unmarshal(recorder.Body.Bytes(), &body)
-		return recorder.Code, body
-	}
+	return live, liveSub, func() (int, map[string]any) { return serveHealthz(&state) }
 }
 
 // /healthz says whether the live topics lane is on: "not_applicable" when ENVOY_SUBSCRIBE_ALL_TOPICS

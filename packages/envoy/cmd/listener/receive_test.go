@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os/exec"
 	"reflect"
 	"strconv"
@@ -578,14 +577,12 @@ func TestAStandbyOutlivesThreeSelfHealthIntervals(t *testing.T) {
 		t.Fatalf("the standby's receive loop is %s", state)
 	}
 
+	subscribeRoleLane(t, standby.client)
 	var state atomic.Pointer[listenerDeps]
 	state.Store(&listenerDeps{client: standby.client, registry: registry, sessions: sessions, caches: caches, receiver: standby.receiver})
-	recorder := httptest.NewRecorder()
-	healthzHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	var body map[string]any
-	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
-	if recorder.Code != http.StatusOK || body["status"] != "healthy" || body["role"] != "standby" || body["active_instance"] != "pod-a" {
-		t.Fatalf("the standby's /healthz = %d %v, want 200 healthy, role standby, active_instance pod-a", recorder.Code, body)
+	code, body := serveHealthz(&state)
+	if code != http.StatusOK || body["status"] != "healthy" || body["role"] != "standby" || body["active_instance"] != "pod-a" {
+		t.Fatalf("the standby's /healthz = %d %v, want 200 healthy, role standby, active_instance pod-a", code, body)
 	}
 	if _, ok := body["num_pending"]; ok {
 		t.Fatalf("the standby's /healthz reports the durable's lag: %v", body)
@@ -625,10 +622,7 @@ func TestTheHolderReceivesOnAConnectionTheBusReplaced(t *testing.T) {
 // noLeaseConfig is a NATS server whose one nkey user may publish to anything but the listener
 // state bucket: the grant of a hub that has not yet granted the bucket to its listeners.
 func noLeaseConfig(user string) string {
-	return "jetstream {}\nauthorization {\n  users = [ { nkey: " + strconv.Quote(user) + ", permissions: { publish: { allow: [\">\"], deny: [" +
-		strconv.Quote("$JS.API.STREAM.*."+"KV_"+bus.ListenerStateBucket) + ", " +
-		strconv.Quote("$JS.API.CONSUMER.*."+"KV_"+bus.ListenerStateBucket+".>") + ", " +
-		strconv.Quote("$KV."+bus.ListenerStateBucket+".>") + "] } } } ]\n}\n"
+	return bucketDeniedConfig(user, bus.ListenerStateBucket)
 }
 
 // A listener whose NATS user lacks the grant for the listener state bucket does not exit: it logs

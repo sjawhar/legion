@@ -138,6 +138,103 @@ func TestTheV1APIIsServedWhileAPreLeaseBuildHoldsTheDurable(t *testing.T) {
 	listener.WaitForOutput(t, "durable receiving")
 }
 
+// A listener started before its NATS answers waits for it, however long that takes: the process
+// stays up past the ten connect tries that once ended the start, /healthz answers 503 "starting"
+// and /v1 503 "service starting" meanwhile, and once NATS answers the listener is ready, 200 as
+// the machine's active pod, within 10 s. A second pod of the machine started then is ready too,
+// 200 as the standby naming the first.
+func TestAListenerStartedBeforeItsNATSWaitsForItThenServes(t *testing.T) {
+	server, uri := testnats.Start(t)
+	server.Stop(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	listener := startListenerProcess(t, binary, uri, "box-late", "ENVOY_INSTANCE_ID=pod-late")
+	// The first retry comes after the connect's own ten tries, where the start used to exit.
+	listener.WaitForOutput(t, "NATS connect failed; retrying")
+	for until := time.Now().Add(3 * time.Second); time.Now().Before(until); time.Sleep(250 * time.Millisecond) {
+		if status, body := callListener(t, listener.port, http.MethodGet, "/healthz", ""); status != http.StatusServiceUnavailable || !strings.Contains(body, `"status":"starting"`) {
+			t.Fatalf("/healthz while NATS is away = %d %s, want 503 starting", status, body)
+		}
+	}
+	if status, body := callListener(t, listener.port, http.MethodGet, "/v1/sessions", ""); status != http.StatusServiceUnavailable || !strings.Contains(body, "service starting") {
+		t.Fatalf("/v1 while NATS is away = %d %s, want 503 service starting", status, body)
+	}
+	select {
+	case <-listener.Exited:
+		t.Fatalf("the listener exited while NATS was away:\n%s", listener.Output.String())
+	default:
+	}
+
+	server.Start(t)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status, body := callListener(t, listener.port, http.MethodGet, "/healthz", "")
+		var health map[string]any
+		_ = json.Unmarshal([]byte(body), &health)
+		if status == http.StatusOK && health["status"] == "healthy" && health["role"] == "active" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("/healthz 10 s after NATS answered = %d %s, want 200 healthy and active:\n%s", status, body, listener.Output.String())
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	standby := startListenerProcess(t, binary, uri, "box-late", "ENVOY_INSTANCE_ID=pod-standby")
+	standby.waitStandby(t, "pod-late")
+	status, body := callListener(t, standby.port, http.MethodGet, "/healthz", "")
+	var health map[string]any
+	_ = json.Unmarshal([]byte(body), &health)
+	if status != http.StatusOK || health["role"] != "standby" || health["active_instance"] != "pod-late" {
+		t.Fatalf("the standby's /healthz = %d %s, want 200, role standby, active_instance pod-late", status, body)
+	}
+}
+
+// A SIGTERM while the start waits for NATS ends the process at once: the start installs its own
+// handler only once it serves /v1, so until then the signal's default action ends it.
+func TestASIGTERMEndsAListenerWaitingForItsNATS(t *testing.T) {
+	server, uri := testnats.Start(t)
+	server.Stop(t)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "box-signalled")
+	listener.WaitForOutput(t, "envoy-listener listening")
+	if status, body := callListener(t, listener.port, http.MethodGet, "/healthz", ""); status != http.StatusServiceUnavailable || !strings.Contains(body, `"status":"starting"`) {
+		t.Fatalf("/healthz while NATS is away = %d %s, want 503 starting", status, body)
+	}
+	listener.Terminate(t)
+	select {
+	case <-listener.Exited:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("the listener was still running 3 s after SIGTERM:\n%s", listener.Output.String())
+	}
+}
+
+// bucketDeniedConfig is a NATS server whose one nkey user may publish to anything but KV bucket
+// bucket: the grant of a hub that does not grant the bucket to its listeners.
+func bucketDeniedConfig(user, bucket string) string {
+	return "jetstream {}\nauthorization {\n  users = [ { nkey: " + strconv.Quote(user) + ", permissions: { publish: { allow: [\">\"], deny: [" +
+		strconv.Quote("$JS.API.STREAM.*."+"KV_"+bucket) + ", " +
+		strconv.Quote("$JS.API.CONSUMER.*."+"KV_"+bucket+".>") + ", " +
+		strconv.Quote("$KV."+bucket+".>") + "] } } } ]\n}\n"
+}
+
+// A store bucket the listener's NATS user may not use is no connection error to wait out: the
+// start ends, exit 1, with one ERROR naming the bucket and the grant that lacks it. (The listener
+// state bucket is the exception: without it the listener delivers without a lease.)
+func TestAListenerWhoseGrantRefusesAStoreBucketExitsNamingIt(t *testing.T) {
+	seed, public := testnats.User(t)
+	_, uri := testnats.StartConfig(t, bucketDeniedConfig(public, bus.SessionBucket), []string{"-js"}, false)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "box-refused", "NATS_NKEY_SEED="+seed)
+	listener.WaitExit(t, "a start whose grant refuses "+bus.SessionBucket)
+	if code := listener.Cmd.ProcessState.ExitCode(); code != 1 {
+		t.Fatalf("the listener exited %d, want 1:\n%s", code, listener.Output.String())
+	}
+	refused := func(record map[string]any) bool {
+		return record["level"] == "ERROR" && record["bucket"] == bus.SessionBucket && record["grant"] == listenerGrant
+	}
+	if got := countRecords(listener, "NATS refused KV bucket "+bus.SessionBucket+": the listener's NATS user lacks the grant for it", refused); got != 1 {
+		t.Fatalf("the listener logged the refused bucket %d times at ERROR, want once:\n%s", got, listener.Output.String())
+	}
+}
+
 // Every pod of one machine id runs the role lane, the active pod and each standby alike, so both
 // subscribe notifications.role.> at once. They are one core-NATS queue group
 // (envoy-listener-<machine id>), and NATS hands each message to one member of a group, so a role
