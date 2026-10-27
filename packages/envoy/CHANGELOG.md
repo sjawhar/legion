@@ -902,6 +902,14 @@
   `route_status: unknown` at once instead of each waiting up to 2 s. A `route_status` can
   therefore be up to 5 s old; its values and the `503 ENVOY_UNAVAILABLE` of a `live` or
   `no_holder` filter are unchanged.
+- `GET /api/v1/agents` no longer asks the Envoy listener on every request: it reads Dispatch's
+  shared copy of the listener's session list, the one issue reads' `route_status` reads, so its
+  list is at most 5 s old and one listener call per 5 s serves both (INFRA-652). Its rows, fields
+  and order are unchanged. A listener slower than 2 s now answers `503 ENVOY_UNAVAILABLE` where
+  the client used to wait up to 5 s, and after a failed listener read an agents list answers that
+  `503` for up to 5 s without asking the listener again. The new test-only
+  `DISPATCH_TEST_ROSTER_UNCACHED=1`, under `DISPATCH_TEST_HOOKS=1`, turns the copy off for an
+  end-to-end test process, so every read asks the listener.
 - **Breaking:** `envoy-dispatch backfill-embeddings` is removed: the server's coverage pass does
   its work at boot and every 10 minutes, and an operator script that still runs it exits 2.
   Migration `0119` drops its checkpoint table, `embeddings_backfill_progress`, in the same release,
