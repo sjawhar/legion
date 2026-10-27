@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-148",
-  "completed": "2026-10-27T16:46:43Z",
+  "completed": "2026-10-27T17:12:22Z",
   "proof": [
     {
       "criterion": "A1: a session whose ask a person answered carries that answer word for word in its next model request (Oh My Pi)",
@@ -53,12 +53,12 @@
       "negativeControl": "An 8,000-character single-item list renders as the header plus `1 older item left out to stay under 8,000 characters: …`"
     },
     {
-      "criterion": "Round 2: no list from another Dispatch URL when Dispatch is off with an error",
-      "surface": "the claude-envoy answers hook bundle (dist/session-hook.js) against stand-in Dispatches A and B",
-      "command": "cd packages/claude-envoy && LEGION_TEST_CLAUDE=<claude 2.1.311> bun test (208 pass) incl. answers-hook.test.ts's A-then-B case; cd packages/envoy-client && bun test src/__tests__/session-answers.test.ts",
-      "observed": "With answers.json read from Dispatch A and envoy.json now naming Dispatch B behind a slow `!` token, the hook prints exactly the failure line in under 1 s, never A's list; its refresher then reads B with the new token and A gets no request. readSessionAnswers off with an error carries only the cache of the URL the caller names (sessionDispatchUrl reads it without running the command).",
-      "headSha": "3d789a90466d5e82c31c0654a551bea8b06e0b11",
-      "negativeControl": "Same setup with the configured URL equal to A carries A's list with the error as its reason; with no URL named, the failure line"
+      "criterion": "No list from another Dispatch URL in the Claude hook, refresher path included (tester's red test 1502ee12)",
+      "surface": "the built claude-envoy hook bundle (dist/session-hook.js) as Claude Code runs it, against two stand-in Dispatches, with a slow `!` token command",
+      "command": "cd packages/claude-envoy && bun run build && bun test tests/answers-hook.test.ts (13 pass, 4 runs in a row), including the tester's unmodified `a refresher started for the Dispatch envoy.json named before never hands its list to a hook for the Dispatch it names now`; full suite with LEGION_TEST_CLAUDE=<claude 2.1.311> 208 pass",
+      "observed": "The refresher now records the Dispatch URL it read in answers-refresh.json; a hook carries its outcome only when that URL is the one envoy.json names to the hook now (sessionDispatchUrl), and otherwise carries the failure line naming that the refresher read another Dispatch, then a later hook carries the list of the Dispatch named now. The refresher read `before` (before-token) and the second hook's context does not contain its list.",
+      "headSha": "33b1f07ac59d4b2850e777fba080f6e2afeebfc5",
+      "negativeControl": "At e1dd5c52 (before the fix) the same red test fails: the second hook carried `before`'s list as a fresh list (tester's 5 of 5 reproductions)."
     }
   ],
   "filesChanged": [
@@ -74,7 +74,8 @@
     "Round 3 (review 1): sessionanswers package (moved from store), migration 0131 covering index on message_deliveries, 0129/0130 header fixes, loadThreadRoot, envoy AGENTS.md routing paragraph; envoy-client dispatch-session-directory leaf module, ownerTitle, getComments(issue), session-answers failure line on empty cache, reason in cached header, cache keyed by Dispatch URL (state key v2); claude-envoy detached answers-refresh mode; pi-envoy context-message module and main-loop request rules, two-copy WeakSet guard; pi-legion imports",
     "Forward merge of main fd05f188 (merge commit b77425ec): publisher.go keeps main's artifact.human_edited author route beside this branch's reply-on-a-document route; publisher_document_authors_test.go, contracts and pi-envoy CHANGELOGs keep both sides; this branch's migrations renumbered 0130 events_person_words, 0131 comment_deliveries_session, 0132 message_deliveries_session_created after main's 0129_document_edit_notices; claude-envoy dist rebuilt",
     "Round 4 (review 2): pi-envoy session-answers-context.ts branchPosition matches custom_message and branch_summary entries and recognises an empty-tail compaction conversion (a repeat while the live AgentSession isCompacting); envoy-client failureSentence, dispatchUrl/sessionDispatchUrl, readSessionAnswers dispatchUrl option (no cross-URL fallback); claude-envoy hook passes the configured URL; dist rebuilt; pi-envoy CHANGELOG line wrapped",
-    "Forward merge of main 2df3353c (merge commit 3d789a90): CHANGELOGs and cmd/dispatch README keep both sides; this branch's migrations renumbered 0135 events_person_words, 0136 comment_deliveries_session, 0137 message_deliveries_session_created after main's 0130-0134; claude-envoy dist rebuilt"
+    "Forward merge of main 2df3353c (merge commit 3d789a90): CHANGELOGs and cmd/dispatch README keep both sides; this branch's migrations renumbered 0135 events_person_words, 0136 comment_deliveries_session, 0137 message_deliveries_session_created after main's 0130-0134; claude-envoy dist rebuilt",
+    "Round 5 (tester fail at e1dd5c52): claude-envoy hooks/session-hook.ts records the refresher's Dispatch URL in answers-refresh.json and refuses another URL's outcome; dist rebuilt"
   ],
   "trickyParts": [
     "A person's reply to a message is a message.answered event, so S1 and the 0121 index take message.answered as well as message.created.",
