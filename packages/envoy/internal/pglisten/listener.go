@@ -10,6 +10,8 @@
 // migration runners.
 package pglisten
 
+// INFRA-583 scratch probe C: dispatch_memory names this package only through two nested anchors.
+
 import (
 	"context"
 	"errors"
