@@ -71,24 +71,22 @@ type roomState struct {
 	updateClasses  []documentUpdateClass
 	pendingUpdates int
 	queuedBytes    int
-	// appendLinger is the channel a lingering browser append of the room waits on, made by the
-	// first one to linger and closed, then dropped, to end every linger at once: when something
-	// asks the room's appends to go now (flushRoomAppends, which also records appendsFlushed, so
-	// an update recorded before that ask no longer lingers), when a wait for the room's appends
-	// begins (waitForRoomIdle, which also counts itself in appendWaiters, so no append lingers
-	// while it waits), when the queue reaches a batch's cap (recordUpdateClass), and when the
-	// record is handed over (handOverFailedRoomLocked).
-	appendLinger   chan struct{}
+	// appendLinger is what a lingering browser append of the room waits on, woken to end every
+	// linger at once: when a wait for the room's appends begins (waitForRoomIdle, which also
+	// records appendsFlushed, so an update recorded before that ask no longer lingers, and counts
+	// itself in appendWaiters, so no append lingers while it waits), when the queue reaches a
+	// batch's cap (recordUpdateClass), and when the record is handed over
+	// (handOverFailedRoomLocked).
+	appendLinger   wakeSignal
 	appendsFlushed time.Time
 	appendWaiters  int
-	// idle is the room's idle signal: the channel a wait for the room's appends waits on
-	// (waitForRoomIdle), made by the first waiter that finds pendingUpdates or durableAppends
-	// above zero and closed, then dropped, once both are zero again (countsFellLocked), or when the
-	// record is handed over with its counts (handOverFailedRoomLocked). Every place either count
-	// falls tells countsFellLocked; nothing is made while nobody waits. settleWhenIdle marks a
-	// settlement whose wait for the appends ran out (retrySettleSoon): the same fall that closes
-	// the signal arms it again, at once, as any settlement timer is armed.
-	idle           chan struct{}
+	// idle is the room's idle signal: what a wait for the room's appends waits on
+	// (waitForRoomIdle) once it finds pendingUpdates or durableAppends above zero, woken once both
+	// are zero again (countsFellLocked), or when the record is handed over with its counts
+	// (handOverFailedRoomLocked). Every place either count falls tells countsFellLocked.
+	// settleWhenIdle marks a settlement whose wait for the appends ran out (retrySettleSoon): the
+	// same fall that wakes the signal arms it again, at once, as any settlement timer is armed.
+	idle           wakeSignal
 	settleWhenIdle bool
 	settle         *time.Timer
 	unrecorded     map[pmdoc.MarkRef]time.Time
@@ -297,7 +295,7 @@ func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 	s.dropResidentBytesLocked(state)
 	// A wait for the room's appends on this record looks the room up again, and waits on the
 	// record that counts the room's updates from now on, if any does.
-	state.wakeIdleLocked()
+	state.idle.wake()
 	if len(state.connected) == 0 && len(state.updateClasses) == 0 {
 		s.rooms.CompareAndDelete(room, state)
 		return
@@ -325,7 +323,7 @@ func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
 	state.queuedBytes = 0
 	state.durableAppends.Add(-carried)
 	// A browser append lingering on this record looks the queue up again on the successor.
-	state.wakeAppendLingerLocked()
+	state.appendLinger.wake()
 	s.rooms.CompareAndSwap(room, state, successor)
 }
 
@@ -366,7 +364,7 @@ func (s *Service) recordUpdateClass(room string, update []byte, class documentUp
 	state.residentBytes += int64(len(update))
 	s.residentBytes.Add(int64(len(update)))
 	if len(state.updateClasses) >= roomAppendBatchUpdates || state.queuedBytes >= roomAppendBatchBytes {
-		state.wakeAppendLingerLocked()
+		state.appendLinger.wake()
 	}
 }
 
@@ -385,6 +383,13 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdate
 	if index < 0 {
 		return documentUpdateClass{contentChanged: true}, nil, false
 	}
+	return s.consumeUpdateClassLocked(room, state, index), state, true
+}
+
+// consumeUpdateClassLocked takes the class at index out of state's queue, room's record, and
+// answers it: its bytes leave queuedBytes, and a durable class no call had taken yet (handed) ends
+// its pending count. Its caller holds state.mu.
+func (s *Service) consumeUpdateClassLocked(room string, state *roomState, index int) documentUpdateClass {
 	class := state.updateClasses[index]
 	if index == 0 {
 		// The usual case, the queue's oldest class: its slot is cleared, so the array the queue
@@ -399,7 +404,7 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdate
 		state.pendingUpdates--
 		s.countsFellLocked(room, state)
 	}
-	return class, state, true
+	return class
 }
 
 // findUpdateClassLocked is the index in queue of the class recorded for update, -1 for none. The
@@ -411,10 +416,8 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdate
 // slice of - a copy, as a test can hand on - falls back to the first class with the same bytes.
 // Its caller holds the queue's state.mu.
 func findUpdateClassLocked(queue []documentUpdateClass, update []byte) int {
-	for index := range queue {
-		if sameUpdate(queue[index].update, update) {
-			return index
-		}
+	if at := queuedUpdateLocked(queue, update, 0); at >= 0 {
+		return at
 	}
 	for index := range queue {
 		if bytes.Equal(queue[index].update, update) {
@@ -478,28 +481,31 @@ func (s *Service) countsFellLocked(room string, state *roomState) {
 	if state.pendingLocked() || state.appendingLocked() {
 		return
 	}
-	state.wakeIdleLocked()
+	state.idle.wake()
 	if state.settleWhenIdle && !state.released {
 		s.rearmSettleLocked(room, state)
 	}
 }
 
-// idleSignalLocked is state's idle signal, made now when no waiter has made it yet. Its caller
-// holds state.mu and has found a count above zero, which countsFellLocked closes the signal for
-// once both are zero again.
-func (state *roomState) idleSignalLocked() <-chan struct{} {
-	if state.idle == nil {
-		state.idle = make(chan struct{})
+// wakeSignal is a channel any number of waiters wait on, and one wake ends every wait at once. The
+// first waiter makes it (wait), and wake closes it, then drops it, so the next waiter makes its
+// own; nothing is made while nobody waits. The zero wakeSignal is ready, and its owner's mutex
+// guards it.
+type wakeSignal struct{ ch chan struct{} }
+
+// wait is the channel the next wake closes, made now when no waiter has made it yet.
+func (w *wakeSignal) wait() <-chan struct{} {
+	if w.ch == nil {
+		w.ch = make(chan struct{})
 	}
-	return state.idle
+	return w.ch
 }
 
-// wakeIdleLocked closes state's idle signal, if a waiter made one, and drops it, so the next
-// waiter makes its own. Its caller holds state.mu.
-func (state *roomState) wakeIdleLocked() {
-	if state.idle != nil {
-		close(state.idle)
-		state.idle = nil
+// wake closes the channel, if a waiter made one, and drops it.
+func (w *wakeSignal) wake() {
+	if w.ch != nil {
+		close(w.ch)
+		w.ch = nil
 	}
 }
 
@@ -628,6 +634,15 @@ func (s *Service) roomClosed(room string) bool {
 type issueRead struct {
 	open bool
 	at   time.Time
+}
+
+// readIssue reads whether room's issue is open (issueOpen) on q, stamped with when the read began:
+// the stamp is taken before the query, so the read is never taken for fresher than it is.
+func (s *Service) readIssue(ctx context.Context, q Queryer, room string) (issueRead, error) {
+	read := issueRead{at: time.Now()}
+	var err error
+	read.open, err = s.issueOpen(ctx, q, room)
+	return read, err
 }
 
 // recordIssueLocked records read on state unless state holds a record made later (closedRead):

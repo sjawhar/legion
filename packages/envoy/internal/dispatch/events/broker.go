@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -67,8 +69,8 @@ func lockOwners(ctx context.Context, tx pgx.Tx, events []model.Event) ([]string,
 		keys[index] = key
 		order[index] = index
 	}
-	sort.SliceStable(order, func(left, right int) bool {
-		return keys[order[left]] < keys[order[right]]
+	slices.SortStableFunc(order, func(left, right int) int {
+		return strings.Compare(keys[left], keys[right])
 	})
 	locked := make(map[string]*lockedOwner, len(events))
 	for _, index := range order {
@@ -104,7 +106,8 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 // What the events cost does not grow with how many there are, only with how many owners they
 // have: every owner is validated before any is locked, each distinct owner is locked once, in
 // LockOwners' order, the commit-order lock is taken once, every row is inserted by one
-// statement, and each owner's last_seq advances once, to its last event's sequence. Every
+// statement, and what follows the insert - each ask.opened event's payload naming its own id, and
+// each owner's last_seq advancing once, to its last event's sequence - goes in one pipeline. Every
 // round trip after the commit-order lock makes every other event writer on the database wait,
 // so a caller with several events to write hands them over together.
 func (b *Broker) AppendAll(ctx context.Context, tx pgx.Tx, events []model.Event) ([]model.Event, error) {
@@ -189,6 +192,10 @@ func (b *Broker) AppendAll(ctx context.Context, tx pgx.Tx, events []model.Event)
 	if inserted != len(appended) {
 		return nil, fmt.Errorf("insert event: %d rows returned for %d events", inserted, len(appended))
 	}
+	// The ask.opened payloads that name their own event's id, then each owner's row advancing once
+	// to its last event, in the order the owners were locked, go in one pipeline: each statement's
+	// error is wrapped as it would be sent alone, and the batch reports the first to fail.
+	var batch pgx.Batch
 	for index := range appended {
 		e := &appended[index]
 		if e.Type != "ask.opened" {
@@ -203,54 +210,54 @@ func (b *Broker) AppendAll(ctx context.Context, tx pgx.Tx, events []model.Event)
 		if err != nil {
 			return nil, fmt.Errorf("encode ask.opened payload: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `update events set payload = $2 where id = $1`, e.ID, payload); err != nil {
-			return nil, fmt.Errorf("record ask.opened event identity: %w", err)
-		}
+		queueExec(&batch, "record ask.opened event identity", `update events set payload = $2 where id = $1`, e.ID, payload)
 		e.Payload = opened
 	}
-	// Each owner's row advances once, to its last event, in the order the owners were locked.
 	last := make(map[string]int, len(owners))
 	for index, e := range appended {
 		if !ownerless(e) {
 			last[keys[index]] = index
 		}
 	}
-	ownerKeys := make([]string, 0, len(last))
-	for key := range last {
-		ownerKeys = append(ownerKeys, key)
+	for _, key := range slices.Sorted(maps.Keys(last)) {
+		queueOwnerSeq(&batch, appended[last[key]])
 	}
-	sort.Strings(ownerKeys)
-	for _, key := range ownerKeys {
-		if err := advanceOwnerSeq(ctx, tx, appended[last[key]]); err != nil {
+	if batch.Len() > 0 {
+		if err := tx.SendBatch(ctx, &batch).Close(); err != nil {
 			return nil, err
 		}
 	}
 	return appended, nil
 }
 
-// advanceOwnerSeq records e, its owner's last appended event, as that owner's last sequence.
-func advanceOwnerSeq(ctx context.Context, tx pgx.Tx, e model.Event) error {
+// queueExec queues sql with args into b; its error, wrapped in what, is what b's Close returns
+// when the statement is the first of b's to fail.
+func queueExec(b *pgx.Batch, what, sql string, args ...any) {
+	b.Queue(sql, args...).Fn = func(results pgx.BatchResults) error {
+		if _, err := results.Exec(); err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		}
+		return nil
+	}
+}
+
+// queueOwnerSeq queues into b the write recording e, its owner's last appended event, as that
+// owner's last sequence.
+func queueOwnerSeq(b *pgx.Batch, e model.Event) {
 	switch {
 	case e.IssueKey != nil:
-		if _, err := tx.Exec(ctx, `
+		queueExec(b, "advance issue event sequence", `
 			update issues set last_seq = $2, updated_at = greatest(updated_at, $3) where key = $1
-		`, *e.IssueKey, e.Seq, e.CreatedAt); err != nil {
-			return fmt.Errorf("advance issue event sequence: %w", err)
-		}
+		`, *e.IssueKey, e.Seq, e.CreatedAt)
 	case e.ArtifactID != nil:
-		if _, err := tx.Exec(ctx, `
+		queueExec(b, "advance artifact event sequence", `
 			update artifacts set last_seq = $2 where id = $1
-		`, *e.ArtifactID, e.Seq); err != nil {
-			return fmt.Errorf("advance artifact event sequence: %w", err)
-		}
+		`, *e.ArtifactID, e.Seq)
 	case e.ProjectKey != nil:
-		if _, err := tx.Exec(ctx, `
+		queueExec(b, "advance project event sequence", `
 			update projects set last_seq = $2 where key = $1
-		`, *e.ProjectKey, e.Seq); err != nil {
-			return fmt.Errorf("advance project event sequence: %w", err)
-		}
+		`, *e.ProjectKey, e.Seq)
 	}
-	return nil
 }
 
 // ownerless reports whether e names no owner row: a session-addressed event, which has no

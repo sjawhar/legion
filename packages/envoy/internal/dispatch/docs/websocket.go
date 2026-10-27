@@ -109,11 +109,11 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 // commits (AppendUpdatesWithCredit). It returns nil only once the update is durable, so ygo's flush
 // still means every update it held is stored.
 //
-// How is room_appends.go's. An update another append of the room already stored is only consumed.
-// One the room's queued updates can go with lingers for them, at most roomAppendLinger from its
-// recording, and then goes in one transaction with the updates the room recorded after it
-// (appendBatch). Any other goes alone once its suppression slot check has passed, as every update
-// did before batches (appendAlone). Either way its append stores only what no other append of the
+// How is room_appends.go's. An update another append of the room already stored is only consumed
+// (planRoomAppend consumes it). One the room's queued updates can go with lingers for them, at most
+// roomAppendLinger from its recording, and then goes in one transaction with the updates the room
+// recorded after it (appendBatch). Any other goes alone once its suppression slot check has passed
+// (appendAlone). Either way its append stores only what no other append of the
 // room stored (storeUpdates). An update that never reaches the store - its room failed, or a live
 // write or a settlement already made it durable - lands its credit here instead: the room drops
 // it with the update, which the browser resends.
@@ -138,7 +138,6 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	}
 	switch plan {
 	case appendStored:
-		a.service.consumeUpdateClass(room, update)
 		return nil
 	case appendAlone:
 		// The class, if any, is marked handed (planRoomAppend) before the slot check, so no
@@ -272,8 +271,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "document not found", http.StatusNotFound)
 		return
 	}
-	issue := issueRead{at: time.Now()}
-	if issue.open, err = s.issueOpen(r.Context(), s.queryFrom(r.Context()), room); err != nil {
+	issue, err := s.readIssue(r.Context(), s.queryFrom(r.Context()), room)
+	if err != nil {
 		http.Error(w, "document not found", http.StatusNotFound)
 		return
 	}
@@ -405,9 +404,8 @@ func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (webs
 	closed, recorded := s.recordedIssueClosed(room)
 	if !recorded {
 		ctx := context.Background()
-		issue := issueRead{at: time.Now()}
-		var err error
-		if issue.open, err = s.issueOpen(ctx, s.queryFrom(ctx), room); err != nil {
+		issue, err := s.readIssue(ctx, s.queryFrom(ctx), room)
+		if err != nil {
 			return websocket.ConnectionConfig{}, err
 		}
 		s.recordIssueRead(room, issue)
@@ -537,8 +535,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// write's publish - reads it here.
 	issue, admitted := s.admittedIssueRead(room)
 	if !admitted {
-		issue.at = time.Now()
-		if issue.open, err = s.issueOpen(ctx, rooms, room); err != nil {
+		if issue, err = s.readIssue(ctx, rooms, room); err != nil {
 			return err
 		}
 	}

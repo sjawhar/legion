@@ -12,8 +12,8 @@ import (
 	"time"
 
 	gws "github.com/gorilla/websocket"
-	"github.com/reearth/ygo/encoding"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -63,46 +63,6 @@ func refuseSocket(t *testing.T, serverURL, id, what string) {
 	}
 	if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("%s: response=%v err=%v, want the socket refused with 503", what, response, err)
-	}
-}
-
-// hocuspocusScope sends the Hocuspocus authentication frame a provider sends once its socket is
-// open, carrying token as the dashboard carries its schema version, and returns the scope the
-// server's authenticated reply names: "readonly" or "read-write".
-func hocuspocusScope(t *testing.T, connection *gws.Conn, room, token string) string {
-	t.Helper()
-	frame := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarString(room)
-		encoder.WriteVarUint(2) // Hocuspocus authentication message.
-		encoder.WriteVarUint(0) // Token authentication payload.
-		encoder.WriteVarString(token)
-	})
-	if err := connection.WriteMessage(gws.BinaryMessage, frame); err != nil {
-		t.Fatalf("send the Hocuspocus authentication frame: %v", err)
-	}
-	_ = connection.SetReadDeadline(time.Now().Add(10 * time.Second))
-	defer func() { _ = connection.SetReadDeadline(time.Time{}) }()
-	for {
-		_, message, err := connection.ReadMessage()
-		if err != nil {
-			t.Fatalf("read the Hocuspocus authentication reply: %v", err)
-		}
-		decoder := encoding.NewDecoder(message)
-		if _, err := decoder.ReadVarString(); err != nil {
-			t.Fatalf("read the Hocuspocus document name: %v", err)
-		}
-		if kind, err := decoder.ReadVarUint(); err != nil || kind != 2 {
-			continue
-		}
-		subtype, err := decoder.ReadVarUint()
-		if err != nil || subtype != 2 {
-			t.Fatalf("Hocuspocus authentication reply subtype = %d (%v), want authenticated", subtype, err)
-		}
-		scope, err := decoder.ReadVarString()
-		if err != nil {
-			t.Fatalf("read the Hocuspocus authentication scope: %v", err)
-		}
-		return scope
 	}
 }
 
@@ -192,7 +152,7 @@ func TestAnIssueClosedWhileASocketLoadsAdmitsItReadOnly(t *testing.T) {
 	if !closed.Load() {
 		t.Fatal("the socket's admission never reached the hook that closes the issue, so nothing here is tested")
 	}
-	if scope := hocuspocusScope(t, connection, artifactID, strconv.Itoa(pmdoc.SchemaVersion())); scope != "readonly" {
+	if scope := docstest.AuthenticationScope(t, connection, artifactID, strconv.Itoa(pmdoc.SchemaVersion())); scope != "readonly" {
 		t.Fatalf("the socket whose issue closed while it loaded is authenticated %q, want readonly", scope)
 	}
 }

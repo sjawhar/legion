@@ -39,8 +39,7 @@ import (
 // holds the document's lock it can only lose what another transaction stored meanwhile
 // (roomAppend.recheck), and an update recorded while it waited goes in a later call's batch. A
 // class queued before u is not u's to take, even unstored: it is an update ygo hands on after u, as
-// two peers' read loops can (consumeUpdateClass), and it keeps its own call, as an update stored
-// out of order always did.
+// two peers' read loops can (consumeUpdateClass), and it keeps its own call.
 //
 // What holds:
 //
@@ -60,8 +59,7 @@ import (
 //   - Versions follow the order in which batches commit, and within a batch the queue's order. A
 //     batch is u and the run after it, stored at consecutive versions from the head its gate read
 //     in the order the room recorded them, its update-log order, the order it applied them. A class
-//     queued before u that its own call stores later is at a later version, as two peers' updates
-//     stored out of order always were.
+//     queued before u that its own call stores later is at a later version.
 //   - A stored class's counts. At its commit an append marks every class it stored stored and
 //     finishes the durable append of each durable one on the record that holds the class then (a
 //     failed room's handover moves a queued class with its count and its mark,
@@ -82,13 +80,12 @@ import (
 //     which it matches, in order, against the update it is handed (consumeSuppressedPersistence). A
 //     slot is queued before its update is recorded and leaves only with that update's own call,
 //     which marks the class handed before it checks the slot. A call that finds a slot of the room
-//     queued stores its update alone, slot check first, as each update was stored before batches;
-//     a batch is taken only while no slot of the room is queued, from classes recorded by then, and
-//     stops at a handed class, so it never holds a slot's update, and a slot queued once it is
-//     taken is for an update recorded after it. A failed room purges its slots
-//     (purgeSuppressedPersistence) and drops what its persistence hands on while it is failed; a
-//     call after its record is handed over meets such an update as any other, as it did before
-//     batches.
+//     queued stores its update alone, slot check first; a batch is taken only while no slot of the
+//     room is queued, from classes recorded by then, and stops at a handed class, so it never holds
+//     a slot's update, and a slot queued once it is taken is for an update recorded after it. A
+//     failed room purges its slots (purgeSuppressedPersistence) and drops what its persistence
+//     hands on while it is failed; a call after its record is handed over meets such an update as
+//     any other.
 //   - No holder of a document lock waits for a RoomAppends connection. A batch takes its connection
 //     (store.Pool.RoomAppends) before the document's lock and holds store.HoldsConnection on its
 //     context, so nothing under it takes a second connection; and nothing else takes a connection of
@@ -119,7 +116,7 @@ import (
 // roomAppendLinger is how long after an update was recorded its call waits for the room's queue to
 // fill before its batch goes to the store. A keystroke's durability then lags its commit by at most
 // this beyond its transaction; a settlement, a shutdown or anything else that waits on the room's
-// appends asks for them at once instead (flushRoomAppends), so it waits out no linger.
+// appends asks for them at once instead (waitForRoomIdle), so it waits out no linger.
 const roomAppendLinger = 50 * time.Millisecond
 
 // roomAppendBatchUpdates and roomAppendBatchBytes bound one batch: at most this many updates and
@@ -311,8 +308,8 @@ func roomAppendFrom(ctx context.Context) *roomAppend {
 
 // cut ends a room's batch before updates[index], the first of them that does not decode alone,
 // and answers what is left of updates and true. The update cut is left to its own call, whose
-// append it then leads and fails, failing the room, as an update stored alone always did. The
-// first update, and any update of an append that is not a room's batch, cannot be cut: false.
+// append it then leads and fails, failing the room. The first update, and any update of an append
+// that is not a room's batch, cannot be cut: false.
 func (a *roomAppend) cut(updates []BrowserUpdate, index int) ([]BrowserUpdate, bool) {
 	if a == nil || index == 0 || len(a.members) != len(updates) {
 		return updates, false
@@ -400,12 +397,14 @@ func (a *roomAppend) committed(head, last, oldest int64) {
 				continue
 			}
 			from = at + 1
-			if queued := &state.updateClasses[at]; !queued.stored {
-				queued.stored = true
-				if queued.durable {
-					state.durableAppends.Add(-1)
-					settles = settles || queued.contentChanged
-				}
+			queued := &state.updateClasses[at]
+			if queued.stored {
+				continue
+			}
+			queued.stored = true
+			if queued.durable {
+				state.durableAppends.Add(-1)
+				settles = settles || queued.contentChanged
 			}
 		}
 		a.service.countsFellLocked(a.room, state)
@@ -450,27 +449,29 @@ type appendPlan int
 
 const (
 	// appendAlone stores the update by itself, after its suppression slot check
-	// (StoreUpdateContext), as each update was stored before batches.
+	// (StoreUpdateContext).
 	appendAlone appendPlan = iota
 	// appendBatch stores the update with the run of the room's queue after it (batchRunLocked).
 	appendBatch
-	// appendStored only consumes the update's class: another call's append stored it.
+	// appendStored only consumes the update's class, which planRoomAppend does: another call's
+	// append stored it.
 	appendStored
 )
 
 // planRoomAppend is how the call for update stores it, read under room's state lock, and the
 // classes its append takes (roomAppend.members): appendStored, and none, for a class another
-// append already stored; appendAlone for an update with no class, and none, for a class that is
-// not durable or while a suppression slot is queued for the room, and the class; appendBatch
-// otherwise, and the class with the run after it (batchRunLocked). Every class it finds and does
-// not answer appendStored for is marked handed, its pending count ended as a class consumed at
-// the start of its call ends it, since the call has taken it; it stays queued for the call's
-// append to find and mark, and no other call's batch takes it. With linger, a batch whose run is
-// not full yet answers no classes but the channel its linger waits on and how long it waits: until
-// roomAppendLinger after the class was recorded, none while the service is stopping, while a wait
-// for the room's appends is waiting (appendWaiters, waitForRoomIdle), or once something asked the
-// room's appends to go after the class was recorded (flushRoomAppends). The call then asks again
-// without linger, and the batch is taken then.
+// append already stored, which it consumes under the same lock (consumeUpdateClassLocked);
+// appendAlone for an update with no class, and none, for a class that is not durable or while a
+// suppression slot is queued for the room, and the class; appendBatch otherwise, and the class
+// with the run after it (batchRunLocked). Every class it finds and does not answer appendStored
+// for is marked handed, its pending count ended as a class consumed at the start of its call ends
+// it, since the call has taken it; it stays queued for the call's append to find and mark, and no
+// other call's batch takes it. With linger, a batch whose run is not full yet answers no classes
+// but the channel its linger waits on and how long it waits: until roomAppendLinger after the
+// class was recorded, none while the service is stopping, while a wait for the room's appends is
+// waiting (appendWaiters, waitForRoomIdle), or once something asked the room's appends to go after
+// the class was recorded (appendsFlushed, waitForRoomIdle). The call then asks again without
+// linger, and the batch is taken then.
 func (s *Service) planRoomAppend(room string, update []byte, linger bool) (plan appendPlan, members []documentUpdateClass, wake <-chan struct{}, wait time.Duration) {
 	state := s.lockExistingState(room)
 	if state == nil {
@@ -483,6 +484,7 @@ func (s *Service) planRoomAppend(room string, update []byte, linger bool) (plan 
 	}
 	class := &state.updateClasses[at]
 	if class.stored {
+		s.consumeUpdateClassLocked(room, state, at)
 		return appendStored, nil, nil, 0
 	}
 	if !class.handed {
@@ -498,10 +500,7 @@ func (s *Service) planRoomAppend(room string, update []byte, linger bool) (plan 
 	end, full := batchRunLocked(state.updateClasses, at)
 	if linger && !full && state.appendWaiters == 0 && !s.stopping.Load() && !s.shuttingDown(room) && class.recorded.After(state.appendsFlushed) {
 		if wait = time.Until(class.recorded.Add(roomAppendLinger)); wait > 0 {
-			if state.appendLinger == nil {
-				state.appendLinger = make(chan struct{})
-			}
-			return appendBatch, nil, state.appendLinger, wait
+			return appendBatch, nil, state.appendLinger.wait(), wait
 		}
 	}
 	return appendBatch, slices.Clone(state.updateClasses[at:end]), nil, 0
@@ -513,27 +512,6 @@ func (s *Service) suppressionQueued(room string) bool {
 	s.suppressMu.Lock()
 	defer s.suppressMu.Unlock()
 	return len(s.suppressed[room]) > 0
-}
-
-// flushRoomAppends asks room's browser appends to go to the store now: a call lingering for its
-// batch goes at once, and an update recorded before this lingers no more. Whatever waits on the
-// room's appends - a settlement, Shutdown's drain - asks first, so it waits out no linger.
-func (s *Service) flushRoomAppends(room string) {
-	state := s.lockExistingState(room)
-	if state == nil {
-		return
-	}
-	state.appendsFlushed = time.Now()
-	state.wakeAppendLingerLocked()
-	s.unlockState(room, state)
-}
-
-// wakeAppendLingerLocked ends every linger waiting on state's queue. Its caller holds state.mu.
-func (state *roomState) wakeAppendLingerLocked() {
-	if state.appendLinger != nil {
-		close(state.appendLinger)
-		state.appendLinger = nil
-	}
 }
 
 // warmRoomAppends opens a connection of the room-appends pool (store.Pool.RoomAppends) when the
@@ -593,9 +571,11 @@ func (f *roomAppendFigures) committed(size int) {
 // this append or by another that marked it, its append finished the rest; refused, the call fails
 // the room and ends the class's durable count and credit as a failed room's update.
 func (a *servicePersistenceAdapter) storeUpdates(ctx context.Context, room string, update []byte, members []documentUpdateClass) error {
-	updates := []BrowserUpdate{{Update: update, ContentChanged: true}}
+	var updates []BrowserUpdate
 	var cursor *roomCursor
-	if len(members) > 0 {
+	if len(members) == 0 {
+		updates = []BrowserUpdate{{Update: update, ContentChanged: true}}
+	} else {
 		cursor = members[0].cursor
 		updates = make([]BrowserUpdate, len(members))
 		for index, class := range members {

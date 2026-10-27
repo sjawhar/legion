@@ -138,6 +138,46 @@ func (p *Peer) read(answers chan<- []byte) {
 	}
 }
 
+// AuthenticationScope sends room's document the Hocuspocus authentication frame a provider sends
+// once its socket is open, carrying token as the dashboard carries its schema version, and returns
+// the scope the server's authenticated reply names: "readonly" or "read-write".
+func AuthenticationScope(t testing.TB, connection *gws.Conn, room, token string) string {
+	t.Helper()
+	frame := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarString(room)
+		encoder.WriteVarUint(2) // Hocuspocus authentication message.
+		encoder.WriteVarUint(0) // Token authentication payload.
+		encoder.WriteVarString(token)
+	})
+	if err := connection.WriteMessage(gws.BinaryMessage, frame); err != nil {
+		t.Fatalf("send the Hocuspocus authentication frame: %v", err)
+	}
+	_ = connection.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = connection.SetReadDeadline(time.Time{}) }()
+	for {
+		_, message, err := connection.ReadMessage()
+		if err != nil {
+			t.Fatalf("read the Hocuspocus authentication reply: %v", err)
+		}
+		decoder := encoding.NewDecoder(message)
+		if _, err := decoder.ReadVarString(); err != nil {
+			t.Fatalf("read the Hocuspocus document name: %v", err)
+		}
+		if kind, err := decoder.ReadVarUint(); err != nil || kind != 2 {
+			continue
+		}
+		subtype, err := decoder.ReadVarUint()
+		if err != nil || subtype != 2 {
+			t.Fatalf("Hocuspocus authentication reply subtype = %d (%v), want authenticated", subtype, err)
+		}
+		scope, err := decoder.ReadVarString()
+		if err != nil {
+			t.Fatalf("read the Hocuspocus authentication scope: %v", err)
+		}
+		return scope
+	}
+}
+
 // Transact runs change in one transaction on document and returns the update it produced, as a
 // browser's provider sends a keystroke's, or nil when it produced none.
 func Transact(document *crdt.Doc, change func(*crdt.Transaction)) []byte {

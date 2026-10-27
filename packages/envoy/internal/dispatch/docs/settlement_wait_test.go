@@ -96,7 +96,7 @@ func TestALaggingRoomsSettlementWakesOnceWhenItsAppendsLand(t *testing.T) {
 func TestShutdownsSettlementLockWaitIsOneStatement(t *testing.T) {
 	database := storetest.Open(t)
 	tracer := &statementTracer{}
-	traced := tracedStore(t, database, tracer)
+	traced := storetest.Traced(t, database, tracer)
 	observer := storetest.SecondProcess(t, database)
 	artifactID := createDocument(t, database, "before")
 	service := newShutdownTestService(t, traced, nil)

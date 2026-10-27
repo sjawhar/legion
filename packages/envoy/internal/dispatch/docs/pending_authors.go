@@ -331,6 +331,15 @@ func (s *Service) cursorOf(live *crdt.Doc) *roomCursor {
 	return nil
 }
 
+// replicaOf is live's rendered replica, nil for a document no update observer listed or one whose
+// replica has been collected.
+func (s *Service) replicaOf(live *crdt.Doc) *renderedReplica {
+	if listed, ok := s.replicas.Load(weak.Make(live)); ok {
+		return listed.(weak.Pointer[renderedReplica]).Value()
+	}
+	return nil
+}
+
 // roomCursor is the durable version one instance of a room stands at: the head its load read, and
 // every version appended since whose update that instance applied - a browser update its own
 // append stored, a committed live write published into it, and settlement's own repair. Two

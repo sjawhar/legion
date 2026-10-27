@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -290,7 +289,8 @@ func appendEvent(t *testing.T, database *store.Store, broker *Broker, event mode
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
-// statementLog records the text of every statement a pool's connections send.
+// statementLog records the text of every statement a pool's connections send, a pipeline's one by
+// one (pgx.QueryTracer and pgx.BatchTracer).
 type statementLog struct {
 	mu         sync.Mutex
 	statements []string
@@ -304,6 +304,19 @@ func (l *statementLog) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pg
 }
 
 func (l *statementLog) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (l *statementLog) TraceBatchStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchStartData) context.Context {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, queued := range data.Batch.QueuedQueries {
+		l.statements = append(l.statements, queued.SQL)
+	}
+	return ctx
+}
+
+func (l *statementLog) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
+
+func (l *statementLog) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
 
 // count is how many statements sent from since on contain text.
 func (l *statementLog) count(since int, text string) int {
@@ -355,14 +368,7 @@ func TestAppendAllSequencesMixedOwnersInInputOrderWithOneInsert(t *testing.T) {
 	appendEvent(t, database, broker, model.Event{IssueKey: new("PP-1"), Type: "issue.updated", Actor: alice, Payload: map[string]any{}})
 
 	log := &statementLog{}
-	config := database.Pool.Config()
-	config.ConnConfig.Tracer = log
-	opened, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatalf("open a traced pool: %v", err)
-	}
-	traced := store.NewPool(opened)
-	t.Cleanup(traced.Close)
+	traced := storetest.Traced(t, database, log).Pool
 
 	type owner struct {
 		key     string

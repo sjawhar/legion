@@ -378,11 +378,7 @@ func (s *Service) residentVerdict(room string) schemaVerdict {
 	if live == nil {
 		return verdictUnknown
 	}
-	listed, ok := s.replicas.Load(weak.Make(live))
-	if !ok {
-		return verdictUnknown
-	}
-	replica := listed.(weak.Pointer[renderedReplica]).Value()
+	replica := s.replicaOf(live)
 	if replica == nil {
 		return verdictUnknown
 	}
@@ -520,11 +516,9 @@ func (s *Service) holdLive(room string, live *crdt.Doc) (doc *crdt.Doc, release 
 	if live == nil {
 		return nil, nil, errDocUnloaded
 	}
-	if listed, ok := s.replicas.Load(weak.Make(live)); ok {
-		if replica := listed.(weak.Pointer[renderedReplica]).Value(); replica != nil {
-			if doc := replica.hold(); doc != nil {
-				return doc, replica.mu.Unlock, nil
-			}
+	if replica := s.replicaOf(live); replica != nil {
+		if doc := replica.hold(); doc != nil {
+			return doc, replica.mu.Unlock, nil
 		}
 	}
 	copied, err := snapshotDocument(live)

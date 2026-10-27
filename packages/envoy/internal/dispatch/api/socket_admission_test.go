@@ -1,9 +1,7 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,15 +13,9 @@ import (
 
 	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/reearth/ygo/encoding"
 
-	"github.com/sjawhar/envoy/internal/dispatch/auth"
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -103,60 +95,15 @@ const (
 // of rooms to decide the caps.
 func TestASocketOpenReadsTheIssueAndTheCallerOnce(t *testing.T) {
 	ctx := context.Background()
-	database := storetest.Open(t)
 	counter := &statementCounter{}
-	config := database.Pool.Config()
-	config.ConnConfig.Tracer = counter
-	opened, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatalf("open a counted pool on the test database: %v", err)
-	}
-	pool := store.NewPool(opened)
-	t.Cleanup(pool.Close)
-	counted := &store.Store{Pool: pool}
-
-	sessions := store.NewPgSessionStore(counted.Pool)
-	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions}
-	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{Store: counted, Events: broker, Identity: cookieIdentity, Settle: time.Hour})
-	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+	counted := storetest.Traced(t, storetest.Open(t), counter)
+	// No heartbeat resolves the caller again while the test counts.
+	handler, _, cookie, request, documentService := newCookieServerOn(t, counted, time.Hour)
 	scans := documentService.CountRoomScansForTest()
-	deps, err := NewDeps(DepsInput{
-		Store: counted, Identity: cookieIdentity, AgentTokens: sharedAgentTokens(t, "agent-token"),
-		Docs: documentService, Events: broker,
-		// No heartbeat resolves the caller again while the test counts.
-		StreamHeartbeat: time.Hour,
-	})
-	if err != nil {
-		t.Fatalf("new API dependencies: %v", err)
-	}
-	handler := http.NewServeMux()
-	Register(handler, deps)
-	generation, err := sessions.EnsureSession(ctx, signedInLogin)
-	if err != nil {
-		t.Fatalf("establish alice's session: %v", err)
-	}
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie(signedInLogin, generation, "signing-key", true))
-	if err != nil {
-		t.Fatalf("parse session cookie: %v", err)
-	}
-	request := func(target string, body any) *httptest.ResponseRecorder {
-		t.Helper()
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			t.Fatalf("encode request: %v", err)
-		}
-		req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(encoded))
-		req.AddCookie(cookie)
-		req.Header.Set("Content-Type", "application/json")
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, req)
-		return response
-	}
-	if response := request("/api/v1/projects", map[string]string{"key": "TEST", "name": "Test"}); response.Code != http.StatusCreated {
+	if response := request(http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "Test"}); response.Code != http.StatusCreated {
 		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
 	}
-	created := request("/api/v1/issues", map[string]string{"project": "TEST", "title": "Socket admission", "spec": "Before.\n"})
+	created := request(http.MethodPost, "/api/v1/issues", map[string]string{"project": "TEST", "title": "Socket admission", "spec": "Before.\n"})
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -182,7 +129,7 @@ func TestASocketOpenReadsTheIssueAndTheCallerOnce(t *testing.T) {
 			t.Fatalf("%s: connect the document socket: response=%v err=%v", open, response, err)
 		}
 		t.Cleanup(func() { _ = connection.Close() })
-		if scope := socketScope(t, connection, room, schemaVersion); scope != "read-write" {
+		if scope := docstest.AuthenticationScope(t, connection, room, schemaVersion); scope != "read-write" {
 			t.Fatalf("%s: the socket is authenticated %q, want read-write", open, scope)
 		}
 		if reads := counter.count(since, issueReadText, room); reads != 1 {
@@ -194,45 +141,5 @@ func TestASocketOpenReadsTheIssueAndTheCallerOnce(t *testing.T) {
 		if scanned := scans.Load() - scansBefore; scanned != 0 {
 			t.Errorf("%s walked the rooms %d times to decide the caps, want none", open, scanned)
 		}
-	}
-}
-
-// socketScope sends the Hocuspocus authentication frame a provider sends once its socket is open,
-// carrying token as the dashboard carries its schema version, and returns the scope the server's
-// authenticated reply names: "readonly" or "read-write".
-func socketScope(t *testing.T, connection *gws.Conn, room, token string) string {
-	t.Helper()
-	frame := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarString(room)
-		encoder.WriteVarUint(2) // Hocuspocus authentication message.
-		encoder.WriteVarUint(0) // Token authentication payload.
-		encoder.WriteVarString(token)
-	})
-	if err := connection.WriteMessage(gws.BinaryMessage, frame); err != nil {
-		t.Fatalf("send the Hocuspocus authentication frame: %v", err)
-	}
-	_ = connection.SetReadDeadline(time.Now().Add(10 * time.Second))
-	defer func() { _ = connection.SetReadDeadline(time.Time{}) }()
-	for {
-		_, message, err := connection.ReadMessage()
-		if err != nil {
-			t.Fatalf("read the Hocuspocus authentication reply: %v", err)
-		}
-		decoder := encoding.NewDecoder(message)
-		if _, err := decoder.ReadVarString(); err != nil {
-			t.Fatalf("read the Hocuspocus document name: %v", err)
-		}
-		if kind, err := decoder.ReadVarUint(); err != nil || kind != 2 {
-			continue
-		}
-		subtype, err := decoder.ReadVarUint()
-		if err != nil || subtype != 2 {
-			t.Fatalf("Hocuspocus authentication reply subtype = %d (%v), want authenticated", subtype, err)
-		}
-		scope, err := decoder.ReadVarString()
-		if err != nil {
-			t.Fatalf("read the Hocuspocus authentication scope: %v", err)
-		}
-		return scope
 	}
 }

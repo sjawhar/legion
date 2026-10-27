@@ -7,6 +7,7 @@ package main
 // from the chunk the relay already copied, so the relay's delay queue never waits for the parser.
 
 import (
+	"bytes"
 	"encoding/binary"
 	"regexp"
 	"sync"
@@ -28,7 +29,7 @@ const (
 var roomWorkPattern = regexp.MustCompile(`(?i)\b(doc_updates|doc_checkpoints|doc_pending_authors|doc_settlements_pending)\b` +
 	`|pg_(try_)?advisory_(xact_)?(un)?lock\s*\(\s*hashtext\s*\(\s*\$[0-9]+\s*\)\s*\)`)
 
-// versionInsertPattern matches the insert of a whole-markdown document version (D6.5).
+// versionInsertPattern matches the insert of a whole-markdown document version.
 var versionInsertPattern = regexp.MustCompile(`(?i)\binsert\s+into\s+(public\.)?artifact_versions\b`)
 
 // stmtClass is what a statement's SQL is, as the counters tell round trips apart.
@@ -39,12 +40,12 @@ const (
 	classVersionInsert
 )
 
-func classifySQL(sql string) stmtClass {
+func classifySQL(sql []byte) stmtClass {
 	var c stmtClass
-	if roomWorkPattern.MatchString(sql) {
+	if roomWorkPattern.Match(sql) {
 		c |= classRoom
 	}
-	if versionInsertPattern.MatchString(sql) {
+	if versionInsertPattern.Match(sql) {
 		c |= classVersionInsert
 	}
 	return c
@@ -243,8 +244,11 @@ type frameReader struct {
 // frames calls each for every whole frame in data, after what earlier chunks left, with the
 // frame's type and body. want says, from its type, whether a frame's body is read: a frame whose
 // body is not read is handed over with a nil body as soon as its header is in, and its body is
-// skipped. It returns false when a length field cannot be a frame's or each returns false.
-func (f *frameReader) frames(data []byte, want func(byte) bool, each func(typ byte, body []byte) bool) bool {
+// skipped. enough says, of a read frame whose body is still arriving, whether the part of it in so
+// far holds all the caller reads: that part is handed over as the body at once and the rest is
+// skipped, so the frame is not held whole. It is asked only of a frame want reads. It returns
+// false when a length field cannot be a frame's or each returns false.
+func (f *frameReader) frames(data []byte, want func(byte) bool, enough func(typ byte, partial []byte) bool, each func(typ byte, body []byte) bool) bool {
 	if f.skip > 0 {
 		n := min(f.skip, len(data))
 		f.skip -= n
@@ -277,7 +281,14 @@ func (f *frameReader) frames(data []byte, want func(byte) bool, each func(typ by
 			continue
 		}
 		if 1+n > len(data) {
-			break
+			if !enough(typ, data[5:]) {
+				break
+			}
+			if !each(typ, data[5:]) {
+				return false
+			}
+			f.skip = 1 + n - len(data)
+			return true
 		}
 		if !each(typ, data[5:1+n]) {
 			return false
@@ -348,13 +359,20 @@ func (p *frontendParser) feed(c *wireConn, data []byte, at time.Time) bool {
 			data = data[n:]
 		}
 	}
-	return p.frames.frames(data, frontendWants, func(typ byte, body []byte) bool {
+	return p.frames.frames(data, frontendWants, frontendEnough, func(typ byte, body []byte) bool {
 		return p.message(c, typ, body, at)
 	})
 }
 
 // frontendWants is the client frames whose bodies the parser reads: Parse, Bind and Query.
 func frontendWants(typ byte) bool { return typ == 'P' || typ == 'B' || typ == 'Q' }
+
+// frontendEnough is whether partial, the body so far of a client frame still arriving, holds all
+// the parser reads of it: a Bind's portal and statement names, its first two strings, and not the
+// parameters after them, which can be a batch's whole updates. A Parse or a Query is read whole.
+func frontendEnough(typ byte, partial []byte) bool {
+	return typ == 'B' && bytes.Count(partial, []byte{0}) >= 2
+}
 
 func (p *frontendParser) message(c *wireConn, typ byte, body []byte, at time.Time) bool {
 	switch typ {
@@ -368,7 +386,7 @@ func (p *frontendParser) message(c *wireConn, typ byte, body []byte, at time.Tim
 			return false
 		}
 		cls := classifySQL(sql)
-		p.stmts[name] = cls
+		p.stmts[string(name)] = cls
 		// Preparing a room statement is room work; preparing an insert inserts nothing, so only
 		// the Bind that runs it marks its round trip as a version insert.
 		p.add(cls &^ classVersionInsert)
@@ -381,7 +399,7 @@ func (p *frontendParser) message(c *wireConn, typ byte, body []byte, at time.Tim
 		if !ok {
 			return false
 		}
-		p.add(p.stmts[name])
+		p.add(p.stmts[string(name)])
 	case 'D', 'E', 'C': // Describe, Execute, Close: each is answered
 		p.pending = true
 	case 'H': // Flush: the client waits for the answers to what it sent since the last round trip
@@ -416,13 +434,11 @@ func (p *frontendParser) add(cls stmtClass) {
 }
 
 // cstring splits b at its first NUL.
-func cstring(b []byte) (string, []byte, bool) {
-	for i, x := range b {
-		if x == 0 {
-			return string(b[:i]), b[i+1:], true
-		}
+func cstring(b []byte) ([]byte, []byte, bool) {
+	if i := bytes.IndexByte(b, 0); i >= 0 {
+		return b[:i], b[i+1:], true
 	}
-	return "", nil, false
+	return nil, nil, false
 }
 
 // backendParser follows the server's stream for its ReadyForQuery frames: first any one-byte
@@ -443,7 +459,7 @@ func (p *backendParser) feed(c *wireConn, data []byte, at time.Time) bool {
 			p.typed = true
 		}
 	}
-	return p.frames.frames(data, func(byte) bool { return false }, func(typ byte, _ []byte) bool {
+	return p.frames.frames(data, func(byte) bool { return false }, nil, func(typ byte, _ []byte) bool {
 		if typ == 'Z' {
 			c.readyForQuery(at)
 		}

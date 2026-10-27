@@ -64,12 +64,12 @@ func statement(sql string) []encoder {
 	}
 }
 
-func checkCounts(t *testing.T, counters *wireCounters, c *wireConn, roundTrips, room int64) {
+func checkCounts(t *testing.T, c *wireConn, roundTrips, room int64) {
 	t.Helper()
 	if c.lost.Load() {
 		t.Fatal("the parser gave the connection up")
 	}
-	s := counters.snapshot()
+	s := c.counters.snapshot()
 	if s.RoundTrips != roundTrips || s.RoomRoundTrips != room {
 		t.Fatalf("round trips = %d, room = %d; want %d and %d", s.RoundTrips, s.RoomRoundTrips, roundTrips, room)
 	}
@@ -86,11 +86,11 @@ func TestProxyCountsAPipelineAsOneRoomRoundTrip(t *testing.T) {
 	msgs = append(msgs, statement(`select pg_notify('dispatch_doc_changed', $1)`)...)
 	msgs = append(msgs, &pgproto3.Sync{})
 	feed(c.frontend, wire(t, msgs...), time.Now())
-	checkCounts(t, counters, c, 1, 1)
+	checkCounts(t, c, 1, 1)
 }
 
 func TestProxyCountsABatchAsItsTwoRoundTrips(t *testing.T) {
-	counters, c := startedConn(t)
+	_, c := startedConn(t)
 	// pgx prepares the batch's new statements in one round trip, then runs them in another.
 	feed(c.frontend, wire(t,
 		&pgproto3.Parse{Name: "stmtcache_1", Query: `select count(*) from issues where project = $1`}, &pgproto3.Describe{ObjectType: 'S', Name: "stmtcache_1"},
@@ -100,31 +100,31 @@ func TestProxyCountsABatchAsItsTwoRoundTrips(t *testing.T) {
 		&pgproto3.Bind{PreparedStatement: "stmtcache_2"}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{},
 		&pgproto3.Sync{},
 	), time.Now())
-	checkCounts(t, counters, c, 2, 0)
+	checkCounts(t, c, 2, 0)
 }
 
 func TestProxyCountsASimpleQueryAsOneRoundTrip(t *testing.T) {
-	counters, c := startedConn(t)
+	_, c := startedConn(t)
 	feed(c.frontend, wire(t, &pgproto3.Query{String: "begin; select 1; commit"}), time.Now())
-	checkCounts(t, counters, c, 1, 0)
+	checkCounts(t, c, 1, 0)
 	feed(c.frontend, wire(t, &pgproto3.Query{String: "DELETE FROM doc_checkpoints WHERE artifact_id = 'x'"}), time.Now())
-	checkCounts(t, counters, c, 2, 1)
+	checkCounts(t, c, 2, 1)
 }
 
 func TestProxyClassifiesANamedStatementReusedByName(t *testing.T) {
-	counters, c := startedConn(t)
+	_, c := startedConn(t)
 	feed(c.frontend, wire(t,
 		&pgproto3.Parse{Name: "stmtcache_doc", Query: `select update from doc_updates where artifact_id = $1 order by version`},
 		&pgproto3.Describe{ObjectType: 'S', Name: "stmtcache_doc"}, &pgproto3.Sync{},
 		&pgproto3.Parse{Name: "stmtcache_issue", Query: `select key from issues where id = $1`},
 		&pgproto3.Describe{ObjectType: 'S', Name: "stmtcache_issue"}, &pgproto3.Sync{},
 	), time.Now())
-	checkCounts(t, counters, c, 2, 1)
+	checkCounts(t, c, 2, 1)
 	// Later round trips name the statements only: the room one counts as room work by its name.
 	feed(c.frontend, wire(t, &pgproto3.Bind{PreparedStatement: "stmtcache_doc"}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{}), time.Now())
-	checkCounts(t, counters, c, 3, 2)
+	checkCounts(t, c, 3, 2)
 	feed(c.frontend, wire(t, &pgproto3.Bind{PreparedStatement: "stmtcache_issue"}, &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{}), time.Now())
-	checkCounts(t, counters, c, 4, 2)
+	checkCounts(t, c, 4, 2)
 }
 
 func TestProxyCountsTheDocumentAdvisoryLockAsRoomWork(t *testing.T) {
@@ -171,7 +171,7 @@ func TestProxyTimesAVersionInsertFromSyncToReadyForQuery(t *testing.T) {
 	feed(c.frontend, wire(t, &pgproto3.Parse{Name: "stmtcache_v", Query: `INSERT INTO artifact_versions (artifact_id) values ($1)`},
 		&pgproto3.Describe{ObjectType: 'S', Name: "stmtcache_v"}, &pgproto3.Sync{}), sent)
 	feed(c.backend, wire(t, &pgproto3.ParseComplete{}, &pgproto3.ParameterDescription{}, &pgproto3.NoData{}, &pgproto3.ReadyForQuery{TxStatus: 'I'}), answered)
-	checkCounts(t, counters, c, 3, 0)
+	checkCounts(t, c, 3, 0)
 	s := counters.snapshot()
 	if s.VersionInserts != 1 || s.VersionInsertNs != int64(7*time.Millisecond) {
 		t.Fatalf("version inserts = %d taking %s, want 1 taking 7ms", s.VersionInserts, time.Duration(s.VersionInsertNs))
@@ -189,19 +189,19 @@ func TestProxyCountsAFlushThatAwaitsAnswers(t *testing.T) {
 		&pgproto3.Parse{Query: `select version from doc_updates where artifact_id = $1`}, &pgproto3.Describe{ObjectType: 'S'}, &pgproto3.Flush{},
 		&pgproto3.Flush{}, &pgproto3.Sync{},
 	), time.Now())
-	checkCounts(t, counters, c, 2, 1)
+	checkCounts(t, c, 2, 1)
 	if s := counters.snapshot(); s.FlushRoundTrips != 1 {
 		t.Fatalf("flush round trips = %d, want 1", s.FlushRoundTrips)
 	}
 }
 
 func TestProxyFollowsLargeFrames(t *testing.T) {
-	counters, c := startedConn(t)
+	_, c := startedConn(t)
 	big := make([]byte, 200_000)
 	feed(c.frontend, wire(t, &pgproto3.Parse{Query: `insert into doc_updates values ($1)`},
 		&pgproto3.Bind{Parameters: [][]byte{big}}, &pgproto3.Execute{}, &pgproto3.Sync{}), time.Now())
 	feed(c.backend, wire(t, &pgproto3.DataRow{Values: [][]byte{big}}, &pgproto3.ReadyForQuery{TxStatus: 'I'}), time.Now())
-	checkCounts(t, counters, c, 1, 1)
+	checkCounts(t, c, 1, 1)
 	if len(c.front.frames.buf) != 0 || len(c.back.frames.buf) != 0 {
 		t.Fatalf("the parser holds %d and %d bytes after whole frames", len(c.front.frames.buf), len(c.back.frames.buf))
 	}

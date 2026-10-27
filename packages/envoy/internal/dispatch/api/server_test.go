@@ -1872,7 +1872,14 @@ type cookieRequest func(method, target string, body any) *httptest.ResponseRecor
 // and a request sent with it.
 func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.Cookie, cookieRequest) {
 	t.Helper()
-	database := storetest.Open(t)
+	handler, sessions, cookie, request, _ := newCookieServerOn(t, storetest.Open(t), 0)
+	return handler, sessions, cookie, request
+}
+
+// newCookieServerOn is newCookieServer on database, with heartbeat as the API's StreamHeartbeat
+// (zero leaves it unset), also returning the server's document service.
+func newCookieServerOn(t *testing.T, database *store.Store, heartbeat time.Duration) (http.Handler, *store.PgSessionStore, *http.Cookie, cookieRequest, *docs.Service) {
+	t.Helper()
 	sessions := store.NewPgSessionStore(database.Pool)
 	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions}
 	broker := events.NewBroker()
@@ -1882,7 +1889,7 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: cookieIdentity, AgentTokens: sharedAgentTokens(t, "agent-token"),
-		Docs: documentService, Events: broker,
+		Docs: documentService, Events: broker, StreamHeartbeat: heartbeat,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -1918,7 +1925,7 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 		handler.ServeHTTP(response, req)
 		return response
 	}
-	return handler, sessions, cookie, request
+	return handler, sessions, cookie, request, documentService
 }
 
 func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {

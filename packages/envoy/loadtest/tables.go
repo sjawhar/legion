@@ -377,6 +377,19 @@ func renderTables(steps []stepData) string {
 		"updates not sent", "relay ms p50 / p99", "durable ms p50 / p99 (found / markers)", "connects / connect failures", "closes by code"}
 	header(editorCells...)
 	var single, editorNotes []string
+	// counted is a count map as "<total> (<key> <n>, ...)", most frequent first, or "0".
+	counted := func(m map[string]int) string {
+		total := 0
+		var parts []string
+		for _, kv := range byCount(m) {
+			total += kv.v
+			parts = append(parts, fmt.Sprintf("%s %s", mdCell(kv.k), num(float64(kv.v), 0)))
+		}
+		if total == 0 {
+			return "0"
+		}
+		return num(float64(total), 0) + " (" + strings.Join(parts, ", ") + ")"
+	}
 	for _, s := range steps {
 		e := s.sum.Editors
 		if e == nil {
@@ -385,19 +398,6 @@ func renderTables(steps []stepData) string {
 		}
 		if len(e.SingleEditorDocs) > 0 {
 			single = append(single, fmt.Sprintf("%s: %s", s.label(), strings.Join(e.SingleEditorDocs, ", ")))
-		}
-		// counted is a count map as "<total> (<key> <n>, ...)", most frequent first, or "0".
-		counted := func(m map[string]int) string {
-			total := 0
-			var parts []string
-			for _, kv := range byCount(m) {
-				total += kv.v
-				parts = append(parts, fmt.Sprintf("%s %s", mdCell(kv.k), num(float64(kv.v), 0)))
-			}
-			if total == 0 {
-				return "0"
-			}
-			return num(float64(total), 0) + " (" + strings.Join(parts, ", ") + ")"
 		}
 		durable := "-"
 		if e.DurableNote == "" {

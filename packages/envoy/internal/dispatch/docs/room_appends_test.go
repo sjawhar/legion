@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 
@@ -30,7 +29,7 @@ import (
 // statementTracer records every round trip the connections of one store make to Postgres: each
 // statement sent on its own (pgx.QueryTracer) and each pipeline (pgx.BatchTracer), a pipeline
 // being one round trip however many statements it carries. It is installed on the store's
-// connection configuration (tracedStore), and every pool the store opens later is opened from a
+// connection configuration (storetest.Traced), and every pool the store opens later is opened from a
 // copy of that configuration (store.Pool.separate), so it sees the shared pool's connections and
 // those of the rooms pool and of any pool of the rooms' own alike.
 //
@@ -161,21 +160,6 @@ func (t *statementTracer) statements(room, text string, since int) int {
 	return count
 }
 
-// tracedStore is a store of its own on database's database whose every connection, and every
-// connection of every pool it opens later, reports to tracer.
-func tracedStore(t *testing.T, database *store.Store, tracer *statementTracer) *store.Store {
-	t.Helper()
-	config := database.Pool.Config()
-	config.ConnConfig.Tracer = tracer
-	opened, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		t.Fatalf("open a traced pool on the test database: %v", err)
-	}
-	pool := store.NewPool(opened)
-	t.Cleanup(pool.Close)
-	return &store.Store{Pool: pool}
-}
-
 // storedVersionsAfter is every version of artifactID's stored updates past after, in order.
 func storedVersionsAfter(t *testing.T, database *store.Store, artifactID string, after int64) []int64 {
 	t.Helper()
@@ -217,7 +201,7 @@ func TestQueuedBrowserUpdatesOfOneRoomCommitInOneTransactionOffTheSharedPool(t *
 	ctx := context.Background()
 	database := storetest.Open(t)
 	tracer := &statementTracer{}
-	traced := tracedStore(t, database, tracer)
+	traced := storetest.Traced(t, database, tracer)
 	// The test's own reads and its hold of the document's lock go through a store of their own,
 	// so the traced store's shared pool counts the room's acquisitions alone.
 	observer := storetest.SecondProcess(t, database)

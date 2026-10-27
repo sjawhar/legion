@@ -318,21 +318,20 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 // appendUpdatesStatement stores every update of one append transaction and announces the change,
 // in one statement: the insert of one doc_updates row per update, at consecutive versions from the
 // head the gate read, each with its own content class, is a data-modifying CTE, and the select it
-// feeds sends both notifications, documentChangedChannel's bare id and documentHeadChannel's
-// documentHeadNotice naming the last version. One update or a room's whole batch, the transaction
-// spends one round trip under the document's advisory lock on its rows and its announcement, and
-// sends each notification once. Why the announcement belongs inside this transaction is
-// notifyDocumentChanged's doc comment, which carries a rebuild's, a prune's and a deletion's. The
-// room is passed twice because its two parameters are different types: doc_updates.artifact_id is
-// a uuid, and pg_notify takes text.
+// feeds is notifyDocumentHeadStatement, which sends both notifications, documentChangedChannel's
+// bare id and documentHeadChannel's documentHeadNotice naming the last version. One update or a
+// room's whole batch, the transaction spends one round trip under the document's advisory lock on
+// its rows and its announcement, and sends each notification once. Why the announcement belongs
+// inside this transaction is notifyDocumentChanged's doc comment, which carries a rebuild's, a
+// prune's and a deletion's. The room is passed twice because its two parameters are different
+// types: pg_notify takes text ($1), and doc_updates.artifact_id is a uuid ($3).
 const appendUpdatesStatement = `
 	with appended as (
 		insert into doc_updates (artifact_id, version, update, content_changed)
-		select $1::uuid, version, update, content_changed
-		from unnest($2::bigint[], $3::bytea[], $4::boolean[]) as appended(version, update, content_changed)
+		select $3::uuid, version, update, content_changed
+		from unnest($4::bigint[], $5::bytea[], $6::boolean[]) as appended(version, update, content_changed)
 	)
-	select pg_notify('` + documentChangedChannel + `', $5), pg_notify('` + documentHeadChannel + `', $6)
-`
+	` + notifyDocumentHeadStatement
 
 // appendWrites is every write of an append transaction whose gate passed at head, in the order the
 // transaction runs them, and the last version they store: the insert and its notifications
@@ -381,7 +380,7 @@ func (p *PgVersioned) appendWrites(room string, head int64, updates []BrowserUpd
 	}
 	statements := []writeStatement{{
 		sql:  appendUpdatesStatement,
-		args: []any{room, versions, contents, classes, room, notice},
+		args: []any{room, notice, room, versions, contents, classes},
 		what: "append document update",
 	}, owedStatement}
 	if len(authors) > 0 {

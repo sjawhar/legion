@@ -4,7 +4,7 @@ package main
 // connections made and how many were room work (the proxy's wire counts, proxy.go), the
 // connections the rooms held (a 100 ms sampler of pg_locks and pg_stat_activity), the append
 // batches Dispatch reports on /debug/vars (dispatch_rooms), and what whole-markdown versions cost
-// (D6.5: artifact_versions' growth and the proxy's timing of its inserts).
+// (artifact_versions' growth and the proxy's timing of its inserts).
 
 import (
 	"context"
@@ -51,13 +51,7 @@ type roomSampler struct {
 
 // loop samples every 100 ms from from to to over its own direct connection.
 func (s *roomSampler) loop(ctx context.Context, url string, from, to time.Time, lg *log.Logger) {
-	config, err := pgx.ParseConfig(url)
-	if err != nil {
-		lg.Printf("room sampler: %v", err)
-		return
-	}
-	config.RuntimeParams["application_name"] = "loadgen-room-sampler"
-	conn, err := pgx.ConnectConfig(ctx, config)
+	conn, err := connectAs(ctx, url, "loadgen-room-sampler")
 	if err != nil {
 		lg.Printf("room sampler: %v", err)
 		return
@@ -86,6 +80,17 @@ func (s *roomSampler) loop(ctx context.Context, url string, from, to time.Time, 
 		case <-t.C:
 		}
 	}
+}
+
+// connectAs opens a direct connection over url under application name name. loadgen's own
+// connections take a name starting loadgen-, which roomConnectionsQuery leaves out.
+func connectAs(ctx context.Context, url, name string) (*pgx.Conn, error) {
+	config, err := pgx.ParseConfig(url)
+	if err != nil {
+		return nil, err
+	}
+	config.RuntimeParams["application_name"] = name
+	return pgx.ConnectConfig(ctx, config)
 }
 
 // dispatchRooms is the part of Dispatch's dispatch_rooms variable (/debug/vars) the tables use:
@@ -159,7 +164,7 @@ func readWindow(ctx context.Context, ep endpoints) windowReading {
 }
 
 func getJSON(ctx context.Context, url string, v any) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
@@ -180,9 +185,10 @@ type roomsSummary struct {
 	RoundTripsNote  string             `json:"round_trips_note,omitempty"`
 	Connections     *roomConnections   `json:"connections"`
 	ConnectionsNote string             `json:"connections_note,omitempty"`
-	Batches         *roomBatches       `json:"batches"`
-	BatchesNote     string             `json:"batches_note,omitempty"`
-	Versions        versionsSummary    `json:"versions"`
+	// Batches is dispatch_rooms' append figures, the window's end minus its start.
+	Batches     *dispatchRooms  `json:"batches"`
+	BatchesNote string          `json:"batches_note,omitempty"`
+	Versions    versionsSummary `json:"versions"`
 }
 
 // roundTripsSummary is the proxy's counts between its readings at the window's start and end
@@ -206,15 +212,7 @@ type roomConnections struct {
 	SharedPoolShare *float64 `json:"shared_pool_share"`
 }
 
-// roomBatches is dispatch_rooms' append figures, the window's end minus its start.
-type roomBatches struct {
-	AppendBatches    uint64            `json:"append_batches"`
-	AppendedUpdates  uint64            `json:"appended_updates"`
-	AppendRoundTrips uint64            `json:"append_round_trips"`
-	BatchSizes       map[string]uint64 `json:"batch_sizes"`
-}
-
-// versionsSummary is D6.5's measurement of whole-markdown versions in the window.
+// versionsSummary is the measurement of whole-markdown versions in the window.
 type versionsSummary struct {
 	// Bytes is artifact_versions' growth (pg_total_relation_size: heap, TOAST and indexes) and
 	// BytesPerS that over the seconds between the two reads; Written its rows' growth.
@@ -286,7 +284,7 @@ func summarizeRooms(start, end windowReading, sampler *roomSampler, sent int) *r
 		out.BatchesNote = end.roomsErr
 	default:
 		a, b := start.rooms, end.rooms
-		rb := &roomBatches{AppendBatches: b.AppendBatches - a.AppendBatches, AppendedUpdates: b.AppendedUpdates - a.AppendedUpdates,
+		rb := &dispatchRooms{AppendBatches: b.AppendBatches - a.AppendBatches, AppendedUpdates: b.AppendedUpdates - a.AppendedUpdates,
 			AppendRoundTrips: b.AppendRoundTrips - a.AppendRoundTrips, BatchSizes: map[string]uint64{}}
 		for k, v := range b.BatchSizes {
 			rb.BatchSizes[k] = v - a.BatchSizes[k]

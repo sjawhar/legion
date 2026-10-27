@@ -672,134 +672,118 @@ func loadAnchorRefreshedAsks(ctx context.Context, tx pgx.Tx, ids []string) (map[
 }
 
 // loadAnchorRefreshedCommentPayloads reads each comment of ids as its refresh event carries it,
-// with the name and place of the artifact its anchor is on, by id: one read each of the rows,
-// their artifacts, their mentions and their deliveries. Every id must name an anchored comment.
+// with the name and place of the artifact its anchor is on, by id: one read each of the rows with
+// their anchors' artifacts, their mentions and their deliveries. Every id must name an anchored
+// comment.
 func loadAnchorRefreshedCommentPayloads(ctx context.Context, tx pgx.Tx, ids []string) (map[string]model.CommentEventPayload, error) {
 	payloads := make(map[string]model.CommentEventPayload, len(ids))
 	if len(ids) == 0 {
 		return payloads, nil
 	}
-	comments, err := loadAnchorRefreshedComments(ctx, tx, ids)
+	comments, places, err := loadAnchorRefreshedComments(ctx, tx, ids)
 	if err != nil {
 		return nil, err
 	}
-	artifactIDs := make([]string, 0, len(ids))
 	for _, id := range ids {
-		comment := comments[id]
-		if comment.Anchor == nil {
+		if comments[id].Anchor == nil {
 			return nil, fmt.Errorf("refreshed comment %q has no anchor", id)
 		}
-		artifactIDs = append(artifactIDs, comment.Anchor.ArtifactID)
-	}
-	type artifactPlace struct{ name, projectKey, slug string }
-	places := make(map[string]artifactPlace, len(artifactIDs))
-	rows, err := tx.Query(ctx, `
-		select id::text, name, coalesce(project_key, ''), slug
-		from artifacts where id = any($1::uuid[])
-	`, artifactIDs)
-	if err != nil {
-		return nil, fmt.Errorf("load refreshed comments' artifacts: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var place artifactPlace
-		if err := rows.Scan(&id, &place.name, &place.projectKey, &place.slug); err != nil {
-			return nil, fmt.Errorf("load refreshed comments' artifacts: %w", err)
-		}
-		places[id] = place
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("load refreshed comments' artifacts: %w", err)
 	}
 	for _, id := range ids {
-		comment := comments[id]
-		place, found := places[comment.Anchor.ArtifactID]
+		place, found := places[id]
 		if !found {
 			return nil, fmt.Errorf("load refreshed comment %q artifact: %w", id, pgx.ErrNoRows)
 		}
 		payloads[id] = model.CommentEventPayload{
-			Comment: comment, ArtifactName: place.name, ProjectKey: place.projectKey, ArtifactSlug: place.slug,
+			Comment: comments[id], ArtifactName: place.name, ProjectKey: place.projectKey, ArtifactSlug: place.slug,
 		}
 	}
 	return payloads, nil
 }
 
-// loadAnchorRefreshedComments reads each comment of ids with its mentions and deliveries, by id.
-// Every id must name a comment.
-func loadAnchorRefreshedComments(ctx context.Context, tx pgx.Tx, ids []string) (map[string]model.Comment, error) {
+// anchorArtifactPlace is the name and place of the artifact a comment's anchor is on.
+type anchorArtifactPlace struct{ name, projectKey, slug string }
+
+// loadAnchorRefreshedComments reads each comment of ids with its mentions and deliveries, by id,
+// and the place of the artifact each anchored comment's anchor is on, by comment id, for the
+// comments whose anchor names an artifact that exists. Every id must name a comment.
+func loadAnchorRefreshedComments(ctx context.Context, tx pgx.Tx, ids []string) (map[string]model.Comment, map[string]anchorArtifactPlace, error) {
 	comments := make(map[string]model.Comment, len(ids))
+	places := make(map[string]anchorArtifactPlace, len(ids))
 	rows, err := tx.Query(ctx, `
-		select id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, turn, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
-		from comments where id = any($1::uuid[])
+		select c.id::text, c.issue_key, c.artifact_id::text, c.author, c.body, c.anchor, c.reply_to::text, c.ask_id::text, c.turn, c.resolved, c.resolved_by, c.resolved_at, c.edited_at, c.suggestion, c.created_at,
+			aa.name, coalesce(aa.project_key, ''), aa.slug
+		from comments c
+		left join artifacts aa on aa.id = (c.anchor->>'artifact_id')::uuid
+		where c.id = any($1::uuid[])
 	`, ids)
 	if err != nil {
-		return nil, fmt.Errorf("load refreshed comments: %w", err)
+		return nil, nil, fmt.Errorf("load refreshed comments: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var comment model.Comment
 		var author, anchor, resolvedBy, suggestion []byte
 		var resolvedAt, editedAt *time.Time
+		var anchorName, anchorSlug *string
+		var anchorProject string
 		if err := rows.Scan(
 			&comment.ID, &comment.IssueKey, &comment.ArtifactID, &author, &comment.Body, &anchor, &comment.ReplyTo, &comment.AskID, &comment.Turn, &comment.Resolved,
 			&resolvedBy, &resolvedAt, &editedAt, &suggestion, &comment.CreatedAt,
+			&anchorName, &anchorProject, &anchorSlug,
 		); err != nil {
-			return nil, fmt.Errorf("load refreshed comments: %w", err)
+			return nil, nil, fmt.Errorf("load refreshed comments: %w", err)
 		}
 		id := comment.ID
 		if err := json.Unmarshal(author, &comment.Author); err != nil {
-			return nil, fmt.Errorf("decode refreshed comment %q author: %w", id, err)
+			return nil, nil, fmt.Errorf("decode refreshed comment %q author: %w", id, err)
 		}
 		if len(anchor) > 0 {
 			value := model.Anchor{}
 			if err := json.Unmarshal(anchor, &value); err != nil {
-				return nil, fmt.Errorf("decode refreshed comment %q anchor: %w", id, err)
+				return nil, nil, fmt.Errorf("decode refreshed comment %q anchor: %w", id, err)
 			}
 			comment.Anchor = &value
 		}
 		if len(resolvedBy) > 0 {
 			value := model.Actor{}
 			if err := json.Unmarshal(resolvedBy, &value); err != nil {
-				return nil, fmt.Errorf("decode refreshed comment %q resolver: %w", id, err)
+				return nil, nil, fmt.Errorf("decode refreshed comment %q resolver: %w", id, err)
 			}
 			comment.ResolvedBy = &value
 		}
-		if resolvedAt != nil {
-			value := resolvedAt.UTC().Format(time.RFC3339Nano)
-			comment.ResolvedAt = &value
-		}
-		if editedAt != nil {
-			value := editedAt.UTC().Format(time.RFC3339Nano)
-			comment.EditedAt = &value
-		}
+		comment.ResolvedAt = askTimestamp(resolvedAt)
+		comment.EditedAt = askTimestamp(editedAt)
 		if len(suggestion) > 0 {
 			value := model.Suggestion{}
 			if err := json.Unmarshal(suggestion, &value); err != nil {
-				return nil, fmt.Errorf("decode refreshed comment %q suggestion: %w", id, err)
+				return nil, nil, fmt.Errorf("decode refreshed comment %q suggestion: %w", id, err)
 			}
 			comment.Suggestion = &value
 		}
 		comment.Mentions = []model.Mention{}
 		comment.Deliveries = []model.CommentDelivery{}
 		comments[id] = comment
+		if anchorName != nil {
+			places[id] = anchorArtifactPlace{name: *anchorName, projectKey: anchorProject, slug: *anchorSlug}
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("load refreshed comments: %w", err)
+		return nil, nil, fmt.Errorf("load refreshed comments: %w", err)
 	}
 	rows.Close()
 	for _, id := range ids {
 		if _, found := comments[id]; !found {
-			return nil, fmt.Errorf("load refreshed comment %q: %w", id, pgx.ErrNoRows)
+			return nil, nil, fmt.Errorf("load refreshed comment %q: %w", id, pgx.ErrNoRows)
 		}
 	}
 	if err := loadAnchorRefreshedCommentMentions(ctx, tx, ids, comments); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := loadAnchorRefreshedCommentDeliveries(ctx, tx, ids, comments); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return comments, nil
+	return comments, places, nil
 }
 
 // loadAnchorRefreshedCommentMentions appends each mention of the comments of ids to its comment

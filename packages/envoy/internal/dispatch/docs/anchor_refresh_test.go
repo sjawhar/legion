@@ -86,7 +86,7 @@ func versionAnchorRefreshTrips(t *testing.T, changed int) int {
 	ctx := context.Background()
 	database := storetest.Open(t)
 	tracer := &statementTracer{}
-	traced := tracedStore(t, database, tracer)
+	traced := storetest.Traced(t, database, tracer)
 	artifactID := createDocument(t, traced, "# First")
 	service, _ := newTestServiceInstance(t, traced)
 	alice := model.Actor{Kind: "user", ID: "alice"}

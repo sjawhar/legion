@@ -1091,8 +1091,7 @@ func (s *Service) Quiesce(ctx context.Context) error {
 		// A settlement whose timer already fired reads the generation it was armed with, so
 		// bumping it here ends that settlement before it opens a transaction.
 		state.roomGeneration = s.nextRoomGeneration()
-		s.stopSettleTimer(state.settle)
-		state.settleWhenIdle = false
+		s.dropSettlementLocked(state)
 		// The closed room's settlement failures are not the next room's (see
 		// reserveRoomCloseLocked).
 		state.settleFailures = 0
@@ -1224,10 +1223,19 @@ func (s *Service) stopSettleTimer(timer *time.Timer) bool {
 // past its supersession check commits its own work, and the one its caller arms finds nothing new.
 // Its caller holds state.mu.
 func (s *Service) takeOverSettlementLocked(state *roomState) bool {
-	stopped := s.stopSettleTimer(state.settle)
-	rearm := state.settleWhenIdle
-	state.settleWhenIdle = false
+	stopped, rearm := s.dropSettlementLocked(state)
 	return stopped || rearm || s.isSettleTimerArmed(state.settle) || state.settling > 0
+}
+
+// dropSettlementLocked drops the settlement armed on state: it stops the room's armed timer
+// (stopSettleTimer) and clears the re-arm a wait for the room's appends left (settleWhenIdle,
+// retrySettleSoon), answering whether a timer was stopped and whether a re-arm was left. Its
+// caller holds state.mu.
+func (s *Service) dropSettlementLocked(state *roomState) (stopped, rearm bool) {
+	stopped = s.stopSettleTimer(state.settle)
+	rearm = state.settleWhenIdle
+	state.settleWhenIdle = false
+	return stopped, rearm
 }
 
 // takeSettleTimer stops an armed settlement timer and hands its caller the settleWG count the timer
@@ -2582,8 +2590,7 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 				// reserveRoomCloseLocked): a record kept across the close and a reopen starts
 				// over.
 				state.settleFailures = 0
-				s.stopSettleTimer(state.settle)
-				state.settleWhenIdle = false
+				s.dropSettlementLocked(state)
 				// Snapshot while the state is locked, then write after unlocking: settlement holds
 				// the document's advisory lock before it takes state.mu, so taking that lock here
 				// while holding the state would invert the lock order. The authors are already in
@@ -2680,8 +2687,7 @@ func (s *Service) invalidateForEviction(room string) *roomState {
 	if state != nil {
 		state.roomGeneration = s.nextRoomGeneration()
 		state.settleFailures = 0
-		s.stopSettleTimer(state.settle)
-		state.settleWhenIdle = false
+		s.dropSettlementLocked(state)
 		s.unlockState(room, state)
 	}
 	return state
@@ -2742,8 +2748,7 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	state.failedDone = make(chan struct{})
 	done := state.failedDone
 	state.roomGeneration = s.nextRoomGeneration()
-	s.stopSettleTimer(state.settle)
-	state.settleWhenIdle = false
+	s.dropSettlementLocked(state)
 	s.purgeSuppressedPersistence(room)
 	// The failure drops this room's settlement: a queued one is stopped just above, one
 	// already running refuses on the failed room (settleRoom), and its retry stops because
@@ -2875,26 +2880,30 @@ func (s *Service) waitForDurableAppends(ctx context.Context, room string) error 
 
 // waitForRoomIdle waits until busy, read under the state lock of room's record, no longer holds,
 // or ctx ends; ctx is the wait's bound, a caller's deadline and not a poll. It asks the room's
-// appends to go first (flushRoomAppends), and none lingers while it waits (appendWaiters), so it
-// waits out no batch's linger. It sleeps on the room's idle signal, which closes once the record
-// counts no update its persistence has not taken and no append that has not landed
-// (countsFellLocked), and looks the room's record up again at each wake: a failed room's
-// eviction moves the counts to a successor record and closes the old one's signal
-// (handOverFailedRoomLocked). Each wake runs the settlementWoke hook.
+// appends to go first, under the record's lock its first look takes: it records appendsFlushed,
+// so an update recorded before that ask lingers no more, and ends every linger waiting. None
+// lingers while it waits (appendWaiters), so it waits out no batch's linger. It sleeps on the
+// room's idle signal, which wakes once the record counts no update its persistence has not taken
+// and no append that has not landed (countsFellLocked), and looks the room's record up again at
+// each wake: a failed room's eviction moves the counts to a successor record and wakes the old
+// one's signal (handOverFailedRoomLocked). Each wake runs the settlementWoke hook.
 func (s *Service) waitForRoomIdle(ctx context.Context, room string, busy func(*roomState) bool) error {
-	s.flushRoomAppends(room)
-	for {
+	for flushed := false; ; flushed = true {
 		state := s.lockExistingState(room)
 		if state == nil {
 			return nil
+		}
+		if !flushed {
+			state.appendsFlushed = time.Now()
+			state.appendLinger.wake()
 		}
 		if !busy(state) {
 			s.unlockState(room, state)
 			return nil
 		}
-		idle := state.idleSignalLocked()
+		idle := state.idle.wait()
 		state.appendWaiters++
-		state.wakeAppendLingerLocked()
+		state.appendLinger.wake()
 		s.unlockState(room, state)
 		var err error
 		select {

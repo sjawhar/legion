@@ -661,14 +661,9 @@ type pendingMarker struct {
 // newDurableProbe connects over url, the direct Postgres URL, and reads each document's highest
 // version, before any editor sends.
 func newDurableProbe(ctx context.Context, url string, docs []string) (*durableProbe, error) {
-	config, err := pgx.ParseConfig(url)
-	if err != nil {
-		return nil, err
-	}
-	config.RuntimeParams["application_name"] = "loadgen-durable-probe"
 	connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	conn, err := pgx.ConnectConfig(connectCtx, config)
+	conn, err := connectAs(connectCtx, url, "loadgen-durable-probe")
 	if err != nil {
 		return nil, err
 	}

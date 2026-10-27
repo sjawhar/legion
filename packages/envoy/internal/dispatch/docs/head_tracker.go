@@ -60,9 +60,9 @@ type headEntry struct {
 	// store.AfterCommit refused), and cleared by the next documentHeadChannel notice of the
 	// document, which that write's commit sends if nothing sent one since.
 	untracked bool
-	// idle is closed once writes empties, for a decision waiting on this process's writes of the
-	// document (ownWritesDone); nil while nothing waits.
-	idle chan struct{}
+	// idle wakes, once writes empties, a decision waiting on this process's writes of the document
+	// (ownWritesDone); nothing is made while nothing waits.
+	idle wakeSignal
 }
 
 // headToken is the tracker's state for one document at one moment (headTracker.token): the epoch,
@@ -261,9 +261,8 @@ func (t *headTracker) dropWriteLocked(w *ownWrite) *headEntry {
 	if at := slices.Index(entry.writes, w); at >= 0 {
 		entry.writes = slices.Delete(entry.writes, at, at+1)
 	}
-	if len(entry.writes) == 0 && entry.idle != nil {
-		close(entry.idle)
-		entry.idle = nil
+	if len(entry.writes) == 0 {
+		entry.idle.wake()
 	}
 	return entry
 }
@@ -292,17 +291,16 @@ func (t *headTracker) ownWriteIn(tx pgx.Tx, room string) (wrote func(head int64)
 }
 
 // token is room's state now, to be compared later with unchanged: taken before a read of the
-// store, it says after the read whether anything has written the document since. trusted is
-// whether the tracker trusts itself now; an untrusted token is never unchanged.
-func (t *headTracker) token(room string) (headToken, bool) {
+// store, it says after the read whether anything has written the document since. Its trusted field
+// is whether the tracker trusts itself now; an untrusted token is never unchanged.
+func (t *headTracker) token(room string) headToken {
 	if t == nil {
-		return headToken{}, false
+		return headToken{}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	entry := t.entryLocked(room)
-	token := headToken{epoch: t.epoch, generation: entry.generation, trusted: t.trustedLocked(entry)}
-	return token, token.trusted
+	return headToken{epoch: t.epoch, generation: entry.generation, trusted: t.trustedLocked(entry)}
 }
 
 // unchanged is whether nothing has written room since token was taken: the token was trusted, the
@@ -344,8 +342,5 @@ func (t *headTracker) ownWritesDone(room string) <-chan struct{} {
 	if entry == nil || len(entry.writes) == 0 {
 		return closedIdle
 	}
-	if entry.idle == nil {
-		entry.idle = make(chan struct{})
-	}
-	return entry.idle
+	return entry.idle.wait()
 }
