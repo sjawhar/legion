@@ -14,6 +14,12 @@ import (
 // every href on both sides (withoutMailtoHrefs): the text, the marks, and where each link is and
 // the address it holds. INFRA-530 makes the hrefs equal; these rows then move into its email table,
 // which compares whole trees.
+//
+// The transform splits each text of the last rows at an email, in a paragraph and in each block
+// that holds one, and searches each text once, so the text beside the email is not searched again
+// as a text of its own. Written as an explicit link, the email ends the text before it and begins
+// the one after it, and both readers link an address that text opens with alone (`.@y.zz`), so the
+// writer writes the email as its address there (runSpelling.bareEmails).
 func TestEmailShapesReadAsTheEngineReadsThemAndSurviveARender(t *testing.T) {
 	markdowns := []string{
 		"_a@b.test_\n",
@@ -33,13 +39,6 @@ func TestEmailShapesReadAsTheEngineReadsThemAndSurviveARender(t *testing.T) {
 		"x _a@b.test end\n",
 		"*a@b.test*\n",
 		"x *a@b.test* y\n",
-	}
-	// The transform splits each of these texts at an email, in a paragraph and in each block that
-	// holds one. The engine searches each text once, so the text beside the email is not searched
-	// again as a text of its own. Go reads them as the engine does, but no write keeps them yet: the
-	// writer writes an email as an explicit link, which ends the text before it and begins the one
-	// after it, and both readers then link what that text reads as alone.
-	searchedOnce := []string{
 		"a\\_b@c.dd\\.@y.zz\n",
 		"- a\\_b@c.dd\\.@y.zz\n",
 		"> a\\_b@c.dd\\.@y.zz\n",
@@ -58,7 +57,7 @@ func TestEmailShapesReadAsTheEngineReadsThemAndSurviveARender(t *testing.T) {
 		}
 		docs[index] = doc
 	}
-	readings := engineReadings(t, slices.Concat(markdowns, rendered, searchedOnce))
+	readings := engineReadings(t, slices.Concat(markdowns, rendered))
 	for index, markdown := range markdowns {
 		doc := withoutMailtoHrefs(docs[index])
 		if engine := readings[index]; engine == nil || !withoutMailtoHrefs(engine).Equal(doc) {
@@ -69,15 +68,6 @@ func TestEmailShapesReadAsTheEngineReadsThemAndSurviveARender(t *testing.T) {
 		}
 		if engine := readings[len(markdowns)+index]; engine == nil || !withoutMailtoHrefs(engine).Equal(doc) {
 			t.Errorf("%q is written %q, which the engine reads back as %s, not %s", markdown, rendered[index], readingSummary(engine), readingSummary(docs[index]))
-		}
-	}
-	for index, markdown := range searchedOnce {
-		doc, err := Parse(markdown)
-		if err != nil {
-			t.Fatalf("Parse(%q) = %v", markdown, err)
-		}
-		if engine := readings[2*len(markdowns)+index]; engine == nil || !withoutMailtoHrefs(engine).Equal(withoutMailtoHrefs(doc)) {
-			t.Errorf("%q: Go reads %s, the engine %s", markdown, readingSummary(doc), readingSummary(engine))
 		}
 	}
 }

@@ -95,9 +95,18 @@ type lineCandidate struct {
 // is kept, as main writes it, and one that does not is written again in the plain respellings, as
 // main writes it again. Only where none of those reads back is it written with open marks kept
 // open (keepingOpen), each such spelling kept only where it reads back with no delimiter run fused.
-// Last come those spellings again with the letter beside each such delimiter run written as a
+// Then come those spellings again with the letter beside each such delimiter run written as a
 // character reference, which is punctuation to the flanking rules, as the browser editor writes it
 // (flanking).
+//
+// An email link is written explicit, and a run holding one is read back too: the text before it and
+// the text after it, which the engine searches for an address each as a text of its own, can read
+// back linked where the run's markdown read them once with the address. `a\_b@c.dd\.@y.zz` reads
+// as the address `a_b@c.dd` and the text `.@y.zz`, but the engine links `.@y.zz` after
+// `[a_b@c.dd](a_b@c.dd)`, and `x /www.` before an explicit link reads as a www URL. Last, where the
+// run holds an email link, come all these spellings again with each email link written as its
+// address (isBareEmailLink), its `@` escaped where the ats spellings escape them, so the address
+// and the text beside it are one text again.
 //
 // A spelling is taken first where it reads back by CommonMark's flanking rules as well
 // (flankingOnlyMarkdown), the rules goldmark reads by, and only where none does by the browser
@@ -111,7 +120,8 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 	bareURL := writesBareURL(nodes, context.tableCell)
 	colons, ats := writesAddressSyntax(nodes)
 	flanking := delimiterBesidePunctuation(nodes, context.tableCell)
-	if r.err != nil || held == delimitersAsRuled && !bareURL && !colons && !ats && !fused && !flanking {
+	emails := writesBareEmail(nodes)
+	if r.err != nil || held == delimitersAsRuled && !bareURL && !colons && !ats && !fused && !flanking && !emails {
 		return
 	}
 	firstReadsBack := r.runReadsBack(from, prefix, nodes, inlineMarkdown)
@@ -119,17 +129,14 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		return
 	}
 	written := string(r.b.Bytes()[from:])
-	spellings := respellings(held, bareURL, colons, ats, false)
-	if fused {
-		spellings = append(spellings, respellings(held, bareURL, colons, ats, true)...)
-	}
-	if flanking {
-		flanked := []runSpelling{{flanking: true}}
-		for _, spelling := range spellings {
-			spelling.flanking = true
-			flanked = append(flanked, spelling)
+	spellings := runSpellings(held, bareURL, colons, ats, fused, flanking)
+	if emails {
+		// Last, each spelling again with every email link written as its address (bareEmails),
+		// whose `@` is text the ats spellings escape.
+		for _, spelling := range append([]runSpelling{{}}, runSpellings(held, bareURL, colons, true, fused, flanking)...) {
+			spelling.bareEmails = true
+			spellings = append(spellings, spelling)
 		}
-		spellings = append(spellings, flanked...)
 	}
 	for _, flankingToo := range []bool{true, false} {
 		if !flankingToo && firstReadsBack {
@@ -152,14 +159,36 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 // text it escapes, whether it writes each bare URL (isBareURLLink) as an autolink (`<href>`, whose
 // text both readers read as written and whose `>` ends it), whether it escapes the colons of URL
 // schemes and the `@`s in text outside a link (escapeContext.schemeColons, ats), whether a mark the
-// next text still carries stays open around that text's other marks (keepingOpen), and whether a
+// next text still carries stays open around that text's other marks (keepingOpen), whether a
 // letter beside a delimiter run that punctuation stands inside is a character reference
-// (flanking).
+// (flanking), and whether it writes each email link as its address (isBareEmailLink), text outside
+// a link to the escapes.
 type runSpelling struct {
 	escapes                      delimiterEscapes
 	angleURLs, schemeColons, ats bool
 	keepOpen                     bool
 	flanking                     bool
+	bareEmails                   bool
+}
+
+// runSpellings is every spelling inlineWithEscapes writes a run in after its first writing, email
+// links explicit: respellings, then where the first writing fused two delimiter runs, respellings
+// with open marks kept open, then where a delimiter run has punctuation inside it, each of these
+// with its letters beside one written as references (flanking).
+func runSpellings(held delimiterEscapes, bareURL, colons, ats, fused, flanking bool) []runSpelling {
+	spellings := respellings(held, bareURL, colons, ats, false)
+	if fused {
+		spellings = append(spellings, respellings(held, bareURL, colons, ats, true)...)
+	}
+	if flanking {
+		flanked := []runSpelling{{flanking: true}}
+		for _, spelling := range spellings {
+			spelling.flanking = true
+			flanked = append(flanked, spelling)
+		}
+		spellings = append(spellings, flanked...)
+	}
+	return spellings
 }
 
 // respellings is every spelling, open marks kept open or not, that inlineWithEscapes writes a run
@@ -226,6 +255,27 @@ func writesBareURL(nodes []*Node, escapePipes bool) bool {
 		}
 	}
 	return false
+}
+
+// writesBareEmail reports whether nodes hold an email link the bareEmails spelling writes as its
+// address (isBareEmailLink).
+func writesBareEmail(nodes []*Node) bool {
+	for _, node := range nodes {
+		if node.Type == "text" && isBareEmailLink(node, node.Marks) {
+			return true
+		}
+	}
+	return false
+}
+
+// spelledMarks is the marks spelling writes node's text under: its writtenMarks, less an email
+// link's where the spelling writes it as its address (runSpelling.bareEmails, isBareEmailLink).
+func spelledMarks(node *Node, escapePipes, wwwBare bool, spelling runSpelling) []Mark {
+	marks := writtenMarks(node, escapePipes, wwwBare)
+	if spelling.bareEmails && isBareEmailLink(node, marks) {
+		marks = withoutMark(marks, "link")
+	}
+	return marks
 }
 
 // writesAddressSyntax reports whether text outside a link or code among nodes holds a URL scheme's
@@ -380,17 +430,17 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			var common int
 			var flankFirst bool
 			for {
-				next = writtenMarks(n, escapePipes, bareHere)
+				next = spelledMarks(n, escapePipes, bareHere, spelling)
 				following = nil
 				if index+1 < len(nodes) {
-					following = writtenMarks(nodes[index+1], escapePipes, wwwBare)
+					following = spelledMarks(nodes[index+1], escapePipes, wwwBare, spelling)
 				}
 				if spelling.keepOpen {
 					next = keepingOpen(active, next, following)
 					if index+1 < len(nodes) {
 						var after []Mark
 						if index+2 < len(nodes) {
-							after = writtenMarks(nodes[index+2], escapePipes, wwwBare)
+							after = spelledMarks(nodes[index+2], escapePipes, wwwBare, spelling)
 						}
 						following = keepingOpen(next, following, after)
 					}
@@ -416,9 +466,10 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				}
 				bareHere = false
 			}
-			hasLink := containsMark(visibleMarks(n.Marks), "link")
-			active = next
 			marks := visibleMarks(n.Marks)
+			// An email link the spelling writes as its address is text outside a link to the escapes.
+			hasLink := containsMark(marks, "link") && !(spelling.bareEmails && isBareEmailLink(n, marks))
+			active = next
 			if isAngleURLLink(n, marks, escapePipes) || spelling.angleURLs && isBareURLLink(n, marks, escapePipes) {
 				// An autolink's text is literal to both parsers, so it takes no escape.
 				r.writeSyntax("<" + n.Text + ">")

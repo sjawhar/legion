@@ -731,6 +731,28 @@ func isBareWWWLink(node *Node, marks []Mark, escapePipes bool) bool {
 	return false
 }
 
+// isBareEmailLink reports whether node is an email link: its text an address the transform's email
+// pattern matches whole and links standing alone (findEmails), its href that address's (emailHref).
+// Such a link is written explicit, and as its text, escaped as text is, only where its run reads
+// back in no other spelling (runSpelling.bareEmails): after an explicit link the engine begins a
+// text node, which it searches for an address of its own, so text after the link that holds one
+// at its start reads back linked; written bare, the link and that text are one text node, searched
+// once.
+func isBareEmailLink(node *Node, marks []Mark) bool {
+	for _, mark := range marks {
+		if mark.Type != "link" {
+			continue
+		}
+		href, _ := mark.Attrs["href"].(string)
+		title, _ := mark.Attrs["title"].(string)
+		value := node.Text
+		var local emailRun
+		return title == "" && value != "" && href == emailHref(value) && local.read(value, 0, len(value)) == len(value) &&
+			strings.IndexByte("-_0123456789", value[len(value)-1]) < 0
+	}
+	return false
+}
+
 // literalLength is the length of the URL the browser editor's tokenizer reads from value, or 0. A
 // bare URL it reads is written as its bytes are: the tokenizer reads a URL's escapes and
 // references as written. The transform, which reads one the tokenizer refuses, reads it from the
