@@ -114,8 +114,10 @@ export function useRenderedMarkdown(
       setReferenceAnchors(anchors.length === 0 ? NO_ANCHORS : anchors);
       const placeholders = collectPictureAnchors(element);
       setPictureAnchors(placeholders.length === 0 ? NO_PICTURES : placeholders);
-      if (parsed !== undefined) {
-        cancelDraw = drawMermaidDiagrams(element, parsed, markdown);
+      if (engine !== undefined && parsed !== undefined) {
+        cancelDraw = drawMermaidDiagrams(element, parsed, markdown, (source) =>
+          engine.parse(source, softBreaks)
+        );
       }
       onRenderedRef.current?.();
     });

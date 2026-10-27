@@ -654,6 +654,31 @@ describe("Mermaid diagrams", () => {
     }
   });
 
+  // A fence opened inside a quote or a list item is still open while its quote or item runs to
+  // the end of the body, so a diagram streamed there stays code too; closed inside its container,
+  // it draws.
+  test("a mermaid fence still open inside a quote or a list item keeps it as code", async () => {
+    const done = fence("sequenceDiagram\n  Alice->>Bob: Hi");
+    for (const [streaming, closing] of [
+      ["> ```mermaid\n> sequenceDiagram\n>   Carol->>Dave: Yo", "\n> ```\n"],
+      ["- ```mermaid\n  sequenceDiagram\n    Carol->>Dave: Yo", "\n  ```\n"],
+    ] as const) {
+      resetMermaidDiagrams();
+      const view = render(<MarkdownBody markdown={`${done}\n${streaming}`} />);
+      try {
+        await waitFor(() => expect(figuresIn(view.container).length).toBeGreaterThan(0));
+        expect(figuresIn(view.container)).toHaveLength(1);
+        const code = view.container.querySelectorAll("pre")[1];
+        expect(code?.textContent).toContain("Carol->>Dave: Yo");
+        expect(code?.closest("figure")).toBeNull();
+        view.rerender(<MarkdownBody markdown={`${done}\n${streaming}${closing}`} />);
+        await waitFor(() => expect(figuresIn(view.container)).toHaveLength(2));
+      } finally {
+        view.unmount();
+      }
+    }
+  });
+
   test("a body whose source changes while the renderer loads draws only the newest source", async () => {
     // With the engine loaded the body paints in its layout effect, so only the renderer is late.
     await warmMarkdownRenderer();

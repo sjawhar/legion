@@ -13,11 +13,13 @@
  * places at once, never point at each other's markers. The accessibility tree and Playwright's
  * locators reach into an open root; the disclosure stays in the light DOM.
  *
- * A mermaid block that is the document's last block while the source's last non-blank line is no
- * closing fence is still being written (an unclosed fence runs to the end of the document), so it
- * stays code: the live view re-parses a turn on every frame while a model streams it, and drawing
- * each frame would run the renderer and flash a refusal (`Dangling Mermaid edge`) until the fence
- * closes. Every other block of the same body still draws.
+ * A mermaid block whose fence the parser still reads as open is still being written (an unclosed
+ * fence runs to the end of the document), so it stays code: the live view re-parses a turn on
+ * every frame while a model streams it, and drawing each frame would run the renderer and flash a
+ * refusal (`Dangling Mermaid edge`) until the fence closes. Every other block of the same body
+ * still draws. Open is the parser's answer, never a reading of the source text: the body is parsed
+ * again with a probe line after it, and the fence is open exactly when the probe lands inside the
+ * block (`endsInOpenMermaidFence`).
  *
  * The renderer (beautiful-mermaid and ELK) is a lazy chunk, loaded only once a body holds a
  * mermaid block. Once it has loaded, a body draws in the same layout effect that painted it;
@@ -40,12 +42,18 @@ type MermaidModule = typeof MermaidRenderer;
 type Drawing = { svg: SVGSVGElement } | { error: string };
 /** A body's blocks waiting for the renderer to load. */
 type PendingDraw = { element: HTMLElement; blocks: HTMLPreElement[] };
+/** Parses a source with the engine and soft-break policy that parsed the body; `undefined` for a
+ *  source the engine refuses. */
+type Reparse = (source: string) => ProseMirrorNode | undefined;
 
 /** How many drawn sources the cache keeps; the oldest insertion goes first. */
 const CACHE_LIMIT = 32;
-/** A line that closes a fence: three or more backticks or tildes alone on it, after any
- *  blockquote markers (a diagram quoted at the end of a body closes inside its quote). */
-const CLOSING_FENCE = /^(?:\s*>)*\s*(`{3,}|~{3,})\s*$/;
+/** The line the open-fence check parses after a body. No author writes it: the words are wrapped
+ *  in invisible separators (U+2063), so a code block that ends in it took in the probe, never an
+ *  author's own text that happens to read the same. */
+const OPEN_FENCE_PROBE = "\u2063dispatch-open-fence-probe\u2063";
+/** The containers a line opens: any block quote markers and list markers, then its indent. */
+const CONTAINER_LEAD = /^(?:[ \t]*(?:>|(?:[-+*]|\d{1,9}[.)])(?=[ \t]|$)))*[ \t]*/;
 /** The one rule the diagram needs beside its own sheet: its natural width, up to the body's. */
 const PREVIEW_STYLE = "svg{max-width:100%;height:auto;display:block}";
 
@@ -74,12 +82,41 @@ function lastLeafBlock(parsed: ProseMirrorNode): ProseMirrorNode | null {
   return node;
 }
 
-/** Whether the document ends in a mermaid block whose fence the source has not closed yet. */
-function endsInOpenMermaidFence(parsed: ProseMirrorNode, markdown: string): boolean {
+/**
+ * Whether the document ends in a mermaid block whose fence is still open. Only the parser can
+ * say, so the source text is never read for a closing fence: a link reference definition after a
+ * closed fence is no block, so the diagram is the document's last block while the source's last
+ * line is the definition; and CommonMark closes a fence only with a line of the opener's
+ * character at least as long as the opener (three backticks under four, or tildes under
+ * backticks, leave it open). So the body is parsed again with `OPEN_FENCE_PROBE` on a line after
+ * it: an open fence runs to the end of the document and takes the probe in as code, a closed one
+ * leaves it outside.
+ *
+ * The probe line sits in the containers the source's last non-blank line is in: that line's block
+ * quote markers kept and its list markers turned into spaces (a list item's content indent), with
+ * no blank line before it. A bare line, or a blank one, would end an open fence's quote or list
+ * item, and the fence with it, so a quoted diagram still being written would read as closed.
+ * Only a body whose last leaf block is a mermaid block is parsed again; a re-parse the engine
+ * refuses counts as closed, so the diagram draws.
+ */
+function endsInOpenMermaidFence(
+  parsed: ProseMirrorNode,
+  markdown: string,
+  reparse: Reparse
+): boolean {
   const last = lastLeafBlock(parsed);
   if (last?.type.name !== "code_block" || !isMermaidLanguage(last.attrs.language)) return false;
   const source = markdown.trimEnd();
-  return !CLOSING_FENCE.test(source.slice(source.lastIndexOf("\n") + 1));
+  const lastLine = source.slice(source.lastIndexOf("\n") + 1);
+  const lead = (CONTAINER_LEAD.exec(lastLine)?.[0] ?? "").replace(/[^\s>]/g, " ");
+  const newline = markdown.endsWith("\n") ? "" : "\n";
+  const probed = reparse(`${markdown}${newline}${lead}${OPEN_FENCE_PROBE}`);
+  const end = probed === undefined ? null : lastLeafBlock(probed);
+  return (
+    end?.type.name === "code_block" &&
+    isMermaidLanguage(end.attrs.language) &&
+    end.textContent.endsWith(OPEN_FENCE_PROBE)
+  );
 }
 
 function loadMermaid(): void {
@@ -166,19 +203,22 @@ function drawBlocks(module: MermaidModule, element: HTMLElement, blocks: HTMLPre
 
 /**
  * Draws every mermaid code block `element` holds (painted from `parsed`, the parse of
- * `markdown`) but one whose fence is still open, loading the renderer when none has loaded. With
- * the renderer loaded it draws now; otherwise when the renderer arrives. Returns the cancel for
- * that late draw; a cancelled draw never runs.
+ * `markdown`) but one whose fence is still open, loading the renderer when none has loaded.
+ * `reparse` parses with the engine and soft-break policy that produced `parsed`; the open-fence
+ * check runs it once, only when the body ends in a mermaid block. With the renderer loaded it
+ * draws now; otherwise when the renderer arrives. Returns the cancel for that late draw; a
+ * cancelled draw never runs.
  */
 export function drawMermaidDiagrams(
   element: HTMLElement,
   parsed: ProseMirrorNode,
-  markdown: string
+  markdown: string,
+  reparse: Reparse
 ): () => void {
   const blocks = Array.from(element.querySelectorAll<HTMLPreElement>("pre[data-language]")).filter(
     (pre) => isMermaidLanguage(pre.getAttribute("data-language"))
   );
-  if (blocks.length > 0 && endsInOpenMermaidFence(parsed, markdown)) blocks.pop();
+  if (blocks.length > 0 && endsInOpenMermaidFence(parsed, markdown, reparse)) blocks.pop();
   if (blocks.length === 0) return noop;
   if (loaded !== undefined) {
     drawBlocks(loaded, element, blocks);
