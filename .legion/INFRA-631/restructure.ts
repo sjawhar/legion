@@ -516,7 +516,7 @@ function unescapeCodePipes(cell: string): string {
     while (cell[at + run] === "`") run++;
     const fence = "`".repeat(run);
     let close = cell.indexOf(fence, at + run);
-    while (close !== -1 && (cell[close - 1] === "`" || cell[close + run] === "`")) {
+    while (close !== -1 && cell[close + run] === "`") {
       let end = close;
       while (cell[end] === "`") end++;
       close = cell.indexOf(fence, end);

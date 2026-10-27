@@ -321,10 +321,14 @@ function proseMask(line: string): boolean[] {
       const end = close === -1 ? at + run : close + run;
       if (close !== -1) prose.fill(false, at, end);
       at = end;
-    } else if (char === "]" && line[at + 1] === "(" && destinationEnd(line, at + 2) !== -1) {
+    } else if (char === "]" && line[at + 1] === "(") {
       const end = destinationEnd(line, at + 2);
-      prose.fill(false, at + 2, end);
-      at = end;
+      if (end === -1) {
+        at++;
+      } else {
+        prose.fill(false, at + 2, end);
+        at = end;
+      }
     } else {
       at++;
     }
@@ -426,6 +430,15 @@ function joinParagraph(source: readonly string[]): string[] {
   return logical;
 }
 
+/** R2: a list item that starts right after a non-blank line. */
+function needsBlankBefore(
+  lines: readonly string[],
+  info: LineInfo | undefined,
+  index: number
+): boolean {
+  return info?.itemStart === true && index > 0 && !isBlank(lines[index - 1] ?? "");
+}
+
 /** The document with each paragraph re-laid out and a blank line before each list item. */
 function relayout(text: string): string {
   const { lines, trailingNewline } = splitLines(text);
@@ -433,7 +446,7 @@ function relayout(text: string): string {
   const out: string[] = [];
   for (let index = 0; index < lines.length; index++) {
     const info = blocks.lines[index];
-    if (info?.itemStart && index > 0 && !isBlank(lines[index - 1] ?? "")) out.push("");
+    if (needsBlankBefore(lines, info, index)) out.push("");
     const paragraph = info?.paragraph;
     if (paragraph?.first === index) {
       const source = lines.slice(paragraph.first, paragraph.last + 1);
@@ -482,12 +495,18 @@ function check(text: string): Finding[] {
     for (const space of sentenceBreaks(line)) {
       findings.push({ line: index, rule: 1, message: excerpt(line, space) });
     }
-    if (info.itemStart && index > 0 && !isBlank(lines[index - 1] ?? "")) {
+    if (needsBlankBefore(lines, info, index)) {
       findings.push({ line: index, rule: 2, message: excerpt(line, 0) });
     }
-    const rows = screenRows([line]);
-    if (info.kind === "table" && rows > MAX_SCREEN_ROWS) {
-      findings.push({ line: index, rule: 3, message: `${rows} screen rows: ${excerpt(line, 0)}` });
+    if (info.kind === "table") {
+      const rows = screenRows([line]);
+      if (rows > MAX_SCREEN_ROWS) {
+        findings.push({
+          line: index,
+          rule: 3,
+          message: `${rows} screen rows: ${excerpt(line, 0)}`,
+        });
+      }
     }
   }
   for (const item of blocks.items) {
