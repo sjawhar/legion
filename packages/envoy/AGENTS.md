@@ -1403,19 +1403,22 @@ version write that records no rendering (`refs.ClearExcerpts`, which keeps the p
 holds for the reconciliation but sets its version null). `cmd/dispatch` runs
 `docs.Service.RunReferenceExcerptReconciliation`, which reads owed rows through the partial index
 `refs_excerpt_drift` (an empty index once it has caught up), stores one batch of 20 documents per
-tick, every 2 s while a batch is full and every five minutes after, and for the hour after its
-start first marks owed the excerpts a version written by the binary a deploy replaces left
-behind (`refs.MarkStaleExcerpts`). A document the reconciliation cannot read for any reason but
-an unloadable history or a tree outside the schema (which it records as having no block), or whose
-excerpts it cannot store, is logged at ERROR and skipped for that tick, its mentions left owed, so
-one document never holds back the rest of its batch. `refs.StoredExcerpts` serves only a row whose
-`excerpt_version` is non-null; a row owed an excerpt is answered with the document's name, not the
-payload it still holds. One window is left: during the one rolling deploy that ships 0092, a
-version the binary it replaces writes leaves the previous version's excerpt with its
-`excerpt_version` still set, and the route serves that excerpt until `refs.MarkStaleExcerpts`
-marks it owed at the reconciliation's next tick, which starts within five minutes
-(`docs.ReferenceExcerptReconcileInterval`) of the last one ending. The deploy's overlap lies inside
-the hour after the new task starts, the only hour `MarkStaleExcerpts` runs.
+tick, every 2 s while a batch is full and every five minutes after, and at each tick that follows
+a five-minute wait (the first tick too, never the 2 s steps) first marks owed the excerpts a
+version written by a build that stores none left behind (`refs.MarkStaleExcerpts`), however long
+its process has run. A document holding an element this build cannot read (`DOC_NEWER_CONTENT`,
+written by a newer build while two builds serve one database) is logged at WARN and its mentions
+stay owed for a build that reads it; the process passes over it at that version for ten minutes,
+or until it has another version, so the drift query lists the documents after it. A document the
+reconciliation cannot read for any other reason but an unloadable history or a tree outside the
+schema (which it records as having no block), or whose excerpts it cannot store, is logged at
+ERROR and skipped for that tick, its mentions left owed, so one document never holds back the
+rest of its batch. `refs.StoredExcerpts` serves only a row whose `excerpt_version` is non-null; a
+row owed an excerpt is answered with the document's name, not the payload it still holds. One
+window is left: a version a build that stores no excerpt writes (the binary the deploy that ships
+0092 replaces) leaves the previous version's excerpt with its `excerpt_version` still set, and the
+route serves that excerpt until `refs.MarkStaleExcerpts` marks it owed at the reconciliation's next
+tick that follows a five-minute wait (`docs.ReferenceExcerptReconcileInterval`).
 Blocker-list and parent changes serialize per project through `lockProjectIssueDependencies`
 (`api/issue_parent.go`), using the two-key advisory-lock namespace `dispatch-issue-dependencies`.
 That transaction lock comes before any row or rank lock. A PATCH then locks every issue row it

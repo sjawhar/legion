@@ -206,9 +206,13 @@ type Service struct {
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
 	// the mutation outside the document's lock and takes the lock for each transaction alone.
 	inServiceTransaction func(txn *crdt.Transaction)
-	// now is the clock the unrecorded-mark sweep ages marks by (sweepUnrecordedMarks).
-	now      func() time.Time
-	settleWG sync.WaitGroup
+	// now is the clock the unrecorded-mark sweep ages marks by (sweepUnrecordedMarks), and the
+	// one the reference-excerpt reconciliation ages its skipped documents by (excerptSkips).
+	now func() time.Time
+	// excerptSkips is the documents this process's reference-excerpt reconciliation passes over
+	// for now, each at the version it could not read (ReconcileReferenceExcerpts).
+	excerptSkips excerptSkips
+	settleWG     sync.WaitGroup
 	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
 	// the store, so shutdown joins them before it closes.
 	evictWG sync.WaitGroup
@@ -1193,14 +1197,15 @@ func (s *Service) settleRoom(room string, generation uint64) {
 
 // skipUnreadableSettlement reports whether err stops a settlement at a document whose tree it cannot
 // read, and logs it: a tree outside the Proof schema, which a replacement from markdown repairs, or
-// a tree holding an element this build does not know (ErrDocNewerContent), which a newer build
-// wrote while two builds serve one database. The settlement writes no version and records no
-// failure, and the document stays unsettled for a later settlement - a repair's, or one on a build
-// that reads the element.
+// an element this build does not know (ErrDocNewerContent), which a newer build wrote while two
+// builds serve one database - in the tree, or in the version a human approved, without which the
+// version write cannot tell whether his approval carries (carryApproval). The settlement writes no
+// version and records no failure, and the document stays unsettled for a later settlement - a
+// repair's, or one on a build that reads the element, which the log names.
 func skipUnreadableSettlement(room string, err error) bool {
 	switch {
 	case errors.Is(err, ErrDocNewerContent):
-		slog.Warn("dispatch: settle document holding an element this build cannot read; no version written", "room", room, "error", err)
+		slog.Warn("dispatch: settle document holding an element this build cannot read; no version written; a build that reads the element writes it", "room", room, "error", err)
 	case errors.Is(err, ErrDocSchema):
 		slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
 	default:
@@ -1669,6 +1674,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			docUpdateVersion: &snapshotCursor,
 		})
 		if writeErr != nil {
+			// The version a human approved holds an element this build does not know: the version
+			// is left, unwritten, to a build that reads it, as a tree holding one is.
+			if len(slots) == 0 && errors.Is(writeErr, ErrDocNewerContent) && skipUnreadableSettlement(room, writeErr) {
+				return
+			}
 			abandon(writeErr)
 			return
 		}

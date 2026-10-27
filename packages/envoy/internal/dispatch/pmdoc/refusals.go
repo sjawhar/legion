@@ -134,7 +134,9 @@ var convertedBlocks = map[ast.NodeKind]bool{
 
 // typedDirectiveRefusal refuses a typed block the browser editor's parser reads differently or
 // refuses, or whose type or attributes the schema does not declare, and otherwise keeps its
-// attributes' values, defaults included, on the directive.
+// attributes' values, defaults included, on the directive. A type, an attribute or an enum value
+// the manifest does not name is ErrUnknownElement as well, as the reader of a stored tree refuses
+// it: a stored version's markdown is a rendering, and a newer build's names what it knows.
 func typedDirectiveRefusal(directive *typedDirective) error {
 	if !directive.Closed && directive.Parent().Kind() == ast.KindDocument {
 		return fmt.Errorf("%w: typed block %q is unclosed at document level", ErrSchema, directive.Name)
@@ -144,7 +146,7 @@ func typedDirectiveRefusal(directive *typedDirective) error {
 	}
 	typ, ok := typedBlock(directive.Name)
 	if !ok {
-		return fmt.Errorf("%w: unknown typed block %q (known types: %s)", ErrSchema, directive.Name, strings.Join(typedBlockNames(), ", "))
+		return unknownElement(fmt.Errorf("%w: unknown typed block %q (known types: %s)", ErrSchema, directive.Name, strings.Join(typedBlockNames(), ", ")))
 	}
 	if err := undeclaredAttributes(directive.Name, directive.Attrs, typ.Attributes); err != nil {
 		return err
@@ -157,7 +159,7 @@ func typedDirectiveRefusal(directive *typedDirective) error {
 		}
 		value, err := parseTypedAttributeValue(typ.Attributes[name], raw)
 		if err != nil {
-			return fmt.Errorf("%w: typed block %q attribute %q: %v", ErrSchema, directive.Name, name, err)
+			return fmt.Errorf("%w: typed block %q attribute %q: %w", ErrSchema, directive.Name, name, err)
 		}
 		values[name] = value
 	}
