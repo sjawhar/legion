@@ -326,6 +326,13 @@ case "$1" in
       echo "pg_dumpall: error: connection to server failed" >&2
       exit 1
     fi
+    # A dump that stops partway (killed, or its redirect's disk full) once it has written the
+    # schema: every CREATE TABLE and no row, the data sections being the dump's last and largest.
+    if [ "$command" = pg_dumpall ] && [ "${FAKE_DUMP_FAILS:-false}" = cut ]; then
+      "${bin}/${command}" -h "${rig}/${cluster}" "${args[@]}" </dev/null | sed '/^COPY public\./,$d'
+      echo "pg_dumpall: error: could not write to output file: No space left on device" >&2
+      exit 1
+    fi
     if "$stdin"; then
       exec "${bin}/${command}" -h "${rig}/${cluster}" "${args[@]}"
     fi
@@ -392,6 +399,20 @@ EOF
     failures=$((failures + 1))
   else
     printf 'PASS: the checks printed before `docker rm -v` tell a restore of an empty dump from a whole one\n'
+  fi
+  # The same checks after a dump that stopped once the schema was written: the dispatch database
+  # then holds every table and none of their rows, which the checks must tell apart too.
+  checks_cut="$(replay_move cut cut)"
+  rows_cut="$(cat "${temporary_dir}/move-cut.rows")"
+  if [ "$rows_whole" != 25 ] || [ "$rows_cut" != 0 ]; then
+    printf 'FAIL: the move replay did not restore 25 rows from a whole dump and an empty table from one cut after its schema (whole: %s, cut: %s)\n' "$rows_whole" "$rows_cut"
+    failures=$((failures + 1))
+  elif [ "$checks_whole" = "$checks_cut" ]; then
+    printf 'FAIL: the checks printed before `docker rm -v` print the same after a restore of a dump cut after its schema as after a whole one, so a move that lost every row passes them\n'
+    printf '%s\n' "$checks_cut" | sed 's/^/  /'
+    failures=$((failures + 1))
+  else
+    printf 'PASS: the checks printed before `docker rm -v` tell a restore of a dump cut after its schema from a whole one\n'
   fi
 fi
 
