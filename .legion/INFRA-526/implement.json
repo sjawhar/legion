@@ -2,11 +2,27 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-526",
-  "completed": "2026-10-27T07:15:00Z",
-  "round": 5,
+  "completed": "2026-10-27T09:00:00Z",
+  "round": 6,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2310",
-  "rebaseRecheck": "c9d865ec -> b57365830bc38e45c202a8b7b390e9d84acd65ff: fingerprint unchanged (5051300770a6dd6d111c0f4dbd52d8014cb466caf440a0a08aafe4b82bbecfef before and after, comment https://github.com/sjawhar/legion/pull/2310#issuecomment-6435840897), bare gates only. A forward merge of main 32b6dd9f resolving the conflict GitHub reported: one import conflict in packages/dispatch/web/src/features/refs/markdown-engine.ts (#2210 moved referenceSpans to ./reference-spans beside this branch's ../doc/typed-block-drawing import), resolved by keeping both imports; nothing else changed. GitHub reports MERGEABLE at b5736583. Earlier round 4: 154d6cea -> 2497adef, also unchanged (main 448a4100 with #2317).",
+  "rebaseRecheck": "083063ed -> dd97e1d0cce2afc3f98d07e233385eb56a4e0236: fingerprint CHANGED (5051300770a6dd6d111c0f4dbd52d8014cb466caf440a0a08aafe4b82bbecfef -> fa59b02c859148081e667ce68b8352c28693673dd2d7a11669f0c90f9a5ee2b3; merge commit f6a986e8 alone 412b405a7e28296b956b793fd83c2ea6ebf3342519b4f14a30da05f4f73d8eae; comment https://github.com/sjawhar/legion/pull/2310#issuecomment-6437494049). Forward merge of main b08a56bc (#2303, INFRA-529) resolving four conflicts, each keeping both changes: lib-headless.ts (renderBlock and readOnly options, HostBlockRenderer re-export), markdown-engine.ts (createHeadlessProof({ blockSchema, readOnly: true, renderBlock }), both doc paragraphs), proof-editor AGENTS.md (both edit entries, seventeen kinds in both counts), MarkdownBody.test.tsx (both sets of cases); dispatch AGENTS.md merged clean. Plus dd97e1d0: a test that a read-only-refused ask beside a valid decision leaves the valid one its own card. A full test round is due. GitHub reports MERGEABLE at dd97e1d0.",
   "proof": [
+    {
+      "criterion": "Round 6 (after merging #2303): a decision the read-only parse refuses leaves the valid decision beside it its own card",
+      "surface": "MarkdownBody under the TextAskCard provider (happy-dom)",
+      "command": "cd packages/dispatch && bun test web/src/features/refs/MarkdownBody.test.tsx",
+      "observed": "31 pass, 0 fail; the new case, in both orders (refused first, valid first): one ask shell, ':::ask' fence text outside it, the h2 outside any section, the shell's own footer holding rows A and B and no X, data-dispatch-ask-options=rows, no fallback",
+      "headSha": "dd97e1d0cce2afc3f98d07e233385eb56a4e0236",
+      "negativeControl": "With collectAskHosts' node walk also counting the refused block (node.textContent starting ':::ask'), the case failed (30 pass, 1 fail); restored"
+    },
+    {
+      "criterion": "Round 6: this change and #2303 together on the real surface (A1a, A1b, A4, the tester's reply test, #2303's unknown-directive rows)",
+      "surface": "Issue Conversation tab, issue page, document and version view, Inbox; real Go Dispatch server, production SPA bundle, Postgres 17 + pgvector, Playwright chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts e2e/unknown-directive.e2e.ts e2e/typed-blocks.e2e.ts e2e/ask-blocks.e2e.ts e2e/conversation.e2e.ts e2e/inbox.e2e.ts e2e/doc.e2e.ts e2e/document.e2e.ts e2e/references.e2e.ts --project chromium --project iphone",
+      "observed": "224 passed, 2 skipped (phone-only rows on the desktop project) in 19.2m from a fresh build, including text-typed-blocks 6/6 and unknown-directive 8/8; also packages/dispatch bun run test 2510/0, typecheck and lint clean; packages/proof-editor test 129/0 and typecheck clean; root biome clean; entry chunk 0 dispatch-ask-block-editing, 768,569 bytes",
+      "headSha": "dd97e1d0cce2afc3f98d07e233385eb56a4e0236",
+      "negativeControl": "text-typed-blocks at base 64e8c890: 4 failed (header/card locators not found); the tester's reply test at b6720fc1: 2 failed; the nested-decision unit case at 9439f4a8: failed"
+    },
     {
       "criterion": "Round 5 smoke after the conflict merge: the change still draws the header and card, and keeps a reply's lists",
       "surface": "Issue Conversation tab and issue page; real Go Dispatch server, production SPA bundle, Postgres 17 + pgvector, Playwright chromium and iphone",
