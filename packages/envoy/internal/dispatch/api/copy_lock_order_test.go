@@ -77,7 +77,11 @@ var (
 // that took either; a statement is ordered only through a function of its own, as
 // markSettlementPending, clearSettlementPending, lockProjectCopies and events.Broker.Append each
 // run theirs. Nor does it tell transactions apart, so a function that commits one transaction and
-// takes the copy lock in the next reads as one; none does.
+// takes the copy lock in the next reads as one. One function is called in a loop that does exactly
+// that: docs.Service.settlePass opens, and commits or rolls back, a transaction of its own each
+// pass, so what one pass took is released before the next pass takes the copy lock. Its calls are
+// listed in transactionsOfTheirOwn: each is still checked against what its caller holds when it
+// runs, and what it takes is not carried past it.
 // TestCopyLockOrderGuardFollowsTheLockTakers holds the resolution to the chains this rule is about,
 // so the check cannot pass by losing them.
 func TestCopyLockComesBeforeEveryPendingRowAndEvent(t *testing.T) {
@@ -791,17 +795,23 @@ func (c *orderCheck) evaluate(node ast.Node) {
 	})
 }
 
+// transactionsOfTheirOwn names the functions that end, within the call, every transaction they
+// open, and that no caller runs inside a transaction of its own.
+var transactionsOfTheirOwn = map[string]bool{"docs.Service.settlePass": true}
+
 func (c *orderCheck) call(call *ast.CallExpr) {
 	var effect lockEffect
+	ownTransaction := true
 	for _, callee := range c.graph.callees(call) {
 		effect |= callee.reach
+		ownTransaction = ownTransaction && transactionsOfTheirOwn[callee.name]
 	}
 	callee := types.ExprString(call.Fun)
 	if effect&takesCopyLock != 0 && c.now.effect&(takesPendingRow|appendsEvent) != 0 {
 		c.offences = append(c.offences, fmt.Sprintf("%s: %s calls %s, which takes the copy lock, after %s",
 			c.graph.line(c.fn.source, call), c.fn.name, callee, c.now.first))
 	}
-	if held := effect &^ takesCopyLock; held != 0 {
+	if held := effect &^ takesCopyLock; held != 0 && !ownTransaction {
 		if c.now.first == "" {
 			c.now.first = fmt.Sprintf("%s, which takes %s (%s)", callee, held, c.graph.line(c.fn.source, call))
 		}

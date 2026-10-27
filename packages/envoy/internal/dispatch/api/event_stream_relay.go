@@ -69,6 +69,10 @@ type eventStreamRelay struct {
 	running sync.WaitGroup
 	// wake holds at most one signal: what a read answers covers every notification before it.
 	wake chan struct{}
+	// live is the pool every read of the relay's goes through (store.Pool.Live), so a commit
+	// reaches the open streams while the requests hold every connection of theirs. start sets it,
+	// before the goroutines that read it run.
+	live *store.Pool
 
 	mu       sync.Mutex
 	started  bool
@@ -105,18 +109,24 @@ func (r *eventStreamRelay) subscribe(ctx context.Context) (<-chan model.Event, f
 
 // start reads the cursor and runs the relay's two goroutines, once. The cursor is read through
 // eventCursorCheck, the same read the reset check uses, so it carries the newest event's
-// created_at beside its id from the first moment the relay holds one.
+// created_at beside its id from the first moment the relay holds one. That read, like every read
+// the relay makes, is on the live pool.
 func (r *eventStreamRelay) start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.started {
 		return nil
 	}
-	cursor, cursorAt, _, err := eventCursorCheck(ctx, r.server.deps.Store.Pool, 0)
+	live, err := r.server.deps.Store.Pool.Live()
+	if err != nil {
+		return fmt.Errorf("open the live event stream's pool: %w", err)
+	}
+	cursor, cursorAt, _, err := eventCursorCheck(ctx, live, 0)
 	if err != nil {
 		return fmt.Errorf("read the live event stream's cursor: %w", err)
 	}
 	r.cursor, r.cursorAt = cursor, cursorAt
+	r.live = live
 	r.started = true
 	dial := r.dial
 	if dial == nil {
@@ -195,7 +205,7 @@ func (r *eventStreamRelay) read(ctx context.Context) bool {
 	}
 	for {
 		cursor, _ := r.at()
-		committed, err := r.server.readEventsAfterID(tracked, cursor)
+		committed, err := r.server.readEventsAfterID(tracked, r.live, cursor)
 		if err != nil {
 			if ctx.Err() == nil {
 				slog.Warn("dispatch: live event stream could not read the committed events; retrying", "error", err)
@@ -241,7 +251,7 @@ func (r *eventStreamRelay) read(ctx context.Context) bool {
 // relay holds nothing but a reader's stream, which only that reader can rebuild.
 func (r *eventStreamRelay) resetCursor(ctx context.Context) (bool, error) {
 	cursor, at := r.at()
-	maxID, maxAt, cursorAt, err := eventCursorCheck(ctx, r.server.deps.Store.Pool, cursor)
+	maxID, maxAt, cursorAt, err := eventCursorCheck(ctx, r.live, cursor)
 	if err != nil {
 		return false, err
 	}

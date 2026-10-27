@@ -57,8 +57,11 @@ func (h *deliveryHub) intake(ctx context.Context) {
 
 // readCursors reads where both logs stand and the open P0 issues.
 func (h *deliveryHub) readCursors() bool {
-	ctx, pool := h.readContext(), h.server.deps.Store.Pool
-	seq, err := delivery.LatestChangeSeq(ctx, pool)
+	ctx, pool, err := h.liveRead()
+	var seq int64
+	if err == nil {
+		seq, err = delivery.LatestChangeSeq(ctx, pool)
+	}
 	var at *time.Time
 	if err == nil && seq > 0 {
 		at, err = delivery.ChangeAt(ctx, pool, seq)
@@ -109,7 +112,10 @@ func (h *deliveryHub) catchUp(changes, events bool) {
 // refilled past it, e2e/seed.ts:150). A reset moves the cursor to the newest row and marks every
 // view dirty.
 func (h *deliveryHub) catchUpChanges() error {
-	ctx, pool := h.readContext(), h.server.deps.Store.Pool
+	ctx, pool, err := h.liveRead()
+	if err != nil {
+		return err
+	}
 	for {
 		h.mu.Lock()
 		seq, at := h.changeSeq, h.changeAt
@@ -168,7 +174,10 @@ func (h *deliveryHub) catchUpChanges() error {
 // RESTART IDENTITY). A reset moves the cursor to the newest event, reloads the open P0 issues and
 // marks every view dirty; a cursor row some other path deleted costs only that.
 func (h *deliveryHub) catchUpEvents() error {
-	ctx, pool := h.readContext(), h.server.deps.Store.Pool
+	ctx, pool, err := h.liveRead()
+	if err != nil {
+		return err
+	}
 	h.mu.Lock()
 	cursor, at := h.eventCursor, h.eventAt
 	h.mu.Unlock()

@@ -360,6 +360,18 @@ func main() {
 		slog.Error("dispatch: open the lease pool for the maintenance loops", "error", err)
 		os.Exit(1)
 	}
+	// The background loops below - the embedding queue and its coverage pass, the suggestion
+	// sweep, the architecture importer's ticker, the delivery reconcile and intakes - read and
+	// write through the background pool, so under load a request never queues behind a loop's
+	// statement for a connection, nor a loop behind the requests. The document service's own loops
+	// (the settlement resumption, the task progress and reference excerpt reconciliations) take it
+	// from the store themselves. Each leased loop still takes its lease on the lease pool above.
+	background, err := database.Pool.Background()
+	if err != nil {
+		slog.Error("dispatch: open the background pool for the background loops", "error", err)
+		os.Exit(1)
+	}
+	backgroundStore := &store.Store{Pool: background}
 
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()
@@ -390,7 +402,7 @@ func main() {
 	if embedder != nil {
 		backgroundEmbedder = embed.NewRateLimitedEmbedder(embedder)
 	}
-	go embedqueue.Run(ctx, embedqueue.Deps{Store: database, Embedder: backgroundEmbedder})
+	go embedqueue.Run(ctx, embedqueue.Deps{Store: backgroundStore, Embedder: backgroundEmbedder})
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
@@ -399,7 +411,7 @@ func main() {
 	// browsers reconnect and re-sync instead of reading text the store no longer holds.
 	go documentService.RunStaleRoomEviction(ctx)
 	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
-	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
+	go api.RunSuggestionOutcomeSweep(ctx, background, api.SuggestionSweepInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again, at start and on an interval, so their progress shows without anyone
@@ -422,13 +434,15 @@ func main() {
 		slog.Info("dispatch: webhook redelivery off: it needs NATS and the GitHub App private key")
 	}
 
-	go architecture.Run(ctx, appCtx.Architecture(), leases)
+	// The ticker's importer is the routes' one on the background pool: it shares their per-project
+	// locks, so a Refresh and a tick of one project still take turns.
+	go architecture.Run(ctx, appCtx.Architecture().On(backgroundStore), leases)
 
 	// LEGION-567: the delivery timeline's 5-minute GitHub-App reconcile runs regardless of NATS
 	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
 	// a connected client, exactly like the outbox above. Both take the event broker: each writes
 	// issue.deployed on a pull request's issue once its shipping run is known (LEGION-781).
-	go delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker).Run(ctx, leases)
+	go delivery.NewReconcile(background, appCtx.GitHub(), broker).Run(ctx, leases)
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
 		// its own (delivery.StartIntakes). Their clients stay open until the publisher closes, so a
@@ -437,7 +451,7 @@ func main() {
 		connectIntake := func(name string) (*bus.Client, error) {
 			return bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName(name))
 		}
-		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker)
+		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, background, leases, appCtx.GitHub(), broker)
 		if err != nil {
 			slog.Error("dispatch delivery: connect NATS", "error", err)
 			os.Exit(1)

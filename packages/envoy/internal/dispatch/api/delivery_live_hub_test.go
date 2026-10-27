@@ -1158,8 +1158,12 @@ func TestAnEventAnotherTaskCommittedReachesThisHub(t *testing.T) {
 	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
 }
 
-// acquires is how many connections the shared pool has handed out so far.
-func acquires(database *store.Store) int64 { return database.Pool.Stat().AcquireCount() }
+// acquires is how many connections the store's pools have handed out so far, every pool it has
+// opened counted: the hub reads through the live pool, a route through the request pool.
+func acquires(database *store.Store) int64 {
+	use := database.Pool.Use()
+	return int64(use.InUse) + use.Returned
+}
 
 // waitConnected waits for the hub's listener to have connected and caught both logs up, after
 // which the hub reads nothing until something changes.
@@ -1194,7 +1198,7 @@ func TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase(t
 
 	delta := conn.delta(t, 4*time.Second, "p")
 	if got := acquires(rig.database); got != before {
-		t.Fatalf("the shared pool handed out %d connections while the oldest pull request left, want none", got-before)
+		t.Fatalf("the pools handed out %d connections while the oldest pull request left, want none", got-before)
 	}
 	if got := delta.Items["prs"].Remove; !slices.Equal(got, []string{"acme/widgets#1"}) {
 		t.Fatalf("the expiry's delta removes %v, want acme/widgets#1", got)
@@ -1217,7 +1221,7 @@ func TestAPipelineViewMovesItsDaysAtMidnightWithoutReadingTheDatabase(t *testing
 	clock.Advance(nextUTCMidnight(now).Sub(now) + time.Second)
 	delta := conn.delta(t, 3*time.Second, "p")
 	if got := acquires(rig.database); got != before {
-		t.Fatalf("the shared pool handed out %d connections at midnight, want none", got-before)
+		t.Fatalf("the pools handed out %d connections at midnight, want none", got-before)
 	}
 	var days []string
 	if err := json.Unmarshal(delta.Set["days"], &days); err != nil {

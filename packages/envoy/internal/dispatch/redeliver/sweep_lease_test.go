@@ -17,11 +17,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// webhookRedeliveryLease is the name the running sweep takes its lease under, written here as the
-// string rather than read from the package: the name is the contract between two envoy-dispatch
-// processes, and a test that held a different one would prove nothing.
-const webhookRedeliveryLease = "webhook-redelivery"
-
 // redeliverTestLeases opens the lease pool a running sweep takes webhook-redelivery on, from the
 // Postgres DISPATCH_TEST_DATABASE_URL names; a test that needs it skips (not fails) when the
 // variable is unset, matching every other Postgres-backed test in this module. A lease is an
@@ -48,7 +43,7 @@ func redeliverTestLeases(t *testing.T) duty.Leases {
 	if err := (&store.Store{Pool: pool}).Migrate(ctx); err != nil {
 		t.Fatalf("migrate the lease pool's database: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `delete from duty_passes where lease = $1`, webhookRedeliveryLease); err != nil {
+	if _, err := pool.Exec(ctx, `delete from duty_passes where lease = $1`, duty.WebhookRedeliveryLease); err != nil {
 		t.Fatalf("clear an earlier run's recorded sweep: %v", err)
 	}
 	leases, err := pool.Leases()
@@ -102,7 +97,7 @@ func TestARunningSweepWhoseLeaseIsHeldElsewhereListsNothing(t *testing.T) {
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)
 	go func() {
-		held <- duty.Exclusive(context.Background(), leases, webhookRedeliveryLease, 0, func(context.Context) {
+		held <- duty.Exclusive(context.Background(), leases, duty.WebhookRedeliveryLease, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})
@@ -122,10 +117,10 @@ func TestARunningSweepWhoseLeaseIsHeldElsewhereListsNothing(t *testing.T) {
 		defer close(done)
 		sweeper.Run(ctx, time.Hour, leases)
 	}()
-	for deadline := time.Now().Add(20 * time.Second); logs.count("dispatch duty: leased pass skipped", "lease="+webhookRedeliveryLease) == 0; {
+	for deadline := time.Now().Add(20 * time.Second); logs.count("dispatch duty: leased pass skipped", "lease="+duty.WebhookRedeliveryLease) == 0; {
 		if time.Now().After(deadline) {
 			cancel()
-			t.Fatalf("the running sweep never reported skipping the %s lease:\n%s", webhookRedeliveryLease, logs)
+			t.Fatalf("the running sweep never reported skipping the %s lease:\n%s", duty.WebhookRedeliveryLease, logs)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

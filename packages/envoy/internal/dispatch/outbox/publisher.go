@@ -79,11 +79,6 @@ type Publisher interface {
 	Window() bus.Sender
 }
 
-// documentCompactionLease names the lease the daily document compaction runs under. It walks
-// every document, so two envoy-dispatch processes compacting at the same moment is twice the work
-// for one result.
-const documentCompactionLease = "document-compaction"
-
 // Deps are the durable state and delivery dependencies for the outbox.
 type Deps struct {
 	// Store is what the outbox reads and records events through. cmd/dispatch gives it a store on
@@ -93,7 +88,7 @@ type Deps struct {
 	Publisher Publisher
 	Broker    *events.Broker
 	Docs      docs.API
-	// Leases is where the compaction tick takes documentCompactionLease (compactDocuments). It
+	// Leases is where the compaction tick takes duty.DocumentCompactionLease (compactDocuments). It
 	// is required of a Run that ticks: there is no nil-means-unleased path, and cmd/dispatch
 	// exits at boot if the lease pool cannot be opened.
 	Leases duty.Leases
@@ -151,12 +146,14 @@ func compactDaily(ctx context.Context, deps Deps) {
 	}
 }
 
-// compactDocuments runs the daily compaction of every document under documentCompactionLease, so
-// that one process does that walk however many serve the database, once per compactInterval and
-// not once per process: the period is this loop's own tick, so a process whose ticker fires hours
-// after the other's finds the day's compaction already done and skips it.
+// compactDocuments runs the daily compaction of every document under duty.DocumentCompactionLease.
+// The compaction walks every document, so two envoy-dispatch processes compacting at the same
+// moment is twice the work for one result: under the lease one process does that walk however
+// many serve the database, once per compactInterval and not once per process. The period is this
+// loop's own tick, so a process whose ticker fires hours after the other's finds the day's
+// compaction already done and skips it.
 func compactDocuments(ctx context.Context, deps Deps) {
-	duty.Exclusive(ctx, deps.Leases, documentCompactionLease, compactInterval, func(ctx context.Context) {
+	duty.Exclusive(ctx, deps.Leases, duty.DocumentCompactionLease, compactInterval, func(ctx context.Context) {
 		if err := deps.Docs.CompactAll(ctx); err != nil {
 			slog.Error("dispatch outbox: compact documents", "error", err)
 		}

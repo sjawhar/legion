@@ -10,30 +10,43 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// leaseNames is every lease Exclusive takes, each spelled out, and Exclusive refuses any other:
-// the lease pool has a connection for each of these and two spare (store.leasePoolSize, held to
-// this list's length by a test), so a lease taken under a name not counted here would take a
-// connection a listed lease counted on. A loop that leases a new name - or holds a connection of
-// the lease pool for any other reason - adds it here, and store's count with it.
+// The lease names, one constant per leased loop, which each loop passes to Exclusive: this file is
+// the one place a lease name is spelled, so the list below and the names the loops take cannot
+// drift apart.
+const (
+	// DocumentCompactionLease is outbox.compactDocuments': the daily document compaction.
+	DocumentCompactionLease = "document-compaction"
+	// SuggestionOutcomeLease is api's suggestion-outcome sweep's.
+	SuggestionOutcomeLease = "suggestion-outcomes"
+	// ReferenceExcerptLease is docs.RunReferenceExcerptReconciliation's.
+	ReferenceExcerptLease = "reference-excerpts"
+	// WebhookRedeliveryLease is redeliver's GitHub webhook redelivery sweep's.
+	WebhookRedeliveryLease = "webhook-redelivery"
+	// ArchitectureImportLease is architecture's import ticker's.
+	ArchitectureImportLease = "architecture-import"
+	// DeliveryReconcileLease is delivery.Reconcile's.
+	DeliveryReconcileLease = "delivery-reconcile"
+	// DeliveryEventsConsumerLease and DeliveryJobsConsumerLease are the consumer leases of the two
+	// delivery durables (bus.DispatchDeliveryDurable and bus.DispatchJobDurable), one per durable,
+	// each taken by its intake's bind poll (delivery.consumerLease maps a durable to its name).
+	DeliveryEventsConsumerLease = "delivery-consumer-delivery-events"
+	DeliveryJobsConsumerLease   = "delivery-consumer-delivery-jobs"
+)
+
+// leaseNames is every lease Exclusive takes, and Exclusive refuses any other: the lease pool has a
+// connection for each of these and two spare (store.leasePoolSize, held to this list's length by a
+// test), so a lease taken under a name not counted here would take a connection a listed lease
+// counted on. A loop that leases a new name - or holds a connection of the lease pool for any other
+// reason - adds its constant above and here, and store's count with it.
 var leaseNames = [...]string{
-	// outbox.compactDocuments: the daily document compaction.
-	"document-compaction",
-	// api's suggestion-outcome sweep.
-	"suggestion-outcomes",
-	// docs.RunReferenceExcerptReconciliation.
-	"reference-excerpts",
-	// redeliver's GitHub webhook redelivery sweep.
-	"webhook-redelivery",
-	// architecture's import ticker.
-	"architecture-import",
-	// delivery.Reconcile.
-	"delivery-reconcile",
-	// delivery.consumerLease of each delivery durable (bus.DispatchDeliveryDurable and
-	// bus.DispatchJobDurable): one per durable, each taken by its intake's bind poll. The names
-	// are built at runtime there and written out here, since delivery imports duty and not the
-	// other way about.
-	"delivery-consumer-delivery-events",
-	"delivery-consumer-delivery-jobs",
+	DocumentCompactionLease,
+	SuggestionOutcomeLease,
+	ReferenceExcerptLease,
+	WebhookRedeliveryLease,
+	ArchitectureImportLease,
+	DeliveryReconcileLease,
+	DeliveryEventsConsumerLease,
+	DeliveryJobsConsumerLease,
 }
 
 // LeaseNames is every lease name Exclusive accepts.

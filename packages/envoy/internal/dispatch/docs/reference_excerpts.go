@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -67,12 +68,6 @@ const (
 	referenceExcerptStaleWindow       = time.Hour
 )
 
-// referenceExcerptLease names the lease one reconciliation tick runs under. The excerpts it
-// stores are the same whichever process cuts them, and a mention is owed one until some process
-// does, so two processes reading the same batch of documents and writing the same rows is work
-// done twice for one result - and, because each tick claims nothing, the same documents twice.
-const referenceExcerptLease = "reference-excerpts"
-
 // RunReferenceExcerptReconciliation stores the excerpts of every document some of whose mentions
 // are owed one (refs.DriftedExcerpts): every mention indexed before migration 0092, each one
 // rebuild-refs inserts, and each a version write could not cut. One batch per tick, at start, then
@@ -82,6 +77,13 @@ const referenceExcerptLease = "reference-excerpts"
 // written by the binary a deploy replaces left behind, while both run; until a tick marks one,
 // GET /api/v1/references serves that older excerpt. A mention owed an excerpt is answered with
 // the document's name until this stores one.
+//
+// Each tick runs under duty.ReferenceExcerptLease. The excerpts it stores are the same whichever
+// process cuts them, and a mention is owed one until some process does, so two processes reading
+// the same batch of documents and writing the same rows is work done twice for one result - and,
+// because each tick claims nothing, the same documents twice. Its own statements run on the
+// background pool (store.Pool.Background), which no request waits on; the documents it reads go
+// through the rooms pool, as every document read does (TextWithBlocks).
 func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
 	started := time.Now()
@@ -97,7 +99,7 @@ func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases 
 		// leaves is what the next tick to take the lease finds. leases is required, as it is of
 		// every leased loop.
 		wait := ReferenceExcerptReconcileInterval
-		duty.Exclusive(ctx, leases, referenceExcerptLease, period, func(ctx context.Context) {
+		duty.Exclusive(ctx, leases, duty.ReferenceExcerptLease, period, func(ctx context.Context) {
 			wait = s.reconcileExcerptTick(ctx, started)
 		})
 		period = wait
@@ -115,7 +117,7 @@ func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases 
 // none does.
 func (s *Service) reconcileExcerptTick(ctx context.Context, started time.Time) time.Duration {
 	if time.Since(started) < referenceExcerptStaleWindow {
-		if marked, err := refs.MarkStaleExcerpts(ctx, s.store.Pool); err != nil && ctx.Err() == nil {
+		if marked, err := s.markStaleExcerpts(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("dispatch: mark stale reference excerpts", "error", err)
 		} else if marked > 0 {
 			slog.Info("dispatch: marked stale reference excerpts owed", "mentions", marked)
@@ -146,7 +148,11 @@ func (s *Service) reconcileExcerptTick(ctx context.Context, started time.Time) t
 // document never holds back the rest of its batch; documents counts the ones recorded, and full
 // reports a batch that was full.
 func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int, full bool, err error) {
-	drifted, err := refs.DriftedExcerpts(ctx, s.store.Pool, referenceExcerptBatch)
+	background, err := s.store.Pool.Background()
+	if err != nil {
+		return 0, false, fmt.Errorf("open the background pool: %w", err)
+	}
+	drifted, err := refs.DriftedExcerpts(ctx, background, referenceExcerptBatch)
 	if err != nil {
 		return 0, false, err
 	}
@@ -166,7 +172,7 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 		default:
 			excerpts = refs.MentionExcerpts(markdown, blocks, s.serverURL)
 		}
-		if err := refs.RecordExcerpts(ctx, s.store.Pool, document.FromID, document.Version, excerpts); err != nil {
+		if err := refs.RecordExcerpts(ctx, background, document.FromID, document.Version, excerpts); err != nil {
 			if ctx.Err() != nil {
 				return documents, false, ctx.Err()
 			}
@@ -177,4 +183,14 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 		documents++
 	}
 	return documents, len(drifted) == referenceExcerptBatch, nil
+}
+
+// markStaleExcerpts marks owed the excerpts a version older than this binary left behind
+// (refs.MarkStaleExcerpts), on the background pool the reconciliation's statements run on.
+func (s *Service) markStaleExcerpts(ctx context.Context) (int64, error) {
+	background, err := s.store.Pool.Background()
+	if err != nil {
+		return 0, fmt.Errorf("open the background pool: %w", err)
+	}
+	return refs.MarkStaleExcerpts(ctx, background)
 }

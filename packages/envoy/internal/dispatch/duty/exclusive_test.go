@@ -41,7 +41,7 @@ func TestExclusiveRefusesASecondCallerWhileTheFirstIsInsideItsPass(t *testing.T)
 	inside, finish := make(chan struct{}), make(chan struct{})
 	first := make(chan bool, 1)
 	go func() {
-		first <- Exclusive(ctx, leases, "document-compaction", 0, func(context.Context) {
+		first <- Exclusive(ctx, leases, DocumentCompactionLease, 0, func(context.Context) {
 			close(inside)
 			<-finish
 		})
@@ -49,7 +49,7 @@ func TestExclusiveRefusesASecondCallerWhileTheFirstIsInsideItsPass(t *testing.T)
 	<-inside
 
 	secondRan := false
-	if Exclusive(ctx, leases, "document-compaction", 0, func(context.Context) { secondRan = true }) {
+	if Exclusive(ctx, leases, DocumentCompactionLease, 0, func(context.Context) { secondRan = true }) {
 		t.Error("the second caller took a lease the first holds")
 	}
 	if secondRan {
@@ -69,7 +69,7 @@ func TestExclusiveFreesTheLeaseWhenThePassReturns(t *testing.T) {
 
 	for pass := 1; pass <= 2; pass++ {
 		ran := false
-		if !Exclusive(ctx, leases, "document-compaction", 0, func(context.Context) { ran = true }) || !ran {
+		if !Exclusive(ctx, leases, DocumentCompactionLease, 0, func(context.Context) { ran = true }) || !ran {
 			t.Fatalf("pass %d did not run under its own lease", pass)
 		}
 	}
@@ -83,8 +83,8 @@ func TestExclusiveLeasesOfDifferentNamesDoNotExcludeEachOther(t *testing.T) {
 	ctx := context.Background()
 
 	otherRan := false
-	held := Exclusive(ctx, leases, "document-compaction", 0, func(context.Context) {
-		otherRan = Exclusive(ctx, leases, "webhook-redelivery", 0, func(context.Context) {})
+	held := Exclusive(ctx, leases, DocumentCompactionLease, 0, func(context.Context) {
+		otherRan = Exclusive(ctx, leases, WebhookRedeliveryLease, 0, func(context.Context) {})
 	})
 	if !held {
 		t.Fatal("the first lease was not taken")
@@ -101,7 +101,7 @@ func TestExclusiveTakesALeaseWhoseHolderDiedWithoutUnlocking(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)
 	ctx := context.Background()
-	const name = "architecture-import"
+	const name = ArchitectureImportLease
 
 	holder, err := database.Pool.Acquire(ctx)
 	if err != nil {
@@ -157,7 +157,7 @@ func TestExclusiveSkipsASecondProcessInsideThePeriod(t *testing.T) {
 	second := storetest.SecondProcess(t, database)
 	leases, otherLeases := leasesOf(t, database), leasesOf(t, second)
 	ctx := context.Background()
-	const name = "webhook-redelivery"
+	const name = WebhookRedeliveryLease
 	const period = time.Hour
 
 	ran := false
@@ -189,7 +189,7 @@ func TestExclusiveSkipsASecondProcessInsideThePeriod(t *testing.T) {
 func TestExclusiveLeavesThePeriodUnservedWhenShutdownCutsThePassShort(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)
-	const name = "architecture-import"
+	const name = ArchitectureImportLease
 	const period = time.Hour
 
 	stopping, stop := context.WithCancel(context.Background())
@@ -214,14 +214,13 @@ func TestExclusiveLeavesThePeriodUnservedWhenShutdownCutsThePassShort(t *testing
 // A period of zero or less is no period at all - mutual exclusion and nothing more - which is what
 // a delivery intake's consumer reconciliation takes: it runs on every bind poll rather than on a
 // ticker, and the throttle that spaces it is its own. There is one such lease per delivery
-// durable (delivery.consumerLease), and the name below is the events intake's, written out
-// because delivery imports duty and not the other way about. Every call runs while the lease is
-// free, and nothing is recorded for a later one to be judged by.
+// durable (delivery.consumerLease), and the name below is the events intake's. Every call runs
+// while the lease is free, and nothing is recorded for a later one to be judged by.
 func TestExclusiveWithoutAPeriodRunsWheneverTheLeaseIsFree(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)
 	ctx := context.Background()
-	const name = "delivery-consumer-delivery-events"
+	const name = DeliveryEventsConsumerLease
 
 	for pass := 1; pass <= 3; pass++ {
 		ran := false
@@ -242,11 +241,11 @@ func TestExclusiveAPeriodHoldsBackOnlyItsOwnLoop(t *testing.T) {
 	ctx := context.Background()
 	const period = time.Hour
 
-	if !Exclusive(ctx, leases, "document-compaction", period, func(context.Context) {}) {
+	if !Exclusive(ctx, leases, DocumentCompactionLease, period, func(context.Context) {}) {
 		t.Fatal("the first loop's pass did not run")
 	}
 	ran := false
-	if !Exclusive(ctx, leases, "webhook-redelivery", period, func(context.Context) { ran = true }) || !ran {
+	if !Exclusive(ctx, leases, WebhookRedeliveryLease, period, func(context.Context) { ran = true }) || !ran {
 		t.Error("a loop's pass was refused by another loop's period")
 	}
 }
@@ -263,7 +262,7 @@ func TestExclusiveDoesNotLockOutALoopWhosePeriodGrows(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)
 	ctx := context.Background()
-	const name = "reference-excerpts"
+	const name = ReferenceExcerptLease
 	const step, interval = 2 * time.Second, 5 * time.Minute
 
 	stepped := false
@@ -385,14 +384,14 @@ func TestExclusiveSkipsWhenEveryLeaseConnectionIsHeld(t *testing.T) {
 
 	started := time.Now()
 	ran := false
-	if Exclusive(ctx, leases, "document-compaction", time.Hour, func(context.Context) { ran = true }) || ran {
+	if Exclusive(ctx, leases, DocumentCompactionLease, time.Hour, func(context.Context) { ran = true }) || ran {
 		t.Fatal("a pass ran with every lease connection held")
 	}
 	if waited := time.Since(started); waited > 2*time.Second+200*time.Millisecond {
 		t.Errorf("the pass skipped after %v, want within the lease pool's 2 s acquire bound + 200 ms", waited)
 	}
 	skip := logged.Lines("no connection of the lease pool came free")
-	if !strings.Contains(skip, "level=WARN") || !strings.Contains(skip, "document-compaction") {
+	if !strings.Contains(skip, "level=WARN") || !strings.Contains(skip, DocumentCompactionLease) {
 		t.Errorf("the skip logged %q, want a WARN line naming the lease", skip)
 	}
 	if failures := logged.Lines("level=ERROR"); failures != "" {

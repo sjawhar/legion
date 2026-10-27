@@ -339,7 +339,8 @@ func (p *Pool) Outbox() (*Pool, error) {
 
 // backgroundPoolSize bounds the pool for work no request waits on: background loops such as the
 // embedding queue and its coverage pass, the suggestion sweep, the delivery reconcile and intakes,
-// the architecture importer and the webhook redelivery sweep. Six is the background's share of the
+// the architecture importer's ticker, the documents' resumption query, task progress and
+// reference-excerpt reconciliation. Six is the background's share of the
 // budget sharedPoolSize describes; nobody waits on these loops, so they wait for each other here
 // (up to backgroundAcquireBound) instead of for the requests' connections.
 const backgroundPoolSize = 6
