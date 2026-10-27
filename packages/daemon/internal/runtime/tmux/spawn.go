@@ -286,9 +286,10 @@ func readPaneReport(command string, res result, expectWindow bool) (paneReport, 
 	return report, nil
 }
 
-// Spawn starts a fresh agent for spec's claim: the pane's secrets written as files, then — under
-// the launch lock — a pane in the issue's window, or a new window for it, running
-// `legion worker-shim` around OMP. The returned locator carries the incarnation read at launch.
+// Spawn starts a fresh agent for spec's claim: under the launch lock, a refusal while the claim's
+// process still runs, then the pane's secrets written as files and a pane in the issue's window, or
+// a new window for it, running `legion worker-shim` around OMP. The returned locator carries the
+// incarnation read at launch.
 // A spec with a ResumeSessionFile is refused: continuing a recorded agent is Resume's, so there is
 // one path to `--resume`.
 func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
@@ -344,8 +345,10 @@ func (r *Runtime) awaitGone(ctx context.Context, loc runtime.Locator) error {
 	return nil
 }
 
-// launch is Spawn's and Resume's shared half: every check that needs no tmux, the secret files,
-// the claim's gh bundle, then the pane.
+// launch is Spawn's and Resume's shared half: every check that needs no tmux, then, under the launch
+// lock, the refusal of a claim whose process still runs, the secret files, the claim's gh bundle
+// and the pane. The refusal comes first, so a refused launch rewrites none of the files the live
+// process reads.
 func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if err := validateSpawnSpec(spec, r.providerKeys); err != nil {
 		return runtime.Locator{}, err
@@ -388,17 +391,28 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	if err := writeTurnScopeOverlay(r.stateDir); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
+	// The credential is minted before the launch lock, since a mint is a network call every other
+	// launch would wait out; only the writes into the claim's directories wait for the refusal.
+	ghRoot, ghDefault, ghWriter := "", "", strings.ToLower(spec.Repository.Owner())
+	var bundle ghconfig.Bundle
+	if r.gitHubCredential != nil {
+		ghRoot = runtime.GHConfigDir(r.stateDir, spec.Claim)
+		minted, err := r.gitHubCredential(ctx, spec.Role, ghWriter)
+		if err != nil {
+			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
+		}
+		bundle = minted
+	}
+	r.launchMu.Lock()
+	defer r.launchMu.Unlock()
+	if err := r.refuseLiveIncarnation(ctx, spec.Claim); err != nil {
+		return runtime.Locator{}, err
+	}
 	files := secretFiles(r.stateDir, spec)
 	if err := runtime.WriteSecretFiles(r.stateDir, files); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
-	ghRoot, ghDefault, ghWriter := "", "", strings.ToLower(spec.Repository.Owner())
 	if r.gitHubCredential != nil {
-		ghRoot = runtime.GHConfigDir(r.stateDir, spec.Claim)
-		bundle, err := r.gitHubCredential(ctx, spec.Role, ghWriter)
-		if err != nil {
-			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
-		}
 		if _, err := ghconfig.WriteBundle(ghRoot, bundle); err != nil {
 			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
 		}
@@ -424,18 +438,13 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	return r.openPane(ctx, spec, ghWriter, paneCommand(append(pairs, backendPairs...), command))
 }
 
-// openPane puts the pane on the server under the launch lock: into the window of a pane of the
-// same issue that still verifies as its recorded process, else into a new window for the issue.
-// The pane is recorded — its incarnation read, the process watched with ghWriter, the owner its
-// launch minted the gh bundle's write token for ("" for none) — before the lock is released, so the
-// next spawn on the issue can share its window and no orphan sweep mistakes it for one.
+// openPane puts the pane on the server, its caller holding the launch lock: into the window of a
+// pane of the same issue that still verifies as its recorded process, else into a new window for
+// the issue. The pane is recorded — its incarnation read, the process watched with ghWriter, the
+// owner its launch minted the gh bundle's write token for ("" for none) — before the lock is
+// released, so the next spawn on the issue can share its window and no orphan sweep mistakes it
+// for one.
 func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghWriter string, pane []string) (runtime.Locator, error) {
-	r.launchMu.Lock()
-	defer r.launchMu.Unlock()
-
-	if err := r.refuseLiveIncarnation(ctx, spec.Claim); err != nil {
-		return runtime.Locator{}, err
-	}
 	window, err := r.issueWindow(ctx, spec.Issue)
 	if err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)

@@ -16,6 +16,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1107,7 +1108,8 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Spawn architect: %v", err)
 	}
-	tester, err := r.rt.Spawn(ctx, r.spec("LEGION-2", "LEGION-2", claim.RoleTester))
+	testerSpec := r.spec("LEGION-2", "LEGION-2", claim.RoleTester)
+	tester, err := r.rt.Spawn(ctx, testerSpec)
 	if err != nil {
 		t.Fatalf("Spawn tester: %v", err)
 	}
@@ -1139,11 +1141,28 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 		t.Errorf("the issue's window is not named for it and marked as the daemon's:\n%s", windows)
 	}
 
-	// One claim, one process: a second spawn of a live claim is refused, and a resume waits for
-	// the previous incarnation to go — and refuses when it does not.
+	// One claim, one process: a second spawn of a live claim is refused, leaving the files the live
+	// process reads as they were, and a resume waits for the previous incarnation to go — and
+	// refuses when it does not.
+	readSecrets := func() map[string]string {
+		t.Helper()
+		contents := map[string]string{}
+		for _, file := range secretFiles(r.stateDir, testerSpec) {
+			raw, err := os.ReadFile(file.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contents[file.Variable] = string(raw)
+		}
+		return contents
+	}
+	before := readSecrets()
 	if _, err := r.rt.Spawn(ctx, r.spec("LEGION-2", "LEGION-2", claim.RoleTester)); err == nil ||
 		!strings.Contains(err.Error(), "is still running in pane "+tester.Tmux.Pane) {
 		t.Errorf("a second spawn of a live claim = %v", err)
+	}
+	if after := readSecrets(); !maps.Equal(after, before) {
+		t.Errorf("the refused second spawn rewrote the live tester's secret files from %q to %q", before, after)
 	}
 	impatient := r.newRuntime(func(o *Options) { o.StopGrace = 300 * time.Millisecond })
 	resume := r.spec("LEGION-2", "LEGION-2", claim.RoleTester)
