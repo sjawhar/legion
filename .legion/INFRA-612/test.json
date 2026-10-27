@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-612",
+  "completed": "2026-10-27T14:32:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's C4 command on the pod harness (tester lane, own database and ports) at code head 5a2593b2: 80 passed (7.4m), matching its 80 passed. Re-ran the C5 greps: first matches only typed-block-drawing.ts:271-273, second matches nothing. Reproduced its C8/C9 negative control on the real surface (drop disabled -> card state answered)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A1 / C4, C6, C7: the three browser specs pass on desktop and phone, the two new cases included",
+      "surface": "Dispatch SPA production build on the real Go Dispatch server, Postgres 17 + pgvector, Playwright chromium and iphone (pod harness /legion/harness, tester lane, database dispatch_tester_e2e)",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts e2e/ask-blocks.e2e.ts e2e/typed-blocks.e2e.ts --project chromium --project iphone",
+      "observed": "80 passed (7.4m), 0 failed",
+      "headSha": "5a2593b2e321",
+      "negativeControl": "Implementer's before-leg at a9f5c529 (new cases only) recorded 4 failed: margin-top Received 16px, display Received list-item; not repeated (diff of the two cases' code unchanged since)"
+    },
+    {
+      "criterion": "C8 / C9: a body's forged server attributes read at their defaults at every depth, and a forged value the schema refuses still draws the block as fence text",
+      "surface": "conversation tab /issues/<KEY>/conversation, a comment thread, chromium and iphone (throwaway spec e2e/zz-tester-infra612.e2e.ts, deleted, never committed)",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/zz-tester-infra612.e2e.ts -g 'forged server' --project chromium --project iphone",
+      "observed": "passes in both projects: four decisions with forged state/answered_by/answered_at/selected/answer/invalid/copied_from (top level, in a ::::callout, in a > quote, in a list item) each have data-dispatch-ask-state=open, no data-dispatch-ask-malformed, data-dispatch-ask-options=rows, 2 option rows, source list hidden, no 'Answered'/'mallory'/'forged' text; ':::ask{state=\"bogus\"}' shows as its fence text with no card; no page error",
+      "headSha": "5a2593b2e321",
+      "negativeControl": "readOnlyDirective mutated to return [{ ...node, children }] (no drop): the case fails on chromium, 'Top?' data-dispatch-ask-state Expected \"open\" Received \"answered\"; mutation reverted (file tag back to its original)"
+    },
+    {
+      "criterion": "C9: the one shell writer keeps a mounted card's stamps and fold right when a body or a document decision changes in place",
+      "surface": "conversation tab (comment edited live by its author through PATCH /api/v1/comments/{id}) and an issue document /issues/<KEY>/artifacts/<slug> edited live through POST /api/v1/artifacts/{id}/edits, chromium and iphone (same throwaway spec)",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/zz-tester-infra612.e2e.ts -g 'edited|fixed live|preview' --project chromium --project iphone",
+      "observed": "passes in both projects: comment well-formed -> malformed -> well-formed changes data-dispatch-ask-malformed, data-dispatch-ask-urgency and data-dispatch-ask-options each time and the 2 rows come back; document decision fixed by replacing ': No label' with 'Hold: Wait' keeps the same frame element, which loses data-dispatch-ask-malformed, gains data-dispatch-ask-options=rows and folds its source list; a collapsed turn preview of a forged decision comment draws with no page error",
+      "headSha": "5a2593b2e321",
+      "negativeControl": "With the decision as the document's first block the caret starts inside it (data-dispatch-ask-editing) and the source list shows, as the editor intends: the fold assertion failed (Expected hidden, Received visible) until a paragraph was put before the decision"
+    }
+  ],
+  "notes": [
+    "Mutation probe: applyAskBlockShell with its removeAttribute branch disabled still passed the comment edit case, because the text path paints a new shell on every body change; data-dispatch-ask-malformed has no CSS or script consumer in web/src (only tests read it), so a stale stamp would not change what a reader sees. Not a finding.",
+    "CI on GitHub at 7a4796cf: build, changes, lint, pr-title, test, typecheck were queued when read; not waited on. Code head 5a2593b2 was never pushed alone, so it has no check runs."
+  ]
+}
