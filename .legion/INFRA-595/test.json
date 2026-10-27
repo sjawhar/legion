@@ -2,54 +2,33 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-595",
-  "completed": "2026-10-27T07:30:00Z",
-  "round": 2,
+  "completed": "2026-10-27T11:05:10Z",
+  "round": "rebase re-check after the conflict merge",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2367",
-  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6436244777",
-  "evidenceRound1": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6435822321",
-  "evidenceRound0": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6435228788",
-  "testedHead": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
+  "evidence": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6440306917",
+  "evidenceRound2": "https://github.com/sjawhar/legion/pull/2367#issuecomment-6436244777",
+  "testedHead": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
+  "rebaseRecheck": {
+    "oldHead": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
+    "newHead": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
+    "fingerprintOld": "9cfde11a35ae2b9601d92dab83bcc08daf816ef0774db140ab7372beb45741e7",
+    "fingerprintNew": "9cfde11a35ae2b9601d92dab83bcc08daf816ef0774db140ab7372beb45741e7",
+    "verdict": "unchanged: bare gates only"
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 2 changes only summary_helpers_test.go and summary_loop_test.go. diff -rq --exclude='*_test.go' of the git-archive trees of 46034eb2 and b1ce6a9 shows nothing, so the production code is the code I drove in round 1. At b1ce6a9 I built the listener myself and repeated the implementer's surface: 30,000 seeded records idled at 0 ticks in 60 s (the implementer saw 2), and a signed check_run settled in 5.7 s (the implementer saw 5,559 ms). I re-ran their two mutants independently, each failing with the message they report."
+    "how": "I computed the conflicts-and-rewrites fingerprint myself, with the fork point against \"main\"@origin and without .legion and docs/solutions. It is 9cfde11a…41e7 at b1ce6a9 (the head my E2E line named) and at f48e32d9, the same value the implementer reports. GitHub reports the PR MERGEABLE."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The summary is recomputed only when an entry changes or falls due (event-driven, due entries in order); no step copies or sorts the whole cache.",
-      "surface": "the real envoy-listener binary built from b1ce6a9 on a testnats natsd with 30,000 CI records in envoy_ci_state (1 in 100 waiting), ENVOY_CI_DEBOUNCE=5s",
-      "command": "bash $TMPDIR/infra595-test/smoke.sh $TMPDIR/infra595-test/listener-head3 $TMPDIR/infra595-test/out-smoke-head3 (throwaway: seed, 30 s warm-up, utime+stime from /proc/<pid>/stat over 60 s); the round-1 scenario.sh run at 46034eb2 covers the deadline probes for the same production code",
-      "observed": "0 ticks in 60 s (0.0000 cores); the 300 waiting records settled. At 46034eb2, with identical non-test files: 0.0003 / 0.0003 / 0.0005 cores, and every claim, deadline and grace probe acted at the first tick after its deadline",
-      "headSha": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
-      "negativeControl": "base c3d09eec on the same seed and harness (round 0): 0.3743 / 0.3640 / 0.3618 cores idle"
-    },
-    {
-      "criterion": "Benchmark at 12,000 and 30,000 records: idle near zero, per-change cost independent of size; before and after in the PR.",
-      "surface": "internal/cistore BenchmarkSummaryIdle / BenchmarkSummaryChange",
-      "command": "GOWORK=off go test -run '^$' -bench 'BenchmarkSummary(Idle|Change)' -benchmem -count 2 ./internal/cistore/ at 46034eb2 (round 1). The bench file and every production file are unchanged in round 2",
-      "observed": "idle 226-243 ns/op and 0 allocs/op at both sizes; change 1357-1799 ns/op, 280 B/op and 3 allocs/op at both sizes",
-      "headSha": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
-      "negativeControl": "base c3d09eec: idle 124-217 ms/op at 12,000 and 338-368 ms/op at 30,000"
-    },
-    {
-      "criterion": "Behaviour visible to callers unchanged; existing cistore tests pass; a test covers an entry falling due with no other change.",
-      "surface": "the real envoy-listener at b1ce6a9: the signed GitHub webhook route and a recreated envoy_ci_state bucket; TestARecreatedBucketForgetsTheOldBucketsRecords",
-      "command": "smoke.sh (post_check_run with the right and with a wrong secret); reset-held.sh listener-head3; GOWORK=off go test -count=10 and CGO_ENABLED=1 go test -race -count=5 -run TestARecreatedBucketForgetsTheOldBucketsRecords ./internal/cistore/; the same test with only the queue reset and then only the held reset removed from summarizer.pass",
-      "observed": "check_run: HTTP 200, pr.42.checks settled once, 5.7 s after the post. Held gauge across a recreation: 2 -> 0 -> 1. The test is ok at -count=10 and -race -count=5. Queue-reset mutant: FAIL 'summary_loop_test.go:487: the pass over the recreated bucket left a deadline queued at 1793089557741, want an empty queue'. Held-reset mutant: FAIL 'summary_loop_test.go:484: … held back 3 records, want 1, the new bucket's'. Round 1, same production code: two replicas 200/200 with 0 duplicates, e2e-local PASS. CI at b1ce6a9 was still queued when read",
-      "headSha": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
+      "criterion": "Behaviour visible to callers unchanged (rebase re-check, bare gates only: CI read on GitHub and the smoke check).",
+      "surface": "the real envoy-listener binary built from the merged tree f48e32d9, on a testnats natsd with 30,000 CI records, ENVOY_CI_DEBOUNCE=5s; the PR's checks on GitHub",
+      "command": "the fingerprint command of skill://legion-worker/references/conflicts-and-rewrites.md for b1ce6a9 and f48e32d9; git archive f48e32d9249c packages/envoy && GOWORK=off go build ./cmd/listener; bash $TMPDIR/infra595-test/smoke.sh listener-head4 out-smoke-head4; bash $TMPDIR/infra595-test/reset-held.sh listener-head4 out-reset-head4; gh api repos/sjawhar/legion/commits/f48e32d9…/check-runs",
+      "observed": "fingerprints equal. Idle: 3 ticks in 60 s (0.0005 cores), the 300 waiting records settled. A signed check_run got HTTP 200 and pr.42.checks settled once, 5.6 s after the post. Held gauge across a recreated envoy_ci_state: 2 -> 0 -> 1. CI at f48e32d9: build, changes, lint, test, typecheck and pr-title queued when read; the PR is MERGEABLE",
+      "headSha": "f48e32d9249c75cb9a82716b3c64cf8fea089305",
       "negativeControl": "the same check_run signed with a wrong secret: HTTP 401 and no settlement"
-    },
-    {
-      "criterion": ".dispatch/architecture/envoy-listener.md says what is now true.",
-      "surface": ".dispatch/architecture/envoy-listener.md",
-      "command": "jj diff --name-only --from 46034eb29416 --to 94234292cf86 (round 2 touches only two _test.go files and handoffs); grep -c 'event-driven' .dispatch/architecture/envoy-listener.md",
-      "observed": "1. The file and the code it describes are unchanged since round 0, where I checked the sentence against loop.go and cistore.go",
-      "headSha": "b1ce6a9d0fa3649d6207f68adab6f432366da5db",
-      "negativeControl": "at base c3d09eec the grep prints 0"
     }
-  ],
-  "observations": [
-    "Both halves of the reset branch now have a test: the queue reset and the held-set reset. The test reads the pass's next deadline and uses a 1 h debounce, so it no longer has the wall-time guard and sleep that the reviewer flagged."
   ]
 }
