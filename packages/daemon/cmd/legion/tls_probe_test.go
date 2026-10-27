@@ -161,6 +161,14 @@ func TestTLSPositiveControlsRequireTheExpectedChain(t *testing.T) {
 		})
 	}
 }
+func TestTLSPositiveControlsLineNamesEverySite(t *testing.T) {
+	sites := []tlsSite{{name: "first"}, {name: "second"}, {name: "third"}}
+	const want = "probe-image: TLS positive controls: first, second and third chains verified"
+
+	if got := tlsPositiveControlsLine(sites); got != want {
+		t.Fatalf("tlsPositiveControlsLine() = %q, want %q", got, want)
+	}
+}
 
 func TestTLSCommandClientClassifiesOutputStreams(t *testing.T) {
 	for _, testCase := range []struct {

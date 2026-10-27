@@ -66,6 +66,22 @@ func compromisedTLSSites() []tlsSite {
 	}
 	return sites
 }
+func tlsPositiveControlsLine(sites []tlsSite) string {
+	var line strings.Builder
+	line.WriteString("probe-image: TLS positive controls: ")
+	for index, site := range sites {
+		if index > 0 {
+			if index == len(sites)-1 {
+				line.WriteString(" and ")
+			} else {
+				line.WriteString(", ")
+			}
+		}
+		line.WriteString(site.name)
+	}
+	line.WriteString(" chains verified")
+	return line.String()
+}
 
 func verifyTLSPositiveControls(sites []tlsSite, probe func(tlsSite) tlsOutcome) error {
 	var failures []string
