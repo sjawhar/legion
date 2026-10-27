@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -340,6 +341,45 @@ func TestTailnetServiceAdvertisesAfterTwoHealthyAnswers(t *testing.T) {
 		}
 	}
 	require.GreaterOrEqual(t, tailnetHealthTimeoutSeconds, 6)
+}
+
+// The kubelet stops the advertiser with SIGTERM, which it must act on itself: as its container's
+// PID 1 it gets no default action. It exits 0 at once, mid-wait, rather than when its sleep ends.
+// The negative controls are the two ways it could fail: killed by the signal (no trap, which as PID
+// 1 would ignore it until the grace period's SIGKILL), or exiting only after its 30 s sleep (a trap
+// held behind a foreground sleep).
+func TestTailnetServiceAdvertiserExitsOnSIGTERM(t *testing.T) {
+	realSleep, err := exec.LookPath("sleep")
+	require.NoError(t, err, "sleep is not on PATH")
+	r := newTailnetRig(t, "", tailnetWithHealth)
+	// A sleep that waits for real, after logging that the advertiser is waiting. It holds none of
+	// the advertiser's output, so Wait does not wait for it once the advertiser is gone, and
+	// records its PID, so the test ends it.
+	sleep := "#!/bin/sh\necho \"$(cat FAKE/clock) sleep $1\" >>FAKE/calls\necho $$ >FAKE/sleep-pid\nexec REALSLEEP 30 >/dev/null 2>&1\n"
+	sleep = strings.NewReplacer("FAKE", r.fake, "REALSLEEP", realSleep).Replace(sleep)
+	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(r.fake), "bin", "sleep"), []byte(sleep), 0o755))
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(filepath.Join(r.fake, "sleep-pid")); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := tailnetTestShell(ctx, "-c", tailnetAdvertiserScript(r.host))
+	cmd.Env = r.env()
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	require.NoError(t, cmd.Start())
+	require.Eventually(t, func() bool { return tailnetIndexOf(r.events(t), 0, "sleep ") >= 0 }, 10*time.Second, 50*time.Millisecond,
+		"the advertiser never waited (with no logged-in node it retries every %d s)", tailnetHealthPeriodSeconds)
+	sent := time.Now()
+	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
+	err = cmd.Wait()
+	took := time.Since(sent)
+	require.NoError(t, err, "the advertiser was killed by SIGTERM rather than exiting on it:\n%s", out.String())
+	require.Less(t, took, 5*time.Second, "the advertiser exited %s after SIGTERM, held by its sleep:\n%s", took, out.String())
 }
 
 // The ready file appears only once the node's service-host capability lists the Service: every

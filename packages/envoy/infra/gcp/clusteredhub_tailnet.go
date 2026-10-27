@@ -15,10 +15,12 @@ import (
 
 const (
 	// clusteredHubTailnetGraceSeconds is each tailnet host pod's terminationGracePeriodSeconds. It
-	// holds both containers' shutdowns, which run side by side from the start of the termination:
+	// holds the containers' shutdowns, which run side by side from the start of the termination:
 	// the tailscale container's preStop hook and containerboot's shutdown (tailnetShutdownSeconds,
 	// 55 s), and the listener's preStop wait and its own shutdown
-	// (clusteredHubListenerPreStopSeconds + clusteredHubListenerShutdownSeconds, 51 s).
+	// (clusteredHubListenerPreStopSeconds + clusteredHubListenerShutdownSeconds, 51 s). The
+	// advertiser exits on its SIGTERM at once (tailnetAdvertiserBody's trap), so the pod is gone
+	// when the slower of the two is, not at the grace period's SIGKILL.
 	clusteredHubTailnetGraceSeconds = 60
 	// clusteredHubListenerPreStopSeconds is the listener's preStop wait: as long as the tailscale
 	// container's hook takes to drain the node and wait for clients to choose another host, so the
