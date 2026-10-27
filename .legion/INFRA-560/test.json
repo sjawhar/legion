@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-560",
+  "completed": "2026-10-27T06:28:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove the same surface independently at code head de49c936. A plugin built with `go build ./cmd/pulumi-resource-envoy-infra` and read with `pulumi package get-schema` (Pulumi v3.268.0) lists databaseAvailabilityType, frontDoorPdbMinAvailable, frontDoorReplicas, frontDoorToolsImage, listenerPdbMinAvailable, listenerReplicas, priorityClassName, proxyCpu, proxyMemory and tailnetService. tailnetService and frontDoorToolsImage are required, and appPriorityClassName is gone. The script-test subset (`go test ./gcp/ -run 'TailnetService|FrontDoor|Cert'`) passed under dash and under busybox sh. The proof is at a head that cannot merge: the pull request conflicts with main (failure 1)."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "The head can merge, and CI is green at the head being tested. The spec also names the dispatch-multiprocess job as part of this child's running system.",
+      "evidence": "`gh pr view 2368 --repo sjawhar/legion --json mergeable` gives CONFLICTING. `gh run list --repo sjawhar/legion --branch legion/INFRA-560` gives []. `gh api repos/sjawhar/legion/commits/<sha>/check-runs` gives total 0 for de49c936 and for a05d9e01. GitHub makes no merge ref for a conflicting head, so no CI lane, the required ones included, has run on this change. Four files changed both on main since base 819dc283d and on this branch: packages/envoy/CHANGELOG.md, packages/envoy/cmd/dispatch/main.go, packages/envoy/cmd/dispatch/main_test.go and packages/envoy/internal/dispatch/store/pool.go. The implementer must merge main@origin into legion/INFRA-560 (a forward merge, as conflicts-and-rewrites.md says). The merge changes a fact the change depends on: main's #2302 (9b92ac14) raised sharedPoolSize from 16 to 64 and added outboxPoolSize 1. One server pod then opens 64+4+1+3+8+1 = 81 connections, not 32. With max_connections 500 on db-custom-4-15360, (replicas+1) x 81 < 500 holds only up to 5 replicas, not 14. These lines are false after the merge and must be recomputed: the defaultDispatchDatabaseTier comment (packages/envoy/infra/gcp/dispatch.go:26-33), the proxy-sizing comment (dispatch.go:77, '32 connections'), README.md:189-232, CHANGELOG.md:859-862 ('15 app pods at the 32 connections') and the pool.go comment. The default tier may also need to change (spec BG-12)."
+    },
+    {
+      "criterion": "Spec item 1: front-door pods keep their own state and certificates come from the stored Secret under the 3-per-7-days claim budget. A pod's claim gate must keep deciding on every pass whatever the ledger annotations hold.",
+      "evidence": "Red test TestDispatchCertificateBudgetSkipsAMalformedEpoch (packages/envoy/infra/gcp/dispatch_frontdoor_test.go, commit b0af6aa9). Command: `cd packages/envoy/infra && go test ./gcp/ -run TestDispatchCertificateBudget -count=1`. Result: `--- FAIL: TestDispatchCertificateBudgetSkipsAMalformedEpoch ... /bin/sh: 91: Illegal number: 09`. Every other TestDispatchCertificateBudget* test passes. Cause: dispatch_frontdoor.go:377 and :389 accept any digits-only epoch (`case \"$t\" in ''|*[!0-9]*)`), and the arithmetic at :378 and :390 reads a leading zero as octal (it fails on 8 or 9; `0177` silently becomes 127), and dash fails on more than 19 digits. The shell error ends the gate's background subshell `( ... ) &`. Nothing restarts it, and the cert-publish container stays alive. So every pod that reads that ledger (all of them share one Secret) never advertises and stays unready until a person edits the annotation. The implementer's tests feed no such epoch. Check that a fix works: skipping `0*` and 20-digit epochs at both lines makes the test pass (tried locally, then reverted)."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "The component exposes the new inputs and drops appPriorityClassName; refusals name the input through the operator's real tool",
+      "surface": "pulumi preview, Pulumi CLI v3.268.0, of a Pulumi YAML program that uses envoy-infra:gcp:Dispatch from the plugin built at the head (gcp 10.1.0, random 4.21.2, kubernetes 4.34.2), with the gcp provider's resourceManager, cloudBilling and compute endpoints pointed at a local stub",
+      "command": "cd $TMPDIR/t560/prog && pulumi preview --non-interactive --json (replicas 3, frontDoorReplicas 3, listenerReplicas 2, appPdbMinAvailable 2, frontDoorPdbMinAvailable 2, listenerPdbMinAvailable 1, priorityClassName example-priority, databaseAvailabilityType REGIONAL, tailnetService from random:RandomPet's id)",
+      "observed": "exit 0, 44 creates: three Deployments (example-dispatch, -tailnet, -listener), three PodDisruptionBudgets with minAvailable 2/2/1 and their own selectors, a read of PriorityClass example-priority, Role/RoleBinding example-dispatch-tailnet-tls, the empty TLS Secret, and serve.json unknown while tailnetService is unknown. With tailnetService svc:example-dispatch the preview is exit 0",
+      "headSha": "de49c936df08d2bcbe90a894e71a5115c27133b2",
+      "negativeControl": "tailnetService svc:secret-other-name gives exit 1, 'tailnetService must be svc:example-dispatch, the Tailscale Service the front door hosts, as Tailscale's API names it (not echoed)', and the value appears 0 times in the output. databaseAvailabilityType 'regional' gives 'must be ZONAL or REGIONAL'. frontDoorPdbMinAvailable 4 with 3 replicas gives 'must be from 1 to frontDoorReplicas (3)'. frontDoorToolsImage example.invalid/envoy:latest gives 'must be pinned by digest'. With frontDoorToolsImage omitted: 'Missing required property'"
+    },
+    {
+      "criterion": "Spreading, budgets, priority, probes and strategy render as valid Kubernetes objects",
+      "surface": "every Kubernetes object the component registers (dumped from the mock engine, at default and at scaled inputs), validated against Kubernetes 1.34.1's strict JSON schemas",
+      "command": "kubeconform -strict -summary -kubernetes-version 1.34.1 -ignore-missing-schemas man-default/kubernetes_*.json man-scaled/kubernetes_*.json",
+      "observed": "43 resources: 41 valid, 0 invalid, 2 skipped (SecretProviderClass CRD). Default: app and listener Recreate at 1, front door RollingUpdate maxSurge 1 maxUnavailable 0 at 2, safe-to-evict on every template (no budget). Scaled: all three RollingUpdate, priorityClassName example-priority on all three, no safe-to-evict, zone spread minDomains 2 DoNotSchedule plus hostname anti-affinity on each own selector, Cloud SQL availabilityType REGIONAL. Every NetworkPolicy is policyTypes [Ingress] with no egress, so the measuring-job contract holds",
+      "headSha": "de49c936df08d2bcbe90a894e71a5115c27133b2",
+      "negativeControl": "the app Deployment with topologySpreadConstraints[0].minDomainz and livenessProbe.periodSeconds 'ten' gives invalid: 'additional properties minDomainz not allowed' and 'got string, want null or integer'"
+    },
+    {
+      "criterion": "Liveness fails only when the process does not answer; the server closes a connection older than 60 s after its next response",
+      "surface": "the real envoy-dispatch and envoy-listener binaries built at the head, on a local Postgres 16.2 with pgvector 0.6.2 (pgserver) and nats-server 2.11.9 -js",
+      "command": "curl -sS -o /dev/null --max-time 8 http://127.0.0.1:18766/livez with Postgres and with NATS stopped or SIGSTOPped; connage.py: one raw keep-alive socket, requests at t=0, 30 s and 61.5 s, then Upgrade requests on an aged socket; the listener's /livez and /healthz with NATS killed",
+      "observed": "server /livez 204 in about 1 ms in every state; /healthz 503 (db:false or nats:false), with readiness curl -f exit 22. Connection: absent at 0 s and 30 s, 'close' at 61.5 s, then EOF; the next request used a new port. 'Upgrade: websocket' and 'h2c' on the aged socket got no close, and a real /ws/delivery upgrade at 61.5 s gave 101 and stayed live. Listener /livez 404 in less than 40 ms with NATS down (the probe passes); /healthz 503 in 3.0 s (less than readiness timeout 6)",
+      "headSha": "de49c936df08d2bcbe90a894e71a5115c27133b2",
+      "negativeControl": "a server built from base 819dc283d's main.go answered /livez 404 from the dashboard router, and its aged connection got no Connection: close at 61.5 s"
+    }
+  ],
+  "observations": [
+    "Low severity and outside the red test: annotation() in dispatch_frontdoor.go:315 puts the key unescaped into a sed regex. A decoy key such as `legionxdev/certificate-claims` that sorts after the real one is read in its place, and the gate then overwrites 3 live claims. A value that holds an escaped quote is cut at the backslash, the gate's merge patch becomes invalid JSON, and the gate gets 400 on every pass. Only a person editing the Secret by hand can cause either.",
+    "The listener on main answers /healthz 200 {\"status\":\"starting\"} before NATS connects, and exits 10 s later if NATS stays unreachable (cmd/listener/main.go log.Fatal). INFRA-557 owns that; it is unchanged here.",
+    "At SIGTERM, Go's Server.Shutdown closes idle keep-alive connections with no response, and only a response already in flight carries Connection: close. The preStop sleep 5 is what covers callers. This matches the implementer's T9.2 deviation in substance."
+  ]
+}
