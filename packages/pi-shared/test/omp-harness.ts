@@ -374,6 +374,20 @@ export function toolResultsIn(request: Request): ToolResult[] {
   });
 }
 
+/** A `tool_use` block calling tool `name` with `input` and the one-line intent (`i`) every
+ *  Oh My Pi tool requires. */
+export function call(name: string, input: Record<string, unknown>, intent: string): Block {
+  return { type: "tool_use", name, input: { i: intent, ...input } };
+}
+
+/** Whether a Messages request is one of a compaction's summary calls, which the host sends under
+ *  their own system prompt: a host that rewords that prompt is fixed here. */
+export function isSummarization(request: Request): boolean {
+  return JSON.stringify(request.body.system ?? null).includes(
+    "Summarize user–AI coding-assistant conversations"
+  );
+}
+
 /** Which Legion pane `runLegionPane` runs, and what its stand-in answers beyond the runner's routes. */
 export interface LegionPaneOptions {
   /**

@@ -5,6 +5,8 @@ import * as path from "node:path";
 import {
   type Block,
   type Cleanup,
+  call,
+  isSummarization,
   messageStream,
   ompRoot,
   type Request,
@@ -15,14 +17,17 @@ import {
 import { connect, ErrorCode, type NatsConnection, NatsError, StringCodec } from "nats";
 import { z } from "zod";
 
-// How an Envoy card and a person's Send reach the real Oh My Pi (extensions/envoy.ts's card send
-// and its wake for a card the host folds): cards come over a real NATS server as the listener
-// forwards a role lane to the session's agent subject, the Send as Dispatch's delivery frame
-// accepted through the stand-in. What reached the model is read off the requests the binary sends
-// the stand-in gateway, each held until the test answers it. LEGION_TEST_OMP names the binary, as
-// in dispatch-first-omp.test.ts, and LEGION_TEST_NATS_URL the NATS server (the name the daemon's
-// tests read, packages/daemon/internal/testnats/nats.go). A run without both skips, except on
-// GitHub Actions, where the pi-envoy job supplies both.
+// How an Envoy card and a person's Send reach the real Oh My Pi (extensions/envoy.ts's card send,
+// and src/card-wake.ts's delivery choice and its wake for a card the host folds): cards come over
+// a real NATS server as the listener forwards a role lane to the session's agent subject, the Send
+// as Dispatch's delivery frame accepted through the stand-in. What reached the model is read off
+// the requests the binary sends the stand-in gateway, each held until the test answers it.
+// LEGION_TEST_OMP names the binary, as in dispatch-first-omp.test.ts, and LEGION_TEST_NATS_URL the
+// NATS server (the name the daemon's tests read, packages/daemon/internal/testnats/nats.go). A run
+// without both skips, except on GitHub Actions, where the pi-envoy job supplies both.
+// This file runs in a Bun process of its own (the package's `test` script): envoy.test.ts's
+// `mock.module("nats", …)` replaces `nats` for the whole process, and a file loaded after it would
+// get the mock's `connect`.
 const omp = process.env.LEGION_TEST_OMP;
 const natsUrl = process.env.LEGION_TEST_NATS_URL;
 const onActions = process.env.GITHUB_ACTIONS === "true";
@@ -35,7 +40,7 @@ function setup(): { readonly binary: string; readonly nats: string } {
   return { binary: omp, nats: natsUrl };
 }
 
-/** What the wake (extensions/envoy.ts, `foldedCards`) says, in its one- and many-card forms. */
+/** What the wake (src/card-wake.ts, `CardWake`) says, in its one- and many-card forms. */
 const WAKE_TEXT = /Envoy messages? above arrived with no turn to read (it|them)/;
 
 /** How long a case waits for one thing the session owes it before failing on it. */
@@ -45,13 +50,6 @@ const cleanup: Cleanup = [];
 afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step();
 });
-
-/** Whether a Messages request is one of a compaction's summary calls (dispatch-first-omp.test.ts). */
-function isSummarization(request: Request): boolean {
-  return JSON.stringify(request.body.system ?? null).includes(
-    "Summarize user–AI coding-assistant conversations"
-  );
-}
 
 /** A Messages request's conversation, as one string to find texts and their order in. */
 function conversation(request: Request): string {
@@ -64,10 +62,8 @@ function lastMessage(request: Request): string {
   return JSON.stringify(messages.at(-1) ?? null);
 }
 
-/** A tool call with the one-line intent every Oh My Pi tool requires. */
-function call(name: string, input: Record<string, unknown>): Block {
-  return { type: "tool_use", name, input: { i: "Running the case's step", ...input } };
-}
+/** The one-line intent of every tool call a case scripts. */
+const INTENT = "Running the case's step";
 
 function text(reply: string): Block {
   return { type: "text", text: reply };
@@ -175,6 +171,11 @@ interface CardSession {
   until<T>(what: string, probe: () => T | undefined | Promise<T | undefined>): Promise<T>;
   /** Answers the registration a session started with `holdStartup` holds; a no-op otherwise. */
   releaseStartup(): void;
+  /** Resolves once the open-asks read a session started with `holdSetup` holds has reached the
+   *  stand-in: the host is setting the prompt up, inside `before_agent_start`. */
+  setupHeld(): Promise<void>;
+  /** Answers the open-asks read a session started with `holdSetup` holds; a no-op otherwise. */
+  releaseSetup(): void;
 }
 
 /** Polls `probe` until it returns a value, failing on `what` at the deadline or when omp exits. */
@@ -202,17 +203,27 @@ async function until<T>(
  * listener and the test holds a NATS connection. With `holdStartup` the stand-in holds its answer
  * to that first registration until `releaseStartup`: envoy.ts's `session_start` awaits it
  * (`reconcileNow` registers once the agent subject is open), so the host is still inside its
- * startup, before it starts any extension send or reads any RPC command.
+ * startup, before it starts any extension send or reads any RPC command. With `holdSetup` it holds
+ * the first open-asks read until `releaseSetup`: envoy.ts's `before_agent_start` awaits it (for a
+ * session its run-end nudge could reach, which this one is: a UI over RPC, a side turn, Dispatch
+ * configured, neither a Legion pane nor a subagent), so the host is setting the first prompt up,
+ * busy with no run, until the read is answered or `OPEN_ASKS_TIMEOUT_MS` (3 s) runs out.
  */
 async function startSession(
-  options: { readonly config?: readonly string[]; readonly holdStartup?: boolean } = {}
+  options: {
+    readonly config?: readonly string[];
+    readonly holdStartup?: boolean;
+    readonly holdSetup?: boolean;
+  } = {}
 ): Promise<CardSession> {
-  const { config = [], holdStartup = false } = options;
+  const { config = [], holdStartup = false, holdSetup = false } = options;
   const { binary, nats } = setup();
   const { root, home, workspace, sessions } = await ompRoot(binary, "card-delivery-omp-", cleanup);
 
   let startupHold = holdStartup ? Promise.withResolvers<void>() : undefined;
   const releaseStartup = startupHold?.resolve ?? (() => undefined);
+  let setupHold = holdSetup ? Promise.withResolvers<void>() : undefined;
+  const releaseSetup = setupHold?.resolve ?? (() => undefined);
   const turns: Turn[] = [];
   const { requests, base } = serveStandin(cleanup, async (url, body) => {
     if (url.pathname === "/anthropic/v1/messages") {
@@ -230,8 +241,15 @@ async function startSession(
     }
     if (url.pathname.startsWith("/anthropic/")) return Response.json({ data: [] });
     // An unavailable open-asks read arms no run-end self-check, so every Messages request is a
-    // turn of the conversation or a compaction's summary call.
-    if (url.pathname === "/api/v1/asks/open") return new Response("unavailable", { status: 503 });
+    // turn of the conversation or a compaction's summary call. A held setup holds the first read.
+    if (url.pathname === "/api/v1/asks/open") {
+      if (setupHold !== undefined) {
+        const held = setupHold.promise;
+        setupHold = undefined;
+        await held;
+      }
+      return new Response("unavailable", { status: 503 });
+    }
     const accept = url.pathname.match(/^\/api\/v1\/messages\/([^/]+)\/deliveries\/(\d+)\/accept$/);
     if (accept !== null) {
       const messageID = accept[1] as string;
@@ -260,10 +278,11 @@ async function startSession(
       topics: [],
     });
   });
-  // A request still held at the end (an aborted one, a held registration) is answered, so the
-  // server stops at once.
+  // A request still held at the end (an aborted one, a held registration or open-asks read) is
+  // answered, so the server stops at once.
   cleanup.push(async () => {
     releaseStartup();
+    releaseSetup();
     for (const turn of turns) turn.reply([text("Case over.")]);
   });
   /** The body each published Send's message id carries, which the accept answers with. */
@@ -395,6 +414,14 @@ async function startSession(
     },
     until: (what, probe) => until(what, probe, closed),
     releaseStartup,
+    async setupHeld() {
+      await until(
+        "the open-asks read the prompt's setup awaits",
+        () => (requests.some((request) => request.path === "/api/v1/asks/open") ? true : undefined),
+        closed
+      );
+    },
+    releaseSetup,
   };
   return session;
 }
@@ -402,10 +429,19 @@ async function startSession(
 /**
  * Ends a negative check: the session has settled with no Messages request after the `expected`
  * ones, and a probe prompt is the next request, on that prompt. Answers the probe and waits for
- * the session to settle again. Returns the probe's request.
+ * the session to settle again. Returns the probe's request. A request past the `expected` ones
+ * fails it at once, with the message it was started on, since a held request never settles.
  */
 async function probe(session: CardSession, expected: number): Promise<Request> {
-  await session.settled();
+  await session.until("the session to settle", async () => {
+    const extra = session.turns[expected];
+    if (extra !== undefined) {
+      throw new Error(
+        `Messages request ${expected} came before the probe, on ${lastMessage(extra.request)}`
+      );
+    }
+    return (await session.state()).isSettled ? true : undefined;
+  });
   expect(session.turns.length).toBe(expected);
   const prompt = `PROBE-${randomUUID().slice(0, 8)}`;
   await session.command({ type: "prompt", message: prompt });
@@ -453,7 +489,7 @@ test.skipIf(skip)(
     );
     // A tool the host runs to its end: a `bash` call is moved to the background when a message
     // is queued, and its result starts a run of its own.
-    held.reply([call("read", { path: "." })]);
+    held.reply([call("read", { path: "." }, INTENT)]);
 
     const next = await session.nextTurn("the model request after the held one");
     const firstWithSend = session.turns.find((turn) => conversation(turn.request).includes(send));
@@ -494,9 +530,13 @@ async function interruptKeepsCards(
     const release = path.join(session.root, "tool-release");
     cleanup.push(() => writeFile(release, ""));
     first.reply([
-      call("bash", {
-        command: `touch '${started}'; while [ ! -e '${release}' ]; do sleep 0.1; done; echo released`,
-      }),
+      call(
+        "bash",
+        {
+          command: `touch '${started}'; while [ ! -e '${release}' ]; do sleep 0.1; done; echo released`,
+        },
+        INTENT
+      ),
     ]);
     await session.until("the blocking tool call to start", async () =>
       (await Bun.file(started).exists()) ? true : undefined
@@ -527,6 +567,39 @@ for (const abort of ["abort", "abort_and_restore_queue"] as const) {
   }
 }
 
+// An interrupt while the host sets a prompt up leaves extensions no sign (src/card-wake.ts, the
+// `setup` marker). The prompt marks the host busy, and its run's `agent_start` comes only after the
+// `before_agent_start` handlers, envoy.ts's open-asks read among them, which the stand-in holds
+// here. A card sent then is queued as an aside. RPC `abort` cancels the setup with no loop running,
+// so no aborted assistant message comes, and abort's `finally` folds the card under the latch the
+// abort set (agent-session.ts `#resumeStrandedIrcAsides`): a wake for it would start the turn the
+// person stopped. The hold is released after the abort, inside the read's 3 s timeout, which would
+// otherwise let the prompt run.
+test.skipIf(skip)(
+  "an interrupt while a prompt is set up keeps a card sent then folded, with no turn",
+  async () => {
+    const session = await startSession({ holdSetup: true });
+    await session.command({ type: "prompt", message: "Start case e." });
+    await session.setupHeld();
+    const card = await session.card("e1");
+    // The host is busy setting the prompt up, and no run has started.
+    expect((await session.state()).isSettled).toBe(false);
+    const agentStarted = (): boolean =>
+      session.frames.some((frame) => "type" in frame && frame.type === "agent_start");
+    expect(agentStarted()).toBe(false);
+    await session.command({ type: "abort" });
+    session.releaseSetup();
+
+    // No turn after the interrupt: the card is folded, and no wake follows it.
+    const request = await probe(session, 0);
+    const entries = await session.cardEntries();
+    expect(entries.filter((entry) => entry.includes(card))).toHaveLength(1);
+    expect(conversation(request)).toContain(card);
+    expect(conversation(request)).not.toMatch(WAKE_TEXT);
+  },
+  120_000
+);
+
 // The host folds an aside that reaches it after the run's last step (here: during the run's
 // automatic compaction) into the context with no turn while an interrupt since the last user
 // prompt is still in effect, which a card-started run does not end. Under every-card-a-steer the
@@ -553,7 +626,7 @@ test.skipIf(skip)(
 
     // An idle card gets a turn under the interrupt; its reply reports usage past the threshold.
     // The session got no card while it started, so this one is still in the startup phase
-    // (extensions/envoy.ts, `startupPhase`): it goes into the context with no turn, and its wake
+    // (src/card-wake.ts, `CardWake`): it goes into the context with no turn, and its wake
     // starts the turn, as its steer did before.
     const first = await session.card("c1");
     const cardTurn = await session.nextTurn("the turn the idle card's wake started");
@@ -591,8 +664,15 @@ test.skipIf(skip)(
   120_000
 );
 
+// Plan mode is the host's other fold with no turn, and no case here reaches it: the pinned build's
+// `/plan` is a TUI-only built-in (a `handleTui` and no `handle` in slash-commands/builtin-modes.ts),
+// which RPC's builtin dispatch (`executeAcpBuiltinSlashCommand`) skips, so over RPC the text is an
+// ordinary prompt and no RPC surface reaches plan mode. A plan-mode fold reaches pi-envoy as the
+// same card `message_end` with no interrupt, so its wake runs the fold path the compaction case
+// above proves, and src/card-wake.test.ts's fold cases cover the rules.
+
 // The first idle card of a session that got none while it started is still in the startup phase
-// (extensions/envoy.ts, `startupPhase`): it goes into the context with no turn, and its wake
+// (src/card-wake.ts, `CardWake`): it goes into the context with no turn, and its wake
 // starts the turn and ends the phase. An idle card after that starts its turn itself.
 test.skipIf(skip)(
   "a card that reaches an idle session starts a turn",
@@ -648,23 +728,6 @@ test.skipIf(skip)(
     expect(lastMessage(woken.request)).toMatch(WAKE_TEXT);
     woken.reply([text("Read the startup cards.")]);
     await probe(session, woken.index + 1);
-  },
-  120_000
-);
-
-// Plan mode is the host's other fold with no turn. The pinned build's `/plan` is a TUI-only
-// built-in (a `handleTui` and no `handle` in slash-commands/builtin-modes.ts), which RPC's builtin
-// dispatch (`executeAcpBuiltinSlashCommand`) skips, so over RPC the text is an ordinary prompt and
-// no RPC surface reaches plan mode: the wake there runs the handler the compaction case proves.
-test.skipIf(skip)(
-  "an RPC prompt of /plan reaches the model as a prompt, entering no plan mode",
-  async () => {
-    const session = await startSession();
-    await session.command({ type: "prompt", message: "/plan" });
-    const turn = await session.nextTurn("the model request /plan started");
-    expect(lastMessage(turn.request)).toContain("/plan");
-    turn.reply([text("Answered /plan as a prompt.")]);
-    await session.settled();
   },
   120_000
 );
