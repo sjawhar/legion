@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-548",
-  "completed": "2026-10-27T06:54:54Z",
+  "completed": "2026-10-27T07:06:07Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2331",
   "round": "Answers review round 1 at d6dfed75 (code head 28355e2e): finding 1, a stale connection with unacknowledged data never redials (nats.js's stale close waits on a flush a dead path never acknowledges, and the stall proxy's discarding freeze could not reach it); finding 2, a patches/-only change ran none of the gates that test the patch; and the reviewer's cleanup list, taken in this round.",
   "proof": [
@@ -10,32 +10,32 @@
       "criterion": "A client behind a TCP proxy that stops forwarding without closing either side reconnects within 60 s (shared code path), also when it wrote data the frozen path never acknowledged, and a redial nats.js gives up on leaves no socket open",
       "surface": "envoy-client suite: real natsd built from packages/envoy, real nats.js (patches/nats@2.29.3.patch applied by bun install) dialled with natsConnectionOptions, the stall proxy (packages/envoy-client/test/stall-proxy.ts) whose freeze() pauses both sockets of every open connection and closes neither",
       "command": "cd packages/envoy-client && LEGION_E2E_ENVOY_STACK=1 bun test src/__tests__/nats-stall.test.ts",
-      "observed": "3 pass 0 fail; row A 'reconnect 30.0 s, first publish received 30.1 s after the freeze'; row B 'reconnect 50.0 s, first publish received 50.3 s after the freeze' and 'hung redial: accepted 30.0 s after the freeze, closed 20.0 s after it was accepted'; row C (64 x 64 KiB written after the freeze) 'reconnect 30.0 s, first publish received 30.0 s after the freeze'",
-      "headSha": "0504cbfb7409c7388c700afeae891300a0bed6eb",
+      "observed": "3 pass 0 fail at 48bef8d1 (also at 0504cbfb before the forward merge); row A 'reconnect 30.0 s, first publish received 30.1 s after the freeze'; row B 'reconnect 50.0 s, first publish received 50.0 s after the freeze' and 'hung redial: accepted 30.0 s after the freeze, closed 20.0 s after it was accepted'; row C (64 x 64 KiB written after the freeze) 'reconnect 30.0 s, first publish received 30.0 s after the freeze'",
+      "headSha": "48bef8d1c5191cab79bcc8eb57ded3593c6f8863",
       "negativeControl": "protocol.js disconnect() put back to this.transport.disconnect() in node_modules: row C 'reconnect none, first publish received never after the freeze', (fail) [60261.41ms]; node_transport.js replaced by the unpatched cached copy: row B 'hung redial: ... still open', expect(hung.closedAt).toBeDefined() failed; node_modules restored with bun install --frozen-lockfile and the patch re-checked"
     },
     {
       "criterion": "The Claude Code plugin's code path recovers from a frozen path, its registration carries the plugin version, and the channel server still exits on SIGTERM after a hung redial",
       "surface": "claude-envoy suite: the real channel server process (bun bin/envoy-channel.ts) with NATS through the stall proxy (pausing freeze) and Envoy at the real listener; channel notifications read from stdout",
       "command": "cd packages/claude-envoy && LEGION_E2E_ENVOY_STACK=1 bun test tests/envoy-channel-stall.test.ts",
-      "observed": "2 pass 0 fail; 'claude-envoy stall: resubscribed 29.8 s, missed message shown 29.9 s after the freeze' (plugin @sjawhar/claude-envoy, plugin_version source; frozen-window message once with the replay suffix); 'claude-envoy stall exit: SIGTERM -> exited after 0.0 s'; bun run check-dist: 'dist/ and legion/ match a fresh build'",
-      "headSha": "0504cbfb7409c7388c700afeae891300a0bed6eb",
+      "observed": "2 pass 0 fail at 48bef8d1; 'claude-envoy stall: resubscribed 29.8 s, missed message shown 29.9 s after the freeze' (plugin @sjawhar/claude-envoy, plugin_version source; frozen-window message once with the replay suffix); 'claude-envoy stall exit: SIGTERM -> exited after 0.0 s'; bun run check-dist: 'dist/ and legion/ match a fresh build'",
+      "headSha": "48bef8d1c5191cab79bcc8eb57ded3593c6f8863",
       "negativeControl": "pre-freeze and post-reconnect messages are shown once without the replay suffix and the frozen-window message never arrives live (runFreezeScenario); before round 2's patch the SIGTERM row printed Received \"running\" 15 s after SIGTERM"
     },
     {
       "criterion": "The same for the Oh My Pi plugin's code path, and a message published while cut off reaches it through the catch-up; its registration carries the plugin version",
       "surface": "pi-envoy suite: the real extension under createPi with real nats.js and real fetch, against a real natsd and the real Envoy listener, NATS through the stall proxy (pausing freeze)",
       "command": "cd packages/pi-envoy && LEGION_E2E_ENVOY_STACK=1 bun test extensions/envoy.test.ts -t \"NATS path freezes\"",
-      "observed": "1 pass 0 fail; 'pi-envoy stall: resubscribed 30.0 s, missed message shown 30.0 s after the freeze'; GET /v1/registry/<id> and GET /v1/sessions show plugin @sjawhar/pi-envoy and plugin_version equal to package.json's",
-      "headSha": "0504cbfb7409c7388c700afeae891300a0bed6eb",
+      "observed": "1 pass 0 fail at 48bef8d1; 'pi-envoy stall: resubscribed 30.0 s, missed message shown 30.0 s after the freeze'; GET /v1/registry/<id> and GET /v1/sessions show plugin @sjawhar/pi-envoy and plugin_version equal to package.json's",
+      "headSha": "48bef8d1c5191cab79bcc8eb57ded3593c6f8863",
       "negativeControl": "the message sent before the freeze and the one after the reconnect are each shown once WITHOUT the replay suffix, while the frozen-window message never arrives live; ENVOY_HEARTBEAT_MS=240000 rules out a heartbeat sweep as the trigger"
     },
     {
       "criterion": "A registered session's entry and the listener's session list carry the plugin version; an older plugin's session shows neither field",
       "surface": "Go listener subscribe handler, GET /v1/sessions, GET /v1/registry/<id> and the NATS KV session registry (real nats-server in-process)",
       "command": "cd packages/envoy && go test ./cmd/listener/ ./internal/session/ -run 'Subscribe|SessionEntry|Registry' -count=1",
-      "observed": "at 28355e2e: go build ./... ok; ok github.com/sjawhar/envoy/cmd/listener 19.132s; ok github.com/sjawhar/envoy/internal/session 6.924s (this round changes no Go file)",
-      "headSha": "28355e2e6dba95c8641c1c93eea895ec5afe5a54",
+      "observed": "at 48bef8d1: go build ./... ok; ok github.com/sjawhar/envoy/cmd/listener 19.026s; ok github.com/sjawhar/envoy/internal/session 6.526s",
+      "headSha": "48bef8d1c5191cab79bcc8eb57ded3593c6f8863",
       "negativeControl": "a subscribe body without plugin/plugin_version: the /v1/sessions row has neither key (TestSubscribeHandlerStoresAndListsThePluginAndItsVersion)"
     },
     {
@@ -43,7 +43,7 @@
       "surface": "the architecture documents",
       "command": "grep -n 'plugin_version' .dispatch/architecture/{pi-envoy,envoy-client,claude-envoy-bridge,envoy-listener}.md; grep -n '10 s\\|10 seconds' .dispatch/architecture/{pi-envoy,envoy-client,claude-envoy-bridge}.md",
       "observed": "one line per file in each grep (line 7 of each)",
-      "headSha": "0504cbfb7409c7388c700afeae891300a0bed6eb",
+      "headSha": "48bef8d1c5191cab79bcc8eb57ded3593c6f8863",
       "negativeControl": "the same greps on main@origin print nothing for those files"
     }
   ],
@@ -59,10 +59,11 @@
   "deviations": [
     "The tester's round-2 red row 'a redial that hangs is closed once nats.js gives up on it' was folded into row B at the reviewer's request (cleanup item: stallNext(1) plus freeze() already makes that connection); same assertion, negative control re-run.",
     "Legion Claude Code panes load the plugin with --plugin-dir and register plugin_version source: left as the reviewer recorded it under Not proven / risk; the docs page says the move checks such sessions by hand.",
-    "No length cap on plugin/plugin_version (reviewer: hardening, same as title and dir): not added."
+    "No length cap on plugin/plugin_version (reviewer: hardening, same as title and dir): not added.",
+    "GitHub reported the PR CONFLICTING against main after the review-round push: forward merges 91e75f83 (legion/INFRA-439 at a92387a8, which brings main into #2228; its one conflict, claude-envoy's dist/envoy-channel.js, rebuilt) and 48bef8d1 (main at 32b6dd9f; four CHANGELOG conflicts, only additions, both sides kept). Fingerprint 96bdc922... unchanged; https://github.com/sjawhar/legion/pull/2331#issuecomment-6435897776."
   ],
   "openQuestions": [
-    "Merge gate: #2228 (legion/INFRA-439) is still open at 3ea454d3; this PR merges only after it, once main's squash commit of #2228 is in the branch.",
+    "Merge gate: #2228 (legion/INFRA-439) is still open at a92387a8; this PR merges only after it, once main's squash commit of #2228 is in the branch.",
     "Rollout: the hub's session listener must run this PR's listener before INFRA-553's move can read versions; INFRA-14 owns that sequencing."
   ],
   "discoveredComplexity": [
