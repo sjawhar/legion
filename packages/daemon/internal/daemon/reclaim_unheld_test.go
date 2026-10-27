@@ -189,6 +189,34 @@ func TestAHealthyArchitectOnANewSessionIsNotReclaimedByAStaleExceptionsReport(t 
 	}
 }
 
+// (M5) A first delivery exception (Resends == 0, not a re-held copy) does NOT relaunch, even on the
+// architect's own session: the first receipt timeout waits for the copy the re-hold sends, so a
+// transient blip is not turned into a process restart. The notice is still re-held. This pins the
+// Resends-gate false-positive guard — flipping Resends to 0 must leave the pane untouched.
+func TestAFirstExceptionDoesNotReclaimAndWaitsForTheReheldCopy(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	reclaimArchitect(t, sup, "LEGION-1", supervise.StateReady, "ses_arch")
+	publisher := &holderPublisher{}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records,
+		notices: publisher, supervisor: sup, project: "legion", now: time.Now}
+	notice := record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}
+	report := laneReport{"evt-exception", "receipt_timeout", architectTopic(t, "LEGION-1"), "pr-blocked on LEGION-2", notice, "legion-outbox:7", "ses_arch"}
+
+	if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
+		t.Fatalf("rehold: %v", err)
+	}
+
+	if got := len(rt.CallsOf("Resume")); got != 0 {
+		t.Fatalf("resumes = %d, want a first exception to wait for the re-held copy, not relaunch", got)
+	}
+	if got := queuedNotices(t, pool); len(got) != 1 {
+		t.Fatalf("queued %v, want the notice still re-held once", got)
+	}
+}
+
 // (4) A burst of exceptions for one topic triggers one relaunch, not one per report: the first
 // relaunch moves the claim out of ready/idle, and every later report finds it launching and does
 // nothing. Red on main: without the state transition gate nothing bounds the relaunches (there are
