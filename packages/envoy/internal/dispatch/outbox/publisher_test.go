@@ -32,8 +32,9 @@ func answered(err error) <-chan error {
 	return answer
 }
 
-// publishOnly completes bus.Sender for a test publisher the outbox only publishes through: the
-// outbox sends nothing with Request or Probe, so a Request answers that it is not served.
+// publishOnly completes Publisher and bus.Sender for a test publisher the outbox only publishes
+// through: the outbox sends nothing with Request, so a Request answers that it is not served, and
+// the publisher is always connected, so its connection never changes.
 type publishOnly struct{}
 
 func (publishOnly) Request(subject string, _ contracts.Envelope, _ bus.RequestOptions) <-chan error {
@@ -41,6 +42,15 @@ func (publishOnly) Request(subject string, _ contracts.Envelope, _ bus.RequestOp
 }
 
 func (publishOnly) Probe(time.Duration) error { return nil }
+
+func (publishOnly) Connected() bool { return true }
+
+func (publishOnly) ConnectionChanged() <-chan struct{} { return nil }
+
+// unfenced is a publisher hold whose deadline never comes, for a test that scans without one.
+type unfenced struct{}
+
+func (unfenced) Deadline() time.Time { return time.Now().Add(time.Hour) }
 
 // publish runs one attempt of event to its end, as scanBatch does for each event of a batch, and
 // returns why it failed.
@@ -1359,7 +1369,7 @@ func TestRunRetriesFailedIssuePublication(t *testing.T) {
 	if publishedAt(t, database, event.ID) != nil {
 		t.Fatal("event was marked published after failed issue publication")
 	}
-	waitFor(t, 7*time.Second, "ticker retry publication", func() bool {
+	waitFor(t, 7*time.Second, "the back-off's retry publication", func() bool {
 		return len(publisher.all()) == 1 && publishedAt(t, database, event.ID) != nil
 	})
 	if publishedAt(t, database, event.ID) == nil {
@@ -1395,7 +1405,7 @@ func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	scanStart := time.Now()
-	scan(ctx, Deps{Store: database, Publisher: publisher, Broker: broker})
+	New(Deps{Store: database, Publisher: publisher, Broker: broker}).scan(ctx, unfenced{})
 	if ctx.Err() != nil {
 		t.Fatal("scan did not return within 30s: failed poison rows keep refilling every batch, as they do when a failure is rescheduled without backoff")
 	}
@@ -1450,7 +1460,7 @@ func TestScanPublishesTheEventBehindAnUnreadableRow(t *testing.T) {
 
 	deps := Deps{Store: database, Publisher: &recordingPublisher{}, Broker: broker}
 	publisher := deps.Publisher.(*recordingPublisher)
-	scan(context.Background(), deps)
+	New(deps).scan(context.Background(), unfenced{})
 	if items := publisher.all(); len(items) != 0 {
 		t.Fatalf("batch the unreadable row ended published %d envelopes: %#v", len(items), items)
 	}
@@ -1472,7 +1482,7 @@ func TestScanPublishesTheEventBehindAnUnreadableRow(t *testing.T) {
 			`update events set next_attempt_at = now() - interval '1 second' where id = $1`, behind.ID); err != nil {
 			t.Fatalf("lapse the claim on the row behind the unreadable one: %v", err)
 		}
-		scan(context.Background(), deps)
+		New(deps).scan(context.Background(), unfenced{})
 	}
 	items := publisher.all()
 	if len(items) != 1 || items[0].SourceEventID != fmt.Sprint(behind.ID) {
@@ -1516,7 +1526,7 @@ func TestRunReplacesOverflowedSubscriptionWithoutBusyLoop(t *testing.T) {
 	close(publisher.release)
 	time.Sleep(100 * time.Millisecond)
 	if calls := publisher.calls.Load(); calls > 70 {
-		t.Fatalf("overflowed subscription caused %d scans, want a bounded number before retry interval", calls)
+		t.Fatalf("overflowed subscription caused %d scans, want a bounded number", calls)
 	}
 }
 
@@ -1556,16 +1566,24 @@ func TestRunMarksIssueLessTargetedMessagesPublishedWithoutRepublishing(t *testin
 	}
 }
 
+// run runs an outbox on database, publishing through publisher, until the returned func stops it.
 func run(t *testing.T, database *store.Store, publisher Publisher, broker *events.Broker) func() {
+	t.Helper()
+	return runDeps(t, Deps{Store: database, Publisher: publisher, Broker: broker, Listen: database.Pool.Listener}, time.Second)
+}
+
+// runDeps runs New(deps) until the returned func stops it, which fails t unless Run returns within
+// stopWithin.
+func runDeps(t *testing.T, deps Deps, stopWithin time.Duration) func() {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { Run(ctx, Deps{Store: database, Publisher: publisher, Broker: broker}); close(done) }()
+	go func() { New(deps).Run(ctx); close(done) }()
 	return func() {
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(time.Second):
+		case <-time.After(stopWithin):
 			t.Fatal("outbox did not stop")
 		}
 	}

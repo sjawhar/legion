@@ -67,11 +67,12 @@ func (p *rendezvousPublisher) published() []string {
 	return append([]string(nil), p.ids...)
 }
 
-// Two envoy-dispatch processes serve one Postgres and one NATS, and an event published twice is
-// delivered twice on the role lanes, which carry no nats.MsgId. scanPendingEvents claims each row
-// before it publishes it, so this drives two processes - each on its own store, as each process
-// has its own pool - over one backlog at once: every seeded event is published exactly once, by
-// exactly one of them, and every row ends marked published with its claim cleared.
+// Only the holder of the publisher hold scans, but a holder that lost the hold mid-batch can still
+// be scanning when the next one starts, and an event published twice is delivered twice on the
+// role lanes, which carry no nats.MsgId. scanPendingEvents claims each row before it publishes it,
+// so this drives two processes - each on its own store, as each process has its own pool - over
+// one backlog at once: every seeded event is published exactly once, by exactly one of them, and
+// every row ends marked published with its claim cleared.
 func TestTwoProcessesPublishEveryEventExactlyOnce(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
@@ -92,7 +93,7 @@ func TestTwoProcessesPublishEveryEventExactlyOnce(t *testing.T) {
 		go func() {
 			defer scanning.Done()
 			<-start
-			scan(ctx, Deps{Store: process.database, Publisher: process.publisher, Broker: broker})
+			New(Deps{Store: process.database, Publisher: process.publisher, Broker: broker}).scan(ctx, unfenced{})
 		}()
 	}
 	close(start)

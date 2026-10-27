@@ -919,7 +919,9 @@ func eventDeliveries(t *testing.T, database *store.Store, documentService docs.A
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		outbox.Run(ctx, outbox.Deps{Store: database, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Docs: documentService})
+		outbox.New(outbox.Deps{
+			Store: database, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Listen: database.Pool.Listener, Docs: documentService,
+		}).Run(ctx)
 	}()
 	defer func() {
 		cancel()
@@ -956,8 +958,12 @@ func eventDeliveries(t *testing.T, database *store.Store, documentService docs.A
 }
 
 // acceptingPublisher takes every envelope the outbox publishes; the outbox records each topic on
-// its event.
+// its event. It is always connected, so its connection never changes.
 type acceptingPublisher struct{}
+
+func (acceptingPublisher) Connected() bool { return true }
+
+func (acceptingPublisher) ConnectionChanged() <-chan struct{} { return nil }
 
 func (p acceptingPublisher) Window() bus.Sender { return p }
 

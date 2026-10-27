@@ -26,16 +26,16 @@ import (
 
 const (
 	batchSize           = 100
-	retryInterval       = 5 * time.Second
 	compactInterval     = 24 * time.Hour
 	documentTopicPrefix = "notifications.dispatch.document."
 	// claimWindow is how long scanPendingEvents' claim keeps an event out of every other
-	// process's batch. Two envoy-dispatch processes serve one Postgres and one NATS, and a
-	// plain select would hand both the same rows and publish every one of them twice. The
-	// claim is one statement (select ... for update skip locked, then push next_attempt_at
-	// out by this), never a transaction held open across the publishes that follow: an open
-	// cursor or transaction holds its pooled connection, which is exactly what pendingEvent's
-	// comment above scanBatch's drain exists to avoid.
+	// process's batch. Only the process holding the publisher hold scans (Outbox), but a holder
+	// that loses the hold mid-batch has claimed rows the next holder must not publish beside it,
+	// and a plain select would hand both the same rows. The claim is one statement (select ...
+	// for update skip locked, then push next_attempt_at out by this), never a transaction held
+	// open across the publishes that follow: an open cursor or transaction holds its pooled
+	// connection, which is exactly what pendingEvent's comment above scanBatch's drain exists to
+	// avoid.
 	//
 	// One minute: a batch is one window of publishes (scanBatch) whose answers each come within
 	// the bus's five-second publish window, plus a handful of statements, so even a batch whose
@@ -45,8 +45,8 @@ const (
 	// legitimately overwrites the claim with the retry's own (usually shorter) wait;
 	// published_at, not this, is what marks an event done.
 	//
-	// What the claim gives, for a batch that finishes inside the window: two healthy processes
-	// no longer publish one event twice, and each events row still reaches published_at exactly
+	// What the claim gives, for a batch that finishes inside the window: two processes scanning at
+	// once no longer publish one event twice, and each events row still reaches published_at exactly
 	// once - the terminal write is guarded on published_at is null, so a second one changes no
 	// row. A batch that overruns the window gets no such guarantee: claimPendingEvents commits
 	// the claim, and scanBatch then publishes up to batchSize events outside any transaction,
@@ -72,11 +72,18 @@ const (
 	recordTimeout = 5 * time.Second
 )
 
-// Publisher is the NATS publication boundary used by the Dispatch outbox.
+// Publisher is the NATS client the outbox publishes through (bus.Client).
 type Publisher interface {
 	// Window starts one batch's sends: each is sent without waiting for NATS's answer, all on one
 	// connection and in the order they were made, or not at all (bus.Client.Window).
 	Window() bus.Sender
+	// Connected reports whether the client has a live connection now. A standby takes the
+	// publisher hold only while it does, and a holder whose client has not for natsLossGrace
+	// releases the hold.
+	Connected() bool
+	// ConnectionChanged returns a channel closed at the client's next connection event
+	// (bus.Client.ConnectionChanged).
+	ConnectionChanged() <-chan struct{}
 }
 
 // documentCompactionLease names the lease the daily document compaction runs under. It walks
@@ -86,52 +93,22 @@ const documentCompactionLease = "document-compaction"
 
 // Deps are the durable state and delivery dependencies for the outbox.
 type Deps struct {
-	// Store is what the outbox reads and records events through. cmd/dispatch gives it a store on
-	// a pool of its own (store.Pool.Outbox), so the requests queued on the shared pool never hold
-	// a publish back.
+	// Store is what the outbox reads and records events through, and its pool is the one the
+	// publisher hold is taken and renewed on. cmd/dispatch gives it a store on a pool of its own
+	// (store.Pool.Outbox), so the requests queued on the shared pool never hold a publish or a
+	// renewal back.
 	Store     *store.Store
 	Publisher Publisher
-	Broker    *events.Broker
-	Docs      docs.API
+	// Broker wakes the outbox for every event this process commits.
+	Broker *events.Broker
+	// Listen dials the outbox's LISTEN connection (pglisten.Listener.Dial): cmd/dispatch passes
+	// store.Pool.Listener.
+	Listen func(ctx context.Context) (*pgx.Conn, error)
+	Docs   docs.API
 	// Leases is where the compaction tick takes documentCompactionLease (compactDocuments). It
 	// is required of a Run that ticks: there is no nil-means-unleased path, and cmd/dispatch
 	// exits at boot if the lease pool cannot be opened.
 	Leases duty.Leases
-}
-
-// Run drains unpublished events at startup, after committed local events, and
-// periodically so a dropped in-process notification cannot strand an event. It
-// returns when ctx is cancelled.
-func Run(ctx context.Context, deps Deps) {
-	// Started before the publisher marks its context, so the compaction carries a marker of its
-	// own: a connection it holds must never count as one the publisher holds.
-	go compactDaily(ctx, deps)
-	// The publisher is one of the process's transaction openers, so its context carries the
-	// pool's marker: a read it ever makes while one of its transactions is open is refused
-	// rather than left to deadlock the pool (store.ErrNestedAcquire).
-	ctx = store.WithTransactionTracking(ctx)
-	events, unsubscribe := deps.Broker.Subscribe()
-	defer func() { unsubscribe() }()
-
-	scan(ctx, deps)
-	retry := time.NewTicker(retryInterval)
-	defer retry.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case _, open := <-events:
-			if !open {
-				unsubscribe()
-				events, unsubscribe = deps.Broker.Subscribe()
-				continue
-			}
-			scan(ctx, deps)
-		case <-retry.C:
-			scan(ctx, deps)
-		}
-	}
 }
 
 // compactDaily runs compactDocuments once per compactInterval until ctx ends, on a goroutine of its
@@ -163,17 +140,41 @@ func compactDocuments(ctx context.Context, deps Deps) {
 	})
 }
 
-func scan(ctx context.Context, deps Deps) {
-	for {
-		count, blocked, err := scanBatch(ctx, deps)
-		if err != nil {
-			slog.Error("dispatch outbox: scan", "error", err)
-			return
-		}
-		if count < batchSize || blocked {
-			return
-		}
+// fence is what a batch checks before each act it may make only while this process holds the
+// publisher hold: the hold's loss deadline (duty.Hold.Deadline).
+type fence interface {
+	Deadline() time.Time
+}
+
+// errFenced is a send refused because the publisher hold's deadline had passed.
+var errFenced = errors.New("the publisher hold's deadline has passed")
+
+// fencedSender is a batch's window that sends nothing once the publisher hold's deadline has
+// passed: every send checks it first, and one past it answers errFenced at once, so a process that
+// froze past its deadline sends nothing when it resumes.
+type fencedSender struct {
+	bus.Sender
+	hold fence
+}
+
+func (s fencedSender) PublishAsync(item contracts.Envelope) <-chan error {
+	if !time.Now().Before(s.hold.Deadline()) {
+		return fencedAnswer()
 	}
+	return s.Sender.PublishAsync(item)
+}
+
+func (s fencedSender) Request(subject string, item contracts.Envelope, opts bus.RequestOptions) <-chan error {
+	if !time.Now().Before(s.hold.Deadline()) {
+		return fencedAnswer()
+	}
+	return s.Sender.Request(subject, item, opts)
+}
+
+func fencedAnswer() <-chan error {
+	answer := make(chan error, 1)
+	answer <- errFenced
+	return answer
 }
 
 // pendingEvent is one row of a scan, read out before anything is published: an open cursor
@@ -211,14 +212,23 @@ type pendingEvent struct {
 // of that issue, which the Legion daemon then drops as stale by their sequence. The guarantee
 // covers a failed connection only: an answer that times out, or no responders, on a connection
 // still current stops no later send, so the released event can land after a later event of its
-// issue that NATS did store.
-func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
+// issue that NATS did store. A batch with a send that failed either way (bus.ErrUnavailable,
+// bus.ErrNotAcknowledged) then probes its window's connection, and a probe that fails reports NATS
+// lost, which gives the publisher hold up (Outbox).
+//
+// The batch runs under hold, the publisher hold: every send checks its deadline first
+// (fencedSender), and once it has passed the batch sends nothing more, the events not sent are
+// released, and the batch is left unrecorded - the record is the last act checked against the
+// deadline - so a process that froze past its deadline neither sends nor writes when it resumes.
+func scanBatch(ctx context.Context, deps Deps, hold fence) (batchResult, error) {
 	pending, blocked, err := scanPendingEvents(ctx, deps)
 	if err != nil {
-		return 0, false, err
+		return batchResult{}, err
 	}
+	result := batchResult{claimed: len(pending), started: time.Now()}
 
-	sender := deps.Publisher.Window()
+	window := deps.Publisher.Window()
+	sender := fencedSender{Sender: window, hold: hold}
 	attempts := make([]*attempt, len(pending))
 	for index, item := range pending {
 		if ctx.Err() != nil {
@@ -227,29 +237,77 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 		if item.failure != nil {
 			continue
 		}
-		attempts[index] = send(ctx, deps, sender, item.event, item.slug, item.route, publishedDestinationSet(item.destinations))
-		if errors.Is(attempts[index].ended, bus.ErrUnavailable) {
+		a := send(ctx, deps, sender, item.event, item.slug, item.route, publishedDestinationSet(item.destinations))
+		attempts[index] = a
+		if len(a.sent) > 0 {
+			if result.sent == 0 {
+				result.firstID = item.event.ID
+			}
+			result.sent++
+			result.lastID = item.event.ID
+		}
+		if errors.Is(a.ended, errFenced) {
+			result.fenced = true
+			break
+		}
+		if errors.Is(a.ended, bus.ErrUnavailable) {
 			break
 		}
 	}
 	outcomes := make([]outcome, len(pending))
-	unavailable := false
+	unavailable, connectionFailed := false, false
 	for index, item := range pending {
 		outcomes[index] = settle(ctx, item, attempts[index])
-		if outcomes[index].state == released && !unavailable && ctx.Err() == nil {
+		if a := attempts[index]; a != nil {
+			if err := a.err(); errors.Is(err, bus.ErrUnavailable) || errors.Is(err, bus.ErrNotAcknowledged) {
+				connectionFailed = true
+			}
+		}
+		switch {
+		case outcomes[index].state == published:
+			result.published++
+		case outcomes[index].state == released && !unavailable && !result.fenced && ctx.Err() == nil:
 			slog.Error("dispatch outbox: NATS is unreachable, so the batch from this event on waits for the next scan",
 				"event_id", item.event.ID)
 			unavailable = true
 		}
+	}
+	if !time.Now().Before(hold.Deadline()) {
+		slog.Error("dispatch outbox: the publisher hold's deadline passed before the batch was recorded, so it is left unrecorded",
+			"events", len(pending))
+		result.fenced = true
+		return result, nil
 	}
 	// Written even when ctx has ended: a process stopping mid-batch records what NATS already
 	// accepted and releases the rest, rather than leave the batch claimed for claimWindow.
 	record, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	if err := recordBatch(record, deps, outcomes); err != nil {
-		return len(pending), true, err
+		result.blocked = true
+		return result, err
 	}
-	return len(pending), blocked || unavailable, nil
+	if connectionFailed && ctx.Err() == nil {
+		if err := window.Probe(probeTimeout); err != nil {
+			slog.Error("dispatch outbox: the batch's sends failed and its connection does not answer", "error", err)
+			result.natsLost = true
+		}
+	}
+	result.blocked = blocked || unavailable
+	return result, nil
+}
+
+// batchResult is what one batch (scanBatch) came to. claimed is how many events it claimed, sent
+// how many of them it sent at least one envelope of, from firstID to lastID, the first send no
+// earlier than started, and published how many it marked published. blocked is a batch after which
+// the scan stops: a row it could not read, NATS unreachable, or its record failed. fenced is the
+// publisher hold's deadline passing during it, and natsLost a probe of its connection failing after
+// its sends failed for the connection.
+type batchResult struct {
+	claimed, sent, published int
+	firstID, lastID          int64
+	started                  time.Time
+	blocked, fenced          bool
+	natsLost                 bool
 }
 
 // outcomeState is what an event of a batch came to.
@@ -260,8 +318,9 @@ const (
 	published outcomeState = "published"
 	// backedOff: the event failed, and waits retry.Delay of its attempts before it is tried again.
 	backedOff outcomeState = "backed_off"
-	// released: the event was not tried to the end, because NATS was unreachable or the process
-	// is stopping, so its claim is cleared and no attempt is counted.
+	// released: the event was not tried to the end, because NATS was unreachable, the publisher
+	// hold's deadline passed or the process is stopping, so its claim is cleared and no attempt is
+	// counted.
 	released outcomeState = "released"
 )
 
@@ -290,9 +349,9 @@ func settle(ctx context.Context, item pendingEvent, a *attempt) outcome {
 	a.wait(ctx)
 	result.reached = a.reached
 	if err := a.err(); err != nil {
-		// The connection failing, or the process stopping before every answer came, is no
-		// failure of the event's own.
-		if errors.Is(err, bus.ErrUnavailable) || ctx.Err() != nil {
+		// The connection failing, the publisher hold's deadline passing, or the process stopping
+		// before every answer came, is no failure of the event's own.
+		if errors.Is(err, bus.ErrUnavailable) || errors.Is(err, errFenced) || ctx.Err() != nil {
 			slog.Info("dispatch outbox: event released", "event_id", item.event.ID, "error", err)
 			result.state = released
 			return result
@@ -492,7 +551,7 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 	// A row that fails to scan kills the cursor, so the claimed ids behind it are never read,
 	// never published and never backed off: without this they would sit out the whole
 	// claimWindow, a minute argued from how long a healthy batch of 100 takes (claimWindow),
-	// where before the claim existed the next scan tick re-selected them retryInterval later.
+	// where released they are selected again by the next scan.
 	// Driven by the ids actually read, because scanBatch's loop reaches every item returned
 	// here: a row the batch reached and backed off keeps the backoff recordBatch wrote for it,
 	// and a row it published keeps its published_at. The paths above that return an error
@@ -519,7 +578,7 @@ func unreachedIDs(claimed []int64, pending []pendingEvent) []int64 {
 	return unreached
 }
 
-// releaseClaim clears the claim claimPendingEvents wrote on ids, so the next scan tick selects
+// releaseClaim clears the claim claimPendingEvents wrote on ids, so the next scan selects
 // them again. Guarded on published_at is null like every other terminal write here, so a row
 // another process published once the window lapsed keeps its mark. A failure is logged and
 // nothing more: those rows then wait the claim out, which is what they did before this existed.

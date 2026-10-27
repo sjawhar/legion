@@ -429,18 +429,5 @@ func runOutbox(t *testing.T, database *store.Store, client *bus.Client, broker *
 	if err != nil {
 		t.Fatalf("open the outbox's pool: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		Run(ctx, Deps{Store: &store.Store{Pool: pool}, Publisher: client, Broker: broker})
-		close(done)
-	}()
-	return func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Fatal("outbox did not stop")
-		}
-	}
+	return runDeps(t, Deps{Store: &store.Store{Pool: pool}, Publisher: client, Broker: broker, Listen: database.Pool.Listener}, 10*time.Second)
 }

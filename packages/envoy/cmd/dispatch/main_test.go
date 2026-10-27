@@ -25,12 +25,15 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
+	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // signInEnvironment is a cookie-identity boot environment with all four sign-in settings.
@@ -426,7 +429,7 @@ func TestResolveBootConfigRequiresBothOIDCVariables(t *testing.T) {
 }
 
 func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
-	handler := dispatchHandler(http.NewServeMux(), nil, nil, nil, "")
+	handler := dispatchHandler(http.NewServeMux(), nil, nil, nil, nil, "")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -440,7 +443,7 @@ func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
 }
 
 func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
-	handler := dispatchHandler(http.NewServeMux(), nil, &bus.Client{}, nil, "")
+	handler := dispatchHandler(http.NewServeMux(), nil, &bus.Client{}, nil, nil, "")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -462,7 +465,7 @@ func TestDispatchHandlerReportsTheFileStore(t *testing.T) {
 	probe := func(store files.Store) (int, map[string]any) {
 		t.Helper()
 		response := httptest.NewRecorder()
-		dispatchHandler(http.NewServeMux(), database, nil, store, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		dispatchHandler(http.NewServeMux(), database, nil, nil, store, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 		var health map[string]any
 		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 			t.Fatalf("decode health response: %v", err)
@@ -492,7 +495,7 @@ func TestDispatchHandlerReportsTheFileStore(t *testing.T) {
 func TestHealthzReportsTheBuildCommitAndTheAppliedSchemaVersion(t *testing.T) {
 	database := storetest.Open(t)
 	const commit = "0123456789abcdef0123456789abcdef01234567"
-	handler := dispatchHandler(http.NewServeMux(), database, nil, nil, commit)
+	handler := dispatchHandler(http.NewServeMux(), database, nil, nil, nil, commit)
 	probe := func() map[string]any {
 		t.Helper()
 		response := httptest.NewRecorder()
@@ -524,18 +527,103 @@ func TestHealthzReportsTheBuildCommitAndTheAppliedSchemaVersion(t *testing.T) {
 	}
 }
 
-// A binary the image build did not stamp says so: null, never an empty string or a guess.
+// A binary the image build did not stamp says so: null, never an empty string or a guess. Every
+// field is always present, the ones nothing filled as null, and outbox_publisher false: a process
+// with NATS disabled publishes nothing.
 func TestHealthzReportsAnUnstampedCommitAsNull(t *testing.T) {
 	response := httptest.NewRecorder()
-	dispatchHandler(http.NewServeMux(), nil, nil, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	dispatchHandler(http.NewServeMux(), nil, nil, nil, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	var health map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 		t.Fatalf("decode health response: %v", err)
 	}
-	for _, field := range []string{"commit", "schema_version"} {
-		if value, found := health[field]; !found || value != nil {
-			t.Fatalf("healthz %s = %#v (present %t), want null", field, value, found)
+	want := map[string]any{
+		"ok": false, "db": false, "nats": nil, "files": nil, "commit": nil, "schema_version": nil, "outbox_publisher": false,
+	}
+	for field, value := range want {
+		if got, found := health[field]; !found || got != value {
+			t.Fatalf("healthz %s = %#v (present %t), want %#v", field, got, found, value)
 		}
+	}
+	if len(health) != len(want) {
+		t.Fatalf("healthz = %#v, want exactly the fields %v", health, want)
+	}
+}
+
+// /healthz says whether this process publishes the events outbox: true while its outbox holds the
+// publisher hold, false while it stands by for the other process's, and false again once it has
+// stopped and released the hold. It never decides ok.
+func TestHealthzReportsWhetherThisProcessPublishesTheOutbox(t *testing.T) {
+	_, url := testnats.Start(t)
+	database := storetest.Open(t)
+	type process struct {
+		outbox  *outbox.Outbox
+		handler http.Handler
+		stop    func()
+	}
+	start := func(database *store.Store) *process {
+		t.Helper()
+		client, err := bus.ConnectOwningStream([]string{url})
+		if err != nil {
+			t.Fatalf("connect NATS: %v", err)
+		}
+		t.Cleanup(client.Close)
+		pool, err := database.Pool.Outbox()
+		if err != nil {
+			t.Fatalf("open the outbox's pool: %v", err)
+		}
+		publisher := outbox.New(outbox.Deps{
+			Store: &store.Store{Pool: pool}, Publisher: client, Broker: events.NewBroker(), Listen: database.Pool.Listener,
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { publisher.Run(ctx); close(done) }()
+		stop := func() { cancel(); <-done }
+		t.Cleanup(stop)
+		return &process{outbox: publisher, handler: dispatchHandler(http.NewServeMux(), database, client, publisher, nil, ""), stop: stop}
+	}
+	probe := func(p *process) bool {
+		t.Helper()
+		response := httptest.NewRecorder()
+		p.handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		var health map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+			t.Fatalf("decode health response: %v", err)
+		}
+		if response.Code != http.StatusOK || health["ok"] != true {
+			t.Fatalf("healthz = %d %#v, want 200 and ok whether or not this process publishes", response.Code, health)
+		}
+		publishing, isBool := health["outbox_publisher"].(bool)
+		if !isBool {
+			t.Fatalf("healthz outbox_publisher = %#v, want a boolean", health["outbox_publisher"])
+		}
+		return publishing
+	}
+
+	first := start(database)
+	deadline := time.Now().Add(10 * time.Second)
+	for !probe(first) {
+		if time.Now().After(deadline) {
+			t.Fatal("healthz never reported the only outbox publishing")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	second := start(storetest.SecondProcess(t, database))
+	time.Sleep(time.Second)
+	if probe(second) || !probe(first) {
+		t.Fatalf("outbox_publisher: first %t, second %t, want only the first, which holds the publisher hold", probe(first), probe(second))
+	}
+
+	first.stop()
+	if probe(first) {
+		t.Fatal("healthz reported a stopped outbox publishing")
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for !probe(second) {
+		if time.Now().After(deadline) {
+			t.Fatal("healthz never reported the standby publishing once the holder stopped")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -586,7 +674,7 @@ func TestHealthzAnswersWhileEveryPooledConnectionIsHeld(t *testing.T) {
 		defer connection.Release()
 	}
 
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, ""))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, nil, ""))
 	defer server.Close()
 	client := &http.Client{Timeout: 3 * time.Second}
 	started := time.Now()
@@ -637,7 +725,7 @@ func TestHealthzAnswersWhilePostgresStopsAnswering(t *testing.T) {
 		database.Pool.Close()
 	})
 
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, ""))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, nil, ""))
 	defer server.Close()
 	// The shared pool's own round trip is the control: the link works right up to the outage.
 	if _, err := database.Pool.Exec(context.Background(), "select 1"); err != nil {
@@ -697,7 +785,7 @@ func TestHealthzAnswersWhilePostgresAndTheBucketBothStopAnswering(t *testing.T) 
 		database.Pool.Close()
 	})
 	bucket := unansweringBucket{filestest.NewMemory()}
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, bucket, ""))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, nil, bucket, ""))
 	defer server.Close()
 
 	client := &http.Client{Timeout: 3 * time.Second}

@@ -340,12 +340,16 @@ func main() {
 	// started minutes apart almost never meet inside a pass, so the lease alone would exclude
 	// nothing.
 	//
+	// The events outbox publishes under a hold of its own rather than such a lease
+	// (outbox.Outbox): it renews duty.Hold "dispatch-outbox" on its own pool every two seconds, so
+	// one process publishes at a time and the other takes over within seconds of a holder that
+	// stops, dies or loses NATS. Its daily document compaction is leased like the loops above.
+	//
 	// Deliberately NOT leased, in three classes:
 	//   - already claims its own work, so two processes never do one unit of it twice: the
 	//     embedding queue (embedqueue, `for update skip locked`), the task progress
-	//     reconciliation (`for no key update ... skip locked`), the outbox's own publish scan
-	//     (its claim window) and the delivery intakes (NATS's push-durable exclusivity, which
-	//     delivery.StartIntakes takes).
+	//     reconciliation (`for no key update ... skip locked`) and the delivery intakes (NATS's
+	//     push-durable exclusivity, which delivery.StartIntakes takes).
 	//   - per-process by design, because each serves this process's own connections or memory:
 	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
 	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
@@ -361,19 +365,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The outbox runs only with NATS, so a process with NATS disabled never publishes
+	// (outboxPublisher stays nil, and /healthz reports outbox_publisher false).
+	var outboxPublisher *outbox.Outbox
 	if natsClient != nil {
 		outboxPool, err := database.Pool.Outbox()
 		if err != nil {
 			slog.Error("dispatch: open the events outbox's pool", "error", err)
 			os.Exit(1)
 		}
-		go outbox.Run(ctx, outbox.Deps{
+		outboxPublisher = outbox.New(outbox.Deps{
 			Store:     &store.Store{Pool: outboxPool},
 			Publisher: natsClient,
 			Broker:    broker,
+			Listen:    database.Pool.Listener,
 			Docs:      documentService,
 			Leases:    leases,
 		})
+		go outboxPublisher.Run(ctx)
 	}
 	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: the server's
 	// embedding queue keeps coverage itself, so a later deploy that gives meaning search a place
@@ -455,7 +464,7 @@ func main() {
 	}
 
 	routesHandler, waitDelivery := routes.New(appCtx)
-	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit)
+	handler := dispatchHandler(routesHandler, database, natsClient, outboxPublisher, fileStore, buildCommit)
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -948,9 +957,9 @@ func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API
 // route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
 // longer pattern, so "GET /healthz" wins over the router's "/".
-func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.Handler {
+func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, publisher *outbox.Outbox, fileStore files.Store, commit string) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit))
+	mux.Handle("GET /healthz", healthzHandler(database, natsClient, publisher, fileStore, commit))
 	mux.Handle("/", handler)
 	return mux
 }
@@ -974,7 +983,12 @@ func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bu
 // the database has applied, read by the same probe (null when the database did not answer).
 // A deploy check compares the two with the commit its image pin names and that commit's
 // migrations, so neither is ever filled with a guess.
-func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string) http.HandlerFunc {
+//
+// `outbox_publisher` says whether this process publishes the events outbox now: true while it
+// holds the outbox's publisher hold and the hold's deadline has not passed, false when it stands
+// by, lost the hold, or runs with NATS disabled (publisher nil). One process of a deployment
+// publishes at a time, so a healthy process may well report false, and it never decides `ok`.
+func healthzHandler(database *store.Store, natsClient *bus.Client, publisher *outbox.Outbox, fileStore files.Store, commit string) http.HandlerFunc {
 	var reportedCommit *string
 	if commit != "" {
 		reportedCommit = &commit
@@ -1024,13 +1038,15 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(struct {
-			OK            bool    `json:"ok"`
-			DB            bool    `json:"db"`
-			NATS          *bool   `json:"nats"`
-			Files         *bool   `json:"files"`
-			Commit        *string `json:"commit"`
-			SchemaVersion *int    `json:"schema_version"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
+			OK              bool    `json:"ok"`
+			DB              bool    `json:"db"`
+			NATS            *bool   `json:"nats"`
+			Files           *bool   `json:"files"`
+			Commit          *string `json:"commit"`
+			SchemaVersion   *int    `json:"schema_version"`
+			OutboxPublisher bool    `json:"outbox_publisher"`
+		}{OK: ok, DB: databaseOK, NATS: natsOK, Files: filesOK, Commit: reportedCommit, SchemaVersion: schemaVersion,
+			OutboxPublisher: publisher.Publishing()})
 	}
 }
 
