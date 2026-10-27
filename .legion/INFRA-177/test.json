@@ -2,46 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "completed": "2026-10-27T13:23:00Z",
-  "round": 4,
-  "headTested": "f29d189081339e6bcabb837283e2edff7a411cbd (code head 4dbcd2324231; f29d1890 adds only .legion/INFRA-177/implement.json)",
-  "fingerprint": "changed by 4dbcd232 (handoffimport.go: merging and awaiting_merge join testing and reviewing in the records' daemon's deferral; docs/kubernetes.md), so a full round. Since round 3's head d72e9a02 only docs/kubernetes.md, handoffimport.go and the .legion/ files changed; no main merge.",
-  "mergeability": "gh pr view 2354 -> MERGEABLE (BLOCKED: required checks not reported); git merge-tree of main 1b859ea3 with f29d1890 -> no conflict; contract 41 / daemon 0060 / Dispatch 0130 still free on main (40 / 0059 / 0129).",
-  "ci": "Read 13:22Z at code head 4dbcd232: every lane queued (build x2, changes, lint, pr-title, test, typecheck). Read as running, not waited for.",
-  "roundThreeFailure": "A9 (the import moved an awaiting_merge branch): the red test TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved is unchanged since b90497b8 (0-line diff) and passes at f29d1890 with the rest of the package (13 tests ok).",
+  "completed": "2026-10-27T14:28:00Z",
+  "round": 5,
+  "headTested": "66c5285b3e6a7bf7dc05e82b42937d973908ab60 (code head 8c69e252a731; 66c5285b adds only .legion/INFRA-177/implement.json)",
+  "fingerprint": "changed by d45c1391 (handoffimport: held deferred, the phase read again before each removal, merging's reason) and the forward merge 8c69e252 with main a5f0cf47 (held ports in the e2e helpers), so a full round",
+  "mergeability": "gh pr view 2354 -> MERGEABLE (BLOCKED: required checks not reported); git merge-tree of main ae36683e with 66c5285b -> no conflict; contract 41, daemon 0060_handoff_records, Dispatch 0130_handoffs still free on main (40, 0059, 0129).",
+  "ci": "Read 14:27Z at code head 8c69e252: every lane queued (build x2, changes, lint, test, typecheck, pr-title). Read as running, not waited for.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's A9 command: `cd packages/daemon && go test ./internal/handoffimport/ -count=1 -v` -> all 13 PASS, TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved among them. Re-ran P1 on a fresh database: `source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_t4?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> 9 checks ok, `--- PASS: TestHandoffRecordsLive (35.21s)`, PASS in 66s. Re-ran A1: `bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t4?sslmode=disable' e2e/handoffs.e2e.ts` -> 2 passed. P7 and P4 not re-run (implement App, model route)."
+    "how": "`cd packages/daemon && go test ./internal/handoffimport/ -count=1 -v` -> 15 PASS, the implementer's TestUnderTheRecordsDaemonHeldAndMergingBranchesAreNotMoved and TestThePhaseIsReadAgainBeforeTheRemoval and my TestUnderTheRecordsDaemonAnAwaitingMergeBranchIsNotMoved among them. P1 on a fresh database through the merged held-port helpers: `source /legion/harness/env.sh && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/legion_t5?sslmode=disable LEGION_E2E_NATS_BIN=/legion/scratch/tmp/bin/nats-server bash scripts/e2e/handoff-records.sh` -> 9 checks ok (a10's Dispatch restart re-bound its port), PASS in 41s. A1: `bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t5?sslmode=disable' e2e/handoffs.e2e.ts` -> 2 passed. P7 and P4 not re-run (implement App, model route)."
   },
   "failures": [],
   "failed": 0,
   "notes": [
-    "Wording only, for the reviewer's Fast-follow judgement: handoffimport.go:10 (package doc) and cmd/legion/handoffs.go:30-31 still say the records' daemon defers the removal only in testing or reviewing; Run's doc, removal()'s doc and docs/kubernetes.md name merging and awaiting_merge too."
+    "Wording, already on the reviewer's Fast-follow list: an issue that left the workflow between the run's first read and its removal prints 'removal deferred: <KEY> is in done; run the import again once the phase ends' and counts as deferred; the next run no longer lists it, so 'deferred 0' is still reachable."
   ],
   "proof": [
     {
-      "criterion": "A9: under the records' daemon the import leaves a branch in merging or awaiting_merge where it is, still writing its records, and reports it deferred, not failed",
-      "surface": "handoffimport.Run (what `legion handoffs import` runs) against a real Dispatch server built from the head (port 18903, own database), GitHub and the daemon's state stood in by the package's world, daemon schema at recordsSchema; a throwaway driver, deleted afterwards",
-      "command": "TESTER_DISPATCH_URL=http://127.0.0.1:18903 go test ./internal/handoffimport/ -run TestZZTesterRealDispatchImport -v (LEG-8 awaiting_merge and LEG-9 merging, each carrying .legion/<KEY>/plan.json and another issue's .legion/OTHER-3/), run twice",
-      "observed": "run 1: 'LEG-8 plan: imported v1', 'LEG-8: removal deferred: LEG-8 is in awaiting_merge; run the import again once the phase ends', the same for LEG-9 in merging, exit 0, 'deferred 4 … failed 0'; LEG-8 and LEG-9 heads unmoved; on Dispatch, LEG-8's plan v1 is under legion-daemon:LEG with the file's text byte for byte; run 2: every file 'unchanged', nothing written or pushed",
-      "headSha": "f29d189081339e6bcabb837283e2edff7a411cbd",
-      "negativeControl": "the same run's LEG-4 (accepting) and LEG-5 (retro) heads did move ('removed .legion/ at …'), and at b90497b8 (before 4dbcd232) the red test reports legion/LEG-8 moved by the removal commit"
+      "criterion": "A9: under the records' daemon the import leaves a branch alone while its issue is in testing, reviewing, merging, awaiting_merge or held, reading the phase again just before the removal, and still writes its records",
+      "surface": "handoffimport.Run (what `legion handoffs import` runs) against a real Dispatch server built from the head (port 18903, own database); GitHub and the daemon's state stood in by the package's world with the schema at recordsSchema; a throwaway driver, deleted afterwards",
+      "command": "TESTER_DISPATCH_URL=http://127.0.0.1:18903 go test ./internal/handoffimport/ -run TestZZTesterRealDispatchImport -v, with LEG-8 held, LEG-9 merging and LEG-10 awaiting_merge each carrying .legion/<KEY>/ and another issue's .legion/OTHER-3/, and the state flipped after its first read: LEG-4 accepting -> held, LEG-5 retro -> done",
+      "observed": "exit 0, 'imported 17 … removed .legion/ 1, deferred 7 … failed 0'; lines 'LEG-8: removal deferred: LEG-8 is in held', 'LEG-9 … is in merging', 'LEG-10 … is in awaiting_merge', 'LEG-4 … is in held', 'LEG-5 … is in done'; none of LEG-4, LEG-5, LEG-8, LEG-9, LEG-10 moved; LEG-8's plan v1 on Dispatch under legion-daemon:LEG; 9 state reads (one per removal plus the first)",
+      "headSha": "66c5285b3e6a7bf7dc05e82b42937d973908ab60",
+      "negativeControl": "LEG-1 (planning, unchanged across the reads) was moved by its removal commit ('LEG-1: removed .legion/ at c0015'); LEG-4 and LEG-5, which round 4's import removed at their first-read phases, were not moved once the re-read named held and done"
     },
     {
       "criterion": "A3, A6, A7, A10 and HANDOFF_NOT_NEW on the whole daemon with the real Dispatch and dispatch CLI",
       "surface": "scripts/e2e/handoff-records.sh",
-      "command": "LEGION_TEST_PG_DSN=…/legion_t4 LEGION_E2E_NATS_BIN=… bash scripts/e2e/handoff-records.sh",
-      "observed": "all 9 checks ok: 41,024-byte bodies as versions 1 and 2 byte-identical; another session's record 403 HANDOFF_SESSION_MISMATCH with the phase kept; the import's record refused and re-written, the reviewer's task naming '--version 2'; round-1 record refused HANDOFF_NOT_NEW; Dispatch stopped 502 DISPATCH_READ_FAILED, restarted and landed",
-      "headSha": "f29d189081339e6bcabb837283e2edff7a411cbd",
-      "negativeControl": "a 262,145-byte body refused by the CLI before sending and 413 CAP_EXCEEDED by the server; the planner's own record moves the issue (a3-control)"
+      "command": "LEGION_TEST_PG_DSN=…/legion_t5 LEGION_E2E_NATS_BIN=… bash scripts/e2e/handoff-records.sh",
+      "observed": "all 9 checks ok; Dispatch stopped -> 502 DISPATCH_READ_FAILED with the phase kept, restarted on the same port -> the retried write and completion land",
+      "headSha": "66c5285b3e6a7bf7dc05e82b42937d973908ab60",
+      "negativeControl": "a 262,145-byte body refused by the CLI before sending and 413 CAP_EXCEEDED by the server; another session's record 403 HANDOFF_SESSION_MISMATCH"
     },
     {
-      "criterion": "A1: a handoff shows in Conversation as one entry with its fields",
-      "surface": "the Dispatch dashboard in Chromium against the real Go server, SPA rebuilt from the head",
-      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t4?sslmode=disable' e2e/handoffs.e2e.ts",
-      "observed": "2 passed: Conversation lists each version and expands to its fields and both proof entries; Activity one line per version",
-      "headSha": "f29d189081339e6bcabb837283e2edff7a411cbd",
-      "negativeControl": "the implementer's run against 8a4d97bf (before the Conversation change): Conversation 0 cards, Activity passes (not re-run)"
+      "criterion": "A1: a handoff shows in Conversation as one entry with its fields; Dispatch's write and read routes hold their limits",
+      "surface": "the Dispatch dashboard in Chromium against the real Go server (SPA rebuilt from the head), and raw HTTP against a scratch Dispatch built from the head",
+      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t5?sslmode=disable' e2e/handoffs.e2e.ts; curl probes (probe.sh, probe2.sh)",
+      "observed": "2 passed; 30 concurrent writes -> versions 1..30; 262,144-byte bodies accepted plain and escaped up to a 1,572,887-byte request; read-back byte-identical",
+      "headSha": "66c5285b3e6a7bf7dc05e82b42937d973908ab60",
+      "negativeControl": "262,145 bytes -> 413 CAP_EXCEEDED; phase PLAN -> 400 HANDOFF_INPUT; a human caller -> 403 HANDOFF_FORBIDDEN; no bearer -> 401"
     }
   ]
 }
