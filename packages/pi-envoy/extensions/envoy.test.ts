@@ -54,6 +54,7 @@ import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensib
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
+import { version as packageVersion } from "../package.json" with { type: "json" };
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
 
 type ToolResult = {
@@ -2926,6 +2927,8 @@ describe("envoy OMP extension", () => {
           self_subscribed: true,
           capabilities: ["aside", "steer"],
           host: machineID(),
+          plugin: "@sjawhar/pi-envoy",
+          plugin_version: packageVersion,
         },
       },
       // The opened agent subject's first sweep, which starts its cursor.
@@ -9386,6 +9389,8 @@ describe("envoy OMP extension", () => {
         self_subscribed: true,
         capabilities: ["aside", "steer"],
         host: machineID(),
+        plugin: "@sjawhar/pi-envoy",
+        plugin_version: packageVersion,
       },
     });
   });

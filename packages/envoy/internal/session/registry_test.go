@@ -68,6 +68,29 @@ func TestSessionRegistry_PutAndGet(t *testing.T) {
 	}
 }
 
+// The stored entry keeps the plugin a session registered through and that plugin's build, so the
+// session list read back from the bucket names them.
+func TestSessionRegistry_PutAndGetKeepsThePluginAndItsVersion(t *testing.T) {
+	client := setupNATS(t)
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	if err != nil {
+		t.Fatalf("failed to open session registry: %v", err)
+	}
+
+	entry := SessionEntry{MachineID: "test-machine", Plugin: "@sjawhar/claude-envoy", PluginVersion: "afe10b2f3e1b"}
+	if err := reg.Put("ses_plugin", entry); err != nil {
+		t.Fatalf("put failed: %v", err)
+	}
+
+	got, err := reg.Get("ses_plugin")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	if got.Plugin != "@sjawhar/claude-envoy" || got.PluginVersion != "afe10b2f3e1b" {
+		t.Fatalf("got %+v, want plugin @sjawhar/claude-envoy at afe10b2f3e1b", got)
+	}
+}
+
 func TestSessionRegistry_GetNotFound(t *testing.T) {
 	client := setupNATS(t)
 	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))

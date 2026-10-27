@@ -19845,7 +19845,9 @@ var SessionWireSchema = exports_external.object({
   roles: exports_external.array(exports_external.string()).optional(),
   capabilities: exports_external.array(exports_external.string()).optional(),
   self_subscribed: exports_external.boolean(),
-  last_seen: exports_external.number().int().optional()
+  last_seen: exports_external.number().int().optional(),
+  plugin: exports_external.string().optional(),
+  plugin_version: exports_external.string().optional()
 });
 var RoleWireSchema = exports_external.object({
   role: exports_external.string(),
@@ -19992,7 +19994,9 @@ function createEnvoyClient(config2) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
-      host: machineID()
+      host: machineID(),
+      plugin: input.plugin.name,
+      plugin_version: input.plugin.version
     }))),
     unsubscribe: async (input) => {
       await post("/v1/interests/unsubscribe", {

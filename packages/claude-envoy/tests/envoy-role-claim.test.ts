@@ -93,6 +93,7 @@ test("reasserts a role claimed after channel startup on the next heartbeat", asy
       heartbeatMs: 25,
       configFile: { path: join(stateDirectory, "envoy.json"), error: null },
       stateDirectory,
+      pluginVersion: "source",
     })
 
     await session.rememberRole("reviewer")

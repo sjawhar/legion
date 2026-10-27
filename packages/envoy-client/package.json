@@ -89,6 +89,11 @@
       "bun": "./src/nats-auth.ts",
       "default": "./dist/nats-auth.js"
     },
+    "./nats-connection": {
+      "types": "./src/nats-connection.ts",
+      "bun": "./src/nats-connection.ts",
+      "default": "./dist/nats-connection.js"
+    },
     "./replay": {
       "types": "./src/replay.ts",
       "bun": "./src/replay.ts",
@@ -121,7 +126,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/delivery.ts src/dispatch-cli.ts src/dispatch-command.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-picture-tools.ts src/dispatch-pictures.ts src/dispatch-session-state.ts src/dispatch-subscribe.ts src/envoy-config.ts src/envoy-settings.ts src/errors.ts src/machine.ts src/nats-auth.ts src/replay.ts src/secret-file.ts src/session-settings.ts src/slack-post.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/delivery.ts src/dispatch-cli.ts src/dispatch-command.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-picture-tools.ts src/dispatch-pictures.ts src/dispatch-session-state.ts src/dispatch-subscribe.ts src/envoy-config.ts src/envoy-settings.ts src/errors.ts src/machine.ts src/nats-auth.ts src/nats-connection.ts src/replay.ts src/secret-file.ts src/session-settings.ts src/slack-post.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/ bin/"

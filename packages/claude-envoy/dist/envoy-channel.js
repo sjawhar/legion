@@ -42997,6 +42997,22 @@ function natsAuthOptions(seed) {
   return { authenticator: import_nats.nkeyAuthenticator(bytes) };
 }
 
+// ../envoy-client/src/nats-connection.ts
+var NATS_PING_INTERVAL_MS = 1e4;
+var NATS_MAX_PINGS_OUT = 2;
+function natsConnectionOptions(input) {
+  return {
+    servers: [...input.servers],
+    name: input.name,
+    ...natsAuthOptions(input.seed),
+    reconnect: true,
+    maxReconnectAttempts: -1,
+    reconnectTimeWait: 2000,
+    pingInterval: NATS_PING_INTERVAL_MS,
+    maxPingOut: NATS_MAX_PINGS_OUT
+  };
+}
+
 // ../envoy-client/src/envoy-config.ts
 import {
   chmodSync,
@@ -43603,7 +43619,9 @@ var SessionWireSchema = exports_external.object({
   roles: exports_external.array(exports_external.string()).optional(),
   capabilities: exports_external.array(exports_external.string()).optional(),
   self_subscribed: exports_external.boolean(),
-  last_seen: exports_external.number().int().optional()
+  last_seen: exports_external.number().int().optional(),
+  plugin: exports_external.string().optional(),
+  plugin_version: exports_external.string().optional()
 });
 var RoleWireSchema = exports_external.object({
   role: exports_external.string(),
@@ -43750,7 +43768,9 @@ function createEnvoyClient(config2) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
-      host: machineID()
+      host: machineID(),
+      plugin: input.plugin.name,
+      plugin_version: input.plugin.version
     }))),
     unsubscribe: async (input) => {
       await post("/v1/interests/unsubscribe", {
@@ -48696,13 +48716,19 @@ function claudeCommandLine(pid, read = processCommandLine, parent = parentProces
   }
   return;
 }
-function installedMarketplace(bundlePath) {
+function pluginCacheSegments(bundlePath) {
   const parts = bundlePath.split(sep);
-  for (let index = 0;index + 2 < parts.length; index++) {
+  for (let index = 0;index + 1 < parts.length; index++) {
     if (parts[index] === "plugins" && parts[index + 1] === "cache")
-      return parts[index + 2];
+      return parts.slice(index + 2);
   }
   return;
+}
+function installedMarketplace(bundlePath) {
+  return pluginCacheSegments(bundlePath)?.[0];
+}
+function installedPluginVersion(bundlePath) {
+  return pluginCacheSegments(bundlePath)?.[2];
 }
 var INLINE_MARKETPLACE = "inline";
 function loadedMarketplace(pluginRoot, bundlePath, commandLine2) {
@@ -49855,7 +49881,8 @@ async function startChannelSession(options) {
       title,
       capabilities: options.capabilities,
       driving: false,
-      selfSubscribed: true
+      selfSubscribed: true,
+      plugin: { name: "@sjawhar/claude-envoy", version: options.pluginVersion }
     });
   };
   const restoreRole = async (previousSessionID = identity.id) => {
@@ -50299,9 +50326,10 @@ async function runEnvoyChannelServer() {
   }), directory);
   const stateDirectory = pluginStateDirectory();
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE]);
+  const bundlePath = process.argv[1] ?? "";
   const channel = inboxSocket === undefined ? detectClaudeChannel({
     claudePid: process.ppid,
-    bundlePath: process.argv[1] ?? "",
+    bundlePath,
     environment: process.env
   }) : { loaded: true };
   if (!channel.loaded) {
@@ -50370,14 +50398,11 @@ async function runEnvoyChannelServer() {
       stampOnce(() => identity.id);
       session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off });
     } else {
-      connection = await import_nats2.connect({
-        servers: [...inbound.natsUrls],
+      connection = await import_nats2.connect(natsConnectionOptions({
+        servers: inbound.natsUrls,
         name: `claude-envoy-channel-${identity.id}`,
-        ...natsAuthOptions(inbound.natsSeed),
-        reconnect: true,
-        maxReconnectAttempts: -1,
-        reconnectTimeWait: 2000
-      });
+        seed: inbound.natsSeed
+      }));
       session = await startChannelSession({
         identity,
         connection,
@@ -50388,6 +50413,7 @@ async function runEnvoyChannelServer() {
         configFile,
         stateDirectory,
         title,
+        pluginVersion: installedPluginVersion(bundlePath) ?? "source",
         ...stamping ? { stampTitle } : {},
         ...configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}
       });

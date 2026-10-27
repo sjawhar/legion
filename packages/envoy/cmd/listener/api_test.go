@@ -2374,6 +2374,56 @@ func TestSubscribeHandlerStoresAndListsCapabilities(t *testing.T) {
 	}
 }
 
+// A registration names its plugin and that plugin's build; both reach the session list and the
+// per-session route, trimmed. A registration from a plugin predating the fields lists neither key.
+func TestSubscribeHandlerStoresAndListsThePluginAndItsVersion(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	state := &listenerDeps{registry: registry, sessions: sessions}
+	handler := subscribeHandler(state, "test-machine", logging.New("test"))
+	for _, body := range []string{
+		`{"session_id":"ses_versioned","topics":[],"self_subscribed":true,"plugin":" @sjawhar/pi-envoy ","plugin_version":" 11.0.0 "}`,
+		`{"session_id":"ses_unversioned","topics":[],"self_subscribed":true}`,
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(body)))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("subscribe: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+
+	list := httptest.NewRecorder()
+	sessionsHandler(registry, sessions).ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	if list.Code != http.StatusOK {
+		t.Fatalf("list sessions: status=%d body=%s", list.Code, list.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.NewDecoder(list.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode sessions: %v", err)
+	}
+	byID := map[string]map[string]any{}
+	for _, row := range rows {
+		byID[row["session_id"].(string)] = row
+	}
+	versioned, unversioned := byID["ses_versioned"], byID["ses_unversioned"]
+	if versioned["plugin"] != "@sjawhar/pi-envoy" || versioned["plugin_version"] != "11.0.0" {
+		t.Fatalf("versioned row = %#v, want plugin @sjawhar/pi-envoy at 11.0.0", versioned)
+	}
+	if _, ok := unversioned["plugin"]; ok {
+		t.Fatalf("unversioned row = %#v, want no plugin key", unversioned)
+	}
+	if _, ok := unversioned["plugin_version"]; ok {
+		t.Fatalf("unversioned row = %#v, want no plugin_version key", unversioned)
+	}
+
+	answer := sessionEntryRoute(t, state, "ses_versioned")
+	if answer.Code != http.StatusOK {
+		t.Fatalf("GET /v1/registry/ses_versioned: status %d %s, want 200", answer.Code, answer.Body.String())
+	}
+	if got := decodeSessionInfo(t, answer); got.Plugin != "@sjawhar/pi-envoy" || got.PluginVersion != "11.0.0" {
+		t.Fatalf("the route answered %#v, want plugin @sjawhar/pi-envoy at 11.0.0", got)
+	}
+}
+
 // A session on a serving port is reached at the host its registration records, so a registration
 // whose host could move the delivery to another authority or path is refused before anything is
 // written: neither the session's interests nor its session entry appear. The same registration

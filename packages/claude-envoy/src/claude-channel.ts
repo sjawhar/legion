@@ -503,16 +503,29 @@ export function claudeCommandLine(
   return undefined
 }
 
+/** The segments after `…/plugins/cache/` in a plugin install path, or undefined for any other path. */
+function pluginCacheSegments(bundlePath: string): string[] | undefined {
+  const parts = bundlePath.split(sep)
+  for (let index = 0; index + 1 < parts.length; index++) {
+    if (parts[index] === "plugins" && parts[index + 1] === "cache") return parts.slice(index + 2)
+  }
+  return undefined
+}
+
 /**
  * The marketplace a plugin install path names (`…/plugins/cache/<marketplace>/<plugin>/…`), or
  * undefined for any other path: a source checkout, `--plugin-dir`, or a bare server config.
  */
 export function installedMarketplace(bundlePath: string): string | undefined {
-  const parts = bundlePath.split(sep)
-  for (let index = 0; index + 2 < parts.length; index++) {
-    if (parts[index] === "plugins" && parts[index + 1] === "cache") return parts[index + 2]
-  }
-  return undefined
+  return pluginCacheSegments(bundlePath)?.[0]
+}
+
+/**
+ * The version a plugin install path names (`…/plugins/cache/<marketplace>/<plugin>/<version>/…`,
+ * the marketplace commit's first 12 characters for this plugin), or undefined for any other path.
+ */
+export function installedPluginVersion(bundlePath: string): string | undefined {
+  return pluginCacheSegments(bundlePath)?.[2]
 }
 
 /** The marketplace Claude Code names a plugin it loads with `--plugin-dir` under. */

@@ -22,7 +22,7 @@ import {
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
-import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
+import { natsConnectionOptions } from "@legion/envoy-client/nats-connection"
 import {
   closeReplayedRemoval,
   createReplayEngine,
@@ -74,7 +74,7 @@ import {
   type ChannelInboundMessage,
   createChannelForwarder,
 } from "./channel-forwarder"
-import { type ChannelGate, detectClaudeChannel } from "./claude-channel"
+import { type ChannelGate, detectClaudeChannel, installedPluginVersion } from "./claude-channel"
 import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
 import { inboundOffChannelSession, serveEnvoyOff } from "./envoy-off"
 import {
@@ -277,6 +277,11 @@ export interface ChannelSessionOptions {
    * My Pi session; omitted, nothing is written.
    */
   readonly stampTitle?: (sessionId: string, title: string) => void
+  /**
+   * The build every registration names (`installedPluginVersion` of the bundle Claude Code runs,
+   * or `source` for a bundle outside its plugin cache).
+   */
+  readonly pluginVersion: string
 }
 
 // The shared tool contract builds schemas from each host's Zod API. Claude's
@@ -738,6 +743,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
+      plugin: { name: "@sjawhar/claude-envoy", version: options.pluginVersion },
     })
   }
 
@@ -1398,6 +1404,8 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const stateDirectory = pluginStateDirectory()
   // The Legion bridge's inbox takes the events itself; otherwise they go to Claude Code's channel.
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE])
+  // The plugin's own bundle, which Claude Code runs from its plugin cache when installed.
+  const bundlePath = process.argv[1] ?? ""
   // Claude Code drops a notification from a channel it did not load without telling this server,
   // so such a session advertises no delivery mode and Dispatch refuses a message to it rather than
   // reporting it delivered. The bridge's inbox needs no channel.
@@ -1405,7 +1413,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
     inboxSocket === undefined
       ? detectClaudeChannel({
           claudePid: process.ppid,
-          bundlePath: process.argv[1] ?? "",
+          bundlePath,
           environment: process.env,
         })
       : { loaded: true }
@@ -1491,14 +1499,13 @@ export async function runEnvoyChannelServer(): Promise<void> {
       stampOnce(() => identity.id)
       session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off })
     } else {
-      connection = await connect({
-        servers: [...inbound.natsUrls],
-        name: `claude-envoy-channel-${identity.id}`,
-        ...natsAuthOptions(inbound.natsSeed),
-        reconnect: true,
-        maxReconnectAttempts: -1,
-        reconnectTimeWait: 2_000,
-      })
+      connection = await connect(
+        natsConnectionOptions({
+          servers: inbound.natsUrls,
+          name: `claude-envoy-channel-${identity.id}`,
+          seed: inbound.natsSeed,
+        }),
+      )
       session = await startChannelSession({
         identity,
         connection,
@@ -1509,6 +1516,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
         configFile,
         stateDirectory,
         title,
+        pluginVersion: installedPluginVersion(bundlePath) ?? "source",
         ...(stamping ? { stampTitle } : {}),
         // The QA override names a fixed identity; only a Claude-minted id follows `/clear`.
         ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),

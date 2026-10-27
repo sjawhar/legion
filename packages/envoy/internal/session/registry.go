@@ -45,6 +45,10 @@ type SessionEntry struct {
 	// through it, else to MachineID, and HostOrMachine falls back to MachineID so every display
 	// caller sees a populated value.
 	Host string `json:"host,omitempty"`
+	// Plugin is the npm package the session registered through and PluginVersion that plugin's
+	// build; both empty for a session whose plugin predates the fields.
+	Plugin        string `json:"plugin,omitempty"`
+	PluginVersion string `json:"plugin_version,omitempty"`
 }
 
 // HostOrMachine is the session's real machine for display: Host when the registering plugin

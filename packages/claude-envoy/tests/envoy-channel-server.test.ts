@@ -344,7 +344,10 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
   })
 
   const session = await startChannelSession(
-    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, { client }),
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      client,
+      pluginVersion: "afe10b2f3e1b",
+    }),
   )
 
   try {
@@ -354,6 +357,7 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
         topics: [directSubject],
         capabilities: ["aside"],
         selfSubscribed: true,
+        plugin: { name: "@sjawhar/claude-envoy", version: "afe10b2f3e1b" },
       }),
     ])
     expect(setRoles).toEqual([
@@ -790,13 +794,20 @@ test("the server calls the listener with the file's envoy.token and signs in to 
   const user = nkeys.createUser()
   const auth: Array<string | null> = []
   const registered = Promise.withResolvers<void>()
+  const plugins: unknown[] = []
   const listener = Bun.serve({
     port: 0,
     fetch: async (request) => {
       auth.push(request.headers.get("Authorization"))
       const url = new URL(request.url)
       if (request.method === "POST" && url.pathname === "/v1/interests/subscribe") {
-        const body = (await request.json()) as { session_id: string; topics: string[] }
+        const body = (await request.json()) as {
+          session_id: string
+          topics: string[]
+          plugin: string
+          plugin_version: string
+        }
+        plugins.push({ plugin: body.plugin, plugin_version: body.plugin_version })
         registered.resolve()
         return Response.json({
           session_id: body.session_id,
@@ -838,6 +849,8 @@ test("the server calls the listener with the file's envoy.token and signs in to 
     await Promise.all([registered.promise, broker.until(() => broker.connects.length > 0)])
     expect(broker.connects[0]).toMatchObject({ nkey: user.getPublicKey() })
     expect(new Set(auth)).toEqual(new Set(["Bearer file-token"]))
+    // The bundle runs from this checkout, outside Claude Code's plugin cache.
+    expect(plugins[0]).toEqual({ plugin: "@sjawhar/claude-envoy", plugin_version: "source" })
     server.kill("SIGTERM")
     expect(await server.exited).toBe(0)
   } finally {

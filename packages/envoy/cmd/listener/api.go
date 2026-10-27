@@ -676,6 +676,10 @@ type sessionInfo struct {
 	Roles          []string `json:"roles"`
 	UpdatedAt      int64    `json:"updated_at"`
 	LastSeen       int64    `json:"last_seen"`
+	// The plugin the session registered through and its build; absent for a session whose plugin
+	// predates the fields.
+	Plugin        string `json:"plugin,omitempty"`
+	PluginVersion string `json:"plugin_version,omitempty"`
 }
 
 // sessionInfoFor joins one session entry with its interests (its topics, and the roles those topics
@@ -694,6 +698,8 @@ func sessionInfoFor(registry *store.Registry, sessionID string, entry session.Se
 		SelfSubscribed: entry.SelfSubscribed,
 		UpdatedAt:      entry.UpdatedAt,
 		LastSeen:       entry.UpdatedAt,
+		Plugin:         entry.Plugin,
+		PluginVersion:  entry.PluginVersion,
 	}
 	if interest, err := registry.Get(sessionID); err == nil {
 		info.Topics = interest.Topics
@@ -1080,7 +1086,7 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 			writeJSONError(w, http.StatusBadRequest, "host is not a host name or address", "host")
 			return
 		}
-		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
+		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir), slog.String("plugin", body.Plugin), slog.String("plugin_version", body.PluginVersion))
 		// A topic reaching a private stream subject (another session's inbox, a failed-delivery
 		// lane, the Legion controller lane; bus.ReachesPrivateStreamSubject) is left out and named in
 		// a warning, the rest of the registration stored: the topics stored here drive the

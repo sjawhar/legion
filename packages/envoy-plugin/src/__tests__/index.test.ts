@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:te
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
+import { version } from "../../package.json" with { type: "json" };
 import { logger } from "../log";
 import { isolateEnvoyConfig } from "./isolated-config";
 
@@ -382,7 +383,7 @@ describe("envoy_sessions", () => {
 });
 
 describe("session title", () => {
-  it("includes title in follow-up subscribe after session activation", async () => {
+  it("includes title in follow-up subscribe after session activation, and every subscribe names the plugin", async () => {
     const originalEnvoyUrl = process.env.ENVOY_URL;
     process.env.ENVOY_URL = "http://127.0.0.1:59999";
 
@@ -443,6 +444,12 @@ describe("session title", () => {
         return body.title === "Test Title";
       });
       expect(hasTitle).toBe(true);
+      for (const call of subscribeCalls) {
+        expect(JSON.parse(call.body as string)).toMatchObject({
+          plugin: "@sjawhar/opencode-legion-envoy",
+          plugin_version: version,
+        });
+      }
     } finally {
       globalThis.fetch = originalFetch;
       process.env.ENVOY_URL = originalEnvoyUrl;

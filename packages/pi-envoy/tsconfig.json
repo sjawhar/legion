@@ -19,7 +19,8 @@
     "strict": true,
     "noEmit": true,
     "types": ["bun"],
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "resolveJsonModule": true
   },
   "include": [
     "extensions/envoy.ts",

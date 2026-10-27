@@ -50,7 +50,7 @@ import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscri
 import { MIN_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
-import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
+import { natsConnectionOptions } from "@legion/envoy-client/nats-connection";
 import {
   closeReplayedRemoval,
   createReplayEngine,
@@ -122,6 +122,7 @@ import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensib
 import { logger, procmgr, VERSION } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, Events, type NatsConnection, StringCodec, type Subscription } from "nats";
+import { version as packageVersion } from "../package.json" with { type: "json" };
 import {
   AgentStreamPublisher,
   type AgentStreamSettingsState,
@@ -974,16 +975,14 @@ export default function envoyExtension(pi: PiApi): void {
   const ensureConnection = async (live: Fence = UNFENCED): Promise<NatsConnection> => {
     if (connection?.isClosed() === false) return connection;
     const { natsUrls, natsSeed } = requireInbound();
-    const dialled = await connect({
-      servers: [...natsUrls],
-      name: `omp-${sessionID || "unknown"}`,
-      ...natsAuthOptions(natsSeed),
-      // Survive NATS drops after the first connection: nats.js re-subscribes
-      // existing subscriptions on its own once reconnected.
-      reconnect: true,
-      maxReconnectAttempts: -1,
-      reconnectTimeWait: 2_000,
-    });
+    // nats.js re-subscribes existing subscriptions on its own once reconnected.
+    const dialled = await connect(
+      natsConnectionOptions({
+        servers: natsUrls,
+        name: `omp-${sessionID || "unknown"}`,
+        seed: natsSeed,
+      })
+    );
     // Another pass can establish the connection, and the session's shutdown drop it, while this
     // dial is in flight, and an abandoned pass must not put its dial in the shared field: cleanup
     // drains `connection` alone, and `maxReconnectAttempts: -1` keeps anything else alive for the
@@ -2097,6 +2096,7 @@ export default function envoyExtension(pi: PiApi): void {
             : DELIVERY_CAPABILITIES,
         driving: false,
         selfSubscribed: true,
+        plugin: { name: "@sjawhar/pi-envoy", version: packageVersion },
       })
       .then((result) => {
         registeredFor = registeringFor;

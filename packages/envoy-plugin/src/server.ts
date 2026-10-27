@@ -12,6 +12,7 @@ import {
 } from "@legion/envoy-client/tool-contract";
 import { createEnvoyClient, type EnvoyClient } from "@legion/envoy-client/transport";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin/tool";
+import { version } from "../package.json" with { type: "json" };
 import { logger } from "./log";
 import { resolvePort } from "./port";
 
@@ -28,6 +29,9 @@ const skillsDirectory = [
 ].find((dir) => existsSync(dir));
 
 const PACKAGE_NAME = "@sjawhar/opencode-legion-envoy";
+
+/** The plugin every registration names: this package and the version its manifest carries. */
+const PLUGIN = { name: PACKAGE_NAME, version };
 
 /** The package root: the nearest directory above `from` whose package.json names this package.
  *  The packed server.js sits in dist/src/, the repo's server.ts in src/. A manifest on the way up
@@ -93,6 +97,7 @@ function envoyTools(
             port: port() ?? 0,
             title: title() ?? "",
             driving: true,
+            plugin: PLUGIN,
           })
         );
       },
@@ -307,6 +312,7 @@ export default async (input: { serverUrl: URL }) => {
         port,
         title: title ?? "",
         driving,
+        plugin: PLUGIN,
       })
       .catch(() => {});
 
