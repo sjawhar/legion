@@ -409,23 +409,57 @@ test("a chunk that fails while online is a real failure, not a network blip", as
   });
 });
 
-test("shows a reloadable update notice when focused after the running index chunk changes", async () => {
-  const currentScript = document.createElement("script");
-  currentScript.type = "application/json";
-  currentScript.src = "/assets/index-current.js";
-  document.head.append(currentScript);
-  function responseForUpdate(input: RequestInfo | URL): Promise<Response> {
+/** The tab's running page: a script naming its entry chunk, as the built page's module script does. */
+function runningPage(entry: string): HTMLScriptElement {
+  const script = document.createElement("script");
+  script.type = "application/json";
+  script.src = entry;
+  document.head.append(script);
+  return script;
+}
+
+/** Answers GET /api/v1/dashboard/builds with `builds` (a status and a body, or a network failure),
+ *  `/healthz` with 200, and `/` with a page naming `pageEntry`, so a check that still read `/`
+ *  would see another build there. */
+function serverAnswering(
+  builds: { status: number; body: unknown } | "network failure",
+  pageEntry = "/assets/index-new.js"
+) {
+  function respond(input: RequestInfo | URL): Promise<Response> {
+    if (input === "/api/v1/dashboard/builds") {
+      if (builds === "network failure") {
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      return Promise.resolve(Response.json(builds.body, { status: builds.status }));
+    }
     if (input === "/healthz") {
       return Promise.resolve(new Response("{}", { status: 200 }));
     }
     return Promise.resolve(
-      new Response('<script src="/a.js"></script><script src="/assets/index-new.js"></script>', {
-        status: 200,
-      })
+      new Response(`<script type="module" src="${pageEntry}"></script>`, { status: 200 })
     );
   }
-  responseForUpdate.preconnect = () => {};
-  const fetch = spyOn(globalThis, "fetch").mockImplementation(responseForUpdate);
+  respond.preconnect = () => {};
+  return respond;
+}
+
+/** Lets the check a focus started run to its end: its request, its body and its state update. */
+async function settleCheck(): Promise<void> {
+  for (let round = 0; round < 5; round++) {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setTimeout(resolve, 10);
+    await promise;
+  }
+}
+
+test("shows a reloadable update notice when one build other than the tab's is live", async () => {
+  const currentScript = runningPage("/assets/index-current.js");
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(
+    serverAnswering({
+      status: 200,
+      body: { serving: "/assets/index-new.js", live: ["/assets/index-new.js"] },
+    })
+  );
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
   const view = render(<DeploymentResilience />);
 
@@ -434,8 +468,8 @@ test("shows a reloadable update notice when focused after the running index chun
 
     const notice = await screen.findByRole("status", { name: "A new version is available" });
     expect(notice.textContent).toContain("A new version is available - Reload");
-    expect(fetch).toHaveBeenCalledWith("/healthz", { cache: "no-store" });
-    expect(fetch).toHaveBeenCalledWith("/", { cache: "no-store" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", { cache: "no-store" });
 
     fireEvent.click(screen.getByRole("button", { name: "Reload" }));
     expect(reload).toHaveBeenCalledTimes(1);
@@ -447,37 +481,80 @@ test("shows a reloadable update notice when focused after the running index chun
   }
 });
 
+const noNotice: [string, { status: number; body: unknown } | "network failure"][] = [
+  [
+    "two builds are live, one newer, while / names the newer one",
+    {
+      status: 200,
+      body: {
+        serving: "/assets/index-new.js",
+        live: ["/assets/index-current.js", "/assets/index-new.js"],
+      },
+    },
+  ],
+  [
+    "the one live build is the tab's own",
+    {
+      status: 200,
+      body: { serving: "/assets/index-current.js", live: ["/assets/index-current.js"] },
+    },
+  ],
+  [
+    "a process older than the route answers 404",
+    { status: 404, body: { code: "NOT_FOUND", error: "no route" } },
+  ],
+  ["the caller is signed out (401)", { status: 401, body: { error: "unauthorized" } }],
+  ["the server fails (500)", { status: 500, body: { error: "internal" } }],
+  ["the request fails on the network", "network failure"],
+];
+
+for (const [when, builds] of noNotice) {
+  test(`shows no update notice when ${when}, from one request`, async () => {
+    const currentScript = runningPage("/assets/index-current.js");
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(serverAnswering(builds));
+    const view = render(<DeploymentResilience />);
+
+    try {
+      fireEvent.focus(window);
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+      await settleCheck();
+
+      expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", { cache: "no-store" });
+    } finally {
+      fetch.mockRestore();
+      currentScript.remove();
+      view.unmount();
+    }
+  });
+}
+
 test("waits one minute before checking for another deployment on focus", async () => {
-  const currentScript = document.createElement("script");
-  currentScript.type = "application/json";
-  currentScript.src = "/assets/index-current.js";
-  document.head.append(currentScript);
+  const currentScript = runningPage("/assets/index-current.js");
   let now = 100_000;
   const dateNow = spyOn(Date, "now").mockImplementation(() => now);
-  function responseForThrottle(input: RequestInfo | URL): Promise<Response> {
-    if (input === "/healthz") {
-      return Promise.resolve(new Response("{}", { status: 200 }));
-    }
-    return Promise.resolve(
-      new Response('<script type="module" src="/assets/index-current.js"></script>', {
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(
+    serverAnswering(
+      {
         status: 200,
-      })
-    );
-  }
-  responseForThrottle.preconnect = () => {};
-  const fetch = spyOn(globalThis, "fetch").mockImplementation(responseForThrottle);
+        body: { serving: "/assets/index-current.js", live: ["/assets/index-current.js"] },
+      },
+      "/assets/index-current.js"
+    )
+  );
   const view = render(<DeploymentResilience />);
 
   try {
     fireEvent.focus(window);
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
 
     fireEvent.focus(window);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(1);
 
     now += 60_000;
     fireEvent.focus(window);
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   } finally {
     fetch.mockRestore();
     dateNow.mockRestore();

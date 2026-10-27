@@ -36,6 +36,7 @@ import {
   processPinCookie,
   processPinHeader,
 } from "./harness-processes";
+import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { type LazyPiece, lazyPieces, type WalkRoutePath, walkRoutes } from "./two-builds-routes";
 import { signIn } from "./users";
@@ -608,4 +609,95 @@ test("every file of both builds' assets answers 200 with its bytes from Dispatch
     }
   }
   expect(wrong.sort()).toEqual([]);
+});
+
+/** Opens the inbox in a signed-in tab whose page, API calls and sockets are all `process`'s (the
+ *  pin cookie), so the tab runs that process's build, and focuses it, which makes it ask
+ *  GET /api/v1/dashboard/builds (`deploymentChanged`). Returns the tab and that answer once the page
+ *  has read it and had three frames to show what it decided. The wait for the answer starts before
+ *  the page loads: a browser that focuses the new page itself has the check run then, and the
+ *  focus sent here, within the minute, asks nothing more. */
+async function focusedTab(
+  browser: Browser,
+  process: DispatchProcess
+): Promise<{ readonly page: Page; readonly builds: unknown }> {
+  const context = await browser.newContext();
+  await context.addCookies([{ name: processPinCookie, url: baseUrl, value: process }]);
+  await signIn(context, "alice");
+  const page = await context.newPage();
+  const answered = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/api/v1/dashboard/builds"
+  );
+  await page.goto("/");
+  await expect(page.locator("#root")).not.toBeEmpty();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  const response = await answered;
+  expect(response.status()).toBe(200);
+  const builds: unknown = await response.json();
+  await response.finished();
+  await page.evaluate(async () => {
+    for (let frame = 0; frame < 3; frame++) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      requestAnimationFrame(() => setTimeout(resolve, 0));
+      await promise;
+    }
+  });
+  return { builds, page };
+}
+
+// While a release overlaps two builds, a reload could land on either, so no tab is told to reload:
+// the route names both builds, from whichever process answers, and the notice stays away.
+test("a tab of build A focused while A and B are both live shows no new-version notice", async ({
+  browser,
+}) => {
+  const { builds: answer, page } = await focusedTab(browser, "a");
+  try {
+    expect(answer).toEqual({
+      live: [builds.a.entry, builds.b.entry].sort(),
+      serving: builds.a.entry,
+    });
+    expect(await page.getByRole("status", { name: "A new version is available" }).count()).toBe(0);
+  } finally {
+    await page.context().close();
+  }
+});
+
+// The counterpart, so the row above cannot pass on a notice that never shows: once A's build is
+// the one every live process serves, a tab of build B is offered the reload. B's registry row is
+// made to name A's build for the length of the row (its heartbeat stamps only heartbeat_at), which
+// is what the registry reads once B has been replaced by a process of build A.
+test("a tab of build B focused once only build A is live shows the new-version notice", async ({
+  browser,
+}) => {
+  for (const entry of [builds.a.entry, builds.b.entry]) {
+    expect(entry, "an entry chunk path safe to name in SQL").toMatch(/^\/assets\/[\w.-]+$/);
+  }
+  const buildOf = (entry: string) =>
+    `(select build from dashboard_builds where entry = '${entry}')`;
+  const moved = (
+    await sql(
+      `update server_processes set dashboard_build = ${buildOf(builds.a.entry)}
+       where dashboard_build in ${buildOf(builds.b.entry)} returning instance`
+    )
+  )
+    .split("\n")
+    .filter((instance) => /^[0-9a-f-]{36}$/.test(instance));
+  let page: Page | undefined;
+  try {
+    expect(moved, "B's registry row").not.toEqual([]);
+    const tab = await focusedTab(browser, "b");
+    page = tab.page;
+    expect(tab.builds).toEqual({ live: [builds.a.entry], serving: builds.b.entry });
+    expect(await page.getByRole("status", { name: "A new version is available" }).isVisible()).toBe(
+      true
+    );
+  } finally {
+    if (moved.length > 0) {
+      await sql(
+        `update server_processes set dashboard_build = ${buildOf(builds.b.entry)}
+         where instance in (${moved.map((instance) => `'${instance}'`).join(", ")})`
+      );
+    }
+    await page?.context().close();
+  }
 });

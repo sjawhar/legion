@@ -831,8 +831,10 @@ sends no Content-Security-Policy; one would have to allow that script by its has
 makes the browser revalidate every page and keep every hashed asset
 (`packages/envoy/cmd/dispatch/AGENTS.md`, "Routes"), so no cached page from an older build asks
 for assets that are gone.
-On focus no more than once a minute, the SPA checks the server health and fresh `index.html`; a
-new entry chunk offers a dismissible **Reload** notice.
+On focus no more than once a minute, the SPA asks `GET /api/v1/dashboard/builds` once; a `200`
+whose `live` names exactly one entry chunk, other than the page's own, offers a dismissible
+**Reload** notice. Two live builds (a rolling update or a rollback in progress), a `404` from a
+process older than the route, a `401`, a `5xx` or a network failure offer nothing.
 
 A paste whose clipboard holds only `text/plain` goes through Milkdown's clipboard plugin, which
 parses the text as markdown and pastes the result as an open slice.

@@ -44,6 +44,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -1513,10 +1514,10 @@ func writeDashboardBuild(t *testing.T, name string) dashboardBuild {
 }
 
 // startOnBuild starts a Dispatch process serving build on database, with no NATS: the dashboard's
-// assets need none.
+// assets need none. It carries multiprocessSigningKey, as every process beside a live peer must.
 func startOnBuild(t *testing.T, database string, build dashboardBuild) *dispatchProcess {
 	t.Helper()
-	process := startDispatchProcessWith(t, database, dispatchOptions{Env: map[string]string{"DISPATCH_WEB_DIST": build.dir}})
+	process := startDispatchProcessWith(t, database, dispatchOptions{SigningKey: multiprocessSigningKey, Env: map[string]string{"DISPATCH_WEB_DIST": build.dir}})
 	process.waitHealthy(t)
 	return process
 }
@@ -1648,5 +1649,68 @@ func TestDashboardRestartOnTheSameBuildWritesNoAssetBytes(t *testing.T) {
 		if err := getAsset(http.DefaultClient, restarted, path, content); err != nil {
 			t.Error(err)
 		}
+	}
+}
+
+// dashboardBuildsOf is GET /api/v1/dashboard/builds from the process, as the test's person.
+func dashboardBuildsOf(t *testing.T, p *dispatchProcess) (serving string, live []string) {
+	t.Helper()
+	var answer struct {
+		Serving string   `json:"serving"`
+		Live    []string `json:"live"`
+	}
+	if err := json.Unmarshal(p.call(t, http.MethodGet, "/api/v1/dashboard/builds", "", http.StatusOK), &answer); err != nil {
+		t.Fatal(err)
+	}
+	return answer.Serving, answer.Live
+}
+
+// A tab offers "A new version is available" only when one build is live and it is not the tab's,
+// so the builds route is what a rolling update shows it. While A and B run both builds are live,
+// whichever process answers; once B shuts down gracefully it has deregistered and only A's build
+// is; and a process that stopped beating without deregistering drops out once its heartbeat is
+// older than the live window, aged here in the database rather than waited for.
+func TestDashboardBuildsAnswersTheBuildsTheLiveProcessesServe(t *testing.T) {
+	ctx := context.Background()
+	pair := &dispatchPair{database: storetest.Open(t)}
+	database := pair.databaseURL(t)
+	const entryA, entryB = "/assets/index-a.js", "/assets/index-b.js"
+	buildB := writeDashboardBuild(t, "b")
+	a := startOnBuild(t, database, writeDashboardBuild(t, "a"))
+	b := startOnBuild(t, database, buildB)
+
+	for _, process := range []struct {
+		name    string
+		p       *dispatchProcess
+		serving string
+	}{{"A", a, entryA}, {"B", b, entryB}} {
+		if serving, live := dashboardBuildsOf(t, process.p); serving != process.serving || !slices.Equal(live, []string{entryA, entryB}) {
+			t.Errorf("process %s with both live: serving %q, live %q; want %q and both builds", process.name, serving, live, process.serving)
+		}
+	}
+
+	b.Terminate(t)
+	b.WaitExit(t, "SIGTERM")
+	if serving, live := dashboardBuildsOf(t, a); serving != entryA || !slices.Equal(live, []string{entryA}) {
+		t.Fatalf("after B shut down: serving %q, live %q; want %q alone", serving, live, entryA)
+	}
+
+	// A process on B's build that is beating, and then one whose last heartbeat left the window.
+	var instance string
+	if err := pair.database.Pool.QueryRow(ctx, `
+		insert into server_processes (instance, dashboard_build, signing_keys) values (gen_random_uuid(), $1, '{fingerprint}')
+		returning instance::text`, processes.DashboardBuild(buildB.dir)).Scan(&instance); err != nil {
+		t.Fatal(err)
+	}
+	if _, live := dashboardBuildsOf(t, a); !slices.Equal(live, []string{entryA, entryB}) {
+		t.Fatalf("with a beating process on B's build: live %q, want both builds", live)
+	}
+	if _, err := pair.database.Pool.Exec(ctx, `
+		update server_processes set heartbeat_at = now() - make_interval(secs => $2) where instance = $1::uuid`,
+		instance, processes.LiveWindow.Seconds()+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, live := dashboardBuildsOf(t, a); !slices.Equal(live, []string{entryA}) {
+		t.Fatalf("after its heartbeat aged past the live window: live %q, want %q alone", live, entryA)
 	}
 }

@@ -24,6 +24,9 @@ const CHUNK_RELOAD_BUDGET = 3;
 const CHUNK_RELOAD_WINDOW_MS = 5 * 60_000;
 const VERSION_CHECK_INTERVAL_MS = 60_000;
 const INDEX_ASSET_PATH = /^\/assets\/index-[^/]+\.js$/;
+// GET /api/v1/dashboard/builds answers `{serving, live}`: the entry chunk of the build the
+// answering process serves, and the entry chunks of the builds every live server process serves.
+const DASHBOARD_BUILDS_PATH = "/api/v1/dashboard/builds";
 
 declare const __DISPATCH_BUILD__: string;
 
@@ -63,30 +66,24 @@ function runningIndexAsset(): string {
   return __DISPATCH_BUILD__;
 }
 
-function newestIndexAsset(html: string): string | undefined {
-  const scripts = html.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi);
-  for (const script of scripts) {
-    const asset = indexAssetPath(script[1]);
-    if (asset !== undefined) {
-      return asset;
-    }
-  }
-  return undefined;
-}
-
+// Whether to offer the reload notice: only when every live server process serves one build, and it
+// is not this tab's. One request answers it, from whichever process the load balancer picks, since
+// every process reads the same registry; asking `/` instead named the build of that one process,
+// so during a rolling update or a rollback, while two builds are live, a tab was told to reload
+// into a page the next request could replace with its own build again. Anything but a 200 offers
+// nothing: a 404 from a process older than the route (one of the two during a roll), a 401, a 5xx,
+// and a network failure, which rejects and which the caller swallows.
 async function deploymentChanged(): Promise<boolean> {
-  const health = await fetch("/healthz", { cache: "no-store" });
-  if (!health.ok) {
+  const response = await fetch(DASHBOARD_BUILDS_PATH, { cache: "no-store" });
+  if (response.status !== 200) {
     return false;
   }
-
-  const index = await fetch("/", { cache: "no-store" });
-  if (!index.ok) {
+  const { live } = (await response.json()) as { live?: unknown };
+  if (!Array.isArray(live) || live.length !== 1) {
     return false;
   }
-
-  const latest = newestIndexAsset(await index.text());
-  return latest !== undefined && latest !== runningIndexAsset();
+  const [newest] = live;
+  return typeof newest === "string" && newest !== runningIndexAsset();
 }
 
 // Set from the start of a navigation away from this page (`beforeunload`, or the Navigation API's
@@ -246,7 +243,7 @@ export async function importWhenOnline<T>(load: () => Promise<T>): Promise<T> {
 
 /**
  * Keeps long-lived Dispatch tabs able to render Markdown after a SPA deployment, and offers a
- * deliberate reload when the page's entry chunk has been replaced.
+ * deliberate reload once every live server process serves one build other than the page's.
  */
 export function DeploymentResilience(): ReactNode {
   const [updateAvailable, setUpdateAvailable] = useState(false);
