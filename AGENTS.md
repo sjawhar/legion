@@ -30,8 +30,9 @@ Claude Code's stream-json on the other (`packages/daemon/internal/claudebridge`)
   interactive OMP session the operator starts on their own machine with `legion controller start`
   (no `--mode rpc`, no shim), unless `legion.yaml` sets `controller: daemon`, where the daemon
   launches it in an Agent Sandbox pod of its own, whose one container runs the controller's
-  `legion launcher`, and supervises it like a root architect (`docs/kubernetes.md`, "The
-  controller").
+  `legion launcher`, or under `runtime: tmux` in a pane of its own `controller` window, and
+  supervises it like a root architect (`docs/kubernetes.md`, "The controller"; `docs/deployment.md`,
+  "The `runtime.tmux` block").
 - **Skills** — guide the architect and sequential phase workers. Durable `.legion/<issue>/<phase>.json`
   handoffs are the recovery source of truth.
 
@@ -59,6 +60,7 @@ legion start [--config <legion.yaml>] [--check-config]  # Run the daemon in the 
 legion status <team>                 # Check daemon status
 legion status <issue> <status>       # The operator's: set an issue's Dispatch lifecycle status (todo|backlog|icebox) from an operator shell; `--operator-token-file <file>` is required (the controller sets a status through its `legion` tool's `set_status`, never from bash)
 legion stop [--config <legion.yaml>]  # Stop the registered daemon of the project that file names
+legion claims retry --operator-token-file <file> (--claim <token> | --failed)  # The operator's: relaunch a failed architect on its session with fresh budgets, or retry a failed phase worker whose issue is held for its own role through that phase's retry (409 when the issue stays held, as a lingering tree's does); `--failed` lists the claims and retries every failed one in turn, printing each it retried and exiting 1 naming each the daemon refused (docs/deployment.md "Moving a project onto tmux")
 legion restart <team>                # Restart daemon, preserve worker sessions
 legion legions                       # List registered Legion daemons
 legion state                         # An operator and coordinator command: read daemon state; `--json` carries the deployment's capability report (`capabilities`) and the daemon's resolved non-secret `legion.yaml` (`settings`). Agents never run it: a role reads its issue record with the `legion` tool's `read_record`, the controller the whole state with `read_state`
@@ -160,7 +162,7 @@ Triage ──┬──► Icebox ──► Backlog ──► Todo ──► In P
 ```
 
 **Phase roles:** architect → plan → implement → test → review → the architect's acceptance → retro → merge
-**Acceptance:** the reviewer's approval moves the issue to `accepting` (Dispatch status `needs_review`), where no worker runs: the tree's architect reads the tester's handoff, the pull request body's two `E2E` lines and the reviewer's approval of the head by SHA, then accepts with the `legion` tool's `sign_off` (→ `retro`; refused in every other phase, `SIGNOFF_OUTSIDE_ACCEPTING`, and refused 409 `SIGNOFF_CHILD_IN_WORKFLOW` while any issue beneath this one — its children, their children — is still in the workflow, the refusal naming each of them: the daemon keeps that order, so the architect accepts once the last of them is done or parked, or takes one out with `park_child`) or sends the issue back to `implementing` or `testing` with `request_backward_move`, which counts a review round. An architect's `handoff_complete` there is refused (`ACCEPTANCE_IS_SIGN_OFF`); CI red there returns the issue to `implementing`.
+**Acceptance:** the reviewer's approval moves the issue to `accepting` (Dispatch status `needs_review`), where no worker runs: the tree's architect reads the tester's handoff, the pull request body's two `E2E` lines and the reviewer's approval of the head by SHA, then accepts with the `legion` tool's `sign_off` (→ `retro`; refused in every other phase, `SIGNOFF_OUTSIDE_ACCEPTING`; nothing beneath the issue holds it, since the tree's order is kept at the close, below) or sends the issue back to `implementing` or `testing` with `request_backward_move`, which counts a review round. An architect's `handoff_complete` there is refused (`ACCEPTANCE_IS_SIGN_OFF`); CI red there returns the issue to `implementing`. The architect's `catch-up` at each launch names, in its `reason`, every issue of the tree in `accepting`, since the reviewer's notice that moved it there is dropped while the architect's claim has failed.
 **Retro:** runs after the architect's acceptance and before the merger completes with its `READY` packet.
 **The merge closes the issue:** a pull request merged while the issue is in `awaiting_merge` writes `done`. A child's close tells its architect `child-closed`, retires five of its six claims and hands the implementer the production check's first look in its live session; a root's close frees the slot and lingers the tree. A root whose pull request merges while any other issue of its tree is still in the workflow records the merge and stays in `awaiting_merge` — no suspension, no linger, no slot freed, and its architect gets one `pr-merged` notice naming the pull request and every issue the close is waiting for — and closes that way once the last open member of the tree is done or parked. A person's own close of a root from the Dispatch dashboard lingers the tree at once, children and all. The architect does nothing after the merge.
 **Production check:** work after the close. The implementer — the agent that developed the change — gets a task whose first line is `Production check of <KEY>: <title>.`, reaches the deploy as the deployment instructions say (the merge commit published to the deploy role, no reply awaited), reads whether production carries the merge, and reports with `handoff_complete` and a `verdict`, no commit: `pass` once it drove the changed path in production and wrote the pull request's `Production:` line (naming the merge commit and what woke the look); `pending` when production does not carry the merge yet (the daemon suspends the implementer's claim with its session, the issue's pod goes and takes the disk it owns, and the daemon wakes the check on Dispatch's `issue.deployed` for the pull request; when the project's `projects.<KEY>.deploys` names the repository's deploy workflow and step, at each completed run of that workflow on the default branch whose step succeeded after the merge, once per such job, read from GitHub as the implement App on the run's `workflow_run` webhook through Envoy, the task naming `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <time>`, and never for a pull-request run, a skipped or failed step, or a step that finished before the merge; or, for `sjawhar/legion`, on a Legion daemon's boot or Dispatch's start on a build containing the merge; a wake while a look is open is kept for the next look); `fail` for a defect, never an issue the implementer files: a defect with a clear fix goes to the controller, which gives it to the running tree whose code it is and files a Legion root only when none does, and one that needs a decision is a `dispatch ask` on the controller's report issue whose reference goes to the controller; either names the issue, the pull request, the merge commit, what was driven and what failed, and the `Production:` line names the message or the ask. Each look is bounded at 2 hours and the check at `production_check_hours` (336 by default), whose wake is the last look. The record lives on the pull request alone, since Dispatch refuses a write on a closed issue; `legion state` prints `open production checks: …`.
@@ -192,8 +194,15 @@ issue (`skills/legion-worker/references/findings.md`).
 A root in `todo` without the label is never admitted, and a root in `triage` without it never wakes
 the controller. A child needs none: it runs under its tree's architect once its root is admitted,
 and its architect's `release_children` records it in the tree even when Dispatch already showed it
-`todo`. A child whose tree is not live is an orphan, admitted as a root of its own, so it needs the
-label as any root does. An issue is recorded on the repository Dispatch resolves for it (its own,
+`todo`. A `todo` child of a live tree that no event of it ever recorded — the event never reached
+the daemon, because a durable consumer created fresh takes only what is published after it or
+because the notification stream drops a message 72 hours old whether or not anyone read it, or it
+reached the daemon while the child's parent had no record or its tree was not live — is recorded
+into the tree at the daemon's next boot, from the parent Dispatch's listing shows then, at any
+depth, as its own event would have. No later event need bring such a child in: Dispatch already
+shows it `todo`, so nothing writes that status again. A child whose tree is not live is an orphan,
+admitted as a root of its own, so it needs the label as any root does. An issue is recorded on the
+repository Dispatch resolves for it (its own,
 else its nearest ancestor's, else the project's default) and keeps it: an issue whose repository
 resolves to none, or to one the daemon does not serve, is not admitted, and the daemon says why on
 the issue; a later change of an admitted issue's repository is not applied, which the daemon says

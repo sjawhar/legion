@@ -80,11 +80,11 @@ type statusWrites struct {
 	writes []string
 }
 
-func (s *statusWrites) SetStatus(_ context.Context, key, status string) error {
+func (s *statusWrites) SetStatus(_ context.Context, key, status string) (dispatch.Issue, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.writes = append(s.writes, key+"="+status)
-	return nil
+	return dispatch.Issue{}, nil
 }
 
 // controllerDaemon is the daemon's HTTP surface as `legion controller start` and `legion status`

@@ -57,7 +57,10 @@ that version, the daemon reopens the gate and sends `design-approved`, and you r
 After approval, follow `skill://legion-architect`, section 1, for whether the root spec changes,
 when to repeat the two reviews, and when a rewrite means requesting approval again. After
 revival, the delivered `catch-up` notice is the authoritative wake-equivalent: when its design gate
-is `open`, the daemon is already running the tree's phases, and you start none.
+is `open`, the daemon is already running the tree's phases, and you start none. The one thing a
+catch-up leaves to you is acceptance: an issue its `reason` names as waiting for your acceptance is
+in `accepting`, where no worker runs and the notice that moved it there may never have reached you,
+so read its evidence and `sign_off`, or send it back with `request_backward_move`.
 During a live session, react only to delivered wakes; do not poll.
 
 When a `catch-up` says `carried`, this root is a child handed over from a finished tree, carrying
@@ -107,8 +110,8 @@ to-do only a human can do is a `dispatch ask`.
 The merge is the close: once a pull request merges while its issue awaits the merge, the daemon
 writes `done`, and the implementer's production check follows in its own session, on the pull
 request, asking nothing of you. Your acceptance comes before it: the reviewer's approval moves an
-issue to `accepting`, where you read the tester's handoff, the pull request body's two `E2E` lines,
-the reviewer's approval of the head by SHA and, for a parent, that every child is done, then
+issue to `accepting`, where you read the tester's handoff, the pull request body's two `E2E` lines
+and the reviewer's approval of the head by SHA (children still running do not hold it), then
 `sign_off` (which moves it to retro) or send it back with `request_backward_move` (`issue`, `to`
 `implementing` or `testing`, `reason`). A tester completion that rejects the implementer's proof goes back to the implementer by the
 daemon's table; a worker that reports no surface reaches the changed path gets a child issue in

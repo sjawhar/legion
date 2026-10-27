@@ -110,7 +110,7 @@ comes back, with everything it knew, the next time its role is needed.
 | `implementing` | implementer | Writes the change, proves it works, pushes `legion/<KEY>` and opens the pull request. | implement App |
 | `testing` | tester | Runs the changed surface for real, tries to break it, judges whether the tests would catch what breaks, and reads CI for everything static; reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
-| `accepting` | the architect | Reads the tester's handoff, the pull request's two `E2E` lines and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. The daemon refuses the acceptance (`SIGNOFF_CHILD_IN_WORKFLOW`) while any issue beneath this one is still in the workflow, naming each of them. No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
+| `accepting` | the architect | Reads the tester's handoff, the pull request's two `E2E` lines and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. Issues still running beneath it do not hold the acceptance: a root's close waits for them instead (`awaiting_merge`). No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
 | `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes, those notes included. | implement App |
 | `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head plus retro's notes, and submits the merge, which GitHub completes under the base branch's own rules. | implement App |
 | `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. The merge closes the issue; a root whose tree still runs records the merge and waits here until the last other issue of its tree is done or parked. | none |
@@ -261,7 +261,13 @@ Legion uses GitHub's own review mechanisms rather than labels:
   code head's own would. The daemon reads each open pull request's required set with the implement
   App as it starts and every two minutes after, with the required workflows' runs on the head;
   until a read succeeds, no verdict stands for the head, and a read GitHub refuses is logged with
-  the repository and the HTTP status.
+  the repository and the HTTP status. The same read follows the pull request's head: when GitHub
+  shows a head the daemon has not recorded, the daemon takes it as the synchronize webhook would,
+  and takes its push too when GitHub shows that it changed only `.legion/`, so a lost or late
+  webhook leaves the record behind for at most one read. A push that changed code is still read
+  from its webhook. The daemon also looks up the open pull request of each issue whose implementer
+  completed while no pull request is recorded, and records it as the opened webhook would, which
+  moves the issue to testing.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
 - Two limits flag a loop: after `review_round_cap` rounds (three by default), or once

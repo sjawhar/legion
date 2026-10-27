@@ -200,7 +200,10 @@ func TestHandOverOfALabelledIssueWritesTheStatusAtItsSequence(t *testing.T) {
 	}
 }
 
-func TestSetStatusSendsDaemonActor(t *testing.T) {
+// SetStatus writes as the daemon's own session and answers the issue as Dispatch's PATCH leaves it:
+// the issue's fields at the top level, beside Dispatch's write advice, at the sequence of the event
+// the write made.
+func TestSetStatusSendsDaemonActorAndAnswersTheWrittenIssue(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch || r.URL.Path != "/api/v1/issues/LEGION-4" {
 			t.Fatalf("request = %s %s, want PATCH /api/v1/issues/LEGION-4", r.Method, r.URL.Path)
@@ -217,12 +220,21 @@ func TestSetStatusSendsDaemonActor(t *testing.T) {
 		if body.Status != "testing" || body.Actor.Kind != "session" || body.Actor.ID != "legion-daemon:LEGION" {
 			t.Fatalf("status request = %#v, want testing from legion-daemon:LEGION", body)
 		}
-		writeJSON(t, w, map[string]string{"status": "testing"})
+		writeJSON(t, w, map[string]any{
+			"key": "LEGION-4", "title": "Widget", "status": "testing", "parent": "LEGION-1", "rank": "B", "labels": []string{"Legion"},
+			"last_seq": 12, "resolved_repo": "acme/widgets", "blocked_by": []string{"LEGION-2"}, "claim": nil,
+			"advice": map[string]any{"suggestions": []any{}},
+		})
 	}))
 	defer server.Close()
 
-	if err := New(server.URL, dispatchToken).SetStatus(context.Background(), "LEGION-4", "testing"); err != nil {
+	written, err := New(server.URL, dispatchToken).SetStatus(context.Background(), "LEGION-4", "testing")
+	if err != nil {
 		t.Fatalf("set status: %v", err)
+	}
+	if written.Key != "LEGION-4" || written.Status != "testing" || written.LastSeq != 12 || written.Parent == nil || *written.Parent != "LEGION-1" ||
+		!written.HandedOver || written.ResolvedRepo != "acme/widgets" || len(written.BlockedBy) != 1 || written.Claim != nil || written.ClaimUnread {
+		t.Fatalf("written issue = %#v, want LEGION-4 as the PATCH answered it, at sequence 12", written)
 	}
 }
 
@@ -439,7 +451,7 @@ func TestClientReturnsDispatchErrorFor5xx(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := New(server.URL, dispatchToken).SetStatus(context.Background(), "LEGION-10", "testing")
+	_, err := New(server.URL, dispatchToken).SetStatus(context.Background(), "LEGION-10", "testing")
 	var dispatchErr *Error
 	if !errors.As(err, &dispatchErr) {
 		t.Fatalf("set status error = %T %v, want *dispatch.Error", err, err)

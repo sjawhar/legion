@@ -72,6 +72,35 @@ func (s *Postgres) Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
 	return issues, nil
 }
 
+// SlottedIssues is the record of each issue of project that holds an admission slot, in slot order
+// (index, then issue), in one read: what admission judges when it releases the slots a fact has
+// finished with (admit's releaseSlots), on every fact and under the one fact lock. The slots table
+// is shared by every project's daemon, so another project's slot is left out here rather than by
+// the caller, and no issue of another project, and no issue holding no slot, is read at all. It
+// selects issueColumns itself, so it reads every column scanIssue scans: the slots join is a
+// derived table whose columns are renamed, so no column of issueColumns is ambiguous.
+func (s *Postgres) SlottedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	rows, err := tx.Query(ctx, `select `+issueColumns+` from issues
+		join (select index, issue from slots) slot (slot_index, slot_issue) on slot.slot_issue = issues.key
+		where issues.project = $1 order by slot.slot_index, slot.slot_issue`, project)
+	if err != nil {
+		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
+	}
+	defer rows.Close()
+	issues := []Issue{}
+	for rows.Next() {
+		issue, err := scanIssue(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read a slotted issue of project %s: %w", project, err)
+		}
+		issues = append(issues, *issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
+	}
+	return issues, nil
+}
+
 func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	switch {
 	case issue.Repo == "":
@@ -152,6 +181,13 @@ func (s *Postgres) UnfilledIssues(ctx context.Context, tx pgx.Tx, project string
 
 func (s *Postgres) UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
 	return s.issuesWhere(ctx, tx, "project = $1 and repo <> '' and github_repo = ''", project, "with no GitHub spelling of their repository")
+}
+
+func (s *Postgres) HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	return s.issuesWhere(ctx, tx, "project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
+		" and key in (select issue from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
+		" and key not in (select issue from pull_requests where state in ('"+string(PullRequestOpen)+"', '"+string(PullRequestMerged)+"'))",
+		project, "in implementing with a recorded handoff and no open or merged pull request")
 }
 
 // issuesWhere is every record of project the condition selects, by key; what names them in an

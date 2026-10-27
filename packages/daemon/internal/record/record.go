@@ -730,6 +730,10 @@ type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
+	// SlottedIssues is the record of each issue of project that holds an admission slot, in slot
+	// order, in one read: another project's slot in the shared table, and every issue holding no
+	// slot, are left out of the read rather than of the caller's loop.
+	SlottedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	// PutIssue writes issue, refusing one without its repository, default branch or GitHub's
 	// spelling of the repository, one whose GitHub spelling names another repository, and one that
 	// would give a recorded issue another of any of them.
@@ -744,6 +748,12 @@ type Store interface {
 	// FillIssueRepository does.
 	UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error
+	// HandedOffWithoutPullRequest is every record of the Dispatch project key project in
+	// implementing, named on its repository as GitHub spells it, whose implementer has recorded its
+	// handoff and which has no open or merged pull request recorded, by key: an issue whose
+	// completion waits for the pull request record that only its opened webhook writes. A merged
+	// one is left out, as GitHub never reopens it and a new generation removes it.
+	HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	// RepoNote is what the daemon last said on issue about its repository, nil for nothing;
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)

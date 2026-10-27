@@ -14,9 +14,10 @@ import (
 // pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz from the release of that tag.
 const downloadURL = "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}"
 
-// New returns the envoy-infra provider serving every component the plugin registers.
+// New returns the envoy-infra provider serving every component the plugin registers, refusing a
+// fractional number in any integer input before a component decodes it (refuseFractionalIntegers).
 func New() (p.Provider, error) {
-	return infer.NewProviderBuilder().
+	prov, err := infer.NewProviderBuilder().
 		WithNamespace("sjawhar").
 		WithDisplayName("Envoy infrastructure").
 		WithRepository("https://github.com/sjawhar/legion").
@@ -32,4 +33,8 @@ func New() (p.Provider, error) {
 			infer.ComponentF(gcp.NewDispatch),
 		).
 		Build()
+	if err != nil {
+		return p.Provider{}, err
+	}
+	return refuseFractionalIntegers(prov), nil
 }
