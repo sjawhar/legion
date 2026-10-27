@@ -1709,6 +1709,15 @@
   liveness with no interest lock held, re-checks each candidate and deletes it only at the
   revision it checked, so an interest written during the pass is kept. Each `reaper cycle` line
   now carries `elapsed_ms`.
+- A heartbeat that adds no topic no longer rewrites the session's unchanged interest row:
+  `POST /v1/interests/subscribe` writes it once the row is 5 minutes old
+  (`store.InterestRefreshAge`), and until then answers with the stored row, `updated_at`
+  included. A changed row is still written at once. KV writes per 90-second heartbeat fall from
+  two to about one and a quarter. The session row is still written on every heartbeat, since its
+  bucket's `MaxAge` is the liveness clock. Run this build only once every listener on the
+  `envoy_interests` bucket reaps at the grace window plus `store.InterestRefreshAge` (INFRA-610's
+  release): an older listener reaps at 10 minutes after the row's last write, and could delete a
+  paused session's interests 5 minutes after its last heartbeat.
 - A bare email address, or one written `<a@b.test>`, in Markdown written to a document through the
   API is now stored and shown as a link to its `mailto:` URL, `[a@b.test](mailto:a@b.test)`, as a
   comment and the browser editor show it (INFRA-530). Dispatch linked it to the bare address, which

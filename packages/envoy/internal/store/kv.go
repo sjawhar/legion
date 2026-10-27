@@ -540,17 +540,31 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 }
 
 // UpsertWithin merges topics into item.SessionID's interest record (mergeForUpsert) and writes it,
-// each bucket call waiting no longer than ctx (bus.Bounded): an HTTP route passes its request's own
-// context. A record this build cannot decode (ErrMalformedInterest) is replaced by item and topics
-// alone, and the registry logs that at WARN naming the session. A write ctx abandoned may still
-// land after this answer. That is safe: it writes the record the caller's retry writes again, it
-// rides the connection ahead of any write this listener sends on it later, so it cannot undo one,
-// and against another listener's write it is last-writer-wins, as every Put already is.
+// stamped with the registry's clock, each bucket call waiting no longer than ctx (bus.Bounded): an
+// HTTP route passes its request's own context. It returns the record as it now stands. A record
+// this build cannot decode (ErrMalformedInterest) is replaced by item and topics alone, and the
+// registry logs that at WARN naming the session. A write ctx abandoned may still land after this
+// answer. That is safe: it writes the record the caller's retry writes again, it rides the
+// connection ahead of any write this listener sends on it later, so it cannot undo one, and
+// against another listener's write it is last-writer-wins, as every Put already is.
+//
+// A heartbeat re-sends the same topics every 90 seconds, so UpsertWithin returns the current row
+// without writing when the merge changes nothing but UpdatedAt and the row is younger than
+// InterestRefreshAge. An unchanged row is thus rewritten once per InterestRefreshAge, its UpdatedAt
+// lags the session's last heartbeat by less than that, and Reap adds InterestRefreshAge to its grace
+// window, so a paused session keeps its interests as long as it did when every heartbeat wrote the
+// row. A changed row, or one whose read failed, is handled as before: written, or refused. The
+// session row (session.SessionRegistry.Put) is still written on every heartbeat: its bucket's
+// MaxAge is the liveness clock, and NATS connect notices ($SYS) are not available to replace it.
 func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []string) (Interest, error) {
 	cur, getErr := r.Get(ctx, item.SessionID)
-	merged, err := mergeForUpsert(cur, getErr, item, topics, r.now().UnixMilli())
+	now := r.now().UnixMilli()
+	merged, err := mergeForUpsert(cur, getErr, item, topics, now)
 	if err != nil {
 		return Interest{}, err
+	}
+	if getErr == nil && sameStoredInterest(cur, merged) && now-cur.UpdatedAt < InterestRefreshAge.Milliseconds() {
+		return cur, nil
 	}
 	buf, err := json.Marshal(merged)
 	if err != nil {
@@ -571,6 +585,18 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 		)
 	}
 	return merged, nil
+}
+
+// sameStoredInterest reports whether writing merged would store the row cur holds, apart from
+// UpdatedAt: the same session, machine, directory and topics in the same order. A topic list
+// stored as null (nil) differs from one stored as [] (empty), since the two encode differently,
+// so a null row is written once and then compares equal.
+func sameStoredInterest(cur, merged Interest) bool {
+	return cur.SessionID == merged.SessionID &&
+		cur.MachineID == merged.MachineID &&
+		cur.Dir == merged.Dir &&
+		(cur.Topics == nil) == (merged.Topics == nil) &&
+		slices.Equal(cur.Topics, merged.Topics)
 }
 
 // mergeForUpsert computes the Interest to persist by reconciling the requested
