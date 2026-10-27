@@ -309,7 +309,7 @@ func sameTokenProjection(held, want *corev1.ServiceAccountTokenProjection) bool 
 // movedInPod is what pod holds, for role, that a pod created now is not handed: the layout before
 // one container (movedLayout), the stream its launcher dials (movedStream), the secrets broker's
 // enrollment its next generation is started against (movedEnrollment), the operator's volume and
-// mount holding each of role's own overlays (movedRoleOverlays), and the whole session store it was
+// mount holding every named role's overlays in role's container (movedRoleOverlays), and the whole session store it was
 // created under (movedSessionStore). All are fixed for the pod's life, so any moved means the pod
 // must be replaced before role can run as one launched now. It is the one rule for all: evaluate
 // reads a role whose pod holds a move as StaleAddress, and relaunch replaces a pod that holds one
@@ -348,6 +348,9 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 // in the old pod. Only what decides whether the file is there is compared, so the fields the API
 // server defaults on a stored volume never read as a move.
 func (r *Runtime) movedRoleOverlays(pod *corev1.Pod, role claim.Role) (movedAddress, bool) {
+	if len(r.roleConfigFiles) == 0 {
+		return movedAddress{}, false
+	}
 	container := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == podContainer(role) })
 	if container < 0 {
 		return movedAddress{}, false
