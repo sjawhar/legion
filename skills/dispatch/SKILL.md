@@ -83,3 +83,4 @@ A bare id or filename is not a reference. An ask or comment id can be an 8-hex p
 
 - Use a personal token from Dispatch **Settings → Agent tokens**, as `DISPATCH_TOKEN` or `dispatch.token` in the session's `envoy.json`.
 - `GET /api/v1` lists every route; never guess one. Branch on an error's `code`, not its text.
+
