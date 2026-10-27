@@ -963,24 +963,21 @@ func childrenAsWritten(node *Node, lineBreaks bool) ([]*Node, bool) {
 		} else if index > 0 {
 			previous = children[index-1]
 		}
-		if previous != nil && previous.Type == "text" && clean.Type == "text" && marksEqual(previous.Marks, clean.Marks) {
-			if merged {
-				previous.Text += clean.Text
-				continue
-			}
-			if out == nil {
-				out = make([]*Node, index, len(children))
-				copy(out, children[:index])
-			}
+		mergeable := previous != nil && previous.Type == "text" && clean.Type == "text" && marksEqual(previous.Marks, clean.Marks)
+		if mergeable && merged {
+			previous.Text += clean.Text
+			continue
+		}
+		if out == nil && (mergeable || clean != child) {
+			out = make([]*Node, index, len(children))
+			copy(out, children[:index])
+		}
+		if mergeable {
 			out[len(out)-1] = &Node{Type: "text", Attrs: previous.Attrs, Text: previous.Text + clean.Text, Marks: previous.Marks, Children: previous.Children}
 			merged = true
 			continue
 		}
 		merged = false
-		if out == nil && clean != child {
-			out = make([]*Node, index, len(children))
-			copy(out, children[:index])
-		}
 		if out != nil {
 			out = append(out, clean)
 		}

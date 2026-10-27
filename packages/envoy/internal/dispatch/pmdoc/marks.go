@@ -106,20 +106,12 @@ func markDelimiter(mark Mark) byte {
 // visibleMarks is the rendered marks of marks in writing order: nil when there are none, else a
 // fresh slice the caller may filter in place (withoutMark) without touching marks.
 func visibleMarks(marks []Mark) []Mark {
-	count := 0
-	for _, mark := range marks {
-		if renderedMarkTypes[mark.Type] {
-			count++
-		}
-	}
-	if count == 0 {
+	out, kept := renderedMarks(marks)
+	if len(out) == 0 {
 		return nil
 	}
-	out := make([]Mark, 0, count)
-	for _, mark := range marks {
-		if renderedMarkTypes[mark.Type] {
-			out = append(out, mark)
-		}
+	if kept {
+		out = slices.Clone(out)
 	}
 	if len(out) > 1 {
 		slices.SortFunc(out, func(left, right Mark) int {

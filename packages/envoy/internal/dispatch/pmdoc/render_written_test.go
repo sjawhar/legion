@@ -28,23 +28,15 @@ func oracleAsWritten(doc *Node) *Node {
 func oracleWriteNulsAsReplacement(node *Node) {
 	node.Text = nulAsReplacement(node.Text)
 	if !IsTypedBlock(node.Type) {
-		oracleWriteNulsInAttrs(node.Attrs)
+		writeNulsInAttrs(node.Attrs)
 	} else if id, ok := node.Attrs[BlockIDAttr].(string); ok && strings.IndexByte(id, 0) >= 0 {
 		node.Attrs[BlockIDAttr] = nulAsReplacement(id)
 	}
 	for _, mark := range node.Marks {
-		oracleWriteNulsInAttrs(mark.Attrs)
+		writeNulsInAttrs(mark.Attrs)
 	}
 	for _, child := range node.Children {
 		oracleWriteNulsAsReplacement(child)
-	}
-}
-
-func oracleWriteNulsInAttrs(attrs Attrs) {
-	for name, value := range attrs {
-		if text, ok := value.(string); ok && strings.IndexByte(text, 0) >= 0 {
-			attrs[name] = nulAsReplacement(text)
-		}
 	}
 }
 
@@ -87,6 +79,17 @@ func writtenCases() map[string]*Node {
 	callout := func(id string, children ...*Node) *Node {
 		return &Node{Type: "callout", Attrs: Attrs{BlockIDAttr: id, "kind": "note", "title": ""}, Children: children}
 	}
+	nested := func() *Node {
+		inner := list(
+			item(paragraph(text("first "), text("it", comment), text("em")), callout("inner", paragraph(text("a\nb"), inlineBreak(), text("c")))),
+			item(paragraph(text("second")), &Node{Type: "blockquote", Children: []*Node{paragraph(text("q"), text("uote", ask))}}),
+		)
+		return &Node{Type: "blockquote", Children: []*Node{
+			paragraph(text("outer")),
+			list(item(paragraph(text("top")), inner)),
+			callout("outer", paragraph(text("in "), text("callout", comment)), list(item(paragraph(text("x\x00"), text("y", comment))))),
+		}}
+	}
 	return map[string]*Node{
 		"plain":                  doc(paragraph(text("plain text")), &Node{Type: "code_block", Children: []*Node{text("x := 1")}}),
 		"anchor-only marks":      doc(paragraph(text("all of it", comment)), paragraph(text("a", ask, comment), text("b", comment))),
@@ -114,7 +117,7 @@ func writtenCases() map[string]*Node {
 		"split frontmatter":       doc(&Node{Type: "frontmatter", Children: []*Node{text("a: "), text("b")}}, paragraph(text("x"))),
 		"split table cell":        doc(writtenTable(text("he"), text("ad", comment))),
 		"untouched beside one":    doc(paragraph(text("kept")), list(item(paragraph(text("kept")))), paragraph(text("ch"), text("anged", comment))),
-		"nested":                  doc(writtenNested(text, paragraph, item, list, callout, comment, ask, inlineBreak)),
+		"nested":                  doc(nested()),
 		"deeply nested nul":       doc(&Node{Type: "blockquote", Children: []*Node{list(item(paragraph(text("x")), callout("id", paragraph(text("a\x00"), text("b", ask)))))}}),
 		"only an empty paragraph": doc(paragraph()),
 	}
@@ -127,20 +130,6 @@ func writtenTable(header ...*Node) *Node {
 	return &Node{Type: "table", Children: []*Node{
 		{Type: "table_header_row", Children: []*Node{cell("table_header", header...)}},
 		{Type: "table_row", Children: []*Node{cell("table_cell", &Node{Type: "text", Text: "body"})}},
-	}}
-}
-
-func writtenNested(text func(string, ...Mark) *Node, paragraph func(...*Node) *Node, item func(...*Node) *Node,
-	list func(...*Node) *Node, callout func(string, ...*Node) *Node, comment, ask Mark, inlineBreak func() *Node,
-) *Node {
-	inner := list(
-		item(paragraph(text("first "), text("it", comment), text("em")), callout("inner", paragraph(text("a\nb"), inlineBreak(), text("c")))),
-		item(paragraph(text("second")), &Node{Type: "blockquote", Children: []*Node{paragraph(text("q"), text("uote", ask))}}),
-	)
-	return &Node{Type: "blockquote", Children: []*Node{
-		paragraph(text("outer")),
-		list(item(paragraph(text("top")), inner)),
-		callout("outer", paragraph(text("in "), text("callout", comment)), list(item(paragraph(text("x\x00"), text("y", comment))))),
 	}}
 }
 
@@ -409,12 +398,7 @@ func TestWrittenMarksDoesNotAliasABareURLsMarks(t *testing.T) {
 	if len(written) != 1 || written[0].Type != "strong" {
 		t.Fatalf("writtenMarks = %v, want the bare URL's link left out", written)
 	}
-	if len(node.Marks) != len(want) {
+	if !reflect.DeepEqual(node.Marks, want) {
 		t.Fatalf("writtenMarks left the node's marks %v, want %v", node.Marks, want)
-	}
-	for index := range want {
-		if node.Marks[index].Type != want[index].Type || !reflect.DeepEqual(node.Marks[index].Attrs, want[index].Attrs) {
-			t.Fatalf("writtenMarks left the node's marks %v, want %v", node.Marks, want)
-		}
 	}
 }
