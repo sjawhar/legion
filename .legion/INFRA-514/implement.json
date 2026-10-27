@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-514",
-  "completed": "2026-10-27T15:52:00Z",
+  "completed": "2026-10-27T17:50:00Z",
   "proof": [
+    {
+      "criterion": "Review round 2 (tester's observation, architect's instruction): Dispatch's subscribers list shows a subscriber that is no longer live with the session's last heartbeat, not the interest row's updated_at, which the heartbeat-write skip can make up to 5 minutes older",
+      "surface": "Real head builds of envoy-listener and envoy-dispatch on nats-server 2.10.29 and the reproduction's Postgres snapshot; Dispatch's GET /api/v1/issues/LGA-1/subscribers as a person (header identity) and the listener's GET /v1/interests/<id>",
+      "command": "repro/lastseen-proof.sh: subscribe ses-lastseen-proof to notifications.dispatch.issue.LGA-1.>, heartbeat again 60 s later, stop, wait 320 s for the session row to expire, read both routes, then restart the listener and read again",
+      "observed": "interest row updated_at 1793122949155 (first heartbeat, not rewritten by the identical second one), listener last_seen 1793123009222 (second heartbeat); after expiry GET /v1/sessions listed no session and Dispatch answered live=false, last_seen=1793123009222",
+      "headSha": "7c57486109d7e4d2cbd18cff2c52a5596cd3b717",
+      "negativeControl": "after a listener restart (its last-seen records gone) the listener row has no last_seen and Dispatch falls back to last_seen=1793122949155, the row's updated_at: the value the subscribers list showed before this fix"
+    },
     {
       "criterion": "R1 EV-5: Get/List/LastSeen take only the shared lock and change nothing; Get at 3,000 sessions within 2x of 400; a reaper pass at 3,000 within 10x of 400",
       "surface": "Go benchmarks in packages/envoy (internal/session, cmd/listener) on the 2-core issue pod, main ae36683e plus the benchmark files against the head",
@@ -62,20 +70,31 @@
     "packages/envoy/internal/session/registry.go",
     "packages/envoy/internal/session/registry_bench_test.go",
     "packages/envoy/internal/store/kv.go",
-    "packages/envoy/internal/store/kv_test.go"
+    "packages/envoy/internal/store/kv_test.go",
+    "packages/envoy/cmd/listener/api.go",
+    "packages/envoy/cmd/listener/main_test.go",
+    "packages/envoy/cmd/listener/interest_read_routes_test.go",
+    "packages/envoy/cmd/listener/interest_key_refused_list_test.go",
+    "packages/envoy/cmd/listener/interest_record_unreadable_test.go",
+    "packages/envoy/cmd/listener/interest_record_unreadable_answer_test.go",
+    "packages/envoy/internal/dispatch/envoy/client.go",
+    "packages/envoy/internal/dispatch/api/subscribers.go",
+    "packages/envoy/internal/dispatch/api/subscribers_test.go"
   ],
   "trickyParts": [
     "kvwatch keeps one complete flag (the atomic) that both #2167's Complete() and the resume read; a resumed generation is complete at its own nil marker, and a WithRescan rescan passes no connection so it always reads in full.",
     "A full-read generation resets hw to 0, so an hw above LastSeq (a restored older snapshot) cannot force a full read at every later Rewatch.",
     "The reaper deletes with nats.LastRevision(checked revision); JetStream's wrong-last-sequence answer (nats.ErrKeyExists) counts as skipped. Revision 0 falls back to deleteInterest because LastRevision(0) is no condition.",
     "The session cache does not insert an already-expired put for an id it does not hold, so a stale delivery after the fence has gone cannot make the id live or bring back a LastSeen answer.",
-    "EV-11 lives in Registry.UpsertWithin (#2167), which Upsert and the subscribe route both reach."
+    "EV-11 lives in Registry.UpsertWithin (#2167), which Upsert and the subscribe route both reach.",
+    "The listener keeps a dead session's last-seen record (and its revision fence) for InterestReapGrace + InterestRefreshAge after the session left the cache (session.WithLastSeenRetention), so GET /v1/interests/ can report the real last heartbeat for every row the reaper still holds; a retention below the TTL is raised to the TTL, because dropping the fence earlier would let a late old revision come back. A listener restarted since the session died has no record, and Dispatch falls back to updated_at."
   ],
   "deviations": [
     "The race job: #2167 added a listener race step, so ./internal/session/ joined that step (plan T5's stated alternative); kvwatch was already in it.",
     "#2167's TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey now writes a key while its watcher is away, because a rewatch resumes and delivers nothing otherwise; it checks the same thing.",
     "Before/after numbers are main ae36683e (merge base after #2167 and INFRA-610) against the head; the earlier 1357b95c run is kept in the artifact and agrees.",
-    "The restart test asserts resumed with 0 entries: the server is down during the restart, so no write lands while the listener is away; the k-writes case is resume_test.go's."
+    "The restart test asserts resumed with 0 entries: the server is down during the restart, so no write lands while the listener is away; the k-writes case is resume_test.go's.",
+    "Round 2: Dispatch keys and dispatch:// links removed from the lines this pull request adds (CHANGELOG, the race step's comment) and from its body, per the repository rule relayed on 2026-10-27; the body's 'Dispatch: INFRA-514' template line stays."
   ],
   "openQuestions": [
     "R7's gate is the tester's: INFRA-610's production check showing all three listeners on its build before this goes to review."
