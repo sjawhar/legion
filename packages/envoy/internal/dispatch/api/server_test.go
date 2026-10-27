@@ -2081,6 +2081,52 @@ func TestRoomBudgetHookIsGatedByTestHooksEnabled(t *testing.T) {
 	}
 }
 
+// The room-live hook is a real-process drive's alone: unmounted without DISPATCH_TEST_HOOKS, and
+// with them it answers whether the document's room is resident in the server - after a write
+// that loaded it, and not once it is closed - without loading the document to answer.
+func TestRoomLiveHookIsGatedByTestHooksEnabled(t *testing.T) {
+	handler := newTestHandler(t)
+	unhooked := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/00000000-0000-0000-0000-000000000001/_test/live", nil, "alice")
+	if unhooked.Code != http.StatusNotFound {
+		t.Fatalf("room-live hook without TestHooksEnabled: status=%d, want %d", unhooked.Code, http.StatusNotFound)
+	}
+	hooked, database, deps := newTestServer(t, testServerOptions{testHooks: true})
+	issue := createInteractionIssue(t, hooked, "TEST", "Live room", "A spec.")
+	live := func(what string) bool {
+		t.Helper()
+		response := dispatchRequest(t, hooked, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/_test/live", nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("room-live hook %s: status=%d body=%s, want 200", what, response.Code, response.Body.String())
+		}
+		return decodeBody[struct {
+			Live bool `json:"live"`
+		}](t, response).Live
+	}
+	service, ok := deps.Docs.(*docs.Service)
+	if !ok {
+		t.Fatalf("the test server's documents are a %T, want *docs.Service", deps.Docs)
+	}
+	ctx := context.Background()
+	if err := service.Evict(ctx, issue.PrimaryArtifactID); err != nil {
+		t.Fatal(err)
+	}
+	if live("before any write") || live("asked again") {
+		t.Fatal("the hook says a closed document's room is resident, or its first answer loaded it")
+	}
+	if _, err := replaceDocumentText(database, service, issue.PrimaryArtifactID, "# Live\n\nWritten.\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	if !live("after a write") {
+		t.Fatal("the hook says the room a write loaded is not resident")
+	}
+	if err := service.Evict(ctx, issue.PrimaryArtifactID); err != nil {
+		t.Fatal(err)
+	}
+	if live("after the room closed") {
+		t.Fatal("the hook says a closed room is resident")
+	}
+}
+
 // TestDisconnectAllStreamsClosesOpenConnections proves the test-only hook drives a
 // client through its reconnect-from-lastId path without seeding thousands of events
 // to trip the replay cap: the same recovery path useEventStream exercises after any

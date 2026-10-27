@@ -10,15 +10,16 @@ import (
 )
 
 // walkUpdate reads a Yjs V1 update in one pass, without decoding it: for each struct it yields
-// the struct's client, clock, length and kind, the encoded bytes of its content and where its
-// parent is named, and for each range of the delete set its client, clock and length, and it
-// allocates nothing per struct. It exists because ygo exports no count of the structs an update
-// carries. crdt.ContentIDsFromUpdateV1 returns clock runs that IDSet.Add coalesces as it goes
-// (sjawhar/ygo v1.51.3-sami.5, crdt/idset.go:83, merging at :21-28), so two structs and one
-// struct of the same clocks are the same answer; and the decoder under it, decodeStructsV1, is
-// unexported and allocates an Item, its content and its decoded values for every struct
-// (crdt/merge.go:24-81), up to 1,048,576 of them for one frame. This repository cannot change
-// ygo (its GitHub Apps have no write to sjawhar/ygo), so the walk lives here.
+// the struct's client, clock, length and kind, its origins, its size in the update, the encoded
+// bytes of its content and where its parent is named, and for each range of the delete set its
+// client, clock and length, and it allocates nothing per struct. It exists because ygo exports no
+// count of the structs an update carries. crdt.ContentIDsFromUpdateV1 returns clock runs that
+// IDSet.Add coalesces as it goes (sjawhar/ygo v1.51.3-sami.5, crdt/idset.go:83, merging at
+// :21-28), so two structs and one struct of the same clocks are the same answer; and the decoder
+// under it, decodeStructsV1, is unexported and allocates an Item, its content and its decoded
+// values for every struct (crdt/merge.go:24-81), up to 1,048,576 of them for one frame. This
+// repository cannot change ygo (its GitHub Apps have no write to sjawhar/ygo), so the walk lives
+// here.
 //
 // It is ported from two places in ygo. The header, the struct loop and the delete set follow
 // ygo's own allocation-free header scanner, pendingScanner (crdt/pending_budget.go:239-566),
@@ -59,10 +60,11 @@ import (
 //     takes doc.getMap("marks"), which it only reads; nothing else in packages/dispatch/web or
 //     packages/proof-editor names a root or makes a subdocument), and a browser hands the third
 //     back in a whole-state message once a rebuild has seeded it, which the hook refuses when it
-//     carries an entry the room does not hold (weighPeerUpdate); a struct or a delete range ending
-//     past 2^53, which no JavaScript clock reaches, so that a caller adding the walk's clocks
-//     cannot wrap where ygo's decodeAndPark adds lengths unchecked (crdt/update.go:602-607); and
-//     bytes after the delete set, which no Yjs encoder writes and ygo's apply ignores.
+//     adds, overwrites or deletes an entry of it (weighPeerUpdate); a struct or a delete range
+//     ending past 2^53, which no JavaScript clock reaches, so that a caller adding the walk's
+//     clocks cannot wrap where ygo's decodeAndPark adds lengths unchecked
+//     (crdt/update.go:602-607); and bytes after the delete set, which no Yjs encoder writes and
+//     ygo's apply ignores.
 //
 // The editor's sources were searched for what writes binary or embedded content on 2026-10-26:
 // `grep -rn -E 'insertEmbed|applyDelta|setAttribute\(|Uint8Array|getMap|\.set\(|insert\('` over
@@ -81,6 +83,19 @@ import (
 // never calls); and the Dispatch web app reads the margin map (bindRemoteMarks, editor.ts:38-62) and
 // applies only updates Yjs itself encoded (pending-sync.ts). None of them makes a Uint8Array value
 // or inserts a non-string into a text.
+//
+// They were searched again on 2026-10-27 for what writes or deletes an entry of the retired
+// clients' list (retiredMapName): `grep -rn -E 'retired'` and
+// `grep -rn -E 'getMap\(|Y\.Map|YMap|\.share\b|ydoc\.get\(|doc\.get\('` over the same two sources
+// and packages/proof-editor/src and packages/dispatch/web/src, tests left out, and
+// `grep -n -E '\.(set|delete|clear)\('` over the web app's and proof-editor's files importing yjs.
+// No file names the list. The only roots any of them reaches are the fragment (y-prosemirror's
+// lib.js:256, which takes it by the name it is given) and the margin, which editor.ts:39 takes and
+// only reads (bindRemoteMarks); y-prosemirror reads doc.share at sync-plugin.js:500-502 only to find
+// its own fragment's name for a snapshot; and the web app saves and replays only the updates its
+// own editor made (pending-sync.ts:245-250, which leaves out what the provider applied). Yjs
+// writes a map entry only through the map's own set and delete, so nothing the editor runs adds,
+// overwrites or deletes an entry of the list.
 //
 // Refusing is safe in both directions, and the tests hold it as a set relation over generated
 // edits, whole states and the fuzz corpus. Every update the walk accepts, ygo applies to a fresh
@@ -113,6 +128,7 @@ func walkUpdate(update []byte, source updateSource, visit updateVisitor) (update
 		if w.refusal != nil {
 			break
 		}
+		start := w.pos
 		structs := w.uint()
 		tally.structs += structs
 		if w.refusal == nil && tally.structs > maxUpdateItems {
@@ -129,6 +145,8 @@ func walkUpdate(update []byte, source updateSource, visit updateVisitor) (update
 			if w.refusal != nil {
 				break
 			}
+			walked.size = w.pos - start
+			start = w.pos
 			end := clock + walked.length
 			if source == fromPeer && (end < clock || end > maxEditorClock) {
 				w.notFromEditor("a clock past what a JavaScript client can write")
@@ -266,6 +284,19 @@ type updateStruct struct {
 	// content is the encoded content after the struct's header, length prefix included, which is
 	// what decodeContent reads: empty for a GC run or a skip, which carry only their length.
 	content []byte
+	// hasOrigin and hasRightOrigin are whether the struct names a left and a right origin, and
+	// origin and rightOrigin the IDs it names: an item inserted beside others, or a later entry for
+	// a map key, which names the entry before it as its origin.
+	hasOrigin, hasRightOrigin bool
+	origin, rightOrigin       structID
+	// size is the struct's bytes in the update, its header and content, and for the first struct
+	// of a client's group the group's header too.
+	size int
+}
+
+// structID is the ID of a struct, a client and a clock, as a struct names its origins.
+type structID struct {
+	client, clock uint64
 }
 
 // structKind is a struct's kind: the wire's content reference for an item, and the GC and skip
@@ -382,18 +413,16 @@ func (w *updateWalker) walkStruct(walked *updateStruct) {
 		walked.length = w.uint()
 		return
 	}
-	hasOrigin := info&infoHasOrigin != 0
-	hasRightOrigin := info&infoHasRightOrigin != 0
-	if hasOrigin {
-		w.uint()
-		w.uint()
+	walked.hasOrigin = info&infoHasOrigin != 0
+	walked.hasRightOrigin = info&infoHasRightOrigin != 0
+	if walked.hasOrigin {
+		walked.origin = structID{client: w.uint(), clock: w.uint()}
 	}
-	if hasRightOrigin {
-		w.uint()
-		w.uint()
+	if walked.hasRightOrigin {
+		walked.rightOrigin = structID{client: w.uint(), clock: w.uint()}
 	}
 	walked.parent = parentOfNeighbour
-	if !hasOrigin && !hasRightOrigin {
+	if !walked.hasOrigin && !walked.hasRightOrigin {
 		if w.byte() == 1 {
 			walked.root = w.varBytes()
 			w.namedRoot(walked)

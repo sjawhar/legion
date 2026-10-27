@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -20,11 +21,14 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
-// atCapStates holds the two stored documents at the decode cap the rebuild tests share, each built
-// once a test process: the agent's rewrites take minutes, and neither changes between tests.
+// atCapStates holds the stored documents at the decode cap the tests share, each built once a test
+// process: the agent's rewrites (agentRewrittenState) and the long edit's keystrokes
+// (longEditedAtCapState) take minutes, and neither changes between tests.
 var atCapStates struct {
 	sync.Mutex
-	longEdited []byte
+	agentRewritten []byte
+	agentRefusal   error
+	longEdited     []byte
 }
 
 // longEditedAtCapState is the long-edited fixture (longEditedState) edited on until its struct
@@ -101,8 +105,9 @@ func closeResidentRoom(t *testing.T, service *Service, artifactID string) {
 // that trims it is refused by the decode cap (refuseUndecodable), and a browser's edit by the
 // room's struct total. A rebuild takes it, from its own text: the two documents a room keeps at
 // the cap - one an agent rewrote whole through the API until the cap refused a write, and the
-// long-edited 5 KiB document typed on until its state reached the cap - each rebuild to a small
-// struct total, read the same text, and take the trimming write that was refused.
+// long-edited 5 KiB document typed on until its state reached the cap - each rebuild to no more
+// structs than a fresh document of the same text and its list of retired clients, read the same
+// text, and take the trimming write that was refused.
 func TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame(t *testing.T) {
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	for _, row := range []struct {
@@ -152,14 +157,42 @@ func TestRebuildingADocumentAtTheDecodeCapLeavesItSmallAndReadingTheSame(t *test
 			if after != before {
 				t.Fatalf("the rebuilt document reads %d bytes, want the %d it read before", len(after), len(before))
 			}
-			if rebuilt > maxUpdateItems/16 {
-				t.Fatalf("the rebuilt document holds %d structs, want a small fraction of the %d cap", rebuilt, maxUpdateItems)
+			history, err := decodeHistory(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fresh, retired := freshStructs(t, loaded.Update), uint64(len(historyClients(history)))
+			if rebuilt > fresh+retired {
+				t.Fatalf("the rebuilt document holds %d structs, want no more than the %d of a fresh document of its text and its %d retired clients", rebuilt, fresh, retired)
 			}
 			if _, err := joinedReplaceText(service, artifactID, trimmed, agent); err != nil {
 				t.Fatalf("the trimming write after the rebuild: %v", err)
 			}
 		})
 	}
+}
+
+// freshStructs is the struct total of a fresh document of the text update's document holds, as
+// an upload of it would seed it (encodeDocumentTree).
+func freshStructs(t *testing.T, update []byte) uint64 {
+	t.Helper()
+	doc, err := decodeHistory(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := treeOf(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := encodeDocumentTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := decodeHistory(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return countRoomStructs(fresh)
 }
 
 // A history that loads and stands further from the decode cap than a write's smallest replacement
@@ -176,11 +209,260 @@ func TestARebuildOfAHistoryThatLoadsFarFromTheCapIsRefusedWithOrWithoutMarkdown(
 	}
 }
 
+// rebuiltRoom is a room loaded from a rebuild's seed of markdown that retires the clients of
+// retired, bounded and listed as every room is (peerUpdateRoom), with its totals counted at the
+// load as a room's are.
+func rebuiltRoom(t *testing.T, markdown string, retired map[crdt.ClientID]uint64) (*Service, *crdt.Doc, *renderedReplica) {
+	t.Helper()
+	tree, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := rebuiltSeed(tree, retired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	room := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(room, seed, nil); err != nil {
+		t.Fatal(err)
+	}
+	boundRoomDocument(room)
+	rendering, err := renderDocument(room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{}
+	return service, room, service.keepReplica(room, nil, &rendering)
+}
+
+// The retired clients' list is the rebuild's alone: an update that adds an entry to it, one that
+// overwrites an entry - a map entry written again, naming the entry before it as its origin - and
+// one that deletes an entry are each refused as what the editor never sends, never applied, and
+// leave the room as it was, while typing and a whole-state message of what the room holds, the
+// list included, are admitted.
+func TestAnUpdateThatOverwritesOrDeletesARetiredEntryIsRefused(t *testing.T) {
+	retired := map[crdt.ClientID]uint64{123: 5, 456: 7}
+	service, room, replica := rebuiltRoom(t, "# Rebuilt\n\nOne paragraph of ordinary prose.\n", retired)
+	if entries := replica.structs.retiredEntries(); len(entries) != 1 {
+		t.Fatalf("the room found its list's entries under %d clients, want the seed's one", len(entries))
+	}
+	// changed is the update a browser holding the room sends for change to the list.
+	changed := func(change func(txn *crdt.Transaction, list *crdt.YMap)) []byte {
+		browser, _ := peerDocument(t, room)
+		list := browser.GetMap(retiredMapName)
+		held := browser.StateVector()
+		browser.Transact(func(txn *crdt.Transaction) { change(txn, list) })
+		return crdt.EncodeStateAsUpdateV1(browser, held)
+	}
+	for _, row := range []struct {
+		name   string
+		update []byte
+	}{
+		{"a new entry", changed(func(txn *crdt.Transaction, list *crdt.YMap) { list.Set(txn, "789", int64(9)) })},
+		{"an overwritten entry", changed(func(txn *crdt.Transaction, list *crdt.YMap) { list.Set(txn, "123", int64(1)) })},
+		{"a deleted entry", changed(func(txn *crdt.Transaction, list *crdt.YMap) { list.Delete(txn, "456") })},
+	} {
+		before := crdt.EncodeStateAsUpdateV1(room, nil)
+		err, called := weighInto(service, room, row.update)
+		if !errors.Is(err, errUpdateNotFromEditor) || called {
+			t.Fatalf("%s was answered %v (applied %t), want it refused as not from the editor and never applied", row.name, err, called)
+		}
+		if !bytes.Equal(crdt.EncodeStateAsUpdateV1(room, nil), before) {
+			t.Fatalf("the room changed for %s, which the hook refused", row.name)
+		}
+	}
+	for _, row := range []struct {
+		name   string
+		update []byte
+	}{
+		{"a keystroke", peerTyping(t, room, "y")},
+		{"the room's whole state handed back", crdt.EncodeStateAsUpdateV1(room, nil)},
+	} {
+		if err, called := weighInto(service, room, row.update); err != nil || !called {
+			t.Fatalf("%s was answered %v (applied %t), want it admitted", row.name, err, called)
+		}
+	}
+	if listed := retiredClientsOf(room); len(listed) != len(retired) || listed[123] != 5 || listed[456] != 7 {
+		t.Fatalf("the room lists %v as retired, want the seed's %v", listed, retired)
+	}
+}
+
+// A document at the decode cap is one people are typing into when they are refused, so its room
+// is resident when someone rebuilds it. The rebuild closes the room rather than refusing it: the
+// connected browser's socket ends; when it reconnects still holding the replaced history it is
+// closed with the document's own close and DOC_NEEDS_REBUILD; and the editor's fresh read of the
+// document, as its 4413 path makes, reads the rebuilt text and saves a new edit. A document far
+// from both caps with a resident room is still refused, DOCUMENT_LIVE
+// (TestRebuildDocumentRefusesALiveRoom).
+func TestARebuildNearACapClosesTheResidentRoomAndItsEditorsReAdmitTheRebuiltDocument(t *testing.T) {
+	state := longEditedAtCapState(t)
+	service, artifactID := newTestService(t)
+	storeHistory(t, service, artifactID, state)
+	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(server.Close)
+	ctx := context.Background()
+	before, err := service.Text(ctx, artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := connectPeer(t, server.URL, artifactID, "alice")
+	awaitAnswer(t, held, "the document at the cap")
+	if service.srv.GetDoc(artifactID) == nil {
+		t.Fatal("the document's room is not resident with a browser connected")
+	}
+
+	report, _, err := rebuildDocument(t, service, artifactID, nil)
+	if err != nil {
+		t.Fatalf("rebuild a document at the cap with its room resident: %v", err)
+	}
+	t.Logf("rebuilt with its room resident: %s", report.ValidationError)
+	select {
+	case <-held.Ended:
+	case <-time.After(time.Minute):
+		t.Fatal("the browser's socket stayed open after its room was closed for the rebuild")
+	}
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+	reconnected := docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID, held.Doc)
+	select {
+	case <-reconnected.Ended:
+	case <-time.After(time.Minute):
+		t.Fatal("the room never answered the browser holding the replaced history")
+	}
+	if closed := reconnected.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentNeedsRebuildCloseReason {
+		t.Fatalf("the room ended the reconnecting browser with %v, want %d %s", closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentNeedsRebuildCloseReason)
+	}
+
+	readmitted := connectPeer(t, server.URL, artifactID, "alice")
+	awaitAnswer(t, readmitted, "the rebuilt document")
+	if rendering, err := renderDocument(readmitted.Doc); err != nil || rendering != before {
+		t.Fatalf("the re-admitted browser reads a %d-byte rendering (%v), want the document's %d", len(rendering), err, len(before))
+	}
+	// The text is taken before the transaction: ygo's fragment lookup takes the document's lock,
+	// which the transaction holds.
+	readmittedText := firstText(readmitted.Doc.GetXmlFragment(fragmentName))
+	if _, err := readmitted.Send(func(txn *crdt.Transaction) {
+		readmittedText.Insert(txn, 0, "readmitted ", nil)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		text, err := service.Text(ctx, artifactID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(text, "readmitted ") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the re-admitted browser typed, and the document still reads %d bytes without it", len(text))
+		}
+	}
+}
+
+// tangledHistory is a document's history whose re-scan passes near roomScanTotal: its first
+// paragraph followed by chain one-character items, each of a client of its own so none merges
+// with its neighbour, and then scanners items each naming the chain's first as its left origin and
+// no right origin, so each scans the chain to its end.
+func tangledHistory(t *testing.T, chain, scanners int) []byte {
+	t.Helper()
+	tree, err := pmdoc.Parse("# Tangled\n\nOne paragraph of ordinary prose.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := encodeDocumentTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(doc, seed, nil); err != nil {
+		t.Fatal(err)
+	}
+	var text *crdt.YXmlText
+	for _, candidate := range allTexts(doc.GetXmlFragment(fragmentName)) {
+		if candidate.Len() > 0 {
+			text = candidate
+		}
+	}
+	if text == nil {
+		t.Fatal("the document holds no text to chain onto")
+	}
+	last := crdt.CreateRelativePositionFromIndex(text, text.Len()-1, 0).Item
+	if last == nil {
+		t.Fatal("the paragraph's last character has no item")
+	}
+	const firstClient, scanClient = 1_000, 4_000_000
+	chained := newV1Frame(chain)
+	origin := *last
+	for i := range chain {
+		client := uint64(firstClient + i)
+		chained = chained.group(1, client, 0).raw(byte(structString) | infoHasOrigin).uint(uint64(origin.Client)).uint(origin.Clock).str("a")
+		origin = crdt.ID{Client: crdt.ClientID(client), Clock: 0}
+	}
+	scanning := newV1Frame(1).group(scanners, scanClient, 0)
+	for range scanners {
+		scanning = scanning.raw(byte(structString) | infoHasOrigin).uint(firstClient).uint(0).str("k")
+	}
+	for _, update := range [][]byte{chained.noDeletes(), scanning.noDeletes()} {
+		if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return crdt.EncodeStateAsUpdateV1(doc, nil)
+}
+
+// A history whose re-scan stands within one honest offline handoff of the room's scan total
+// (roomScanTotal, honestHandoffScans) is near the scan total, which leaves every larger merge
+// refused, and a rebuild takes it: the rebuilt history re-scans fewer items than one honest
+// handoff and reads the same text. It needs a count of a re-scan's items (historyScans), which
+// sjawhar/ygo v1.51.3-sami.5 does not report.
+func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadingTheSame(t *testing.T) {
+	state := tangledHistory(t, 2_000, 250)
+	history, err := decodeHistory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scans, counted := historyScans(history)
+	if !counted {
+		t.Skip("historyScans cannot count a re-scan's items at sjawhar/ygo v1.51.3-sami.5, which reports no scan count; this runs once it reads one from the re-scan's transaction")
+	}
+	if scans+honestHandoffScans < roomScanTotal {
+		t.Fatalf("the tangled history re-scans %d items, want it within %d of the %d scan total: tangle it further", scans, honestHandoffScans, roomScanTotal)
+	}
+	service, artifactID := newTestService(t)
+	storeHistory(t, service, artifactID, state)
+	ctx := context.Background()
+	before, err := service.Text(ctx, artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeResidentRoom(t, service, artifactID)
+	if _, _, err := rebuildDocument(t, service, artifactID, nil); err != nil {
+		t.Fatalf("rebuild a history re-scanning %d items: %v", scans, err)
+	}
+	loaded, err := service.persistence.Load(ctx, artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := decodeHistory(loaded.Update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := service.Text(ctx, artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rescans, _ := historyScans(rebuilt); rescans >= honestHandoffScans || after != before {
+		t.Fatalf("the rebuilt history re-scans %d items and reads %d bytes, want fewer than %d and the %d it read before", rescans, len(after), honestHandoffScans, len(before))
+	}
+}
+
 // A browser that held a document before its rebuild still holds the history the rebuild replaced,
 // and the edits it made while disconnected. When it reconnects, the rebuilt room holds none of
 // that history, so the browser's answer to the room's sync hands all of it back with its unsent
-// edit: the room refuses it with the document's own close, on which the editor drops what it sent
-// and builds its document afresh from the room, and drops its saved rows typed against the old
+// edit: the room refuses it with the document's own close and the reason that the document needed
+// rebuilding (DOC_NEEDS_REBUILD), on which the editor drops what it sent and builds its document
+// afresh from the room, and drops its saved rows typed against the old
 // history as rows of a rebuilt document. The room's struct total stays small, the document reads
 // the rebuilt text with no block twice and without the unsent edit, and a browser of the rebuilt
 // history - its whole state, the retired clients' list included, handed back - edits it as before.
@@ -203,8 +485,9 @@ func TestABrowserHoldingTheHistoryARebuildReplacedCannotHandItBack(t *testing.T)
 		t.Fatalf("the browser holds a %d-byte rendering (%v), want the document's %d", len(rendering), err, len(before))
 	}
 	held.Close()
+	unsentInto := firstText(held.Doc.GetXmlFragment(fragmentName))
 	docstest.Transact(held.Doc, func(txn *crdt.Transaction) {
-		firstText(held.Doc.GetXmlFragment(fragmentName)).Insert(txn, 0, "unsent ", nil)
+		unsentInto.Insert(txn, 0, "unsent ", nil)
 	})
 	closeResidentRoom(t, service, artifactID)
 	if _, _, err := rebuildDocument(t, service, artifactID, nil); err != nil {
@@ -222,8 +505,8 @@ func TestABrowserHoldingTheHistoryARebuildReplacedCannotHandItBack(t *testing.T)
 	case <-time.After(time.Minute):
 		t.Fatal("the room never answered the browser holding the replaced history")
 	}
-	if closed := reconnected.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentTooLargeCloseReason {
-		t.Fatalf("the room ended the browser holding the replaced history with %v, want %d %s", closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentTooLargeCloseReason)
+	if closed := reconnected.Closed(); closed == nil || closed.Code != contracts.DocumentTooLargeCloseCode || closed.Text != contracts.DocumentNeedsRebuildCloseReason {
+		t.Fatalf("the room ended the browser holding the replaced history with %v, want %d %s", closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentNeedsRebuildCloseReason)
 	}
 	live := service.srv.GetDoc(artifactID)
 	if live == nil {
@@ -249,8 +532,9 @@ func TestABrowserHoldingTheHistoryARebuildReplacedCannotHandItBack(t *testing.T)
 	if err := fresh.Write(ygsync.EncodeUpdate(crdt.EncodeStateAsUpdateV1(fresh.Doc, nil))); err != nil {
 		t.Fatal(err)
 	}
+	freshInto := firstText(fresh.Doc.GetXmlFragment(fragmentName))
 	if _, err := fresh.Send(func(txn *crdt.Transaction) {
-		firstText(fresh.Doc.GetXmlFragment(fragmentName)).Insert(txn, 0, "fresh ", nil)
+		freshInto.Insert(txn, 0, "fresh ", nil)
 	}); err != nil {
 		t.Fatal(err)
 	}

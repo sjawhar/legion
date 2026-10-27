@@ -149,7 +149,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/artifacts/{id}/subscribers", authHuman, "Sessions subscribed to a document's topics.", s.listArtifactSubscribers},
 		{http.MethodDelete, "/api/v1/artifacts/{id}/subscribers/{session_id}", authHuman, "Unsubscribe a session from a document.", s.unsubscribeArtifactSession},
 		{http.MethodGet, "/api/v1/artifacts/{id}", authAny, "Read a document's metadata and current version.", s.getArtifact},
-		{http.MethodPost, "/api/v1/artifacts/{id}/rebuild", authHuman, "Rebuild a document history ygo cannot load from its latest saved markdown; a live document is 409 DOCUMENT_LIVE and one that loads is 409 DOCUMENT_LOADS.", s.rebuildArtifact},
+		{http.MethodPost, "/api/v1/artifacts/{id}/rebuild", authHuman, "Rebuild a document's history into one fresh update: a history ygo cannot load, from its latest saved markdown or supplied {markdown}; a history so near the decode cap or the edit-scan total that every write is refused, from its own text or supplied markdown, closing its room in this server first, whose connected browsers drop their unsent edits; 409 DOCUMENT_LIVE for any other document live in this server, 409 DOCUMENT_LOADS for any other history that loads.", s.rebuildArtifact},
 		{http.MethodGet, "/api/v1/artifacts/{id}/reviews", authAny, "List a document's approval reviews.", s.listArtifactReviews},
 		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authHuman, "Approve or request changes on a document's latest settled version; answers the open approval ask when present, preserving its thread.", s.createArtifactReview},
 		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open an approval ask for a document's latest version, with an optional summary. A document a human approved before carries that approval on the ask (approval.approved: version, at, by). An open ask follows later versions and waits on its agent until this route hands the same row back to a human.", s.requestArtifactApproval},
@@ -195,6 +195,7 @@ func (s *server) routes() []apiRoute {
 			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/room-budget", authAny, "Test hook: set the open documents' memory budget to bytes (0 restores the real one), so a browser test can fill it.", s.setRoomBudget},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
+			apiRoute{http.MethodGet, "/api/v1/artifacts/{id}/_test/live", authAny, "Test hook: whether the document's room is resident in this server, {live}; loads and rebuilds nothing.", s.artifactRoomLive},
 			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
 		)
 	}

@@ -472,8 +472,11 @@ cause the error carries: a failed room carries the error another operation faile
 the issue had closed, among others - a writer's failed or cancelled commit, a failed store write
 or load, a history that did not decode), which says nothing of this request.
 `DOCUMENT_UNLOADABLE` (409) is a stored history this request itself could not decode
-(`docs.ErrDocumentUnloadable`), the one state `POST /api/v1/artifacts/{id}/rebuild` repairs and the
-one code the dashboard offers that rebuild for. `DOC_SCHEMA` is a tree outside the schema: one the
+(`docs.ErrDocumentUnloadable`), one of the states `POST /api/v1/artifacts/{id}/rebuild` repairs
+and the one code the dashboard offers that rebuild for. The rebuild is also the recovery from
+either cap a history that loads can reach: one so near the decode cap or the room's edit-scan
+total that every write is refused (`docs.nearACap`) is rebuilt from its own text, its room in
+this server closed first. `DOC_SCHEMA` is a tree outside the schema: one the
 document holds is a `docs.OutsideSchemaError`, which `treeOf` and `documentMarkdown` classify where
 they read or render a document's tree, so every route that starts from it - `GET /text`,
 `GET /blocks`, `POST /edits`, `POST /versions` - answers 409 with its one message, while a schema

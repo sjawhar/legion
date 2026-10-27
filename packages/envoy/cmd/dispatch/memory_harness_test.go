@@ -144,6 +144,9 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		// expose. Every server runs with none unless its test sets GOMEMLIMIT or AUTOMEMLIMIT in
 		// env.
 		"AUTOMEMLIMIT=off",
+		// The test-only routes, for the one the drives read whether a room is resident through
+		// (memoryServer.roomLive), which loads and rebuilds nothing.
+		"DISPATCH_TEST_HOOKS=1",
 	}
 	command.Env = append(command.Env, h.env...)
 	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{})}

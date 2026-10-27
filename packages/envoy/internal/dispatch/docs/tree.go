@@ -341,7 +341,7 @@ type renderedReplica struct {
 	// bytes and elements are that rendering's size, published beside it: bytes for the peer update
 	// hook to load (Service.weighPeerUpdate), elements for the room budget to charge the room by
 	// (roomCharge). The hook runs on the peer's read loop, where taking mu would put every browser
-	// in the room behind its load (AGENTS.md:556-559), so the measurement travels as two atomics
+	// in the room behind its load (AGENTS.md:559-562), so the measurement travels as two atomics
 	// rather than under the lock the rendering itself is kept under. Both are sizeUnmeasured while
 	// the room has no rendering to measure, which is a document outside the schema; elements is
 	// elementsPastCounting for a rendering whose elements goldmark stopped counting. An update's
@@ -512,7 +512,7 @@ func (r *renderedReplica) publishCounted(markdown *string, elements int64) {
 // could not read reads sizeUnmeasured elements until its count lands, which the budget does not
 // re-base on (storeCounted). A caller reading across a publication sees one rendering's bytes
 // beside the elements of the rendering before it too, which is within that same staleness.
-// Neither half makes the document bound a ceiling (peer_update.go:52-54).
+// Neither half makes the document bound a ceiling (peer_update.go:55-57).
 func (r *renderedReplica) size() (bytes, elements int64, measured bool) {
 	bytes, elements = r.bytes.Load(), r.elements.Load()
 	return bytes, elements, bytes != sizeUnmeasured

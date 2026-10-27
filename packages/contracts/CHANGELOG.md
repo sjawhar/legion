@@ -20,6 +20,13 @@
   nothing of it is stored or relayed. Like `DOC_TOO_LARGE` it is permanent: the dashboard drops the
   refused edit and re-reads the document, and says "Your last edit was not saved: Dispatch could not
   merge it into this document quickly enough. Your other edits are kept." (INFRA-179).
+- `DOCUMENT_NEEDS_REBUILD_CLOSE_REASON` (`DOC_NEEDS_REBUILD`), a third reason for
+  `DOCUMENT_TOO_LARGE_CLOSE_CODE` (4413), generated into Go as
+  `contracts.DocumentNeedsRebuildCloseReason`: the document cannot take the browser's update until
+  it is rebuilt. The server closes with it a browser that reconnects still holding the edit history
+  a rebuild of the document replaced, so the old history is never handed back beside the rebuilt
+  one. Like `DOC_TOO_LARGE` it is permanent: the dashboard drops the refused edit and re-reads the
+  rebuilt document (INFRA-179).
 - `dispatch doc-edit --help` says the spec, not every document, holds no progress or status, and that a record of open items or progress is a document of its own.
 
 - `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of

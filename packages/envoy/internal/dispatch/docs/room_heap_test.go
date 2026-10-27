@@ -15,7 +15,7 @@ import (
 // What one open document costs the pod is the figure the room budget charges a room by
 // (bytesOfHeapAnElement), and it was first read off a benchmark of a read's second replica rather
 // than measured of a room: about 120 bytes of heap for every byte of markdown for one copy, and
-// two copies for a room under edit (AGENTS.md:587-588). This measures the room itself: the live
+// two copies for a room under edit (AGENTS.md:590-591). This measures the room itself: the live
 // document alone, which is all a room that is only read holds, and the live document beside the
 // rendered replica the update observer takes on the room's first transaction and keeps while the
 // room is resident (keepReplica, renderedReplica.observe), which is what a room under edit holds.

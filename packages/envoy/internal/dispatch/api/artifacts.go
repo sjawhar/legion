@@ -1391,3 +1391,22 @@ func (s *server) setRoomBudget(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteJSON(w, http.StatusOK, map[string]int64{"bytes": s.deps.Docs.SetRoomBudgetForTest(input.Bytes)})
 }
+
+// artifactRoomLive answers whether the document's room is resident in this server, a read that
+// loads and rebuilds nothing. Test-only: mounted by routes() only when Deps.TestHooksEnabled is
+// set, so a real-process drive can see that the room budget closed or refused a room.
+func (s *server) artifactRoomLive(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]bool{"live": s.deps.Docs.RoomLiveForTest(artifact.ID)})
+}

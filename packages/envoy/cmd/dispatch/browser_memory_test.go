@@ -39,8 +39,8 @@ const (
 
 	// These mirror constants of internal/dispatch/docs, which this package cannot read:
 	// roomBudgetBytes (room_budget.go:36), bytesOfHeapAnElement (:48), roomCopies (:441),
-	// maxPeerInsertAtTheBound (peer_update.go:87), maxPeerByteCreep (:92) and maxMessageBytes
-	// (:121). No drive takes a mirror on trust. The server names its budget and what each refused
+	// maxPeerInsertAtTheBound (peer_update.go:109), maxPeerByteCreep (:114) and maxMessageBytes
+	// (:226). No drive takes a mirror on trust. The server names its budget and what each refused
 	// document needs in the line it logs for a refusal (refuseOverRoomBudget), and the budget
 	// drives fail unless those are these numbers; the byte drive fails unless a run of small
 	// inserts is refused exactly once the room is the creep past the bound, a paste past the
@@ -51,13 +51,20 @@ const (
 	roomCopiesForTest              = 2
 	maxPeerInsertAtTheBoundForTest = 8 << 10
 	maxPeerByteCreepForTest        = 64 << 10
-	maxMessageBytesForTest         = 37 << 20
-	// integrateScanBoundForTest mirrors integrateScanBound (peer_update.go:153), which
+	maxMessageBytesForTest         = 54 << 20
+	// maxUnrenderedBytesForTest mirrors maxUnrenderedBytes (peer_update.go:124), 9.5 MiB, and
+	// heaviestHandoffBoundForTest heaviestHandoffBound (:174), F, the sum of bounds the frame
+	// total refuses past. The margin flood fails unless exactly as many records are admitted as
+	// fit within the first, and the heaviest handoff unless the room refuses a paste with its
+	// whole state within one paste of the second.
+	maxUnrenderedBytesForTest   = 9_961_472
+	heaviestHandoffBoundForTest = 44_936_089
+	// integrateScanBoundForTest mirrors integrateScanBound (peer_update.go:258), which
 	// TestAScanFrameIsRefusedWholeAndTheRoomIsAsItWas pins: a frame scanning past it is refused,
 	// and one an item shorter applies.
 	integrateScanBoundForTest = 28_640
 
-	// roomCountIntervalForTest mirrors roomCountInterval (internal/dispatch/docs/tree.go:476), the
+	// roomCountIntervalForTest mirrors roomCountInterval (internal/dispatch/docs/tree.go:481), the
 	// least time between two counts of one room's elements, which is how stale a room's charge
 	// can be. The drives that grow rooms send a round of growth no more often than this and two
 	// seconds, so each round's counts have landed before the next is sent, as they would under a
@@ -67,7 +74,7 @@ const (
 )
 
 // One browser's update is bounded by bytes, over a real document socket of a real server
-// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:238-318): an update that would
+// (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go:275-468): an update that would
 // take a document past the bound is refused with 4413 and DOC_TOO_LARGE, and the document is kept;
 // small updates carry a document over the bound only by the creep they are allowed; a document at
 // or over the bound can be opened, handed back whole, edited and shortened; an edit under it
@@ -419,6 +426,212 @@ func canonicalState(t *testing.T, state []byte) []byte {
 // them (Service.weighPeerUpdate, internal/dispatch/docs/peer_update.go).
 var scanRefusalLine = regexp.MustCompile(`msg="dispatch: refused a browser's update its room could not merge within the integrate-scan bound" room=(\S+) update_bytes=\d+ charged=(\d+) limit=(\d+) struct_total=(\d+)`)
 
+// setRoomBudget sets the server's room budget to bytes through its test-only route, so a drive of
+// the document's own bounds is not refused by the budget first; the drive puts the real one back
+// when it ends.
+func (p *memoryServer) setRoomBudget(t *testing.T, bytes int64) {
+	t.Helper()
+	set := func(bytes int64) error {
+		body, err := json.Marshal(map[string]int64{"bytes": bytes})
+		if err != nil {
+			return err
+		}
+		answer, err := p.trySend(http.MethodPost, "/api/v1/artifacts/_test/room-budget", "application/json", strings.NewReader(string(body)), http.Header{"X-Dispatch-User": {"alice"}})
+		if err == nil && answer.status != http.StatusOK {
+			err = fmt.Errorf("status %d body %.300s", answer.status, answer.body)
+		}
+		return err
+	}
+	if err := set(bytes); err != nil {
+		t.Fatalf("set the room budget to %d bytes: %v", bytes, err)
+	}
+	t.Cleanup(func() { _ = set(0) })
+}
+
+// unboundedRoomBudget is a room budget no drive of one document's bounds comes near: the budget
+// charges a byte of content the measurer has not yet counted at the densest price, 2,116 bytes at
+// both copies (bytesOfHeapAByteAtTheDensest, internal/dispatch/docs/room_budget.go:78), so a
+// mebibyte written in one update would fill the real budget until the room's next count.
+const unboundedRoomBudget = 1 << 50
+
+// marginFloodRecord is the update a browser that is not the editor sends to write one margin
+// record of text under key, as a client of its own: one struct, one clock, a map entry whose
+// value is a map holding the text, as the server writes a comment's record.
+func marginFloodRecord(client uint64, key, text string) []byte {
+	doc := crdt.New(crdt.WithClientID(crdt.ClientID(client)))
+	margin := doc.GetMap("marks")
+	doc.Transact(func(txn *crdt.Transaction) { margin.Set(txn, key, map[string]any{"text": text}) })
+	return crdt.EncodeStateAsUpdateV1(doc, nil)
+}
+
+// marginFloodUnrendered is the unrendered bytes one marginFloodRecord carries, worked out from the
+// wire as the server's walk counts them (unrenderedBytes, internal/dispatch/docs/peer_update.go):
+// its key as encoded, and its content, the count of values and the one lib0 Any value.
+func marginFloodUnrendered(key, text string) int {
+	encoded := encoding.NewEncoder()
+	encoded.WriteVarString(key)
+	encoded.WriteVarUint(1)
+	encoded.WriteAny(map[string]any{"text": text})
+	return len(encoded.Bytes())
+}
+
+// The flood the unrendered bound closes, over a real document socket of a real server: a browser
+// that is not the editor sends eighty updates of a million margin bytes each, every one a single
+// clock and a single struct of a client of its own, which before the bound were all admitted and
+// took a room's whole-state frame from 264 bytes to 80,001,457, past the message floor every
+// browser of the document then reconnects against. Each is admitted while the room's unrendered
+// bytes stay within maxUnrenderedBytes - nine, for a document whose own are a few hundred - and the
+// first past it and every one after it is refused with 4413 and DOC_TOO_LARGE. The stored
+// document, once settled, is a whole-state frame within F and under the floor, and a browser
+// opening it receives that state and hands it back whole without its socket being closed. The
+// room budget is set out of reach first, so what refuses is the document's bound and nothing else.
+func TestEightyMarginFloodUpdatesStopAtTheUnrenderedBoundAndTheFrameStaysUnderTheFloor(t *testing.T) {
+	memory := newMemoryHarness(t)
+	server := memory.start(t)
+	server.setRoomBudget(t, unboundedRoomBudget)
+	stored := server.upload(t, "json", memory.issue, "# Flooded\n\nOne paragraph of ordinary prose.\n")
+	if stored.status != http.StatusCreated {
+		t.Fatalf("upload: status %d body %.300s, want 201", stored.status, stored.body)
+	}
+	memory.waitForSettlement(t, stored)
+	room := stored.artifactID
+	const updates, size = 80, 1_000_000
+	text := strings.Repeat("m", size)
+	each := marginFloodUnrendered("c00", text)
+	want := maxUnrenderedBytesForTest / each
+	admitted, refused := 0, 0
+	flooding := server.openBrowser(t, room)
+	for i := range updates {
+		applied, closed, err := flooding.send(flooding.updateFrame(marginFloodRecord(uint64(5_000_000+i), fmt.Sprintf("c%02d", i), text)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if applied {
+			if refused > 0 {
+				t.Fatalf("update %d was applied after %d refusals, want every update after the first refusal refused", i, refused)
+			}
+			admitted++
+			continue
+		}
+		requireRefused(t, applied, closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentTooLargeCloseReason)
+		refused++
+		flooding.leave()
+		flooding = server.openBrowser(t, room)
+	}
+	flooding.leave()
+	memory.waitForSettled(t, room)
+	frame := len(canonicalState(t, memory.storedState(t, room)))
+	t.Logf("%d of %d updates of %d unrendered bytes admitted against the %d-byte bound, %d refused; the stored whole-state frame is %d bytes, against F %d and the %d-byte floor",
+		admitted, updates, each, maxUnrenderedBytesForTest, refused, frame, heaviestHandoffBoundForTest, maxMessageBytesForTest)
+	if admitted != want {
+		t.Fatalf("%d updates were admitted, want the %d that fit within the %d-byte unrendered bound", admitted, want, maxUnrenderedBytesForTest)
+	}
+	if frame > heaviestHandoffBoundForTest || frame >= maxMessageBytesForTest {
+		t.Fatalf("the stored whole-state frame is %d bytes, want it within F (%d) and under the %d-byte floor", frame, heaviestHandoffBoundForTest, maxMessageBytesForTest)
+	}
+	handing := server.openBrowser(t, room)
+	t.Cleanup(handing.leave)
+	state := handing.state(t)
+	if applied, closed, err := handing.send(handing.stateFrame(state)); err != nil || !applied || closed != nil {
+		t.Fatalf("handing back the flooded document's %d-byte whole state: applied %v, closed %v, %v; want it applied and the socket open", len(state), applied, closed, err)
+	}
+}
+
+// The heaviest whole state a browser can hand over under the bounds is admitted, over a real
+// document socket of a real server, where the floor before them would have closed it. F
+// (heaviestHandoffBound) is a sum of bounds no test can build term by term, so the drive builds its
+// frame total instead, through what only that total sees: text nested under the margin, which
+// renders nothing and adds no unrendered bytes, pasted a million bytes an update until the room
+// refuses a paste with 4413 and DOC_TOO_LARGE because it would take the frame total past F. The
+// room's whole state then stands within one paste of F; a delete-only update at F is admitted; and
+// a browser opening the document receives that state and hands it back whole, a frame far past
+// the 37 MiB floor of before and under maxMessageBytes, without its socket being closed. The room
+// budget is set out of reach first, so what refuses is the document's bound and nothing else.
+func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
+	memory := newMemoryHarness(t)
+	server := memory.start(t)
+	server.setRoomBudget(t, unboundedRoomBudget)
+	stored := server.upload(t, "json", memory.issue, "# Heavy\n\nOne paragraph of ordinary prose.\n")
+	if stored.status != http.StatusCreated {
+		t.Fatalf("upload: status %d body %.300s, want 201", stored.status, stored.body)
+	}
+	memory.waitForSettlement(t, stored)
+	room := stored.artifactID
+	const nestedKey = "nested"
+	// nestedText is a browser's copy of the room's state and the text nested under its margin.
+	nestedText := func(t *testing.T, state []byte) (*crdt.Doc, *crdt.YText) {
+		t.Helper()
+		doc := newBrowserDocument(t, state).doc
+		value, ok := doc.GetMap("marks").Get(nestedKey)
+		text, isText := value.(*crdt.YText)
+		if !ok || !isText {
+			t.Fatalf("the margin holds %T under %q, want the nested text", value, nestedKey)
+		}
+		return doc, text
+	}
+
+	pasting := server.openBrowser(t, room)
+	doc := newBrowserDocument(t, pasting.state(t)).doc
+	margin := doc.GetMap("marks")
+	held := doc.StateVector()
+	doc.Transact(func(txn *crdt.Transaction) { margin.Set(txn, nestedKey, crdt.NewTextPrelim()) })
+	requireApplied(t, pasting, crdt.EncodeStateAsUpdateV1(doc, held), "a text nested under the margin")
+	value, _ := margin.Get(nestedKey)
+	text, isText := value.(*crdt.YText)
+	if !isText {
+		t.Fatalf("the browser's margin holds %T under %q, want the text it nested", value, nestedKey)
+	}
+	paste := strings.Repeat("t", 1_000_000)
+	pastes := 0
+	for ; ; pastes++ {
+		if pastes > heaviestHandoffBoundForTest/len(paste)+1 {
+			t.Fatalf("%d pastes of %d bytes were all applied, want one refused before the frame total passes F (%d)", pastes, len(paste), heaviestHandoffBoundForTest)
+		}
+		held := doc.StateVector()
+		doc.Transact(func(txn *crdt.Transaction) { text.Insert(txn, text.Len(), paste, nil) })
+		applied, closed, err := pasting.send(pasting.updateFrame(crdt.EncodeStateAsUpdateV1(doc, held)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !applied {
+			requireRefused(t, applied, closed, contracts.DocumentTooLargeCloseCode, contracts.DocumentTooLargeCloseReason)
+			break
+		}
+	}
+	pasting.leave()
+
+	cutting := server.openBrowser(t, room)
+	t.Cleanup(cutting.leave)
+	atF := cutting.state(t)
+	t.Logf("%d pastes of %d bytes under the margin were applied before one was refused; the room's whole state is %d bytes, F %d",
+		pastes, len(paste), len(atF), heaviestHandoffBoundForTest)
+	// The refused paste adds its text and its struct's header, a few dozen bytes, to the frame.
+	if len(atF) > heaviestHandoffBoundForTest || len(atF)+len(paste)+64 <= heaviestHandoffBoundForTest {
+		t.Fatalf("the room's whole state is %d bytes after the refusal, want it within F (%d) and short of it by less than the refused %d-byte paste",
+			len(atF), heaviestHandoffBoundForTest, len(paste))
+	}
+	cutDoc, cutText := nestedText(t, atF)
+	held = cutDoc.StateVector()
+	cutDoc.Transact(func(txn *crdt.Transaction) { cutText.Delete(txn, 0, 1_000) })
+	cut := crdt.EncodeStateAsUpdateV1(cutDoc, held)
+	requireInsertsNothing(t, cut)
+	requireApplied(t, cutting, cut, "a cut of 1,000 bytes from a room at F")
+
+	handing := server.openBrowser(t, room)
+	t.Cleanup(handing.leave)
+	state := handing.state(t)
+	frame := handing.stateFrame(state)
+	applied, closed, err := handing.send(frame)
+	t.Logf("the whole state of the room at F is a %d-byte frame, against the 37 MiB floor of before (%d) and the %d-byte floor: applied %v, closed %v",
+		len(frame), 37<<20, maxMessageBytesForTest, applied, closed)
+	if err != nil || !applied || closed != nil {
+		t.Fatalf("handing back the %d-byte whole state of a room at F: applied %v, closed %v, %v; want it applied and the socket open", len(frame), applied, closed, err)
+	}
+	if len(frame) <= 37<<20 || len(frame) >= maxMessageBytesForTest {
+		t.Fatalf("the handoff is a %d-byte frame, want one past the 37 MiB floor of before and under the %d-byte floor", len(frame), maxMessageBytesForTest)
+	}
+}
+
 // The room budget refuses the browser its own arithmetic says it has no room for: documents of a
 // mebibyte of prose, each edited once, opened until one is refused with 4503 and DOC_BUSY, under the
 // Go limit a 4 GiB pod gives the server. A room is charged at both copies from its admission
@@ -431,7 +644,7 @@ var scanRefusalLine = regexp.MustCompile(`msg="dispatch: refused a browser's upd
 // rooms are still charged starts a sweep that closes one of them to make room for the refused
 // browser (sweepRooms), and that browser's next attempt, as the editor's backoff makes it, is
 // admitted. Each close is read twice before that attempt: from the line the server logs for it, in
-// the budget's own figures, and from the room's absence, which the rebuild route reports (roomLive).
+// the budget's own figures, and from the room's absence, which a test-only read reports (roomLive).
 // Each refusal is read from its close frame and from its document's absence. A browser that stayed
 // keeps its room, the server's peak resident memory stays under the pod's, and once the rest have
 // left, a browser is admitted again.
@@ -1299,25 +1512,18 @@ func (h *memoryHarness) waitForStored(t *testing.T, artifactID, what string, hol
 }
 
 // roomLive asks the server whether the document is live in it, a question the room budget plays no
-// part in answering: the rebuild route refuses a document live in this server with 409
-// DOCUMENT_LIVE before it reads anything, and one that is not live, whose history loads, with 409
-// DOCUMENT_LOADS, and rebuilds nothing either way (docs.Service.RebuildDocument,
-// internal/dispatch/docs/rebuild.go:65-75). For a document that is not live, the answer costs the
-// server a load of its stored history.
+// part in answering: the test-only route reads whether this server holds the document's room and
+// loads, rebuilds and charges nothing to answer (docs.Service.RoomLiveForTest).
 func (p *memoryServer) roomLive(t *testing.T, artifactID string) bool {
 	t.Helper()
-	answer := p.send(t, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/rebuild", "application/json", strings.NewReader("{}"), http.Header{"X-Dispatch-User": {"alice"}})
-	var refusal struct{ Code string }
-	if answer.status == http.StatusConflict && json.Unmarshal(answer.body, &refusal) == nil {
-		switch refusal.Code {
-		case "DOCUMENT_LIVE":
-			return true
-		case "DOCUMENT_LOADS":
-			return false
-		}
+	answer := p.send(t, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/_test/live", "", nil, http.Header{"X-Dispatch-User": {"alice"}})
+	var read struct {
+		Live *bool `json:"live"`
 	}
-	t.Fatalf("asking whether document %s is live: %d %.300s, want 409 DOCUMENT_LIVE or DOCUMENT_LOADS", artifactID, answer.status, answer.body)
-	return false
+	if answer.status != http.StatusOK || json.Unmarshal(answer.body, &read) != nil || read.Live == nil {
+		t.Fatalf("asking whether document %s is live: %d %.300s, want 200 and {live}", artifactID, answer.status, answer.body)
+	}
+	return *read.Live
 }
 
 // requireRoomAbsent fails the test unless the server says the document is not live (roomLive).
@@ -1532,7 +1738,7 @@ func requireBudgetRefusals(t *testing.T, server *memoryServer, reserved int64) [
 }
 
 // budgetCloseLine is the line the room budget's sweep logs for each unused room it closes, in the
-// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1218-1251).
+// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1219-1252).
 var budgetCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed an unused document" room=(\S+) charged_before=(\d+) charged=(\d+) limit=(\d+) making_room_for=(\d+)`)
 
 // budgetClose is one close the server logged: the room, what the budget charged before and after

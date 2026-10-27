@@ -32,6 +32,14 @@ func (s *Service) SetRoomBudgetForTest(bytes int64) int64 {
 	return bytes
 }
 
+// RoomLiveForTest reports whether artifactID's room is resident in this server, which a
+// real-process drive reads to see that a room was closed or refused. It reads the server's rooms
+// and nothing else, so it can neither load nor rebuild a document. It is mounted only through
+// Dispatch's test-hook route.
+func (s *Service) RoomLiveForTest(artifactID string) bool {
+	return s.srv.GetDoc(artifactID) != nil
+}
+
 // AppendRenderOnlySchemaViolationForTest appends to artifactID's stored history a tree the
 // validator reads and the renderer refuses: a checked task whose empty first paragraph precedes a
 // heading has no markdown the browser reads back as a task. Tests here and in package api build

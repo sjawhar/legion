@@ -324,9 +324,11 @@ func TestALongEditsKeystrokesLeaveTheRoomWhatTheirUpdatesLeaveThroughTheHook(t *
 // TestTheHeaviestWholeStateFrameABrowserCanGrowFitsTheMessageFloor writes them - from a small
 // document until the hook's struct total refuses a single pair more. Updates start at 4,096 pairs,
 // and each refused one is tried again at half its pairs. It returns the room's state at the start
-// and at the end. What it measures is the frame a struct at the decode cap, so the room's totals
-// count no unrendered bytes: the unrendered bound (maxUnrenderedBytes) would refuse the shape at
-// about 22,000 pairs, long before the struct total does.
+// and at the end. What it measures is the frame a struct at the decode cap, so the room's count
+// holds structs alone, neither unrendered bytes nor the frame: the unrendered bound
+// (maxUnrenderedBytes) would refuse the shape at about 22,000 pairs, long before the struct total
+// does, and the frame total then counts only what the updates add, under F at the shape's
+// 33,609,343-byte end.
 func densestStructCapRoom(t *testing.T) (start, end []byte) {
 	t.Helper()
 	const pair = "- \n\n* \n\n"
@@ -413,9 +415,15 @@ func heapOfOneCopy(t *testing.T, state []byte) int64 {
 
 // agentRewrittenState is the stored state of a document an agent has rewritten whole through the
 // API (ReplaceText), each write 16,384 headings of fresh text at both halves of the byte and element
-// bounds, until a write is refused; and the refusal.
+// bounds, until a write is refused; and the refusal. It is built once a test process
+// (atCapStates): the 28 writes take about 200 s here, and the state does not change between tests.
 func agentRewrittenState(t *testing.T) ([]byte, error) {
 	t.Helper()
+	atCapStates.Lock()
+	defer atCapStates.Unlock()
+	if atCapStates.agentRewritten != nil {
+		return atCapStates.agentRewritten, atCapStates.agentRefusal
+	}
 	service, artifactID := newTestService(t)
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	const headingBytes = 64
@@ -435,6 +443,7 @@ func agentRewrittenState(t *testing.T) ([]byte, error) {
 				t.Fatal(loadErr)
 			}
 			t.Logf("the agent's write %d was refused: %v", write+1, err)
+			atCapStates.agentRewritten, atCapStates.agentRefusal = loaded.Update, err
 			return loaded.Update, err
 		}
 	}

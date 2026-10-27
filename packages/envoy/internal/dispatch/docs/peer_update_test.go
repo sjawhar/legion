@@ -398,8 +398,9 @@ func TestTheHeaviestWholeStateFrameFitsTheMessageFloor(t *testing.T) {
 // to the next mebibyte, and under the 64 MiB ygo allowed before (maxMessageBytes). The heaviest
 // the server stores is a document an agent rewrote whole through the API until the decode cap
 // refused a write, whose state carries every rewrite's tombstones: built here, its frame is held
-// within serverStoredStateFrame, the figure the floor is set from, up to the few bytes a write's
-// random client ids move it by.
+// within a hundredth of serverStoredStateFrame, the figure the floor is set from. The writes'
+// random client ids move it from run to run: 12,555,674 and 12,630,814 bytes were measured on
+// 2026-10-26 and 2026-10-27, and four times either is still under a quarter more than F.
 func TestTheHeaviestWholeStateFrameTheServerStoresFitsTheMessageFloor(t *testing.T) {
 	state, refusal := agentRewrittenState(t)
 	if !errors.Is(refusal, ErrDocumentTooLarge) {
@@ -409,8 +410,8 @@ func TestTheHeaviestWholeStateFrameTheServerStoresFitsTheMessageFloor(t *testing
 	floor := max(4*serverStoredStateFrame, heaviestHandoffBound*5/4+1)
 	t.Logf("an agent's rewrites stored %d structs rendering %d bytes in a %d-byte frame; F is %d; the floor is %d, from four times %d and a quarter more than F",
 		structs, rendered, len(state), heaviestHandoffBound, maxMessageBytes, serverStoredStateFrame)
-	if len(state) > serverStoredStateFrame+serverStoredStateFrame/1000 {
-		t.Fatalf("the stored frame is %d bytes, past the %d the floor is set from: measure it again and set the floor from it", len(state), serverStoredStateFrame)
+	if len(state) > serverStoredStateFrame+serverStoredStateFrame/100 {
+		t.Fatalf("the stored frame is %d bytes, past the %d the floor is set from by more than a hundredth: measure it again and set the floor from it", len(state), serverStoredStateFrame)
 	}
 	if maxMessageBytes < floor || maxMessageBytes-1<<20 >= floor || maxMessageBytes > 64<<20 {
 		t.Fatalf("the floor is %d bytes, want the next mebibyte at or above %d, and at most the 64 MiB ygo allowed before", maxMessageBytes, floor)

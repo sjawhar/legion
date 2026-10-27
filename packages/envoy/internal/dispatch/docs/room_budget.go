@@ -950,13 +950,14 @@ func (b *roomBudget) reweighLocked(charge *roomCharge) {
 // which integrates nothing, adds nothing; and a struct parked until what it waits for arrives
 // counts in the transaction that integrates it.
 //
-// What no rendering shows is left out: a struct directly under the margin, and JSON, binary,
-// deleted and GC content, which the Proof schema renders nowhere. A browser's are charged in the
-// structure part instead (peerWeighing.structureHeap); the server's own writes bound the margin at
-// maxMarginBytes (growth.go:171) and their margin is priced through the rendering alone. Any
-// content under an item or beside a neighbour may be an XML element's attribute, which renders,
-// and is counted. An update the walk cannot read is counted whole, which is never less than its
-// content.
+// What no rendering shows is left out: a struct directly under the margin, under a rebuilt
+// history's retired clients (parentRetired) or under any other named root, a GC run or a skip, and
+// JSON, binary, deleted and GC content, which the Proof schema renders nowhere. A browser's are
+// charged in the structure part instead (peerWeighing.structureHeap); the server's own writes
+// bound the margin at maxMarginBytes (growth.go:171) and their margin is priced through the
+// rendering alone. Any content under an item or beside a neighbour may be an XML element's
+// attribute, which renders, and is counted. An update the walk cannot read is counted whole, which
+// is never less than its content.
 func contentAdded(update []byte) int64 {
 	var added renderedContent
 	if _, err := walkUpdate(update, fromRoom, &added); err != nil {

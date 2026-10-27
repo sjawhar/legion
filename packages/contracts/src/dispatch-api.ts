@@ -2473,6 +2473,13 @@ export const DOCUMENT_TOO_LARGE_CLOSE_REASON = "DOC_TOO_LARGE";
  *  its own. Generated into Go as `contracts.DocumentTooTangledCloseReason`. */
 export const DOCUMENT_TOO_TANGLED_CLOSE_REASON = "DOC_TOO_TANGLED";
 
+/** The reason the document websocket closes with `DOCUMENT_TOO_LARGE_CLOSE_CODE` when the document
+ *  must be rebuilt before it can take the update: the browser still holds the edit history a
+ *  rebuild of the document replaced, so the update is refused whole, with nothing of it stored or
+ *  relayed. Permanent like the size refusal: the dashboard drops the refused edit and re-reads the
+ *  rebuilt document. Generated into Go as `contracts.DocumentNeedsRebuildCloseReason`. */
+export const DOCUMENT_NEEDS_REBUILD_CLOSE_REASON = "DOC_NEEDS_REBUILD";
+
 /**
  * The close code the document websocket (`/ws/doc/{room}`) refuses with when the memory budget over
  * the documents it holds open is full and no room can be closed: a browser asking for one more

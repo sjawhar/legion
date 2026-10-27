@@ -158,12 +158,22 @@ func TestTheUpdateWalkNamesParentsAndContent(t *testing.T) {
 	if tally.structs != uint64(len(want)) || len(walked.structs) != len(want) {
 		t.Fatalf("the walk counted %d structs and showed %d, want %d", tally.structs, len(walked.structs), len(want))
 	}
+	size := 0
 	for i, s := range walked.structs {
 		w := want[i]
 		if s.client != w.client || s.clock != w.clock || s.length != w.length || s.kind != w.kind || s.parent != w.parent ||
 			s.keyed != w.keyed || string(s.key) != string(w.key) || string(s.root) != string(w.root) || string(s.content) != string(w.content) {
 			t.Errorf("struct %d: walked %+v, want %+v", i, s, w)
 		}
+		size += s.size
+	}
+	// The third struct names the first as its origin, and the sizes, the client group's header in
+	// the first, are every byte between the update's count of clients and its delete set.
+	if s := walked.structs[2]; !s.hasOrigin || s.origin != (structID{client: 9, clock: 0}) || s.hasRightOrigin {
+		t.Errorf("the struct with an origin was walked naming %t %+v and a right origin %t, want 9:0 alone", s.hasOrigin, s.origin, s.hasRightOrigin)
+	}
+	if clients := len(varuint(1)); size != tally.deletesAt-clients {
+		t.Errorf("the walked structs' sizes sum to %d bytes, want the %d between the client count and the delete set", size, tally.deletesAt-clients)
 	}
 }
 
