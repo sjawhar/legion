@@ -26,6 +26,11 @@
 
 ### Changed
 
+- The `dispatch` command (`dist/dispatch.js`) prints every open thread anchored on a document
+  `dispatch doc-read` reads in full: an open ask with its question and every reply under it, and
+  a comment thread with its root and every reply's author, time and text, in place of the one line
+  of ask and comment ids that never showed a reply. The bundled `dispatch_doc_read` description
+  says so, since `dist/` was regenerated (INFRA-596).
 - The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
   `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
   while its architect waits on a person's answer, and the issue field `waitingOn`, naming the

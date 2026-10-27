@@ -176,6 +176,9 @@
 
 ### Changed
 
+- The `dispatch_doc_read` description says a read prints every open thread anchored on the
+  document in full after the markdown, an open ask's replies included, and no resolved thread or
+  closed ask (INFRA-596).
 - `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
   place of the dispatch skill's "Writing a spec". Five descriptions take a rule the
   dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`

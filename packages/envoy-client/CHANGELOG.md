@@ -4,6 +4,19 @@
 
 ### Changed
 
+- `dispatch doc-read` prints every open thread anchored on the document in full, after the
+  document token and approval lines, under `Open anchored threads:`: an open ask as
+  `ask <id> · <author> · <time>`, its quote and `Question: <question>`; a comment thread as
+  `comment <id> · <author> · <time>`, its quote and `Body: <text>`. Under either, each reply
+  follows as `reply <id> · <author> · <time>` and `Body: <text>`, oldest first, none cut: an ask's
+  replies are the comments whose `ask_id` names it. It replaces the
+  `Open anchored asks/comments: ask <id>, comment <id>` line, which named a thread a person had
+  reopened by replying by its root's id alone and never showed the reply. A resolved thread, and
+  an ask that is answered or resolved, is not printed, nor are its replies. The threads come from
+  one read of the issue's comments without the `artifact` filter (a reply carries no anchor, so
+  the filter dropped every reply), or of a project document's own
+  `GET /api/v1/artifacts/{id}/comments`, grouped by ask or root; `DispatchClient.getComments`
+  loses its `artifact` argument (INFRA-596).
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
