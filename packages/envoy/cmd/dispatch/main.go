@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -320,10 +319,9 @@ func main() {
 	}
 
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
-		SigningKey: signingKey,
-		WebDistDir: webDistDir,
-		AssetStore: dashboard.NewStore(database.Pool),
-		// The entry chunk publishDashboard read is the one GET /api/v1/dashboard/builds answers.
+		SigningKey:     signingKey,
+		WebDistDir:     webDistDir,
+		AssetStore:     dashboard.NewStore(database.Pool),
 		DashboardEntry: dashboardBuild.Entry,
 		People:         people,
 		Sessions:       sessions,
@@ -926,7 +924,6 @@ func publishDashboard(ctx context.Context, pool *store.Pool, webDistDir string, 
 	switch {
 	case errors.Is(err, dashboard.ErrNoBuild):
 		slog.Info("dispatch: no dashboard build to publish: the web dist holds no index.html", "dir", webDistDir)
-		published = dashboard.Published{}
 	case err != nil:
 		return dashboard.Published{}, err
 	default:
@@ -937,16 +934,10 @@ func publishDashboard(ctx context.Context, pool *store.Pool, webDistDir string, 
 	// beside the newest dashboard.KeepNewest. This process registers only once it listens, after
 	// this, so it is not among them yet; the publish above has just renewed its build's
 	// last_started_at, which puts it among the newest.
-	live, err := processes.Live(ctx, pool)
+	liveBuilds, err := api.LiveDashboardBuilds(ctx, pool)
 	if err != nil {
 		slog.Error("dispatch: prune dashboard builds", "error", err)
 		return published, nil
-	}
-	var liveBuilds []string
-	for _, process := range live {
-		if process.DashboardBuild != "" && !slices.Contains(liveBuilds, process.DashboardBuild) {
-			liveBuilds = append(liveBuilds, process.DashboardBuild)
-		}
 	}
 	pruned, err := dashboard.Prune(ctx, pool, liveBuilds)
 	if err != nil {

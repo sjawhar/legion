@@ -37,9 +37,9 @@ export function useConnectionState(): ConnectionState {
 }
 
 /** The window the first reconnect after a dropped connection is spread over: uniformly in
- *  [0, 2 s), a mean of 1 s, the fixed delay it replaced. A Dispatch restart or roll drops every
- *  tab at the same moment; spread, their reconnects and the refreshes that follow each one reach
- *  the new process over two seconds instead of in one burst. */
+ *  [0, 2 s), a mean of 1 s. A Dispatch restart or roll drops every tab at the same moment;
+ *  spread, their reconnects and the refreshes that follow each one reach the new process over two
+ *  seconds instead of in one burst. */
 export const RECONNECT_SPREAD_MS = 2_000;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 30_000;

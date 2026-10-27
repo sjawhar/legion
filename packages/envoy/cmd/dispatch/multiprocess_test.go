@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1569,11 +1570,7 @@ func TestDashboardServesABurstOfTheOtherBuildsFiles(t *testing.T) {
 	a := writeDashboardBuild(t, "a")
 	startOnBuild(t, database, a)
 	b := startOnBuild(t, database, writeDashboardBuild(t, "b"))
-	paths := make([]string, 0, len(a.assets))
-	for path := range a.assets {
-		paths = append(paths, path)
-	}
-	slices.Sort(paths)
+	paths := slices.Sorted(maps.Keys(a.assets))
 
 	const burst = 200
 	client := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: burst}}
@@ -1581,13 +1578,11 @@ func TestDashboardServesABurstOfTheOtherBuildsFiles(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := range burst {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			path := paths[i%len(paths)]
 			failures[i] = getAsset(client, b, path, a.assets[path])
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

@@ -1,5 +1,5 @@
 import { resetFakeEnvoy, setLiveSessions } from "./agents";
-import { baseUrl, devSignInPath, listAgents, sessionCookieName } from "./api";
+import { baseUrl, devSignInPath, listAgents, sessionCookieFrom } from "./api";
 import { harnessPorts } from "./harness-ports";
 import {
   type DispatchProcess,
@@ -59,10 +59,7 @@ async function requireOneCookieKey(): Promise<void> {
     headers: pinnedTo("a"),
     redirect: "manual",
   });
-  const cookie = signIn.headers
-    .getSetCookie()
-    .find((header) => header.startsWith(`${sessionCookieName}=`))
-    ?.split(";")[0];
+  const cookie = sessionCookieFrom(signIn);
   if (signIn.status !== 302 || cookie === undefined) {
     throw new Error(
       `The Dispatch e2e harness cannot start: dev sign-in on Dispatch A answered ` +

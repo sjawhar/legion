@@ -83,6 +83,14 @@ export function devSignInPath(login: string): string {
   return `/auth/_dev/signin?login=${encodeURIComponent(login)}`;
 }
 
+/** The `name=value` of the session cookie `response` sets, or undefined when it sets none. */
+export function sessionCookieFrom(response: Response): string | undefined {
+  return response.headers
+    .getSetCookie()
+    .find((header) => header.startsWith(`${sessionCookieName}=`))
+    ?.split(";")[0];
+}
+
 export function devSignInError(login: string, status: number, responseText: string): Error {
   return new Error(`dev sign-in as ${login} failed: ${status} ${responseText}`);
 }
@@ -101,10 +109,7 @@ function sessionCookie(login: string): Promise<string> {
   }
   const cookie = fetch(new URL(devSignInPath(login), baseUrl), { redirect: "manual" }).then(
     async (response) => {
-      const value = response.headers
-        .getSetCookie()
-        .find((header) => header.startsWith(`${sessionCookieName}=`))
-        ?.split(";")[0];
+      const value = sessionCookieFrom(response);
       if (response.status !== 302 || value === undefined) {
         throw devSignInError(login, response.status, await response.text());
       }

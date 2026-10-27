@@ -32,6 +32,7 @@ import { setCredentialRecords } from "./fake-broker-helpers";
 import { seedFakeGithub } from "./fake-github-helpers";
 import {
   type DispatchProcess,
+  dispatchProcesses,
   pinnedTo,
   processPinCookie,
   processPinHeader,
@@ -587,7 +588,7 @@ test("every route renders with its page from Dispatch B and every asset from Dis
 
 test("every file of both builds' assets answers 200 with its bytes from Dispatch A and from Dispatch B", async () => {
   const wrong: string[] = [];
-  for (const target of ["a", "b"] as const) {
+  for (const target of dispatchProcesses) {
     for (const build of [builds.a, builds.b]) {
       await Promise.all(
         build.assets.map(async (file) => {
