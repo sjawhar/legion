@@ -2,39 +2,39 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-529",
-  "completed": "2026-10-27T02:56:00Z",
-  "round": 3,
-  "testedHead": "aa697447115385954f823d0f0458e245ce5d1efe",
-  "codeHead": "65158f49ef623a9dfe0077694f4984ce3dc084a8",
+  "completed": "2026-10-27T03:37:00Z",
+  "round": 4,
+  "testedHead": "b0c0c10fbb54bb269bdd6db2cb942fdc669927db",
+  "codeHead": "0d5fff64e7ad",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command on the tester lane (port 28777, database dispatch_infra529_tester) at aa6974471153: cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium -> '✓ 1 … :19:1 (5.5s)', '✓ 2 … :52:1 (2.6s)', '✓ 3 … :89:1 Conversation draws a message's lone-CR unknown block once, each line on its own (2.3s)'."
+    "how": "Re-ran the implementer's command on the tester lane (port 28777, database dispatch_infra529_tester) at b0c0c10fbb54: cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium -> rows 1-4 ✓, '✓ 4 … :119:1 Conversation draws the unknown block of a message that starts with a byte-order mark (2.2s)', '4 passed (26.1s)'."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "A1: comment, message and ask bodies with bold text and a :::note block show the bold formatted and the note's lines as text",
+      "criterion": "A1 and the earlier rows: unknown directives drawn as text in comment, message and ask; typed blocks whose content breaks their rule keep every line; lone-CR bodies draw each line once",
       "surface": "Dispatch Conversation tab, Chromium, real Go Dispatch server and Postgres 17 + pgvector in the issue pod (tester lane, port 28777, database dispatch_infra529_tester)",
       "command": "cd packages/dispatch && . /legion/harness/env.sh && bun run build:web && bunx playwright test --config e2e/playwright.config.ts unknown-directive.e2e.ts --project chromium",
-      "observed": "✓ 1 [chromium] › e2e/unknown-directive.e2e.ts:19:1 (5.5s); rows 2 and 3 ✓ too.",
-      "headSha": "aa697447115385954f823d0f0458e245ce5d1efe",
-      "negativeControl": "Base 7f7edb8de3e3 fails row 1 (implementer's run, https://github.com/sjawhar/legion/pull/2303#issuecomment-6431409111); the default (not read-only) engine still throws for every unknown-directive body probed this round."
+      "observed": "✓ 1 … :19:1 (3.2s), ✓ 2 … :52:1 (3.2s), ✓ 3 … :89:1 (2.1s)",
+      "headSha": "b0c0c10fbb54bb269bdd6db2cb942fdc669927db",
+      "negativeControl": "Earlier rounds: row 1 on base 7f7edb8de3e3 shows one raw-text node; row 2 fails with the round-2 fit check bypassed; the round-3 mark handling disabled loses the ask's text (test.json rounds 2 and 3)."
     },
     {
-      "criterion": "Review findings 1-3: lone-CR lines drawn once; a block-level dispatch mark span inside an ask does not drop the ask's text; a non-fence last line is not drawn as a closing fence",
+      "criterion": "Review round 2 finding: a body that starts with U+FEFF draws its unknown block's fence lines and loses no text, in a comment, a message and an ask",
       "surface": "Dispatch Conversation tab, Chromium, same lane",
-      "command": "Row 3 of the command above, plus a throwaway spec posting three comments: 'Lead **bold**\\n\\n> :::a\\r> quoted body\\r> :::\\r'; 'Lead **bold**\\n\\n:::note\\nbody\\n\\n[x]: mailto:\\n'; 'Lead **bold**\\n\\n:::ask\\n<span data-dispatch=\"ask\" data-id=\"x\">\\n\\n# Heading words\\n\\n</span>\\n:::\\n', each thread expanded",
-      "observed": "Row 3 ✓ (2.3s). Probe blocks: [\"Lead bold\",\":::a\",\"quoted body\",\":::\"]; [\"Lead bold\",\":::note\",\"body\"] (no ':' fence); [\"Lead bold\",\":::ask\",\"Heading words\",\":::\"]; no data-markdown-fallback in any card.",
-      "headSha": "aa697447115385954f823d0f0458e245ce5d1efe",
-      "negativeControl": "Mark handling disabled in packages/proof-editor/src/read-only-directives.ts:56 (inner placeholders forced undefined, the round-2 behaviour), SPA rebuilt, probe re-run: the mark-wrapped ask card shows only [\"Lead bold\"], 'Heading words' lost. Source restored; jj status clean."
+      "command": "Row 4 of the command above, plus a throwaway spec posting '\\ufeffHello **b**\\n\\n:::note\\nbody words\\n:::\\n' (the reviewer's example) as a comment and as an ask question",
+      "observed": "Row 4 ✓ (2.2s). Probe: comment and ask cards each show paragraphs [\"Hello b\",\":::note\",\"body words\",\":::\"], 'b' strong, no data-markdown-fallback.",
+      "headSha": "b0c0c10fbb54bb269bdd6db2cb942fdc669927db",
+      "negativeControl": "BOM slice removed at packages/proof-editor/src/read-only-directives.ts:189 (source: text), SPA rebuilt: row 4 '✘ … Expected: 1 Received: 0'; probe cards [\"Hello b\",\"\",\"body words\"], both fence lines lost. Source restored; jj status clean."
     }
   ],
   "probed": [
-    "Engine (read-only, server schema): lone CR, mixed CRLF/CR, lone CR in a quote, unclosed CR; mark-wrapped heading in ask (drawn), in callout (typed), mark-wrapped paragraphs in ask (typed), mark around a note, mark in a note in an ask; '[x]: mailto:' and '…/a:::' last lines (no fence drawn); '::::note' closed by ':::' (not a fence); 4-space ':::' (code block, no fence); 2-space ':::' (fence); tab ':::' (paragraph text); ':::' in a nested quote; list in a quote; '::: y'; '::::::' closing ':::'. Every word kept, nothing thrown.",
-    "Timing: ':::a\\r:::\\r'.repeat(3555) read-only 790 ms (default 476 ms); LF version 585 ms (217 ms); long opening line 16 ms; 200 mark-wrapped asks 147 ms (default 182 ms).",
-    "Pre-existing, not this change: 2,000 nested unclosed ':::a' lines then a 21,000-char line (31,000 chars) take 66.3 s read-only and 64.3 s in the default engine; 1,000 nested closed directives take 15.9 s / 15.5 s. [INFERENCE] the cost is in the shared remark/micromark parse, since the default mode throws only after it. Sent to the architect.",
-    "Red test integrity: the two removed lines in tests/read-only-directives.test.ts since ee272bb6d857 belong to the implementer's direct-call test, not the tester's red test."
+    "Engine (read-only, server schema): BOM + note, BOM + lead paragraph, BOM + lone CR, BOM + CRLF, BOM + quote, BOM + unclosed, BOM + broken ask, BOM + mark-wrapped ask, BOM + accepted callout (stays typed), BOM alone; all draw every line. A second BOM, or a BOM mid-body, is content micromark keeps, so the line reads as paragraph text, as the parser reads it.",
+    "Copy semantics: a mark span as the last child of a note in a quote draws ':::note', 'Inner', ':::' once each.",
+    "Timing: ':::a\\r:::\\r'.repeat(3555) 516 ms; LF version 766 ms; 200 mark-wrapped asks 260 ms.",
+    "Red test integrity: the only removed lines in tests/read-only-directives.test.ts since ee272bb6d857 are the implementer's direct-call test header, not the tester's red test."
   ],
-  "ci": "Read on GitHub at code head 65158f49ef62: build, changes, lint, test, typecheck and pr-title queued (not yet run); not waited for."
+  "ci": "Read on GitHub at code head 0d5fff64e7ad: build, changes, lint, test, typecheck and pr-title queued (not yet run); not waited for."
 }
