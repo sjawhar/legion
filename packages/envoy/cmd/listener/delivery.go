@@ -380,7 +380,7 @@ func resolveLaneRoleHolder(registry roleClaimResolver, sessions *session.Session
 		}
 		now := time.Now().UnixMilli()
 		holder, holderErr := roleHolderSession(sessions, sessionID, func(holder session.SessionEntry) bool {
-			return holder.UpdatedAt > 0 && now-holder.UpdatedAt < int64(session.ClaimStaleAfter/time.Millisecond)
+			return laneHolderFresh(holder, now)
 		})
 		if holderErr == nil {
 			return laneHolderResolution{outcome: laneHolderLive, holder: sessionID, entry: holder}
@@ -399,6 +399,12 @@ func resolveLaneRoleHolder(registry roleClaimResolver, sessions *session.Session
 		return laneHolderResolution{outcome: laneHolderNotLive, holder: sessionID, release: release, lastSeen: lastSeen}
 	}
 	return laneHolderResolution{outcome: laneHolderChurned}
+}
+
+// laneHolderFresh is the role lane's liveness test of a holder's session entry at now, in Unix
+// milliseconds: the entry heartbeated within session.ClaimStaleAfter.
+func laneHolderFresh(entry session.SessionEntry, now int64) bool {
+	return entry.UpdatedAt > 0 && now-entry.UpdatedAt < int64(session.ClaimStaleAfter/time.Millisecond)
 }
 
 // resolveCoreRoleHolder resolves the current live holder for a role-lane delivery by the lane's

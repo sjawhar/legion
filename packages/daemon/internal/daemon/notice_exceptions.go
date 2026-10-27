@@ -120,23 +120,23 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	default:
 		return fmt.Errorf("%w: exception %s names reason %q", errNoticeException, envelope.EventID, exception.Reason)
 	}
-	if err := r.reholdNotice(ctx, reported, exception.Reason, exception.RecipientSession, exception.DedupeKey); err != nil {
+	if err := r.reholdNotice(ctx, reported, exception.Reason, exception.RecipientSession); err != nil {
 		return fmt.Errorf("re-hold the notice of exception %s: %w", envelope.EventID, err)
 	}
 	return nil
 }
 
 // reholdNotice queues reported's notice again after a publish its architect's session did not
-// take: the publish key went to the architect's role topic, the listener named reason, and
-// recipient is the session it forwarded to ("" when it named none). It runs from a role-lane
-// exception of an earlier listener (rehold) and from the 504 `receipt_timeout` answer of the
-// confirmed publish route (notice). A session that stopped running but is still registered
-// produces a receipt_timeout: the listener forwards to it and waits for a receipt that never
-// comes. So does the relaunch window, until the claim's agent has taken the Envoy role back. Every
-// such failure is queued, a late receipt from the claim's own session too: a Go relaunch resumes
-// the claim's session id, so a failure naming it cannot tell the stopped process from the
-// relaunched one, and a copy the session already has costs one frame its plugin drops, where a
-// skipped copy the relaunched process never saw is a notice lost.
+// take: the publish, under the dedupe key of reported's row (record.OutboxKey), went to the
+// architect's role topic, the listener named reason, and recipient is the session it forwarded to
+// ("" when it named none). It runs from a role-lane exception of an earlier listener (rehold) and
+// from the 504 `receipt_timeout` answer of the confirmed publish route (notice). A session that
+// stopped running but is still registered produces a receipt_timeout: the listener forwards to it
+// and waits for a receipt that never comes. So does the relaunch window, until the claim's agent
+// has taken the Envoy role back. Every such failure is queued, a late receipt from the claim's own
+// session too: a Go relaunch resumes the claim's session id, so a failure naming it cannot tell the
+// stopped process from the relaunched one, and a copy the session already has costs one frame its
+// plugin drops, where a skipped copy the relaunched process never saw is a notice lost.
 //
 // The notice goes back through the executor as a new row of its issue, counted in its Resends,
 // so it is routed, fenced and held as any notice is, and it is published under the dedupe key of
@@ -158,7 +158,8 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 // is sent to it. Those checks read the claim from memory, outside ApplyFact's lock, which the
 // ready handler holds, so a copy can still lose the race to a ready; the notice executor checks
 // again when it runs the row.
-func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reason, recipient, key string) error {
+func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reason, recipient string) error {
+	key := record.OutboxKey(reported.row)
 	issue, notice := reported.issue, reported.notice
 	topic := notify.RoleTopicPrefix + string(reported.architect)
 	held := r.supervisedClaim(reported.architect)

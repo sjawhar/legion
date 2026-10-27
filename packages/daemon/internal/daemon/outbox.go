@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -688,12 +689,10 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	case published == nil:
 		return nil
 	case errors.As(published, &notDelivered) && notDelivered.Reason == notify.ReasonReceiptTimeout:
-		source, ok := record.ParseOutboxKey(key)
-		if !ok {
-			return fmt.Errorf("re-hold notice row %d: its key %q names no outbox row", row.ID, key)
-		}
+		// The notice went out under the key of the row it copies, or of this row (Notice.Published).
+		source := cmp.Or(payload.ResendOf, row.ID)
 		reported := reportedNotice{issue: row.Issue, notice: notice, row: source, architect: architect}
-		if err := r.reholdNotice(ctx, reported, notDelivered.Reason, notDelivered.Holder, key); err != nil {
+		if err := r.reholdNotice(ctx, reported, notDelivered.Reason, notDelivered.Holder); err != nil {
 			return fmt.Errorf("re-hold the notice for %s that its architect %s did not take: %w", row.Issue, architect, err)
 		}
 		return nil

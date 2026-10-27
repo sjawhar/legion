@@ -469,6 +469,26 @@ func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.Session
 	return roleHolderResult{}, fmt.Errorf("role holder changed while resolving")
 }
 
+// deliveryModeRefusal is the refusal of a message to sessionID, whose session entry is entry, by
+// its payload's delivery mode, read as the receiving client reads it (frameDeliveryMode): the mode
+// cannot be read unambiguously, or entry does not advertise it (hasCapability). It is "" when entry
+// can take the payload. sendHandler and a role send through the publish route
+// (roleSend.settledBeforeForward) both answer a refusal 403 with this text.
+func deliveryModeRefusal(sessionID string, entry session.SessionEntry, payload string) string {
+	var framed *string
+	if payload != "" {
+		framed = &payload
+	}
+	mode, err := frameDeliveryMode(framed)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("session %s (%s) sent a delivery mode that cannot be read unambiguously", sessionID, entry.Title)
+	case mode != "" && !hasCapability(entry.Capabilities, mode):
+		return fmt.Sprintf("session %s (%s) does not advertise %s", sessionID, entry.Title, mode)
+	}
+	return ""
+}
+
 // sendHandler publishes a direct message only while the target session has a
 // live registry entry.
 func sendHandler(d *listenerDeps) http.HandlerFunc {
@@ -515,21 +535,8 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
 			return
 		}
-		var itemPayload *string
-		if item.Payload != "" {
-			itemPayload = &item.Payload
-		}
-		mode, deliveryErr := frameDeliveryMode(itemPayload)
-		if deliveryErr != nil {
-			writeJSONError(w, http.StatusForbidden, fmt.Sprintf(
-				"session %s (%s) sent a delivery mode that cannot be read unambiguously", targetSession, target.Title,
-			))
-			return
-		}
-		if mode != "" && !hasCapability(target.Capabilities, mode) {
-			writeJSONError(w, http.StatusForbidden, fmt.Sprintf(
-				"session %s (%s) does not advertise %s", targetSession, target.Title, mode,
-			))
+		if refusal := deliveryModeRefusal(targetSession, target, item.Payload); refusal != "" {
+			writeJSONError(w, http.StatusForbidden, refusal)
 			return
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)

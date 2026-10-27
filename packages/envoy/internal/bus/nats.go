@@ -911,7 +911,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	}
 	options := []nats.PubOpt{nats.Context(ctx)}
 	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
-		options = append(options, nats.MsgId(item.DedupeKey+":"+item.Topic))
+		options = append(options, nats.MsgId(ForwardMsgID(item.DedupeKey, item.Topic)))
 	}
 	js := c.JS()
 	ack, err := js.Publish(item.Topic, data, options...)
@@ -968,11 +968,13 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 // the connection dropped, since either may have hidden its denial.
 var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 
-// ForwardMsgID is the Nats-Msg-Id of a forward of an envelope whose dedupe key is dedupeKey to
-// subject: the stream, which captures every agent subject, keeps one copy of a message per
-// recipient however many times a sender forwards it, and a forward of the same message to another
-// recipient is a copy of its own. It is the shape the stream's own publishes use (dedupe key, a
-// colon, the subject), and every forward to a session's subject sets its header through it.
+// ForwardMsgID is the Nats-Msg-Id of an envelope whose dedupe key is dedupeKey published or
+// forwarded to subject: the dedupe key, a colon, the subject. publishJetStream stores an envelope
+// that earns a MsgId under it, so each topic one upstream event is published on keeps its own
+// copy, and every forward to a session's subject (RequestCoreTo) sets its header through it, so the
+// stream, which captures every agent subject, keeps one copy of a message per recipient however
+// many times a sender forwards it, and a forward of the same message to another recipient is a
+// copy of its own.
 func ForwardMsgID(dedupeKey, subject string) string {
 	return dedupeKey + ":" + subject
 }

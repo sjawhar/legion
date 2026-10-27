@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
 
@@ -99,14 +100,7 @@ func receiptWindow(ctx context.Context) time.Duration {
 // pauseBeforeRetry waits publishRetryPause, or until ctx ends, and reports whether the send has time
 // left for another attempt.
 func pauseBeforeRetry(ctx context.Context) bool {
-	timer := time.NewTimer(publishRetryPause)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return ctx.Err() == nil
-	case <-ctx.Done():
-		return false
-	}
+	return waitUnlessDone(ctx, publishRetryPause) == nil && ctx.Err() == nil
 }
 
 // forwardRefused reports whether a forward failed in a way another attempt repeats: NATS refuses
@@ -165,14 +159,16 @@ func (s *roleSend) settle(outcome, metricStatus string) {
 		slog.String("elapsed", time.Since(s.arrived).String()))
 }
 
-// delivered answers 200 with the envelope and the holder that took it.
-func (s *roleSend) delivered(outcome, metricStatus string) {
+// delivered answers 200 with the envelope and the holder that took it; outcome is also the label
+// the role lane gives it.
+func (s *roleSend) delivered(outcome string) {
 	writeJSON(s.w, http.StatusOK, publishResponse{Envelope: s.item, Holder: s.holder})
-	s.settle(outcome, metricStatus)
+	s.settle(outcome, outcome)
 }
 
-// noHolder answers today's 404 for a role with no live claim, which the Legion daemon reads as
-// notify.ErrNoHolder. The role lane counts an unclaimed role skipped and a lapsed holder failed.
+// noHolder answers writeRoleHolderError's 404 (unclaimed or holder_lapsed) for a role with no live
+// claim, which the Legion daemon reads as notify.ErrNoHolder. The role lane counts an unclaimed
+// role skipped and a lapsed holder failed.
 func (s *roleSend) noHolder(result roleHolderResult) {
 	writeRoleHolderError(s.w, s.role, result)
 	metricStatus := "failed"
@@ -203,55 +199,44 @@ func (s *roleSend) timedOut(lastForward error) {
 	s.settle(reason, deliveryStatus(reason))
 }
 
-// settledBeforeForward applies, to a holder the send has not checked yet, the rules the role lane
-// applies before it forwards, in the lane's order, and reports whether it answered: the source
-// session holds the role (the lane's echo skip) or the holder already took this dedupe key, both
-// answered 200 with nothing forwarded; the holder cannot take the payload's delivery mode, read as
-// sendHandler and roleTopicDelivery read it (frameDeliveryMode + hasCapability), answered 403.
-// Guarding after the dedupe check keeps a delivered repeat from being judged by the holder's
-// current capabilities.
-func (s *roleSend) settledBeforeForward(title string, capabilities []string) bool {
+// settledBeforeForward applies, to a holder the send has not checked yet, whose session entry is
+// entry, the rules the role lane applies before it forwards, in the lane's order, and reports
+// whether it answered: the source session holds the role (the lane's echo skip) or the holder
+// already took this dedupe key, both answered 200 with nothing forwarded; the holder cannot take
+// the payload's delivery mode (deliveryModeRefusal, sendHandler's refusal, read as
+// roleTopicDelivery reads it), answered 403. Guarding after the dedupe check keeps a delivered
+// repeat from being judged by the holder's current capabilities.
+func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 	if s.item.SourceSession != "" && s.item.SourceSession == s.holder {
-		s.delivered("skipped", "skipped")
+		s.delivered("skipped")
 		return true
 	}
 	if s.d.dedupeCache.Seen(s.item.DedupeKey, s.holder) {
-		s.delivered("dedupe", "dedupe")
+		s.delivered("dedupe")
 		return true
 	}
-	var payload *string
-	if s.item.Payload != "" {
-		payload = &s.item.Payload
-	}
-	mode, err := frameDeliveryMode(payload)
-	switch {
-	case err != nil:
-		writeJSON(s.w, http.StatusForbidden, capabilityRefusal{
-			Error:  fmt.Sprintf("session %s (%s) sent a delivery mode that cannot be read unambiguously", s.holder, title),
-			Reason: "capability",
-			Holder: s.holder,
-		})
-	case mode != "" && !hasCapability(capabilities, mode):
-		writeJSON(s.w, http.StatusForbidden, capabilityRefusal{
-			Error:  fmt.Sprintf("session %s (%s) does not advertise %s", s.holder, title, mode),
-			Reason: "capability",
-			Holder: s.holder,
-		})
-	default:
+	refusal := deliveryModeRefusal(s.holder, entry, s.item.Payload)
+	if refusal == "" {
 		return false
 	}
+	writeJSON(s.w, http.StatusForbidden, capabilityRefusal{
+		Error:  refusal,
+		Reason: "capability",
+		Holder: s.holder,
+	})
 	s.settle("capability", "failed")
 	return true
 }
 
 // sendToRole delivers a role message through the publish route. The first resolution keeps
 // resolveLiveRoleHolder's rule and its answers (404 unclaimed or holder_lapsed, a read error's
-// 500). Each attempt then resolves the holder again by the role lane's rule
-// (resolveLaneRoleHolder), so a holder that relaunched under a new session between attempts gets
-// the next one, and forwards the same envelope, under the role forward's dedupe key, with a receipt
-// window of what is left of the send, at most roleReceiptTimeout. Every forward carries the same
-// Nats-Msg-Id (bus.Client.RequestCoreTo), so the stream, which captures agent subjects, keeps one
-// copy however many attempts there are.
+// 500). The first attempt forwards to that holder when its session entry passes the role lane's
+// freshness test (laneHolderFresh), without reading the claim again; every other attempt resolves
+// the holder again by the role lane's rule (resolveLaneRoleHolder), so a holder that relaunched
+// under a new session between attempts gets the next one. Each attempt forwards the same envelope,
+// under the role forward's dedupe key, with a receipt window of what is left of the send, at most
+// roleReceiptTimeout. Every forward carries the same Nats-Msg-Id (bus.Client.RequestCoreTo), so the
+// stream, which captures agent subjects, keeps one copy however many attempts there are.
 func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time) {
 	send := &roleSend{w: w, d: d, item: item, role: role, arrived: arrived}
 	type liveResolution struct {
@@ -283,19 +268,24 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, ite
 		return
 	}
 	send.item.Sender = sender
-	if send.settledBeforeForward(first.result.entry.Title, first.result.entry.Capabilities) {
+	if send.settledBeforeForward(first.result.entry) {
 		return
 	}
 	checked := send.holder
 	forwarded := send.item
 	forwarded.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
 	var lastForward error
-	for {
-		resolved, err := readBefore(ctx, func() laneHolderResolution {
-			return resolveLaneRoleHolder(d.registry, d.sessions, role)
-		})
-		if err != nil {
-			break
+	for pass := 0; ; pass++ {
+		var resolved laneHolderResolution
+		if pass == 0 && laneHolderFresh(first.result.entry, time.Now().UnixMilli()) {
+			resolved = laneHolderResolution{outcome: laneHolderLive, holder: first.result.holder, entry: first.result.entry}
+		} else {
+			resolved, err = readBefore(ctx, func() laneHolderResolution {
+				return resolveLaneRoleHolder(d.registry, d.sessions, role)
+			})
+			if err != nil {
+				break
+			}
 		}
 		if resolved.holder != "" {
 			send.holder = resolved.holder
@@ -316,7 +306,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, ite
 		case resolved.outcome == laneHolderLive:
 			if send.holder != checked {
 				checked = send.holder
-				if send.settledBeforeForward(resolved.entry.Title, resolved.entry.Capabilities) {
+				if send.settledBeforeForward(resolved.entry) {
 					return
 				}
 			}
@@ -329,7 +319,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, d *listenerDeps, ite
 			err := d.forward(contracts.AgentSubject(send.holder), forwarded, window)
 			if err == nil {
 				d.dedupeCache.Record(item.DedupeKey, send.holder)
-				send.delivered("delivered", "delivered")
+				send.delivered("delivered")
 				return
 			}
 			if forwardRefused(err) {
