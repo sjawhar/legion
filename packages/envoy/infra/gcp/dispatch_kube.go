@@ -106,8 +106,9 @@ func outputString(value any) (string, error) {
 // scale-down and node auto-upgrade only (node repair, maintenance and drains still evict), on a
 // node of the pod's own whenever possible, and with each pod raised to at least 500m CPU and 512Mi
 // memory, the floor Autopilot also holds a pod with pod anti-affinity to, which every Dispatch pod
-// carries (dispatchSpread). So no pod here requests less: the resolver refuses an appCpu or
-// appMemory that would take the app pod below that (newDispatchAppResources).
+// carries (dispatchSpread). So no pod here requests less: the resolver refuses an appCpu,
+// appMemory, proxyCpu or proxyMemory that would take the app pod below that
+// (newDispatchAppResources).
 const safeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 
 // dispatchSpread keeps the pods selector matches, a Deployment's own, apart at any replica count:
@@ -602,7 +603,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			corev1.ContainerArgs{
 				Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"),
 				Args:      pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), pulumi.String("--health-check"), pulumi.String("--http-address=0.0.0.0"), pulumi.String("--http-port=9801"), cloud.instance.ConnectionName},
-				Resources: resources(dispatchProxyCPU, dispatchProxyMemory), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)},
+				Resources: resources(s.proxyCPU, s.proxyMemory), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)},
 				StartupProbe: proxyStartup, LivenessProbe: proxyLiveness,
 			},
 		},

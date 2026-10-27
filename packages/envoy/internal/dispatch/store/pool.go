@@ -149,9 +149,16 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // blocked writer is all it takes to starve everything else: with four writers parked on one
 // issue's row lock, a read of an unrelated issue waited the whole seventeen seconds the lock
 // was held, where sixteen connections served 3,853 such reads at a four-millisecond median.
-// The shared Aurora cluster has thousands of connections spare, so the ceiling is picked here
-// rather than derived from the task's CPU allotment or read out of the DSN another
-// repository's URL builder writes.
+// The ceiling is picked here rather than derived from the task's CPU allotment or read out of
+// the DSN another repository's URL builder writes, and the database bounds it from above.
+// Dispatch's database is the gcp:Dispatch component's Cloud SQL Postgres instance, whose
+// default max_connections follows its tier's memory - 100 from 3.75 GB, 500 from 15 GB
+// (https://cloud.google.com/sql/docs/postgres/flags, max_connections) - and every server pod
+// opens up to the sum of its pools: this one, roomsPoolSize, healthPoolSize, leasePoolSize and
+// the connections the listener pool dials and hands off, one per permanent listener. That sum
+// times the pod count, plus one pod during a rolling update, must stay under max_connections,
+// so raising a pool or the pod count is checked against it: read SHOW max_connections on the
+// instance before raising a pool.
 const sharedPoolSize = 16
 
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always

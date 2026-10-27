@@ -23,9 +23,20 @@ const dispatchType = "envoy-infra:gcp:Dispatch"
 
 const (
 	defaultDispatchDatabaseVersion = "POSTGRES_16"
-	defaultDispatchDatabaseTier    = "db-custom-1-3840"
-	defaultDispatchNamespace       = "dispatch"
-	defaultDispatchReplicas        = 1
+	// defaultDispatchDatabaseTier is the Cloud SQL tier when databaseTier is unset: 4 vCPU and
+	// 15 GB, the size an operator already chose for this deployment. Cloud SQL's default
+	// max_connections follows the instance's memory, and from 15 to under 30 GB it is 500
+	// (https://cloud.google.com/sql/docs/postgres/flags, max_connections). Every server pod opens
+	// up to the sum of its pools (packages/envoy/internal/dispatch/store/pool.go): 16 shared, on
+	// which migrations run too, 4 rooms, 1 health, 8 leases, and the 3 LISTEN connections the
+	// listener pool dials and hands off, 32 in all; the listener's and the front door's pods open
+	// none. 32 connections x 15 pods is 480, inside 500 with 20 to spare, and a rolling update
+	// runs replicas plus one pod (maxSurge), so up to 14 replicas roll inside it. The previous
+	// default, db-custom-1-3840 (3.75 GB, 100 connections), held three pods, so two replicas
+	// rolling, with 4 connections to spare, and its one vCPU served every pod's queries.
+	defaultDispatchDatabaseTier = "db-custom-4-15360"
+	defaultDispatchNamespace    = "dispatch"
+	defaultDispatchReplicas     = 1
 
 	// defaultDispatchFrontDoorReplicas and defaultDispatchListenerReplicas are the front door's
 	// and the listener's pod counts when frontDoorReplicas and listenerReplicas are unset. The
@@ -63,10 +74,19 @@ const (
 	defaultDispatchAppCPU    = "1"
 	defaultDispatchAppMemory = "4Gi"
 
-	// dispatchProxyCPU and dispatchProxyMemory size the app pod's cloud-sql-proxy sidecar, which
-	// Autopilot counts in the pod's request beside envoy-dispatch.
-	dispatchProxyCPU    = "200m"
-	dispatchProxyMemory = "256Mi"
+	// defaultDispatchProxyCPU and defaultDispatchProxyMemory size the app pod's cloud-sql-proxy
+	// sidecar when proxyCpu and proxyMemory are unset; Autopilot counts it in the pod's request
+	// beside envoy-dispatch. Every database call of the pod passes through the proxy's TLS: up
+	// to 32 connections at once (defaultDispatchDatabaseTier counts them). The proxy's own
+	// Kubernetes sidecar example requests 1 CPU, since its CPU use scales linearly with the IO
+	// between the database and the application, and 2Gi, since its memory scales linearly with
+	// the active connections
+	// (https://github.com/GoogleCloudPlatform/cloud-sql-proxy/blob/v2.26.3/examples/k8s-sidecar/README.md,
+	// "Run the Cloud SQL Auth Proxy as a sidecar"). One server pod's pools are that example's
+	// load, so these are its values. With the app's defaults the pod requests 2 CPU and 6Gi,
+	// inside Autopilot's bounds below.
+	defaultDispatchProxyCPU    = "1"
+	defaultDispatchProxyMemory = "2Gi"
 )
 
 // Autopilot's bounds for the app pod's total request, the general-purpose compute class's for a pod
@@ -168,10 +188,16 @@ type DispatchArgs struct {
 
 	// AppCpu and appMemory size the app Deployment's envoy-dispatch container, as Kubernetes
 	// quantities set as both its request and its limit: 1 CPU and 4Gi by default. The pod's
-	// cloud-sql-proxy sidecar keeps its own 200m and 256Mi, and the front door and the listener
-	// are unchanged.
+	// cloud-sql-proxy sidecar is sized by proxyCpu and proxyMemory, and the front door and the
+	// listener are unchanged.
 	AppCpu    *string `pulumi:"appCpu,optional"`
 	AppMemory *string `pulumi:"appMemory,optional"`
+	// ProxyCpu and proxyMemory size the app pod's cloud-sql-proxy sidecar, through whose TLS every
+	// database call of the pod passes, as Kubernetes quantities set as both its request and its
+	// limit: 1 CPU and 2Gi by default, sized for one server pod's connection pools. Autopilot's
+	// bounds apply to the pod's total, envoy-dispatch's and the proxy's together.
+	ProxyCpu    *string `pulumi:"proxyCpu,optional"`
+	ProxyMemory *string `pulumi:"proxyMemory,optional"`
 
 	// PprofPort turns on envoy-dispatch's Go profiler: DISPATCH_PPROF_PORT on its container alone,
 	// so it serves net/http/pprof on 127.0.0.1 at this port, reachable through kubectl
@@ -275,6 +301,12 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	if args.AppMemory != nil && bus.HoldsSeed(*args.AppMemory) {
 		return "appMemory", true
 	}
+	if args.ProxyCpu != nil && bus.HoldsSeed(*args.ProxyCpu) {
+		return "proxyCpu", true
+	}
+	if args.ProxyMemory != nil && bus.HoldsSeed(*args.ProxyMemory) {
+		return "proxyMemory", true
+	}
 	if args.PriorityClassName != nil && bus.HoldsSeed(*args.PriorityClassName) {
 		return "priorityClassName", true
 	}
@@ -325,6 +357,7 @@ type dispatchSettings struct {
 	replicas                                    int
 	frontDoorReplicas, listenerReplicas         int
 	appCPU, appMemory                           string
+	proxyCPU, proxyMemory                       string
 	pprofPort                                   int
 	disruption                                  dispatchDisruption
 	// strategy is the app Deployment's update strategy; frontDoorStrategy and listenerStrategy
@@ -601,7 +634,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	s.strategy = dispatchStrategyFor(s.replicas)
 	s.frontDoorStrategy = dispatchStrategyFor(s.frontDoorReplicas)
 	s.listenerStrategy = dispatchStrategyFor(s.listenerReplicas)
-	if s.appCPU, s.appMemory, err = newDispatchAppResources(args); err != nil {
+	if s.appCPU, s.appMemory, s.proxyCPU, s.proxyMemory, err = newDispatchAppResources(args); err != nil {
 		return dispatchSettings{}, err
 	}
 	if s.pprofPort, err = newDispatchPprofPort(args); err != nil {
@@ -729,71 +762,77 @@ func newDispatchDisruption(args *DispatchArgs, replicas, frontDoorReplicas, list
 }
 
 // newDispatchAppResources resolves appCpu and appMemory, the envoy-dispatch container's request
-// and limit, and refuses a size at which Autopilot would not run the app pod as rendered: the
-// pod's total, with the cloud-sql-proxy sidecar's, below autopilotPodMinCPU or
-// autopilotPodMinMemory or outside the memory-per-CPU ratio (Autopilot raises it), or above
-// autopilotPodMaxCPU or autopilotPodMaxMemory (Autopilot rejects it).
-func newDispatchAppResources(args *DispatchArgs) (cpu, memory string, err error) {
-	cpu, memory = defaultDispatchAppCPU, defaultDispatchAppMemory
-	if args.AppCpu != nil {
-		if *args.AppCpu == "" {
-			return "", "", errors.New("appCpu is empty; leave it unset for " + defaultDispatchAppCPU)
-		}
-		cpu = *args.AppCpu
-	}
-	if args.AppMemory != nil {
-		if *args.AppMemory == "" {
-			return "", "", errors.New("appMemory is empty; leave it unset for " + defaultDispatchAppMemory)
-		}
-		memory = *args.AppMemory
-	}
-	appCPU, err := appQuantity("appCpu", cpu, "1, 1500m or 2")
+// and limit, and proxyCpu and proxyMemory, the cloud-sql-proxy sidecar's, and refuses a size at
+// which Autopilot would not run the app pod as rendered: the two containers' total below
+// autopilotPodMinCPU or autopilotPodMinMemory or outside the memory-per-CPU ratio (Autopilot
+// raises it), or above autopilotPodMaxCPU or autopilotPodMaxMemory (Autopilot rejects it). Each
+// refusal names the inputs whose sum it judges.
+func newDispatchAppResources(args *DispatchArgs) (cpu, memory, proxyCPU, proxyMemory string, err error) {
+	cpu, appCPU, err := appQuantity("appCpu", args.AppCpu, defaultDispatchAppCPU, "1, 1500m or 2")
 	if err != nil {
-		return "", "", err
+		return "", "", "", "", err
 	}
-	appMemory, err := appQuantity("appMemory", memory, "4Gi or 6144Mi")
+	memory, appMemory, err := appQuantity("appMemory", args.AppMemory, defaultDispatchAppMemory, "4Gi or 6144Mi")
 	if err != nil {
-		return "", "", err
+		return "", "", "", "", err
 	}
-	proxyCPU, _ := quantityValue(dispatchProxyCPU)
-	proxyMemory, _ := quantityValue(dispatchProxyMemory)
-	podCPU := new(big.Rat).Add(appCPU, proxyCPU)
-	podMemory := new(big.Rat).Add(appMemory, proxyMemory)
+	proxyCPU, proxyCPUValue, err := appQuantity("proxyCpu", args.ProxyCpu, defaultDispatchProxyCPU, "1, 1500m or 2")
+	if err != nil {
+		return "", "", "", "", err
+	}
+	proxyMemory, proxyMemoryValue, err := appQuantity("proxyMemory", args.ProxyMemory, defaultDispatchProxyMemory, "2Gi or 1536Mi")
+	if err != nil {
+		return "", "", "", "", err
+	}
+	podCPU := new(big.Rat).Add(appCPU, proxyCPUValue)
+	podMemory := new(big.Rat).Add(appMemory, proxyMemoryValue)
 	if podCPU.Cmp(autopilotPodMinCPU) < 0 {
-		return "", "", fmt.Errorf("appCpu %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it, since the pod carries pod anti-affinity (and safe-to-evict when no budget covers it)",
-			cpu, milliCPU(new(big.Rat).Sub(autopilotPodMinCPU, proxyCPU)), dispatchProxyCPU, milliCPU(autopilotPodMinCPU))
+		return "", "", "", "", fmt.Errorf("appCpu %q and proxyCpu %q must make at least %s together: below it Autopilot raises the app pod's request, since the pod carries pod anti-affinity (and safe-to-evict when no budget covers it)",
+			cpu, proxyCPU, milliCPU(autopilotPodMinCPU))
 	}
 	if podCPU.Cmp(autopilotPodMaxCPU) > 0 {
-		return "", "", fmt.Errorf("appCpu %q must be at most %s: with cloud-sql-proxy's %s the app pod would request above %s CPU, and Autopilot rejects such a pod",
-			cpu, milliCPU(new(big.Rat).Sub(autopilotPodMaxCPU, proxyCPU)), dispatchProxyCPU, autopilotPodMaxCPU.RatString())
+		return "", "", "", "", fmt.Errorf("appCpu %q and proxyCpu %q must make at most %s CPU together: Autopilot rejects an app pod that requests more",
+			cpu, proxyCPU, autopilotPodMaxCPU.RatString())
 	}
 	if podMemory.Cmp(autopilotPodMinMemory) < 0 {
-		return "", "", fmt.Errorf("appMemory %q must be at least %s: with cloud-sql-proxy's %s the app pod would request less than %s, below which Autopilot raises it, since the pod carries pod anti-affinity (and safe-to-evict when no budget covers it)",
-			memory, mebibytes(new(big.Rat).Sub(autopilotPodMinMemory, proxyMemory)), dispatchProxyMemory, mebibytes(autopilotPodMinMemory))
+		return "", "", "", "", fmt.Errorf("appMemory %q and proxyMemory %q must make at least %s together: below it Autopilot raises the app pod's request, since the pod carries pod anti-affinity (and safe-to-evict when no budget covers it)",
+			memory, proxyMemory, mebibytes(autopilotPodMinMemory))
 	}
 	if podMemory.Cmp(autopilotPodMaxMemory) > 0 {
-		return "", "", fmt.Errorf("appMemory %q must be at most %s: with cloud-sql-proxy's %s the app pod would request above 110Gi, and Autopilot rejects such a pod",
-			memory, mebibytes(new(big.Rat).Sub(autopilotPodMaxMemory, proxyMemory)), dispatchProxyMemory)
+		return "", "", "", "", fmt.Errorf("appMemory %q and proxyMemory %q must make at most 110Gi together: Autopilot rejects an app pod that requests more",
+			memory, proxyMemory)
 	}
 	gibPerCPU := new(big.Rat).Quo(podMemory, podCPU)
 	gibPerCPU.Quo(gibPerCPU, new(big.Rat).SetInt64(1<<30))
 	if gibPerCPU.Cmp(autopilotMinGiBPerCPU) < 0 || gibPerCPU.Cmp(autopilotMaxGiBPerCPU) > 0 {
-		return "", "", fmt.Errorf("appCpu %q and appMemory %q: with cloud-sql-proxy's %s and %s the app pod must hold between 1 and 6.5 GiB of memory per CPU, or Autopilot raises the smaller of the two",
-			cpu, memory, dispatchProxyCPU, dispatchProxyMemory)
+		return "", "", "", "", fmt.Errorf("appCpu %q, appMemory %q, proxyCpu %q and proxyMemory %q: the app pod must hold between 1 and 6.5 GiB of memory per CPU, or Autopilot raises the smaller of the two",
+			cpu, memory, proxyCPU, proxyMemory)
 	}
-	return cpu, memory, nil
+	return cpu, memory, proxyCPU, proxyMemory, nil
 }
 
-// appQuantity is the exact value of input's quantity, or a refusal naming input.
-func appQuantity(input, value, examples string) (*big.Rat, error) {
-	quantity, err := quantityValue(value)
+// appQuantity resolves one container size input of the app pod: fallback when it is unset, and
+// its exact value, or a refusal naming input. It refuses an empty value, which is no quantity,
+// and one of 0 or less, which sizes no container: the pod's floor is judged on the two
+// containers' sum, so a negative size beside a large one would otherwise pass it.
+func appQuantity(input string, value *string, fallback, examples string) (string, *big.Rat, error) {
+	resolved := fallback
+	if value != nil {
+		if *value == "" {
+			return "", nil, errors.New(input + " is empty; leave it unset for " + fallback)
+		}
+		resolved = *value
+	}
+	quantity, err := quantityValue(resolved)
 	switch {
 	case errors.Is(err, errQuantityExponent):
-		return nil, fmt.Errorf("%s %q has a decimal exponent outside e%d to e%d, the range of the suffixes n to E; write it with a suffix, such as %s", input, value, minQuantityExponent, maxQuantityExponent, examples)
+		return "", nil, fmt.Errorf("%s %q has a decimal exponent outside e%d to e%d, the range of the suffixes n to E; write it with a suffix, such as %s", input, resolved, minQuantityExponent, maxQuantityExponent, examples)
 	case err != nil:
-		return nil, fmt.Errorf("%s %q is not a Kubernetes quantity, such as %s", input, value, examples)
+		return "", nil, fmt.Errorf("%s %q is not a Kubernetes quantity, such as %s", input, resolved, examples)
+	case quantity.Sign() <= 0:
+		return "", nil, fmt.Errorf("%s %q must be more than 0, such as %s", input, resolved, examples)
 	}
-	return quantity, nil
+	return resolved, quantity, nil
 }
 
 var (

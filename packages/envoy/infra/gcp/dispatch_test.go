@@ -132,7 +132,7 @@ func TestDispatchSettingsApplyDefaults(t *testing.T) {
 	settings, err := gcp.ResolveDispatch(dispatchArgs())
 	require.NoError(t, err)
 	require.Equal(t, "POSTGRES_16", settings.DatabaseVersion)
-	require.Equal(t, "db-custom-1-3840", settings.DatabaseTier)
+	require.Equal(t, "db-custom-4-15360", settings.DatabaseTier)
 	require.True(t, settings.DeletionProtection)
 	require.Equal(t, "dispatch", settings.Namespace)
 	require.Equal(t, 1, settings.Replicas)
@@ -141,7 +141,7 @@ func TestDispatchSettingsApplyDefaults(t *testing.T) {
 }
 
 // Unset, appCpu and appMemory are the 1 CPU and 4Gi the app container always had, as requests and
-// limits of envoy-dispatch, so a deployment that sets neither sees no change to its pod
+// limits of envoy-dispatch, so a deployment that sets neither keeps its app container's size
 // (TestDispatchPodMatchesGolden pins the whole template).
 func TestDispatchAppContainerDefaultsToOneCPUAnd4Gi(t *testing.T) {
 	settings, err := gcp.ResolveDispatch(dispatchArgs())
@@ -154,27 +154,57 @@ func TestDispatchAppContainerDefaultsToOneCPUAnd4Gi(t *testing.T) {
 	require.Equal(t, appResources("1", "4Gi"), container["resources"])
 }
 
-// The quantity forms Kubernetes reads are taken as written, up to Autopilot's bounds for the pod:
-// with cloud-sql-proxy's 200m and 256Mi, 300m and 256Mi make the 500m and 512Mi floor, 29800m
-// and 112384Mi the 30 CPU and 110Gi ceiling, and 800m and 6400Mi exactly 6.5 GiB per CPU. A
-// decimal exponent inside e-9 to e18 is valued exactly, its mantissa included.
+// proxyContainer is the app pod template's cloud-sql-proxy native sidecar.
+func proxyContainer(t *testing.T, template map[string]any) map[string]any {
+	t.Helper()
+	proxy := template["spec"].(map[string]any)["initContainers"].([]any)[0].(map[string]any)
+	require.Equal(t, "cloud-sql-proxy", proxy["name"])
+	return proxy
+}
+
+// Unset, proxyCpu and proxyMemory size the cloud-sql-proxy sidecar for one server pod's pools,
+// 1 CPU and 2Gi as its request and its limit, the sizes the proxy's own Kubernetes sidecar
+// example requests: every database call of the pod, up to 32 connections, passes through its TLS.
+func TestDispatchProxyContainerDefaultsToOneCPUAnd2Gi(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	require.Equal(t, appResources("1", "2Gi"), proxyContainer(t, deploymentPodTemplate(t, m, "example-dispatch"))["resources"])
+}
+
+// The quantity forms Kubernetes reads are taken as written, up to Autopilot's bounds for the pod,
+// judged on the two containers' sum with the proxy's resolved size. With proxyCpu 200m and
+// proxyMemory 256Mi, 300m and 256Mi make the 500m and 512Mi floor, 29800m and 112384Mi the 30 CPU
+// and 110Gi ceiling, and 800m and 6400Mi exactly 6.5 GiB per CPU. With the proxy's default 1 CPU
+// and 2Gi, 29 and 108Gi make the ceiling, 1 and 11Gi exactly 6.5 GiB per CPU, and 100m and 256Mi
+// sit above the floor; and the proxy takes any size that keeps the pod inside them. A decimal
+// exponent inside e-9 to e18 is valued exactly, its mantissa included.
 func TestDispatchAcceptsAppResourcesWithinAutopilotsBounds(t *testing.T) {
-	for _, row := range []struct{ cpu, memory string }{
-		{"300m", "512Mi"},
-		{"300m", "256Mi"},
-		{"1.5", "6Gi"},
-		{"2", "8589934592"},
-		{"4", "16G"},
-		{"29800m", "112384Mi"},
-		{"2e0", "0.5e10"},
-		{"800m", "6400Mi"},
-		{"1", "4500000k"},
-		{"1000000000e-9", "0.000000004e18"},
+	for _, row := range []struct{ cpu, memory, proxyCPU, proxyMemory string }{
+		{"300m", "512Mi", "200m", "256Mi"},
+		{"300m", "256Mi", "200m", "256Mi"},
+		{"1.5", "6Gi", "200m", "256Mi"},
+		{"2", "8589934592", "200m", "256Mi"},
+		{"4", "16G", "200m", "256Mi"},
+		{"29800m", "112384Mi", "200m", "256Mi"},
+		{"2e0", "0.5e10", "200m", "256Mi"},
+		{"800m", "6400Mi", "200m", "256Mi"},
+		{"1", "4500000k", "200m", "256Mi"},
+		{"1000000000e-9", "0.000000004e18", "200m", "256Mi"},
+		{"29", "108Gi", "", ""},
+		{"1", "11Gi", "", ""},
+		{"100m", "256Mi", "", ""},
+		{"1", "4Gi", "250m", "1Gi"},
+		{"1", "4Gi", "4", "8Gi"},
+		{"1", "4Gi", "2500m", "1536Mi"},
 	} {
-		t.Run(row.cpu+"/"+row.memory, func(t *testing.T) {
+		t.Run(row.cpu+"/"+row.memory+"/"+row.proxyCPU+"/"+row.proxyMemory, func(t *testing.T) {
 			args := dispatchArgs()
 			args.AppCpu = pulumi.StringRef(row.cpu)
 			args.AppMemory = pulumi.StringRef(row.memory)
+			if row.proxyCPU != "" {
+				args.ProxyCpu = pulumi.StringRef(row.proxyCPU)
+				args.ProxyMemory = pulumi.StringRef(row.proxyMemory)
+			}
 			settings, err := gcp.ResolveDispatch(args)
 			require.NoError(t, err)
 			require.Equal(t, row.cpu, settings.AppCPU)
@@ -252,7 +282,7 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "no sign-in client ID", edit: func(a *gcp.DispatchArgs) { a.SignInClientId = "" }, err: []string{"signInClientId", "required"}},
 		{name: "an invalid sign-in domain", edit: func(a *gcp.DispatchArgs) { a.SignInDomain = "Example.COM" }, err: []string{"signInDomain", "lowercase DNS name"}},
 		{name: "an empty database version", edit: func(a *gcp.DispatchArgs) { a.DatabaseVersion = pulumi.StringRef("") }, err: []string{"databaseVersion", "empty"}},
-		{name: "an empty database tier", edit: func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef("") }, err: []string{"databaseTier", "empty"}},
+		{name: "an empty database tier", edit: func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef("") }, err: []string{"databaseTier is empty", "leave it unset for db-custom-4-15360"}},
 		{name: "an invalid namespace", edit: func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef("Dispatch") }, err: []string{"namespace", "DNS label"}},
 		{name: "an invalid allowed namespace", edit: func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", "Legion"} }, err: []string{"allowedNamespaces[1]", "DNS label"}},
 		{name: "a namespace longer than a DNS label", edit: func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(strings.Repeat("a", 64)) }, err: []string{"namespace", "DNS label"}},
@@ -356,26 +386,46 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an app memory that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4 GiB") }, err: []string{`appMemory "4 GiB"`, "Kubernetes quantity"}},
 		{name: "an empty app CPU", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("") }, err: []string{"appCpu is empty", "leave it unset for 1"}},
 		{name: "an empty app memory", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("") }, err: []string{"appMemory is empty", "leave it unset for 4Gi"}},
-		{name: "a negative app CPU", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("-1") }, err: []string{`appCpu "-1"`, "at least 300m", "less than 500m", "Autopilot raises it"}},
-		{name: "an app CPU below Autopilot's pod floor", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("250m") }, err: []string{`appCpu "250m"`, "at least 300m", "cloud-sql-proxy's 200m", "less than 500m", "Autopilot raises it"}},
-		{name: "an app memory below Autopilot's pod floor", edit: func(a *gcp.DispatchArgs) {
+		{name: "a negative app CPU", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("-1") }, err: []string{`appCpu "-1"`, "more than 0"}},
+		{name: "a zero app memory", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("0") }, err: []string{`appMemory "0"`, "more than 0"}},
+		{name: "an app CPU below Autopilot's pod floor with the proxy's", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("250m")
+			a.ProxyCpu = pulumi.StringRef("200m")
+		}, err: []string{`appCpu "250m" and proxyCpu "200m"`, "at least 500m together", "Autopilot raises"}},
+		{name: "an app memory below Autopilot's pod floor with the proxy's", edit: func(a *gcp.DispatchArgs) {
 			a.AppCpu = pulumi.StringRef("500m")
 			a.AppMemory = pulumi.StringRef("128Mi")
-		}, err: []string{`appMemory "128Mi"`, "at least 256Mi", "cloud-sql-proxy's 256Mi", "less than 512Mi", "Autopilot raises it"}},
+			a.ProxyMemory = pulumi.StringRef("256Mi")
+		}, err: []string{`appMemory "128Mi" and proxyMemory "256Mi"`, "at least 512Mi together", "Autopilot raises"}},
 		{name: "an app CPU above Autopilot's pod ceiling", edit: func(a *gcp.DispatchArgs) {
 			a.AppCpu = pulumi.StringRef("30")
 			a.AppMemory = pulumi.StringRef("64Gi")
-		}, err: []string{`appCpu "30"`, "at most 29800m", "above 30", "rejects"}},
+		}, err: []string{`appCpu "30" and proxyCpu "1"`, "at most 30 CPU together", "rejects"}},
+		// 29.5 CPU fit beside the 200m the proxy had; beside its 1 CPU the pod requests 30.5.
+		{name: "an app CPU above Autopilot's pod ceiling only with the proxy's default", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("29.5")
+			a.AppMemory = pulumi.StringRef("64Gi")
+		}, err: []string{`appCpu "29.5" and proxyCpu "1"`, "at most 30 CPU together", "rejects"}},
 		{name: "an app memory above Autopilot's pod ceiling", edit: func(a *gcp.DispatchArgs) {
 			a.AppCpu = pulumi.StringRef("20")
 			a.AppMemory = pulumi.StringRef("110Gi")
-		}, err: []string{`appMemory "110Gi"`, "at most 112384Mi", "above 110Gi", "rejects"}},
-		{name: "app CPU raised without memory to match", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("8") }, err: []string{`appCpu "8"`, `appMemory "4Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
-		{name: "app memory raised without CPU to match", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("32Gi") }, err: []string{`appCpu "1"`, `appMemory "32Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
-		{name: "app memory just above 6.5 GiB per CPU", edit: func(a *gcp.DispatchArgs) {
+		}, err: []string{`appMemory "110Gi" and proxyMemory "2Gi"`, "at most 110Gi together", "rejects"}},
+		// 109Gi fit beside the 256Mi the proxy had; beside its 2Gi the pod requests 111Gi.
+		{name: "an app memory above Autopilot's pod ceiling only with the proxy's default", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("20")
+			a.AppMemory = pulumi.StringRef("109Gi")
+		}, err: []string{`appMemory "109Gi" and proxyMemory "2Gi"`, "at most 110Gi together", "rejects"}},
+		{name: "app CPU raised without memory to match", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("8") }, err: []string{`appCpu "8", appMemory "4Gi", proxyCpu "1" and proxyMemory "2Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "app memory raised without CPU to match", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("32Gi") }, err: []string{`appCpu "1", appMemory "32Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "app memory just above 6.5 GiB per CPU with the proxy's", edit: func(a *gcp.DispatchArgs) {
 			a.AppCpu = pulumi.StringRef("800m")
 			a.AppMemory = pulumi.StringRef("6401Mi")
-		}, err: []string{`appCpu "800m"`, `appMemory "6401Mi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+			a.ProxyCpu = pulumi.StringRef("200m")
+			a.ProxyMemory = pulumi.StringRef("256Mi")
+		}, err: []string{`appCpu "800m", appMemory "6401Mi", proxyCpu "200m" and proxyMemory "256Mi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		// 1 CPU and 11Gi were refused beside the 200m and 256Mi the proxy had (9.4 GiB per CPU);
+		// beside its 1 CPU and 2Gi the pod is 2 CPU and 13Gi, exactly 6.5, and 11265Mi tips it over.
+		{name: "app memory just above 6.5 GiB per CPU with the proxy's default", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("11265Mi") }, err: []string{`appCpu "1", appMemory "11265Mi", proxyCpu "1" and proxyMemory "2Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
 		{name: "an app CPU with leading whitespace", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef(" 1") }, err: []string{`appCpu " 1"`, "Kubernetes quantity"}},
 		{name: "an app CPU with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1 ") }, err: []string{`appCpu "1 "`, "Kubernetes quantity"}},
 		{name: "an app memory with leading whitespace", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef(" 4Gi") }, err: []string{`appMemory " 4Gi"`, "Kubernetes quantity"}},
@@ -394,6 +444,38 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 			a.AppCpu = pulumi.StringRef("10000000000000000000000000000000000000000e-39")
 		}, err: []string{`appCpu "10000000000000000000000000000000000000000e-39"`, "decimal exponent outside e-9 to e18"}},
 		{name: "an app memory with an exponent past int's range", edit: func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("1e99999999999999999999") }, err: []string{`appMemory "1e99999999999999999999"`, "decimal exponent outside e-9 to e18"}},
+		{name: "a proxy CPU that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("one") }, err: []string{`proxyCpu "one"`, "Kubernetes quantity"}},
+		{name: "a proxy memory that is not a quantity", edit: func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef("2 GiB") }, err: []string{`proxyMemory "2 GiB"`, "Kubernetes quantity"}},
+		{name: "a proxy CPU with trailing whitespace", edit: func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("1 ") }, err: []string{`proxyCpu "1 "`, "Kubernetes quantity"}},
+		{name: "a proxy memory with an exponent outside the suffixes' range", edit: func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef("2e19") }, err: []string{`proxyMemory "2e19"`, "decimal exponent outside e-9 to e18"}},
+		{name: "an empty proxy CPU", edit: func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("") }, err: []string{"proxyCpu is empty", "leave it unset for 1"}},
+		{name: "an empty proxy memory", edit: func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef("") }, err: []string{"proxyMemory is empty", "leave it unset for 2Gi"}},
+		// A negative proxy size beside a large app size would pass the pod's floor on the sum.
+		{name: "a negative proxy CPU", edit: func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("-100m") }, err: []string{`proxyCpu "-100m"`, "more than 0"}},
+		{name: "a zero proxy memory", edit: func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef("0Mi") }, err: []string{`proxyMemory "0Mi"`, "more than 0"}},
+		{name: "a proxy CPU below Autopilot's pod floor with the app's", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("300m")
+			a.AppMemory = pulumi.StringRef("512Mi")
+			a.ProxyCpu = pulumi.StringRef("100m")
+			a.ProxyMemory = pulumi.StringRef("256Mi")
+		}, err: []string{`appCpu "300m" and proxyCpu "100m"`, "at least 500m together", "Autopilot raises"}},
+		{name: "a proxy memory below Autopilot's pod floor with the app's", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("300m")
+			a.AppMemory = pulumi.StringRef("256Mi")
+			a.ProxyCpu = pulumi.StringRef("200m")
+			a.ProxyMemory = pulumi.StringRef("255Mi")
+		}, err: []string{`appMemory "256Mi" and proxyMemory "255Mi"`, "at least 512Mi together", "Autopilot raises"}},
+		{name: "a proxy CPU above Autopilot's pod ceiling with the app's", edit: func(a *gcp.DispatchArgs) {
+			a.ProxyCpu = pulumi.StringRef("29001m")
+			a.ProxyMemory = pulumi.StringRef("60Gi")
+		}, err: []string{`appCpu "1" and proxyCpu "29001m"`, "at most 30 CPU together", "rejects"}},
+		{name: "a proxy memory above Autopilot's pod ceiling with the app's", edit: func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("10")
+			a.ProxyCpu = pulumi.StringRef("10")
+			a.ProxyMemory = pulumi.StringRef("107Gi")
+		}, err: []string{`appMemory "4Gi" and proxyMemory "107Gi"`, "at most 110Gi together", "rejects"}},
+		{name: "proxy CPU raised without memory to match", edit: func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("8") }, err: []string{`appCpu "1", appMemory "4Gi", proxyCpu "8" and proxyMemory "2Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
+		{name: "proxy memory raised without CPU to match", edit: func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef("10Gi") }, err: []string{`appCpu "1", appMemory "4Gi", proxyCpu "1" and proxyMemory "10Gi"`, "between 1 and 6.5 GiB of memory per CPU"}},
 		{name: "an Azure endpoint without its quota", edit: func(a *gcp.DispatchArgs) {
 			setAzureKey(a)
 			a.AzureEmbedTokensPerMinute = nil
@@ -495,6 +577,8 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed as the database availability type", "databaseAvailabilityType", func(a *gcp.DispatchArgs) { a.DatabaseAvailabilityType = pulumi.StringRef(seed) }},
 		{"a seed as the app CPU", "appCpu", func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef(seed) }},
 		{"a seed as the app memory", "appMemory", func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef(seed) }},
+		{"a seed as the proxy CPU", "proxyCpu", func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef(seed) }},
+		{"a lowercase seed as the proxy memory", "proxyMemory", func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef(lower) }},
 		{"a seed as the priority class", "priorityClassName", func(a *gcp.DispatchArgs) { a.PriorityClassName = pulumi.StringRef(lower) }},
 		{"a seed as the namespace", "namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(lower) }},
 		{"a seed in an allowed namespace", "allowedNamespaces[1]", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", lower} }},
@@ -1896,7 +1980,7 @@ func appResources(cpu, memory string) map[string]any {
 
 // appCpu and appMemory size the app's envoy-dispatch container and nothing else: the app's pod
 // template is the default's with that one container's resources changed, so cloud-sql-proxy keeps
-// its 200m and 256Mi, and the front door's and the listener's pods match their goldens.
+// its default 1 CPU and 2Gi, and the front door's and the listener's pods match their goldens.
 func TestDispatchAppResourcesReachEnvoyDispatchAlone(t *testing.T) {
 	defaults, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1911,21 +1995,61 @@ func TestDispatchAppResourcesReachEnvoyDispatchAlone(t *testing.T) {
 	want := deploymentPodTemplate(t, defaults, "example-dispatch")
 	podContainer(t, want, "envoy-dispatch")["resources"] = appResources("2", "8Gi")
 	require.Equal(t, want, got)
-	proxy := got["spec"].(map[string]any)["initContainers"].([]any)[0].(map[string]any)
-	require.Equal(t, "cloud-sql-proxy", proxy["name"])
-	require.Equal(t, appResources("200m", "256Mi"), proxy["resources"])
+	require.Equal(t, appResources("1", "2Gi"), proxyContainer(t, got)["resources"])
 	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
 	requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
 }
 
-// A size Autopilot would raise or reject is refused by the resolver, before the component
-// registers, so nothing beyond the test's providers exists.
+// proxyCpu and proxyMemory size the cloud-sql-proxy sidecar and nothing else, as both its request
+// and its limit: the app's pod template is the default's with that one container's resources
+// changed, so envoy-dispatch keeps its 1 CPU and 4Gi, and the front door's and the listener's pods
+// match their goldens.
+func TestDispatchProxyResourcesReachCloudSQLProxyAlone(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	for _, row := range []struct{ cpu, memory string }{{"2", "4Gi"}, {"500m", "1536Mi"}} {
+		t.Run(row.cpu+"/"+row.memory, func(t *testing.T) {
+			args := dispatchArgs()
+			args.ProxyCpu = pulumi.StringRef(row.cpu)
+			args.ProxyMemory = pulumi.StringRef(row.memory)
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			got := deploymentPodTemplate(t, m, "example-dispatch")
+			require.Equal(t, appResources(row.cpu, row.memory), proxyContainer(t, got)["resources"])
+			require.Equal(t, appResources("1", "4Gi"), podContainer(t, got, "envoy-dispatch")["resources"])
+			want := deploymentPodTemplate(t, defaults, "example-dispatch")
+			proxyContainer(t, want)["resources"] = appResources(row.cpu, row.memory)
+			require.Equal(t, want, got)
+			requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+			requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+		})
+	}
+}
+
+// A size Autopilot would raise or reject, judged on envoy-dispatch's and cloud-sql-proxy's sum,
+// is refused by the resolver, before the component registers, so nothing beyond the test's
+// providers exists.
 func TestDispatchRefusesAppResourcesBeforeRegistering(t *testing.T) {
-	args := dispatchArgs()
-	args.AppCpu = pulumi.StringRef("100m")
-	m, err := runDispatch(t, args, true)
-	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: appCpu "100m" must be at least 300m`)
-	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+	for _, row := range []struct {
+		edit func(*gcp.DispatchArgs)
+		err  string
+	}{
+		{func(a *gcp.DispatchArgs) {
+			a.AppCpu = pulumi.StringRef("100m")
+			a.ProxyCpu = pulumi.StringRef("200m")
+		}, `appCpu "100m" and proxyCpu "200m" must make at least 500m together`},
+		{func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("30") }, `appCpu "1" and proxyCpu "30" must make at most 30 CPU together`},
+		{func(a *gcp.DispatchArgs) { a.ProxyMemory = pulumi.StringRef("0") }, `proxyMemory "0" must be more than 0`},
+	} {
+		t.Run(row.err, func(t *testing.T) {
+			args := dispatchArgs()
+			row.edit(args)
+			m, err := runDispatch(t, args, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.err)
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+		})
+	}
 }
 
 const (
@@ -2110,6 +2234,25 @@ func TestDispatchDatabaseAvailabilityTypeReachesTheInstance(t *testing.T) {
 			require.NoError(t, err)
 			settings := m.One(t, "gcp:sql/databaseInstance:DatabaseInstance").Inputs.Mappable()["settings"].(map[string]any)
 			require.Equal(t, row.want, settings["availabilityType"])
+		})
+	}
+}
+
+// Unset, databaseTier reaches the Cloud SQL instance's settings as db-custom-4-15360, 4 vCPU and
+// 15 GB, whose default max_connections of 500 holds 15 server pods of 32 connections each; set, it
+// reaches them as written.
+func TestDispatchDatabaseTierReachesTheInstance(t *testing.T) {
+	for _, row := range []struct {
+		value *string
+		want  string
+	}{{nil, "db-custom-4-15360"}, {pulumi.StringRef("db-custom-2-7680"), "db-custom-2-7680"}} {
+		t.Run(row.want, func(t *testing.T) {
+			args := dispatchArgs()
+			args.DatabaseTier = row.value
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			settings := m.One(t, "gcp:sql/databaseInstance:DatabaseInstance").Inputs.Mappable()["settings"].(map[string]any)
+			require.Equal(t, row.want, settings["tier"])
 		})
 	}
 }

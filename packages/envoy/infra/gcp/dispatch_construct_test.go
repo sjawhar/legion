@@ -139,9 +139,10 @@ func TestConstructRefusesDispatchPprofPortFromAnotherResource(t *testing.T) {
 	require.Empty(t, m.Types())
 }
 
-// appCpu and appMemory are plain strings, refused from another resource's output as replicas is.
+// appCpu, appMemory, proxyCpu and proxyMemory are plain strings, refused from another resource's
+// output as replicas is.
 func TestConstructRefusesDispatchAppResourcesFromAnotherResource(t *testing.T) {
-	for _, input := range []string{"appCpu", "appMemory"} {
+	for _, input := range []string{"appCpu", "appMemory", "proxyCpu", "proxyMemory"} {
 		t.Run(input, func(t *testing.T) {
 			inputs := dispatchConstructInputs()
 			inputs[input] = property.New("2").WithDependencies([]resource.URN{upstream})
