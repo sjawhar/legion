@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -19,24 +20,78 @@ import (
 	ygsync "github.com/reearth/ygo/sync"
 )
 
+// The Hocuspocus message kinds a Peer reads and writes: the outer type after the document's name.
+const (
+	messageSync      = 0
+	messageAwareness = 1
+	messageAuth      = 2
+)
+
+// The auth message's sub-kinds: the client's token, and the room's two answers to it.
+const (
+	authToken            = 0
+	authPermissionDenied = 1
+	authAuthenticated    = 2
+)
+
 // Peer is a writable connection to a document's room that behaves as a browser's provider does: it
 // applies every sync message the room sends to Doc, answers the room's sync step 1, and sends the
-// updates its own transactions make.
+// updates its own transactions make. It keeps the awareness states the room sends it, and can
+// announce awareness states and authenticate as a provider does.
 type Peer struct {
 	// Doc is the peer's copy of the document. The peer's reader applies the room's updates to it.
 	Doc *crdt.Doc
 	// Answers carries the content of each sync step 2 the room sends, once Doc holds it. One that
 	// arrives while sixteen are waiting to be read is dropped.
 	Answers <-chan []byte
+	// Awareness carries the entries of each awareness update the room sends, in order, once
+	// AwarenessStates holds them. One that arrives while sixty-four are waiting to be read is
+	// dropped; AwarenessStates and WaitForAwareness miss none.
+	Awareness <-chan []AwarenessEntry
 	// Ended is closed once the connection has ended and the reader has stopped.
 	Ended <-chan struct{}
+	// UpgradeHeader is the header of the room's answer to the websocket upgrade.
+	UpgradeHeader http.Header
 
 	artifactID string
 	connection *gws.Conn
 	// writes holds one write at a time: gorilla/websocket panics on two writes at once, and the
 	// reader answers the room's sync step 1 while a test sends.
-	writes  sync.Mutex
-	endedAt time.Time
+	writes sync.Mutex
+	// auth carries the room's answers to Authenticate.
+	auth chan authReply
+	// mu guards the fields below it.
+	mu sync.Mutex
+	// awareness is every client the room has sent a state of, a client that left included, as
+	// y-protocols folds the updates (foldAwareness).
+	awareness map[uint64]AwarenessEntry
+	// awarenessChanged is closed, and replaced, each time awareness changes.
+	awarenessChanged chan struct{}
+	// clocks is the clock of the last state SetAwareness sent for each client.
+	clocks map[uint64]uint64
+	scope  string
+	// endedAt and closeCode are written by the reader before Ended closes, and read after.
+	endedAt   time.Time
+	closeCode int
+}
+
+// AwarenessEntry is one client's state in an awareness update: its client id, its clock, and its
+// state as JSON, which is null for a client that left.
+type AwarenessEntry struct {
+	Client uint64
+	Clock  uint64
+	State  json.RawMessage
+}
+
+// Removed reports whether the entry says its client left.
+func (e AwarenessEntry) Removed() bool {
+	return bytes.Equal(bytes.TrimSpace(e.State), []byte("null"))
+}
+
+// authReply is the room's answer to an auth token: the scope it granted, or the reason it refused.
+type authReply struct {
+	granted bool
+	text    string
 }
 
 // Dial connects a peer to artifactID's room at url, the document websocket's full address with its
@@ -49,11 +104,15 @@ func Dial(t testing.TB, url string, header http.Header, artifactID string, doc *
 	if err != nil {
 		t.Fatalf("connect a peer to document %s: response=%#v err=%v", artifactID, response, err)
 	}
-	answers, ended := make(chan []byte, 16), make(chan struct{})
-	peer := &Peer{Doc: doc, Answers: answers, Ended: ended, artifactID: artifactID, connection: connection}
+	answers, awareness, ended := make(chan []byte, 16), make(chan []AwarenessEntry, 64), make(chan struct{})
+	peer := &Peer{
+		Doc: doc, Answers: answers, Awareness: awareness, Ended: ended, UpgradeHeader: response.Header,
+		artifactID: artifactID, connection: connection, auth: make(chan authReply, 4),
+		awareness: make(map[uint64]AwarenessEntry), awarenessChanged: make(chan struct{}), clocks: make(map[uint64]uint64),
+	}
 	t.Cleanup(peer.Close)
 	go func() {
-		peer.read(answers)
+		peer.read(answers, awareness)
 		peer.endedAt = time.Now()
 		close(ended)
 	}()
@@ -63,13 +122,19 @@ func Dial(t testing.TB, url string, header http.Header, artifactID string, doc *
 // Write sends syncMessage to the room as Hocuspocus carries it: the document's name, then the sync
 // kind.
 func (p *Peer) Write(syncMessage []byte) error {
+	return p.writeFrame(messageSync, func(encoder *encoding.Encoder) { encoder.WriteRaw(syncMessage) })
+}
+
+// writeFrame sends the room one Hocuspocus frame: the document's name, kind, then what body writes.
+func (p *Peer) writeFrame(kind uint64, body func(*encoding.Encoder)) error {
 	frame := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
 		encoder.WriteVarString(p.artifactID)
-		encoder.WriteVarUint(0)
+		encoder.WriteVarUint(kind)
+		body(encoder)
 	})
 	p.writes.Lock()
 	defer p.writes.Unlock()
-	return p.connection.WriteMessage(gws.BinaryMessage, append(frame, syncMessage...))
+	return p.connection.WriteMessage(gws.BinaryMessage, frame)
 }
 
 // Send runs change in one transaction on Doc and sends the room the update it made, as a keystroke
@@ -88,6 +153,134 @@ func (p *Peer) AskForDocument() error {
 	return p.Write(ygsync.EncodeSyncStep1(crdt.New()))
 }
 
+// SetAwareness announces client's awareness state to the room, as y-protocols encodes an update of
+// one client: state is marshalled to JSON, and nil announces that client gone. Each announcement
+// carries a clock one past the last this peer sent or the room sent it for client, so the room
+// takes it. The room relays it to its other peers, not back to this one.
+func (p *Peer) SetAwareness(client uint64, state any) error {
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("encode the awareness state of client %d: %w", client, err)
+	}
+	p.mu.Lock()
+	clock := max(p.clocks[client], p.awareness[client].Clock) + 1
+	p.clocks[client] = clock
+	p.mu.Unlock()
+	update := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(1)
+		encoder.WriteVarUint(client)
+		encoder.WriteVarUint(clock)
+		encoder.WriteVarString(string(encoded))
+	})
+	return p.writeFrame(messageAwareness, func(encoder *encoding.Encoder) { encoder.WriteVarBytes(update) })
+}
+
+// AwarenessStates is every client the room has sent this peer a state of and has not since said
+// left, each with its state's JSON.
+func (p *Peer) AwarenessStates() map[uint64]json.RawMessage {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.awarenessStatesLocked()
+}
+
+func (p *Peer) awarenessStatesLocked() map[uint64]json.RawMessage {
+	states := make(map[uint64]json.RawMessage, len(p.awareness))
+	for client, entry := range p.awareness {
+		if !entry.Removed() {
+			states[client] = entry.State
+		}
+	}
+	return states
+}
+
+// WaitForAwareness waits up to within for the awareness states the room has sent this peer
+// (AwarenessStates) to satisfy holds, which it calls each time they change. It fails naming the
+// states it last saw when they do not, or when the connection ends first.
+func (p *Peer) WaitForAwareness(within time.Duration, holds func(map[uint64]json.RawMessage) bool) error {
+	deadline := time.NewTimer(within)
+	defer deadline.Stop()
+	for {
+		p.mu.Lock()
+		states, changed := p.awarenessStatesLocked(), p.awarenessChanged
+		p.mu.Unlock()
+		if holds(states) {
+			return nil
+		}
+		select {
+		case <-changed:
+		case <-p.Ended:
+			if final := p.AwarenessStates(); holds(final) {
+				return nil
+			}
+			return fmt.Errorf("the peer's connection closed before its awareness states held what was awaited; they hold %s", describeStates(p.AwarenessStates()))
+		case <-deadline.C:
+			return fmt.Errorf("the peer's awareness states did not hold what was awaited within %v; they hold %s", within, describeStates(p.AwarenessStates()))
+		}
+	}
+}
+
+func describeStates(states map[uint64]json.RawMessage) string {
+	described := make(map[uint64]string, len(states))
+	for client, state := range states {
+		described[client] = string(state)
+	}
+	return fmt.Sprint(described)
+}
+
+// WaitForText asks the room for its document until render, which renders the peer's copy, answers
+// want, and fails when it does not within that time or the connection ends first. render is the
+// caller's, since this package imports no document renderer (see the package comment).
+func (p *Peer) WaitForText(render func(*Peer) string, want string, within time.Duration) error {
+	deadline := time.NewTimer(within)
+	defer deadline.Stop()
+	for render(p) != want {
+		if err := p.AskForDocument(); err != nil {
+			return fmt.Errorf("ask the room for the document: %w", err)
+		}
+		select {
+		case <-p.Answers:
+		case <-p.Ended:
+			return fmt.Errorf("the peer's connection closed before the room sent the document: its copy renders %q, want %q", render(p), want)
+		case <-deadline.C:
+			return fmt.Errorf("the peer's copy renders %q, want %q, after %v", render(p), want, within)
+		}
+	}
+	return nil
+}
+
+// Authenticate sends the room token, as a Hocuspocus provider authenticates (the document room
+// reads it as the editor's schema version), and waits up to within for the answer: the scope the
+// room granted, "read-write" or "readonly", or an error naming its refusal.
+func (p *Peer) Authenticate(token string, within time.Duration) (string, error) {
+	if err := p.writeFrame(messageAuth, func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(authToken)
+		encoder.WriteVarString(token)
+	}); err != nil {
+		return "", fmt.Errorf("send the auth token: %w", err)
+	}
+	deadline := time.NewTimer(within)
+	defer deadline.Stop()
+	select {
+	case reply := <-p.auth:
+		if !reply.granted {
+			return "", fmt.Errorf("the room refused the auth token: %s", reply.text)
+		}
+		return reply.text, nil
+	case <-p.Ended:
+		return "", errors.New("the peer's connection closed before the room answered the auth token")
+	case <-deadline.C:
+		return "", fmt.Errorf("the room did not answer the auth token within %v", within)
+	}
+}
+
+// Scope is the scope the room's last authenticated answer granted, "read-write" or "readonly", or
+// "" before any.
+func (p *Peer) Scope() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.scope
+}
+
 // Close closes the connection and waits for the reader to stop.
 func (p *Peer) Close() {
 	_ = p.connection.Close()
@@ -100,41 +293,157 @@ func (p *Peer) EndedAt() time.Time {
 	return p.endedAt
 }
 
-// read applies every sync frame the room sends and answers its sync step 1 until the connection
-// closes, handing answers the content of each sync step 2 once it is applied.
-func (p *Peer) read(answers chan<- []byte) {
+// CloseCode is the websocket close code the connection ended with: the room's close frame's, 1006
+// for a connection that dropped without one, or 0 for one this side closed (Close). It waits for
+// Ended.
+func (p *Peer) CloseCode() int {
+	<-p.Ended
+	return p.closeCode
+}
+
+// read applies every sync frame the room sends and answers its sync step 1, keeps every awareness
+// update and hands on every auth answer, until the connection closes, handing answers the content
+// of each sync step 2 once it is applied and awareness each awareness update once it is kept.
+func (p *Peer) read(answers chan<- []byte, awareness chan<- []AwarenessEntry) {
 	for {
 		_, message, err := p.connection.ReadMessage()
 		if err != nil {
+			if closed := (*gws.CloseError)(nil); errors.As(err, &closed) {
+				p.closeCode = closed.Code
+			}
 			return
 		}
 		decoder := encoding.NewDecoder(message)
 		if _, err := decoder.ReadVarString(); err != nil {
 			return
 		}
-		if kind, err := decoder.ReadVarUint(); err != nil || kind != 0 {
+		kind, err := decoder.ReadVarUint()
+		if err != nil {
 			continue
 		}
-		payload := decoder.RemainingBytes()
-		kind, content, err := ygsync.ReadSyncMessage(payload)
-		if err != nil {
-			return
-		}
-		reply, err := ygsync.ApplySyncMessage(p.Doc, payload, nil)
-		if err != nil {
-			return
-		}
-		if kind == ygsync.MsgSyncStep1 && reply != nil {
-			if err := p.Write(reply); err != nil {
+		switch kind {
+		case messageSync:
+			if err := p.applySync(decoder.RemainingBytes(), answers); err != nil {
 				return
 			}
-		}
-		if kind == ygsync.MsgSyncStep2 {
+		case messageAwareness:
+			update, err := decoder.ReadVarBytes()
+			if err != nil {
+				return
+			}
+			entries, err := decodeAwareness(update)
+			if err != nil {
+				return
+			}
+			p.foldAwareness(entries)
 			select {
-			case answers <- content:
+			case awareness <- entries:
 			default:
 			}
+		case messageAuth:
+			p.readAuth(decoder)
 		}
+	}
+}
+
+// applySync applies one sync message the room sent and answers its sync step 1, handing answers
+// the content of a sync step 2 once Doc holds it.
+func (p *Peer) applySync(payload []byte, answers chan<- []byte) error {
+	kind, content, err := ygsync.ReadSyncMessage(payload)
+	if err != nil {
+		return err
+	}
+	reply, err := ygsync.ApplySyncMessage(p.Doc, payload, nil)
+	if err != nil {
+		return err
+	}
+	if kind == ygsync.MsgSyncStep1 && reply != nil {
+		if err := p.Write(reply); err != nil {
+			return err
+		}
+	}
+	if kind == ygsync.MsgSyncStep2 {
+		select {
+		case answers <- content:
+		default:
+		}
+	}
+	return nil
+}
+
+// readAuth reads the room's answer to an auth token, records the scope it granted, and hands the
+// answer to Authenticate. An answer that arrives while four are waiting is dropped.
+func (p *Peer) readAuth(decoder *encoding.Decoder) {
+	kind, err := decoder.ReadVarUint()
+	if err != nil {
+		return
+	}
+	text, err := decoder.ReadVarString()
+	if err != nil {
+		return
+	}
+	var reply authReply
+	switch kind {
+	case authAuthenticated:
+		reply = authReply{granted: true, text: text}
+		p.mu.Lock()
+		p.scope = text
+		p.mu.Unlock()
+	case authPermissionDenied:
+		reply = authReply{text: text}
+	default:
+		return
+	}
+	select {
+	case p.auth <- reply:
+	default:
+	}
+}
+
+// decodeAwareness reads a y-protocols awareness update: a count, then each client's id, clock and
+// state JSON.
+func decodeAwareness(update []byte) ([]AwarenessEntry, error) {
+	decoder := encoding.NewDecoder(update)
+	count, err := decoder.ReadVarUint()
+	if err != nil {
+		return nil, err
+	}
+	var entries []AwarenessEntry
+	for range count {
+		client, err := decoder.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		clock, err := decoder.ReadVarUint()
+		if err != nil {
+			return nil, err
+		}
+		state, err := decoder.ReadVarString()
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, AwarenessEntry{Client: client, Clock: clock, State: json.RawMessage(state)})
+	}
+	return entries, nil
+}
+
+// foldAwareness keeps each entry as y-protocols' applyAwarenessUpdate does: one with a later clock
+// than the client's last, or a removal at the same clock of a client still present.
+func (p *Peer) foldAwareness(entries []AwarenessEntry) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	changed := false
+	for _, entry := range entries {
+		current, known := p.awareness[entry.Client]
+		present := known && !current.Removed()
+		if current.Clock < entry.Clock || (current.Clock == entry.Clock && entry.Removed() && present) {
+			p.awareness[entry.Client] = entry
+			changed = true
+		}
+	}
+	if changed {
+		close(p.awarenessChanged)
+		p.awarenessChanged = make(chan struct{})
 	}
 }
 

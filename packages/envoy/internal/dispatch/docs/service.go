@@ -62,6 +62,9 @@ type Deps struct {
 	Settle            time.Duration
 	MarkWait          time.Duration
 	UnrecordedMarkTTL time.Duration
+	// TestHooks keeps the state the test hooks read and steer (testhooks_rooms.go); cmd/dispatch
+	// sets it under DISPATCH_TEST_HOOKS=1. Without it every hook answers ErrTestHooksOff.
+	TestHooks bool
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
@@ -259,6 +262,8 @@ type Service struct {
 	// reads holds the renderings of the documents cold reads served, each under the stored state
 	// it was rendered from (coldRead).
 	reads *documentReads
+	// hooks is the test hooks' state (testhooks_rooms.go), nil unless Deps.TestHooks is set.
+	hooks *testHooks
 }
 
 type artifactOwner struct {
@@ -583,6 +588,9 @@ func New(deps Deps) *Service {
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
 		reads:             newDocumentReads(documentReadBudget),
+	}
+	if deps.TestHooks {
+		service.hooks = newTestHooks()
 	}
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
 	srv := websocket.NewServerWithPersistence(adapter)
@@ -2402,6 +2410,7 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 		return
 	}
 	state.failed = cause
+	s.hooks.countRoomFailure(room)
 	state.failedDone = make(chan struct{})
 	done := state.failedDone
 	state.roomGeneration = s.nextRoomGeneration()

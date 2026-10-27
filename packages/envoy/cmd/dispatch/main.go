@@ -826,6 +826,7 @@ func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 // router through appContextOptions, so dropping a hand-off here fails a case.
 func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
 	built.AgentTokens = boot.AgentTokens
+	built.TestHooks = boot.TestHooksEnabled
 	return docs.New(built)
 }
 

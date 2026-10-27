@@ -138,7 +138,9 @@ func TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip(t *tes
 	pair := newProcessPair(t)
 	runStaleRoomEvictor(t, pair.taskA)
 	browser := connectPeer(t, pair.serverA.URL, pair.artifactID, "alice")
-	waitForPeerDocument(t, browser, storedMarkdown(t, pair.database, pair.artifactID))
+	if err := browser.WaitForText(peerMarkdown, storedMarkdown(t, pair.database, pair.artifactID), 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 
 	started := time.Now()
 	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 2,
@@ -163,7 +165,9 @@ func TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip(t *tes
 	// What the browser does next: its provider reconnects and syncs, and the room it reaches is
 	// loaded from the stored document. A new copy, as a provider that lost its document has.
 	again := connectPeer(t, pair.serverA.URL, pair.artifactID, "alice")
-	waitForPeerDocument(t, again, stored)
+	if err := again.WaitForText(peerMarkdown, stored, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // This process's own writes evict nothing: a browser typing here appends several updates a

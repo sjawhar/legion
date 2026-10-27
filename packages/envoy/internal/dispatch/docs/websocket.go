@@ -121,6 +121,7 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
+	a.service.hooks.awaitPersistenceHold(ctx, room)
 	if _, err := a.store.AppendUpdateWithCredit(withRoomCursor(ctx, class.cursor), room, update, class.contentChanged, class.credit); err != nil {
 		a.service.failRoom(room, err)
 		return err
@@ -138,6 +139,8 @@ func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) er
 	// a failed room's eviction compacts under the lock so recovery remains fail-fast (compactIfIdle).
 	if !a.service.roomFailed(room) {
 		ctx = compactIfIdle(ctx)
+	} else {
+		a.service.hooks.countLockWaitingCompaction(room)
 	}
 	_, err := a.store.Compact(ctx, room, compactKeep)
 	return err

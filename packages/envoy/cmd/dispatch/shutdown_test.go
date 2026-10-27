@@ -762,20 +762,17 @@ func (p *dispatchProcess) openStream(t *testing.T, path string) <-chan streamEnd
 // presents, so the room takes its edits, and returns once the editor's copy renders want.
 func (p *dispatchProcess) openEditor(t *testing.T, artifactID, want string) *docstest.Peer {
 	t.Helper()
+	return p.openEditorAs(t, dispatchTestLogin, artifactID, want)
+}
+
+// openEditorAs is openEditor for login, the person the tab is signed in as (X-Dispatch-User, the
+// identity these processes trust).
+func (p *dispatchProcess) openEditorAs(t *testing.T, login, artifactID, want string) *docstest.Peer {
+	t.Helper()
 	url := "ws://127.0.0.1:" + strconv.Itoa(p.port) + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
-	editor := docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{dispatchTestLogin}}, artifactID, crdt.New())
-	deadline := time.After(10 * time.Second)
-	for markdown(editor) != want {
-		if err := editor.AskForDocument(); err != nil {
-			t.Fatalf("ask the room for the document: %v", err)
-		}
-		select {
-		case <-editor.Answers:
-		case <-editor.Ended:
-			t.Fatalf("the editor's connection closed before the room sent the document:\n%s", p.Output.String())
-		case <-deadline:
-			t.Fatalf("the room never sent the editor the document:\n%s", p.Output.String())
-		}
+	editor := docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{login}}, artifactID, crdt.New())
+	if err := editor.WaitForText(markdown, want, 10*time.Second); err != nil {
+		t.Fatalf("%v:\n%s", err, p.Output.String())
 	}
 	return editor
 }

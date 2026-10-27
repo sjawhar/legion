@@ -194,6 +194,10 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err != nil {
 		return fmt.Errorf("append transactional live document update: %w", err)
 	}
+	if len(write.versions) == 0 {
+		// The transaction holds the document's advisory lock from this append until it ends.
+		s.hooks.parkLiveWrite(artifactID, PauseAfterFirstAppend)
+	}
 	// The append holds the document's advisory lock until the transaction ends, so no eviction
 	// of the room can finish before then, and a later reload holds the write. A room that failed
 	// before it may already have reloaded without the write, beyond the writer slot, which is on

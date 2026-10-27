@@ -195,6 +195,12 @@ func (s *server) routes() []apiRoute {
 			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
 			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
+			apiRoute{http.MethodGet, "/api/v1/artifacts/_test/rooms", authAny, "Test hook: list the documents this process holds a room of.", s.listResidentRooms},
+			apiRoute{http.MethodGet, "/api/v1/artifacts/{id}/_test/room-counters", authAny, "Test hook: count this process's room failures and lock-waiting compactions of a document.", s.getRoomCounters},
+			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/hold-persistence", authAny, "Test hook: hold this process's appends of a document's browser updates for a duration.", s.holdRoomPersistence},
+			apiRoute{http.MethodPut, "/api/v1/artifacts/{id}/_test/live-write-pauses/{point}", authAny, "Test hook: park the document's next live write at a point (after-first-append, after-commit).", s.armLiveWritePause},
+			apiRoute{http.MethodGet, "/api/v1/artifacts/{id}/_test/live-write-pauses/{point}", authAny, "Test hook: wait until a live write parks at the armed pause.", s.awaitLiveWriteParked},
+			apiRoute{http.MethodDelete, "/api/v1/artifacts/{id}/_test/live-write-pauses/{point}", authAny, "Test hook: release the live write parked at the pause and disarm it.", s.releaseLiveWritePause},
 		)
 	}
 	return routes

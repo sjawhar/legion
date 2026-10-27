@@ -39,7 +39,9 @@ func TestShutdownSettlesARoomWithAnEditorConnectedBeforeClosingIt(t *testing.T) 
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	editor := connectPeer(t, httpServer.URL, artifactID, "alice")
-	waitForPeerDocument(t, editor, "before\n")
+	if err := editor.WaitForText(peerMarkdown, "before\n", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	typeOver(t, editor, "before", "after")
 	waitForSettlementOwed(t, service, artifactID)
 
@@ -78,7 +80,9 @@ func TestShutdownJoinsTheSettlementItsLastBrowserLeavingStarted(t *testing.T) {
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	browser := connectPeer(t, httpServer.URL, artifactID, "alice")
-	waitForPeerDocument(t, browser, "before\n")
+	if err := browser.WaitForText(peerMarkdown, "before\n", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 	// A block with no id arms the room's settlement, which has to stamp one.
 	editLiveTree(t, service, artifactID, appendUnidentifiedBlocks(t, "added"))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -210,7 +214,9 @@ func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testi
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	editor := connectPeer(t, httpServer.URL, artifactID, "alice")
-	waitForPeerDocument(t, editor, "before\n")
+	if err := editor.WaitForText(peerMarkdown, "before\n", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 
 	appends.armed.Store(true)
 	editLiveTree(t, service, artifactID, replaceRun("before", "first"))
@@ -219,7 +225,9 @@ func TestShutdownSettlesABurstOfAppendsIncludingOneRecordedAfterItsScan(t *testi
 	case <-time.After(10 * time.Second):
 		t.Fatal("the first append never reached the store")
 	}
-	waitForPeerDocument(t, editor, "first\n")
+	if err := editor.WaitForText(peerMarkdown, "first\n", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancelShutdown()
@@ -383,24 +391,6 @@ func newShutdownTestService(t *testing.T, database *store.Store, appends Version
 	// s.stopping guard returns it almost instantly), so it is a harmless no-op, not a race.
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	return service
-}
-
-// waitForPeerDocument asks the room for its document until the peer's copy renders want.
-func waitForPeerDocument(t *testing.T, peer *docstest.Peer, want string) {
-	t.Helper()
-	deadline := time.After(10 * time.Second)
-	for peerMarkdown(peer) != want {
-		if err := peer.AskForDocument(); err != nil {
-			t.Fatalf("ask the room for the document: %v", err)
-		}
-		select {
-		case <-peer.Answers:
-		case <-peer.Ended:
-			t.Fatal("the peer's connection closed before the room sent the document")
-		case <-deadline:
-			t.Fatalf("the peer's copy renders %q, want %q", peerMarkdown(peer), want)
-		}
-	}
 }
 
 // peerMarkdown renders the peer's copy of the document, read under its lock while the room's

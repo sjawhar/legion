@@ -636,6 +636,7 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 // error, and every write to the document until it recovered again would be refused.
 func (s *Service) publishLiveWrite(write *liveWrite) {
 	defer s.finishLiveWrite(write)
+	s.hooks.parkLiveWrite(write.artifactID, PauseAfterCommit)
 	// Committed, the write has no more use for its fork, so the fork goes before the publish,
 	// which loads the room when no room holds the document (coldFork).
 	write.releaseFork()

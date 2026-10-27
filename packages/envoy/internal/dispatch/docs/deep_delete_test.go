@@ -41,7 +41,9 @@ func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 		peer := connectPeer(t, httpServer.URL, artifactID, "alice")
 		// The peer writes on the room's document, as a browser does once the room has sent it, so
 		// the chain's root always lands beside the seeded paragraph.
-		waitForPeerDocument(t, peer, "before\n")
+		if err := peer.WaitForText(peerMarkdown, "before\n", 10*time.Second); err != nil {
+			t.Fatal(err)
+		}
 		fragment := peer.Doc.GetXmlFragment(fragmentName)
 		root := crdt.NewYXmlElement("blockquote")
 		if _, err := peer.Send(func(txn *crdt.Transaction) { fragment.InsertElement(txn, 0, root) }); err != nil {

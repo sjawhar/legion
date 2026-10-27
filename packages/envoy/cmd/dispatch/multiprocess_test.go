@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -38,8 +39,10 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -83,11 +86,32 @@ func newPair(t *testing.T) *dispatchPair {
 // do when their loops fire at the same moment, which a staggered start would hide.
 func (p *dispatchPair) start(t *testing.T, env map[string]string) {
 	t.Helper()
+	p.startSettling(t, env, 0, 0)
+}
+
+// startSettling is start with each process's own settle delay (DISPATCH_TEST_SETTLE_DELAY): how
+// long A, then B, waits after a live change before it settles the document. Zero keeps the
+// server's default. Both run with the test hooks (DISPATCH_TEST_HOOKS=1), as every process
+// startDispatchProcessWith starts does.
+func (p *dispatchPair) startSettling(t *testing.T, env map[string]string, settleA, settleB time.Duration) {
+	t.Helper()
 	options := dispatchOptions{NATSURL: p.nats, SigningKey: multiprocessSigningKey, Env: env}
-	p.a = startDispatchProcessWith(t, p.databaseURL(t), options)
-	p.b = startDispatchProcessWith(t, p.databaseURL(t), options)
+	optionsA, optionsB := options, options
+	optionsA.SettleDelay, optionsB.SettleDelay = settleA, settleB
+	p.a = startDispatchProcessWith(t, p.databaseURL(t), optionsA)
+	p.b = startDispatchProcessWith(t, p.databaseURL(t), optionsB)
 	p.a.waitHealthy(t)
 	p.b.waitHealthy(t)
+}
+
+// kill ends the process with SIGKILL (os.Process.Kill), as a task replaced mid-deploy or killed
+// for memory ends, with no chance to finish anything, and returns once it has exited.
+func (p *dispatchProcess) kill(t *testing.T) {
+	t.Helper()
+	if err := p.Cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill the process: %v", err)
+	}
+	<-p.Exited
 }
 
 // startPair is newPair and start together, for a row that seeds nothing first.
@@ -289,6 +313,101 @@ func (p *dispatchProcess) documentText(t *testing.T, artifactID string) string {
 		t.Fatalf("decode the document's text: %v: %s", err, answer)
 	}
 	return document.Markdown
+}
+
+// ───── document editors and the document test hooks ───────────────────────
+
+// servingProcess is the X-Dispatch-Process header of the editor's websocket upgrade: the process
+// that served its socket, or "" when the answer carried none.
+func servingProcess(editor *docstest.Peer) string {
+	return editor.UpgradeHeader.Get("X-Dispatch-Process")
+}
+
+// authenticateEditor authenticates the editor at the schema version the dashboard presents, as
+// its provider does, and answers the scope the room granted: "read-write" or "readonly".
+func authenticateEditor(t *testing.T, editor *docstest.Peer) string {
+	t.Helper()
+	scope, err := editor.Authenticate(strconv.Itoa(pmdoc.SchemaVersion()), 10*time.Second)
+	if err != nil {
+		t.Fatalf("authenticate the editor: %v", err)
+	}
+	return scope
+}
+
+// residentRooms lists the documents the process holds a room of now
+// (GET /api/v1/artifacts/_test/rooms).
+func (p *dispatchProcess) residentRooms(t *testing.T) []string {
+	t.Helper()
+	answer := p.call(t, http.MethodGet, "/api/v1/artifacts/_test/rooms", "", http.StatusOK)
+	var listed struct {
+		Rooms []string `json:"rooms"`
+	}
+	if err := json.Unmarshal(answer, &listed); err != nil {
+		t.Fatalf("decode the resident rooms: %v: %s", err, answer)
+	}
+	return listed.Rooms
+}
+
+// roomCounters is how often the process's rooms of the document failed and compacted waiting for
+// the document lock since it started (GET /api/v1/artifacts/{id}/_test/room-counters).
+func (p *dispatchProcess) roomCounters(t *testing.T, artifactID string) docs.RoomCounters {
+	t.Helper()
+	answer := p.call(t, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/_test/room-counters", "", http.StatusOK)
+	var counters docs.RoomCounters
+	if err := json.Unmarshal(answer, &counters); err != nil {
+		t.Fatalf("decode the room counters: %v: %s", err, answer)
+	}
+	return counters
+}
+
+// holdPersistence holds, for duration from now, every append of a browser update the process's
+// rooms of the document make (POST /api/v1/artifacts/{id}/_test/hold-persistence).
+func (p *dispatchProcess) holdPersistence(t *testing.T, artifactID string, duration time.Duration) {
+	t.Helper()
+	p.call(t, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/_test/hold-persistence",
+		fmt.Sprintf(`{"duration":%q}`, duration.String()), http.StatusNoContent)
+}
+
+// liveWritePausePath is the test hook route of the pause of the document's live writes at point.
+func liveWritePausePath(artifactID string, point docs.LiveWritePausePoint) string {
+	return "/api/v1/artifacts/" + artifactID + "/_test/live-write-pauses/" + string(point)
+}
+
+// armLiveWritePause makes the next live write of the document on this process park at point
+// until releaseLiveWritePause. Arm it before the write is sent, then awaitLiveWriteParked.
+func (p *dispatchProcess) armLiveWritePause(t *testing.T, artifactID string, point docs.LiveWritePausePoint) {
+	t.Helper()
+	p.call(t, http.MethodPut, liveWritePausePath(artifactID, point), "", http.StatusNoContent)
+}
+
+// awaitLiveWriteParked waits up to ten seconds for a write of the document to park at the pause
+// armed at point, and fails the test when none does.
+func (p *dispatchProcess) awaitLiveWriteParked(t *testing.T, artifactID string, point docs.LiveWritePausePoint) {
+	t.Helper()
+	answer := p.call(t, http.MethodGet, liveWritePausePath(artifactID, point)+"?wait=10s", "", http.StatusOK)
+	var parked struct {
+		Parked bool `json:"parked"`
+	}
+	if err := json.Unmarshal(answer, &parked); err != nil {
+		t.Fatalf("decode the live write pause: %v: %s", err, answer)
+	}
+	if !parked.Parked {
+		t.Fatalf("no live write of %s parked at %s within ten seconds:\n%s", artifactID, point, p.Output.String())
+	}
+}
+
+// releaseLiveWritePause lets the write parked at point go on and disarms the pause, answering
+// whether a write had parked there.
+func (p *dispatchProcess) releaseLiveWritePause(t *testing.T, artifactID string, point docs.LiveWritePausePoint) bool {
+	t.Helper()
+	answer := p.call(t, http.MethodDelete, liveWritePausePath(artifactID, point), "", http.StatusOK)
+	var released struct {
+		Parked bool `json:"parked"`
+	}
+	if err := json.Unmarshal(answer, &released); err != nil {
+		t.Fatalf("decode the live write release: %v: %s", err, answer)
+	}
+	return released.Parked
 }
 
 // ───── a live stream carries the other process's events ─────────────────────
@@ -649,10 +768,7 @@ func TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy(t *testing.T) {
 	// chance to unsubscribe, and the process that was standing by takes the durable over.
 	dying := holders["delivery-events"]
 	survivor := pair.other(dying)
-	if err := dying.Cmd.Process.Kill(); err != nil {
-		t.Fatalf("kill the holder: %v", err)
-	}
-	<-dying.Exited
+	dying.kill(t)
 	handedOver := time.Now()
 	for _, durable := range deliveryDurables {
 		if holders[durable] != dying {
