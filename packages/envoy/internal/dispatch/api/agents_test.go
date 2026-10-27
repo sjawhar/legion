@@ -6,7 +6,10 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -190,5 +193,270 @@ func TestAgentsReportsListenerUnavailable(t *testing.T) {
 				t.Fatalf("status %d: %s", response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+// agentIDs reads GET /api/v1/agents and answers the session ids it lists, in its order.
+func agentIDs(t *testing.T, handler http.Handler) []string {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents", nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("list agents: status %d: %s", response.Code, response.Body.String())
+	}
+	rows := decodeBody[[]struct {
+		SessionID string `json:"session_id"`
+	}](t, response)
+	ids := make([]string, len(rows))
+	for index, row := range rows {
+		ids[index] = row.SessionID
+	}
+	return ids
+}
+
+// sessionsListener is a listener whose GET /v1/sessions answers the JSON list answer, until the
+// test passes set a new one. calls counts the requests that reached it.
+func sessionsListener(t *testing.T, answer string) (url string, set func(string), calls *atomic.Int32) {
+	t.Helper()
+	calls = &atomic.Int32{}
+	var current atomic.Pointer[string]
+	current.Store(&answer)
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sessions" {
+			http.NotFound(w, r)
+			return
+		}
+		calls.Add(1)
+		_, _ = w.Write([]byte(*current.Load()))
+	}))
+	t.Cleanup(listener.Close)
+	return listener.URL, func(next string) { current.Store(&next) }, calls
+}
+
+// The agents list and issue reads share the process's one copy of the listener's sessions: an
+// agents list, an issue read and a second agents list inside the TTL make one listener call, and
+// the second list is the first answer even though the listener's own answer has changed since.
+func TestAgentsListsAndIssueReadsWithinTheTTLShareOneListenerCall(t *testing.T) {
+	roster := &fakeRoster{}
+	roster.set("ses-sre", "sre")
+	handler, _, served := cachedRouteStatusServer(t, roster)
+	// A minute, not the deployment's five seconds, so a slow machine's reads stay inside it.
+	served.rosters.ttl = time.Minute
+	key := routedIssueKey(t, handler, "role:sre")
+	before := roster.lookups.Load()
+
+	if got := agentIDs(t, handler); !reflect.DeepEqual(got, []string{"ses-sre"}) {
+		t.Fatalf("first agents list = %v, want [ses-sre]", got)
+	}
+	if got := detailReach(t, handler, key); got != "live ses-sre" {
+		t.Fatalf("issue read after the agents list: %s, want live ses-sre", got)
+	}
+	roster.end("ses-sre")
+	roster.set("ses-new", "sre")
+	if got := agentIDs(t, handler); !reflect.DeepEqual(got, []string{"ses-sre"}) {
+		t.Fatalf("second agents list inside the TTL = %v, want the cached [ses-sre]", got)
+	}
+	if calls := roster.lookups.Load() - before; calls != 1 {
+		t.Fatalf("two agents lists and an issue read inside the TTL made %d listener calls, want 1", calls)
+	}
+}
+
+// An agents list after the TTL asks the listener again and lists its new answer.
+func TestAnAgentsListAfterTheTTLListsTheListenersNewAnswer(t *testing.T) {
+	roster := &fakeRoster{}
+	roster.set("ses-sre", "sre")
+	handler, _, served := cachedRouteStatusServer(t, roster)
+	served.rosters.ttl = 50 * time.Millisecond
+	before := roster.lookups.Load()
+
+	if got := agentIDs(t, handler); !reflect.DeepEqual(got, []string{"ses-sre"}) {
+		t.Fatalf("first agents list = %v, want [ses-sre]", got)
+	}
+	roster.end("ses-sre")
+	roster.set("ses-new", "sre")
+	time.Sleep(100 * time.Millisecond)
+	if got := agentIDs(t, handler); !reflect.DeepEqual(got, []string{"ses-new"}) {
+		t.Fatalf("agents list after the TTL = %v, want [ses-new]", got)
+	}
+	if calls := roster.lookups.Load() - before; calls != 2 {
+		t.Fatalf("two agents lists a TTL apart made %d listener calls, want 2", calls)
+	}
+}
+
+// A listener that fails answers every agents list 503 ENVOY_UNAVAILABLE with the fetch's own
+// error, and is asked once within the silence window; once the window has passed, a list asks
+// the recovered listener and lists its sessions. The window is two seconds, so a loaded machine's
+// second list still lands inside it.
+func TestAgentsAnswer503ThroughTheSilenceWindowAndListOnceTheListenerRecovers(t *testing.T) {
+	roster := &fakeRoster{}
+	roster.down.Store(true)
+	handler, _, served := cachedRouteStatusServer(t, roster)
+	const silence = 2 * time.Second
+	served.rosters.ttl, served.rosters.silenceTTL = time.Minute, silence
+	before := roster.lookups.Load()
+
+	var failed time.Time
+	for read := 1; read <= 2; read++ {
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents", nil, "alice")
+		if read == 1 {
+			failed = time.Now()
+		}
+		body := response.Body.String()
+		if response.Code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"ENVOY_UNAVAILABLE"`) ||
+			!strings.Contains(body, "GET /v1/sessions returned 503") {
+			t.Fatalf("agents list %d with the listener down: status %d: %s, want 503 ENVOY_UNAVAILABLE carrying the fetch's error", read, response.Code, body)
+		}
+	}
+	if calls := roster.lookups.Load() - before; calls != 1 {
+		t.Fatalf("two agents lists inside the silence window made %d listener calls, want 1", calls)
+	}
+
+	roster.down.Store(false)
+	roster.set("ses-sre", "sre")
+	time.Sleep(time.Until(failed.Add(silence + 200*time.Millisecond)))
+	if got := agentIDs(t, handler); !reflect.DeepEqual(got, []string{"ses-sre"}) {
+		t.Fatalf("agents list after the silence window = %v, want [ses-sre]", got)
+	}
+	if calls := roster.lookups.Load() - before; calls != 2 {
+		t.Fatalf("agents lists either side of the silence window made %d listener calls, want 2", calls)
+	}
+}
+
+// Every read the cache serves shares one session list, so agents lists and issue reads running
+// together leave it as the listener sent it: no list sorts it or fills in a host in place (the
+// race detector catches the write itself), and each list still comes out newest first with the
+// machine_id standing in for a missing host. The listener sends the sessions oldest first, so the
+// sorted order is the reverse of the cached one.
+func TestConcurrentAgentsListsAndIssueReadsLeaveTheSharedListAsTheListenerSentIt(t *testing.T) {
+	listenerURL, _, calls := sessionsListener(t, `[
+		{"session_id":"a","title":"oldest","machine_id":"box-a","roles":["sre"],"last_seen":100},
+		{"session_id":"b","title":"middle","machine_id":"box-b","host":"host-b","last_seen":200},
+		{"session_id":"c","title":"newest","machine_id":"box-c","last_seen":300}
+	]`)
+	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listenerURL})
+	served.rosters.ttl = time.Minute
+	key := routedIssueKey(t, handler, "role:sre")
+
+	const readers = 8
+	agents := make([]*httptest.ResponseRecorder, readers)
+	issues := make([]*httptest.ResponseRecorder, readers)
+	start := make(chan struct{})
+	var done sync.WaitGroup
+	for index := range readers {
+		done.Add(2)
+		go func() {
+			defer done.Done()
+			<-start
+			agents[index] = dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents", nil, "alice")
+		}()
+		go func() {
+			defer done.Done()
+			<-start
+			issues[index] = dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil, "alice")
+		}()
+	}
+	close(start)
+	done.Wait()
+
+	type agentRow struct {
+		SessionID string `json:"session_id"`
+		Host      string `json:"host"`
+	}
+	want := []agentRow{{"c", "box-c"}, {"b", "host-b"}, {"a", "box-a"}}
+	for index, response := range agents {
+		if response.Code != http.StatusOK {
+			t.Fatalf("agents list %d: status %d: %s", index, response.Code, response.Body.String())
+		}
+		if got := decodeBody[[]agentRow](t, response); !reflect.DeepEqual(got, want) {
+			t.Fatalf("agents list %d = %v, want %v", index, got, want)
+		}
+	}
+	for index, response := range issues {
+		if response.Code != http.StatusOK {
+			t.Fatalf("issue read %d: status %d: %s", index, response.Code, response.Body.String())
+		}
+		issue := decodeBody[routedIssue](t, response)
+		if got := reachText(issue.RouteStatus, issue.RouteHolder); got != "live a" {
+			t.Fatalf("issue read %d: %s, want live a", index, got)
+		}
+	}
+
+	served.rosters.mu.Lock()
+	cached := served.rosters.roster.sessions
+	served.rosters.mu.Unlock()
+	sent := make([]agentRow, len(cached))
+	for index, session := range cached {
+		sent[index] = agentRow{session.SessionID, session.Host}
+	}
+	if wantSent := []agentRow{{"a", ""}, {"b", "host-b"}, {"c", ""}}; !reflect.DeepEqual(sent, wantSent) {
+		t.Fatalf("the cached session list is %v after the reads, want the listener's own %v", sent, wantSent)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("%d agents lists and %d issue reads inside the TTL made %d listener calls, want 1", readers, readers, got)
+	}
+}
+
+// An agents list whose request ends while it waits on the shared fetch answers 503
+// ENVOY_UNAVAILABLE at once, saying why; the fetch runs on, and the next list is its answer.
+func TestAnAgentsListWhoseRequestEndsWhileItWaitsOnTheFetchAnswers503(t *testing.T) {
+	database := storetest.Open(t)
+	mux := http.NewServeMux()
+	_, calls, release := heldRosterMux(t, mux, Deps{Store: database, Identity: headerIdentity(database)})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil).WithContext(ctx)
+	request.Header.Set("X-Dispatch-User", "alice")
+	response := httptest.NewRecorder()
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		mux.ServeHTTP(response, request)
+	}()
+	awaitCalls(t, calls, 1)
+	cancel()
+	select {
+	case <-answered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("an agents list did not answer within 5 s of its request ending")
+	}
+	body := response.Body.String()
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"ENVOY_UNAVAILABLE"`) ||
+		!strings.Contains(body, "context canceled") {
+		t.Fatalf("an agents list whose request ended: status %d: %s, want 503 ENVOY_UNAVAILABLE saying the request ended", response.Code, body)
+	}
+
+	release()
+	if got := agentIDs(t, mux); !reflect.DeepEqual(got, []string{"ses-sre"}) {
+		t.Fatalf("the next agents list = %v, want the fetch's answer [ses-sre]", got)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("two agents lists made %d listener calls, want 1", got)
+	}
+}
+
+// A server built with Deps.ListenerRosterUncached asks the listener on every agents list, so an
+// end-to-end test sees the listener's change at its next read however long the TTL.
+func TestAnUncachedListenerRosterAsksTheListenerOnEveryAgentsList(t *testing.T) {
+	listenerURL, set, calls := sessionsListener(t, `[{"session_id":"first","title":"worker","last_seen":100}]`)
+	database := storetest.Open(t)
+	mux := http.NewServeMux()
+	served := register(mux, Deps{
+		Store:                  database,
+		Identity:               headerIdentity(database),
+		Envoy:                  envoy.New(listenerURL),
+		ListenerRosterUncached: true,
+	})
+	// A minute each, so only the uncached flag, never an expiry, explains a second call.
+	served.rosters.ttl, served.rosters.silenceTTL = time.Minute, time.Minute
+
+	if got := agentIDs(t, mux); !reflect.DeepEqual(got, []string{"first"}) {
+		t.Fatalf("first agents list = %v, want [first]", got)
+	}
+	set(`[{"session_id":"second","title":"worker","last_seen":200}]`)
+	if got := agentIDs(t, mux); !reflect.DeepEqual(got, []string{"second"}) {
+		t.Fatalf("second agents list = %v, want the listener's new [second]", got)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("two agents lists made %d listener calls, want 2", got)
 	}
 }

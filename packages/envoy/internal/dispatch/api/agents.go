@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"time"
 
@@ -78,7 +79,10 @@ func (s *server) agentLastActivity(ctx context.Context, sessionIDs []string) (ma
 }
 
 // listAgents is readable by any authenticated caller: a session picks a target by the
-// capabilities it advertises. Sending to a session without an issue stays human-only.
+// capabilities it advertises. Sending to a session without an issue stays human-only. The list is
+// the process's copy of the listener's live sessions (readRouteRoster), at most routeRosterTTL
+// (5 s) old plus the fetch that answered it, so one listener call serves agents lists and issue
+// reads alike; a listener that did not answer answers 503 for as long as that copy is a silence.
 func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -88,20 +92,22 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessions, err := s.deps.Envoy.Sessions(r.Context())
-	if err != nil {
-		if errors.Is(err, envoy.ErrUnavailable) {
-			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, err.Error())
+	roster := s.readRouteRoster(r.Context())
+	if !roster.answered {
+		if errors.Is(roster.err, envoy.ErrUnavailable) {
+			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, roster.err.Error())
 			return
 		}
-		s.writeHandlerError(w, err)
+		s.writeHandlerError(w, roster.err)
 		return
 	}
-	if len(sessions) == 0 {
+	if len(roster.sessions) == 0 {
 		// Nothing to look up: both aggregates would bind an empty id list and return no rows.
 		WriteJSON(w, http.StatusOK, []agentResponse{})
 		return
 	}
+	// The roster's list is every read's, so the sort orders a copy of it.
+	sessions := slices.Clone(roster.sessions)
 	sort.SliceStable(sessions, func(left, right int) bool {
 		if sessions[left].LastSeen != sessions[right].LastSeen {
 			return sessions[left].LastSeen > sessions[right].LastSeen
