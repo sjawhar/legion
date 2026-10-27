@@ -6,8 +6,6 @@ disable-model-invocation: true
 
 # Thermonuclear Code Quality
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 This is a maintainability review of one diff: the current branch's changes, or the range you are given. Every remedy keeps behavior the same and removes code or concepts, or moves code where a reader finds it without reading the rest of the file, because a behavior change is work for `skill://thermonuclear-deep-review`, not a cleanup. The table's last two rows change ordering or failure behavior: say so in the finding.
 
 ## Report

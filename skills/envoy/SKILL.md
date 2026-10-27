@@ -5,8 +5,6 @@ description: Use when you send a message to another agent session, reply to an E
 
 # Envoy
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Envoy delivers external events and messages between sessions. Delivery is at-least-once and can come out of order across topics: drop a repeated `id`, and when two deliveries conflict, act on the one with the later `at`.
 
 ## Send a message to another session

@@ -5,8 +5,6 @@ description: Use when you are about to ask a human a question about a pattern, c
 
 # Legion Oracle
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 ## When to research instead of asking
 
 - Research when the answer is a fact a file, command or document can show (a pattern, convention, solved problem or technical approach), because `docs/solutions/` records what past work learned and a human should not answer it twice.
