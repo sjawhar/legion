@@ -2,42 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-536",
-  "completed": "2026-10-27T12:10:00Z",
-  "round": 3,
-  "headTested": "6d88b3998e1f1aa0e4f055410bc67f14135b6a2f",
-  "codeHead": "6328064ef4ec",
-  "fingerprint": "changed: round 2 tested 4daf66f5; ee91e91f replaces the characterReference regex with characterReferenceLength (references.go, elements.go escapes, render.go escapeFootnoteLabel) and 6328064e refactors render_readback_test.go, so this is a full test round",
+  "completed": "2026-10-27T13:40:00Z",
+  "round": 4,
+  "headTested": "d2504ed87896ee8189d941dfafb40d89b34e7470",
+  "codeHead": "6c7efe727834",
+  "fingerprint": "changed: 6d88b399 (round 3) 4028984e… -> d2504ed8 e27cb169…. The code since round 3 is the merge of main c892b97d at aac74fb5 (conflict only in packages/envoy/CHANGELOG.md) and 6c7efe72 (escapes() comment in elements.go, readingDiff folded into parseAsTheEngine). This is a full real-surface round, because main's merge changed the document write path (internal/dispatch/docs: livewrite, persistence, mutation, rebuild …).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Proof 1 re-run at 6d88b399: doc.e2e.ts:707 passed in chromium and iphone; the e2e files are unchanged since round 1, when my base run failed (editor [\"Plain & end.\"]). Proof 3 re-run: differential.sh --base 4bbb2a9c --head 6d88b399 -> the same gate counts as rounds 1 and 2 and the implementer's. The refactor is behaviour-preserving: a throwaway Go check (deleted) compared characterReferenceLength (string and []byte) with the deleted regex `^&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});` at 71,779 `&` positions in 400,000 random strings: every length agreed. It also checked that characterReferenceAt decodes every numeric shape to numericReferenceCharacter of its digits and never reports a length other than the shape's: no difference. The tester's red test TestAnImageAddressEndingInABackslashRendersAndReadsBack, restructured at the reviewer's request onto rendersBackInBothParsers, still holds the same six markdowns, the RefuseMisreadDocument check and both parsers' read-back."
+    "how": "Proof 1 re-run at d2504ed8: doc.e2e.ts:707 passed in chromium and iphone; the five e2e files are unchanged since round 1, when my base run failed (editor [\"Plain & end.\"]). Proof 3 (differential) not re-run: `jj diff --from 6d88b399 --to d2504ed8 --stat` over packages/envoy/internal/dispatch/pmdoc and packages/proof-editor shows only elements.go (5 lines, comment) and render_readback_test.go, and main b08a56bc..c892b97d touches no pmdoc or proof-editor file. The differential reads pmdoc alone, deterministically, so its round-3 counts at 6d88b399 hold for this head (0 regressions, 0 churn, 0 engine-tree regressions, 0 panics, 0 lost fixed points; 231 engine-tree churn and 2 INFRA-425 misreads, all generated). The red test TestAnImageAddressEndingInABackslashRendersAndReadsBack is unchanged by 6c7efe72."
   },
   "failed": 0,
   "failures": [],
-  "ci": "read at 6328064e (6d88b399 is handoff-only): changes, lint, typecheck, test, build and pr-title queued. Not waited for.",
+  "ci": "read at 6c7efe72 (d2504ed8 is handoff-only): changes, lint, typecheck, test, build and pr-title queued; the PR is MERGEABLE (round 2 review's conflict blocker resolved). Not waited for.",
   "proof": [
     {
       "criterion": "A1 a document written through the API, A1 dispatch doc-read, and the comment control",
       "surface": "Dispatch browser suite in this pod: real Go server, real migrations on Postgres 17, production SPA bundle, live editor at /issues/<KEY>/spec (chromium, iphone), the Conversation, the real packages/envoy-client/bin/dispatch.ts",
       "command": "cd packages/dispatch && bun run e2e doc.e2e.ts -g \"backslash before a character reference\" (in-pod: $TMPDIR/infra536/run-e2e.sh doc.e2e.ts zz-tester-probe.e2e.ts -g \"backslash before a character reference|tester probe\")",
-      "observed": "doc.e2e.ts:707 passed in chromium (8.9s) and iphone (8.8s)",
-      "headSha": "6d88b3998e1f1aa0e4f055410bc67f14135b6a2f",
+      "observed": "doc.e2e.ts:707 passed in chromium (9.5s) and iphone (6.6s)",
+      "headSha": "d2504ed87896ee8189d941dfafb40d89b34e7470",
       "negativeControl": "the same test (e2e files unchanged) on a git archive of base 4bbb2a9c, run in round 1: 2 failed at doc.e2e.ts:723, the editor shows [\"Plain & end.\"]"
     },
     {
-      "criterion": "Every escape and character reference reads as the engine reads it, and renders back so that it reads the same, at every decoded site including footnote labels (whose writer the review round changed)",
+      "criterion": "Every escape and character reference reads as the engine reads it, and renders back so that it reads the same, through the merged document write path",
       "surface": "same stack: a spec written through the API, the live editor's paragraphs and link/image attributes, the stored markdown, dispatch doc-read and dispatch artifact",
-      "command": "throwaway packages/dispatch/e2e/zz-tester-probe.e2e.ts (deleted after the run), run-e2e.sh zz-tester-probe.e2e.ts --project chromium",
-      "observed": "1 passed: the editor's 15 paragraphs equal engineParagraphs of the written markdown, with footnote references shown as their decoded labels (`fn xa&b y&copy; zq\\` for `x[^a&amp;b] y[^\\&copy;] z[^q\\\\]`); link title `&amp; t ©`; image src `https://a.example/u&amp;v`, and `https://a.example/u\\`, `https://a.example/u v\\` for addresses ending in a backslash; stored markdown (labels written `[^a&b]`, `[^\\&copy;]`, `[^q\\\\]`) and doc-read read as the engine reads the original; doc-read uploaded as back.md reads back byte-identical",
-      "headSha": "6d88b3998e1f1aa0e4f055410bc67f14135b6a2f",
+      "command": "throwaway packages/dispatch/e2e/zz-tester-probe.e2e.ts (deleted after the run), chromium",
+      "observed": "1 passed: the editor's 15 paragraphs equal engineParagraphs of the written markdown, footnote references shown as their decoded labels (`fn xa&b y&copy; zq\\`); link title `&amp; t ©`; image src `https://a.example/u&amp;v`, `https://a.example/u\\`, `https://a.example/u v\\`, `https://a.example/u\\` (table cell); stored markdown and doc-read read as the engine reads the original; doc-read uploaded as back.md reads back byte-identical",
+      "headSha": "d2504ed87896ee8189d941dfafb40d89b34e7470",
       "negativeControl": "dispatch artifact --project TPR --name bad.md --content of a code block with language `&amp;` -> exit 1, `markdown is not a Proof document: outside Proof schema: a code block whose language holds a backslash escape or a character reference, which the browser editor's parser decodes and goldmark keeps as written`"
-    },
-    {
-      "criterion": "Stored documents keep their reading",
-      "surface": "pmdoc differential over 5,137 stored production documents and 8,084 generated (13,221)",
-      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base 4bbb2a9c --head 6d88b399 --corpus $TMPDIR/infra536/stored.jsonl --corpus $TMPDIR/infra536/references.jsonl --out $TMPDIR/infra536/tester-diff3",
-      "observed": "regressions 0, churn 0, engine-tree regressions 0, head panics 0, lost fixed points 0; engine-tree churn 231 and misreads 2 (the INFRA-425 bare-URL link address, recorded by the architect's decision), every report row from the generated corpus",
-      "headSha": "6d88b3998e1f1aa0e4f055410bc67f14135b6a2f",
-      "negativeControl": "the base side of the same run: 4,722 documents the head fixes and 1,483 engine trees the base renders wrong"
     }
   ]
 }
