@@ -35,6 +35,7 @@ func openStore(t testing.TB, conn *natsgo.Conn) *Store {
 	if err != nil {
 		t.Fatalf("open cistore: %v", err)
 	}
+	t.Cleanup(func() { forgetTestSummarizer(st) })
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := st.WaitForCacheReady(ctx); err != nil {

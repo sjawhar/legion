@@ -197,11 +197,6 @@ func due(st State, now int64, debounce time.Duration) bool {
 		!legacyBacklog(st, now, debounce)
 }
 
-// heldBack reports whether st would be due but for legacyBacklog.
-func heldBack(st State, now int64, debounce time.Duration) bool {
-	return !st.SettledEmitted && settlementReady(st) && legacyBacklog(st, now, debounce)
-}
-
 // UnmarshalJSON maps the retired resettled marker to the durable fact that
 // this record emitted at least one settlement.
 func (state *State) UnmarshalJSON(data []byte) error {

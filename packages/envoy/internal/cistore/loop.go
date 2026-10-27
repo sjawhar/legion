@@ -99,7 +99,7 @@ func gridIndexAtOrAfter(start time.Time, tick time.Duration, at int64) int64 {
 }
 
 // backlogHeld reports the records a head-gated listener left that the summary loop holds back
-// (heldBack): its gauge is set to each pass's count, and the first pass that holds any logs the
+// (verdictHeld): its gauge is set to each pass's count, and the first pass that holds any logs the
 // count once, at INFO. The loop does not wait for the CI cache to load (cmd/listener starts it
 // before the cache is ready), so that first count is a floor, and the line says "at least".
 type backlogHeld struct {
@@ -131,8 +131,8 @@ const (
 	verdictIdle verdict = iota
 	// verdictWait: the record's verdict changes at a later millisecond.
 	verdictWait
-	// verdictHeld: the record is a head-gated listener's leftover (heldBack), which only a change
-	// makes otherwise.
+	// verdictHeld: the record is unsettled, ready and a head-gated listener's leftover
+	// (legacyBacklog), which only a change makes otherwise.
 	verdictHeld
 	// verdictAttempt: the pass tries to settle the record now.
 	verdictAttempt
@@ -140,7 +140,8 @@ const (
 
 // schedule returns the verdict on st at now, in wall-clock milliseconds, and for verdictWait the
 // first millisecond at which the verdict changes. A record is attempted exactly when it is due
-// and carries no fresh claim, and held exactly when heldBack holds it.
+// and carries no fresh claim, and held exactly when it is unsettled, ready and legacyBacklog holds
+// it.
 func schedule(st State, now int64, debounce time.Duration) (verdict, int64) {
 	if st.SettledEmitted || !settlementReady(st) {
 		return verdictIdle, 0
@@ -246,7 +247,7 @@ func newSummarizer(store *Store, debounce time.Duration) *summarizer {
 // pass runs one pass at now (wall-clock milliseconds). It files each record the change feed names
 // by its verdict, takes every queued record due by now, and attempts the due ones in key order,
 // queueing each attempted record at now so the next pass looks at it again. It returns how many
-// records it holds back (heldBack) and, when the queue is not empty, the earliest queued
+// records it holds back (verdictHeld) and, when the queue is not empty, the earliest queued
 // millisecond.
 func (z *summarizer) pass(pub Publisher, logger *logging.Logger, now int64) (held int, next int64, ok bool) {
 	z.mu.Lock()
@@ -317,9 +318,6 @@ func (z *summarizer) settle(pub Publisher, logger *logging.Logger, key string, c
 	staleBefore := now - (2 * debounce).Milliseconds()
 	if cached.Claim != nil {
 		claimGeneration := cached.Claim.Generation
-		if claimFresh(cached, now, debounce) {
-			return
-		}
 		reclaimed, err := store.ReclaimSettlement(key, claimGeneration, staleBefore)
 		if err != nil {
 			logger.Warn("checks reclaim failed", slog.String("error", err.Error()), slog.String("sha", cached.SHA))

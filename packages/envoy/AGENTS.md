@@ -2254,7 +2254,7 @@ the synchronous listener call records the sent or failed attempt instead of blin
   last settlement, which nothing supersedes, so a consumer holding it learns about the refused
   checks only from GitHub's own read. A settlement NATS refuses anyway (a server whose max payload
   is set lower) marks the record overflowed too, logged once as `checks settlement refused`, rather
-  than being published again at the pass on every tick.
+  than being published again at every attempt.
 - The listener's HTTP server gives every route 10 s from the request's start to read its header
   and body, and 10 s from the end of its header to write its answer (`newHTTPServer`,
   `cmd/listener/main.go`). The GitHub webhook route alone moves its own connection's deadlines

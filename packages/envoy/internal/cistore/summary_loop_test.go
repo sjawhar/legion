@@ -10,9 +10,12 @@ import (
 	"testing"
 	"time"
 
+	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // verdictNames names a verdict in a failure message.
@@ -20,6 +23,11 @@ var verdictNames = map[verdict]string{verdictIdle: "idle", verdictWait: "wait", 
 
 // predicates is what the predicates say of a record at one millisecond.
 type predicates struct{ due, claimFresh, heldBack bool }
+
+// heldBack reports whether st would be due but for legacyBacklog.
+func heldBack(st State, now int64, debounce time.Duration) bool {
+	return !st.SettledEmitted && settlementReady(st) && legacyBacklog(st, now, debounce)
+}
 
 func predicatesAt(st State, now int64, debounce time.Duration) predicates {
 	return predicates{due(st, now, debounce), claimFresh(st, now, debounce), heldBack(st, now, debounce)}
@@ -419,5 +427,63 @@ func TestAFailingPublisherIsRetriedOncePerTick(t *testing.T) {
 	}
 	if attempts < 2 {
 		t.Fatalf("%d publication attempts in %v, want the failed settlement retried", attempts, elapsed)
+	}
+}
+
+// A CI bucket deleted and created again holds none of the old bucket's records, and the store
+// empties its cache for it, so the loop forgets what it knew of the old records too: the records
+// it held back are no longer counted, and a record it queued to settle is never attempted, even
+// once its debounce has run out. The pass after the recreate counts only what the new bucket
+// holds; a loop that kept its old queue and held set would count the old records with the new.
+func TestARecreatedBucketForgetsTheOldBucketsRecords(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	store := openStore(t, conn)
+	pub := &recPub{}
+	logger := logging.New("test")
+	const debounce = time.Second
+	stamped := func(st *State) { st.Schema = recordSchema }
+	past := time.Now().Add(-debounce - handoverGrace - time.Minute).UnixMilli()
+	putHeadGatedRecord(t, store, head{"example-org", "example-repo", "70", "01d070000000000000000000000000000000beef"}, past, nil)
+	putHeadGatedRecord(t, store, head{"example-org", "example-repo", "71", "01d071000000000000000000000000000000beef"}, past, nil)
+	queuedAt := time.Now().UnixMilli()
+	putHeadGatedRecord(t, store, head{"example-org", "example-repo", "72", "9e0e72000000000000000000000000000000beef"}, queuedAt, stamped)
+	due := queuedAt + debounce.Milliseconds()
+
+	if held := runSummaryTick(store, pub, debounce, logger); held != 2 {
+		t.Fatalf("the pass over the old bucket held back %d records, want 2", held)
+	}
+	if at := time.Now().UnixMilli(); at >= due {
+		t.Fatalf("the first pass ended at %d, once the waiting record fell due at %d, so it never queued it", at, due)
+	}
+	if got := pub.count(); got != 0 {
+		t.Fatalf("the pass over the old bucket published %d settlements, want none", got)
+	}
+
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue(bus.CIStateBucket); err != nil {
+		t.Fatalf("delete the bucket: %v", err)
+	}
+	// The config openStore opens the bucket with.
+	testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: bus.CIStateBucket, Replicas: 1, Storage: natsgo.FileStorage, TTL: time.Hour})
+	if err := store.Rewatch(conn); err != nil {
+		t.Fatalf("rewatch: %v", err)
+	}
+	fresh := head{"example-org", "example-repo", "73", "f2e573000000000000000000000000000000beef"}
+	putHeadGatedRecord(t, store, fresh, past, nil)
+	if cached := store.List(); len(cached) != 1 {
+		t.Fatalf("the cache after the recreate holds %d records, want only the new bucket's %s", len(cached), fresh.key())
+	}
+
+	// Past the old waiting record's deadline, a queue entry the loop kept for it would come due.
+	time.Sleep(time.Until(time.UnixMilli(due + 50)))
+	if held := runSummaryTick(store, pub, debounce, logger); held != 1 {
+		t.Fatalf("the pass over the recreated bucket held back %d records, want 1, the new bucket's", held)
+	}
+	if got := pub.count(); got != 0 {
+		t.Fatalf("the pass over the recreated bucket published %d settlements, want none", got)
 	}
 }
