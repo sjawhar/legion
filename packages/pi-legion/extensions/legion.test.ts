@@ -2692,6 +2692,57 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     ]);
   });
 
+  // The same race through the manual claim: /legion-claim-controller typed while the start
+  // command's registration is in flight waits for that claim, then registers again, so the two
+  // registrations never overlap and the session ends holding the one the daemon issued last.
+  test("/legion-claim-controller typed during the start command's claim registers only after that claim ends", async () => {
+    const held = Promise.withResolvers<void>();
+    const firstRegistration = Promise.withResolvers<void>();
+    let registrations = 0;
+    let inFlight = 0;
+    let mostInFlight = 0;
+    const controller = await launchedController({
+      sessionId: "ses_controller_claim_during_start",
+      register: async () => {
+        registrations += 1;
+        inFlight += 1;
+        mostInFlight = Math.max(mostInFlight, inFlight);
+        firstRegistration.resolve();
+        if (registrations === 1) await held.promise;
+        inFlight -= 1;
+        return undefined;
+      },
+    });
+    const context = controller.context("ses_controller_claim_during_start");
+    await controller.handlers.get("session_start")?.({}, context);
+    const claimCommand = controller.commands.find(
+      (command) => command.name === "legion-claim-controller"
+    );
+    if (claimCommand === undefined) throw new Error("controller claim command was not registered");
+
+    const start = runStartCommand(controller, context);
+    await firstRegistration.promise;
+    const manual = claimCommand.handler("", context);
+    // The proposition is an absence: the manual claim does not reach its own registration while
+    // the first is held. An unserialised claim reaches it within a few event-loop turns (its
+    // transcript write, the state read), so the held registration is released only after those
+    // turns have run; no real clock is involved.
+    for (let turn = 0; turn < 50; turn += 1) {
+      const nextTurn = Promise.withResolvers<void>();
+      setImmediate(nextTurn.resolve);
+      await nextTurn.promise;
+    }
+    held.resolve();
+    expect(await start).toEqual([]);
+    await manual;
+
+    expect(registrations).toBe(2);
+    expect(mostInFlight).toBe(1);
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+  });
+
   // The start message is read and validated before anything that mutates daemon-side state
   // (registerController, which replaces the running controller's session; claimEnvoyRole, which
   // takes its role): a missing value refuses here, leaving the previous controller, if any, still

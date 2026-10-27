@@ -55,6 +55,9 @@ export function createControllerSession(deps: {
   // The controller's own transcript as of the last successful claim, which a session navigation
   // compares to decide whether to claim again; a hand-started takeover records none.
   let controllerTranscript: string | undefined;
+  // The claim running now, if one is: `claim` runs one at a time, and `/legion-controller-start`
+  // waits for it before it decides whether there is anything left to do.
+  let claimInFlight: Promise<void> | undefined;
 
   /**
    * Makes the context's session the controller: it registers on the claim route with the
@@ -122,6 +125,22 @@ export function createControllerSession(deps: {
    * capability and stops before any daemon call without it.
    */
   const claim = async (context: CommandContext | SessionContext): Promise<void> => {
+    // One claim at a time, in the order they were asked for: each registration replaces the
+    // controller secret the daemon holds, so two claims racing could leave this session holding
+    // the secret a later registration replaced, and every controller grant refused. Oh My Pi reads
+    // the terminal while `/legion-controller-start`'s claim runs, so `/legion-claim-controller` or
+    // the command itself can be typed before it ends.
+    while (claimInFlight !== undefined) await claimInFlight.catch(() => undefined);
+    const running = claimOnce(context);
+    claimInFlight = running;
+    try {
+      await running;
+    } finally {
+      if (claimInFlight === running) claimInFlight = undefined;
+    }
+  };
+
+  const claimOnce = async (context: CommandContext | SessionContext): Promise<void> => {
     const supervised = daemonLaunchedController(process.env);
     if (!supervised) return claimWith(context, false);
     try {
@@ -270,9 +289,12 @@ export function createControllerSession(deps: {
    * succeeds, if it is still unsent; the command itself never fails past that notice. Once a claim
    * has succeeded in this process — the command run again — and in a hand-started takeover or the
    * controller the daemon launched (which claimed at `session_start`), there is nothing to do, and
-   * the command says so.
+   * the command says so. Oh My Pi reads the terminal while the claim runs, so the operator can run
+   * the command again before it ends: that run waits for the claim in flight and then decides
+   * again.
    */
   const startCommand = async (context: CommandContext): Promise<void> => {
+    while (claimInFlight !== undefined) await claimInFlight.catch(() => undefined);
     if (
       classifySession(process.env).kind !== "controller" ||
       daemonLaunchedController(process.env) ||
