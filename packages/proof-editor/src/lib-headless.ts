@@ -20,6 +20,7 @@ import {
   blockSchemaPlugins,
   remarkTypedBlocks,
   type BlockSchema,
+  type HostBlockRenderer,
 } from './block-schema.js';
 import { configureDispatchLinks } from './dispatch-links.js';
 import { schema as gfmSchema } from '@milkdown/preset-gfm';
@@ -73,6 +74,9 @@ export interface HeadlessProofOptions {
   blockId?: BlockIdGenerator;
   /** Typed block schema fetched from the document service before construction. */
   blockSchema?: BlockSchema;
+  /** Draws each typed block's DOM (its node spec's `toDOM`) for a host that serializes the
+   *  parsed document, as the live entry's option of the same name does. */
+  renderBlock?: HostBlockRenderer;
 }
 
 export async function createHeadlessProof(options: HeadlessProofOptions = {}): Promise<HeadlessProofEditor> {
@@ -103,7 +107,7 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
     // Frontmatter must be registered after commonmark so `---` parses as YAML.
     ...frontmatterSchema,
     ...codeBlockExtPlugins,
-    ...(options.blockSchema ? blockSchemaPlugins(options.blockSchema) : []),
+    ...(options.blockSchema ? blockSchemaPlugins(options.blockSchema, options.renderBlock) : []),
     ...blockIdSchemas,
     // Some schema nodes reference proof marks (e.g. code_block allows them).
     ...proofMarkPlugins,
@@ -197,6 +201,7 @@ export type {
   BlockAttributeSchema,
   BlockSchema,
   BlockTypeSchema,
+  HostBlockRenderer,
 } from './block-schema.js';
 
 export default createHeadlessProof;
