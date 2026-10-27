@@ -2731,8 +2731,8 @@ A terminal hang-up before the line or paste ends returns an error, never a parti
 does a bracketed paste that falls quiet for `maxPasteDrain` (10 s) before its closing mark comes,
 where the signal keys pressed meanwhile were pasted text; input arriving after it is given up
 reaches the shell.
-Piped input is read to EOF, less one trailing newline. Empty and non-UTF-8 values are usage errors
-on either path.
+Piped input is read to EOF, less one trailing `\n` or `\r\n`. Empty and non-UTF-8 values are usage
+errors on either path.
 
 The reader alone changes the terminal, including its final flushing restore and bracketed-paste
 disable. It joins the signal watcher before restoring, and restores only while its process group

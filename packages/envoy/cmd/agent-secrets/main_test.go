@@ -796,6 +796,7 @@ func TestBuildChildEnvTrimsOneTrailingNewlineFromSingleLineValues(t *testing.T) 
 		{"only crlf", "\r\n", "\r\n"},
 		{"trailing space", "fake-token \n", "fake-token "},
 		{"lone cr", "fake-token\r", "fake-token\r"},
+		{"cr inside the line", "fake\rtoken\n", "fake\rtoken\n"},
 		{"empty", "", ""},
 	}
 	for _, tc := range cases {
