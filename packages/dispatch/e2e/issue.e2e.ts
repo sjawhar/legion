@@ -762,6 +762,11 @@ test("issue header keeps every control in a shared row on a phone and the whose-
     await testInfo.attach("issue header (390px)", { contentType: "image/png", path: phoneShot });
 
     await page.setViewportSize({ height: 900, width: 1280 });
+    // The shell swaps its phone bar for the sidebar, and the margin its sheet for the column, in
+    // a React commit after the media query's change event. Until then the phone DOM is laid out
+    // under the desktop CSS, which squeezes <main> to its padding at the right edge.
+    await expect(page.getByRole("navigation", { name: "Navigation" })).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Review margin" })).toBeVisible();
     await expect(indicator).toHaveText("Waiting on you (1)");
     expect(await inView(indicator, 1280)).toBe(true);
     const desktopHeader = await header.boundingBox();
