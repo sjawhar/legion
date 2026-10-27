@@ -321,6 +321,13 @@ func TestClusteredNatsHubChart(t *testing.T) {
 	require.EqualValues(t, 3, dig(t, statefulSet, "spec", "replicas"))
 	require.Equal(t, s.PodSelector, stringMap(t, dig(t, statefulSet, "spec", "selector", "matchLabels")),
 		"the hub's selector is the StatefulSet's")
+	// pulumi-kubernetes applies the StatefulSet only after the object this annotation names, which
+	// must be the chart's own ConfigMap, the one holding auth.conf, or the order would not hold.
+	configMap := r.one(t, "ConfigMap", s.Name+"-config")
+	require.Contains(t, dig(t, configMap, "data").(map[string]any), "auth.conf")
+	require.Equal(t, "/namespaces/"+r.namespace+"/ConfigMap/"+s.Name+"-config",
+		dig(t, statefulSet, "metadata", "annotations", "config.kubernetes.io/depends-on"),
+		"the StatefulSet is applied after the ConfigMap holding auth.conf")
 	pod := dig(t, statefulSet, "spec", "template")
 	spread := dig(t, pod, "spec", "topologySpreadConstraints").([]any)
 	require.Len(t, spread, 1)

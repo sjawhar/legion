@@ -120,7 +120,9 @@ func TestClusteredNatsHubInstallsThePinnedChart(t *testing.T) {
 // on a 10Gi claim holding at most 9Gi, no memory store, monitoring on 8222, auth.conf included
 // and held in the chart's ConfigMap, the three images by digest, the sizes, nats-server's
 // GOMEMLIMIT at 80% of its 2Gi (⌊1638.4⌋ MiB), the client Service with the nats port alone, one
-// server per zone, the session user's key on the pods, the budget, and no nats-box.
+// server per zone, the session user's key on the pods, the budget, no nats-box, and the
+// StatefulSet applied after the ConfigMap envoy-nats-config in namespace envoy, so a pod a
+// session-user change rolls mounts the auth.conf naming the new session user.
 func wantChartValues(authConf string) map[string]any {
 	ports := map[string]any{}
 	for _, port := range []string{"nats", "leafnodes", "websocket", "mqtt", "cluster", "gateway", "monitor", "profiling"} {
@@ -166,6 +168,9 @@ func wantChartValues(authConf string) map[string]any {
 			}}},
 		},
 		"podDisruptionBudget": map[string]any{"enabled": true},
+		"statefulSet": map[string]any{"merge": map[string]any{"metadata": map[string]any{"annotations": map[string]any{
+			"config.kubernetes.io/depends-on": "/namespaces/envoy/ConfigMap/envoy-nats-config",
+		}}}},
 	}
 }
 

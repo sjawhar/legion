@@ -780,6 +780,11 @@ session user's public key into the hub pods' annotation `envoy-infra.sjawhar.dev
 template, and the StatefulSet replaces its pods one at a time, each server restarting on its own
 claim while the other two serve. Any other users change leaves the pod template as it was. A users
 change made in the same update as a session-user change applies, with it, as each pod restarts.
+The roll must start from the new `auth.conf`: a pod restarted on the old file keeps the old session
+user, and the reload that later brings the new file is refused. So the StatefulSet's annotation
+`config.kubernetes.io/depends-on: /namespaces/<namespace>/ConfigMap/<n>-config` makes pulumi-kubernetes
+apply the StatefulSet only after the ConfigMap, and a ConfigMap update that fails stops the update
+before any pod rolls.
 
 ### Routes, guarded by the NetworkPolicy alone
 

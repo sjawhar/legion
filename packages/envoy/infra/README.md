@@ -163,7 +163,9 @@ zone, held hard (`topology.kubernetes.io/zone`, `maxSkew: 1`, `DoNotSchedule`, `
 on a cluster with nodes in fewer than three zones a pod stays Pending rather than share a zone. A
 change of `users` rewrites `auth.conf` alone, which the reloader applies without restarting a
 server; a change of `sessionUser` restarts the hub pods one at a time, since nats-server refuses to
-reload a changed `no_auth_user`.
+reload a changed `no_auth_user`. The StatefulSet carries `config.kubernetes.io/depends-on` naming the
+chart's ConfigMap `<n>-config`, so Pulumi applies it only once the ConfigMap holding the new
+`auth.conf` is applied, and every restarted pod mounts the new session user.
 
 ### Inputs
 

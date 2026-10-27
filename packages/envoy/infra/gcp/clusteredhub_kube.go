@@ -39,7 +39,18 @@ const (
 	clusteredHubAuthConf = "auth.conf"
 	// statefulSetType is the type of the chart's StatefulSet, the one child the hub protects.
 	statefulSetType = "kubernetes:apps/v1:StatefulSet"
+	// clusteredHubDependsOnAnnotation orders one object of a helm v4 Chart after others of the
+	// same chart: pulumi-kubernetes reads it as a comma-separated list of references,
+	// <group>/namespaces/<namespace>/<kind>/<name>, the core group's empty.
+	clusteredHubDependsOnAnnotation = "config.kubernetes.io/depends-on"
 )
+
+// clusteredHubConfigMapRef is the depends-on reference of the chart's ConfigMap, which holds
+// nats.conf and auth.conf: the chart names it <fullname>-config (values.yaml configMap.name), and
+// the hub's fullname is its release name.
+func clusteredHubConfigMapRef(namespace, release string) string {
+	return "/namespaces/" + namespace + "/ConfigMap/" + release + "-config"
+}
 
 // clusteredHubTailnetSelector is the selector labels of the hub's tailnet hosts, the pods that
 // forward the tailnet's NATS port to the hub's client Service: what their workload selects and
@@ -226,6 +237,15 @@ func clusteredHubChartValues(s clusteredHubSettings) pulumi.Map {
 		"service":             pulumi.Map{"enabled": pulumi.Bool(true), "name": pulumi.String(s.serviceName), "ports": servicePorts},
 		"podTemplate":         podTemplate,
 		"podDisruptionBudget": pulumi.Map{"enabled": pulumi.Bool(true)},
+		// The StatefulSet is applied only once the ConfigMap holding auth.conf is. A session-user
+		// change updates both: the annotation rolls the pods, and each new pod must mount the new
+		// auth.conf, since nats-server refuses to reload no_auth_user. Applied in parallel, a pod
+		// could restart on the old file, and a failed ConfigMap update could leave the pods rolled
+		// on the old session user with nothing left to roll them again. pulumi-kubernetes orders a
+		// helm v4 Chart's objects by this annotation (references within the chart only).
+		"statefulSet": pulumi.Map{"merge": pulumi.Map{"metadata": pulumi.Map{"annotations": pulumi.Map{
+			clusteredHubDependsOnAnnotation: pulumi.String(clusteredHubConfigMapRef(s.namespace, s.name)),
+		}}}},
 	}
 }
 
