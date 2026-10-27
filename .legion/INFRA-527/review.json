@@ -2,29 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-527",
-  "completed": "2026-10-27T08:27:00Z",
-  "round": 3,
-  "decision": "approved",
-  "reviewedCodeHead": "5e832b77ad6174d51302a6790697f054f869b7b4",
+  "completed": "2026-10-27T10:20:00Z",
+  "round": 4,
+  "decision": "changes_requested",
+  "reviewedCodeHead": "84f50938f2b741fa1f714cc765e1a35bc9c551f0",
+  "fingerprint": "Last review APPROVE at 1ab4b685 (f3549e3d486deea516dd1bd45d81ed86c8153dee4ec7583a2288810a740019f6); head 7153f13e (5a80822aa077a2a8bc91d213bd3694223ec2451adeedd5b3f0656b811da35e3c): changed, so a new round. The two fingerprinted diffs differ only in the packages/dispatch/AGENTS.md MarkdownBody paragraph, which keeps main's #2303 text and adds this branch's sentence.",
   "critical": 0,
-  "important": 0,
-  "minor": 2,
-  "roundTwoFinding": {
-    "PRRT_kwDORFy7ds6wj7qi (position-dependent pixel check)": "Fixed in 5e832b77: each box is measured against its own padded surroundings (ring-median background, middle inset by a quarter, ticked >= 0.25 ink, unticked <= 0.05). Implementer: 50/50 pass at --repeat-each=5 chromium+iphone; forced-colors block removed 20/20 fail. Tester: 50 pass; block removed 12/12 fail; fill rule removed 4/4 fail. Deep-review probe (288 runs, DPR 1 and 3, offsets, fonts, schemes): ticked 0.50-0.667, unticked 0.000; three broken CSS variants each fail. Accepted."
-  },
+  "important": 1,
+  "minor": 0,
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "packages/dispatch/e2e/task-items.e2e.ts",
-      "description": "Lines 133-134 give a CSP Dispatch does not send as the reason for decoding the PNG from a Blob. Wording only."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/e2e/task-items.e2e.ts",
-      "description": "Lines 94-95 say the clip maps back exactly 'at any device pixel ratio'; exact only at whole ratios (projects use 1 and 3, and the height check rounds). Wording only."
+      "severity": "important",
+      "file": "packages/daemon/internal/workspace/fetch_test.go",
+      "description": "Required check `test` is failure at the CI head 84f50938 (job 122089229548, step 'Test the Go daemon'): TestFetchKeepsAFeedAfterGitGC/killed_during_repack, fetch_test.go:1115: foreignFeed after git gc = \"it holds packed-refs.lock, which no fetch writes\", <nil>; want the feed trusted. This PR changes no Go code and main's Tests run at b08a56bc (the merged base) passed, so the failure is not from this diff; a red required check still blocks approval. Re-run the failed job once (gh run rerun 40474487697 --failed); if it fails again, it is a defect for the controller."
     }
   ],
-  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title; branch protection off. CI head 5e832b77ad61 (newest pull_request run); compare to caed6be5 handoffsOnly true, 2 files. At 08:25Z lint, typecheck, test success; pr-title success (two runs; one earlier run cancelled); changes and build success; dispatch and envoy-smoke (not required) still queued.",
-  "thermonuclear": "Pair run at 5e832b77: deep-review approve, no findings (standalone Chromium probe of the exact helpers and CSS); code-quality two comment-wording minors only.",
-  "threads": "3 threads, all mine; all fixed, answered and accepted; the implementer resolved all three."
+  "codeReview": "No finding in the code. Thermonuclear pair at 84f50938: deep-review approve, no findings (post-paint passes linkifyDispatchRefs/collectReferenceAnchors leave the box intact; #2303's read-only engine keeps li[data-item-type=task][data-checked]; main changed no CSS); code-quality approve, no findings (merged AGENTS.md paragraph accurate).",
+  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title; branch protection off. CI head 84f50938 (newest pull_request run); compare to 7153f13e handoffsOnly true, 2 files. At 10:18Z lint, typecheck, pr-title, changes, build success; test failure; dispatch and envoy-smoke (not required) queued.",
+  "threads": "3 threads, all mine, all answered, accepted and resolved in earlier rounds; none new."
 }
