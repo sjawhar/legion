@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-595",
+  "completed": "2026-10-27T06:34:24Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "e55604e4f5c4fc9a9751b2a15403980039248f39",
+  "critical": 0,
+  "important": 1,
+  "minor": 4,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/cistore/loop.go:254",
+      "description": "The recreated-bucket branch of summarizer.pass (drop the queue and the held set when takeChanges reports a reset) has no test. With the branch removed, GOWORK=off go test -count=1 ./internal/cistore/ passes (reproduced by the reviewer; the tester saw the same, and saw envoy_ci_legacy_records_held stay 2 -> 2 -> 3 on the real binary where head goes 2 -> 0 -> 1). Add a test that fails without the branch: held records and a queued record in the old bucket, the bucket recreated, then the held count counts only the new bucket's records and the old queued key is not attempted."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/AGENTS.md:2257",
+      "description": "'rather than being published again at the pass on every tick' is garbled and false: passes no longer run on every tick. Use the markOverflowed comment's wording (cistore.go:822-823), e.g. 'rather than being published again at every attempt'."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/cistore/loop.go:320",
+      "description": "Dead branch: settle is called only with the record schedule judged verdictAttempt at the same now, and schedule returns that only when claimFresh is false. Delete the claimFresh check in settle."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/cistore/cistore.go:201",
+      "description": "heldBack has no production caller left; its only caller is the test oracle at summary_loop_test.go:25. Move it into the test file and point the '(heldBack)' comments in loop.go (102, 134, 143, 249) at legacyBacklog / verdictHeld."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/cistore/summary_helpers_test.go:41",
+      "description": "testSummarizers never forgets a store: every store runSummaryTick touched (the benchmark's 12,000- and 30,000-record stores included) stays in memory and attached until the test binary exits, and a later StartSummaryLoop on such a store panics naming the attach, not the helper. Have openStore register a t.Cleanup that drops the entry and detaches."
+    }
+  ],
+  "notDefects": [
+    "summarizer.mu: it makes a summarizer safe for runSummaryTick's use from tests and costs nothing measurable; removing it is a style choice.",
+    "cacheReset flag vs marking every cached key at reset: same result; the explicit flag is clearer.",
+    "A change marked during a pass that overran a grid instant with an empty queue waits one more tick: needs a >1 s pass with no attempt.",
+    "gridIndexAtOrAfter overflows only for deadlines ~292 years ahead; the timestamps come from the listener's own clock."
+  ],
+  "ci": "At code head e55604e4 the required checks lint, typecheck, test and pr-title are completed success; compare e55604e4...d462fdf1 is handoffs only (2 files).",
+  "thermonuclear": "deep-review: approve, 3 minor (clock-step risk, overrun extra tick, AGENTS.md:2257); code-quality: 6 minor cleanups. Both at e55604e4."
+}
