@@ -1,13 +1,13 @@
 name: Worker Image
 
 on:
+  # release.yaml calls this file twice in one run: once with skip_attest, which builds and pushes
+  # the image's sha- tag, and once with attest_digest set to the digest that call pushed, which
+  # skips the build and attests that digest after the caller's own publish job. Both inputs are
+  # named for what they turn off, so a `pull_request` or `workflow_dispatch` run, where they are
+  # unset, builds and (off pull requests) attests in one run.
   workflow_call:
     inputs:
-      legion_version:
-        description: Version the `legion` job released in this run (empty when it released nothing)
-        type: string
-        required: false
-        default: ""
       pi_legion_version:
         description: Resolved @sjawhar/pi-legion version for this build (empty when neither published nor known)
         type: string
@@ -18,18 +18,29 @@ on:
         type: string
         required: false
         default: ""
+      skip_attest:
+        description: Build only; the caller attests in a later call
+        type: boolean
+        required: false
+        default: false
+      attest_digest:
+        description: Attest only this digest the caller's earlier call pushed; the build job skips
+        type: string
+        required: false
+        default: ""
     outputs:
       ref:
         description: The pushed image, pinned by digest (ghcr.io/sjawhar/legion-worker@sha256:…)
         value: ${{ jobs.build.outputs.ref }}
+      image:
+        description: The pushed image's repository (ghcr.io/sjawhar/legion-worker)
+        value: ${{ jobs.build.outputs.image }}
+      digest:
+        description: The pushed image's digest (sha256:…)
+        value: ${{ jobs.build.outputs.digest }}
   # Post-merge only: GitHub dispatches a workflow only once it exists on the default branch.
   workflow_dispatch:
     inputs:
-      legion_version:
-        description: Optional legion version to also tag the image with (main only)
-        type: string
-        required: false
-        default: ""
       pi_legion_version:
         description: Optional resolved @sjawhar/pi-legion version to link into the smoke-tested binary
         type: string
@@ -90,21 +101,28 @@ on:
       - scripts/assemble-third-party-notices.sh
 
 # Same-repo `pull_request` runs get this token too (a fork PR would get a read-only token, and this
-# repo takes no fork PRs), so it carries only what the pull request path needs. The release note that
-# needs `contents: write` runs in release.yaml's own `worker_image_release_note` job, and the
-# attestation's `id-token` and `attestations: write` belong to the `attest` job below alone, which a
-# pull request run skips. A pull request runs its own head's copy of this file, so one that drops
-# that `if:` gets those scopes too; its attestation is still refused, because its certificate names
-# `refs/pull/<n>/merge`, never `refs/heads/main` (docs/kubernetes.md, "Pin by digest, never by tag").
+# repo takes no fork PRs), so it carries only what the pull request path needs. The legion version
+# tag and the release note, which needs `contents: write`, run in release.yaml's own
+# `worker_image_release` job, and the attestation's `id-token` and `attestations: write` belong to
+# the `attest` job below alone, which a pull request run skips. A pull request runs its own head's
+# copy of this file, so one that drops that `if:` gets those scopes too; its attestation is still
+# refused, because its certificate names `refs/pull/<n>/merge`, never `refs/heads/main`
+# (docs/kubernetes.md, "Pin by digest, never by tag").
 permissions:
   contents: read
   packages: write # ghcr.io push
 
+# The image the build pushes and the attest job attests a digest of.
+env:
+  IMAGE: ghcr.io/sjawhar/legion-worker
+
 jobs:
   build:
+    # An attest-only call (attest_digest) attests what the caller's earlier call built.
+    if: inputs.attest_digest == ''
     runs-on: ubuntu-24.04
-    # Job-level (not workflow-level): this file is also a called workflow, and job-level concurrency/env
-    # behave identically for `workflow_call`, `workflow_dispatch`, and `pull_request`.
+    # Job-level concurrency (not workflow-level): this file is also a called workflow, and job-level
+    # concurrency behaves identically for `workflow_call`, `workflow_dispatch`, and `pull_request`.
     # Two pushes to one PR serialize on the PR number (unchanged). Other events key on
     # github.sha, not github.ref, so a dropped pending main run never leaves a commit with no
     # image to pin (why: this PR's description).
@@ -112,7 +130,6 @@ jobs:
       group: worker-image-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
       cancel-in-progress: false
     env:
-      IMAGE: ghcr.io/sjawhar/legion-worker
       # The commit that is built and that the sha- tag names: the PR head on `pull_request` (github.sha
       # would be the ephemeral merge commit there); the triggering commit for workflow_call/dispatch.
       BUILT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -127,25 +144,18 @@ jobs:
           # This job never pushes with git.
           persist-credentials: false
 
+      # The sha- tag alone, which the image's version label repeats: release.yaml's
+      # worker_image_release tags this image's digest with the legion version once that version is
+      # released, so a version tag still means "released".
       - name: Compute tags
         id: meta
-        env:
-          LEGION_VERSION: ${{ inputs.legion_version }}
         run: |
           short="${BUILT_SHA::12}"
-          tags="${IMAGE}:sha-${short}"
-          version_label="sha-$short"
-          if [ "$GITHUB_REF" = "refs/heads/main" ] && [ -n "$LEGION_VERSION" ]; then
-            tags="${tags}"$'\n'"${IMAGE}:${LEGION_VERSION}"
-            version_label="$LEGION_VERSION"
-          fi
           {
             echo "built_sha=$BUILT_SHA"
             echo "short=$short"
-            echo "version_label=$version_label"
-            echo "tags<<EOF"
-            echo "$tags"
-            echo "EOF"
+            echo "version_label=sha-$short"
+            echo "tags=${IMAGE}:sha-${short}"
           } >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -237,9 +247,13 @@ jobs:
   # of them. A pull request run skips this job (the comment above `permissions:` covers one that edits
   # the `if:` out). This statement is GitHub's, separate from the BuildKit provenance the build job
   # keeps off (provenance: false and the comments above).
+  #
+  # It attests this run's own build, or, in an attest-only call, the digest attest_digest names,
+  # which the same caller run's build-only call pushed; a build-only call (skip_attest) skips it.
+  # `!cancelled()` lets it run past the build job an attest-only call skips.
   attest:
     needs: build
-    if: github.event_name != 'pull_request'
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && !inputs.skip_attest && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.attest_digest != '')) }}
     runs-on: ubuntu-24.04
     # id-token: write is the OIDC token Sigstore issues the signing certificate for; attestations:
     # write stores the attestation with GitHub.
@@ -249,5 +263,5 @@ jobs:
     steps:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-name: ${{ needs.build.outputs.image }}
-          subject-digest: ${{ needs.build.outputs.digest }}
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ inputs.attest_digest || needs.build.outputs.digest }}
