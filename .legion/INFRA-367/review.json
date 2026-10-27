@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-367",
+  "completed": "2026-10-27T10:25:00Z",
+  "decision": "changes_requested",
+  "reviewedHead": "9386d55648029c5fefaf811446f2064202db2c4e",
+  "critical": 0,
+  "important": 2,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/refs/graph.go",
+      "description": "storedActors (726-746) guesses one actor or a list from the first byte, and turns a malformed actor column, or an element with no kind or id, into [] ('nobody recorded') with no error. Every caller knows its column's shape (single actor: issues.created_by, events.actor, artifacts.created_by, asks.author, comments.author, messages.author, ask.edited payload edited_by; list: artifact_versions.authors), all jsonb not null and written from model.Actor, and refs/refs.go:388-393 decodes the same artifacts.created_by and artifact_versions.authors strictly and returns the error. Decode each column as its shape (for example jsonb_build_array on the single-actor columns in SQL, then json.Unmarshal into []model.Actor), keep SQL NULL from a left join as [], and return a decode error as refs.go does."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/e2e/acceptance/block-graph.sh",
+      "description": "No '## Contract change census' in the PR body. The driver now refuses to start without COMPONENT_SOURCE (line 40) and, for fixture, FAKE_GITHUB_PORT; its callers include the INFRA-156 tree plan's invocations (dispatch://INFRA-156/artifact/plan-md, Task 2.9 and the coordinator's production run, with DISPATCH_URL/DISPATCH_TOKEN/PROJECT only) and the sibling slices that extend the driver. contracts GraphNode.changed_at widened from string to string | null. The census lists the search commands, every hit with a disposition, and a rollout line (warn-first, or an immediate refusal with its reason)."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "'components that existed before this release answer null until they change' is wrong for made_at: 0131 seeds made_at null and the importer upsert (architecture/importer.go:583-588) never sets made_at on an existing row, so it stays null permanently; only changed_at is filled by a later change."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/refs/blocks.go",
+      "description": "Cleanup, no behaviour change: RemovedBlockFacts (349) fills four fields of a node api/references.go:141-154 built, through a pointer parameter; return the facts (or the whole node) instead."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/refs/graph.go",
+      "description": "Cleanup, no behaviour change: the comment parent order (reply, then ask thread, then document) is written both in the SQL join condition (575) and the Go switch (596-605); drop 'c.reply_to is null and c.ask_id is null' from the join and leave the order to the switch."
+    }
+  ],
+  "ci": "At 9386d556 (the CI head: the tester's push carried code, e39017e4) every required check (lint, typecheck, test, pr-title) was queued when this was written; the request for changes does not wait on it.",
+  "thermo": "thermonuclear-deep-review at 9386d556: Verdict APPROVE (two Minors). thermonuclear-code-quality at 9386d556: Verdict CHANGES (storedActors; RemovedBlockFacts pointer; comment parent rule twice).",
+  "threads": "No review threads before this round."
+}
