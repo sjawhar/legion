@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-148",
-  "completed": "2026-10-27T17:12:22Z",
+  "completed": "2026-10-27T18:26:45Z",
   "proof": [
     {
       "criterion": "A1: a session whose ask a person answered carries that answer word for word in its next model request (Oh My Pi)",
@@ -59,6 +59,14 @@
       "observed": "The refresher now records the Dispatch URL it read in answers-refresh.json; a hook carries its outcome only when that URL is the one envoy.json names to the hook now (sessionDispatchUrl), and otherwise carries the failure line naming that the refresher read another Dispatch, then a later hook carries the list of the Dispatch named now. The refresher read `before` (before-token) and the second hook's context does not contain its list.",
       "headSha": "33b1f07ac59d4b2850e777fba080f6e2afeebfc5",
       "negativeControl": "At e1dd5c52 (before the fix) the same red test fails: the second hook carried `before`'s list as a fresh list (tester's 5 of 5 reproductions)."
+    },
+    {
+      "criterion": "Review 4: a failing `!` token command's real error reaches the Claude hook; a URL mismatch is reported only when both URLs are known and differ",
+      "surface": "the built claude-envoy hook bundle (dist/session-hook.js) as Claude Code runs it, with stand-in Dispatches",
+      "command": "cd packages/claude-envoy && bun run build && bun test tests/answers-hook.test.ts (14 pass, 3 runs unloaded; 2 of 3 under four busy loops on 2 CPUs, the third failing only the five-source content test whose quick read missed its 150 ms wait); LEGION_TEST_CLAUDE=<claude 2.1.311> bun test (210 pass)",
+      "observed": "With token `!echo boom >&2; exit 3` the hook carries exactly the failure line naming `<envoy.json>: dispatch.token's command exited with status 3`, never `not the Dispatch envoy.json names now`; the refresher records the URL it targeted (sessionDispatchUrl, before running the command). The cross-URL test now asserts the exact mismatch reason `the refresher read <before>, not the Dispatch envoy.json names now`. Deadline checks read the hook's own began/printed timing (ENVOY_ANSWERS_TIMING_FILE seam), not wall time from spawn.",
+      "headSha": "b6079d1bcd8be26979a154bc39ed349788a8897e",
+      "negativeControl": "Without the fix the failing-command test received `…(the refresher read no Dispatch, not the Dispatch envoy.json names now)…`."
     }
   ],
   "filesChanged": [
@@ -75,7 +83,8 @@
     "Forward merge of main fd05f188 (merge commit b77425ec): publisher.go keeps main's artifact.human_edited author route beside this branch's reply-on-a-document route; publisher_document_authors_test.go, contracts and pi-envoy CHANGELOGs keep both sides; this branch's migrations renumbered 0130 events_person_words, 0131 comment_deliveries_session, 0132 message_deliveries_session_created after main's 0129_document_edit_notices; claude-envoy dist rebuilt",
     "Round 4 (review 2): pi-envoy session-answers-context.ts branchPosition matches custom_message and branch_summary entries and recognises an empty-tail compaction conversion (a repeat while the live AgentSession isCompacting); envoy-client failureSentence, dispatchUrl/sessionDispatchUrl, readSessionAnswers dispatchUrl option (no cross-URL fallback); claude-envoy hook passes the configured URL; dist rebuilt; pi-envoy CHANGELOG line wrapped",
     "Forward merge of main 2df3353c (merge commit 3d789a90): CHANGELOGs and cmd/dispatch README keep both sides; this branch's migrations renumbered 0135 events_person_words, 0136 comment_deliveries_session, 0137 message_deliveries_session_created after main's 0130-0134; claude-envoy dist rebuilt",
-    "Round 5 (tester fail at e1dd5c52): claude-envoy hooks/session-hook.ts records the refresher's Dispatch URL in answers-refresh.json and refuses another URL's outcome; dist rebuilt"
+    "Round 5 (tester fail at e1dd5c52): claude-envoy hooks/session-hook.ts records the refresher's Dispatch URL in answers-refresh.json and refuses another URL's outcome; dist rebuilt",
+    "Round 6 (review 4): claude-envoy session-hook.ts records the targeted Dispatch URL and reports a mismatch only when both URLs are known and differ; ENVOY_ANSWERS_TIMING_FILE test seam; answers-hook.test.ts timing assertions on the hook's own bound, quick-token and cross-URL tests assert the outcome, failing-command test added; dist rebuilt"
   ],
   "trickyParts": [
     "A person's reply to a message is a message.answered event, so S1 and the 0121 index take message.answered as well as message.created.",
@@ -97,10 +106,12 @@
     "A hook whose Bun start-up takes longer than 650 ms can now run past 800 ms after process start, by at most 150 ms plus the 50 ms settle: the tester's red test requires the list Dispatch answers at once even after an 820 ms start-up.",
     "Live steering on the OpenAI Codex WebSocket path runs the context handler on the queued steering messages alone, which carry nothing that tells them from a first request, so the list (and dispatch-first, as before this PR) goes out with a live steer there; documented in pi-envoy AGENTS.md.",
     "Side-turn and handoff detection read the pinned host's prompt texts; a pin bump that rewords them fails session-answers-omp.test.ts cases (i) and (j).",
-    "Open, documented in pi-envoy AGENTS.md: a speculative compaction with an empty tail running beside the main-loop request it matches can drop that request's list (needs the kept turn right after a failed reply the branch still holds); a task subagent's empty-tail compaction still carries the list, since a subagent is not in the host's registry."
+    "Open, documented in pi-envoy AGENTS.md: a speculative compaction with an empty tail running beside the main-loop request it matches can drop that request's list (needs the kept turn right after a failed reply the branch still holds); a task subagent's empty-tail compaction still carries the list, since a subagent is not in the host's registry.",
+    "The tester's red test (cross-URL) was strengthened as the reviewer and architect asked: it now waits for the first refresher to run its command, holds the second hook's code until that refresher finished (preload), and asserts the exact mismatch reason; it still asserts the earlier Dispatch's list is not carried."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "The answers-hook wall-time checks (< 1 s) measured 0.87-0.90 s on this loaded pod because Bun start-up varies 240-760 ms; a very loaded CI runner could make them flaky."
+    "The answers-hook wall-time checks (< 1 s) measured 0.87-0.90 s on this loaded pod because Bun start-up varies 240-760 ms; a very loaded CI runner could make them flaky.",
+    "Under synthetic overload (four busy loops on 2 CPUs) the five-source content test can miss: a hook whose start-up spent the budget waits only 150 ms for a quick Dispatch read, and the design then carries the failure line (1 of 3 loaded runs here)."
   ]
 }
