@@ -168,6 +168,10 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	require.Equal(t, "integer", dispatch.InputProperties["pprofPort"].Type)
 	require.False(t, dispatch.InputProperties["pprofPort"].Secret)
 	require.NotContains(t, dispatch.RequiredInputs, "pprofPort")
+	// Query Insights is an optional plain boolean.
+	require.Equal(t, "boolean", dispatch.InputProperties["databaseQueryInsights"].Type)
+	require.False(t, dispatch.InputProperties["databaseQueryInsights"].Secret)
+	require.NotContains(t, dispatch.RequiredInputs, "databaseQueryInsights")
 	// The app container's size is two optional plain strings, Kubernetes quantities.
 	for _, input := range []string{"appCpu", "appMemory"} {
 		require.Equal(t, "string", dispatch.InputProperties[input].Type, input)

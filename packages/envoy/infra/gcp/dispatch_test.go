@@ -1154,6 +1154,33 @@ func TestDispatchProtectsItsInstanceServerSide(t *testing.T) {
 	}
 }
 
+// databaseQueryInsights turns on Query Insights with each query's application tags and client
+// address, and changes nothing else the instance registers. Unset or false, the settings carry no
+// insightsConfig at all, so an instance deployed before the input existed sees no change.
+func TestDispatchDatabaseQueryInsights(t *testing.T) {
+	instanceSettings := func(t *testing.T, args *gcp.DispatchArgs) map[string]any {
+		t.Helper()
+		m, err := runDispatch(t, args, true)
+		require.NoError(t, err)
+		return m.One(t, "gcp:sql/databaseInstance:DatabaseInstance").Inputs.Mappable()["settings"].(map[string]any)
+	}
+	defaults := instanceSettings(t, dispatchArgs())
+	require.NotContains(t, defaults, "insightsConfig")
+
+	off := dispatchArgs()
+	off.DatabaseQueryInsights = pulumi.BoolRef(false)
+	require.Equal(t, defaults, instanceSettings(t, off))
+
+	on := dispatchArgs()
+	on.DatabaseQueryInsights = pulumi.BoolRef(true)
+	got := instanceSettings(t, on)
+	require.Equal(t, map[string]any{
+		"queryInsightsEnabled": true, "recordApplicationTags": true, "recordClientAddress": true,
+	}, got["insightsConfig"])
+	delete(got, "insightsConfig")
+	require.Equal(t, defaults, got)
+}
+
 // Dispatch itself trims one trailing slash off DISPATCH_AGENT_SECRETS_URL, so the component
 // renders the value as Dispatch reads it.
 func TestDispatchTrimsTheAgentSecretsUrlsTrailingSlash(t *testing.T) {

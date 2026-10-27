@@ -121,7 +121,11 @@ type DispatchArgs struct {
 	DatabaseVersion    *string `pulumi:"databaseVersion,optional"`
 	DatabaseTier       *string `pulumi:"databaseTier,optional"`
 	DeletionProtection *bool   `pulumi:"deletionProtection,optional"`
-	Namespace          *string `pulumi:"namespace,optional"`
+	// DatabaseQueryInsights turns on Cloud SQL Query Insights for the instance, recording each
+	// query's application tags and client address too. Unset or false, the instance's settings
+	// carry no insightsConfig, as before the input existed.
+	DatabaseQueryInsights *bool   `pulumi:"databaseQueryInsights,optional"`
+	Namespace             *string `pulumi:"namespace,optional"`
 	// ExistingNamespace: use the namespace as it exists in the cluster rather than creating it
 	// (another program owns the namespace).
 	ExistingNamespace *bool `pulumi:"existingNamespace,optional"`
@@ -276,6 +280,7 @@ type dispatchSettings struct {
 	appClientID, appID                          string
 	appKeySecretName, appKeySecretKey           string
 	deletionProtection, existingNamespace       bool
+	databaseQueryInsights                       bool
 	replicas                                    int
 	appCPU, appMemory                           string
 	pprofPort                                   int
@@ -525,6 +530,9 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 	if args.DeletionProtection != nil {
 		s.deletionProtection = *args.DeletionProtection
+	}
+	if args.DatabaseQueryInsights != nil {
+		s.databaseQueryInsights = *args.DatabaseQueryInsights
 	}
 	if args.Replicas != nil {
 		if *args.Replicas < minDispatchReplicas {

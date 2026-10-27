@@ -4,6 +4,11 @@
 
 ### Added
 
+- `envoy-infra:gcp:Dispatch` takes `databaseQueryInsights`, which turns on Cloud SQL Query
+  Insights for the component's instance, recording each query's application tags and client
+  address, so a deployment sets it in its program rather than in the console, whose setting the
+  component's settings do not carry. Unset or `false`, the instance's settings carry no
+  `insightsConfig` and the instance is the one it always was.
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update

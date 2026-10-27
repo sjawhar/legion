@@ -137,7 +137,7 @@ the listener may dial the proxy, and the app alone may dial the listener.
 | VPC, subnetwork, router and Cloud NAT | Private Autopilot nodes can pull images and reach the tailnet control plane without public node addresses. |
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
-| Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
+| Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery, and, with `databaseQueryInsights`, Query Insights. |
 | Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pods' configuration, tailnet state permission, generated application secrets, the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the Serve configuration, and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). |
 | Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). |
 | Three Deployments | The app at `replicas` pods, `Recreate` at one and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, with a 35-second termination grace period — a five-second pre-stop wait and the thirty seconds `envoy-dispatch`'s shutdown is built for; the front door and the listener at one pod each, always `Recreate`. Every container has equal requests and limits. All three pod templates carry `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: without it the cluster autoscaler evicts these pods whenever it consolidates a node, and the one-replica front door takes Dispatch off the tailnet until its replacement is ready. Autopilot honours the annotation as [extended-duration](https://cloud.google.com/kubernetes-engine/docs/how-to/extended-duration-pods) protection: for up to seven days, from scale-down and node auto-upgrade only (node repair, Compute Engine maintenance and drains still evict), with each such pod on a node of its own whenever possible and raised to at least 500m CPU and 512Mi memory, so the front door and the listener each request 500m and 512Mi. |
@@ -154,6 +154,13 @@ defaults to `POSTGRES_16`, `databaseTier` to `db-custom-1-3840`, `namespace` to 
 `deletionProtectionEnabled`, which refuses a delete from the API or the console too, and the
 `dispatch` database's `deletionPolicy` `PREVENT` (otherwise `DELETE`), which keeps an instance
 replacement from deleting the database first.
+`databaseQueryInsights`, unset by default, set to `true` turns on Cloud SQL
+[Query Insights](https://cloud.google.com/sql/docs/postgres/using-query-insights) for the
+instance, with each query's application tags and client address recorded
+(`insightsConfig` `queryInsightsEnabled`, `recordApplicationTags` and `recordClientAddress`).
+Unset or `false`, the instance's settings carry no `insightsConfig`, as before the input existed.
+The component owns the instance's settings, so an update of an instance whose Query Insights was
+turned on by hand in the console, with this input unset, plans to turn it off; set it first.
 `existingNamespace`, `false` by default, makes the component use
 the namespace as it exists in the cluster rather than create it, for a deployment where another
 program owns the namespace. On a stack that has already applied, turning it on removes the

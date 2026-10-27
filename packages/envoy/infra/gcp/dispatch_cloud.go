@@ -108,14 +108,22 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	if err != nil {
 		return nil, err
 	}
+	settings := &sql.DatabaseInstanceSettingsArgs{
+		DeletionProtectionEnabled: pulumi.Bool(s.deletionProtection),
+		Tier:                      pulumi.String(s.databaseTier), Edition: pulumi.String("ENTERPRISE"), AvailabilityType: pulumi.String("ZONAL"), DiskType: pulumi.String("PD_SSD"), DiskSize: pulumi.Int(10), DiskAutoresize: pulumi.Bool(true),
+		IpConfiguration:     &sql.DatabaseInstanceSettingsIpConfigurationArgs{Ipv4Enabled: pulumi.Bool(false), PrivateNetwork: network.ID(), SslMode: pulumi.String("ENCRYPTED_ONLY")},
+		BackupConfiguration: &sql.DatabaseInstanceSettingsBackupConfigurationArgs{Enabled: pulumi.Bool(true), PointInTimeRecoveryEnabled: pulumi.Bool(true), StartTime: pulumi.String("08:00"), TransactionLogRetentionDays: pulumi.Int(7), BackupRetentionSettings: &sql.DatabaseInstanceSettingsBackupConfigurationBackupRetentionSettingsArgs{RetainedBackups: pulumi.Int(14)}},
+	}
+	// Unset, the settings carry no insightsConfig, so an instance deployed before the input
+	// existed sees no change.
+	if s.databaseQueryInsights {
+		settings.InsightsConfig = &sql.DatabaseInstanceSettingsInsightsConfigArgs{
+			QueryInsightsEnabled: pulumi.Bool(true), RecordApplicationTags: pulumi.Bool(true), RecordClientAddress: pulumi.Bool(true),
+		}
+	}
 	instance, err := sql.NewDatabaseInstance(ctx, s.hostname, &sql.DatabaseInstanceArgs{
 		DatabaseVersion: pulumi.String(s.databaseVersion), Region: pulumi.String(s.region), DeletionProtection: pulumi.Bool(s.deletionProtection),
-		Settings: &sql.DatabaseInstanceSettingsArgs{
-			DeletionProtectionEnabled: pulumi.Bool(s.deletionProtection),
-			Tier:                      pulumi.String(s.databaseTier), Edition: pulumi.String("ENTERPRISE"), AvailabilityType: pulumi.String("ZONAL"), DiskType: pulumi.String("PD_SSD"), DiskSize: pulumi.Int(10), DiskAutoresize: pulumi.Bool(true),
-			IpConfiguration:     &sql.DatabaseInstanceSettingsIpConfigurationArgs{Ipv4Enabled: pulumi.Bool(false), PrivateNetwork: network.ID(), SslMode: pulumi.String("ENCRYPTED_ONLY")},
-			BackupConfiguration: &sql.DatabaseInstanceSettingsBackupConfigurationArgs{Enabled: pulumi.Bool(true), PointInTimeRecoveryEnabled: pulumi.Bool(true), StartTime: pulumi.String("08:00"), TransactionLogRetentionDays: pulumi.Int(7), BackupRetentionSettings: &sql.DatabaseInstanceSettingsBackupConfigurationBackupRetentionSettingsArgs{RetainedBackups: pulumi.Int(14)}},
-		},
+		Settings: settings,
 	}, child, pulumi.DependsOn([]pulumi.Resource{connection}))
 	if err != nil {
 		return nil, err
