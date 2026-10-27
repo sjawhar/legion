@@ -1813,3 +1813,103 @@ func TestTwoPodsReportALapsedHoldersLastSeenAlike(t *testing.T) {
 	}
 	requireSameLapsedAnswer(t, a, b, onA, onB, "holder", "last_seen", "claim_released")
 }
+
+// mpTakeoverHolder waits until one of pods logs that it took the machine's expired lease, and
+// returns that pod and the other one.
+func mpTakeoverHolder(t *testing.T, within time.Duration, first, second *mpPod) (holder, other *mpPod) {
+	t.Helper()
+	mpEventually(t, within, "a standby to take the expired lease", func() bool {
+		for _, pod := range []*mpPod{first, second} {
+			if strings.Contains(pod.Output.String(), `"from":"expired"`) {
+				holder = pod
+			}
+		}
+		return holder != nil
+	})
+	if holder == first {
+		return first, second
+	}
+	return second, first
+}
+
+// A lost node, then a graceful stop of the pod that took its expired lease, with a second standby
+// running (a rolling update, or a rescheduled pod, after a node loss). The server keeps the lost
+// pod's connection, and with it the durable's push binding, until its ping timeout, minutes in
+// production; the second standby takes the released lease and must deliver all the same: every
+// message published since the node was lost reaches its session, and every message published after
+// the SIGTERM within 10 s of it. At 24a88452 (the INFRA-557 tester's finding) the second standby
+// logs "durable is push-bound by a subscriber without the lease; waiting for its binding to end"
+// and delivers nothing until the lost pod's connection goes (3 min 42 s against a real
+// nats-server 2.10.29), while the server redelivers each message to that connection every ack
+// wait until MaxDeliver is spent, so a message published meanwhile is never delivered at all.
+func TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s(t *testing.T) {
+	uri := testnats.URL(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a, b := mpStartPair(t, binary, uri)
+	c := mpStartPod(t, binary, uri, "pod-c")
+	mpWaitStandby(t, c, 30*time.Second)
+	serving := mpStartServingPort(t)
+	sessions := []string{"ses_mp_lossstop_one", "ses_mp_lossstop_two"}
+	for _, sessionID := range sessions {
+		a.registerPort(t, serving, sessionID)
+	}
+	publisher := mpConnectPublisher(t, uri)
+
+	var thaw func()
+	frozen := publisher.quiesce(t, serving, func() { thaw = a.relay.freeze() })
+	t.Cleanup(thaw)
+	stop := publisher.every(100*time.Millisecond, sessions...)
+	holder, other := mpTakeoverHolder(t, mpHardBound, b, c)
+	serving.awaitAll(t, publisher.since(frozen), mpHardBound+5*time.Second)
+
+	signalled := holder.Terminate(t)
+	holder.WaitExit(t, "SIGTERM")
+	time.Sleep(4 * time.Second) // publish on past the hand-over
+	stop()
+
+	serving.awaitAll(t, publisher.since(frozen), mpGracefulBound+5*time.Second)
+	serving.requireWithin(t, publisher.since(signalled), mpGracefulBound, signalled)
+	mpWaitActive(t, other, time.Second)
+}
+
+// A lost node, then, while the pod that took its expired lease still holds what it received for
+// one ack wait, a graceful stop of that pod, with a second standby running. The lost pod is gone
+// for good by then (killed, its connection closed), so no push binding outlives it. The messages
+// the server pushed to the lost pod come back over one ack wait, after newer ones, some to the
+// stopping holder and the rest to the second standby, which takes the released lease: each
+// session must still take its messages in the order they were published, as after a hard
+// take-over alone. At 24a88452 (the INFRA-557 tester's finding) the stopping holder NAKs what it
+// holds in the order it received it, and the second standby delivers at once, without the hold,
+// so messages published before the take-over reach their session after newer ones.
+func TestTwoPodsGracefulStopDuringAHardTakeoversHoldKeepsOrder(t *testing.T) {
+	uri := testnats.URL(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a, b := mpStartPair(t, binary, uri)
+	c := mpStartPod(t, binary, uri, "pod-c")
+	mpWaitStandby(t, c, 30*time.Second)
+	serving := mpStartServingPort(t)
+	sessions := []string{"ses_mp_holdstop_one", "ses_mp_holdstop_two"}
+	for _, sessionID := range sessions {
+		a.registerPort(t, serving, sessionID)
+	}
+	publisher := mpConnectPublisher(t, uri)
+
+	var thaw func()
+	publisher.quiesce(t, serving, func() { thaw = a.relay.freeze() })
+	t.Cleanup(thaw)
+	stop := publisher.every(100*time.Millisecond, sessions...)
+	holder, other := mpTakeoverHolder(t, mpHardBound, b, c)
+	a.kill(t)
+	a.relay.close()             // the lost pod's connection goes, so the second standby finds no binding
+	time.Sleep(2 * time.Second) // inside the new holder's hold of one ack wait and a second
+	holder.Terminate(t)
+	holder.WaitExit(t, "SIGTERM")
+	time.Sleep(4 * time.Second) // publish on past the hand-over
+	stop()
+
+	messages := publisher.all()
+	serving.awaitAll(t, messages, mpHardBound+5*time.Second)
+	serving.requireKnown(t, messages)
+	serving.requireOrder(t, messages)
+	mpWaitActive(t, other, time.Second)
+}
