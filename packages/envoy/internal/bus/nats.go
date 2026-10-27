@@ -336,12 +336,7 @@ func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues .
 func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) (*nats.Subscription, error) {
 	c.subscriptionsMu.Lock()
 	subscription := &c.subscriptions[next.transport]
-	for subscription.binding != nil {
-		inFlight := subscription.binding
-		c.subscriptionsMu.Unlock()
-		<-inFlight
-		c.subscriptionsMu.Lock()
-	}
+	c.awaitBindLocked(subscription)
 	if c.stopped() {
 		c.subscriptionsMu.Unlock()
 		return nil, errStopped
@@ -391,12 +386,7 @@ func (c *Client) Release(sub *nats.Subscription) {
 	}
 	c.subscriptionsMu.Lock()
 	subscription := &c.subscriptions[jetStreamSubscription]
-	for subscription.binding != nil {
-		inFlight := subscription.binding
-		c.subscriptionsMu.Unlock()
-		<-inFlight
-		c.subscriptionsMu.Lock()
-	}
+	c.awaitBindLocked(subscription)
 	if subscription.subscribed != sub {
 		c.subscriptionsMu.Unlock()
 		return
@@ -406,6 +396,18 @@ func (c *Client) Release(sub *nats.Subscription) {
 	c.subscriptionsMu.Unlock()
 	if rebound != nil && rebound != sub {
 		_ = rebound.Unsubscribe()
+	}
+}
+
+// awaitBindLocked waits until no bind of the registration s holds is in flight. It is called with
+// subscriptionsMu held and returns with it held; the lock is let go while it waits, so a bind that
+// ends while it waits may have changed s, and another may have started, which it waits for too.
+func (c *Client) awaitBindLocked(s *recoverableSubscription) {
+	for s.binding != nil {
+		inFlight := s.binding
+		c.subscriptionsMu.Unlock()
+		<-inFlight
+		c.subscriptionsMu.Lock()
 	}
 }
 

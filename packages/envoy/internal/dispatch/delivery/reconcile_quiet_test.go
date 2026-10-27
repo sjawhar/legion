@@ -5,52 +5,15 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
-
-// statementRecorder records the SQL of every statement run on the pool it traces.
-type statementRecorder struct {
-	mu  sync.Mutex
-	sql []string
-}
-
-func (r *statementRecorder) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	r.mu.Lock()
-	r.sql = append(r.sql, data.SQL)
-	r.mu.Unlock()
-	return ctx
-}
-
-func (r *statementRecorder) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
-
-func (r *statementRecorder) statements() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]string(nil), r.sql...)
-}
-
-// recordedDeliveryPool is a pool of its own on pool's database whose every statement is recorded.
-func recordedDeliveryPool(t *testing.T, pool *store.Pool) (*store.Pool, *statementRecorder) {
-	t.Helper()
-	config := pool.Config().Copy()
-	recorder := &statementRecorder{}
-	config.ConnConfig.Tracer = recorder
-	opened, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		t.Fatalf("open recorded pool: %v", err)
-	}
-	recorded := store.NewPool(opened)
-	t.Cleanup(recorded.Close)
-	return recorded, recorder
-}
 
 // timelineWrite is a statement that writes one of the timeline's tables directly. The bounded
 // attribution walk (AttributePullRequests) is not one: it is a `with` statement that re-resolves up
@@ -129,8 +92,8 @@ func quietReconcilePass(t *testing.T, prs int) []string {
 
 	before := timelineRows(t, ctx, pool)
 	changesBefore := latestChange(t, ctx, pool)
-	recorded, recorder := recordedDeliveryPool(t, pool)
-	NewReconcile(recorded, github, events.NewBroker()).runOnce(ctx)
+	recorder := &storetest.StatementRecorder{}
+	NewReconcile(storetest.Traced(t, pool, recorder, nil), github, events.NewBroker()).runOnce(ctx)
 
 	settings, err := GetSettings(ctx, pool)
 	if err != nil {
@@ -145,7 +108,7 @@ func quietReconcilePass(t *testing.T, prs int) []string {
 	if changes := changesAfter(t, ctx, pool, changesBefore); len(changes) != 0 {
 		t.Fatalf("a pass with nothing new logged %+v, want nothing", changes)
 	}
-	statements := recorder.statements()
+	statements := recorder.Statements()
 	for _, sql := range statements {
 		if timelineWrite.MatchString(sql) {
 			t.Errorf("a pass with nothing new wrote the timeline directly: %s", strings.TrimSpace(sql))

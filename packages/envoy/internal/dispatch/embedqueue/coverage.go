@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -413,7 +413,7 @@ func runCoverage(ctx context.Context, deps Deps) {
 				answered = deps.proven.answered()
 			}
 		}
-		timer := time.NewTimer(jittered(identityRecheckInterval))
+		timer := time.NewTimer(duty.Jittered(identityRecheckInterval))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -423,12 +423,6 @@ func runCoverage(ctx context.Context, deps Deps) {
 			timer.Stop()
 		}
 	}
-}
-
-// jittered is d plus up to a tenth of d again, drawn afresh each call, so the rechecks of
-// processes that booted together drift apart.
-func jittered(d time.Duration) time.Duration {
-	return d + time.Duration(rand.Int64N(int64(d)/10+1))
 }
 
 // coverageQuery counts, per kind, coverageSources' items left-joined to their embeddings rows, in

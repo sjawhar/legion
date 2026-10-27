@@ -12,12 +12,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// EventsChannel is the Postgres notification channel every event commit announces itself on
-// (events_notify, migration 0107), whichever process committed it: the channel whose pglisten.Hub
-// wake the server passes to RunSuggestionOutcomeSweep. The event stream relay and the delivery hub
-// listen on it too.
-const EventsChannel = dispatchEventsChannel
-
 // suggestionOutcomeLease names the lease one pass of the outcome sweep runs under. A pass holds
 // the cursor row for update, so a second process's pass beside it would only wait for the first
 // and then find its page already judged; the lease makes that second process retry later instead

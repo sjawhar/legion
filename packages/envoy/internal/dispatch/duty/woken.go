@@ -116,7 +116,7 @@ func (l WokenLoop) run(ctx context.Context, exclusive exclusiveFunc) {
 			return
 		}
 		owed = true
-		notBefore = later(notBefore, time.Now().Add(jittered(l.HeldRetry)))
+		notBefore = later(notBefore, time.Now().Add(Jittered(l.HeldRetry)))
 	}
 }
 

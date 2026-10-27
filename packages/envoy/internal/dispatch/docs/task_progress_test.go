@@ -5,70 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
-
-// statementCounter counts every statement started on the pool it traces.
-type statementCounter struct{ count atomic.Int64 }
-
-func (c *statementCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
-	c.count.Add(1)
-	return ctx
-}
-
-func (c *statementCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
-
-// countedStore is database through a pool of its own whose every statement the returned counter
-// counts, the lease pool built from it included (store.Pool.Leases). Only the code under test is
-// given it, so everything it counts is that code's.
-func countedStore(t *testing.T, database *store.Store) (*store.Store, *statementCounter) {
-	t.Helper()
-	config := database.Pool.Config().Copy()
-	counter := &statementCounter{}
-	config.ConnConfig.Tracer = counter
-	opened, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		t.Fatalf("open a counted pool: %v", err)
-	}
-	pool := store.NewPool(opened)
-	t.Cleanup(pool.Close)
-	return &store.Store{Pool: pool}, counter
-}
-
-// awaitQuiet waits until counter has counted no statement for quiet, failing once within passes.
-func awaitQuiet(t *testing.T, counter *statementCounter, quiet, within time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	last, since := counter.count.Load(), time.Now()
-	for time.Since(since) < quiet {
-		if time.Now().After(deadline) {
-			t.Fatalf("statements did not stop for %v within %v", quiet, within)
-		}
-		time.Sleep(20 * time.Millisecond)
-		if n := counter.count.Load(); n != last {
-			last, since = n, time.Now()
-		}
-	}
-}
-
-// requireNoStatements fails if counter counts any statement over window.
-func requireNoStatements(t *testing.T, counter *statementCounter, window time.Duration, what string) {
-	t.Helper()
-	before := counter.count.Load()
-	time.Sleep(window)
-	if made := counter.count.Load() - before; made != 0 {
-		t.Errorf("%s: %d statements over %v, want none", what, made, window)
-	}
-}
 
 // captureLogs sends the default logger's lines to the returned log until the test ends.
 func captureLogs(t *testing.T) *storetest.LockedLog {
@@ -153,7 +96,8 @@ func TestTaskProgressIsCountedAtStartAndThenNothingRuns(t *testing.T) {
 		seedUncountedIssue(t, database, 1, "- [x] a\n- [ ] b\n"),
 		seedUncountedIssue(t, database, 2, "- [x] a\n- [x] b\n- [ ] c\n"),
 	}
-	counted, counter := countedStore(t, database)
+	counter := &storetest.StatementCounter{}
+	counted := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
 	service := New(Deps{Store: counted, Events: events.NewBroker(), Settle: time.Hour})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 
@@ -168,7 +112,7 @@ func TestTaskProgressIsCountedAtStartAndThenNothingRuns(t *testing.T) {
 			t.Fatalf("%s counted %d/%d at version %d; want %d/%d at version %d", keys[index], tasksDone, total, version, want[0], want[1], want[2])
 		}
 	}
-	requireNoStatements(t, counter, time.Second, "task progress after its boot pass")
+	storetest.RequireNoStatements(t, counter, time.Second, "task progress after its boot pass")
 }
 
 // A row another writer holds through the whole boot pass - its own retries included - is left

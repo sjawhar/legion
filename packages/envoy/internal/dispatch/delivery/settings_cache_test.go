@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/pglisten"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -81,16 +81,8 @@ func (c *settingsReadCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.Trac
 // counted, on its lease and listener connections as well, which are opened from its configuration.
 func countedDeliveryPool(t *testing.T, pool *store.Pool) (*store.Pool, *settingsReadCounter) {
 	t.Helper()
-	config := pool.Config().Copy()
 	counter := &settingsReadCounter{}
-	config.ConnConfig.Tracer = counter
-	opened, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		t.Fatalf("open counted pool: %v", err)
-	}
-	counted := store.NewPool(opened)
-	t.Cleanup(counted.Close)
-	return counted, counter
+	return storetest.Traced(t, pool, counter, nil), counter
 }
 
 // With both intakes running and bound, and nothing written, delivery_settings is read twice in

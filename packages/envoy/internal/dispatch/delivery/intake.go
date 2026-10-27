@@ -80,10 +80,10 @@ func newIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, git
 // filtering, from those settings.
 //
 // Two things wake an unbound intake: the cache storing settings, since an intake with none has
-// nothing to route by, and durableBindInterval's ticker. The durable admits one subscriber, so a
-// second envoy-dispatch process stands by on that ticker -- for the life of the process, with no
-// deadline -- and takes the durable over within seconds of the process holding it going away.
-// The bind poll stops once this process is bound.
+// nothing to route by, and, once it has settings, durableBindInterval's ticker. The durable admits
+// one subscriber, so a second envoy-dispatch process stands by on that ticker -- for the life of
+// the process, with no deadline -- and takes the durable over within seconds of the process
+// holding it going away. The bind poll stops once this process is bound.
 //
 // The PR-checks workflow path is live-reachable only for a fork-originated pull request: Envoy's
 // own webhook normalizer (internal/contracts/normalize.go, untouched by this package) drops a
@@ -97,15 +97,21 @@ func (in *Intake) Run(ctx context.Context) {
 	defer binds.Stop()
 	// changed is taken before each Load, so settings stored after that Load wake the loop.
 	for changed := in.settings.Changed(); ; {
-		if in.settings.Load() != nil && in.bind(ctx) == bindBound {
-			break
+		// poll stays nil, and so never ready, while the cache holds no settings: a tick then has
+		// nothing to bind by, and the cache's Changed signal wakes the first bind.
+		var poll <-chan time.Time
+		if in.settings.Load() != nil {
+			if in.bind(ctx) == bindBound {
+				break
+			}
+			poll = binds.C
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-changed:
 			changed = in.settings.Changed()
-		case <-binds.C:
+		case <-poll:
 		}
 	}
 	// Nothing rebinds a bound intake, so the poll stops here rather than waking every two seconds
@@ -747,10 +753,9 @@ func intakeKey(msg *natsgo.Msg) (key string, envelope *contracts.Envelope, wante
 	if len(tokens) < 5 || tokens[0] != "notifications" || tokens[1] != "github" {
 		return "", nil, false
 	}
-	repo := tokens[2] + "/" + tokens[3]
 	switch {
 	case tokens[4] == "pr" && len(tokens) == 6:
-		return "pr " + repo + "#" + tokens[5], nil, true
+		return "pr " + tokens[2] + "/" + tokens[3] + "#" + tokens[5], nil, true
 	case tokens[4] == "workflow" && len(tokens) == 7:
 		decoded, err := decodeEnvelope(msg.Data)
 		if err != nil {

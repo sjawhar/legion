@@ -1106,6 +1106,19 @@ func waitForLease(t *testing.T, pair *dispatchPair, message, lease string, withi
 	}
 }
 
+// waitForLeaseInEach waits for both processes to have written message for lease.
+func waitForLeaseInEach(t *testing.T, pair *dispatchPair, message, lease string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for countLease(pair.a, message, lease) == 0 || countLease(pair.b, message, lease) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("both processes did not each write %s for the %s lease within %v:\nA:\n%s\nB:\n%s",
+				message, lease, within, pair.a.Output.String(), pair.b.Output.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // requireLeasedOnce is what a leased loop's window must show: the pass ran once across the two
 // processes, which is what one process alone would have done, and the other process found the
 // lease held and skipped rather than running the same work beside it.
@@ -1194,14 +1207,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	}
 	// The process that skipped retries a little over two seconds after each skip; a minute is
 	// room for the held pass to finish and for that retry to run a pass of its own.
-	deadline := time.Now().Add(60 * time.Second)
-	for countLease(pair.a, leaseRan, "reference-excerpts") == 0 || countLease(pair.b, leaseRan, "reference-excerpts") == 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("both processes did not each run a reference-excerpt pass of their own within 60s:\nA:\n%s\nB:\n%s",
-				pair.a.Output.String(), pair.b.Output.String())
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	waitForLeaseInEach(t, pair, leaseRan, "reference-excerpts", 60*time.Second)
 	for _, unobserved := range []struct{ lease, why string }{
 		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
@@ -1240,14 +1246,7 @@ func TestTheSuggestionOutcomeSweepNeverPassesAtOnceAcrossBothProcessesAndBothPas
 		t.Fatalf("release the cursor the pass is waiting on: %v", err)
 	}
 	// The second process's next retry is up to a minute and a tenth after its last skip.
-	deadline := time.Now().Add(3 * time.Minute)
-	for countLease(pair.a, leaseRan, "suggestion-outcomes") == 0 || countLease(pair.b, leaseRan, "suggestion-outcomes") == 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("both processes did not each run a suggestion-outcome pass of their own within 3m:\nA:\n%s\nB:\n%s",
-				pair.a.Output.String(), pair.b.Output.String())
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	waitForLeaseInEach(t, pair, leaseRan, "suggestion-outcomes", 3*time.Minute)
 }
 
 // A rolling update starts the second process minutes after the first, and at a steady two

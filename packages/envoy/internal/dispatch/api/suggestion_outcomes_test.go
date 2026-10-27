@@ -4,63 +4,13 @@ import (
 	"context"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
-
-// sweepStatementCounter counts every statement started on the pool it traces.
-type sweepStatementCounter struct{ count atomic.Int64 }
-
-func (c *sweepStatementCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
-	c.count.Add(1)
-	return ctx
-}
-
-func (c *sweepStatementCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
-
-// countedSweepStore is database through a pool of its own whose every statement the returned
-// counter counts, the lease pool built from it included (store.Pool.Leases), with params set on
-// each of its connections. Only the code under test is given it, so everything it counts is that
-// code's.
-func countedSweepStore(t *testing.T, database *store.Store, params map[string]string) (*store.Store, *sweepStatementCounter) {
-	t.Helper()
-	config := database.Pool.Config().Copy()
-	counter := &sweepStatementCounter{}
-	config.ConnConfig.Tracer = counter
-	for name, value := range params {
-		config.ConnConfig.RuntimeParams[name] = value
-	}
-	opened, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		t.Fatalf("open a counted pool: %v", err)
-	}
-	pool := store.NewPool(opened)
-	t.Cleanup(pool.Close)
-	return &store.Store{Pool: pool}, counter
-}
-
-// awaitSweepQuiet waits until counter has counted no statement for quiet, failing after within.
-func awaitSweepQuiet(t *testing.T, counter *sweepStatementCounter, quiet, within time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	last, since := counter.count.Load(), time.Now()
-	for time.Since(since) < quiet {
-		if time.Now().After(deadline) {
-			t.Fatalf("statements did not stop for %v within %v", quiet, within)
-		}
-		time.Sleep(20 * time.Millisecond)
-		if n := counter.count.Load(); n != last {
-			last, since = n, time.Now()
-		}
-	}
-}
 
 // createOutcomeIssue files an issue in project as alice and returns its key.
 func createOutcomeIssue(t *testing.T, handler http.Handler, project, title string) string {
@@ -120,7 +70,7 @@ func sweepSuggestionOutcomes(ctx context.Context, pool *store.Pool) error {
 type idleSweep struct {
 	handler        http.Handler
 	server         *server
-	counter        *sweepStatementCounter
+	counter        *storetest.StatementCounter
 	target, source string
 }
 
@@ -150,7 +100,8 @@ func startIdleSweep(t *testing.T, project string, settle time.Duration) idleSwee
 		<-hubDone
 	})
 
-	counted, counter := countedSweepStore(t, database, nil)
+	counter := &storetest.StatementCounter{}
+	counted := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
 	leases := sweepLeases(t, counted)
 	schedule := suggestionSchedule{minGap: idleSweepGap, settle: settle, page: suggestionOutcomePage}
 	started := time.Now()
@@ -164,7 +115,7 @@ func startIdleSweep(t *testing.T, project string, settle time.Duration) idleSwee
 	// The hub's signal after its LISTEN earns one more pass, no sooner than the gap after the boot
 	// pass began; after it the loop is idle.
 	time.Sleep(time.Until(started.Add(idleSweepGap + 300*time.Millisecond)))
-	awaitSweepQuiet(t, counter, 500*time.Millisecond, 10*time.Second)
+	storetest.AwaitQuiet(t, counter, 500*time.Millisecond, 10*time.Second)
 	return idleSweep{handler: handler, server: directServer(deps), counter: counter, target: target, source: source}
 }
 
@@ -174,9 +125,9 @@ func TestTheSuggestionSweepMakesNoStatementWithNoEvents(t *testing.T) {
 	sweep := startIdleSweep(t, "OIDLE", idleSweepGap)
 	seedWriteSuggestion(t, sweep.server, "issue", sweep.source, "", "alice", "issue", sweep.target, sweep.target)
 
-	before := sweep.counter.count.Load()
+	before := sweep.counter.Count()
 	time.Sleep(15 * idleSweepGap)
-	if made := sweep.counter.count.Load() - before; made != 0 {
+	if made := sweep.counter.Count() - before; made != 0 {
 		t.Fatalf("the sweep made %d statements over %v with no event written; want none", made, 15*idleSweepGap)
 	}
 	if row := readSuggestionOutcome(t, sweep.server, sweep.source, sweep.target); row.Outcome != "ignored" {
@@ -402,17 +353,18 @@ func measureTouchedPass(t *testing.T, project string, pending bool) touchedPassC
 		t.Fatalf("vacuum write_suggestions: %v", err)
 	}
 
-	counted, counter := countedSweepStore(t, database, map[string]string{"enable_seqscan": "off"})
-	tx, err := counted.Pool.Begin(ctx)
+	counter := &storetest.StatementCounter{}
+	counted := storetest.Traced(t, database.Pool, counter, map[string]string{"enable_seqscan": "off"})
+	tx, err := counted.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin the page's transaction: %v", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	before := counter.count.Load()
+	before := counter.Count()
 	if _, _, err := judgeSuggestionPage(ctx, tx, suggestionOutcomePage, 0); err != nil {
 		t.Fatalf("judge the page: %v", err)
 	}
-	cost := touchedPassCost{statements: counter.count.Load() - before}
+	cost := touchedPassCost{statements: counter.Count() - before}
 	rows, err := tx.Query(ctx, `
 		select relname, seq_tup_read, coalesce(idx_tup_fetch, 0)
 		  from pg_stat_xact_user_tables

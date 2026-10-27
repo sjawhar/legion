@@ -135,8 +135,8 @@ func (d Deps) embedderProven() bool {
 	}
 }
 
-// signalEnqueued wakes Run's scan loop for rows Cover just made pending, without blocking: one
-// signal waiting in the buffer already earns the scan.
+// signalEnqueued wakes Run's scan loop, for rows Cover just made pending or a signal on deps.Wake
+// (relayWakes), without blocking: one signal waiting in the buffer already earns the scan.
 func (d Deps) signalEnqueued() {
 	if d.enqueued == nil {
 		return
@@ -186,7 +186,7 @@ func Run(ctx context.Context, deps Deps) {
 	defer wg.Wait()
 	wg.Go(func() { runCoverage(coverageCtx, deps) })
 	if deps.Wake != nil {
-		wg.Go(func() { relayWakes(ctx, deps.Wake, wake) })
+		wg.Go(func() { relayWakes(ctx, deps) })
 	}
 	duty.RunWoken(scanCtx, duty.WokenLoop{
 		Wake:   wake,
@@ -195,19 +195,16 @@ func Run(ctx context.Context, deps Deps) {
 	})
 }
 
-// relayWakes copies each signal on from into to, the one channel the scan loop waits on, so a
-// notification and a row Cover wrote wake it alike; a signal already waiting in to absorbs the
-// next.
-func relayWakes(ctx context.Context, from <-chan struct{}, to chan struct{}) {
+// relayWakes copies each signal on deps.Wake into deps.enqueued (Deps.signalEnqueued), the one
+// channel the scan loop waits on, so a notification and a row Cover wrote wake it alike; a signal
+// already waiting there absorbs the next.
+func relayWakes(ctx context.Context, deps Deps) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-from:
-			select {
-			case to <- struct{}{}:
-			default:
-			}
+		case <-deps.Wake:
+			deps.signalEnqueued()
 		}
 	}
 }

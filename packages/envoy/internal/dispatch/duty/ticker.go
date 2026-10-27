@@ -25,11 +25,12 @@ var jitterN = func(n time.Duration) time.Duration {
 	return rand.N(n)
 }
 
-// jittered is d plus up to a tenth of d again. The jitter only ever adds, so a jittered wait is
-// never shorter than the d it was asked for - which is what keeps a periodic pass from landing
-// inside a period duty_passes already records as served (Exclusive): a wait of at least one period
-// always reaches the next boundary.
-func jittered(d time.Duration) time.Duration {
+// Jittered is d plus up to a tenth of d again, drawn afresh each call, so the waits of processes
+// that booted together drift apart. The jitter only ever adds, so a jittered wait is never shorter
+// than the d it was asked for - which is what keeps a periodic pass from landing inside a period
+// duty_passes already records as served (Exclusive): a wait of at least one period always reaches
+// the next boundary.
+func Jittered(d time.Duration) time.Duration {
 	return d + jitterN(d/10)
 }
 
@@ -54,6 +55,6 @@ func RunJittered(ctx context.Context, interval time.Duration, idle func() bool, 
 		case <-timer.C:
 		}
 		pass(ctx)
-		wait = jittered(interval)
+		wait = Jittered(interval)
 	}
 }

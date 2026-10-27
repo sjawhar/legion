@@ -5,15 +5,14 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // One import pass imports every enabled source, two of one project included, and a source whose
@@ -59,21 +58,6 @@ func TestAnImportPassSyncsEverySourceAndGoesOnPastAFailure(t *testing.T) {
 	}
 }
 
-// statementRecorder records the SQL of every statement run on the pool it traces.
-type statementRecorder struct {
-	mu  sync.Mutex
-	sql []string
-}
-
-func (r *statementRecorder) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	r.mu.Lock()
-	r.sql = append(r.sql, data.SQL)
-	r.mu.Unlock()
-	return ctx
-}
-
-func (r *statementRecorder) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
-
 // writeStatement is a statement that writes rows directly, or opens a transaction to.
 var writeStatement = regexp.MustCompile(`(?is)^\s*(insert|update|delete|begin)\b`)
 
@@ -111,16 +95,8 @@ func TestAnImportPassOverUnchangedHeadsFetchesNothingAndTouchesEachSourceOnce(t 
 		t.Fatalf("read last_sync_at: %v", err)
 	}
 
-	config := database.Pool.Config().Copy()
-	recorder := &statementRecorder{}
-	config.ConnConfig.Tracer = recorder
-	opened, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatalf("open recorded pool: %v", err)
-	}
-	recorded := store.NewPool(opened)
-	t.Cleanup(recorded.Close)
-	syncAll(ctx, NewImporter(&store.Store{Pool: recorded}, importer.github, events.NewBroker()))
+	recorder := &storetest.StatementRecorder{}
+	syncAll(ctx, NewImporter(&store.Store{Pool: storetest.Traced(t, database.Pool, recorder, nil)}, importer.github, events.NewBroker()))
 
 	if gotTrees, gotBlobs := fake.reads(); gotTrees != trees || gotBlobs != blobs {
 		t.Fatalf("the pass over unchanged heads read %d trees and %d blobs; want none", gotTrees-trees, gotBlobs-blobs)
@@ -132,10 +108,8 @@ func TestAnImportPassOverUnchangedHeadsFetchesNothingAndTouchesEachSourceOnce(t 
 	if err := database.Pool.QueryRow(ctx, `select count(*) from architecture_sources where last_sync_at > $1`, lastSync).Scan(&fresh); err != nil || fresh != 3 {
 		t.Fatalf("%d of 3 sources carry a freshness stamp from the pass over unchanged heads (err %v); want every one", fresh, err)
 	}
-	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
 	touches := 0
-	for _, sql := range recorder.sql {
+	for _, sql := range recorder.Statements() {
 		switch {
 		case touchStatement.MatchString(sql):
 			touches++

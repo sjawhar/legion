@@ -2,6 +2,7 @@ package pglisten
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -126,12 +127,9 @@ func (h *Hub) register(add func()) {
 
 // listenOn adds channel to the LISTEN statement once, however many subscribers name it.
 func (h *Hub) listenOn(channel string) {
-	for _, listened := range h.channels {
-		if listened == channel {
-			return
-		}
+	if !slices.Contains(h.channels, channel) {
+		h.channels = append(h.channels, channel)
 	}
-	h.channels = append(h.channels, channel)
 }
 
 func (h *Hub) onConnected() {

@@ -310,14 +310,15 @@ func TestTwentyFailingDocumentsDoNotHoldBackATwentyFirstsExcerpts(t *testing.T) 
 func TestTheExcerptReconciliationMakesNoStatementOnceDrained(t *testing.T) {
 	database := storetest.Open(t)
 	documents := owedDocuments(t, database, 3)
-	counted, counter := countedStore(t, database)
+	counter := &storetest.StatementCounter{}
+	counted := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
 	service := newExcerptService(t, counted, nil)
 	leases := excerptLeases(t, counted)
 	runExcerpts(t, func(ctx context.Context) { service.RunReferenceExcerptReconciliation(ctx, leases, nil) })
 
 	waitFor(t, 15*time.Second, "every owed excerpt stored", func() bool { return len(owedMentions(t, database)) == 0 })
-	awaitQuiet(t, counter, time.Second, 10*time.Second)
-	requireNoStatements(t, counter, 3*time.Second, "the reconciliation with nothing owed")
+	storetest.AwaitQuiet(t, counter, time.Second, 10*time.Second)
+	storetest.RequireNoStatements(t, counter, 3*time.Second, "the reconciliation with nothing owed")
 	if next := service.reconcileExcerptPass(context.Background(), referenceExcerptSchedule); !next.IsZero() {
 		t.Fatalf("a pass with nothing owed asked to run again at %v; want no timer", next)
 	}
@@ -349,7 +350,8 @@ func TestAMentionOwedAnExcerptWakesTheReconciliation(t *testing.T) {
 		stopHub()
 		<-hubDone
 	})
-	counted, counter := countedStore(t, database)
+	counter := &storetest.StatementCounter{}
+	counted := &store.Store{Pool: storetest.Traced(t, database.Pool, counter, nil)}
 	service := newExcerptService(t, counted, nil)
 	leases := excerptLeases(t, counted)
 	started := time.Now()
@@ -363,7 +365,7 @@ func TestAMentionOwedAnExcerptWakesTheReconciliation(t *testing.T) {
 	// The hub's signal after its LISTEN earns one more pass, no sooner than the gap after the
 	// boot pass began; after it the loop is idle.
 	time.Sleep(time.Until(started.Add(referenceExcerptSchedule.minGap + time.Second)))
-	awaitQuiet(t, counter, 500*time.Millisecond, 10*time.Second)
+	storetest.AwaitQuiet(t, counter, 500*time.Millisecond, 10*time.Second)
 
 	ctx := context.Background()
 	for name, leaveOwed := range map[string]func() error{
