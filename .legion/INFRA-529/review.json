@@ -2,22 +2,16 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-529",
-  "completed": "2026-10-27T04:33:00Z",
+  "completed": "2026-10-27T05:58:30Z",
   "round": 3,
-  "reviewedCodeHead": "0d5fff64e7ad941b54c4a297937dda9c21092703",
-  "decision": "changes_requested",
+  "continuation": "Round 3 continued against the merged head: its REQUEST_CHANGES at ee1734a1663a found no code finding, only main's red daemon tests. Unchanged-diff fingerprint a5647b0894f9b42645105ad26fc51a50a146714d1d729725775474b536d36639 at ee1734a1663a and at 7743653c2bbc (forward merge of main baadccdc in bd81c99b6daa), so the round continues; no new thermonuclear pass.",
+  "reviewedCodeHead": "bd81c99b6daa9f475cb99673ec6be8170833b893",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "scope": "Narrowed by the INFRA-138 architect: A1, the byte-order-mark fix, the copy-instead-of-in-place change, the AGENTS.md wording.",
-  "codeVerdict": "Clean. BOM fix verified at 0d5fff64e7ad with the server schema: '\\ufeff:::note\\nbody\\n:::\\n' draws ':::note', 'body', ':::'; '\\ufeffHello **b**\\n\\n:::note\\nbody\\n:::\\n' draws 'Hello b', ':::note', 'body', ':::' with nothing logged. A1 body draws 'Some bold text', ':::note', 'A note with inner words', ':::'. The mark-span example draws each line once. Thermonuclear pair at 0d5fff64e7ad: both APPROVE.",
-  "ci": "Required (ruleset): lint, typecheck, test, pr-title; branch protection none. CI head 0d5fff64e7ad (run 40444276086): lint success, typecheck success, pr-title success, test FAILURE. Compare 0d5fff64e7ad...99d086e5: handoffsOnly true, 2 files. Every failure is in 'Test the Go daemon' (packages internal/admit, internal/api, internal/daemon): 'read a slotted issue ... number of field descriptions must equal number of destinations, got 20 and 31' (306 lines), main's breakage from #2289 (47e85fdd), fixed on main by #2317 (baadccdc, 04:19Z). The run's merge ref predates baadccdc, so a rerun reuses it.",
-  "threads": "Nine threads, all resolved by the implementer; each carries the reviewer's reply (accepted). Round-2 threads PRRT_kwDORFy7ds6wiOiH, PRRT_kwDORFy7ds6wiOiN, PRRT_kwDORFy7ds6wiOiQ answered at 0d5fff64e7ad.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "(CI) test",
-      "description": "The required 'test' check is red at code head 0d5fff64e7ad (run 40444276086), only from main's daemon admission breakage, not from this change. The implementer merges main (now at baadccdc, with #2317) and changes nothing else, so CI runs on a merge ref that carries the fix."
-    }
-  ]
+  "ci": "Required (ruleset): lint, typecheck, test, pr-title; branch protection none. CI head bd81c99b6daa: lint success, typecheck success, test success, pr-title success (read 05:57Z). Compare bd81c99b6daa...7743653c: handoffsOnly true, 2 files.",
+  "threads": "Nine review threads, all resolved, each carrying the reviewer's reply; no bot threads.",
+  "e2e": "E2E (implementer) and E2E (tester) present; the tester smoked unknown-directive.e2e.ts rows 1-4 at 04fbe7963e51 on the merged tree (4 passed).",
+  "keyFindings": []
 }
