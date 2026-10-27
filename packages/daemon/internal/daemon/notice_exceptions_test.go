@@ -313,8 +313,11 @@ func TestAReportOfAPublishTheListenerRefusedQueuesNothingAndIsNoError(t *testing
 			if got := queuedNotices(t, pool); len(got) != 0 {
 				t.Fatalf("queued %v after a %s report, want nothing: its row retries on its own", got, tc.reason)
 			}
-			if tc.refused && strings.Contains(logged.String(), "level=ERROR") {
-				t.Fatalf("a %s report logged an error:\n%s", tc.reason, logged.String())
+			// The handler is at slog's default Info level, so the quiet branch's debug line is the only
+			// thing it may say: any louder line, a WARN included, is one every few hundred
+			// milliseconds at hundreds of unheld roles, about a state the executor already handles.
+			if tc.refused && logged.Len() != 0 {
+				t.Fatalf("a %s report logged at Info or above, want nothing:\n%s", tc.reason, logged.String())
 			}
 		})
 	}

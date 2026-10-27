@@ -138,18 +138,22 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 		return nil
 	}
 	issue, notice := reported.issue, reported.notice
-	switch exception.Reason {
-	case "delivery_failed", "no_holder", "receipt_timeout":
-	case "unclaimed", "holder_lapsed":
+	if notify.IsNoHolderReason(exception.Reason) {
 		// The listener refused this publish itself, before forwarding anything, because no live
 		// session held the role, and answered it 404 (notify.ErrNoHolder). The executor that sent it
 		// still holds the row and retries it on its own backoff (errNoticeWaits), or finishes it once
 		// the architect will not hold its role again, so a copy queued here would send the notice
-		// twice. These two reasons are never a re-hold, and they are not malformed: a positive match
-		// that changes nothing, so the default below still refuses every other reason.
+		// twice. These reasons are never a re-hold, and they are not malformed: a positive match on
+		// the one list notify.Publish reads its 404 by (notify.IsNoHolderReason), so a refusal state
+		// the listener adds there is quiet here too, and the switch below still refuses every other
+		// reason. It logs at debug alone: at hundreds of unheld roles, anything louder is a line
+		// every few hundred milliseconds about a state the executor already handles.
 		r.log.Debug("outbox notice not re-held: the listener refused its publish, and its row retries on its own",
 			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason)
 		return nil
+	}
+	switch exception.Reason {
+	case "delivery_failed", "no_holder", "receipt_timeout":
 	default:
 		return fmt.Errorf("%w: exception %s names reason %q", errNoticeException, envelope.EventID, exception.Reason)
 	}
