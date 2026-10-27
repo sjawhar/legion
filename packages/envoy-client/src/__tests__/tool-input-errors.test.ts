@@ -3,7 +3,6 @@ import {
   ASK_QUESTION_MAX,
   dispatchToolSchema,
   dispatchToolSpecs,
-  overCapMessage,
   zodSchemaApi,
 } from "@legion/contracts";
 import { z } from "zod";
@@ -133,7 +132,8 @@ describe("formatZodIssues", () => {
         options: Array.from({ length: 9 }, (_, index) => ({ label: `o${index}` })),
       })
     ).toEqual([
-      `--question ${overCapMessage(ASK_QUESTION_MAX + 50, ASK_QUESTION_MAX)}`,
+      `--question is 50 characters over the ${ASK_QUESTION_MAX}-character limit ` +
+        `(${ASK_QUESTION_MAX + 50}/${ASK_QUESTION_MAX})`,
       "--option has 9 items; the limit is 8",
     ]);
   });

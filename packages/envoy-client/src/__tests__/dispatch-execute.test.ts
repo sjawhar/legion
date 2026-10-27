@@ -469,7 +469,8 @@ describe("executeDispatchTool", () => {
         fetchImpl
       )
     ).rejects.toThrow(
-      `question plus ref ${overCapMessage(ASK_QUESTION_MAX + 21, ASK_QUESTION_MAX)}; shorten the question or drop the ref`
+      `question plus ref is 21 characters over the ${ASK_QUESTION_MAX}-character limit ` +
+        `(${ASK_QUESTION_MAX + 21}/${ASK_QUESTION_MAX}); shorten the question or drop the ref`
     );
   });
 
