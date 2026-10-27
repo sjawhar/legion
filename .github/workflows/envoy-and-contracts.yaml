@@ -154,10 +154,9 @@ jobs:
           # go.mod moves the versions the build compiles. A Go job's filter names the packages
           # `go list -deps -test` lists for its test command, with that command's build tags, and
           # the files its tests read outside them; a test that comes to import or read something
-          # new adds it to that job's filter. bun_toolchain, bun_install, go_workspace,
-          # dispatch_server, listener_command and dispatch_command_tests are no job's gate: each
-          # is a group written once and named by the filters that need it through its anchor,
-          # which dorny/paths-filter flattens into the list that names it.
+          # new adds it to that job's filter. The first keys, each defined with an `&anchor`, are
+          # no job's gate: each is a group written once and named by the filters that need it
+          # through its anchor, which dorny/paths-filter flattens into the list that names it.
           filters: |
             # The Bun pin and the action that installs it (.github/actions/setup-bun reads
             # .bun-version).
@@ -380,7 +379,7 @@ jobs:
               # src/__tests__/dispatch-advice.test.ts holds every skill section a notice cites to a
               # heading of that skill's SKILL.md.
               - 'skills/**'
-            # envoy-go's gate alone; the other Go jobs have filters of their own above.
+            # envoy-go's gate alone; every other Go job has a filter of its own.
             envoy:
               - 'packages/envoy/**'
               - 'packages/proof-editor/**'
