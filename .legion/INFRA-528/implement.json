@@ -2,26 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-528",
-  "completed": "2026-10-27T14:40:00Z",
+  "completed": "2026-10-27T16:05:00Z",
   "proof": [
     {
-      "criterion": "The conflict with main (INFRA-530 #2307 and INFRA-527 #2322, among others up to ae36683e) is resolved by a forward merge that keeps both sides in each file and changes nothing else",
+      "criterion": "The conflict with main (INFRA-172 #2272 and INFRA-565 #2388, up to 2df3353c) is resolved by a forward merge that keeps both sides and changes nothing else",
       "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector: Desktop Chrome, iPhone 13, Desktop Safari (WebKit), Desktop Firefox",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox; then the same runner for e2e/text-typed-blocks.e2e.ts e2e/unknown-directive.e2e.ts e2e/task-items.e2e.ts across the same four projects (main now runs Playwright through e2e/run.ts)",
-      "observed": "At the merge a45806be: mermaid suite 32 passed (2.8m); text-typed-blocks, unknown-directive and task-items 24 passed (1.6m); `bun test --parallel web/src e2e/__tests__` 2538 pass / 0 fail; proof-editor 139 pass; biome, tsc, check:classes green.",
-      "headSha": "a45806be02b00460a36635bc9d732b3aadba1a1a",
-      "negativeControl": "Before the merge GitHub reported the pull request CONFLICTING (three files) and ran no checks on 47c1efcb."
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox; then the same runner for e2e/text-typed-blocks.e2e.ts e2e/unknown-directive.e2e.ts e2e/task-items.e2e.ts e2e/typed-block-content-rule.e2e.ts",
+      "observed": "At the merge bf7eb796: mermaid suite 32 passed (2.7m); text-typed-blocks, unknown-directive, task-items and typed-block-content-rule 28 passed (1.9m); `bun test --parallel web/src e2e/__tests__` 2539 pass / 0 fail; proof-editor 155 pass; biome, tsc, check:classes green.",
+      "headSha": "bf7eb796259d3b997dc1e14221477edfa0340339",
+      "negativeControl": "Before the merge GitHub reported the pull request CONFLICTING (biome.json and packages/proof-editor/AGENTS.md) and ran no checks on a46b8afd."
     }
   ],
   "filesChanged": [
-    "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx (merge resolution: the Mermaid describe block, then main's INFRA-527 task-item test)",
-    "packages/dispatch/web/src/styles.css (merge resolution: the .dispatch-mermaid rules, then main's task-checkbox rules)",
-    "packages/envoy/CHANGELOG.md (merge resolution: this issue's Unreleased/Fixed entry, then main's INFRA-530 entry)"
+    "biome.json (merge resolution: main's typed-block-drawing.ts line kept beside the two mermaid lines)",
+    "packages/proof-editor/AGENTS.md (merge resolution: 'Thirteen files' (main's eleven plus the two mermaid files), main's typed-block-drawing and rewritten read-only-directives rows, then the two mermaid rows, and the Conventions list naming all of them)"
   ],
   "trickyParts": [
-    "All three conflicts were two additions at the same place with no base text (both sides appended); each keeps this branch's block first and main's after. Re-materialized with ui.conflict-marker-style=snapshot so the resolution only removed marker lines.",
-    "Fingerprint 47c1efcb 5e380076f5de... -> merge a45806be c2f25b53face...: changed by one blank added line in MarkdownBody.test.tsx moving from before the Mermaid block to after it, now that main's task-item test follows it; both fingerprint inputs hold 1836 lines and no other line differs. No function holds both changes.",
-    "Main changed the e2e harness: playwright.config.ts starts no server, and runs go through `bun e2e/run.ts -- bunx playwright test …`."
+    "Both conflicts were list entries both sides added. Fingerprint a46b8afd c2f25b53face... -> merge bf7eb796 b41f344dc455...: changed only in two documentation lines of packages/proof-editor/AGENTS.md that main changed too (the legion-own file count and the Conventions list, which now also name main's typed-block-drawing.ts). No code line or function differs."
   ],
   "deviations": [],
   "openQuestions": []
