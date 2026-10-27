@@ -13,14 +13,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-// Kinds is every edge type graph_edges emits.
-var Kinds = []string{"mentions", "child_of", "blocked_by", "attached_to", "anchored_to", "owned_by", "replies_to", "followed_by", "part_of", "depends_on", "affects"}
-
-// KnownKind reports whether kind is an edge type graph_edges emits.
-func KnownKind(kind string) bool {
-	return slices.Contains(Kinds, kind)
-}
-
 // excerptRunes bounds the head of an item's text shown beside an edge.
 const excerptRunes = 240
 

@@ -1,4 +1,5 @@
 import { hasControlCharacter } from "./dispatch-href";
+import { referenceTargetFits, utf8Bytes } from "./dispatch-text-rules";
 
 const encoder = new TextEncoder();
 
@@ -98,3 +99,198 @@ export const DISPATCH_BLOCK_ID_ENCODINGS: readonly { id: string; encoded: string
   { id: "it@v2", encoded: "it%40v2" },
   { id: "📊", encoded: "%F0%9F%93%8A" },
 ];
+
+/**
+ * A block reference as `parseCanonicalBlockReference` reads it: the block's document - `issue`
+ * and the document's slug `document` (`spec` for the issue's primary document), or `project` and
+ * its document's slug - the block id `block`, decoded, and the pinned version's decimal digits
+ * `pin`, when the reference is pinned.
+ */
+export interface DispatchBlockReference {
+  readonly issue?: string;
+  readonly project?: string;
+  readonly document: string;
+  readonly block: string;
+  readonly pin?: string;
+}
+
+// Go's `text` grammars: an issue key, a project key and a document slug.
+const ISSUE_KEY = "[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*";
+const PROJECT_KEY = "[A-Z][A-Z0-9]{1,9}";
+const DOCUMENT_SLUG = "[a-z0-9]+(?:-[a-z0-9]+)*";
+const ISSUE_KEY_ONLY = new RegExp(`^${ISSUE_KEY}$`);
+const BLOCK_REFERENCE = new RegExp(
+  `^dispatch://(?:(${ISSUE_KEY})/spec|(${ISSUE_KEY}|${PROJECT_KEY})/artifact/(${DOCUMENT_SLUG}))#b-(.*)$`,
+  "s"
+);
+
+/**
+ * A block reference as every writer writes one: `dispatch://<ISSUE>/spec` for a block of an
+ * issue's primary document, `dispatch://<ISSUE or PROJECT>/artifact/<slug>` for any other document
+ * of an issue or a project (a project's document whose slug is `spec` included), then `#b-` and
+ * the id as `encodeBlockId` writes it, then `@v<pin>` when it is pinned. Go's twin is
+ * `text.FormatBlockRef`.
+ */
+export function formatBlockReference(reference: DispatchBlockReference): string {
+  const document =
+    reference.issue !== undefined && reference.document === "spec"
+      ? `${reference.issue}/spec`
+      : `${reference.issue ?? reference.project}/artifact/${reference.document}`;
+  const pin = reference.pin === undefined ? "" : `@v${reference.pin}`;
+  return `dispatch://${document}#b-${encodeBlockId(reference.block)}${pin}`;
+}
+
+/**
+ * The block `value` names when it is one block reference written exactly as
+ * `formatBlockReference` writes it - the one way a typed block's `block[]` attribute holds a
+ * pointer - or undefined. Its document part is an issue's primary document
+ * (`dispatch://<ISSUE>/spec`) or a document of an issue or a project
+ * (`dispatch://<ISSUE or PROJECT>/artifact/<slug>`), its fragment one `parseBlockFragment` reads,
+ * its id at most MAX_BLOCK_ID_BYTES and its target id at most MAX_REFERENCE_TARGET_BYTES, as text
+ * cites a block; and `formatBlockReference` must write it back as `value`, which refuses what a
+ * reader alone accepts: lower-case or needless percent-encoding, and an issue's primary document
+ * spelled `artifact/spec`. Go's twin is `text.CanonicalBlockRef`.
+ */
+export function parseCanonicalBlockReference(value: string): DispatchBlockReference | undefined {
+  const match = BLOCK_REFERENCE.exec(value);
+  if (match === null) {
+    return undefined;
+  }
+  const [, specIssue, owner, slug, fragment] = match;
+  const parsed = parseBlockFragment(fragment ?? "");
+  if (parsed === undefined || utf8Bytes(parsed.block) > MAX_BLOCK_ID_BYTES) {
+    return undefined;
+  }
+  const key = specIssue ?? owner ?? "";
+  const document = specIssue === undefined ? (slug ?? "") : "spec";
+  if (!referenceTargetFits(`${key}/${document}#${parsed.block}`)) {
+    return undefined;
+  }
+  const reference: DispatchBlockReference = {
+    ...(ISSUE_KEY_ONLY.test(key) ? { issue: key } : { project: key }),
+    document,
+    ...parsed,
+  };
+  return formatBlockReference(reference) === value ? reference : undefined;
+}
+
+/**
+ * The pointers a typed block's `block[]` attribute holds, as markdown writes it: the empty string
+ * for none, else canonical block references (`parseCanonicalBlockReference`) joined by exactly one
+ * space, with none leading or trailing and none repeated. Undefined for any other value, which is
+ * refused, never normalised, so the editor and the server never disagree on one. Go's twin is
+ * `pmdoc.ParseBlockPointerValue`; both are tested against DISPATCH_BLOCK_POINTER_VALUES, whose
+ * JSON copy is `packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json`.
+ */
+export function parseBlockPointerValue(value: string): string[] | undefined {
+  if (value === "") {
+    return [];
+  }
+  const references = value.split(" ");
+  if (new Set(references).size !== references.length) {
+    return undefined;
+  }
+  return references.every((reference) => parseCanonicalBlockReference(reference) !== undefined)
+    ? references
+    : undefined;
+}
+
+const atIdBound = `dispatch://CORE-1/spec#b-${"x".repeat(MAX_BLOCK_ID_BYTES)}`;
+
+/** Every value a `block[]` attribute may hold (`ok`) or not, and why. */
+export const DISPATCH_BLOCK_POINTER_VALUES: readonly { value: string; ok: boolean; why: string }[] =
+  [
+    {
+      value: "dispatch://CORE-1/spec#b-x",
+      ok: true,
+      why: "a block of an issue's primary document",
+    },
+    {
+      value: "dispatch://CORE-1/artifact/notes-md#b-x",
+      ok: true,
+      why: "a block of an issue's document",
+    },
+    {
+      value: "dispatch://CORE/artifact/handbook-md#b-x",
+      ok: true,
+      why: "a block of a project's document",
+    },
+    {
+      value: "dispatch://CORE/artifact/spec#b-x",
+      ok: true,
+      why: "a project's document whose slug is spec",
+    },
+    { value: "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1", ok: true, why: "a Unicode id" },
+    { value: "dispatch://CORE-1/spec#b-x@v2", ok: true, why: "a pinned block" },
+    { value: "dispatch://CORE-1/spec#b-x@v9223372036854775807", ok: true, why: "the largest pin" },
+    {
+      value: "dispatch://CORE-1/spec#b-x dispatch://CORE/artifact/handbook-md#b-y",
+      ok: true,
+      why: "two references separated by one space",
+    },
+    { value: "", ok: true, why: "no pointers" },
+    { value: atIdBound, ok: true, why: "an id of exactly 256 bytes" },
+    {
+      value: "dispatch://CORE-1/artifact/spec#b-x",
+      ok: false,
+      why: "an issue's primary document is written /spec",
+    },
+    { value: "dispatch://CORE-1/spec", ok: false, why: "a document, not a block" },
+    {
+      value: "dispatch://agent/s1/artifact/x#b-y",
+      ok: false,
+      why: "an agent's document has no blocks to point at",
+    },
+    { value: "dispatch://CORE-1/spec#b-d%c3%a9", ok: false, why: "lower-case hex" },
+    { value: "dispatch://CORE-1/spec#b-%41", ok: false, why: "an over-encoded ASCII letter" },
+    { value: "dispatch://CORE-1/spec#b-x%2Dy", ok: false, why: "an over-encoded -" },
+    { value: "dispatch://CORE-1/spec#b-%FF", ok: false, why: "invalid UTF-8" },
+    { value: "dispatch://CORE-1/spec#b-%0A", ok: false, why: "a control character" },
+    { value: "dispatch://CORE-1/spec#x", ok: false, why: "a fragment that is not b-" },
+    { value: "dispatch://CORE-1/spec#c-x", ok: false, why: "a fragment that is not b-" },
+    { value: "dispatch://CORE-1/spec#b-", ok: false, why: "an empty id" },
+    { value: `${atIdBound}x`, ok: false, why: "an id over 256 bytes" },
+    { value: "dispatch://CORE-1/artifact/notes-md@v2#b-x", ok: false, why: "a versioned document" },
+    { value: "dispatch://CORE-1#b-x", ok: false, why: "an issue names no document" },
+    {
+      value: "dispatch://CORE-1/spec#b-x@v9223372036854775808",
+      ok: false,
+      why: "a pin past the largest",
+    },
+    { value: "dispatch://CORE-1/spec#b-x@v01", ok: false, why: "a pin with a leading zero" },
+    { value: "dispatch://CORE-1/spec#b-x@v0", ok: false, why: "a pin of zero" },
+    {
+      value: "https://dispatch.example/issues/CORE-1/spec#b-x",
+      ok: false,
+      why: "a dashboard URL of a block",
+    },
+    { value: "dispatch://CORE-1/spec#b-x.", ok: false, why: "trailing punctuation" },
+    { value: "dispatch://CORE-1/spec#b-x)", ok: false, why: "a trailing parenthesis" },
+    {
+      value: "dispatch://CORE-1/spec#b-x,dispatch://CORE-1/spec#b-y",
+      ok: false,
+      why: "references joined by a comma",
+    },
+    {
+      value: "dispatch://CORE-1/spec#b-x dispatch://CORE-1/spec#b-x",
+      ok: false,
+      why: "a repeated reference",
+    },
+    {
+      value: "dispatch://CORE-1/spec#b-x  dispatch://CORE-1/spec#b-y",
+      ok: false,
+      why: "a doubled space",
+    },
+    { value: " dispatch://CORE-1/spec#b-x", ok: false, why: "a leading space" },
+    { value: "dispatch://CORE-1/spec#b-x ", ok: false, why: "a trailing space" },
+    {
+      value: "dispatch://CORE-1/spec#b-x\tdispatch://CORE-1/spec#b-y",
+      ok: false,
+      why: "a tab between references",
+    },
+    {
+      value: "dispatch://CORE-1/spec#b-x\uFEFFdispatch://CORE-1/spec#b-y",
+      ok: false,
+      why: "U+FEFF between references",
+    },
+  ];
