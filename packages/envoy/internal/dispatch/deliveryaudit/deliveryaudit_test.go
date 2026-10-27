@@ -34,8 +34,9 @@ func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 // commentColumns is comments.sql's output contract, in order.
 var commentColumns = []string{
 	"comment_id", "event_id", "owner", "created_at", "published_at", "author", "shape", "reopened",
-	"target", "target_kind", "owed_reasons", "addressed", "mention_state", "mention_error",
-	"route_used", "claim_used", "route_source", "mention_envelope_id", "mention_delivery",
+	"target", "owed_reasons", "addressed", "mention_session_id", "mention_envelope_ids",
+	"mention_btw_reply_id", "mention_modes", "mention_state", "mention_error",
+	"route_used", "claim_used", "route_source",
 }
 
 // recorder is the outbox's NATS boundary: it accepts every envelope and records each topic under
@@ -67,7 +68,7 @@ const heardEnvelope = "envelope-heard-1"
 
 // rig is a Dispatch API server on its own database, with a stand-in Envoy listener that knows two
 // live sessions: s-mention, every send to which it refuses, and s-heard, every send to which it
-// accepts under heardEnvelope.
+// accepts under heardEnvelope. s-heard holds the role lead.
 type rig struct {
 	handler   http.Handler
 	database  *store.Store
@@ -86,6 +87,8 @@ func newRig(t *testing.T) *rig {
 			_, _ = w.Write([]byte(mentioned))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s-heard":
 			_, _ = w.Write([]byte(heard))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/lead":
+			_, _ = w.Write([]byte(`{"role":"lead","holder":"s-heard","title":"heard","capabilities":["btw","steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte("[" + mentioned + "," + heard + "]"))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -325,9 +328,9 @@ func expect(t *testing.T, row map[string]string, want map[string]string) {
 	}
 }
 
-// expectAddressedAsRecorded checks that the row's addressed column says whether its target is a
-// destination the outbox recorded on the comment's event, and that those recorded destinations are
-// exactly the topics the outbox sent the event to.
+// expectAddressedAsRecorded checks that the row's addressed column says whether its target's
+// subject is a destination the outbox recorded on the comment's event, and that those recorded
+// destinations are exactly the topics the outbox sent the event to.
 func (r *rig) expectAddressedAsRecorded(t *testing.T, row map[string]string) {
 	t.Helper()
 	var recorded []string
@@ -339,13 +342,19 @@ func (r *rig) expectAddressedAsRecorded(t *testing.T, row map[string]string) {
 	if !slices.Equal(slices.Sorted(slices.Values(recorded)), slices.Sorted(slices.Values(sent))) {
 		t.Errorf("event %s recorded destinations %v, but the outbox sent it to %v", row["event_id"], recorded, sent)
 	}
-	want := fmt.Sprint(row["target"] != "" && slices.Contains(recorded, row["target"]))
+	subject := ""
+	if session, ok := strings.CutPrefix(row["target"], "session:"); ok {
+		subject = contracts.AgentSubject(session)
+	} else if role, ok := strings.CutPrefix(row["target"], "role:"); ok {
+		subject = contracts.RoleTopicPrefix + role
+	}
+	want := fmt.Sprint(subject != "" && slices.Contains(recorded, subject))
 	if row["addressed"] != want {
 		t.Errorf("comment %s target %q: addressed = %q, want %q (destinations %v)", row["comment_id"], row["target"], row["addressed"], want, recorded)
 	}
 }
 
-func agent(session string) string { return contracts.AgentSubject(session) }
+func agent(session string) string { return "session:" + session }
 
 func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testing.T) {
 	r := newRig(t)
@@ -417,12 +426,32 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 		"mentions": []map[string]any{{"target": "session:s-heard"}}, "delivery": "btw",
 	})
 
+	// (i) A mention of a role, which resolves to its holder s-heard, and the listener accepts.
+	roleIssue, _ := createIssue(t, r, "BET", "Lead", "A note for the lead.\n")
+	roleMention := r.comment(t, "/api/v1/issues/"+roleIssue+"/comments", "alice", "", map[string]any{
+		"body": "Lead, take a look.", "mentions": []map[string]any{{"target": "role:lead"}},
+	})
+
+	// (j) A comment that mentions the issue's claimant: one session, owed twice.
+	claimedIssue, _ := createIssue(t, r, "BET", "Claimed", "A claimed issue.\n")
+	claim(t, r, claimedIssue, "s-heard")
+	claimantMention := r.comment(t, "/api/v1/issues/"+claimedIssue+"/comments", "alice", "", map[string]any{
+		"body": "You again.", "mentions": []map[string]any{{"target": "session:s-heard"}},
+	})
+
+	// (b) again: the person retries the refused mention by BTW, which the listener refuses too.
+	r.call(t, http.MethodPost, "/api/v1/comments/"+mention+"/deliveries", "alice", "", map[string]any{"delivery": "btw"}, http.StatusCreated)
+
 	r.publishAll(t)
 
 	// After the publish: a follower who joins the ask now was not following when the reply went
 	// out, and closing the released issue changes nothing about a comment published before.
 	r.call(t, http.MethodPut, "/api/v1/asks/"+ask+"/followers/s-late", "alice", "", nil, http.StatusNoContent)
 	r.call(t, http.MethodPatch, "/api/v1/issues/"+releasedIssue, "alice", "", map[string]any{"status": "done"}, http.StatusOK)
+	// s-heard answers the BTW mention of (h); a side turn posts its answer as a reply.
+	r.call(t, http.MethodPost, "/api/v1/comments/"+heardReply+"/reply", "", "s-heard", map[string]any{
+		"attempt": 1, "body": "Zone b.",
+	}, http.StatusCreated)
 
 	// (g) A comment the outbox has not published.
 	unpublished := r.comment(t, "/api/v1/issues/"+threadIssue+"/comments", "alice", "", map[string]any{"body": "Still waiting."})
@@ -447,10 +476,10 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 		}
 		row := targetRow(t, rows, personReply, agent("s-claimant"))
 		expect(t, row, map[string]string{
-			"owner": threadIssue, "shape": "reply", "reopened": "true", "target_kind": "session",
+			"owner": threadIssue, "shape": "reply", "reopened": "true",
 			"owed_reasons": "claimant", "route_used": "", "claim_used": "session:s-claimant",
 			"route_source": threadClaim, "mention_state": "", "mention_error": "",
-			"mention_envelope_id": "", "mention_delivery": "",
+			"mention_session_id": "", "mention_envelope_ids": "", "mention_btw_reply_id": "", "mention_modes": "",
 		})
 		if row["event_id"] == "" || row["published_at"] == "" {
 			t.Errorf("the reply's row names no published event: %v", row)
@@ -465,12 +494,12 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 		}
 	})
 
-	t.Run("a mention whose delivery failed carries the attempt's state, error and mode", func(t *testing.T) {
+	t.Run("a mention whose attempts failed lists each attempt's mode, with an empty envelope id for each", func(t *testing.T) {
 		row := targetRow(t, rows, mention, agent("s-mention"))
 		expect(t, row, map[string]string{
-			"shape": "conversation", "owed_reasons": "mention", "target_kind": "session",
-			"mention_state": "failed", "mention_delivery": "steer", "mention_envelope_id": "",
-			"claim_used": "", "route_used": "",
+			"shape": "conversation", "owed_reasons": "mention", "mention_session_id": "s-mention",
+			"mention_state": "failed", "mention_modes": "steer,btw", "mention_envelope_ids": ",",
+			"mention_btw_reply_id": "", "claim_used": "", "route_used": "",
 		})
 		if row["mention_error"] == "" {
 			t.Errorf("the failed mention's row carries no error: %v", row)
@@ -478,22 +507,51 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 		r.expectAddressedAsRecorded(t, row)
 	})
 
-	t.Run("a sent mention carries the envelope the listener minted and the attempt's mode", func(t *testing.T) {
+	t.Run("a sent BTW mention carries the envelope the listener minted, the mode and the side turn's reply", func(t *testing.T) {
 		row := targetRow(t, rows, heardReply, agent("s-heard"))
 		expect(t, row, map[string]string{
-			"shape": "ask_thread", "owed_reasons": "mention", "target_kind": "session",
-			"mention_state": "sent", "mention_error": "", "mention_delivery": "btw",
-			"mention_envelope_id": heardEnvelope,
+			"shape": "ask_thread", "owed_reasons": "mention", "mention_session_id": "s-heard",
+			"mention_state": "sent", "mention_error": "", "mention_modes": "btw",
+			"mention_envelope_ids": heardEnvelope,
 		})
 		_, recorded := r.query(t, `
-			select envelope_id, delivery from comment_deliveries
-			where comment_id = $1 and target = 'session:s-heard' order by attempt desc limit 1
+			select envelope_id, delivery, reply_id::text as reply_id from comment_deliveries
+			where comment_id = $1 and target = 'session:s-heard' order by attempt
 		`, heardReply)
-		if len(recorded) != 1 || recorded[0]["envelope_id"] != row["mention_envelope_id"] || recorded[0]["delivery"] != row["mention_delivery"] {
-			t.Errorf("comment_deliveries = %v, want the row's envelope id and mode: %v", recorded, row)
+		if len(recorded) != 1 || recorded[0]["reply_id"] == "" || recorded[0]["reply_id"] != row["mention_btw_reply_id"] {
+			t.Errorf("comment_deliveries = %v, want one attempt whose reply is the row's mention_btw_reply_id: %v", recorded, row)
 		}
 		asker := targetRow(t, rows, heardReply, agent("s-heard-asker"))
-		expect(t, asker, map[string]string{"owed_reasons": "asker;follower", "mention_state": "", "mention_envelope_id": "", "mention_delivery": ""})
+		expect(t, asker, map[string]string{
+			"owed_reasons": "asker;follower", "mention_state": "", "mention_session_id": "",
+			"mention_envelope_ids": "", "mention_btw_reply_id": "", "mention_modes": "",
+		})
+	})
+
+	t.Run("a mention of a role is the role's pair and names the session it resolved to", func(t *testing.T) {
+		got := rowsFor(rows, roleMention)
+		if len(got) != 1 {
+			t.Fatalf("rows of the role mention = %v, want one: the role", got)
+		}
+		row := targetRow(t, rows, roleMention, "role:lead")
+		expect(t, row, map[string]string{
+			"owed_reasons": "mention", "mention_session_id": "s-heard", "mention_state": "sent",
+			"mention_envelope_ids": heardEnvelope, "mention_modes": "steer", "mention_btw_reply_id": "",
+		})
+		r.expectAddressedAsRecorded(t, row)
+	})
+
+	t.Run("a claimant the comment also mentions is one pair owed for both reasons", func(t *testing.T) {
+		got := rowsFor(rows, claimantMention)
+		if len(got) != 1 {
+			t.Fatalf("rows of the comment that mentions its claimant = %v, want one", got)
+		}
+		row := targetRow(t, rows, claimantMention, agent("s-heard"))
+		expect(t, row, map[string]string{
+			"owed_reasons": "claimant;mention", "claim_used": "session:s-heard", "mention_session_id": "s-heard",
+			"mention_state": "sent", "mention_envelope_ids": heardEnvelope, "mention_modes": "steer",
+		})
+		r.expectAddressedAsRecorded(t, row)
 	})
 
 	t.Run("an ask-thread reply is owed to the asker and the followers as they stood when it was published", func(t *testing.T) {
@@ -519,9 +577,9 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 		if len(got) != 1 {
 			t.Fatalf("rows of the routed comment = %v, want one: the route", got)
 		}
-		row := targetRow(t, rows, routed, "notifications.role.reviewer")
+		row := targetRow(t, rows, routed, "role:reviewer")
 		expect(t, row, map[string]string{
-			"target_kind": "role", "owed_reasons": "route", "addressed": "true",
+			"owed_reasons": "route", "addressed": "true",
 			"route_used": "role:reviewer", "claim_used": "session:s-worker",
 			"route_source": fmt.Sprint(r.eventSeq(t, routedIssue, "issue.updated")),
 		})
@@ -534,7 +592,7 @@ func TestCommentsSQLReadsWhomEachPersonsCommentWasOwedAndWhomItReached(t *testin
 			t.Fatalf("rows of the comment on the released issue = %v, want one", got)
 		}
 		expect(t, got[0], map[string]string{
-			"target": "", "target_kind": "", "owed_reasons": "", "addressed": "false",
+			"target": "", "owed_reasons": "", "addressed": "false",
 			"route_used": "", "claim_used": "",
 			"route_source": fmt.Sprintf("%d;claim=%d", r.eventSeq(t, releasedIssue, "issue.created"), r.eventSeq(t, releasedIssue, "issue.released")),
 		})

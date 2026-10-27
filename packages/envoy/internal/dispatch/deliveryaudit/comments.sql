@@ -3,12 +3,13 @@
 -- Read-only: one select, no temporary tables.
 -- README.md holds the column contract and how to run it (psql --csv -v from=... -v to=...).
 --
--- A comment's targets are the union of the ones it was owed and every notifications.agent.* or
--- notifications.role.* subject its comment.created event's published_destinations records. Owed is:
--- the issue's route when it has one, else its claimant when that is a session; for a reply on an ask
--- thread the ask's asker and every session that followed the ask then; and every session a mention
--- resolved to. Route, claim and followers are read as they stood when the outbox published the event
--- (its published_at, or its created_at while it is unpublished).
+-- A target is session:<id> or role:<token>. A comment's targets are the union of the ones it was
+-- owed and every notifications.agent.* or notifications.role.* subject its comment.created event's
+-- published_destinations records. Owed is: the issue's route when it has one, else its claimant
+-- when that is a session; for a reply on an ask thread the ask's asker and every session that
+-- followed the ask then; and every target a mention named (comment_mentions.target, session:<id>
+-- or role:<token>). Route, claim and followers are read as they stood when the outbox published
+-- the event (its published_at, or its created_at while it is unpublished).
 with window_comments as (
     select c.id, c.author, c.anchor, c.reply_to, c.ask_id, c.created_at,
            coalesce(c.issue_key, ar.issue_key) as owner_issue,
@@ -121,38 +122,38 @@ followers as (
     order by comment_id, session_id, at desc, event_id desc
 ),
 owed as (
-    -- The route's subject, as the outbox's publishRoute names it.
-    select s.id as comment_id,
-           case
-               when s.route_value ~ '^role:[a-z0-9-]+$' then 'notifications.role.' || substr(s.route_value, 6)
-               when s.route_value ~ '^session:[A-Za-z0-9_-]+$' then 'notifications.agent.' || substr(s.route_value, 9)
-           end as target,
-           'route' as reason
+    -- The route as Dispatch stores it, when it names a session or a role.
+    select s.id as comment_id, s.route_value as target, 'route' as reason
     from state s
-    where coalesce(s.route_value, '') <> ''
+    where s.route_value ~ '^role:[a-z0-9-]+$' or s.route_value ~ '^session:[A-Za-z0-9_-]+$'
     union all
-    select s.id, 'notifications.agent.' || (s.claim_actor ->> 'id'), 'claimant'
+    select s.id, 'session:' || (s.claim_actor ->> 'id'), 'claimant'
     from state s
     where coalesce(s.route_value, '') = ''
       and s.claim_actor ->> 'kind' = 'session'
       and coalesce(s.claim_actor ->> 'id', '') <> ''
     union all
-    select b.id, 'notifications.agent.' || (a.author ->> 'id'), 'asker'
+    select b.id, 'session:' || (a.author ->> 'id'), 'asker'
     from base b
     join asks a on a.id = b.ask_id
     where a.author ->> 'kind' = 'session' and coalesce(a.author ->> 'id', '') <> ''
     union all
-    select f.comment_id, 'notifications.agent.' || f.session_id, 'follower'
+    select f.comment_id, 'session:' || f.session_id, 'follower'
     from followers f
     where f.joined
     union all
-    select b.id, 'notifications.agent.' || m.resolved_session_id, 'mention'
+    -- Every mention, resolved or not: its target is already session:<id> or role:<token>.
+    select b.id, m.target, 'mention'
     from base b
     join comment_mentions m on m.comment_id = b.id
-    where coalesce(m.resolved_session_id, '') <> ''
+    where m.target ~ '^(session|role):.+$'
 ),
 addressed as (
-    select distinct b.id as comment_id, d.subject as target
+    select distinct b.id as comment_id,
+           case
+               when d.subject like 'notifications.agent.%' then 'session:' || substr(d.subject, 21)
+               else 'role:' || substr(d.subject, 20)
+           end as target
     from base b
     cross join lateral unnest(b.destinations) as d(subject)
     where d.subject like 'notifications.agent.%' or d.subject like 'notifications.role.%'
@@ -160,7 +161,6 @@ addressed as (
 targets as (
     select o.comment_id, o.target, string_agg(distinct o.reason, ';' order by o.reason) as owed_reasons
     from owed o
-    where o.target is not null
     group by o.comment_id, o.target
     union all
     select a.comment_id, a.target, 'addressed-only'
@@ -183,15 +183,18 @@ select s.id::text as comment_id,
        end as shape,
        case when s.reopened then 'true' else 'false' end as reopened,
        coalesce(t.target, '') as target,
-       case
-           when t.target like 'notifications.agent.%' then 'session'
-           when t.target like 'notifications.role.%' then 'role'
-           else ''
-       end as target_kind,
        coalesce(t.owed_reasons, '') as owed_reasons,
-       case when t.target = any(s.destinations) then 'true' else 'false' end as addressed,
-       coalesce(delivery.state, '') as mention_state,
-       coalesce(delivery.error, '') as mention_error,
+       case
+           when t.target like 'session:%' and 'notifications.agent.' || substr(t.target, 9) = any(s.destinations) then 'true'
+           when t.target like 'role:%' and 'notifications.role.' || substr(t.target, 6) = any(s.destinations) then 'true'
+           else 'false'
+       end as addressed,
+       coalesce(m.resolved_session_id, '') as mention_session_id,
+       coalesce(attempts.envelope_ids, '') as mention_envelope_ids,
+       coalesce(attempts.btw_reply_id, '') as mention_btw_reply_id,
+       coalesce(attempts.modes, '') as mention_modes,
+       coalesce(attempts.state, '') as mention_state,
+       coalesce(attempts.error, '') as mention_error,
        coalesce(s.route_value, '') as route_used,
        case
            when s.claim_actor ->> 'kind' is not null
@@ -202,24 +205,21 @@ select s.id::text as comment_id,
            when not s.has_issue then ''
            when s.route_from = s.claim_from then s.route_from
            else s.route_from || ';claim=' || s.claim_from
-       end as route_source,
-       coalesce(delivery.envelope_id, '') as mention_envelope_id,
-       coalesce(delivery.delivery, '') as mention_delivery
+       end as route_source
 from state s
 left join targets t on t.comment_id = s.id
--- The newest delivery attempt of the mention that resolved to this target session.
+-- The mention whose target is this pair's target, and every delivery attempt of it. Envelope ids
+-- and modes are both listed by attempt, one element per attempt, so the nth envelope id (empty
+-- for an attempt the listener minted none for) belongs to the nth mode.
+left join comment_mentions m on m.comment_id = s.id and m.target = t.target
 left join lateral (
-    select cd.state, coalesce(cd.error, cd.resolve_error) as error, cd.envelope_id, cd.delivery
+    select string_agg(coalesce(cd.envelope_id, ''), ',' order by cd.attempt) as envelope_ids,
+           string_agg(cd.delivery, ',' order by cd.attempt) as modes,
+           (array_agg(cd.reply_id::text order by cd.attempt desc)
+               filter (where cd.delivery = 'btw' and cd.reply_id is not null))[1] as btw_reply_id,
+           (array_agg(cd.state order by cd.attempt desc))[1] as state,
+           (array_agg(coalesce(cd.error, cd.resolve_error) order by cd.attempt desc))[1] as error
     from comment_deliveries cd
-    where cd.comment_id = s.id
-      and (
-          cd.session_id = substr(t.target, 21)
-          or cd.target in (
-              select m.target from comment_mentions m
-              where m.comment_id = s.id and m.resolved_session_id = substr(t.target, 21)
-          )
-      )
-    order by cd.attempt desc
-    limit 1
-) delivery on t.target like 'notifications.agent.%'
+    where cd.comment_id = s.id and cd.target = m.target
+) attempts on true
 order by s.created_at, s.id, coalesce(t.target, '') collate "C";
