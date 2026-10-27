@@ -133,14 +133,19 @@ const (
 type Registry struct {
 	// kvMu guards roleKV, which Rewatch moves to a replacement connection. The interest bucket's
 	// handle is the watcher's (kvwatch.Watcher.KV).
-	kvMu                  sync.RWMutex
-	roleKV                bus.KeyValue
-	log                   *slog.Logger
-	now                   func() time.Time
-	openedAt              time.Time
-	restoredRoleRevisions map[string]uint64
-	mu                    sync.RWMutex
-	cache                 map[string]Interest
+	kvMu   sync.RWMutex
+	roleKV bus.KeyValue
+	log    *slog.Logger
+	now    func() time.Time
+	// started is the registry clock's reading when Open returned: this process's own start, the
+	// machine's service start while serviceSince has none to give (serviceStart).
+	started time.Time
+	// serviceSince reads the machine's service start (WithServiceSince); nil when the caller gave
+	// none.
+	serviceSince func() time.Time
+
+	mu    sync.RWMutex
+	cache map[string]Interest
 	// cacheRevisions holds the latest KV revision applied for each cache key,
 	// including delete tombstones. It prevents a delayed local write-through
 	// from replacing a newer watcher update.
@@ -155,9 +160,10 @@ type Registry struct {
 type OpenOption func(*openOpts)
 
 type openOpts struct {
-	replicas int
-	now      func() time.Time
-	log      *slog.Logger
+	replicas     int
+	now          func() time.Time
+	log          *slog.Logger
+	serviceSince func() time.Time
 }
 
 // WithLogger sets the logger the registry and its cache watcher write through. The listener passes
@@ -179,10 +185,21 @@ func WithReplicas(n int) OpenOption {
 }
 
 // WithClock sets the registry's clock: the time every interest and role claim records, the reaper's
-// staleness window, and a restored role claim's grace window, which starts when Open returns. Tests
-// move it to end a window without waiting for it.
+// staleness window, the time a role claim's grace window is measured at, and the process's own
+// start (read when Open returns), which serves as the machine's service start when WithServiceSince
+// gives none. Tests move it to end a window without waiting for it.
 func WithClock(now func() time.Time) OpenOption {
 	return func(o *openOpts) { o.now = now }
+}
+
+// WithServiceSince sets where the registry reads the machine's service start for a role claim's
+// grace (ReleaseExpiredRoleClaim): since a time from which this machine's listener pods have served
+// without a gap. The listener passes its delivery lease's service_since, which every pod of the
+// machine reads from one record, so every pod gives a claim the same grace. since answers the zero
+// time while there is no record to read it from (a standby that has not read the record yet), and
+// without this option it is never set: the registry then takes its own start as the service start.
+func WithServiceSince(since func() time.Time) OpenOption {
+	return func(o *openOpts) { o.serviceSince = since }
 }
 
 func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
@@ -202,18 +219,14 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	restoredRoleRevisions, err := roleRevisions(roleKV, opts.log)
-	if err != nil {
-		return nil, err
-	}
 	r := &Registry{
-		roleKV:                roleKV,
-		log:                   opts.log,
-		cache:                 map[string]Interest{},
-		cacheRevisions:        map[string]uint64{},
-		now:                   opts.now,
-		openedAt:              opts.now(),
-		restoredRoleRevisions: restoredRoleRevisions,
+		roleKV:         roleKV,
+		log:            opts.log,
+		cache:          map[string]Interest{},
+		cacheRevisions: map[string]uint64{},
+		now:            opts.now,
+		started:        opts.now(),
+		serviceSince:   opts.serviceSince,
 	}
 	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache, kvwatch.WithLogger(opts.log))
 	// No eager load: the watcher populates the cache asynchronously. A synchronous load of N
@@ -274,26 +287,17 @@ func (r *Registry) roles() bus.KeyValue {
 	return r.roleKV
 }
 
-// roleRevisions reads the revision of every role claim kv holds, for the grace a restored claim's
-// holder gets to register again. It takes them from one scan over the bucket's existing keys
-// (kvwatch.ScanExistingKeys), the way the interest, session and CI caches read theirs, so readiness
-// costs one pass over the bucket rather than a round trip per stored claim. A claim whose key this
-// build cannot read gets a revision here; it still gets no grace, because ReleaseExpiredRoleClaim,
-// the only reader of these revisions, reads the claim itself first and cannot.
-//
-// A snapshot short of the bucket is missing claims that are in it, and each one it misses is a
-// restored holder that loses its grace and is released a session TTL early, so an incomplete scan
-// fails the caller, and only a complete one logs.
-func roleRevisions(kv bus.KeyValue, log *slog.Logger) (map[string]uint64, error) {
-	revisions := map[string]uint64{}
-	scan, err := kvwatch.ScanExistingKeys(kv, "role revisions", log, func(entry nats.KeyValueEntry) {
-		revisions[entry.Key()] = entry.Revision()
-	})
-	if err != nil {
-		return nil, err
+// serviceStart is the machine's service start a role claim's grace counts from: the time
+// WithServiceSince reads (the delivery lease's service_since, a server timestamp), or this
+// process's own start while that is zero or was never set, which is the service start of a pod
+// that serves alone.
+func (r *Registry) serviceStart() time.Time {
+	if r.serviceSince != nil {
+		if since := r.serviceSince(); !since.IsZero() {
+			return since
+		}
 	}
-	log.Info("restored role claims", slog.Int("restored", len(revisions)), slog.Int("delete_markers", scan.Markers))
-	return revisions, nil
+	return r.started
 }
 
 func (r *Registry) cachedRevision(sessionID string) uint64 {
@@ -656,9 +660,17 @@ func (r *Registry) releaseRoleClaim(sessionID, role string) error {
 }
 
 // ReleaseExpiredRoleClaim drops role only when sessionID remains its holder and
-// a restored claim has exhausted the session registry's TTL. A listener restart
-// therefore gives an existing holder one TTL to register again, while an
-// already-expired holder cannot block a new claimant forever.
+// the claim has no grace left. A claim the bucket held from before the machine's
+// service start (serviceStart) keeps its grace for one session TTL after that
+// start, so a listener restart, or a gap with no pod serving, gives an existing
+// holder one TTL to register again, while an already-expired holder cannot block
+// a new claimant forever. A claim written since the service start gets none.
+// Every pod of a machine reads one service start (WithServiceSince), so every
+// pod answers one claim alike, whenever it started.
+//
+// The claim's age is its KV entry's timestamp, the server's clock, and the
+// window is measured on this process's clock: a skew of seconds between the
+// two, against a session TTL of minutes, moves the window's end by that skew.
 //
 // Its result distinguishes a confirmed deletion from a concurrent removal or
 // replacement, so callers never report that a lost conditional delete released
@@ -674,10 +686,7 @@ func (r *Registry) ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL ti
 	if claim.HolderSessionID != sessionID {
 		return ExpiredRoleClaimSuperseded, nil
 	}
-	r.mu.RLock()
-	restoredRevision, restored := r.restoredRoleRevisions[role]
-	r.mu.RUnlock()
-	if restored && restoredRevision == entry.Revision() && sessionTTL > 0 && r.now().Sub(r.openedAt) < sessionTTL {
+	if since := r.serviceStart(); sessionTTL > 0 && entry.Created().Before(since) && r.now().Sub(since) < sessionTTL {
 		return ExpiredRoleClaimRetained, nil
 	}
 	err = r.roles().Delete(role, nats.LastRevision(entry.Revision()))

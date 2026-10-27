@@ -52,7 +52,7 @@ type KVConfig struct {
 
 // KV is the delivery ledger every pod of one machine shares, the `delivery.` keys of the listener
 // state bucket: one record per (dedupe key, session) pair, under
-// `delivery.<durable>.<first 32 hex of sha256(dedupe key)>.<session token>` (sessionToken).
+// `delivery.<durable>.<first 32 hex of sha256(dedupe key)>.<session token>` (SessionToken).
 type KV struct {
 	kv     bus.KeyValue
 	prefix string
@@ -74,15 +74,17 @@ func NewKV(kv bus.KeyValue, cfg KVConfig) *KV {
 }
 
 // plainSessionID is a session id that is a KV key token as it stands, short enough to keep every
-// ledger key well inside the bound bus.KeyValue holds a key to.
+// key of the listener state bucket that ends in one well inside the bound bus.KeyValue holds a key
+// to.
 var plainSessionID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
-// sessionToken is the session's token in a ledger key: the id itself when plainSessionID holds,
+// SessionToken is the session's token in a key of the listener state bucket (a ledger key here,
+// the session's last-seen record in internal/session): the id itself when plainSessionID holds,
 // so an operator reading the bucket sees whose record it is, else "=" and the first 32 hex of the
 // id's sha256, since an id can hold a character a KV key refuses (a dot splits a token, `:`
 // leaves nats.go's key alphabet) or run past the key bound. A plain id holds no "=", so the two
 // forms never meet.
-func sessionToken(sessionID string) string {
+func SessionToken(sessionID string) string {
 	if plainSessionID.MatchString(sessionID) {
 		return sessionID
 	}
@@ -96,7 +98,7 @@ func digest(text string) string {
 
 // Key returns the ledger key of (dedupeKey, sessionID).
 func (l *KV) Key(dedupeKey, sessionID string) string {
-	return l.prefix + digest(dedupeKey) + "." + sessionToken(sessionID)
+	return l.prefix + digest(dedupeKey) + "." + SessionToken(sessionID)
 }
 
 func (l *KV) value(state string) []byte {

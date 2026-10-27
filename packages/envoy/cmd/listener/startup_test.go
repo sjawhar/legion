@@ -632,8 +632,9 @@ func do(t *testing.T, request *http.Request) (int, string) {
 }
 
 // Two packages the listener calls into log two different ways, and both are load-bearing.
-// internal/store's and internal/kvwatch's lines exist for the SRE to query a restart (the role
-// restore and every cache's warm-up cost), so they go through the listener's own handler and
+// internal/kvwatch's lines, which internal/store's and internal/session's caches log through the
+// logger the listener hands them, exist for the SRE to query a restart (every cache's warm-up
+// cost), so they go through the listener's own handler and
 // arrive as JSON records with this machine's id. internal/bus's lines, and the stdlib log
 // package's, must stay in Go's text format: the deployed CloudWatch metric filters for publish
 // failures, webhook refusals and dropped stream subjects are space-delimited patterns anchored on
@@ -647,40 +648,10 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 	const machineID = "logger-split"
 	const instance = "logger-split-pod"
 	server, uri := testnats.Start(t)
-	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect bus: %v", err)
-	}
-	registry, err := store.Open(client.Conn, store.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("open the registry: %v", err)
-	}
-	if _, err := registry.SetRole("ses_"+machineID, machineID, "role-"+machineID, false); err != nil {
-		t.Fatalf("claim a role for the restart to restore: %v", err)
-	}
-	registry.StopWatch()
-	client.Close()
-
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID,
 		append([]string{"ENVOY_INSTANCE_ID=" + instance}, githubWebhookEnv...)...)
 	listener.waitHealthy(t)
 
-	restored := listenerJSONRecord(t, listener, "restored role claims")
-	if restored == nil {
-		t.Fatalf("internal/store's role-restore line is not a JSON record in the listener's output:\n%s", listener.Output.String())
-	}
-	if restored["machine_id"] != machineID {
-		t.Fatalf("the role-restore record's machine_id = %v, want %q; a query keyed on it cannot find this restart", restored["machine_id"], machineID)
-	}
-	if restored["instance"] != instance {
-		t.Fatalf("the role-restore record's instance = %v, want %q", restored["instance"], instance)
-	}
-	if _, ok := restored["restored"].(float64); !ok {
-		t.Fatalf("the role-restore record has no numeric restored field: %v", restored)
-	}
-	if _, ok := restored["delete_markers"].(float64); !ok {
-		t.Fatalf("the role-restore record has no numeric delete_markers field: %v", restored)
-	}
 	// Every cache's warm-up line, which names what a restart spent before it served. The CI
 	// cache's readiness is not on the healthy path, so its line can arrive just after.
 	for _, cache := range []string{"interest registry", "session registry", "cistore"} {

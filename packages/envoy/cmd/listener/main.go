@@ -947,11 +947,17 @@ func main() {
 	openWebhooks(webhookGate, hooks, client, ciStore)
 	logger.Info("envoy-listener webhooks open (NATS connected)")
 
-	// The registry and its cache watcher log through the listener's own handler, so its role-restore
-	// count, its warm-up and its reaper cycles are JSON records with this machine's id. Never
-	// slog.SetDefault instead: see store.WithLogger for the CloudWatch filters that breaks.
+	// The registry and its cache watcher log through the listener's own handler, so its warm-up
+	// and its reaper cycles are JSON records with this machine's id. Never slog.SetDefault
+	// instead: see store.WithLogger for the CloudWatch filters that breaks. A role claim's grace
+	// counts from the machine's service start, the delivery lease record's service_since, which
+	// every pod reads alike; a listener with no lease takes its own start (store.WithServiceSince).
+	registryOptions := []store.OpenOption{store.WithReplicas(cfg.NATSReplicas), store.WithLogger(logger.Slog())}
+	if deliveryLease != nil {
+		registryOptions = append(registryOptions, store.WithServiceSince(func() time.Time { return deliveryLease.Status().ServiceSince }))
+	}
 	registry := openStartStore(client, logger, "interest registry", []string{bus.InterestBucket, bus.RoleClaimBucket}, func(conn *nats.Conn) (*store.Registry, error) {
-		return store.Open(conn, store.WithReplicas(cfg.NATSReplicas), store.WithLogger(logger.Slog()))
+		return store.Open(conn, registryOptions...)
 	})
 
 	// Wait for the interest cache to finish its initial scan of existing KV
@@ -969,8 +975,15 @@ func main() {
 	}
 	cacheReadyCancel()
 
+	// A session's last-seen time lives in the listener state bucket beside the lease, so every pod
+	// answers it alike for a lapsed session; a listener with no lease keeps it in process
+	// (session.WithLastSeenBucket).
+	sessionOptions := []session.SessionRegistryOption{session.WithSessionReplicas(cfg.NATSReplicas), session.WithSessionLogger(logger.Slog())}
+	if deliveryLease != nil {
+		sessionOptions = append(sessionOptions, session.WithLastSeenBucket(deliveryLease.kv))
+	}
 	sessions := openStartStore(client, logger, "session registry", []string{bus.SessionBucket}, func(conn *nats.Conn) (*session.SessionRegistry, error) {
-		return session.OpenSessionRegistry(conn, session.WithSessionReplicas(cfg.NATSReplicas), session.WithSessionLogger(logger.Slog()))
+		return session.OpenSessionRegistry(conn, sessionOptions...)
 	})
 
 	// The margin between a client's registration refresh and this lifetime can only be checked

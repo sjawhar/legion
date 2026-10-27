@@ -95,47 +95,43 @@ func TestGet_ValidReturnsEntry(t *testing.T) {
 	}
 }
 
-func TestPingPrunesExpiredLastSeen(t *testing.T) {
-	client := setupNATS(t)
-	registry, err := OpenSessionRegistry(
-		client.Conn,
-		WithSessionReplicas(1),
-		WithSessionTTL(time.Minute),
-	)
-	if err != nil {
-		t.Fatalf("open session registry: %v", err)
-	}
-	registry.mu.Lock()
-	registry.lastSeen = map[string]lastSeenSession{
-		"ses_lapsed": {
-			lastSeen:  time.Now().Add(-2 * time.Minute).UnixMilli(),
-			expiresAt: time.Now().Add(-time.Minute),
+// Without the listener state bucket a lapsed session's last-seen time is the registry's own
+// (seenLocal), reported for one TTL after the expiry of the registration it came from and then
+// dropped.
+func TestPerProcessLastSeenEndsOneTTLAfterTheRegistrationsExpiry(t *testing.T) {
+	now := time.Now()
+	r := &SessionRegistry{
+		ttl:            time.Minute,
+		cache:          map[string]cachedSession{},
+		cacheRevisions: map[string]uint64{},
+		seenLocal: map[string]int64{
+			"ses_recent": now.Add(-90 * time.Second).UnixMilli(),
+			"ses_old":    now.Add(-2*time.Minute - time.Second).UnixMilli(),
 		},
 	}
-	registry.mu.Unlock()
-
-	if err := registry.Ping(); err != nil {
-		t.Fatalf("ping session registry: %v", err)
+	if got, want := r.LastSeen("ses_recent"), now.Add(-90*time.Second).UnixMilli(); got != want {
+		t.Fatalf("last seen of a session that lapsed 30 s ago = %d, want %d", got, want)
 	}
-	registry.mu.RLock()
-	_, retained := registry.lastSeen["ses_lapsed"]
-	registry.mu.RUnlock()
+	if got := r.LastSeen("ses_old"); got != 0 {
+		t.Fatalf("last seen of a session whose registration expired over a TTL ago = %d, want none", got)
+	}
+	r.mu.RLock()
+	_, retained := r.seenLocal["ses_old"]
+	r.mu.RUnlock()
 	if retained {
-		t.Fatal("Ping retained an expired last-seen timestamp")
+		t.Fatal("the registry kept a last-seen time past its retention")
 	}
 }
+
+// A lapsed session's per-process last-seen time does not make it live, and once the session
+// registers again its last-seen time is the live registration's.
 func TestLastSeenRetentionDoesNotRestoreLiveSession(t *testing.T) {
 	now := time.Now()
 	r := &SessionRegistry{
 		ttl:            5 * time.Minute,
 		cache:          map[string]cachedSession{},
 		cacheRevisions: map[string]uint64{},
-		lastSeen: map[string]lastSeenSession{
-			"ses_lapsed": {
-				lastSeen:  now.Add(-time.Minute).UnixMilli(),
-				expiresAt: now.Add(time.Minute),
-			},
-		},
+		seenLocal:      map[string]int64{"ses_lapsed": now.Add(-6 * time.Minute).UnixMilli()},
 	}
 
 	if _, err := r.Get("ses_lapsed"); !errors.Is(err, natsgo.ErrKeyNotFound) {
@@ -158,8 +154,8 @@ func TestLastSeenRetentionDoesNotRestoreLiveSession(t *testing.T) {
 	if _, err := r.Get("ses_lapsed"); err != nil {
 		t.Fatalf("Get(reregistered): %v", err)
 	}
-	if got := r.LastSeen("ses_lapsed"); got != 0 {
-		t.Fatalf("last seen = %d after re-registration, want removed diagnostic", got)
+	if got := r.LastSeen("ses_lapsed"); got != now.UnixMilli() {
+		t.Fatalf("last seen = %d after re-registration, want the live registration's %d", got, now.UnixMilli())
 	}
 }
 
