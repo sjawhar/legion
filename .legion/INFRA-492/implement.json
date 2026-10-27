@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-492",
+  "completed": "2026-10-27T03:58:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2324",
+  "proof": [
+    {
+      "criterion": "Spec acceptance 1 (budget and freshness): over 20 title writes to issues the page does not show, at most 5 GETs under /api/ and no read of an untouched issue; a referenced issue's title and a child's status in the open parent's Children tab each show within 2 s; fails at the commit before",
+      "surface": "Dispatch in Chromium and iPhone (Playwright) against the branch's Go server, fake Envoy and a loopback Postgres 17 + pgvector, production SPA bundle",
+      "command": "cd packages/dispatch && bun run build:web && DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e?sslmode=disable bunx playwright test --config e2e/playwright.config.ts e2e/refetch-budget.e2e.ts; base: same file (sha256 253c18d832c8c5bf7d1282aefa68a5b90420479691754ee7e7841f534f1a7290) in a git archive of 16e4bb0f758e, --project=chromium -g 'budget:'",
+      "observed": "Head: 'GETs under /api/ in the window: 0; reads of an issue no write touched: 0' on chromium and iphone, freshness checks passed, 10 passed (1.5m). Base: fails on the count, 'Received: 1120' against '<= 5', 1020 of them reads of issues no write touched; setup (50 titles shown, barrier, 500 ms quiet) passed.",
+      "headSha": "a863af8397450b1dccf1fc669fce93ce4b328cc9",
+      "negativeControl": "Removing the rule that refreshes a parent's detail on a child's status change made the budget test fail its freshness check: Expected substring \"In progress\", received the old child row; restored before every later run."
+    },
+    {
+      "criterion": "Spec acceptance 2 (sidebar keeps its first responses): the three held first reads render the navigation and none is sent again after an issue event; at the commit before they are cancelled and sent again",
+      "surface": "Dispatch in Chromium and iPhone (Playwright) against the branch's Go server and a loopback Postgres",
+      "command": "same file at head (both projects) and at base 16e4bb0f758e with -g 'sidebar:'",
+      "observed": "Head: 'requests sent: inbox 1, pinned 1, projects 1' on chromium and iphone, navigation rendered from the held responses. Base: 'inbox 2, pinned 2, projects 2' against 1 each.",
+      "headSha": "a863af8397450b1dccf1fc669fce93ce4b328cc9",
+      "negativeControl": "The base build (the cancelling refresh) is the deliberately broken input: the identical test fails there on the counts, not on setup."
+    },
+    {
+      "criterion": "Spec item 2 requirements with no spec check: a pin from another tab updates this tab's pinned list; a reply moves only its participants' Replies count; a project board under 20 writes is fetched at most about once a second",
+      "surface": "Dispatch in Chromium and iPhone (Playwright)",
+      "command": "same file, tests 'pin:', 'replies:', 'project board:'",
+      "observed": "Head: 1 pinned-list read and the row shows within 2 s; 0 /api/v1/me/replies reads after a reply in a thread alice never wrote in; 6 list reads for 20 writes, last title within 2 s.",
+      "headSha": "a863af8397450b1dccf1fc669fce93ce4b328cc9",
+      "negativeControl": "At base 16e4bb0f758e: the pin never shows within 2 s, Replies reads 1 (expected 0), board list reads 20 (expected <= 7)."
+    },
+    {
+      "criterion": "Server: summary routes, event fields (changed incl. closed_at, ancestors, thread_logins, user_state changed), replay header, wider references_changed",
+      "surface": "Dispatch's Go api, docs, refs, events and model packages on a real Postgres 17 (ICU template1, pgvector)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_gotest?sslmode=disable go test ./internal/dispatch/api/ -count=1 -timeout 55m && go test ./internal/dispatch/docs/ ./internal/dispatch/refs/ ./internal/dispatch/events/ ./internal/dispatch/model/ -count=1 -timeout 55m",
+      "observed": "ok api 1165.236s; ok docs 853.018s, refs, events, model ok. New tests TestIssueSummaryCarriesTheIssueAndEveryDocumentsLatestVersion, TestProjectDocumentSummaryResolvesAsTheDocumentReadDoes, TestIssueEventsSayWhatTheWriteChanged, TestUserStateEventSaysWhichFieldsMoved, TestEventStreamSaysWhenItsReplayCoversTheGap, TestReplyEventsNameTheThreadsParticipants ran (not skipped).",
+      "headSha": "a863af8397450b1dccf1fc669fce93ce4b328cc9",
+      "negativeControl": "A cold connect and a since above the head get no X-Dispatch-Event-Replay header; a missing issue's summary answers 404 NOT_FOUND and a missing project document 404 ARTIFACT_NOT_FOUND; a reopen's thread_logins names alice (open-ask thread) and not bob (plain comment thread)."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api: issue_summary.go (new, two summary routes), issue_event_fields.go (new: changed incl. closed_at, ancestors), thread_logins.go (new), routes_table.go, events.go (replay header), state.go (user_state changed), issue_patch.go, issue_create.go, comment_create.go, comment_delivery.go, messages.go, message_delivery.go, asks.go, reviews.go, ask_transitions.go, comment_actions.go, references.go, artifacts.go, and tests",
+    "packages/envoy/internal/dispatch/{events/thread_logins.go (new: ThreadLogins, IssueThreadLogins, AskEventPayload), refs/refs.go, refs/excerpts.go, docs/*.go, model/model.go}",
+    "packages/contracts/src/dispatch-api.ts (+ test): optional payload fields, summary types",
+    "packages/dispatch/web/src/api: event-refresh.ts (new rules), query-refresh.ts (rewritten scheduler), query-client.ts (new DispatchQueryClient), sse.ts, live.ts, client.ts, types.ts; main.tsx; features/refs/* (summary reads); features/issue/IssueHeader.tsx (pin refresh); unit tests",
+    "packages/dispatch/e2e: refetch-budget.e2e.ts (new), live.e2e.ts, deep-links.e2e.ts, inbox.e2e.ts; comment-only edits in artifacts.e2e.ts, phone-landing.e2e.ts",
+    "docs: packages/dispatch/AGENTS.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, packages/envoy/cmd/dispatch/AGENTS.md, packages/envoy/CHANGELOG.md, packages/contracts/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "A reopen cannot be told from another status move by status alone, so issue events now name closed_at in changed on a close or reopen; the client refreshes the whole Inbox and the project badges only then.",
+    "thread_logins on a status move names only logins with a Replies row on the issue's open asks (what myRepliesUnread can move), read through asks_open and user_threads_thread, so no scan of user_threads.",
+    "The scheduler counts a refresh as paid by any fetch that starts after it was asked for; a first-loading query's predicate runs on the landed body; nothing is ever cancelled (DispatchQueryClient covers mutation invalidations too).",
+    "The budget test's barrier renames the open issue until its detail is read again and the header shows the new title, so it works at both commits and under INFRA-258's transport."
+  ],
+  "deviations": [
+    "Plan departure kept: acceptance 1's 50 links are in the spec and in one message; the test opens the Conversation tab (the live spec editor makes no per-reference read).",
+    "['artifact-ref'] is not dead (useProjectArtifact reads ['artifact-ref','P/slug']): narrowed to a data test on the artifact id instead of removed.",
+    "Added beyond the plan: closed_at in issue events' changed; references_changed names targets whose kept edge's excerpt moved and, on a retitle, the parent and blockers; the Inbox refreshes on block.* like the projects badge.",
+    "The contracts zod schemas list the new fields, so agents' parsed issue, message and ask notifications carry changed, ancestors and thread_logins (comment payloads already passed them through).",
+    "inbox.e2e.ts 'a later Inbox response clears a hidden ask's pending refresh' changed its ordering signal to a pinned-list read, because the held Inbox first load is no longer cancelled (spec item 5); its assertions are unchanged.",
+    "webkit and firefox projects of deep-links/delivery-live cannot launch in this pod (no browser binary); chromium and iphone are 169 passed, 0 failed."
+  ],
+  "openQuestions": [
+    "Memory with kubectl top (dispatch://INFRA-492/comment/8d3d6ac7-d9a7-4187-a9bb-348c88cac96e) is not in the approved acceptance and not done; the architect decides (comment 32 says not added).",
+    "Spec acceptance 3 and 4 (production check and the 10-minute request-log rate) run after the merge and the deploy; acceptance 4 also needs dispatch://INFRA-507 applied."
+  ],
+  "discoveredComplexity": [
+    "A document mention is never named in references_changed, so a document's backlink panel refreshes only on focus/staleTime or a whole-cache refresh, as on main."
+  ]
+}
