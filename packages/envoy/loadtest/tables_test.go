@@ -66,3 +66,45 @@ func TestTablesRenderTheSamplersAndOldSummaries(t *testing.T) {
 		}
 	}
 }
+
+func TestTablesRenderEditorsAndRoomsPerStep(t *testing.T) {
+	var old summary
+	if err := json.Unmarshal([]byte(`{"config":{"step":"old"}}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	perUpdate, share, bytesPerS := 1.75, 0.25, 2048.0
+	count, written, total := int64(4), int64(4), 31.2
+	edited := summary{
+		Config: summaryConfig{Step: "editors-1x"},
+		Editors: &editorsSummary{
+			Editors: 3, Docs: 2, SingleEditorDocs: []string{"LGA-0002"}, TargetPerS: 6, Sent: 1000, SentPerS: 5.6, Acknowledged: 990, Refused: 2,
+			NotSent: map[string]int{"disconnected": 4}, Connects: 3, ConnectFailures: map[string]int{"http 503": 2}, Closes: map[string]int{"1006": 1},
+			RelayMs: stat{N: 600, P50: 12, P99: 80}, Markers: 20, MarkersFound: 19, DurableMs: stat{N: 19, P50: 40, P99: 150},
+		},
+		Rooms: &roomsSummary{
+			RoundTrips:  &roundTripsSummary{All: 9000, Room: 1750, RoomPerUpdate: &perUpdate},
+			Connections: &roomConnections{Samples: 1800, Held: stat{N: 1800, P50: 2, P99: 9, Max: 12}, SharedPoolShare: &share},
+			Batches:     &roomBatches{AppendBatches: 400, AppendedUpdates: 1000, AppendRoundTrips: 800, BatchSizes: map[string]uint64{"1": 100, "3-4": 50, "2": 250, "5-8": 0}},
+			Versions:    versionsSummary{BytesPerS: &bytesPerS, Written: &written, InsertCount: &count, InsertTotalMs: &total, InsertMs: stat{N: 4, P50: 6.5, P99: 12}},
+		},
+	}
+	restOnly := summary{
+		Config: summaryConfig{Step: "rest-only"},
+		Rooms:  &roomsSummary{RoundTripsNote: "stack.json names no proxy_stats port", ConnectionsNote: "the room sampler runs only in a step with editors", BatchesNote: notServed},
+	}
+	md := renderTables([]stepData{{name: "old", sum: old}, {name: "editors-1x", sum: edited}, {name: "rest-only", sum: restOnly}})
+	for _, c := range []struct{ title, want string }{
+		{"Editors", "| old | - | - | - | - | - | - | - | - |\n"},
+		{"Editors", "| editors-1x | 3 on 2 (1) | 6.0 / 5.6 | 1,000 / 990 / 2 | 4 (disconnected 4) | 12 / 80 | 40 / 150 (19 / 20) | 3 / 2 (http 503 2) | 1006: 1 |\n"},
+		{"Editors", "| rest-only | - | - | - | - | - | - | - | - |\n"},
+		{"Editors", "Documents with one editor, which have no relay latency: editors-1x: LGA-0002."},
+		{"Document rooms", "| old | - | - | - | - | - | - | - | - | - |\n"},
+		{"Document rooms", "| editors-1x | 1,750 / 9,000 | 1.75 | 2 / 9 / 12 | 25% | 400 / 1,000 / 800 | 1: 100, 2: 250, 3-4: 50 | 2.0 | 4 | 6.5 / 12.0 (4, 31) |\n"},
+		{"Document rooms", "| rest-only | - | - | - | - | not served by this build | not served by this build | - | - | - |\n"},
+		{"Document rooms", "rest-only: round trips not measured: stack.json names no proxy_stats port."},
+	} {
+		if text := section(md, c.title); !strings.Contains(text, c.want) {
+			t.Errorf("section %q lacks %q:\n%s", c.title, c.want, text)
+		}
+	}
+}

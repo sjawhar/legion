@@ -53,6 +53,7 @@ type runConfig struct {
 	// boxBusyBefore is the box's busy fraction read before Dispatch started (run-step.sh reads it
 	// with `loadgen box-busy` before its reset); negative means collectMeta reads it itself.
 	boxBusyBefore float64
+	editors       editorConfig
 	args          []string
 }
 
@@ -78,6 +79,9 @@ func runLoad(args []string) error {
 	buildCommit := fs.String("build-commit", "", "commit Dispatch was built from, for meta.json")
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
 	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
+	editors := fs.Int("editors", 0, "browser editors on document websockets (0: none)")
+	editorRate := fs.Float64("editor-rate", 2, "updates per second per editor")
+	editorDocs := fs.Int("editor-docs", 10, "documents the editors share: the first N seeded specs in key order")
 	_ = fs.Parse(args)
 
 	// Every input is validated before the first connection.
@@ -114,6 +118,12 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-sse must be 0 or more")
 	case *boxBusyBefore > 1 || !finite(*boxBusyBefore):
 		return fmt.Errorf("-box-busy-before must be a fraction between 0 and 1")
+	case *editors < 0:
+		return fmt.Errorf("-editors must be 0 or more")
+	case *editorRate <= 0 || !finite(*editorRate):
+		return fmt.Errorf("-editor-rate must be more than 0")
+	case *editorDocs < 1:
+		return fmt.Errorf("-editor-docs must be at least 1")
 	}
 	if *out == "" {
 		return fmt.Errorf("-out is required")
@@ -133,6 +143,9 @@ func runLoad(args []string) error {
 			return fmt.Errorf("seed %s: issue %s has no quotes for anchored comments", *seedPath, is.Key)
 		}
 	}
+	if *editors > 0 && *editorDocs > len(sf.Issues) {
+		return fmt.Errorf("-editor-docs %d is more than the seed's %d specs", *editorDocs, len(sf.Issues))
+	}
 	if *sse < 0 {
 		*sse = max(1, int(math.Round(*requests/30)))
 	}
@@ -147,7 +160,10 @@ func runLoad(args []string) error {
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
 		human: *human, sse: *sse, rngSeed: *rngSeed, natsConns: *natsConns,
-		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: args,
+		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore,
+		// Fewer editors than documents edit only as many documents as there are editors.
+		editors: editorConfig{editors: *editors, rate: *editorRate, docs: min(*editorDocs, max(*editors, 1))},
+		args:    args,
 	}, sf)
 }
 
@@ -201,6 +217,11 @@ type summaryConfig struct {
 	GraceS       float64  `json:"grace_s"`
 	RNGSeed      uint64   `json:"rng_seed"`
 	NATSConns    int      `json:"nats_conns"`
+	// Editors, EditorRate and EditorDocs are the editors workload's flags; EditorDocs is the
+	// documents it edited, at most Editors.
+	Editors    int     `json:"editors"`
+	EditorRate float64 `json:"editor_rate"`
+	EditorDocs int     `json:"editor_docs"`
 }
 
 type sessionsSummary struct {
@@ -222,6 +243,10 @@ type summary struct {
 	// SSE is nil when read from a summary.json older than the SSE frame timing.
 	SSE      *sseSummary `json:"sse"`
 	SSEBytes int64       `json:"sse_bytes"`
+	// Editors is nil in a step without editors, and in a summary.json older than them; Rooms is
+	// nil in a summary.json older than it.
+	Editors *editorsSummary `json:"editors"`
+	Rooms   *roomsSummary   `json:"rooms"`
 	// StackExits are the stack processes that exited during the step; such a step fails and its
 	// row does not measure the load.
 	StackExits []stackExit `json:"stack_exits,omitempty"`
@@ -263,8 +288,9 @@ func execute(cfg runConfig, sf seedFile) error {
 	}
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
-	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d rng-seed=%d",
-		cfg.name, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.sse, cfg.rngSeed)
+	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d rng-seed=%d editors=%d editor-rate=%g editor-docs=%d",
+		cfg.name, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.sse, cfg.rngSeed,
+		cfg.editors.editors, cfg.editors.rate, cfg.editors.docs)
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
@@ -560,6 +586,13 @@ func execute(cfg runConfig, sf seedFile) error {
 		}
 	}()
 
+	// Browser editors on document websockets (editors.go), from the step's start to the window's
+	// end, each on its own deterministic stream.
+	var ed *editorWorkload
+	if cfg.editors.editors > 0 {
+		ed = startEditors(ctx, cfg, sf, start, winStart, winEnd, lg)
+	}
+
 	// Sampler, lock probe (20 ms), ungranted-lock sampler (1 s), transaction-id probe and profiles.
 	// The two lock samplers run from 20 s into the window to its end.
 	smp := newSampler(cfg.ep)
@@ -601,8 +634,38 @@ func execute(cfg runConfig, sf seedFile) error {
 		fetchTo(cfg.ep.pprof+"/debug/pprof/heap?debug=1", filepath.Join(cfg.out, "heap.txt"), 60*time.Second, lg)
 	}()
 
+	// The rooms' counters at the window's start and end (rooms.go), and, in a step with editors,
+	// the 100 ms sampler of the connections rooms hold, from the window's start to its end.
+	var winStartReading, winEndReading windowReading
+	winDone := make(chan struct{})
+	go func() {
+		defer close(winDone)
+		if !sleepUntil(ctx, winStart) {
+			return
+		}
+		winStartReading = readWindow(ctx, cfg.ep)
+		if !sleepUntil(ctx, winEnd) {
+			return
+		}
+		winEndReading = readWindow(ctx, cfg.ep)
+	}()
+	var rs *roomSampler
+	rsDone := make(chan struct{})
+	if ed != nil {
+		rs = &roomSampler{}
+		go func() {
+			defer close(rsDone)
+			rs.loop(ctx, cfg.ep.pg, winStart, winEnd, lg)
+		}()
+	} else {
+		close(rsDone)
+	}
+
 	<-genDone
 	<-reqDone
+	if ed != nil {
+		ed.waitSchedules()
+	}
 	lg.Printf("generators done at %s; grace %s", time.Since(start).Round(time.Second), cfg.grace)
 	time.Sleep(cfg.grace)
 	smp.checkAlive(time.Now())
@@ -610,7 +673,12 @@ func execute(cfg runConfig, sf seedFile) error {
 	<-lpDone
 	<-lsDone
 	<-xidDone
+	<-winDone
+	<-rsDone
 	cancel()
+	if ed != nil {
+		ed.wait()
+	}
 	for _, nc := range conns {
 		nc.Close()
 	}
@@ -661,6 +729,7 @@ func execute(cfg runConfig, sf seedFile) error {
 			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, SSE: cfg.sse,
 			EventMix: cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
+			Editors: cfg.editors.editors, EditorRate: cfg.editors.rate, EditorDocs: cfg.editors.docs,
 		},
 		Events:   joinDelivery(ws, commits, rc, watcherCount, durS),
 		Requests: summarizeRequests(rq, int(reqDropped.Load()), cfg.requests, durS),
@@ -677,6 +746,12 @@ func execute(cfg runConfig, sf seedFile) error {
 		sum.Events.CommitsError = commitsErr.Error()
 		lg.Printf("commits: %v", commitsErr)
 	}
+	editorsSent := 0
+	if ed != nil {
+		sum.Editors = ed.summary(durS)
+		editorsSent = sum.Editors.Sent
+	}
+	sum.Rooms = summarizeRooms(winStartReading, winEndReading, rs, editorsSent)
 	ss := smp.all()
 	writeJSONFile(filepath.Join(cfg.out, "samples.json"), ss, lg)
 	sum.Resources = summarizeResources(ss, sum.Events.Committed+sum.Requests.Sent, durS)
@@ -687,9 +762,9 @@ func execute(cfg runConfig, sf seedFile) error {
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, lg)
 	meta.End = time.Now()
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, lg)
-	lg.Printf("step %s done: events offered %d committed %d, receipts %d of %d, requests sent %d (%.1f/s of %g)",
+	lg.Printf("step %s done: events offered %d committed %d, receipts %d of %d, requests sent %d (%.1f/s of %g), editor updates sent %d",
 		cfg.name, sum.Events.Offered, sum.Events.Committed, sum.Events.IssueTopicReceipts, sum.Events.ExpectedIssueTopicReceipts,
-		sum.Requests.Sent, sum.Requests.SentPerS, cfg.requests)
+		sum.Requests.Sent, sum.Requests.SentPerS, cfg.requests, editorsSent)
 	if err := stackExitsError(sum.StackExits); err != nil {
 		lg.Print(err)
 		return err

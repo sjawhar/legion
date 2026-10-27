@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -370,6 +371,119 @@ func renderTables(steps []stepData) string {
 		emptyRow(s.label(), 2)
 	}
 
+	w("\n## Editors\n")
+	w("Browser editors on document websockets. Updates, latencies and markers count the updates scheduled in the window; connects, connect failures and closes count the whole step. Relay: one editor's send to another editor's receipt of that update on the same document. Durable: send to the marker's row in doc_updates, ±10 ms.\n")
+	editorCells := []string{"step", "editors on documents (with one editor)", "updates/s target / sent", "updates sent / acknowledged / refused",
+		"updates not sent", "relay ms p50 / p99", "durable ms p50 / p99 (found / markers)", "connects / connect failures", "closes by code"}
+	header(editorCells...)
+	var single, editorNotes []string
+	for _, s := range steps {
+		e := s.sum.Editors
+		if e == nil {
+			emptyRow(s.label(), len(editorCells))
+			continue
+		}
+		if len(e.SingleEditorDocs) > 0 {
+			single = append(single, fmt.Sprintf("%s: %s", s.label(), strings.Join(e.SingleEditorDocs, ", ")))
+		}
+		// counted is a count map as "<total> (<key> <n>, ...)", most frequent first, or "0".
+		counted := func(m map[string]int) string {
+			total := 0
+			var parts []string
+			for _, kv := range byCount(m) {
+				total += kv.v
+				parts = append(parts, fmt.Sprintf("%s %s", mdCell(kv.k), num(float64(kv.v), 0)))
+			}
+			if total == 0 {
+				return "0"
+			}
+			return num(float64(total), 0) + " (" + strings.Join(parts, ", ") + ")"
+		}
+		durable := "-"
+		if e.DurableNote == "" {
+			durable = fmt.Sprintf("%s (%s / %s)", pair(e.DurableMs, p50, p99, 0), num(float64(e.MarkersFound), 0), num(float64(e.Markers), 0))
+		} else {
+			editorNotes = append(editorNotes, fmt.Sprintf("%s: durable latency %s", s.label(), e.DurableNote))
+		}
+		var closes []string
+		for _, kv := range byCount(e.Closes) {
+			closes = append(closes, fmt.Sprintf("%s: %s", mdCell(kv.k), num(float64(kv.v), 0)))
+		}
+		closeText := "0"
+		if len(closes) > 0 {
+			closeText = strings.Join(closes, "; ")
+		}
+		row(s.label(), fmt.Sprintf("%s on %s (%s)", num(float64(e.Editors), 0), num(float64(e.Docs), 0), num(float64(len(e.SingleEditorDocs)), 0)),
+			num(e.TargetPerS, 1)+" / "+num(e.SentPerS, 1),
+			fmt.Sprintf("%s / %s / %s", num(float64(e.Sent), 0), num(float64(e.Acknowledged), 0), num(float64(e.Refused), 0)),
+			counted(e.NotSent), pair(e.RelayMs, p50, p99, 0), durable,
+			num(float64(e.Connects), 0)+" / "+counted(e.ConnectFailures), closeText)
+	}
+	if len(single) > 0 {
+		w("\nDocuments with one editor, which have no relay latency: %s.", strings.Join(single, "; "))
+	}
+	for _, n := range editorNotes {
+		w("\n%s.", strings.TrimSuffix(n, "."))
+	}
+
+	w("\n## Document rooms\n")
+	w("Round trips: the latency proxy's count of Dispatch's round trips (each Sync and simple Query) from the window's start to its end; room work names a room table or the document's advisory lock. Connections held by rooms: backends holding or waiting for a document advisory lock, or running a statement on doc_updates, every 100 ms in a step with editors. Batches: dispatch_rooms on /debug/vars. Versions: artifact_versions' growth, and the proxy's timing of its inserts.\n")
+	roomCells := []string{"step", "round trips room / all", "room round trips per update", "connections held by rooms p50 / p99 / max",
+		"shared-pool share", "append batches / updates / round trips", "batch sizes (updates: batches)", "artifact_versions KiB/s",
+		"versions written", "version insert ms p50 / p99 (count, total ms)"}
+	header(roomCells...)
+	var roomNotes []string
+	for _, s := range steps {
+		r := s.sum.Rooms
+		if r == nil {
+			emptyRow(s.label(), len(roomCells))
+			continue
+		}
+		trips, perUpdate := "-", "-"
+		if rt := r.RoundTrips; rt != nil {
+			trips = num(float64(rt.Room), 0) + " / " + num(float64(rt.All), 0)
+			if rt.RoomPerUpdate != nil {
+				perUpdate = num(*rt.RoomPerUpdate, 2)
+			}
+			if rt.UnparsedConnections > 0 {
+				roomNotes = append(roomNotes, fmt.Sprintf("%s: the proxy could not follow %s connections, whose round trips are not counted", s.label(), num(float64(rt.UnparsedConnections), 0)))
+			}
+		} else {
+			roomNotes = append(roomNotes, fmt.Sprintf("%s: round trips not measured: %s", s.label(), r.RoundTripsNote))
+		}
+		held, share := "-", "-"
+		if c := r.Connections; c != nil && c.Held.N > 0 {
+			held = fmt.Sprintf("%s / %s / %s", num(c.Held.P50, 0), num(c.Held.P99, 0), num(c.Held.Max, 0))
+			if c.SharedPoolShare != nil {
+				share = num(100**c.SharedPoolShare, 0) + "%"
+			}
+		}
+		batches, sizes := r.BatchesNote, r.BatchesNote
+		if b := r.Batches; b != nil {
+			batches = fmt.Sprintf("%s / %s / %s", num(float64(b.AppendBatches), 0), num(float64(b.AppendedUpdates), 0), num(float64(b.AppendRoundTrips), 0))
+			sizes = batchSizesText(b.BatchSizes)
+		}
+		v := r.Versions
+		kibPerS, written := "-", "-"
+		if v.BytesPerS != nil {
+			kibPerS = num(*v.BytesPerS/1024, 1)
+		}
+		if v.Written != nil {
+			written = num(float64(*v.Written), 0)
+		}
+		if v.Note != "" {
+			roomNotes = append(roomNotes, fmt.Sprintf("%s: artifact_versions not read: %s", s.label(), v.Note))
+		}
+		inserts := "-"
+		if v.InsertCount != nil && v.InsertTotalMs != nil {
+			inserts = fmt.Sprintf("%s (%s, %s)", pair(v.InsertMs, p50, p99, 1), num(float64(*v.InsertCount), 0), num(*v.InsertTotalMs, 0))
+		}
+		row(s.label(), trips, perUpdate, held, share, mdCell(batches), mdCell(sizes), kibPerS, written, inserts)
+	}
+	for _, n := range roomNotes {
+		w("\n%s.", strings.TrimSuffix(n, "."))
+	}
+
 	w("\n## Requests by route\n")
 	w("p50 / p99 ms (failures, non-2xx or transport, / count).\n")
 	cells = []string{"route"}
@@ -535,4 +649,24 @@ func mdCell(s string) string {
 		return "(none)"
 	}
 	return strings.ReplaceAll(s, "|", `\|`)
+}
+
+// batchSizesText is dispatch_rooms' batch-size histogram as "<updates>: <batches>" for each
+// bucket that holds a batch, smallest bucket first; "0" when none does.
+func batchSizesText(sizes map[string]uint64) string {
+	lower := func(label string) int {
+		n, _ := strconv.Atoi(strings.SplitN(label, "-", 2)[0])
+		return n
+	}
+	labels := slices.SortedFunc(maps.Keys(sizes), func(a, b string) int { return lower(a) - lower(b) })
+	var parts []string
+	for _, label := range labels {
+		if n := sizes[label]; n > 0 {
+			parts = append(parts, label+": "+num(float64(n), 0))
+		}
+	}
+	if len(parts) == 0 {
+		return "0"
+	}
+	return strings.Join(parts, ", ")
 }
