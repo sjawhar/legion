@@ -89,9 +89,11 @@ function isLive(sessionID: string): boolean {
   return state.liveSessions.has(sessionID) && state.records.get(sessionID) !== "absent";
 }
 
-Bun.serve({
+// FAKE_ENVOY_PORT, or with it unset port 0, so the OS chooses; the line at the end reports the
+// port bound, which e2e/harness-start.ts reads.
+const server = Bun.serve({
   hostname: "127.0.0.1",
-  port: harnessPorts.fakeEnvoy.port,
+  port: harnessPorts().fakeEnvoy.port,
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/v1/sessions") {
@@ -261,4 +263,4 @@ Bun.serve({
   },
 });
 
-console.log(`fake envoy listener on 127.0.0.1:${harnessPorts.fakeEnvoy.port}`);
+console.log(`fake envoy listener on 127.0.0.1:${server.port}`);

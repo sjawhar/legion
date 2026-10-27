@@ -964,8 +964,8 @@ func TestCensusSubcommandExitsOneWhenAPendingMigrationsCensusCountsRows(t *testi
 
 func TestWriteRebuildRefsReport(t *testing.T) {
 	var output bytes.Buffer
-	writeRebuildRefsReport(&output, refs.Rebuild{Documents: 4, Asks: 3, Comments: 2, Messages: 1, Orphans: 5, Edges: 9})
-	const want = "rebuild-refs: documents=4 asks=3 comments=2 messages=1 orphans=5 edges=9\n"
+	writeRebuildRefsReport(&output, refs.Rebuild{Documents: 4, Asks: 3, Comments: 2, Messages: 1, Orphans: 5, Edges: 9, BlocksOwed: 4})
+	const want = "rebuild-refs: documents=4 asks=3 comments=2 messages=1 orphans=5 edges=9 blocks_owed=4\n"
 	if got := output.String(); got != want {
 		t.Fatalf("rebuild-refs output = %q, want %q", got, want)
 	}
@@ -1067,6 +1067,41 @@ func TestResolveBootConfigDevSignInChecksTheAddressItBinds(t *testing.T) {
 	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": "", "DISPATCH_PORT": "70000"})); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
 		t.Errorf("DISPATCH_PORT=70000: err = %v, want a refusal naming DISPATCH_PORT", err)
 	}
+}
+
+// With DISPATCH_LISTEN_FD the fence checks the inherited socket's own address, which is what
+// serves: a socket on every interface is refused, naming the variable, though DISPATCH_LISTEN_HOST
+// names that socket's address correctly, and a loopback one is accepted.
+func TestResolveBootConfigDevSignInChecksTheListenSocket(t *testing.T) {
+	wildcard, address := listeningFD(t, "tcp4", "0.0.0.0:0")
+	_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_FD": wildcard, "DISPATCH_LISTEN_HOST": "0.0.0.0"}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_DEV_SIGNIN=1 is for a loopback server only") ||
+		!strings.Contains(err.Error(), "DISPATCH_LISTEN_FD="+wildcard) || !strings.Contains(err.Error(), address.String()) {
+		t.Errorf("dev sign-in on a socket on %s: err = %v, want the fence's refusal naming DISPATCH_LISTEN_FD and the address", address, err)
+	}
+	loopback, address := listeningFD(t, "tcp4", "127.0.0.1:0")
+	boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_FD": loopback}))
+	if err != nil || !boot.DevSignIn || boot.ListenAddr != address.String() {
+		t.Errorf("dev sign-in on a socket on %s: ListenAddr = %q, DevSignIn %t, %v; want accepted", address, boot.ListenAddr, boot.DevSignIn, err)
+	}
+}
+
+// listeningFD listens on address and returns the number of a descriptor of the listening socket's
+// own, as DISPATCH_LISTEN_FD names an inherited one, with the socket's address. Both close when the
+// test ends; resolveBootConfig only inspects the descriptor.
+func listeningFD(t *testing.T, network, address string) (string, *net.TCPAddr) {
+	t.Helper()
+	listener, err := net.Listen(network, address)
+	if err != nil {
+		t.Fatalf("listen on %s: %v", address, err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	file, err := listener.(*net.TCPListener).File()
+	if err != nil {
+		t.Fatalf("take the listening socket's descriptor: %v", err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return strconv.Itoa(int(file.Fd())), listener.Addr().(*net.TCPAddr)
 }
 
 func TestResolveBootConfigDevSignInRequiresALoopbackDatabase(t *testing.T) {
