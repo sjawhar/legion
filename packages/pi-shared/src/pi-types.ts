@@ -67,6 +67,12 @@ export interface SessionContext {
   /** The host's managed one-shot timer: a throw or rejection is contained, cleared on shutdown. */
   readonly setTimeout: (callback: () => void | Promise<void>, delayMs: number) => void;
   /**
+   * The host's `ctx.mode` (`ExtensionMode`): how the process was launched, an RPC host (every
+   * Legion pane), a terminal, or a one-shot `-p` run printing text or JSON. Absent on a host that
+   * predates it.
+   */
+  readonly mode?: "tui" | "rpc" | "json" | "print";
+  /**
    * Oh My Pi 18.3 on: one side turn on the session's model over a snapshot of its conversation,
    * never added to the transcript. The host sends `promptText` as given. A context kept from
    * `session_start` may call it from later callbacks (upstream `docs/extensions.md`, "Ephemeral
