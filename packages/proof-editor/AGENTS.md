@@ -30,7 +30,7 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
 
-Eleven files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Twelve files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
@@ -43,11 +43,12 @@ not reach them:
 | `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (it removes no span, as a creation over another record's mark does not since the three declare `excludes: ''`, or puts back what it removes, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; any other removal of a record mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
 | `src/record-mark-retype.ts` | Retyping a provisional record mark for the margin composer's Comment / Suggest / Ask switch, and the precise span-by-span removal behind the handle's `removeMark`, over text and inline atoms such as an image alike (LEGION-363); it is also biome-checked |
 | `src/record-mark-target.ts` | Which mark a click or a hover in the document names: of the mark spans around the target, the record mark whose range is the smallest, the innermost span's among marks the same size, since which of two overlapping record marks nests inside the other follows the order they were made in (LEGION-458); it is also biome-checked |
-| `src/typed-block-drawing.ts` | The typed-block drawing both parse modes share: `markdownSource`, a file's text without one leading U+FEFF, which micromark drops before it counts the offsets the tree carries; the content-rule fit check, which maps each child to the node its `parseMarkdown.match` accepts (a mark node's children in its place) and calls `NodeType.createAndFill`, since Milkdown drops a node whose content breaks its rule, with all its text, without throwing; `drawDirective`, a directive drawn in place as a paragraph of its opening line, its content formatted (the label paragraph dropped) and a paragraph of its closing fence when the source closes it; and `remarkDecideTypedBlocks`, the transformer whose innermost-first walk keeps a container directive typed only when the caller accepts it and its processed content fits. `remarkUnfitTypedBlocks` (the headless engine's default mode) and `unfitTypedBlocksRemarkPlugin` (the live editor, reading the editor's schema when it parses, registered after the mark plugins) accept every directive `remarkTypedBlocks` let through, so an ask holding a heading is drawn as its lines instead of vanishing (INFRA-565); it is also biome-checked |
-| `src/read-only-directives.ts` | `remarkReadOnlyDirectives`, the headless engine's read-only stand-in for `remarkTypedBlocks`, built on `remarkDecideTypedBlocks`: a container directive the block schema refuses (or any, with no schema) is drawn in place, and the paragraph-line directive refusals are not applied, so a body only shown to a reader formats around a block Dispatch does not know instead of falling back whole to its raw source (INFRA-529). An accepted typed block whose content would break its content rule is drawn the same way; it is also biome-checked |
+| `src/typed-block-drawing.ts` | The typed-block drawing both parse modes share: `markdownSource`, a file's text without one leading U+FEFF, which micromark drops before it counts the offsets the tree carries; the content-rule fit check, which maps each child to the node its `parseMarkdown.match` accepts (a mark node's children in its place) and calls `NodeType.createAndFill`, since Milkdown drops a node whose content breaks its rule, with all its text, without throwing; `drawDirective`, a directive drawn in place as a paragraph of its opening line, its content formatted (the label paragraph dropped) and a paragraph of its closing fence when the source closes it; and `remarkDecideTypedBlocks`, the transformer whose innermost-first walk keeps a container directive typed only when the caller accepts it and its processed content fits. `remarkUnfitTypedBlocks` (the headless engine's default mode) accepts every directive `remarkTypedBlocks` let through, so an ask holding a heading is drawn as its lines instead of vanishing (INFRA-565); it is also biome-checked |
+| `src/read-only-directives.ts` | `remarkReadOnlyDirectives`, the headless engine's read-only stand-in for `remarkTypedBlocks`, built on `remarkDecideTypedBlocks`: a container directive the block schema refuses (or any, with no schema) is drawn in place, and the paragraph-line directive refusals are not applied, so a body only shown to a reader formats around a block Dispatch does not know instead of falling back whole to its raw source (INFRA-529). An accepted typed block whose content would break its content rule is drawn the same way. The live editor uses it too, as `liveTypedBlocksRemarkPlugin` (reading the editor's schema the first time it parses, registered after the mark plugins): a paste or `setMarkdown` (a past version's view) draws a directive the block schema refuses as its literal lines rather than throwing, where a throw in a paste let the browser insert the plain text with its lines joined (INFRA-624); it is also biome-checked |
+| `src/ask-content.ts` | `relaxAskContentCheck`, which replaces the `ask` node's `validContent` so a built ask may hold any non-empty run of the blocks the document service accepts in it (`SERVER_BLOCK_TYPES`, kept equal to pmdoc's `isBlockNodeType`, or a typed block of the block schema). y-prosemirror builds each node through `createChecked` and deletes from the shared document one it refuses, so an ask two collaborators' concurrent edits left off its `paragraph+ bullet_list?` rule (two lists, a paragraph after its list) lost its text in every editor and on the server (INFRA-624). Content matching keeps the rule, so local edits, input rules, pastes and markdown parses still hold to it; it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Eighteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Nineteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -86,15 +87,19 @@ the refusal `visit` throws, so the read-only transform decides with the same rul
 taking `renderBlock` and passing it to `blockSchemaPlugins`, as `src/lib.ts` does, and
 re-exporting `HostBlockRenderer`, with the case in `src/tests/block-schema.test.ts` that a host
 drawing keeps the block's copy attributes (INFRA-526); `src/block-schema.ts`'s
-`remarkTypedBlocks` reading its source through `markdownSource` from `./typed-block-drawing`,
+`remarkTypedBlocks` reading its source through `markdownSource` from `./typed-block-drawing`, and
 `src/lib-headless.ts`'s default branch installing `remarkUnfitTypedBlocks` after
-`remarkTypedBlocks`, and `src/lib.ts` installing `unfitTypedBlocksRemarkPlugin` after the mark
-plugins (INFRA-565); and annotations, casts and assertions that make a file type-check, each of
-which erases before runtime (below).
+`remarkTypedBlocks` (INFRA-565); `src/lib.ts` installing `liveTypedBlocksRemarkPlugin` from
+`./read-only-directives` after the mark plugins in place of `typedBlockRemarkPlugin`, and calling
+`relaxAskContentCheck` from `./ask-content` before it binds the shared document,
+`src/lib-headless.ts` calling it after building its schema, with its `parseMarkdown` and
+`readOnly` comments naming the live editor's step, and `src/lib-remark-directive-plugin.ts`
+dropping `typedBlockRemarkPlugin` (INFRA-624); and annotations, casts and assertions that make a
+file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the eighteen kinds.
+only lines that differ should be the nineteen kinds.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
@@ -191,6 +196,6 @@ against the pinned commit stays readable. `assist` matters as much as the other 
 would reorder the copy's imports. `upstream/` is excluded the same way, for the same reason:
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,
 `src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
-`src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`, `src/read-only-directives.ts`, `src/typed-block-drawing.ts`,
+`src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`, `src/read-only-directives.ts`, `src/typed-block-drawing.ts`, `src/ask-content.ts`,
 `src/tests/harness.ts` — follow the
 repo's conventions and are checked.

@@ -1706,6 +1706,34 @@
 
 ### Fixed
 
+- An ask that two people's concurrent edits leave holding two option lists, or a paragraph after
+  its options, now keeps every word in every editor and in the stored document, stays open, and
+  shows as a malformed decision until its text is fixed (INFRA-624). The browser editor refused to
+  build such an ask, so y-prosemirror deleted it, with all its text, from the shared document
+  every editor and the server read, and settlement then retracted it. The editor now builds an ask
+  holding any non-empty run of the blocks the server accepts in one; its own edits, input rules,
+  pastes and markdown imports still hold an ask to `paragraph+ bullet_list?`.
+
+- Settlement now reads an ask that parses but breaks its content rule, a second bullet list or a
+  paragraph after its list, as malformed (INFRA-624): it marks the block `invalid` with the
+  content rule's reason (`pmdoc.AskContentError`), emits `block.invalid`, and keeps the ask's row
+  open and unchanged, as it already did for an ask holding a heading; an edit that makes the ask
+  conform clears `invalid` and updates the row. It used to index such an ask as valid, with its
+  option lists concatenated and its question's paragraphs joined. This changes how such a
+  document is read: at the time of the change, a census of every live document in all 11 Dispatch
+  projects (5,499 documents, 633 ask blocks) found no ask it newly marks.
+
+- The document editor now draws a pasted container directive it refuses, an unknown typed block
+  such as `:::note` or a typed block with a refused attribute, as its literal lines around its
+  formatted content, and so does a past version's view that holds one (INFRA-624). It threw, so a
+  paste fell back to the browser's own plain-text paste, with the lines joined. The editor also no
+  longer refuses the paragraph-line directive forms: a line opening `::name` (a leaf directive), a
+  `:name{…}` text directive, and a malformed `:::` line such as a Pandoc `::: warning` fence now
+  stay the text they are, which the server escapes when it saves them. Only those inputs read
+  differently: a pasted ask with two option lists or a paragraph after its list is still drawn as
+  its lines, as since INFRA-565, and the headless engine's default mode, which the server's parity
+  fixtures are generated with, still refuses all of them.
+
 - A bare email address, or one written `<a@b.test>`, in Markdown written to a document through the
   API is now stored and shown as a link to its `mailto:` URL, `[a@b.test](mailto:a@b.test)`, as a
   comment and the browser editor show it (INFRA-530). Dispatch linked it to the bare address, which
