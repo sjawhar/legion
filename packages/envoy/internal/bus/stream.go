@@ -272,7 +272,7 @@ type streamReconciliation struct {
 	foreign  []string
 }
 
-// subjectReplacement is a deployed subject a start dropped and every one of its own subjects that
+// subjectReplacement is a deployed subject an ensure dropped and every one of its own subjects that
 // overlapped it.
 type subjectReplacement struct {
 	dropped string

@@ -377,10 +377,12 @@ absent (`store/refresh_token_seal.go`). One process cannot detect another's key,
 refuses the boot, no log line names it and `/healthz` cannot report it: it is a hard precondition
 of a multi-process deployment rather than something the server checks.
 
-**Every migration leaves the release before it able to read and write the schema** (Database
-migrations, below): a rolling update runs the old build and the new build against one database at
-once. A change that cannot be written that way is a stop-the-world migration, deployed with no
-server of the earlier release running, and that is an exception named in the pull request.
+**Every release keeps the build before it working** (Two builds at once, below): a rolling update
+runs the old build and the new build against one database and one NATS at once, and the page and
+the `dispatch` command of either build reach either process. No release is an exception to that,
+and no release stops every server process. The one crossing left is migration `0117` (Database
+migrations, below): a deployment still on a release before it crosses it once with Dispatch
+stopped, before it runs more than one replica, and every release after it rolls.
 
 What the two processes share, and what each keeps to itself:
 
@@ -391,14 +393,22 @@ What the two processes share, and what each keeps to itself:
 - A reader's live SSE stream carries the other process's events. It is re-sourced from Postgres
   through a per-process relay on `listen dispatch_events` (migration `0107_events_notify`), so an
   event committed on either process reaches every open stream with no reconnect.
-- The two delivery durables keep their shape. NATS admits one binder; the second process stands
-  by, asking every two seconds, and takes the durable over within seconds of the holder dying.
+- Each delivery durable delivers to one process at a time: the process that holds that durable's
+  hold (`duty.Hold`, migration `0121_duty_holds`, a row with a 15-second lease on the database's
+  clock, renewed every five seconds). The other processes stand by and try for the hold every two
+  seconds. A process that stops hands back every message it was delivered and did not handle and
+  releases the hold, so another process takes the durable over at once and is redelivered those
+  messages within seconds; a process that dies is replaced within the hold's 15 seconds and one
+  try. A take-over recreates the durable at its ack floor on a fresh deliver subject, which fences
+  the old holder off: a subscription its client sends again after a reconnect gets nothing. A
+  durable bound by a build before holds, which binds by lookup and holds nothing, is left to that
+  build until it lets go (`delivery/intake.go`, `heldDurable`).
 - Six periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
-  recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
-  lands between another's passes — the ordinary case, since each ticker draws its phase at boot
-  and a rolling update starts the second process minutes after the first — finds the period
+  recorded in `duty_passes` (migration `0115`), in a row per lease and period, so a process whose
+  tick lands between another's passes — the ordinary case, since each ticker draws its phase at
+  boot and a rolling update starts the second process minutes after the first — finds the period
   already served and logs the same skip. The settlement resumption, the delivery live hub, the
   event-stream relay, the stale-room evictor and the document rooms' timers stay per-process by
   design, and the embedding queue, the task progress reconciliation and the outbox's own scan
@@ -406,6 +416,7 @@ What the two processes share, and what each keeps to itself:
   each of its steps safe beside another process's, and drops every vector its own embedder did not
   make, so every process takes the same embedder settings (Search, below); `cmd/dispatch/main.go`
   says at the call site which loop is which and why.
+  <!-- INFRA-558 E-a/E-b: this sentence changes when the embedder is coordinated by the code. -->
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
@@ -422,6 +433,95 @@ meets, since the last notification of a burst is one of the refused ones. Either
 reconnects, re-syncs and shows the current text. A reader sees a brief reconnect, never stale
 text they can act on. Cross-process live co-editing of one document — two rooms with text
 streaming between them — is a follow-up issue, out of scope here.
+
+### Two builds at once
+
+A release rolls: while build N serves, build N+1 starts beside it on the same Postgres and NATS,
+and a page or a `dispatch` command of either build can reach a process of either build. So for
+each surface the two builds share, this is what build N+1 may change while build N serves:
+
+- **Request bodies.** A new member is additive and ignorable. A route decodes a body into the
+  members it declares and ignores every other one (`api/server.go`, `decodeJSON`; the JSON upload,
+  `jsonArtifactUpload`), and logs the ignored top-level names at debug with the route. So a member
+  whose loss changes what a request does (a precondition, a guard, a member that makes the request
+  do something else) ships as a new route, never as a new member: build N would ignore it and do
+  the request without it.
+- **Routes.** A route is added freely. Build N answers a route that only build N+1 serves with the
+  JSON `404 NOT_FOUND` `no route for <METHOD> <path>`, and it answers a known path asked with a
+  method it does not serve the same way (Routes, below). The page (`web/src/api/client.ts`) and the
+  `dispatch` command (`packages/envoy-client/src/dispatch-http.ts`) send that request again, with
+  the same body, after 1, 2 and 4 seconds, each wait jittered by a quarter: no handler ran, and the
+  next attempt can reach the other build. After the last attempt they say that the action is not
+  offered yet because a release is in progress. A route is removed only in the release after the
+  one that stops calling it, so no page or command still serving calls a route that is gone.
+- **Query values and opaque tokens** (a cursor, a `kind`, an enum value in a query): reader-first.
+  The release that reads a new value or token shape ships before the release that sends or mints
+  it. A reader that meets a value it does not know answers without it where it can:
+  `GET /api/v1/references?kind=` answers no edges of a kind this build does not emit and lists that
+  kind in `unknown_kinds`.
+- **Socket frames.** A new member is additive: the delivery socket (`/ws/delivery`) ignores a
+  member a frame does not declare (`decodeSocketClientFrame`). A new frame type or view kind
+  degrades on build N, which answers it `INVALID_FRAME`: the page then closes the socket and
+  reconnects with the backoff of a lost socket (`web/src/api/delivery-live.ts`), until it reaches a
+  process that serves the frame.
+- **Response members.** A new member is optional to every reader: a page or command of build N+1
+  works when build N answers without it. A member is removed only once no page or command still
+  serving reads it.
+- **Stored documents.** Reader-first, by the schema manifest
+  (`internal/dispatch/pmdoc/schema/blocks.json`). Every node, mark, typed block, attribute and enum
+  value carries `since`, the schema version from which a build reads it, and `creatable_since`, the
+  version from which a build creates it; both are 1 where the manifest names neither. A new element
+  is readable one release before it is creatable, so no build that serves beside its writer meets
+  it unread. Every write path refuses an element this build reads but may not create yet
+  (`pmdoc`, `refuseUncreatable`), unless the document already holds it, and the editor offers only
+  the elements it may create. An element stays readable while stored documents may hold it: no
+  release removes a readable element from the manifest. A build that still meets an element it
+  does not know answers `409 DOC_NEWER_CONTENT` for that document, and its document socket closes
+  with `4425` (Document errors, below). No route repairs, replaces or rebuilds such a document,
+  since each of those would delete the element; settlement writes no version of it and leaves an
+  approval to carry over to a build that reads it; and the excerpt reconciliation leaves its
+  mentions owed. A renderer change (the markdown a tree renders as) and a reference-grammar change
+  (what a body's references parse as) are reader-first too: a build whose renderer writes an
+  unchanged document differently writes no new version of it, and a rewrite of a body keeps the
+  reference edges to node kinds this build does not know.
+- **NATS.** The settings of the stream `ENVOY_NOTIFICATIONS` and of the delivery durables carry a
+  generation in their metadata (`dispatch.stream-generation`, `dispatch.consumer-generation`). A
+  change to the stream's `MaxAge`, `Duplicates` or subjects, or to a durable's config, takes a new
+  generation (`streamConfigGeneration` in `internal/bus/stream.go`, `consumerConfigGeneration` in
+  `internal/dispatch/delivery/intake.go`, each pinned by a test row). A build that finds a higher
+  generation deployed leaves the stream as it is and recreates a durable with the deployed config,
+  so build N never reverts what build N+1 set. Dispatch keeps the stream's deployed replica count.
+  Every ensure keeps a deployed subject it does not know, unless it overlaps a subject of its own,
+  and each client publishes a topic on the transport the deployed stream's subjects call for
+  (`usesCoreTransport`), so build N publishes a topic under a subject only build N+1 adds to the
+  stream too, with its message id. No subject is retired while a running build publishes to it:
+  retiring one is an operator step (`internal/bus/stream.go`, `streamReconciliation`). Each
+  delivery durable has one intake holder at a time, the process that holds its `duty.Hold` (above).
+- **Settings.** A loop interval may change: a periodic loop records its passes per lease and period
+  (`duty_passes`, the row `<lease>/<period_ns>`; `duty/exclusive.go`), so two builds with different
+  intervals for one loop each run it once per their own period, and two builds at one interval
+  share it as one build does. The embedder and the file store keep the rules their sections give:
+  every process of a deployment runs the same embedder configuration, since each process's coverage
+  pass drops the vectors any other identity made (Search, below); a process without
+  `DISPATCH_FILE_STORE_BUCKET` answers `503 FILE_STORE_UNAVAILABLE` for a file whose bytes are in
+  the bucket alone, and turning the file store off takes `backfill-files --restore` first (Moving
+  uploaded files to the bucket, above).
+  <!-- INFRA-558 E-a/E-b: the embedder and file store rule changes when the code coordinates them. -->
+- **SQL.** Expand-then-contract across two releases (Database migrations, below), unchanged.
+
+The two-build test checks this rule (`cmd/dispatch/twobuild_test.go`, `go test -tags twobuild
+./cmd/dispatch`, CI job `dispatch-two-builds`). `packages/envoy/scripts/build-dispatch-build.sh`
+builds the previous release from its commit, and the test runs it beside this tree on one
+Postgres, cloned at this tree's schema, and one NATS. It drives each build's `dispatch` command
+against the other build's server, reads and edits each build's stored documents and opens their
+document socket on the other build, and passes messages both ways while it checks that the stream
+and consumer settings stay as they are.
+
+Generations and holds protect from the release after the first one that carries them. The build
+before them compares stream and consumer settings with no generation, binds its delivery durable
+by lookup with no hold, and refuses a request member it does not declare. So the release that
+introduces them changes no request member, document element, stream or consumer setting, or loop
+interval, and each protection binds from the release after it.
 
 ## Database migrations
 
@@ -450,10 +550,12 @@ ships no earlier than the next release, once no running build reads the old shap
   behind a release that writes only the values the narrower shape admits, and narrows in the
   release after it.
 
-A migration that cannot be written that way is a stop-the-world migration: it is deployed with no
-server of the earlier release running, and that is an exception named in the pull request, not a
-default (`0113` and `0117` below are the two). The pre-deploy census ("Pre-deploy census" below) is unchanged by
-that rule and still applies to every migration: it is taken before any migration of the release
+No migration is an exception to that rule: a change that cannot be written that way is split into
+releases that can, so no release stops every server process. `0113` and `0117` below were each
+deployed with no server of the earlier release running, under an exception this rule no longer
+has, and a deployment still on a release before `0117` crosses it once that way, before it runs
+more than one replica. The pre-deploy census ("Pre-deploy census" below) is unchanged by that
+rule and still applies to every migration: it is taken before any migration of the release
 applies, and a census that refuses fails the deploy before the service moves. The rule in brief
 is `internal/dispatch/store/README.md`, beside the migrations directory rather than in it, since
 the loader below refuses a set holding a file named anything else.
@@ -713,9 +815,11 @@ release still serving, before the deploy, by deleting them:
 `delete from components c where not exists (select 1 from architecture_sources s where s.project_key = c.project_key)`;
 then take the census again.
 
-**`0117` is a stop-the-world migration: deploy it with no server of the earlier release running,
-and never start a release older than `0117` over it again.** Stop the earlier release, or scale it
-to zero, before the new release boots and migrates: a Kubernetes Deployment's
+**`0117` was the last migration deployed with no server of the earlier release running: deploy it
+that way, and never start a release older than `0117` over it again.** A deployment still on a
+release before it crosses it once with Dispatch stopped, before it runs more than one replica;
+every release after it rolls. Stop the earlier release, or scale it to zero, before the new
+release boots and migrates: a Kubernetes Deployment's
 `strategy: Recreate`, which `envoy-infra:gcp:Dispatch` uses at its default one replica
 (`packages/envoy/infra/README.md`); a deployment running more than one replica, which rolls, is
 scaled to zero first. The compose auto-deployer above stops the old container before it starts the
@@ -801,6 +905,13 @@ the release before it runs over the new schema unchanged, and the trigger gives 
 release writes its sequence. The auto-deployer is the exception, by its own rule above: once the
 schema has moved it refuses to start the previous tag, and recovery there is forward.
 
+Migration `0121_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, the holds a
+process keeps by renewing them (`duty.Hold`): each delivery intake holds one name per durable
+(Running more than one process, above), and the holder records its deliver subject as `token`.
+`expires_at` is always written from the database's `now()`, so a lapse is judged by one clock. It
+is a new table: nothing existing is read, locked or rewritten, the release before it neither reads
+nor writes it, and its census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -818,11 +929,12 @@ accept both shapes, and the second removes the old one once no pod serves it.
 
 The census below does not cover this. It reports locks, sizes and counts — what a migration would
 wait behind and how much it would rewrite — not whether the previous build's queries still answer
-against the new schema; that one-release gap is the author's to reason about. The five-second
-`pgmigrate.LockTimeout` also bites harder under a rolling update than under `Recreate`, which
-stops the previous pods before the new one boots: while a deployment rolls, the old build's
-connections are still open and still holding locks on the tables the migration wants, so a
-migration that applies cleanly against an idle database can fail the new pod's boot.
+against the new schema; that one-release gap is the author's to reason about, and the two-build
+test (Two builds at once, above) boots the previous release on this tree's schema and drives it.
+The five-second `pgmigrate.LockTimeout` also bites harder under a rolling update than under
+`Recreate`, which stops the previous pods before the new one boots: while a deployment rolls, the
+old build's connections are still open and still holding locks on the tables the migration wants,
+so a migration that applies cleanly against an idle database can fail the new pod's boot.
 
 ### Pre-deploy census
 
@@ -1066,6 +1178,7 @@ current vector of that identity, how many lack one, how many failed for good, an
 oldest lacking item has waited. The `backfill-embeddings` subcommand, which did the pass's first
 job by hand, is gone, with its checkpoint table (0119).
 
+<!-- INFRA-558 E-a/E-b: this paragraph changes when the embedder is coordinated by the code. -->
 Every process of one deployment runs the same embedder configuration, since each one's pass drops
 the vectors any other identity made. Moving a deployment to another place or Azure deployment makes
 every stored vector another identity's: search finds by meaning only what the new identity has

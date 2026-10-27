@@ -404,11 +404,16 @@ The `/api/v1` routes are one table, `api/routes_table.go` (`routes()`): `Registe
 path then method. Add a route by adding a row — never a `mux.HandleFunc` line — and bump the pinned
 count in `api/routes_table_test.go`. `auth` is `public`, `any` (user or bearer), `human`, or
 `bearer`; it describes the check the handler makes, the handler still enforces it. An unknown path
-under a server root (`/api`, `/v1`, `/auth`, `/ws`, `/healthz`) is answered by
-`routes/router.go` with `404 {"code":"NOT_FOUND","error":"no route for <METHOD> <path>","hint":"GET
-/api/v1 lists every route"}` before any dashboard lookup; only paths outside those roots fall back
-to the SPA shell. Every page the static handler serves (`index.html` and that fallback) carries
-`Cache-Control: no-cache` and an `ETag` of its bytes, never a `Last-Modified` (`servePage` in
+under a server root (`/api`, `/v1`, `/auth`, `/ws`, `/healthz`), and a known path asked with a
+method its route does not serve, is answered by `routes/router.go` with
+`404 {"code":"NOT_FOUND","error":"no route for <METHOD> <path>","hint":"GET /api/v1 lists every
+route"}` before any dashboard lookup; only paths outside those roots fall back to the SPA shell.
+While a release rolls out, a process of the build before a route answers that route this way, so
+the page and the `dispatch` command send such a request again after 1, 2 and 4 seconds before
+they fail it (README, "Two builds at once"): a route is added freely, and removed only in the
+release after the one that stops calling it. Every page the static handler serves (`index.html`
+and that fallback) carries `Cache-Control: no-cache` and an `ETag` of its bytes, never a
+`Last-Modified` (`servePage` in
 `routes/router.go`): a browser revalidates it before running it, gets a 304 only for the page this
 server holds, and gets this server's page in place of any other, since the servers behind one load
 balancer can hold different builds whose pages' file times say nothing about which is newer (a
@@ -593,10 +598,13 @@ The two-build tests (`twobuild_test.go`, INFRA-558) start one Dispatch server of
 and one of this tree on one Postgres and one NATS, as a rolling release runs them: each build's CLI
 against the other's server, each build's corpus documents read, edited, approved and opened on the
 other's document socket, and outbox events, GitHub messages and the stream and consumer settings
-across a stop and restart of each build. They build only under the `twobuild` tag. The earlier
-build is a directory `packages/envoy/scripts/build-dispatch-build.sh` writes, named by
-`DISPATCH_PREVIOUS_BUILD`: the suite skips when that variable is unset, and fails when the
-directory lacks a part it reads. The helpers both process suites share are in `processes_test.go`.
+across a stop and restart of each build. They build only under the `twobuild` tag and run in their
+own CI job, `dispatch-two-builds` in `.github/workflows/envoy-and-contracts.yaml`, which builds the
+previous release (or the commit a manual run names in its `previous_commit` input) and caches that
+build by its commit. The earlier build is a directory `packages/envoy/scripts/build-dispatch-build.sh`
+writes, named by `DISPATCH_PREVIOUS_BUILD`: the suite skips when that variable is unset, and fails
+when the directory lacks a part it reads. The helpers both process suites share are in
+`processes_test.go`.
 
 ```sh
 bash packages/envoy/scripts/build-dispatch-build.sh --previous-release --out "$TMPDIR/dispatch-previous"   # from the repository root

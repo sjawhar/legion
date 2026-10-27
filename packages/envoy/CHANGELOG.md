@@ -4,6 +4,36 @@
 
 ### Added
 
+- Two Dispatch builds, the one that serves and the one a release rolls in beside it, now serve one
+  Postgres and one NATS together, in both directions, and no release stops every server process.
+  `cmd/dispatch/README.md` ("Two builds at once") gives the rule each release keeps while the build
+  before it serves, for request bodies, routes, query values and opaque tokens, socket frames,
+  response members, stored documents, NATS settings and subjects, settings and SQL; the exception
+  for stop-the-world migrations is gone. `0113` and `0117` stay deployed as they were, and a
+  deployment still on a release before `0117` crosses it once with Dispatch stopped, before it
+  runs more than one replica. Stream and consumer generations and the delivery holds protect from
+  the release after this one: the build before it compares settings without generations, binds
+  its durable with no hold and refuses request members it does not declare, so this release
+  changes no request member, document element, stream or consumer setting, or loop interval
+  (INFRA-558).
+- The two-build test, `go test -tags twobuild ./cmd/dispatch` (`cmd/dispatch/twobuild_test.go`),
+  runs a previous build and this tree on one Postgres and one NATS: each build's `dispatch` command
+  against the other's server, each build's corpus documents read, edited, approved and opened on the
+  other's document socket, and outbox events, GitHub messages and the stream and consumer settings
+  across a stop and restart of each build. `scripts/build-dispatch-build.sh --commit <sha|tag>
+  --out <dir>` (or `--previous-release`, the newest `legion-envoy-v*` tag in the history of the
+  branch's merge base with `origin/main`) builds that previous build from `git archive` of its
+  commit, and refuses a commit whose migrations stop below `0117`. The CI job `dispatch-two-builds`
+  runs it against the previous release, or against the commit a manual run names (INFRA-558).
+- `409 DOC_NEWER_CONTENT`: a stored document tree holding an element this Dispatch build does not
+  know (a node, mark or typed block its manifest does not name, an undeclared attribute or an
+  unlisted enum value), which a newer build wrote during a release. `/text`, `/blocks`,
+  `POST /edits` and `POST /versions` answer it with one message that names the element and says to
+  try again in one minute; the document socket closes with `4425`, which the provider reconnects
+  on. Nothing repairs such a document: a replacement from markdown, an upload over it and a rebuild
+  are refused and change nothing, settlement writes no version of it, and the dashboard shows "This
+  document holds content this version of Dispatch cannot show yet. It reloads in a minute." with no
+  upload or rebuild, and admits the document again on its own (INFRA-558).
 - `envoy-infra:gcp:Dispatch` takes `pprofPort`, which sets `DISPATCH_PPROF_PORT` on the app
   Deployment's `envoy-dispatch` container alone, so a deployment turns on Dispatch's loopback-only
   profiler through the component rather than by editing the Deployment, which the next update
@@ -796,6 +826,64 @@
 
 ### Changed
 
+- A Dispatch route ignores a request-body member it does not declare, where it answered `400`
+  before, and logs the ignored names at debug with the route; the JSON upload does too, and still
+  refuses `primary` by name. The delivery socket ignores a frame member it does not declare, and
+  still answers an unknown frame type or view kind `INVALID_FRAME`, on which the dashboard now
+  closes the socket and reconnects with its backoff. The dashboard sends a request a Dispatch
+  process answered `404 NOT_FOUND` "no route for …" again after 1, 2 and 4 seconds (each jittered
+  by a quarter), since no handler ran and a release may be rolling out, then says that the action
+  is not offered yet. A known `/api` path asked with a method it does not serve answers that same
+  JSON 404 (INFRA-558).
+- The document schema manifest (`pmdoc/schema/blocks.json`, `GET /api/v1/schema/blocks`) names the
+  schema's nodes and marks beside its typed blocks, and every element may carry `since` (the schema
+  version from which a build reads it) and `creatable_since` (from which a build creates it), both
+  1 when absent; every element today is 1, and the version stays 2. A write that would add an
+  element this build reads but may not create yet is refused, naming it, unless the document holds
+  it already. The dashboard uses the manifest it was built with instead of fetching it, presents it
+  to the document socket as `schema_version` and `schema_creatable`, and never keeps or replays the
+  editor's removal of an element its schema cannot build (INFRA-558).
+- `409 DOCUMENT_UNLOADABLE`, `DOCUMENT_LIVE` and `DOCUMENT_LOADS` no longer tell the reader to
+  rebuild or replace a document: each message names what a rebuild discards (every edit after the
+  latest saved version) and what a replacement from markdown discards (the current content), and
+  says that a person decides (INFRA-558).
+- `GET /api/v1/references?kind=` answers a kind this build does not emit with no edges of it and
+  lists it in the top-level `unknown_kinds`, where it answered `400 INVALID_KIND`. A rewrite of a
+  body keeps its reference edges to node kinds this build does not know, which a newer build
+  wrote (INFRA-558).
+- A version is no longer written for a document whose content did not change since its latest
+  version only because another build renders it differently, at a snapshot as at settlement. An
+  approved version holding an element this build does not know is left to a build that reads it:
+  settlement writes no version and the approval stays to be carried there. The reference-excerpt
+  reconciliation passes over a document holding such an element for ten minutes or until its next
+  version, leaving its mentions owed, and marks stale excerpts at every tick that follows its
+  five-minute wait rather than only in the hour after its process started (INFRA-558).
+- `ENVOY_NOTIFICATIONS` carries the generation of its settings in its metadata
+  (`dispatch.stream-generation`). An owning client (the listener, Dispatch's server) leaves a
+  stream stamped with a higher generation exactly as it is, so an older build never reverts a
+  newer one's `MaxAge`, `Duplicates` or subjects. It ensures the stream on its connect and again
+  after every reconnect, so a stream lost while it runs is created again. Dispatch's server keeps
+  the stream's deployed replica count on every update, where it set one; the listener still sets
+  `ENVOY_NATS_REPLICAS`. Every client decides a topic's transport from the deployed stream's
+  subjects, read at each ensure, or at connect and every 60 s by a client that owns no stream, so
+  a topic under a subject only a newer build adds is published through JetStream, with its message
+  id, by an older build too (INFRA-558).
+- Each Dispatch delivery durable (`delivery-events`, `delivery-jobs`) delivers to one process at a
+  time: the holder of its hold, a row of `duty_holds` (migration `0121`) with a 15-second lease on
+  the database's clock, renewed every 5 s, which the holder reports lost 2 s before it lapses. The
+  other processes stand by, logging so at INFO, and try for the hold every 2 s. A take-over deletes
+  the durable and creates it again at its ack floor on a fresh deliver subject, which redelivers a
+  dead holder's unacknowledged messages at once and fences that holder off. A stopping process
+  finishes the message in its handler, hands back the messages behind it and releases the hold, so
+  another process takes over and is redelivered them within seconds rather than after the ack wait.
+  A durable carries its config's generation (`dispatch.consumer-generation`), and a take-over that
+  finds a higher one keeps the deployed config; standbys no longer reconcile the durable's settings
+  on every poll. A durable bound by a build before holds is left to it until it lets go. The lease
+  pool grows from 8 to 12 connections for the holds (INFRA-558).
+- A periodic maintenance loop records its passes per lease and period (`duty_passes` row
+  `<lease>/<period_ns>`), so two builds with different intervals for one loop each run it once per
+  their own period, and still share the previous build's row when their period is its own
+  (INFRA-558).
 - A rate-limited answer to any minter call, a release with no narrowing and a Google login's
   refresh included, is now logged `broker: mint failed … class=upstream` with `…, a rate limit` in
   its error, where a 4xx one was `class=refused`: a 429, GitHub's `X-RateLimit-Remaining: 0`, or a

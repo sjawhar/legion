@@ -4,6 +4,16 @@
 
 ### Changed
 
+- `DispatchClient` sends a request that a Dispatch process answered `404 NOT_FOUND` "no route for
+  …" again, with the same body, after 1, 2 and 4 seconds, each wait jittered by a quarter
+  (`NO_ROUTE_RETRY_DELAYS_MS`): while a release rolls out, two builds of Dispatch answer, the older
+  one has no route for a route only the newer one serves, no handler ran, and the next attempt can
+  reach the newer build. After the last attempt it throws `DispatchNoRouteError`, whose message
+  (`NO_ROUTE_ROLLING_RELEASE_MESSAGE`) says that the Dispatch process that answered does not offer
+  the action yet because a release is in progress, and to try again in one minute. The
+  architecture-source fallbacks to an older server's singular routes run once the retries are
+  spent. The client and `executeDispatchTool` take a `sleep`, so a test does not wait (INFRA-558).
+
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The

@@ -26,6 +26,13 @@
 
 ### Changed
 
+- The `dispatch` command (`dist/dispatch.js`) and the MCP server's Dispatch tools send a request
+  that a Dispatch process answered `404 NOT_FOUND` "no route for …" again after 1, 2 and 4 seconds,
+  since during a release the older build has no route for what only the newer one serves; after
+  the last attempt they say the action is not offered yet because a release is in progress, and to
+  try again in one minute. The bundled tool descriptions name `DOC_NEWER_CONTENT` among an ask's or
+  comment's `anchor_block_error` codes (a document holding an element this Dispatch build cannot
+  read; try again in one minute), since `dist/` was regenerated (INFRA-558).
 - The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
   `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
   while its architect waits on a person's answer, and the issue field `waitingOn`, naming the

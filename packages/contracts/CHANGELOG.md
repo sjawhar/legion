@@ -4,6 +4,22 @@
 
 ### Added
 
+- `DOCUMENT_NEWER_CONTENT_CLOSE_CODE` (`4425`) and `DOCUMENT_NEWER_CONTENT_CLOSE_REASON`
+  (`"DOC_NEWER_CONTENT"`), with which the document websocket closes a room whose tree holds an
+  element this Dispatch build cannot read, which a newer build wrote during a release; the
+  Hocuspocus provider reconnects on the code. `bun run gen:go` writes them into Go as
+  `contracts.DocumentNewerContentCloseCode` and `contracts.DocumentNewerContentCloseReason`.
+  `AnchorPosition.anchor_block_error` gains `"DOC_NEWER_CONTENT"`, and the Dispatch tools'
+  description of it says to try again in one minute (INFRA-558).
+- `BlockElementVersions` (`since`, `creatable_since`) on every element of the document schema
+  manifest: `BlockTypeSchema` and `BlockAttributeSchema` extend it, `BlockAttributeSchema` gains
+  `choice_versions` by choice, and the manifest gains `nodes` and `marks`, each a
+  `BlockSchemaElement` (`name` and the two numbers). A server older than INFRA-558 names no nodes or
+  marks (INFRA-558).
+- `GraphReferences.unknown_kinds`: the `?kind=` values the answering Dispatch build does not emit
+  (during a release, a newer build's kinds), which it answers with no edges; absent when there are
+  none (INFRA-558).
+
 - Daemon API contract 40: `LEGION_WORKFLOW_PHASES` gains `awaiting_person`, after `admitted`, a
   root that gave its admission slot up while its architect waits on a person's answer, and the
   state issue view gains `waitingOn`, present only in that phase: `kind: "ask"` with the question's

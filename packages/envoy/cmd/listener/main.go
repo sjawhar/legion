@@ -636,8 +636,11 @@ func main() {
 	listeningAt := time.Now()
 	logger.Info("envoy-listener listening", slog.String("addr", addr))
 
-	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener owns
-	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream).
+	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener and
+	// Dispatch's server both own ENVOY_NOTIFICATIONS: this client ensures the stream on this connect
+	// and after every reconnect, and leaves as it is a stream that a newer build stamped with a
+	// higher generation (bus.ConnectOwningStream). It names the replica count, which every update
+	// sets.
 	client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
 	if err != nil {
 		log.Fatal(err)

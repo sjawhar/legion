@@ -141,6 +141,14 @@
 
 ### Changed
 
+- The `dispatch` command and the Dispatch tools send a request that a Dispatch process answered
+  `404 NOT_FOUND` "no route for …" again after 1, 2 and 4 seconds, since during a release the older
+  build has no route for what only the newer one serves; after the last attempt they say the action
+  is not offered yet because a release is in progress, and to try again in one minute. `dispatch
+  read` names `DOC_NEWER_CONTENT` among the codes of `Position: unavailable (<code>)`: a document
+  holding an element this Dispatch build cannot read, which a newer build wrote; try again in one
+  minute (INFRA-558).
+
 - `dispatch` and `dispatch-first` say that a Legion session files no issue for a finding outside its
   own issue, and point to `legion-worker/references/findings.md`: a defect with a clear fix in code
   the session's own tree touches is fixed in that tree's pull request, any other goes to the

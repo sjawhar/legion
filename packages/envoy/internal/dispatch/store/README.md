@@ -11,9 +11,13 @@ release rolls, so the old build and the new build run against this schema at onc
 boot refuses a schema newer than the binary knows. A change is therefore expand-then-contract
 across two releases: the expanding migration adds, with a default or a backfill, and the release
 that ships it writes both shapes, while the migration that drops, renames or narrows ships no
-earlier than the next release, once no running build reads the old shape. A migration that cannot
-be written that way is a stop-the-world migration, deployed with no server of the earlier release
-running, and that is an exception named in the pull request, not a default.
+earlier than the next release, once no running build reads the old shape. No migration is an
+exception: a change that cannot be written that way is split into releases that can, so no
+release stops every server process. The same rule holds for everything else the two builds share
+(request bodies and routes, query values, socket frames, response members, stored documents, NATS
+stream and consumer settings and subjects, and settings), and the two-build test checks it
+(`go test -tags twobuild ./cmd/dispatch`).
 
-`../../../cmd/dispatch/README.md` ("Database migrations") has the rule with its examples, the
-naming and numbering a set is refused for, and what the census is held to.
+`../../../cmd/dispatch/README.md` has the rule for each surface ("Two builds at once") and for
+migrations with their examples ("Database migrations"), the naming and numbering a set is refused
+for, and what the census is held to.
