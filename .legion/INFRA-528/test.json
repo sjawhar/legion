@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-528",
+  "completed": "2026-10-27T07:37:00Z",
+  "testedHead": "8c37d5bfb494160b1df58bb84fdb045183ad3132 (code head 25fba83e57509f251052e760cb2e60370da6baa9, merge of main b08a56bc)",
+  "rebaseCheck": "Fingerprint (conflicts-and-rewrites.md, fileset '~(.legion | docs/solutions)') at my last verified head 04728453: 0bbefab27a0501b849ab88ad807e7f2207de35a14b230606fed64b2421a3995a; at 8c37d5bf: 314ca169ce859c13fe5f179c9a4ab8555ac5ac62b31e16d043ef1e1f457f1918. Changed, so a full round. The two diffs differ only in two lines of packages/proof-editor/AGENTS.md (the legion-own file count, 'Eleven' over main's 'Nine' before and 'Twelve' over main's 'Ten' now, and the file list that now also names main's read-only-directives.ts). No code line differs. Main's #2303 (INFRA-529) makes the shared parser read-only, so unknown directives draw as text. That change reaches the parse the open-fence probe re-runs, so this round drives the two together.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its two commands on the tester lane after `bun run build:web` at 8c37d5bf: `bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox` -> 32 passed (3.0m), and INFRA-529's `e2e/unknown-directive.e2e.ts --project chromium --project iphone` -> 8 passed (28.6s), both matching its counts."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "A1, the spec Summary rows and the time limit at the merged head: comment, Inbox ask, message, reply, refusal, too-large refusal with the page responsive, markup label, other-language guard",
+      "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector, Desktop Chrome, iPhone 13, WebKit, Firefox",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium --project iphone --project webkit --project firefox",
+      "observed": "32 passed (3.0m)",
+      "headSha": "8c37d5bfb494160b1df58bb84fdb045183ad3132",
+      "negativeControl": "Round 1: the same suite at the red commit ecc18ff3 -> 24 failed, 4 passed (9.1m)."
+    },
+    {
+      "criterion": "Main's read-only directive parsing (#2303) and the mermaid drawing work together: a diagram inside or after an unknown directive draws, and a fence still open inside an unclosed directive stays code",
+      "surface": "Dispatch Conversation, chromium, real server, throwaway e2e (deleted after the run), one comment per body",
+      "command": "bunx playwright test --config e2e/playwright.config.ts e2e/zz-tester-probe6.e2e.ts --project chromium",
+      "observed": "7/7 as expected, no fallback body, no page error: drawn (1 image) inside `:::note` … `:::`, inside an unclosed `:::note`, after a Pandoc `::: warning` line, after a `::leaf` line, inside `:::note` followed by a link reference definition, and plain. Kept as code (0 images, no refusal): `:::note` then a mermaid fence still open. The directive fences show as text around the diagram, as INFRA-529 draws them.",
+      "headSha": "8c37d5bfb494160b1df58bb84fdb045183ad3132",
+      "negativeControl": "The open fence inside the unclosed directive stays code while the same diagram with its fence closed draws, so the probe's verdict is the parser's and not the directive's."
+    }
+  ],
+  "notCarriedOver": "Round 4's leave-the-page and edit-during-draw probes were not repeated: mermaid-diagrams.ts and the worker are byte-identical between 04728453 and 8c37d5bf (the fingerprint diff holds only the two AGENTS.md lines).",
+  "ci": "At 25fba83e on GitHub when read (07:35Z): build pending/queued, changes, lint, pr-title, test, typecheck queued; no lane concluded. 8c37d5bf (handoff-only) has no runs."
+}
