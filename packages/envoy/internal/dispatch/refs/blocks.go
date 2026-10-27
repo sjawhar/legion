@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,14 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
+
+// Pointer is one reference a typed block's `block[]` attribute holds (pmdoc.BlockPointer): the
+// typed block's id, the link's kind (the attribute's name), the canonical block reference, and
+// the block types the attribute points at (none: any block).
+type Pointer struct {
+	Block, Kind, Ref string
+	Targets          []string
+}
 
 // IndexBlocks records version `version` (written at versionAt) of document artifactID's blocks as
 // graph nodes, and each mention written inside a block as an edge out of the innermost block
@@ -23,18 +32,26 @@ import (
 // mention inside it starts at the innermost node holding it, if any, and the indexing logs a
 // warning naming the document, the longest such id's length and the bound.
 //
+// pointers are the version's `block[]` values: each whose block is a node is an edge of its
+// attribute's kind from that block, carrying the attribute's targets as to_types, which the
+// readers list only while its target has an allowed type (block_ref_listed). A value is written in
+// its typed block's opening line, so the extraction also finds it as a mention held by that block:
+// the block's mention of a target is kept only while the block itself holds more references to it
+// than its pointers do (a string attribute citing it too, say).
+//
 // A block whose text (markdown[From:To]) is unchanged keeps its changed version; a new, changed
 // or restored block takes this version, and its text is recorded in document_block_texts; a
 // block the version no longer holds is deleted, recorded there with no text, and the edges at it
 // stop resolving until a version holds its id again. A block's stored excerpt is its text cut to
 // BlockExcerptRunes, the excerpt a document's mention has shown since migration 0092.
 //
-// A pair (block, target) that survives keeps its created version, time and source event. A new
-// pair takes this version and versionAt, and the source event Stamp gives it. On the document's
-// first indexing (no block rows yet), a new pair dates instead from the document's own refs row
-// for that target, when one exists. The version is recorded as indexed, and as the version the
-// document's blocks stand at (document_block_versions). It returns the targets of the pairs it
-// inserted or deleted, whose counts moved: a node is counted once for each block citing it.
+// A pair (block, kind, target) that survives keeps its created version, time and source event,
+// and takes the to_types this version gives it. A new pair takes this version and versionAt, and
+// the source event Stamp gives it. On the document's first indexing (no block rows yet), a new
+// pair dates instead from the document's own refs row for that target, when one exists. The
+// version is recorded as indexed, and as the version the document's blocks stand at
+// (document_block_versions). It returns the targets of the pairs it inserted or deleted, or whose
+// to_types it changed, whose counts moved: a node is counted once for each block citing it.
 func IndexBlocks(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -44,6 +61,7 @@ func IndexBlocks(
 	markdown string,
 	blocks []model.ArtifactBlock,
 	located []text.Located,
+	pointers []Pointer,
 ) ([]Target, error) {
 	stored, err := storedBlockSums(ctx, tx, artifactID)
 	if err != nil {
@@ -112,7 +130,7 @@ func IndexBlocks(
 		}
 	}
 
-	moved, err := replaceBlockRefs(ctx, tx, artifactID, version, versionAt, firstIndexing, blockPairs(nodes, located))
+	moved, err := replaceBlockRefs(ctx, tx, artifactID, version, versionAt, firstIndexing, blockPairs(nodes, located, pointers))
 	if err != nil {
 		return nil, err
 	}
@@ -151,23 +169,70 @@ func storedBlockSums(ctx context.Context, tx pgx.Tx, artifactID string) (map[str
 	return stored, rows.Err()
 }
 
-// blockPair is one link a block holds: the block's id, the edge's kind and its target.
+// blockPair is one link a block holds: the block's id, the edge's kind and its target, and the
+// block types it points at (nil: any).
 type blockPair struct {
 	blockID string
 	kind    string
 	target  Target
+	toTypes []string
 }
 
-// blockPairs is each distinct link the mentions in located write from the innermost of nodes
-// holding its start. A mention no block holds, and an external URL, write none.
-func blockPairs(nodes []model.ArtifactBlock, located []text.Located) []blockPair {
+// heldTarget is a target as one block holds it.
+type heldTarget struct {
+	blockID string
+	target  Target
+}
+
+// blockPairs is each distinct link the pointers of nodes and the mentions in located write: a
+// pointer from its typed block, a mention from the innermost of nodes holding its start. A mention
+// no block holds, and an external URL, write none; nor does a block's mention of a target its own
+// pointers account for (IndexBlocks).
+func blockPairs(nodes []model.ArtifactBlock, located []text.Located, pointers []Pointer) []blockPair {
+	pairs := make([]blockPair, 0, len(located)+len(pointers))
+
+	// pointed counts each block's pointer values naming a target. A pinned and an unpinned value
+	// of one attribute name one target, and write one pair. No attribute is named mentions
+	// (pmdoc), so no pointer's pair is a mention's.
+	var pointed map[heldTarget]int
+	if len(pointers) > 0 {
+		type pointerKey struct {
+			held heldTarget
+			kind string
+		}
+		written := make(map[pointerKey]struct{}, len(pointers))
+		isNode := make(map[string]struct{}, len(nodes))
+		for _, node := range nodes {
+			isNode[node.ID] = struct{}{}
+		}
+		pointed = make(map[heldTarget]int, len(pointers))
+		for _, pointer := range pointers {
+			if _, ok := isNode[pointer.Block]; !ok {
+				continue
+			}
+			ref, ok := text.CanonicalBlockRef(pointer.Ref)
+			if !ok {
+				continue
+			}
+			target, _ := targetOf(ref)
+			held := heldTarget{blockID: pointer.Block, target: target}
+			pointed[held]++
+			key := pointerKey{held: held, kind: pointer.Kind}
+			if _, dup := written[key]; dup {
+				continue
+			}
+			written[key] = struct{}{}
+			pairs = append(pairs, blockPair{blockID: pointer.Block, kind: pointer.Kind, target: target, toTypes: pointer.Targets})
+		}
+	}
+
 	starts := make([]int, len(located))
 	for i, mention := range located {
 		starts[i] = mention.Offset
 	}
 	holders := innermostBlocks(nodes, starts)
-	pairs := make([]blockPair, 0, len(located))
-	seen := make(map[blockPair]struct{}, len(located))
+	mentions := make([]heldTarget, 0, len(located))
+	counts := make(map[heldTarget]int, len(located))
 	for i, mention := range located {
 		if holders[i] < 0 {
 			continue
@@ -176,18 +241,23 @@ func blockPairs(nodes []model.ArtifactBlock, located []text.Located) []blockPair
 		if !ok {
 			continue
 		}
-		pair := blockPair{blockID: nodes[holders[i]].ID, kind: "mentions", target: target}
-		if _, dup := seen[pair]; dup {
-			continue
+		held := heldTarget{blockID: nodes[holders[i]].ID, target: target}
+		if counts[held] == 0 {
+			mentions = append(mentions, held)
 		}
-		seen[pair] = struct{}{}
-		pairs = append(pairs, pair)
+		counts[held]++
+	}
+	for _, held := range mentions {
+		if counts[held] > pointed[held] {
+			pairs = append(pairs, blockPair{blockID: held.blockID, kind: "mentions", target: held.target})
+		}
 	}
 	return pairs
 }
 
 // replaceBlockRefs reconciles the document's block_refs with pairs, matching on the five columns
-// of its key, and returns the targets of the pairs it deleted and inserted.
+// of its key, and returns the targets of the pairs it deleted and inserted, and of those whose
+// to_types it changed.
 func replaceBlockRefs(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -201,8 +271,15 @@ func replaceBlockRefs(
 	kinds := make([]string, len(pairs))
 	toKinds := make([]string, len(pairs))
 	toIDs := make([]string, len(pairs))
+	// A pair's to_types travel as one space-joined text, null for no limit: a block type's name is
+	// a directive name (pmdoc), which holds no space.
+	toTypes := make([]*string, len(pairs))
 	for i, pair := range pairs {
 		blockIDs[i], kinds[i], toKinds[i], toIDs[i] = pair.blockID, pair.kind, pair.target.Kind, pair.target.ID
+		if len(pair.toTypes) > 0 {
+			joined := strings.Join(pair.toTypes, " ")
+			toTypes[i] = &joined
+		}
 	}
 	moved, err := scanTargets(tx.Query(ctx, `
 		delete from block_refs r
@@ -217,17 +294,20 @@ func replaceBlockRefs(
 	if len(pairs) == 0 {
 		return moved, nil
 	}
+	// A surviving pair keeps its dates and source event and takes this version's to_types, so a
+	// change of an attribute's targets reaches it here; it is returned only when that changed.
 	added, err := scanTargets(tx.Query(ctx, `
-		insert into block_refs (artifact_id, block_id, from_node, to_kind, to_id, kind, created_version, created_at, source_seq)
-		select $1::uuid, p.block_id, a.ref_key || '#' || p.block_id, p.to_kind, p.to_id, p.kind, $6,
+		insert into block_refs (artifact_id, block_id, from_node, to_kind, to_id, kind, to_types, created_version, created_at, source_seq)
+		select $1::uuid, p.block_id, a.ref_key || '#' || p.block_id, p.to_kind, p.to_id, p.kind, string_to_array(p.to_types, ' '), $6,
 		       coalesce(case when $8 then r.created_at end, $7), case when $8 then r.source_seq end
-		from unnest($2::text[], $3::text[], $4::text[], $5::text[]) as p (block_id, kind, to_kind, to_id)
+		from unnest($2::text[], $3::text[], $4::text[], $5::text[], $9::text[]) as p (block_id, kind, to_kind, to_id, to_types)
 		cross join (select ref_key from artifacts where id = $1::uuid) a
 		left join refs r on r.from_kind = 'artifact' and r.from_id = $1::uuid::text
 		                and r.to_kind = p.to_kind and r.to_id = p.to_id
-		on conflict (artifact_id, block_id, to_kind, to_id, kind) do nothing
+		on conflict (artifact_id, block_id, to_kind, to_id, kind) do update set to_types = excluded.to_types
+		where block_refs.to_types is distinct from excluded.to_types
 		returning to_kind, to_id
-	`, artifactID, blockIDs, kinds, toKinds, toIDs, version, versionAt, firstIndexing))
+	`, artifactID, blockIDs, kinds, toKinds, toIDs, version, versionAt, firstIndexing, toTypes))
 	if err != nil {
 		return nil, fmt.Errorf("record the block mentions of version %d of %s: %w", version, artifactID, err)
 	}
@@ -238,14 +318,15 @@ func replaceBlockRefs(
 // toArtifact (artifact uuids; the two may be one document), newest first, then by the source
 // block's node id, then by the target's. A link counts only while both of its blocks are current
 // blocks of their documents: a deleted block's links drop out, and its stored mentions bring them
-// back when a version holds its id again.
+// back when a version holds its id again. A pointer's link counts only while its target has a
+// type the pointer allows (block_ref_listed).
 func BlockLinks(ctx context.Context, q Queryer, fromArtifact, toArtifact string) ([]model.BlockLink, error) {
 	rows, err := q.Query(ctx, `
 		select r.kind, r.from_node, r.to_id, r.created_at, r.created_version
 		from block_refs r
 		join document_blocks f on f.artifact_id = r.artifact_id and f.block_id = r.block_id
 		join document_blocks t on t.node_id = r.to_id and t.artifact_id = $2::uuid
-		where r.artifact_id = $1::uuid and r.to_kind = 'block'
+		where r.artifact_id = $1::uuid and r.to_kind = 'block' and block_ref_listed(r.to_types, r.to_id)
 		order by r.created_at desc, r.from_node, r.to_id`, fromArtifact, toArtifact)
 	if err != nil {
 		return nil, fmt.Errorf("list the block links from %s to %s: %w", fromArtifact, toArtifact, err)

@@ -177,6 +177,56 @@ func sortGraphEdges(edges []graphEdgeRow) {
 	})
 }
 
+// The view's block_refs arm calls block_ref_listed for each row, and a SQL function whose body
+// holds a subquery is not inlined into the view's plan, so the no-sequential-scan check above
+// cannot see the lookup it makes. The function's own query, planned as the function plans it,
+// finds its target's rows through document_blocks_node_id.
+func TestBlockRefListedFindsItsTargetByTheNodeIDIndex(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var body string
+	if err := store.Pool.QueryRow(ctx, `select prosrc from pg_proc where proname = 'block_ref_listed'`).Scan(&body); err != nil {
+		t.Fatalf("read block_ref_listed: %v", err)
+	}
+	tx, err := store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin explain: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	for _, statement := range []string{
+		`set local enable_seqscan = off`,
+		`set local plan_cache_mode = force_generic_plan`,
+		`prepare block_ref_listed_body (text[], text) as ` + body,
+	} {
+		if _, err := tx.Exec(ctx, statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	rows, err := tx.Query(ctx, `explain (costs off) execute block_ref_listed_body (array['requirement'], 'CORE-1/spec#r1')`)
+	if err != nil {
+		t.Fatalf("explain block_ref_listed: %v", err)
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		lines = append(lines, line)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate plan: %v", err)
+	}
+	plan := strings.Join(lines, "\n")
+	if !strings.Contains(plan, "document_blocks_node_id") || strings.Contains(plan, "Seq Scan") {
+		t.Fatalf("block_ref_listed's query does not find its target by document_blocks_node_id:\n%s", plan)
+	}
+}
+
 func explainWithoutSeqScan(t *testing.T, store *Store, query string) string {
 	t.Helper()
 	ctx := context.Background()

@@ -47,9 +47,9 @@ var AskBacklinkExclusions = []string{"replies_to"}
 // BacklinkCounts is how many edges point at each of ids, in one grouped query: the number a
 // list carries beside a row, counted the same way the rows behind it are listed. It counts only
 // edges whose source is a node kind this build reads, so the count is the rows its list shows,
-// and counts a document's mention once for each of its blocks citing the node, in place of the
-// document's own edge (heldByABlock). A node with no inbound edge is absent from the result; the
-// caller decides what zero means.
+// and counts a document's mention once for each of its blocks' links to the node, of whatever
+// kind, in place of the document's own edge (heldByABlock). A node with no inbound edge is absent
+// from the result; the caller decides what zero means.
 func BacklinkCounts(
 	ctx context.Context,
 	q Queryer,
@@ -103,13 +103,16 @@ type edgeRow struct {
 }
 
 // heldByABlock is true of a document's mention edge (graph_edges row alias) when a block of that
-// document holds a link of the same kind to the same target: that block's own edge is listed and
-// counted in its place, so each link shows once. A document the block index has not reached
-// holds no block_refs row, so its own edge stays.
+// document holds a link of any kind to the same target, listed or not: that block's own edge is
+// listed and counted in its place, so each link shows once. A typed block's pointer is also
+// written in the document's text, so its document's mention of the target is hidden behind the
+// pointer's edge, and stays hidden while the pointer's target has a type the pointer does not
+// allow (block_ref_listed). A document the block index has not reached holds no block_refs row, so
+// its own edge stays.
 func heldByABlock(alias string) string {
 	return `(` + alias + `.from_kind = 'artifact' and ` + alias + `.kind = 'mentions' and exists (
 		select 1 from block_refs b where b.to_kind = ` + alias + `.to_kind and b.to_id = ` + alias + `.to_id
-		and b.kind = ` + alias + `.kind and b.artifact_id::text = ` + alias + `.from_id))`
+		and b.artifact_id::text = ` + alias + `.from_id))`
 }
 
 // documentBlockIDs is the node id of every current block of the document whose ref_key is the
@@ -216,7 +219,7 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 			from graph_edges g where g.from_kind = $1 and g.from_id = $2 and not ` + heldByABlock("g") + `
 			union all
 			select b.kind, b.to_kind, b.to_id, b.created_at, b.source_seq, b.from_node
-			from block_refs b where b.artifact_id = $3::uuid`
+			from block_refs b where b.artifact_id = $3::uuid and block_ref_listed(b.to_types, b.to_id)`
 	case query.Direction == "out":
 		arms = `select g.kind, g.to_kind, g.to_id, g.created_at, g.source_seq, null::text
 			from graph_edges g where g.from_kind = $1 and g.from_id = $2`

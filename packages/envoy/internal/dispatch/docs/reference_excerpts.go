@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
@@ -58,21 +59,22 @@ func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID strin
 	for index, offset := range rendered.offsets {
 		blocks[index] = model.ArtifactBlock{ID: offset.ID, Type: offset.Type, From: offset.From, To: offset.To}
 	}
-	return s.indexRenderedVersion(ctx, tx, artifactID, version, versionAt, markdown, blocks)
+	return s.indexRenderedVersion(ctx, tx, artifactID, version, versionAt, markdown, blocks, rendered.tree)
 }
 
 // indexRenderedVersion indexes one document version, written at versionAt, in a transaction
 // holding the document's owner row: its references, the excerpt of each mention, and its blocks
-// with the mentions each holds (refs.IndexBlocks), all from one extraction of markdown. blocks
-// index into markdown, the render they came from. The event the caller appends names the counted
-// targets both the document's references and its blocks' mentions moved, since a node is counted
+// with the links each holds (refs.IndexBlocks), all from one extraction of markdown. blocks
+// index into markdown, the render they came from; tree, when the caller holds it, is the tree
+// markdown was rendered from, and nil otherwise. The event the caller appends names the counted
+// targets both the document's references and its blocks' links moved, since a node is counted
 // once for each block citing it.
-func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, blocks []model.ArtifactBlock) (model.ReferenceChanges, error) {
+func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, blocks []model.ArtifactBlock, tree *pmdoc.Node) (model.ReferenceChanges, error) {
 	located := text.ExtractAt(markdown, s.serverURL)
 	// The blocks are indexed before the document's own references are reconciled: a first
 	// indexing dates a block's mention from the document's refs row for its target, which a
 	// surviving target already holds and a new one gets with this same time.
-	moved, err := refs.IndexBlocks(ctx, tx, artifactID, version, versionAt, markdown, blocks, located)
+	moved, err := refs.IndexBlocks(ctx, tx, artifactID, version, versionAt, markdown, blocks, located, blockPointers(artifactID, markdown, blocks, tree))
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
@@ -81,6 +83,31 @@ func (s *Service) indexRenderedVersion(ctx context.Context, tx pgx.Tx, artifactI
 		return model.ReferenceChanges{}, err
 	}
 	return changes, refs.RecordExcerpts(ctx, tx, artifactID, version, refs.MentionExcerpts(markdown, blocks, located))
+}
+
+// blockPointers is each `block[]` value of the version (pmdoc.BlockPointers) as the block index
+// writes it: none when the schema declares no `block[]` attribute or the version has no blocks;
+// otherwise those of tree, or, with no tree, of markdown read back. A version whose markdown does
+// not read back is indexed with no pointers, as one the server cannot read is with no blocks.
+func blockPointers(artifactID, markdown string, blocks []model.ArtifactBlock, tree *pmdoc.Node) []refs.Pointer {
+	if len(blocks) == 0 || len(pmdoc.LinkKinds()) == 0 {
+		return nil
+	}
+	if tree == nil {
+		read, err := pmdoc.ParseRendering(markdown)
+		if err != nil {
+			slog.Warn("dispatch: a document version's block pointers are not indexed: its markdown does not read back",
+				"artifact", artifactID, "error", err)
+			return nil
+		}
+		tree = read
+	}
+	found := pmdoc.BlockPointers(tree)
+	pointers := make([]refs.Pointer, len(found))
+	for index, pointer := range found {
+		pointers[index] = refs.Pointer{Block: pointer.Block, Kind: pointer.Attribute, Ref: pointer.Ref, Targets: pointer.Targets}
+	}
+	return pointers
 }
 
 // indexUnrenderedVersion indexes one document version with no rendering, written at versionAt, in

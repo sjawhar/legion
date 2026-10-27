@@ -193,7 +193,7 @@ func TestABlockTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
 			citer, _ := createReferenceArtifact(t, tx, "", "ACME", "citer")
 			citingBlock := random(t, text.MaxBlockIDBytes)
 			blocks := []model.ArtifactBlock{{ID: citingBlock, Type: "paragraph", From: 0, To: len(markdown)}}
-			if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located); err != nil {
+			if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located, nil); err != nil {
 				t.Fatalf("write the reference at the bound from a block of %d bytes: %v", text.MaxBlockIDBytes, err)
 			}
 			var fromComment, fromBlock int
@@ -272,7 +272,7 @@ func TestEveryTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
 	}
 	citingBlock := random(t, text.MaxBlockIDBytes)
 	blocks := []model.ArtifactBlock{{ID: citingBlock, Type: "paragraph", From: 0, To: len(markdown)}}
-	if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located); err != nil {
+	if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located, nil); err != nil {
 		t.Fatalf("write the references at the bound from a block of %d bytes: %v", text.MaxBlockIDBytes, err)
 	}
 	for _, table := range []string{"refs", "block_refs"} {
