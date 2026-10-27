@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-520",
+  "completed": "2026-10-27T00:43:37Z",
+  "plan": "dispatch://INFRA-520/artifact/plan-md",
+  "summary": "One router workflow .github/workflows/ci.yaml (name CI) replaces pr-and-main.yaml, envoy-and-contracts.yaml and docs.yaml, and calls worker-image.yaml for pull requests. Triggers: pull_request [opened, reopened, synchronize, ready_for_review], push to main, merge_group; no edited, no paths, no schedule. Concurrency per PR ref with cancel on pull_request; per commit and never cancelled on main. A `changes` job (skipped on drafts) runs one dorny/paths-filter step with one filter per job; every test job runs only when its filter is true; lint, typecheck and test keep their ids and a fail-open condition because ruleset 12331919 requires them until the flip; the final job `ci-ok` (if !cancelled()) passes only when changes succeeded and every other job succeeded or skipped, and is red on drafts. Filters name every file each job reads by a reproducible method (go list -deps -test closures, embeds, subprocess targets, runtime reads, step inputs, ci.yaml). No pull-request run writes an Actions cache: worker image layers go to a ghcr registry cache written only from main; Go caches use actions/cache/restore and save only on push; go-notices is keyed on its script and target lists; setup-bun gets no-cache off main. check-image-trigger-paths.sh learns event and draft terms and actions/cache/restore|save; check-bun-version.sh allows no-cache. Cutover: merge under today's ruleset, flip to [ci-ok, pr-title] once every open non-draft non-conflicting PR head carries ci-ok, by session 01a16962 with the admin token.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: push rules, the skip-checks trailer, the PR body and proof format (references/pr-body.md), the default-branch identity check, base reintegration only on a real conflict, the production check after the close (rows 3, 5, 7, 9 of the plan are measured there)",
+      "envoy: the coordination messages of plan section 2.9 to the INFRA-256, INFRA-522, INFRA-519, INFRA-490 and open-PR tree architects over their role topics",
+      "dispatch: any write to the issue (production record, an ask for a stale PR decision) and reading the linked measurement documents",
+      "asd-ste100: the PR body and every message to another team's agent",
+      "ce-simplify-code: the simplify pass over ci.yaml and the two checker changes before the proof runs"
+    ],
+    "test": [
+      "legion-worker: the tester's handoff and proof entries (criterion, surface, command, observed, headSha, negativeControl), re-running the plan's commands on GitHub Actions scratch pull requests",
+      "dispatch: reading the spec, plan.md and measurement documents the acceptance rows cite"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for the approval of the head and references/review-threads.md for threads",
+      "ce-simplify-code: judging whether ci.yaml and the checker extensions are the simplest shape that meets the spec"
+    ]
+  },
+  "acceptance": [
+    {"criterion": "1. A title or body edit starts no router run", "surface": "GitHub Actions, scratch PR", "command": "gh pr edit <n> --body/--title; gh run list -R sjawhar/legion --workflow ci.yaml --branch <b> shows no new run in 5 min; negative control: a push starts one"},
+    {"criterion": "2. Each job's path list names every file it reads", "surface": "ci.yaml filters; local script and scratch PRs", "command": "throwaway script: for each job, the plan 2.4 reference commands (go list -deps -test with tags, embeds, subprocess closures, runtime reads, step inputs) checked against the job's filter with .github/scripts/workflow_paths.py Filter, printing 0 uncovered; negative control: a filter with one dir removed prints the uncovered files; plus one scratch PR per job changing one file of its list, showing the job selected in the changes job outputs"},
+    {"criterion": "3. <=5% of test-job minutes in the first 100 PR runs go to unneeded jobs", "surface": "Actions API after the merge", "command": "production check: script over the first 100 pull_request runs of ci.yaml, job minutes (runner_name non-empty) vs each run's diff against the row-2 reference; pre-merge projection over the last 3 days of PR file lists in the PR body"},
+    {"criterion": "4. A draft starts no test job; ready starts them", "surface": "scratch draft PR", "command": "gh pr create --draft; jobs API shows only ci-ok with a runner, red with the draft message; gh pr ready <n> starts the selected jobs; negative control: the same change non-draft"},
+    {"criterion": "5. 7 days after merge: cache < 9 GB; notices step p90 < 3 min", "surface": "caches API, jobs API", "command": "production check: gh api repos/sjawhar/legion/actions/cache/usage daily max < 9 GB, no refs/pull/* entry created after the merge; lint notices step durations p90 < 3 min; pre-merge: plan 2.6 projection <= 7 GB and no cache entry for the scratch PRs' refs"},
+    {"criterion": "6. A newer push cancels an older head's worker image build", "surface": "scratch PR touching an image input", "command": "push head A, wait for worker-image / build in progress, push head B; A's run and job end cancelled (jobs API); negative control: main release worker builds of two merges both complete"},
+    {"criterion": "7. A release run starts within 30 minutes of its merge, 7 days after", "surface": "Actions API", "command": "production check: for each push to main touching release.yaml's push paths, the first release.yaml push run at that commit or a descendant created at or after it; min started_at of its jobs with a runner minus the push time <= 30 min"},
+    {"criterion": "8. Exact ruleset edit and cutover order in the implement handoff", "surface": ".legion/INFRA-520/implement.json requiredChecksCutover", "command": "the tester compares the handoff's PUT body with a fresh GET of rulesets/12331919: only required_status_checks differs, becoming ci-ok and pr-title with integration_id 15368"},
+    {"criterion": "9. The PR states runner minutes and queue time before and after", "surface": "PR body", "command": "before from dispatch://INFRA-490/artifact/ci-router-measurement-2026-10-26-md; after: the projection at merge, the measured first-100-run minutes and queue times in the Production line at the production check"},
+    {"criterion": "Checker extensions", "surface": ".github/scripts tests", "command": "bash .github/scripts/check-image-trigger-paths.test.sh; bash .github/scripts/check-bun-version.test.sh (new tests red on the unmodified checks); both checks pass on the tree"},
+    {"criterion": "Final job semantics", "surface": "scratch PR", "command": "a selected job made to fail, a selected job cancelled, and a failing changes job each turn ci-ok red; with changes failing, lint/typecheck/test still run"},
+    {"criterion": "Workflow syntax", "surface": "actionlint", "command": "go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/ci.yaml .github/workflows/worker-image.yaml exits 0"}
+  ],
+  "decisionsForArchitect": [
+    "ci.yaml is in every job's filter, so a router edit runs every job; the measurement's reference sets name the workflow file for each job, so those runs count as needed; INFRA-516 chose the opposite for agent-infra (its acceptance 2)",
+    "A draft PR's run ends with a red ci-ok and no test job; a Legion PR left a draft would be sent back to its implementer by the daemon's CI-red rule",
+    "Acceptance 7 is read as: first release.yaml run covering the merge has a job on a runner within 30 minutes; main pushes stay one group per commit, never cancelled; nothing in this change guarantees the queue time",
+    "The release-envoy-listener.yaml gha cache counts in acceptance 5's budget but that file is INFRA-522's change in flight",
+    "mergeWaitWarn in packages/daemon/internal/daemon/auto_merge.go stays one hour; only its comment is corrected to the new required set",
+    "Between the merge and the ruleset flip, the required set is today's lint, typecheck, test, pr-title; the other router jobs stay advisory until the flip; a stale PR that keeps the flip condition false is the controller's call"
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "B1: cutover by workflow_dispatch on PR branches cannot run (branches have no ci.yaml) and its checks would land at a different SHA; the admin token is directed only for the ruleset edit", "answer": "workflow_dispatch dropped; cutover is merge under today's ruleset with lint/typecheck/test ids kept, then a flip once every open non-draft non-conflicting PR head carries ci-ok (machine check in plan 2.8), only the ruleset edit uses the admin token; close/reopen ruled out (pr-closed-unmerged)"},
+      {"finding": "B1 hidden: kept lint/typecheck/test ids could become passing skips when changes fails under the old ruleset", "answer": "lint, typecheck and test use a fail-open condition: they run when changes did not succeed (plan 2.3)"},
+      {"finding": "B2: the filter method missed files tests read through go subprocesses and repo-root joins, and test's steps", "answer": "method adds every exec.Command go target's closure and filepath.Abs/repositoryRoot reads; test's filter is the closure plus every file its steps read (plan 2.4)"},
+      {"finding": "B3: main-only writes do not bound the cache; worker image buildkit churn, listener gha cache, shared index-buildkit scope, new Go caches, 2.2 GB go-notices per key change", "answer": "worker image cache moves to a ghcr registry cache written only from main; only jobs that cache today get a Go family; go-notices keyed on its script and target lists; budget projection <= 7 GB with ordered levers; listener coordinated with INFRA-522 (plan 2.6)"},
+      {"finding": "B4: release start time not addressed; acceptance 7 ambiguous; queue: max not weighed", "answer": "acceptance 7 defined as a query (plan row 7); queue: max weighed and rejected with arithmetic (34 merges a day); per-commit main groups kept; noted as a decision for the architect"},
+      {"finding": "B5: open PRs editing the replaced files would lose edits merged into deleted files", "answer": "port step before each push (git diff of the four files since the base) and notices to each owning architect (plan 2.9)"},
+      {"finding": "B6: ci.yaml in every filter vs acceptance 3 and the parent's agent-infra waste count", "answer": "kept, with the reference stated (measurement section 4 names the workflow file for each job); raised to the architect as the spec owner's call"},
+      {"finding": "N1: draft red ci-ok cost for Legion drafts; acceptance 4 machine check", "answer": "cost stated; row 4 checks only ci-ok got a runner"},
+      {"finding": "N2: a ruleset GET does not prove admin; PUT must carry every rule", "answer": "gh api repos/sjawhar/legion --jq .permissions.admin must print true; PUT carries the whole document as read, diff after (plan 2.8)"},
+      {"finding": "N3: acceptance 9 missing", "answer": "row 9: before from the measurement, after projected at merge and measured in the production check"},
+      {"finding": "N4: mergeWaitWarn justification becomes false", "answer": "comment corrected; constant kept; raised to the architect"},
+      {"finding": "N5: cache-to on workflow_dispatch writes branch caches; setup-bun saves on a Bun bump in a PR", "answer": "registry cache-to only when github.ref is refs/heads/main; setup-bun no-cache off main, with check-bun-version.sh extended"},
+      {"finding": "N6: worker image loses branches: [main]", "answer": "stated: stacked PRs publish sha- tags, which pins never accept"},
+      {"finding": "N7: packages/envoy enumeration misses dot files", "answer": "packages/envoy/* plus each non-infra top-level dir; the checker fails on a new uncovered dir"},
+      {"finding": "N8: no schedule exists", "answer": "stated: ci.yaml has no schedule"},
+      {"finding": "N9: the INFRA-256 fact comment was not cited", "answer": "read and cited (dispatch://INFRA-520/comment/62e71556-6bf1-4e51-92e8-821cc837e684)"},
+      {"finding": "N10: INFRA-519 measurement will see workflow names change", "answer": "its architect is told the new names (plan 2.9)"},
+      {"finding": "Unsupported claims: #2244's file list; '13 .github/scripts headers'", "answer": "#2244's files read with gh pr view (worker-image.yaml, docs/kubernetes.md, six docs/solutions notes); sweep is every file the grep finds, about 25 scripts"}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {
+      "spec": "Pull-request runs read caches and never write them (buildkit cache-to in the Worker Image build, go-notices, setup-go).",
+      "plan": "The worker image's build cache moves from the Actions cache to a registry cache on ghcr (ghcr.io/sjawhar/legion-worker:buildcache), read by every build and written only from main; the setup-bun Bun-binary cache is neither read nor written off main (no-cache), so a PR downloads Bun.",
+      "evidence": "The Actions cache held 10.80 GB of PR-scope buildkit blobs in 257 entries on 2026-10-27, and main builds the worker image about 16 times a day (measurement section 3), so main-only gha writes would still exceed 9 GB in 7 days; oven-sh/setup-bun has no restore-only mode.",
+      "outcome": {"kind": "unchanged"}
+    }
+  ]
+}
