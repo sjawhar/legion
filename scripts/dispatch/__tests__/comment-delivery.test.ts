@@ -310,10 +310,14 @@ describe("the document", () => {
         "`checked_session`, `status`, `class` and `cause`.\n\n## Unlisted receipts\n"
     );
     expect(first.stdout).not.toContain("| Target |");
+    // A value from the input, an author's e-mail address first, is a code span, which a Markdown
+    // editor does not make a link; a uuid stays bare.
     expect(first.stdout).toContain(
-      `| ${BET15} | BET-15 | 2026-10-19T01:31:21.247610Z | sami@theorem.dev | reply | ` +
-        `not delivered | \`not-addressed:claimant\` | ${BET15_LEAD} (claimant): not-addressed:claimant |`
+      `| ${BET15} | \`BET-15\` | 2026-10-19T01:31:21.247610Z | \`sami@theorem.dev\` | reply | ` +
+        `not delivered | \`not-addressed:claimant\` | \`${BET15_LEAD}\` (claimant): ` +
+        "not-addressed:claimant |"
     );
+    expect(first.stdout).not.toMatch(/[^`]sami@theorem\.dev/);
     expect(first.stdout).toContain(
       "## What tq receipts counted\n\n" +
         "- Listed pairs: 14 = received 3 + not_received 8 + unknown 3 (session_not_in_store 1, " +
@@ -326,12 +330,29 @@ describe("the document", () => {
         "- A person's comment rows from which no id was read: 0.\n"
     );
     expect(first.stdout).toContain(
-      `- Comment ${id(7)}: session:01a1f001-0000-7000-8000-00000000000f, first at ` +
-        "2026-10-20T04:00:01.000Z, sami-rocqperf:/home/sami/.omp/agent/sessions/a/" +
-        "01a1f001-0000-7000-8000-00000000000f.jsonl:40"
+      `- Comment ${id(7)}: \`session:01a1f001-0000-7000-8000-00000000000f\`, first at ` +
+        "2026-10-20T04:00:01.000Z, `sami-rocqperf:/home/sami/.omp/agent/sessions/a/" +
+        "01a1f001-0000-7000-8000-00000000000f.jsonl:40`"
     );
     expect(first.stdout).toContain(
-      `### trace.csv\n\n\`\`\`text\n${await fixture("trace.csv")}\`\`\``
+      `### \`trace.csv\`\n\n\`\`\`text\n${await fixture("trace.csv")}\`\`\``
+    );
+  });
+
+  test("a value with a backtick or a pipe is still one code span, in its table cell", async () => {
+    const comments = input.comments.replace(
+      `${id(3)},1003,INFRA-1,2026-10-20T00:00:00.000000Z,,sami@theorem.dev,`,
+      `${id(3)},1003,\`INFRA-1\`,2026-10-20T00:00:00.000000Z,,a\`b|c@theorem.dev,`
+    );
+    expect(comments).not.toBe(input.comments);
+    const run = await cli({ comments });
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe("");
+    // The fence is the shortest backtick run that is not a run of the value; a space pads a
+    // value that starts or ends with a backtick; a `|` is `\|`.
+    expect(run.stdout).toContain(
+      `| ${id(3)} | \`\` \`INFRA-1\` \`\` | 2026-10-20T00:00:00.000000Z | ` +
+        "``a`b\\|c@theorem.dev`` | conversation | not delivered | `never-published` | "
     );
   });
 

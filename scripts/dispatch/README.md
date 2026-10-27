@@ -225,6 +225,12 @@ its fix. The document has a row for each comment, the pairs file has a row for e
 document lists the unlisted rows. No session was owed a comment with the cause `no-target`; give
 the cause of each such comment in a findings file.
 
+The document writes each value that it copies from its input (an owner, an author, a target, an
+evidence, a receipt's place, a file name) as a code span, so that a Markdown editor does not make
+an e-mail address or a URL in it a link and the uploaded document stays byte for byte the one a
+re-run writes. A comment id of only hex digits and dashes stays bare. A findings file and a trace
+go in as they are.
+
 The report refuses its input (exit 1, each problem on stderr, nothing on stdout, no pairs file) in
 these cases:
 

@@ -1155,18 +1155,46 @@ function cell(value: string): string {
     : value.replaceAll("\\", "\\\\").replaceAll("|", "\\|").replace(/\r?\n/g, " ");
 }
 
-function verdictText(verdict: Verdict): string {
-  if (verdict.class === "delivered") {
-    return verdict.evidence === undefined ? "delivered" : `delivered (${verdict.evidence})`;
-  }
-  if (verdict.class === "unknown") {
-    return verdict.why === undefined ? "unknown" : `unknown (${verdict.why})`;
-  }
-  return "not delivered";
+/** A value as a CommonMark code span, so that a Markdown editor reads no link, e-mail address or
+ *  emphasis in it. The fence is the shortest run of backticks that is not a run in the value. A
+ *  space goes inside each fence when the value starts or ends with a backtick, or starts and ends
+ *  with a space: CommonMark takes one such space off each end. A line ending is a space, as in any
+ *  code span. Empty for an empty value. */
+function code(value: string): string {
+  if (value === "") return "";
+  const text = value.replace(/\r\n?|\n/g, " ");
+  const runs = new Set([...text.matchAll(/`+/g)].map((match) => match[0].length));
+  let length = 1;
+  while (runs.has(length)) length += 1;
+  const marks = "`".repeat(length);
+  const padded =
+    /^`|`$/.test(text) || (text.startsWith(" ") && text.endsWith(" ") && /[^ ]/.test(text));
+  const pad = padded ? " " : "";
+  return `${marks}${pad}${text}${pad}${marks}`;
 }
 
-function causeText(verdict: Verdict): string {
-  return verdict.cause === "" ? "" : `\`${verdict.cause}\``;
+/** A value as a code span in a table cell: each `|` as `\|`, which GFM reads as `|` also inside a
+ *  code span. (A backslash of the value just before a `|` cannot be kept.) */
+function cellCode(value: string): string {
+  return code(value).replaceAll("|", "\\|");
+}
+
+/** An id as the document shows it: bare when it is only hex digits and dashes, as a uuid is, and
+ *  so cannot be read as a link; else as `span` writes it. */
+function idText(value: string, span: (value: string) => string): string {
+  return /^[0-9A-Fa-f-]+$/.test(value) ? value : span(value);
+}
+
+/** The class, with the evidence of a delivered verdict or the why of an unknown one as `span`
+ *  writes it: as it is for the pairs file, a code span for the document. */
+function verdictText(verdict: Verdict, span = (value: string) => value): string {
+  if (verdict.class === "delivered") {
+    return verdict.evidence === undefined ? "delivered" : `delivered (${span(verdict.evidence)})`;
+  }
+  if (verdict.class === "unknown") {
+    return verdict.why === undefined ? "unknown" : `unknown (${span(verdict.why)})`;
+  }
+  return "not delivered";
 }
 
 function fence(text: string): string {
@@ -1334,7 +1362,7 @@ function renderReport(
   for (const cause of allCauses) {
     const entry = describeCause(cause, CAUSES);
     out.push(
-      `| \`${cause}\` | ${counts.causes.get(cause) ?? 0} | ${pairCounts.causes.get(cause) ?? 0} | ` +
+      `| ${cellCode(cause)} | ${counts.causes.get(cause) ?? 0} | ${pairCounts.causes.get(cause) ?? 0} | ` +
         `${cell(entry?.meaning ?? "")} | ${cell(entry?.fix ?? "")} |`
     );
   }
@@ -1362,7 +1390,7 @@ function renderReport(
   );
   out.push("## Traces", "");
   if (traces.length === 0) out.push("No trace was given.", "");
-  for (const trace of traces) out.push(`### ${trace.name}`, "", fence(trace.text), "");
+  for (const trace of traces) out.push(`### ${code(trace.name)}`, "", fence(trace.text), "");
   out.push("## Each comment", "");
   out.push(
     "| Comment | On | Created | Author | Shape | Class | Cause | Pairs |",
@@ -1373,19 +1401,21 @@ function renderReport(
     const pairs =
       judged.pairs
         .map(({ pair, verdict: its }) => {
-          const result = its.class === "not-delivered" ? its.cause : verdictText(its);
-          return `${pair.target} (${owedText(pair)}): ${result}`;
+          const result =
+            its.class === "not-delivered" ? cell(its.cause) : verdictText(its, cellCode);
+          return `${cellCode(pair.target)} (${owedText(pair)}): ${result}`;
         })
         .join("<br>") || "(none)";
     out.push(
-      `| ${comment.id} | ${cell(comment.owner)} | ${comment.createdAt} | ${cell(comment.author)} | ` +
-        `${comment.shape} | ${cell(verdictText(verdict))} | ${causeText(verdict)} | ${cell(pairs)} |`
+      `| ${idText(comment.id, cellCode)} | ${cellCode(comment.owner)} | ${comment.createdAt} | ` +
+        `${cellCode(comment.author)} | ${comment.shape} | ${verdictText(verdict, cellCode)} | ` +
+        `${cellCode(verdict.cause)} | ${pairs} |`
     );
   }
   out.push("");
   out.push("## Each pair", "");
   out.push(
-    `The rows of the pairs are in the TSV file \`${pairs.name}\`, beside this document: ` +
+    `The rows of the pairs are in the TSV file ${code(pairs.name)}, beside this document: ` +
       `${pairs.rows} rows after a header line, one for each pair, in the order of the comments ` +
       "above. Its columns are " +
       `${PAIR_COLUMNS.slice(0, -1)
@@ -1401,8 +1431,8 @@ function renderReport(
   );
   for (const receipt of report.unlisted) {
     out.push(
-      `- Comment ${receipt.commentId}: ${receipt.target}, first at ` +
-        `${receipt.firstReceivedAt}, ${receipt.firstReceipt}`
+      `- Comment ${idText(receipt.commentId, code)}: ${code(receipt.target)}, first at ` +
+        `${receipt.firstReceivedAt}, ${code(receipt.firstReceipt)}`
     );
   }
   return `${out.join("\n").trimEnd()}\n`;
