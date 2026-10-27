@@ -2,9 +2,25 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-530",
-  "completed": "2026-10-27T02:11:28Z",
+  "completed": "2026-10-27T02:32:55Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2307",
+  "round2": {
+    "answers": "test.json (083d4fd1) verdict fail: two CI items, behaviour verified",
+    "prTitle": "retitled to 'fix(dispatch): store an email address written into a document as a mailto: link' (conventional commit subject for the required pr-title check)",
+    "conflict": "forward merge of legion/INFRA-530 with main@origin 08c345f7 in 1e5169a6; the one conflict was packages/envoy/CHANGELOG.md ### Fixed, resolved by keeping both entries (this one first, then main's envoy-infra integer entry)",
+    "fingerprint": "083d4fd1 10032dfcdebbcda1ae265372a0a7b22c89cd249b5f4190fcb8d6c4abec0444c3 -> 1e5169a6 10032dfcdebbcda1ae265372a0a7b22c89cd249b5f4190fcb8d6c4abec0444c3: unchanged, bare gates only",
+    "bareGates": "at 1e5169a6: go vet ./internal/dispatch/pmdoc/ clean; the four pmdoc tests PASS with the engine compared; packages/dispatch bun run lint and bun run typecheck pass",
+    "notTouched": "the tester's five extra email shapes go to INFRA-531 per the architect (02:30Z)"
+  },
   "proof": [
+    {
+      "criterion": "rebase re-check after the forward merge with main: the change is unchanged",
+      "surface": "the pull request's diff against its fork point (jj fingerprint excluding .legion and docs/solutions), plus the pmdoc tests that compare Go to the browser editor's engine",
+      "command": "jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, for 083d4fd1 and 1e5169a6; go test ./internal/dispatch/pmdoc -run 'TestLinkifyGuardLinksWhatGoldmarkLinks|TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine|TestEmailReadingsThatDifferAreRecorded|TestRenderKeepsStoredMarkdownThatReadsBack' -count=1 -v",
+      "observed": "rebase re-check 8a431a76 -> 1e5169a6: fingerprint 10032dfc... unchanged on both sides, bare gates only; four tests PASS",
+      "headSha": "1e5169a6fa79e249a46d82a10c88f3ca7117a8d3",
+      "negativeControl": "the conflicted merge before resolution held jj conflict markers in packages/envoy/CHANGELOG.md (conflict=true); after resolution conflict=false. The round-1 entries below keep their negative controls at 5158fd92"
+    },
     {
       "criterion": "A1 stores: a bare email written through the API is stored as a mailto: link",
       "surface": "Dispatch API (agent doc-edit insert and issue spec create) and the stored markdown it returns, real Go server + Postgres 17/pgvector, plus Go pmdoc Parse compared to the browser editor's engine",
