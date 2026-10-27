@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T00:03:13Z",
+  "completed": "2026-10-27T00:08:00Z",
   "pinnedCommit": "ad909178a0cbc43e0deef1a528051bc499ce1fb0",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2272",
   "documents": [
-    "dispatch://INFRA-172/artifact/architecture-assessment-md (v1)",
-    "dispatch://INFRA-172/artifact/refactor-order-md (v2)",
+    "dispatch://INFRA-172/artifact/architecture-assessment-md (v2)",
+    "dispatch://INFRA-172/artifact/refactor-order-md (v3)",
     "dispatch://INFRA-172/artifact/escaped-pipe-census-ts (v1, the script as run; the --projects and --latest-only flags added during the run are documented in the copy under $TMPDIR/infra172 and in refactor-order-md's method)"
   ],
   "proof": [
@@ -73,7 +73,7 @@
   "deviations": [
     "Architect decision (2026-10-26 19:29Z): Go follows the browser everywhere, with stored documents rewritten by ordinary guarded doc-edits rather than left reading differently; eight documents rewritten, each owner commented on.",
     "Architect decision (20:41Z): schema option C built as B first, recorded on INFRA-172 by the architect; step B sent as a draft for the architect to file as a child of INFRA-138 blocking INFRA-173; other refactor steps stay unfiled in refactor-order-md for the controller and a person.",
-    "Six uncovered render differences sent to the architect as drafts to file as INFRA-138 children; the assessment's 'Uncovered' list links nothing yet.",
+    "Six uncovered render differences went to the architect as drafts; the architect filed them as INFRA-526 to INFRA-531 (children of INFRA-138), and schema step B as INFRA-525; the assessment (v2) and refactor order (v3) link them.",
     "The every-version census of LINUX, OSSV, ROADMAP, SMOKE, XV6SSH and ZLIB was still running at completion (architect: it need not hold up the phase); its count goes on the pull request with the production check.",
     "The pmdoc timing tests TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestBareURLShapesParseAndRenderLinearly and TestUpdateIsLinearInTheBlockCount fail on this 3-CPU pod at the base ad909178 as at the head; CI decides them.",
     "refactor-order-md v2 was made by re-uploading the same name rather than doc-edit; later changes use doc-edit."
