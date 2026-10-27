@@ -44,7 +44,7 @@ function foreignInterface(version: number, from: string): EnvoyPluginInterface {
     },
     injectedUserTurns: new Map(),
     bootstrappedSession: { file: undefined },
-    startupTurn: { session: undefined, sentAt: undefined },
+    startupTurn: undefined,
   };
 }
 

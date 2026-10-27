@@ -40,13 +40,16 @@ export interface EnvoyPluginInterface {
   readonly bootstrappedSession: { file: string | undefined };
   /**
    * The session whose first turn is the Legion controller's start turn, and when its start was
-   * sent (ms since epoch): `/legion-controller-start` sets both right before it sends the start
-   * message, and the daemon-launched controller sets both right before `claims/ready`, after
-   * which the daemon sends its start prompt. Both are undefined once that session's first run
-   * starts or the session shuts down. Nothing in the Envoy entry reads it yet; it is the Envoy
-   * entry's signal to keep a card that arrived during startup from taking that first turn.
+   * sent (ms since epoch); undefined while there is none. Any claim that sends the operator's
+   * controller its start message to an idle session sets it right before the send, and the
+   * daemon-launched controller sets it right before `claims/ready`, after which the daemon sends
+   * its start prompt. A start message queued as a follow-up behind a turn the operator already
+   * started sets nothing, since that session's first run has already started. It is cleared once
+   * that session's first run starts or the session shuts down. Nothing in the Envoy entry reads it
+   * yet; it is the Envoy entry's signal to keep a card that arrived during startup from taking that
+   * first turn.
    */
-  readonly startupTurn: { session: string | undefined; sentAt: number | undefined };
+  startupTurn: { readonly session: string; readonly sentAt: number } | undefined;
 }
 
 type EnvoyPluginInterfaceReading =
@@ -90,7 +93,7 @@ export function envoyPluginInterface(): EnvoyPluginInterface {
     },
     injectedUserTurns: new Map(),
     bootstrappedSession: { file: undefined },
-    startupTurn: { session: undefined, sentAt: undefined },
+    startupTurn: undefined,
   };
   store[ENVOY_PLUGIN_INTERFACE_KEY] = created;
   return created;

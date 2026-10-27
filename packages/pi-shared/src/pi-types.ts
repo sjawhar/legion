@@ -275,8 +275,8 @@ export interface CommandContext {
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
   };
-  /** The host's `ctx.isIdle()`: false while a turn runs. Legion's own test hosts may leave it out. */
-  readonly isIdle?: () => boolean;
+  /** The host's `ctx.isIdle()`: false while a turn runs. */
+  readonly isIdle: () => boolean;
 }
 
 /** The host's text block (`TextContent` in `@oh-my-pi/pi-ai`), as far as this package writes it. */

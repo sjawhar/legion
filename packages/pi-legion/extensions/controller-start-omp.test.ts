@@ -491,10 +491,10 @@ test.skipIf(skip)(
 
     start.reply("Start procedure done.");
     const next = await session.nextTurn("the typed message's model request");
-    const conversation = JSON.stringify(next.request.body.messages ?? null);
-    const startAt = conversation.indexOf(START_MESSAGE_JSON);
+    const held = conversation(next.request);
+    const startAt = held.indexOf(START_MESSAGE_JSON);
     expect(startAt).toBeGreaterThanOrEqual(0);
-    expect(conversation.indexOf(typed)).toBeGreaterThan(startAt);
+    expect(held.indexOf(typed)).toBeGreaterThan(startAt);
     expect(lastMessage(next.request)).toContain(typed);
     next.reply("Typed message answered.");
     await settledOn(session, "Typed message answered.");
