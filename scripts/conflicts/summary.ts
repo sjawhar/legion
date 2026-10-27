@@ -126,6 +126,9 @@ export function readRawRun(text: string): RawRun {
         `raw records: prs[${index}] needs a number, headRefName, state, merges and force_pushes`
       );
     }
+    if ("closedAt" in pr && pr.closedAt !== null && typeof pr.closedAt !== "string") {
+      throw new UsageError(`raw records: prs[${index}].closedAt is not a string or null`);
+    }
   });
   if ("measured_at" in data && typeof data.measured_at !== "string") {
     throw new UsageError(`raw records: "measured_at" is not a string`);
@@ -457,24 +460,62 @@ function windowTest(window: { since: number; until: number }): (when: string) =>
 }
 
 /**
+ * Whether a PR existed in the window: opened by its end and neither merged nor closed before its
+ * start, or carrying a merge or force push dated inside it (a PR opened later from a branch that
+ * merged main inside the window).
+ */
+function existedInWindow(
+  pr: PullRequestRecord,
+  window: { since: number; until: number },
+  inWindow: (when: string) => boolean
+): boolean {
+  const { mergedAt, closedAt } = pr;
+  return (
+    (Date.parse(pr.createdAt) <= window.until &&
+      !(mergedAt !== null && Date.parse(mergedAt) < window.since) &&
+      !(pr.state === "CLOSED" && closedAt != null && Date.parse(closedAt) < window.since)) ||
+    pr.merges.some((merge) => inWindow(merge.date)) ||
+    pr.force_pushes.some((push) => inWindow(push.date))
+  );
+}
+
+/**
+ * The PRs a run counts: those whose head branch starts with `prefix`, narrowed for a run of this
+ * script (one with a `selection`) to those that existed in the window, since its list runs to
+ * whenever it was made. The Python run's records are taken as they are.
+ */
+function prsRead(
+  run: RawRun,
+  prefix: string,
+  window: { since: number; until: number },
+  inWindow: (when: string) => boolean
+): PullRequestRecord[] {
+  const prs = run.prs.filter((pr) => pr.headRefName.startsWith(prefix));
+  return run.selection === undefined
+    ? prs
+    : prs.filter((pr) => existedInWindow(pr, window, inWindow));
+}
+
+/**
  * The combined section's counted conflicting forward merges, one record per merge commit (the
  * first PR's, as the section takes it): the merges `--fixed` classifies.
  */
 export function conflictingMerges(run: RawRun, prefix: string): MergeRecord[] {
-  const prs = run.prs.filter((pr) => pr.headRefName.startsWith(prefix));
-  const events = uniqueMerges(prs, windowTest(resolveWindow(run.since, run.until)));
+  const window = resolveWindow(run.since, run.until);
+  const inWindow = windowTest(window);
+  const events = uniqueMerges(prsRead(run, prefix, window, inWindow), inWindow);
   return conflictingForward([...events.values()]).map((event) => event.record);
 }
 
 /**
  * Python's `summarise` as numbers: events are unique merge commits, a merge carried by several
  * PRs counts once and is attributed to each; only merges and force pushes dated inside the
- * window count, and only PRs whose head branch starts with `prefix`.
+ * window count, and only the PRs `prsRead` gives.
  */
 export function summarise(run: RawRun, options: SummaryOptions): Summary {
   const window = resolveWindow(run.since, run.until);
   const inWindow = windowTest(window);
-  const prs = run.prs.filter((pr) => pr.headRefName.startsWith(options.prefix));
+  const prs = prsRead(run, options.prefix, window, inWindow);
   const isMerged =
     run.selection === undefined
       ? (pr: PullRequestRecord) => pr.state === "MERGED"

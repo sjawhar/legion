@@ -108,6 +108,7 @@ class Scratch {
       headRefOid: oids[oids.length - 1],
       mergedAt: "2026-12-31T00:00:00Z",
       createdAt: "2026-12-01T00:00:00Z",
+      closedAt: "2026-12-31T00:00:00Z",
       commits: await Promise.all(oids.map((oid) => this.graphCommit(oid))),
       forcePushes: [],
     };
@@ -167,6 +168,21 @@ describe("analysePullRequest", () => {
     const record = await analysePullRequest(git, pr, UPSTREAM);
 
     expect(record.commit_count).toBe(3);
+    expect(Object.keys(record)).toEqual([
+      "number",
+      "title",
+      "state",
+      "baseRefName",
+      "headRefName",
+      "headRefOid",
+      "mergedAt",
+      "createdAt",
+      "closedAt",
+      "commit_count",
+      "merges",
+      "force_pushes",
+    ]);
+    expect(record.closedAt).toBe(pr.closedAt);
     expect(record.merges.map((m) => m.oid)).toEqual([m1, m2]);
     expect(mergeOf(record.merges, m1)).toMatchObject({
       kind: "forward",

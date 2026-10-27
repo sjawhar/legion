@@ -5,12 +5,12 @@ import type { GraphCommit, GraphForcePush, GraphPullRequest } from "./types.ts";
 const SEARCH_CAP = 1000;
 
 /** The pull request's fields, a page of its commits and its force pushes, as the Python run read
- * them. */
+ * them, plus `closedAt`. */
 const QUERY = `
 query($owner:String!, $name:String!, $n:Int!, $after:String) {
   repository(owner:$owner, name:$name) {
     pullRequest(number:$n) {
-      number title state baseRefName headRefName headRefOid mergedAt createdAt
+      number title state baseRefName headRefName headRefOid mergedAt createdAt closedAt
       commits(first:100, after:$after) {
         pageInfo { hasNextPage endCursor }
         nodes { commit { oid messageHeadline committedDate parents(first:5) { nodes { oid } } } }

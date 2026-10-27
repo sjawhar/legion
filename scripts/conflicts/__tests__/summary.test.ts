@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { compare, readRawRun, resolveWindow, summarise } from "../summary.ts";
+import { category, compare, readRawRun, resolveWindow, summarise } from "../summary.ts";
 import {
   type FixState,
   type MergeRecord,
@@ -138,6 +138,127 @@ describe("summarise", () => {
     expect(merged.prs).toBe(1);
     expect(other.prs).toBe(3);
     expect(snapshot.open).toBe(1);
+  });
+
+  describe("a run with a selection reads only the PRs that existed in the window", () => {
+    // The window is 2026-10-20T00:00:00Z to 2026-10-26T23:59:59Z.
+    const forward = (oid: string, date: string): MergeRecord => ({
+      oid,
+      date,
+      headline: "Merge main",
+      parents: [`${oid}-branch`, `${oid}-main`],
+      kind: "forward",
+      branch_parent: `${oid}-branch`,
+      upstream_parent: `${oid}-main`,
+      conflicts: [X_CHANGELOG],
+    });
+    const pr = (number: number, fields: Partial<PullRequestRecord>): PullRequestRecord => ({
+      number,
+      title: `PR ${number}`,
+      state: "OPEN",
+      baseRefName: "main",
+      headRefName: `legion/D-${number}`,
+      headRefOid: `h${number}`,
+      mergedAt: null,
+      createdAt: "2026-10-21T00:00:00Z",
+      commit_count: 0,
+      merges: [],
+      force_pushes: [],
+      ...fields,
+    });
+    const late = "2026-10-27T09:00:00Z";
+    const early = "2026-10-10T00:00:00Z";
+    const cases: Array<{ pr: PullRequestRecord; read: boolean }> = [
+      // Opened after the window with no merge in it, conflicting with main now.
+      {
+        pr: pr(40, {
+          createdAt: late,
+          merges: [forward("p40", "2026-10-27T10:00:00Z")],
+          open_conflicts_now: [X_CHANGELOG],
+        }),
+        read: false,
+      },
+      // Opened after the window from a branch that merged main inside it.
+      {
+        pr: pr(41, { createdAt: late, merges: [forward("p41", "2026-10-25T08:16:00Z")] }),
+        read: true,
+      },
+      // Opened after the window, force-pushed inside it.
+      {
+        pr: pr(42, {
+          createdAt: late,
+          force_pushes: [{ date: "2026-10-26T00:00:00Z", before: "a", after: "b", conflicts: [] }],
+        }),
+        read: true,
+      },
+      // Merged before the window.
+      {
+        pr: pr(43, { state: "MERGED", createdAt: early, mergedAt: "2026-10-19T23:59:59Z" }),
+        read: false,
+      },
+      // Closed unmerged before the window.
+      {
+        pr: pr(44, { state: "CLOSED", createdAt: early, closedAt: "2026-10-19T23:59:59Z" }),
+        read: false,
+      },
+      // Closed unmerged, no closedAt (an earlier run's record).
+      { pr: pr(45, { state: "CLOSED", createdAt: early }), read: true },
+      // Closed unmerged inside the window.
+      {
+        pr: pr(46, { state: "CLOSED", createdAt: early, closedAt: "2026-10-22T00:00:00Z" }),
+        read: true,
+      },
+      // Opened at the window's last second, open now.
+      { pr: pr(47, { createdAt: "2026-10-26T23:59:59Z" }), read: true },
+      // Merged inside the window.
+      {
+        pr: pr(48, { state: "MERGED", createdAt: early, mergedAt: "2026-10-22T00:00:00Z" }),
+        read: true,
+      },
+    ];
+    const runOf = (prs: PullRequestRecord[], selection?: "updated-since"): RawRun => ({
+      since: "2026-10-20",
+      until: "2026-10-26",
+      origin_main: "o",
+      prs,
+      ...(selection ? { measured_at: "2026-10-30T00:00:00Z", selection } : {}),
+    });
+
+    test("each PR is read or not by when it was opened, merged, closed and pushed", () => {
+      const read = cases.map(
+        ({ pr }) =>
+          summarise(runOf([pr], "updated-since"), { prefix: "legion/" }).combined.prs === 1
+      );
+      expect(read).toEqual(cases.map((c) => c.read));
+    });
+
+    test("every section counts only the PRs read", () => {
+      const summary = summarise(
+        runOf(
+          cases.map((c) => c.pr),
+          "updated-since"
+        ),
+        {
+          prefix: "legion/",
+        }
+      );
+      expect(summary.combined.prs).toBe(6);
+      expect(summary.merged.prs).toBe(1);
+      expect(summary.other.prs).toBe(5);
+      expect(summary.combined.perPr).toEqual([{ pr: 41, conflicting: 1 }]);
+      expect(summary.forcePushes.count).toBe(1);
+      expect(summary.snapshot.open).toBe(3);
+      expect(summary.snapshot.rows).toEqual([]);
+    });
+
+    test("a run without a selection (the Python run) reads every PR", () => {
+      const summary = summarise(runOf(cases.map((c) => c.pr)), { prefix: "legion/" });
+      expect(summary.combined.prs).toBe(cases.length);
+      expect(summary.merged.prs).toBe(2);
+      expect(summary.other.prs).toBe(cases.length - 2);
+      expect(summary.snapshot.open).toBe(4);
+      expect(summary.snapshot.rows).toEqual([{ pr: 40, base: "main", conflicts: [X_CHANGELOG] }]);
+    });
   });
 
   test("fix states give per-file before/transition/after and zeros for an unmatched spec", async () => {
@@ -415,5 +536,42 @@ describe("readRawRun", () => {
     expect(() => readRawRun(JSON.stringify({ ...run, prs: [{ number: 1 }] }))).toThrow(UsageError);
     expect(() => readRawRun("not json")).toThrow(UsageError);
     expect(readRawRun(JSON.stringify({ ...run, prs: [] })).prs).toEqual([]);
+  });
+
+  test("takes closedAt as a string or null, or absent, and refuses anything else", () => {
+    const pr = {
+      number: 1,
+      headRefName: "legion/A",
+      state: "CLOSED",
+      merges: [],
+      force_pushes: [],
+    };
+    const read = (fields: object) =>
+      readRawRun(
+        JSON.stringify({
+          since: "2026-10-20",
+          until: "2026-10-27",
+          origin_main: "abc",
+          prs: [{ ...pr, ...fields }],
+        })
+      ).prs[0].closedAt;
+    expect(read({ closedAt: "2026-10-21T00:00:00Z" })).toBe("2026-10-21T00:00:00Z");
+    expect(read({ closedAt: null })).toBeNull();
+    expect(read({})).toBeUndefined();
+    expect(() => read({ closedAt: 5 })).toThrow(UsageError);
+  });
+});
+
+describe("category", () => {
+  test("a file under a .changes/ directory or named CHANGELOG.md is a changelog", () => {
+    expect(
+      [
+        ".changes/unreleased/x.yaml",
+        "packages/envoy/.changes/unreleased/x.yaml",
+        "packages/x/CHANGELOG.md",
+        "packages/x/changes.md",
+        "packages/x/changes/y.go",
+      ].map(category)
+    ).toEqual(["changelog", "changelog", "changelog", "doc", "code"]);
   });
 });

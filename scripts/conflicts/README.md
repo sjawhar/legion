@@ -56,6 +56,14 @@ the window too large for one search; measure shorter windows instead.
 `--branch-prefix` is applied to that list before any pull request is fetched, so a prefixed run's
 raw records hold only the pull requests whose head branch starts with the prefix.
 
+The search has no upper bound, so its list grows with every day between the window's end and the
+run. The summary therefore narrows it to the pull requests that existed in the window: one counts
+when it was opened by the window's end and was neither merged nor closed unmerged (by its
+`closedAt`, when the record has one) before the window's start, or when it carries a merge or force
+push dated inside the window (a pull request opened later from a branch that merged main in the
+window). Every section counts only these, so a run made days after its window counts the same pull
+requests as one made as it ended. The Python run's records are read as they are.
+
 ## Flags
 
 | flag | meaning |
@@ -80,15 +88,16 @@ any git or `gh` call.
 
 ## The report's sections
 
-1. **All PRs read**: every pull request read, merges deduplicated across all of them: conflicting
-   forward merges, the pull requests carrying one, the tiers, and the conflicting merges by category
-   and by file. This is the section the comparison uses, and the one `--fixed` annotates.
+1. **All PRs read**: every pull request read (for a run of this script, every one that existed in
+   the window), merges deduplicated across all of them: conflicting forward merges, the pull
+   requests carrying one, the tiers, and the conflicting merges by category and by file. This is the
+   section the comparison uses, and the one `--fixed` annotates.
 2. **Merged in the window**: the pull requests merged inside the window, as the Python script's
    "merged PRs" section.
 3. **Every other pull request read**: open now, merged after the window, or closed unmerged; merges
    the merged section already counted are left out.
 4. **Force pushes**, over every pull request read.
-5. **Open-PR snapshot**, over the pull requests open now.
+5. **Open-PR snapshot**, over the pull requests read that are open now.
 
 For the Python run's records, sections 2 and 3 split by `state` as the Python report did: `MERGED`,
 then the rest (that run read only merged and open pull requests).
@@ -115,8 +124,9 @@ need git, so `--fixed` with `--from-json` uses the bare clone in `--workdir`, fe
 
 The raw records keep the Python run's layout and key names, so one format serves both: top-level
 `since`, `until` and `origin_main`, and `prs[]`, each with `number`, `title`, `state`,
-`baseRefName`, `headRefName`, `headRefOid`, `mergedAt`, `createdAt`, `commit_count`, `merges[]`
-(`oid`, `date`, `headline`, `parents`, `kind`, `branch_parent`, `upstream_parent`,
+`baseRefName`, `headRefName`, `headRefOid`, `mergedAt`, `createdAt`, `closedAt` (`null` while
+open; absent from the Python run's records and earlier runs of this script), `commit_count`,
+`merges[]` (`oid`, `date`, `headline`, `parents`, `kind`, `branch_parent`, `upstream_parent`,
 `upstream_on_main`, `upstream_on_base`, `conflicts`, `error`), `force_pushes[]` (`date`, `before`,
 `after`, `main_at_push`, `already_contains_main`, `conflicts`, `error`), and for open pull requests
 `open_conflicts_now` and `open_behind_base`. `conflicts` is the sorted list of conflicted paths,

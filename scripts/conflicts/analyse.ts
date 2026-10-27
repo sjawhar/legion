@@ -110,6 +110,7 @@ export async function analysePullRequest(
     headRefOid: pr.headRefOid,
     mergedAt: pr.mergedAt,
     createdAt: pr.createdAt,
+    closedAt: pr.closedAt,
     commit_count: pr.commits.length,
     merges,
     force_pushes: pushes,

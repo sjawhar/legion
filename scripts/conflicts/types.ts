@@ -35,6 +35,7 @@ export interface PullRequestRecord {
   headRefOid: string;
   mergedAt: string | null;
   createdAt: string;
+  closedAt?: string | null; // absent from the Python run's records and earlier runs
   commit_count: number;
   merges: MergeRecord[];
   force_pushes: ForcePushRecord[];
@@ -73,6 +74,7 @@ export interface GraphPullRequest {
   headRefOid: string;
   mergedAt: string | null;
   createdAt: string;
+  closedAt: string | null;
   commits: GraphCommit[];
   forcePushes: GraphForcePush[];
 }
