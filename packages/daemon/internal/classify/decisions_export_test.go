@@ -2,6 +2,7 @@ package classify
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -231,18 +232,68 @@ func TestPushesWaitingForALinkAreBounded(t *testing.T) {
 			t.Fatalf("after %d moves %d pushes are kept, want at most %d", i, len(pr.Pushes), maxWaitingPushes)
 		}
 	}
-	dropped := 0
+	// The one push left waiting is c-1..c0, whose move the record never made; the line's pushes
+	// then wait behind it, and each past the bound lets the oldest go, never the one just recorded.
+	waiting := pushKeys(pr.Pushes)
 	for i := 1; i <= 40; i++ {
 		prior := pr
-		pr = ApplyPush(pr, record.ClassifiedPush{SHA: fmt.Sprintf("a%d", i), Before: fmt.Sprintf("a%d", i-1)})
-		dropped += len(DroppedPushes(prior, pr))
-		if len(pr.Pushes) > maxWaitingPushes {
-			t.Fatalf("after %d pushes of a line the branch never takes %d pushes are kept, want at most %d", i, len(pr.Pushes), maxWaitingPushes)
+		push := record.ClassifiedPush{SHA: fmt.Sprintf("a%d", i), Before: fmt.Sprintf("a%d", i-1)}
+		pr = ApplyPush(pr, push)
+		waiting = append(waiting, pushKey(push))
+		var want [][2]string
+		if len(waiting) > maxWaitingPushes {
+			want, waiting = waiting[:1], waiting[1:]
+		}
+		if got := pushKeys(DroppedPushes(prior, pr)); !slices.Equal(got, want) {
+			t.Fatalf("after %d pushes of a line the branch never takes the pushes let go are %v, want %v: the oldest waiting goes first", i, got, want)
+		}
+		if got := pushKeys(pr.Pushes); !slices.Equal(got, waiting) {
+			t.Fatalf("after %d pushes of a line the branch never takes the pushes kept are %v, want %v", i, got, waiting)
 		}
 	}
-	if dropped == 0 {
-		t.Fatal("no push was let go, want the oldest let go once the bound is reached")
+}
+
+// The bound counts and lets go only the pushes waiting for a link. A push that carries an approval
+// across stays for the life of the pull request, and a push still on its way forward from the head
+// stays until its move is made, however many waiting pushes arrive behind them.
+func TestTheBoundKeepsApprovalCarriesAndPushesOnTheirWay(t *testing.T) {
+	kept := []record.ClassifiedPush{
+		{SHA: "r1", Before: "r0", HandoffOnly: true},               // carries an approval of r0 to r1
+		{SHA: "r2", Before: "r1", HandoffOnly: true},               // and on to r2
+		{SHA: "h1", Before: "h0"},                                  // code on its way from the head
+		{SHA: "h2", Before: "h1", HandoffOnly: true},               // a handoff on its way after it
+		{SHA: "h3", Before: "h2", HandoffOnly: true, Forced: true}, // a forced push on its way
 	}
+	pr := record.PullRequest{HeadSHA: "h0"}
+	for _, p := range kept {
+		pr = ApplyPush(pr, p)
+	}
+	var waiting [][2]string
+	for i := 1; i <= 3*maxWaitingPushes; i++ {
+		prior := pr
+		push := record.ClassifiedPush{SHA: fmt.Sprintf("w%d", i), Before: fmt.Sprintf("w%d", i-1)}
+		pr = ApplyPush(pr, push)
+		waiting = append(waiting, pushKey(push))
+		var want [][2]string
+		if len(waiting) > maxWaitingPushes {
+			want, waiting = waiting[:1], waiting[1:]
+		}
+		if got := pushKeys(DroppedPushes(prior, pr)); !slices.Equal(got, want) {
+			t.Fatalf("after %d waiting pushes the pushes let go are %v, want %v", i, got, want)
+		}
+		if got, want := pushKeys(pr.Pushes), append(pushKeys(kept), waiting...); !slices.Equal(got, want) {
+			t.Fatalf("after %d waiting pushes the pushes kept are %v, want %v: every approval carry and push on its way, and the newest %d waiting", i, got, want, maxWaitingPushes)
+		}
+	}
+}
+
+// pushKeys is the identities of pushes, in order.
+func pushKeys(pushes []record.ClassifiedPush) [][2]string {
+	keys := make([][2]string, 0, len(pushes))
+	for _, p := range pushes {
+		keys = append(keys, pushKey(p))
+	}
+	return keys
 }
 
 // The counted mark names the head the count last counted, and stays across every head pushed on
