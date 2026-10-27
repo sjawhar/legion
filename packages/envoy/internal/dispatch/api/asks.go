@@ -163,19 +163,44 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 
-	tx, err := s.begin(r.Context())
+	// An anchored ask marks its document, so it queues for that document's writer gate before its
+	// transaction opens, and checks under the owner's lock that the anchor still names it.
+	type askWrite struct {
+		tx     pgx.Tx
+		status *string
+	}
+	start, gatedCtx, release, err := gatedWrite(r.Context(), s.deps.Docs,
+		func(ctx context.Context) ([]string, error) {
+			return anchorDocuments(ctx, s.documentQueryer(), owner, input.Anchor)
+		},
+		func(ctx context.Context, gated []string) (askWrite, error) {
+			tx, err := s.begin(ctx)
+			if err != nil {
+				return askWrite{}, err
+			}
+			status, err := s.requireOpenOwnerStatus(ctx, tx, owner)
+			if err == nil {
+				var named []string
+				if named, err = anchorDocuments(ctx, tx, owner, input.Anchor); err == nil && !sameDocuments(gated, named) {
+					err = errDocumentsMoved
+				}
+			}
+			if err != nil {
+				_ = tx.Rollback(ctx)
+				return askWrite{}, err
+			}
+			return askWrite{tx: tx, status: status}, nil
+		})
 	if err != nil {
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	defer release()
+	r = r.WithContext(gatedCtx)
+	tx, status := start.tx, start.status
 	defer tx.Rollback(r.Context())
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
-	status, err := s.requireOpenOwnerStatus(r.Context(), tx, owner)
-	if err != nil {
-		s.writeHandlerError(w, r, err)
-		return
-	}
 	var rowID string
 	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
 		s.writeHandlerError(w, r, err)
@@ -363,6 +388,19 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A block ask's text is written into its block, so the edit queues for the writer gate of the
+	// block's document before its transaction opens. A block ask never moves to another document.
+	documents, err := s.askDocuments(r.Context(), s.documentQueryer(), r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
+	r, release, err := s.gateDocuments(r, documents...)
+	if err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
+	defer release()
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, r, err)

@@ -46,6 +46,12 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r, release, err := s.gateComment(r, r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
+	defer release()
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, r, err)
@@ -143,6 +149,12 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		capExceeded(w, "body", length, contracts.DispatchBodyMax)
 		return
 	}
+	r, release, err := s.gateComment(r, r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
+	defer release()
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, r, err)
@@ -241,6 +253,12 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	if !ok {
 		return
 	}
+	r, release, err := s.gateComment(r, r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
+	defer release()
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, r, err)

@@ -309,6 +309,134 @@ func writeDocumentVersion(ctx context.Context, tx pgx.Tx, artifactID string, num
 	return version, nil
 }
 
+// uploadDocuments is the document an upload of name to target writes live: the existing document
+// of that name, whose text the upload replaces. None for a file, or a name no document has yet,
+// which the upload creates and seeds.
+func (s *server) uploadDocuments(ctx context.Context, target artifactTarget, name, kind string) ([]string, error) {
+	q := s.documentQueryer()
+	if q == nil || kind != "doc" {
+		return nil, nil
+	}
+	artifact, err := s.findArtifactByName(ctx, q, target, name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if artifact.Kind != kind {
+		return nil, nil
+	}
+	return []string{artifact.ID}, nil
+}
+
+// artifactStore is an upload's open transaction, its owner locked, and the artifact it writes,
+// found or created; issueStatus is the issue's lifecycle status for an issue's artifact.
+type artifactStore struct {
+	tx          pgx.Tx
+	issueStatus *string
+	artifact    model.Artifact
+	created     bool
+}
+
+// beginArtifactStore opens an upload's transaction, locks its owner, and finds the artifact named
+// input.name or creates it (lockArtifactStore), with the writer gates of gated held. An existing
+// document's text is replaced live, so its gate must be among gated: a document another upload
+// created after this one named its documents is refused with errDocumentsMoved, rolled back.
+func (s *server) beginArtifactStore(
+	ctx context.Context, input artifactUploadInput, actor model.Actor, kind string, target artifactTarget, gated []string,
+) (artifactStore, error) {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return artifactStore{}, err
+	}
+	opened, err := s.lockArtifactStore(ctx, tx, input, actor, kind, target)
+	if err == nil {
+		var named []string
+		if !opened.created && kind == "doc" {
+			named = []string{opened.artifact.ID}
+		}
+		if !sameDocuments(gated, named) {
+			err = errDocumentsMoved
+		}
+	}
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return artifactStore{}, err
+	}
+	opened.tx = tx
+	return opened, nil
+}
+
+// lockArtifactStore locks an upload's owner inside tx and finds the artifact named input.name,
+// or creates it.
+func (s *server) lockArtifactStore(
+	ctx context.Context, tx pgx.Tx, input artifactUploadInput, actor model.Actor, kind string, target artifactTarget,
+) (artifactStore, error) {
+	var issueStatus *string
+	var project, session *string
+	var err error
+	switch {
+	case target.Session != "":
+		session = &target.Session
+		if err := lockAgentArtifacts(ctx, tx, target.Session); err != nil {
+			return artifactStore{}, err
+		}
+	case target.IssueKey != nil:
+		issueStatus, err = s.requireOpenOwnerStatus(ctx, tx, issueOwner(*target.IssueKey))
+		if err != nil {
+			return artifactStore{}, err
+		}
+		if err := tx.QueryRow(ctx, `select project_key from issues where key = $1`, *target.IssueKey).Scan(&project); err != nil {
+			return artifactStore{}, err
+		}
+	default:
+		loaded, err := s.loadProject(ctx, tx, target.Project)
+		if err != nil {
+			return artifactStore{}, err
+		}
+		project = &loaded.Key
+	}
+	var artifact model.Artifact
+	var created bool
+	artifact, err = s.findArtifactByName(ctx, tx, target, input.name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		created = true
+		slug, err := s.nextArtifactSlug(ctx, tx, target, input.name)
+		if err != nil {
+			return artifactStore{}, err
+		}
+		actorJSON, err := encodeJSON(actor)
+		if err != nil {
+			return artifactStore{}, err
+		}
+		artifact, err = scanArtifact(tx.QueryRow(ctx, `
+			insert into artifacts (issue_key, project_key, session_id, slug, name, kind, is_primary, created_by)
+			values ($1, $2, $3, $4, $5, $6, false, $7)
+			returning `+artifactColumns,
+			target.IssueKey, project, session, slug, input.name, kind, actorJSON))
+		if err != nil {
+			return artifactStore{}, err
+		}
+	} else if err != nil {
+		return artifactStore{}, err
+	} else if artifact.Kind != kind {
+		return artifactStore{}, errorf(http.StatusBadRequest, "ARTIFACT_KIND_MISMATCH", "uploaded content type does not match existing artifact")
+	}
+	// A project document's owner row is the artifact itself, and until here this transaction
+	// has not locked it: the issue branch above locks its issue, but this one only read its
+	// project. Every writer that takes the owner row at all takes it before the room lock -
+	// the durable writers never take it - and the event this upload appends takes it after the
+	// document write has taken the room. Without this line the upload would run room -> owner
+	// against a settlement's owner -> room, and Postgres would break the cycle with a 500.
+	if target.IssueKey == nil && target.Session == "" && !created {
+		if err := s.requireOpenOwner(ctx, tx, ownerForArtifact(artifact)); err != nil {
+			return artifactStore{}, err
+		}
+	}
+	return artifactStore{issueStatus: issueStatus, artifact: artifact, created: created}, nil
+}
+
 func (s *server) storeArtifact(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -323,82 +451,24 @@ func (s *server) storeArtifact(
 	if !s.putUploadedFile(w, r, kind, sha, input) {
 		return
 	}
-	tx, err := s.begin(r.Context())
+	// An upload to an existing document replaces its live text, so it queues for the document's
+	// writer gate before its transaction opens; a new document is seeded, which no live write
+	// joins, and needs none.
+	opened, gatedCtx, release, err := gatedWrite(r.Context(), s.deps.Docs,
+		func(ctx context.Context) ([]string, error) {
+			return s.uploadDocuments(ctx, target, input.name, kind)
+		},
+		func(ctx context.Context, gated []string) (artifactStore, error) {
+			return s.beginArtifactStore(ctx, input, actor, kind, target, gated)
+		})
 	if err != nil {
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	defer release()
+	r = r.WithContext(gatedCtx)
+	tx, issueStatus, artifact, created := opened.tx, opened.issueStatus, opened.artifact, opened.created
 	defer tx.Rollback(r.Context())
-	var issueStatus *string
-	var project, session *string
-	switch {
-	case target.Session != "":
-		session = &target.Session
-		if err := lockAgentArtifacts(r.Context(), tx, target.Session); err != nil {
-			s.writeHandlerError(w, r, err)
-			return
-		}
-	case target.IssueKey != nil:
-		issueStatus, err = s.requireOpenOwnerStatus(r.Context(), tx, issueOwner(*target.IssueKey))
-		if err != nil {
-			s.writeHandlerError(w, r, err)
-			return
-		}
-		if err := tx.QueryRow(r.Context(), `select project_key from issues where key = $1`, *target.IssueKey).Scan(&project); err != nil {
-			s.writeHandlerError(w, r, err)
-			return
-		}
-	default:
-		loaded, err := s.loadProject(r.Context(), tx, target.Project)
-		if err != nil {
-			s.writeHandlerError(w, r, err)
-			return
-		}
-		project = &loaded.Key
-	}
-	var artifact model.Artifact
-	var created bool
-	artifact, err = s.findArtifactByName(r.Context(), tx, target, input.name)
-	if errors.Is(err, pgx.ErrNoRows) {
-		created = true
-		slug, err := s.nextArtifactSlug(r.Context(), tx, target, input.name)
-		if err != nil {
-			s.writeHandlerError(w, r, err)
-			return
-		}
-		actorJSON, err := encodeJSON(actor)
-		if err != nil {
-			s.writeHandlerError(w, r, err)
-			return
-		}
-		artifact, err = scanArtifact(tx.QueryRow(r.Context(), `
-			insert into artifacts (issue_key, project_key, session_id, slug, name, kind, is_primary, created_by)
-			values ($1, $2, $3, $4, $5, $6, false, $7)
-			returning `+artifactColumns,
-			target.IssueKey, project, session, slug, input.name, kind, actorJSON))
-		if err != nil {
-			s.writeHandlerError(w, r, err)
-			return
-		}
-	} else if err != nil {
-		s.writeHandlerError(w, r, err)
-		return
-	} else if artifact.Kind != kind {
-		writeError(w, "ARTIFACT_KIND_MISMATCH", http.StatusBadRequest, "uploaded content type does not match existing artifact")
-		return
-	}
-	// A project document's owner row is the artifact itself, and until here this transaction
-	// has not locked it: the issue branch above locks its issue, but this one only read its
-	// project. Every writer that takes the owner row at all takes it before the room lock -
-	// the durable writers never take it - and the event this upload appends takes it after the
-	// document write has taken the room. Without this line the upload would run room -> owner
-	// against a settlement's owner -> room, and Postgres would break the cycle with a 500.
-	if target.IssueKey == nil && target.Session == "" && !created {
-		if err := s.requireOpenOwner(r.Context(), tx, ownerForArtifact(artifact)); err != nil {
-			s.writeHandlerError(w, r, err)
-			return
-		}
-	}
 
 	var nextNumber int
 	if err := tx.QueryRow(r.Context(), `select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1`, artifact.ID).Scan(&nextNumber); err != nil {
@@ -861,14 +931,15 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
-	if input.Precondition != nil {
-		release, err := s.deps.Docs.AcquireConditionalEdit(r.Context(), artifact.ID)
-		if err != nil {
-			s.writeHandlerError(w, r, err)
-			return
-		}
-		defer release()
+	// Conditional or not, an edit writes the live document, so it queues for the document's
+	// writer gate before its transaction opens: a flood of stale conditional retries, or writers
+	// clustered on one document, wait here holding no connection.
+	r, release, err := s.gateDocuments(r, artifact.ID)
+	if err != nil {
+		s.writeHandlerError(w, r, err)
+		return
 	}
+	defer release()
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, r, err)

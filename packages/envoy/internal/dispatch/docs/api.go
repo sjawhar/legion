@@ -28,7 +28,7 @@ type API interface {
 	BlockPath(ctx context.Context, artifactID, blockID string) (model.BlockPath, error)
 	SnapshotVersion(ctx context.Context, artifactID string, actor model.Actor) (VersionResult, error)
 	SetIssueClosed(ctx context.Context, issueKey string, closed bool)
-	AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error)
+	AcquireDocumentWriter(ctx context.Context, artifactIDs ...string) (context.Context, func(), error)
 	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (EditOutcome, error)
 	SetBlockAttributes(ctx context.Context, artifactID, blockID string, attributes map[string]any, actor model.Actor) error
 	SetAskBlockText(ctx context.Context, artifactID, blockID string, edit AskBlockEdit, actor model.Actor) (AskBlockText, error)

@@ -100,12 +100,17 @@ func TestMarkAnchorVerifiesBrowserMark(t *testing.T) {
 // ygo's persistence worker would otherwise store it on its own schedule.
 func writeBrowserMark(t *testing.T, database *store.Store, documentService *docs.Service, artifactID string, mark docs.MarkSpec, quote string) {
 	t.Helper()
-	tx, err := database.Pool.Begin(context.Background())
+	gated, release, err := documentService.AcquireDocumentWriter(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("take the document's writer gate: %v", err)
+	}
+	defer release()
+	tx, err := database.Pool.Begin(gated)
 	if err != nil {
 		t.Fatalf("begin browser mark: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	ctx, ledger := documentService.Join(context.Background(), tx)
+	ctx, ledger := documentService.Join(gated, tx)
 	defer ledger.Discard()
 	if _, err := documentService.MarkQuote(ctx, artifactID, mark, quote, nil); err != nil {
 		t.Fatalf("write browser mark: %v", err)

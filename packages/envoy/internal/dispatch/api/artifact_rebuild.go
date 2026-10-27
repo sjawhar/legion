@@ -35,6 +35,12 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
+	r, release, err := s.gateDocuments(r, artifact.ID)
+	if err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
+	defer release()
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, r, err)

@@ -44,7 +44,7 @@ func TestAColdWriteLoadsNoRoomUntilItCommits(t *testing.T) {
 				precondition = &model.EditPrecondition{Document: token}
 			}
 			var write *liveWrite
-			err := joinedWrite(service, func(ctx context.Context) error {
+			err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 				if _, err := service.ApplyOps(ctx, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, precondition); err != nil {
 					return err
 				}
@@ -150,7 +150,7 @@ func TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits(t *testing.T) {
 			}
 
 			ops := []model.EditOp{{Op: "replace", Find: "Bravo", With: "Charlie"}}
-			err := joinedWrite(service, func(ctx context.Context) error {
+			err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 				if _, err := service.ApplyOps(ctx, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
 					return err
 				}

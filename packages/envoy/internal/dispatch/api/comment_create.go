@@ -240,10 +240,14 @@ type commentRoute struct {
 
 // commentWrite is the open comment transaction and what its locked owner said: the owner's
 // lifecycle status (nil for a project document) and the route resolution that row agreed with.
+// ctx carries the writer gates of the documents the comment writes, which release hands on once
+// the comment has committed and published.
 type commentWrite struct {
-	tx     pgx.Tx
-	status *string
-	route  commentRoute
+	tx      pgx.Tx
+	status  *string
+	route   commentRoute
+	ctx     context.Context
+	release func()
 }
 
 // resolveCommentRoute reads the owner's delivery route and resolves it to a live session with
@@ -285,11 +289,33 @@ func (s *server) resolveCommentRoute(
 	return route, nil
 }
 
+// gatedCommentWrite takes the writer gates of the documents the comment writes - the one its
+// anchor marks, and the one its reply's thread root is anchored to (newCommentDocuments) - with
+// no transaction open, then opens the comment's transaction under them (beginCommentWrite). The
+// listener resolution ran before, so no document waits on the listener.
+func (s *server) gatedCommentWrite(ctx context.Context, owner owner, input commentInput, route commentRoute) (commentWrite, error) {
+	write, gatedCtx, release, err := gatedWrite(ctx, s.deps.Docs,
+		func(ctx context.Context) ([]string, error) {
+			return newCommentDocuments(ctx, s.documentQueryer(), owner, input)
+		},
+		func(ctx context.Context, gated []string) (commentWrite, error) {
+			return s.beginCommentWrite(ctx, owner, input, route, gated)
+		})
+	if err != nil {
+		return commentWrite{}, err
+	}
+	write.ctx, write.release = gatedCtx, release
+	return write, nil
+}
+
 // beginCommentWrite opens the comment's transaction, locks its owner, and verifies that the
-// route the listener resolved is still the one the locked issue row carries. A route that
-// moved in between leaves the resolution unusable, so the write is resolved once more rather
-// than suppressing the wrong session's fan-out.
-func (s *server) beginCommentWrite(ctx context.Context, owner owner, route commentRoute) (commentWrite, error) {
+// route the listener resolved is still the one the locked issue row carries, and that the
+// documents the comment writes are still the ones gated. A route that moved in between leaves
+// the resolution unusable, so the write is resolved once more rather than suppressing the wrong
+// session's fan-out; documents that moved are gated once more (gatedWrite).
+func (s *server) beginCommentWrite(
+	ctx context.Context, owner owner, input commentInput, route commentRoute, gated []string,
+) (commentWrite, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return commentWrite{}, err
@@ -297,6 +323,12 @@ func (s *server) beginCommentWrite(ctx context.Context, owner owner, route comme
 	// The transaction is the caller's on success only, so every refusal unwinds here: a later
 	// check that forgot its own rollback would hold a pooled connection for the process's life.
 	status, err := s.lockCommentOwner(ctx, tx, owner, route)
+	if err == nil {
+		var named []string
+		if named, err = newCommentDocuments(ctx, tx, owner, input); err == nil && !sameDocuments(gated, named) {
+			err = errDocumentsMoved
+		}
+	}
 	if err != nil {
 		_ = tx.Rollback(ctx)
 		return commentWrite{}, err
@@ -384,7 +416,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			return s.resolveCommentRoute(ctx, owner, resolvedMentions)
 		},
 		func(ctx context.Context, resolved commentRoute) (commentWrite, error) {
-			return s.beginCommentWrite(ctx, owner, resolved)
+			return s.gatedCommentWrite(ctx, owner, input, resolved)
 		},
 		errorf(http.StatusConflict, "ROUTE_CHANGED",
 			"the issue's delivery route changed while this comment was being written; post it again"),
@@ -393,6 +425,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	defer start.release()
+	r = r.WithContext(start.ctx)
 	tx, status, route := start.tx, start.status, start.route
 	defer tx.Rollback(r.Context())
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)

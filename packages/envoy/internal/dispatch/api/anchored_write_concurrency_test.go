@@ -101,10 +101,11 @@ func (g *gatedMarkQuote) MarkQuote(
 
 // The other holders that wait are the document settlements: each opens its own transaction and
 // locks the same issue row an anchored write locks first (lockArtifactOwner), before it knows
-// whether it has work. Two of them, one anchored write holding the row, and one more write
-// queued behind it fill a four-connection pool - small on purpose, because the cycle this
-// pins closes at any size and four reaches it with four callers - so the write in the middle
-// must finish without asking that pool for anything else.
+// whether it has work. Three of them and one anchored write holding the row fill a
+// four-connection pool - small on purpose, because the cycle this pins closes at any size and
+// four reaches it with four callers - so the write in the middle must finish without asking that
+// pool for anything else. A second anchored write to the same document queues behind it in the
+// document's writer gate, holding no connection, and finishes once the first has.
 func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 	const maxConns = 4
 	gate := &gatedMarkQuote{entered: make(chan struct{}), release: make(chan struct{})}
@@ -121,8 +122,8 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 	defer release()
 	issue := createInteractionIssue(t, handler, "TEST", "Settlement contention",
 		"alpha bravo charlie delta")
-	siblings := make([]string, 0, 2)
-	for index := range 2 {
+	siblings := make([]string, 0, maxConns-1)
+	for index := range maxConns - 1 {
 		response := dispatchRequest(t, handler, http.MethodPost,
 			"/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
 				"content": fmt.Sprintf("# Sibling %d\n\nfirst body\n", index),
@@ -152,7 +153,7 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 				"body":   "held write",
 			}, "alice").Code
 	}()
-	<-gate.entered // the first write holds a connection and the issue row
+	<-gate.entered // the first write holds a connection, the issue row and the document's gate
 
 	writes.Add(1)
 	go func() {
@@ -163,7 +164,7 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 				"body":   "queued write",
 			}, "alice").Code
 	}()
-	waitForAcquiredConns(t, database, 2)
+	waitForQueuedWriters(t, service, 1)
 
 	for _, artifactID := range siblings {
 		service.ScheduleSettlement(artifactID)

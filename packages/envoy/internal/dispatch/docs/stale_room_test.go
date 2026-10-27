@@ -1466,7 +1466,7 @@ func TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow(t *testing.T) 
 	var forked string
 	written := make(chan error, 1)
 	go func() {
-		written <- joinedWrite(service, func(ctx context.Context) error {
+		written <- joinedWrite(service, artifactID, func(ctx context.Context) error {
 			if err := service.ProjectMark(ctx, artifactID, "mark-in-the-window", MarkRecord{
 				Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
 			}, model.Actor{Kind: "user", ID: "bob"}); err != nil {
@@ -1541,7 +1541,7 @@ func TestARoomLoadingWhileThisProcessesWriteCommitsStandsAtTheHead(t *testing.T)
 	if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
 		t.Fatalf("lock document owner: %v", err)
 	}
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	defer ledger.Discard()
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{
 		{Op: "insert", Markdown: "Agent's paragraph.", After: "Second."},

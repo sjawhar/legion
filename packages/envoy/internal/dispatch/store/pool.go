@@ -91,6 +91,14 @@ func holdsConnection(ctx context.Context) bool {
 	return ok && state.connection.Load()
 }
 
+// ConnectionHeld reports whether ctx's caller holds a pooled connection: its transaction, a
+// cursor, or a connection it acquired or marked (HoldsConnection). It is the test the pools refuse
+// a second acquire by (ErrNestedAcquire), for whatever else a connection holder must never wait
+// for - a document's writer gate, whose holder may be waiting for a connection itself.
+func ConnectionHeld(ctx context.Context) bool {
+	return holdsConnection(ctx)
+}
+
 // ForConcurrentRead returns a context for one of a caller's reads that run side by side: ctx's
 // deadline, cancellation and values, with a hold mark of its own, so that read takes one
 // connection and the pool still refuses it a second. Reads sharing one mark would refuse each

@@ -570,6 +570,14 @@ func (s *server) writeHandlerError(w http.ResponseWriter, r *http.Request, err e
 	if admission.WriteUnserved(w, r.Context(), err) {
 		return
 	}
+	// A write that waited for a document's writer gate gave its admission units back while it
+	// waited (docs.Service.AcquireDocumentWriter) and found no room to take them back: refused
+	// as admission refuses a request, before its transaction opened.
+	var refusal *admission.Refusal
+	if errors.As(err, &refusal) {
+		admission.WriteRefused(w, refusal)
+		return
+	}
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)

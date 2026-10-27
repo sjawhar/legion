@@ -169,7 +169,7 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer tx.Rollback(ctx)
-		joined, ledger := service.Join(ctx, tx)
+		joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 		defer ledger.Discard()
 		if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{
 			{Op: "insert", After: "end", Markdown: "agent\n"},

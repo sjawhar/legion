@@ -8,6 +8,7 @@ import (
 	"maps"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -209,7 +210,9 @@ func agentEditVersion(t *testing.T, service *Service, artifactID string, actor m
 		t.Fatalf("begin agent edit: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	editCtx, ledger := service.Join(ctx, tx)
+	writeCtx, release := gatedContext(t, service, ctx, artifactID)
+	defer release()
+	editCtx, ledger := service.Join(writeCtx, tx)
 	defer ledger.Discard()
 	edit, err := service.ApplyOps(editCtx, artifactID, ops, actor, nil)
 	if err != nil {
@@ -864,7 +867,9 @@ func TestAMarkInsideAWordWritesNoVersion(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer tx.Rollback(context.Background())
-		ctx, ledger := service.Join(context.Background(), tx)
+		writeCtx, release := gatedContext(t, service, context.Background(), artifactID)
+		defer release()
+		ctx, ledger := service.Join(writeCtx, tx)
 		defer ledger.Discard()
 		if mark != nil {
 			if _, err := service.MarkQuote(ctx, artifactID, *mark, "case", nil); err != nil {
@@ -973,7 +978,7 @@ func TestAReaderIsNoAuthorOfAnAgentsVersion(t *testing.T) {
 					t.Fatalf("begin agent edit: %v", err)
 				}
 				defer tx.Rollback(context.Background())
-				joinedCtx, ledger := service.Join(context.Background(), tx)
+				joinedCtx, ledger := service.Join(gated(t, service, context.Background(), artifactID), tx)
 				defer ledger.Discard()
 				if _, err := service.ApplyOps(joinedCtx, artifactID, edit, agent, nil); err != nil {
 					t.Fatalf("agent edit: %v", err)
@@ -1622,7 +1627,7 @@ func TestRolledBackWriteNeverReachesTheRoom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	if _, err := service.ReplaceText(joined, artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace text: %v", err)
 	}
@@ -1770,7 +1775,7 @@ func TestSettleAttributesAServiceWrittenAskBlockToItsWriterAfterBrowserEdits(t *
 		t.Fatalf("begin agent edit: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
+	joined, ledger := service.Join(gated(t, service, ctx, artifactID), tx)
 	defer ledger.Discard()
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{
 		Op: "insert", After: "end", Markdown: ":::ask{#agent-after-browser urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n",
@@ -2670,12 +2675,33 @@ func seedServiceText(t *testing.T, service *Service, artifactID, markdown string
 	}
 }
 
-// joinedWrite runs write inside a transaction joined with Service.Join, as every caller of a
-// document write does, and commits it when write succeeds. It returns write's own error, which
-// tests assert on, or the transaction's, and never fails the test itself, so a goroutine may call
-// it.
-func joinedWrite(service *Service, write func(ctx context.Context) error) error {
-	ctx := context.Background()
+// testGateWait bounds a test's wait for a document's writer gate, so a gate an earlier write of
+// the same test still holds fails the test, naming the gate, instead of hanging the package.
+const testGateWait = 10 * time.Second
+
+// takeWriterGates takes the writer gates of artifactIDs as a handler does before its
+// transaction, waiting at most testGateWait, and returns ctx carrying them with their release.
+func takeWriterGates(service *Service, ctx context.Context, artifactIDs ...string) (context.Context, func(), error) {
+	wait, cancel := context.WithTimeout(ctx, testGateWait)
+	defer cancel()
+	gated, release, err := service.AcquireDocumentWriter(wait, artifactIDs...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("take the writer gates of %v: %w", artifactIDs, err)
+	}
+	return context.WithValue(ctx, documentWriterKey{}, gated.Value(documentWriterKey{})), release, nil
+}
+
+// joinedWrite runs write to artifactID inside a transaction joined with Service.Join, as every
+// caller of a document write does: holding the document's writer gate, taken before the
+// transaction opens, and committing when write succeeds. It returns write's own error, which
+// tests assert on, or the gate's or the transaction's, and never fails the test itself, so a
+// goroutine may call it.
+func joinedWrite(service *Service, artifactID string, write func(ctx context.Context) error) error {
+	ctx, release, err := takeWriterGates(service, context.Background(), artifactID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	tx, err := service.store.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin the write's transaction: %w", err)
@@ -2689,9 +2715,40 @@ func joinedWrite(service *Service, write func(ctx context.Context) error) error 
 	return ledger.Commit(ctx)
 }
 
+// gatedContext is ctx carrying the writer gates of artifactIDs, for a test that opens a write's
+// transaction itself, as a handler takes them before its transaction. The gates are released when
+// the test ends, or earlier by the release returned, which a test writing the same document again
+// runs once the first write has committed or rolled back.
+func gatedContext(t testing.TB, service *Service, ctx context.Context, artifactIDs ...string) (context.Context, func()) {
+	t.Helper()
+	gated, release, err := takeWriterGates(service, ctx, artifactIDs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	return gated, release
+}
+
+// gated is gatedContext's context alone, for a test that writes the document once.
+func gated(t testing.TB, service *Service, ctx context.Context, artifactIDs ...string) context.Context {
+	t.Helper()
+	ctx, _ = gatedContext(t, service, ctx, artifactIDs...)
+	return ctx
+}
+
+// beneathTheGate is ctx carrying artifactIDs' writer-gate mark without having queued for the gate,
+// for the tests that pin the writer slot and the lock order beneath the gate: what a second write
+// to a document does once it is inside its transaction while a first holds the slot. The gate
+// keeps two writes of one process from getting there together, so only such a test, giving the
+// second write the mark the gate would, still reaches the slot code it pins.
+func beneathTheGate(ctx context.Context, artifactIDs ...string) context.Context {
+	hold := &documentWriterHold{artifactIDs: slices.Compact(slices.Sorted(slices.Values(artifactIDs)))}
+	return context.WithValue(ctx, documentWriterKey{}, hold)
+}
+
 func joinedReplaceText(service *Service, artifactID, markdown string, actor model.Actor) (string, error) {
 	var canonical string
-	err := joinedWrite(service, func(ctx context.Context) (err error) {
+	err := joinedWrite(service, artifactID, func(ctx context.Context) (err error) {
 		canonical, err = service.ReplaceText(ctx, artifactID, markdown, actor)
 		return err
 	})
@@ -2700,7 +2757,7 @@ func joinedReplaceText(service *Service, artifactID, markdown string, actor mode
 
 func joinedApplyOps(service *Service, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (EditOutcome, error) {
 	var outcome EditOutcome
-	err := joinedWrite(service, func(ctx context.Context) (err error) {
+	err := joinedWrite(service, artifactID, func(ctx context.Context) (err error) {
 		outcome, err = service.ApplyOps(ctx, artifactID, ops, actor, precondition)
 		return err
 	})
@@ -2709,7 +2766,7 @@ func joinedApplyOps(service *Service, artifactID string, ops []model.EditOp, act
 
 func joinedMarkQuote(service *Service, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error) {
 	var anchored Anchored
-	err := joinedWrite(service, func(ctx context.Context) (err error) {
+	err := joinedWrite(service, artifactID, func(ctx context.Context) (err error) {
 		anchored, err = service.MarkQuote(ctx, artifactID, mark, quote, occurrence)
 		return err
 	})
@@ -2717,25 +2774,25 @@ func joinedMarkQuote(service *Service, artifactID string, mark MarkSpec, quote s
 }
 
 func joinedProjectMark(service *Service, artifactID, markID string, record MarkRecord, actor model.Actor) error {
-	return joinedWrite(service, func(ctx context.Context) error {
+	return joinedWrite(service, artifactID, func(ctx context.Context) error {
 		return service.ProjectMark(ctx, artifactID, markID, record, actor)
 	})
 }
 
 func joinedAcceptSuggestion(service *Service, artifactID, id, replaceWith string, actor model.Actor) error {
-	return joinedWrite(service, func(ctx context.Context) error {
+	return joinedWrite(service, artifactID, func(ctx context.Context) error {
 		return service.AcceptSuggestion(ctx, artifactID, id, replaceWith, actor)
 	})
 }
 
 func joinedRejectSuggestion(service *Service, artifactID, id string, actor model.Actor) error {
-	return joinedWrite(service, func(ctx context.Context) error {
+	return joinedWrite(service, artifactID, func(ctx context.Context) error {
 		return service.RejectSuggestion(ctx, artifactID, id, actor)
 	})
 }
 
 func joinedSetBlockAttributes(service *Service, artifactID, blockID string, attributes map[string]any, actor model.Actor) error {
-	return joinedWrite(service, func(ctx context.Context) error {
+	return joinedWrite(service, artifactID, func(ctx context.Context) error {
 		return service.SetBlockAttributes(ctx, artifactID, blockID, attributes, actor)
 	})
 }

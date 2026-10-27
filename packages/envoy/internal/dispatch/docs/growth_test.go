@@ -138,7 +138,7 @@ func seedByWriter(t *testing.T, service *Service, artifactID string, client crdt
 	if err := doc.TransactE(func(txn *crdt.Transaction) error { return pmdoc.Update(txn, fragment, tree) }); err != nil {
 		t.Fatal(err)
 	}
-	if err := joinedWrite(service, func(ctx context.Context) error {
+	if err := joinedWrite(service, artifactID, func(ctx context.Context) error {
 		tx, _ := txFromContext(ctx)
 		_, err := service.persistence.AppendUpdateTx(ctx, tx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true)
 		return err

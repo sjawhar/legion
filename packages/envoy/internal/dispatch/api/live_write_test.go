@@ -535,12 +535,16 @@ func (f *heldWriteFixture) durableText(t *testing.T) string {
 	return renderDocument(t, document)
 }
 
-// waitForLockWaiter returns once a session of this database waits on a lock: a request queued
-// behind the held transaction.
+// waitForLockWaiter returns once a request is queued behind the held transaction: a session of
+// this database waiting on a lock, or a writer waiting for the document's writer gate the held
+// write holds.
 func (f *heldWriteFixture) waitForLockWaiter(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
+		if f.docs.QueuedDocumentWriters() > 0 {
+			return
+		}
 		var waiting int
 		if err := f.probe.QueryRow(context.Background(), `
 			select count(*) from pg_stat_activity

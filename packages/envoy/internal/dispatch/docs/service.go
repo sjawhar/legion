@@ -235,8 +235,10 @@ type Service struct {
 	// calls (see serviceTransact), so a room's update observer can tell a service mutation from
 	// a browser peer's edit. Every other origin a live document reports, but a published live
 	// write's (liveWriteOrigin), is a connected peer.
-	serviceOrigins   sync.Map
-	conditionalGates sync.Map
+	serviceOrigins sync.Map
+	// writers is the per-document writer gate every live write takes before its transaction
+	// opens (AcquireDocumentWriter).
+	writers documentWriterGate
 	// rebuilding names the documents a rebuild holds (RebuildDocument): their rooms refuse
 	// loads and injections until the rebuild's transaction ends (Ledger.endRebuilds).
 	rebuilding sync.Map
