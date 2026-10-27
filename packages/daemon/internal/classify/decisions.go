@@ -13,7 +13,7 @@ import (
 // mark are those every push arriving first would have given.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
 	if pr.Run == nil {
-		if _, _, chained := arrivalPlan(arrivalPushes(pr, headSHA), pr.HeadSHA, headSHA); chained || pr.HeadSHA == "" {
+		if _, _, chained := arrivalPlan(pr.Pushes, pr.HeadSHA, headSHA); chained || pr.HeadSHA == "" {
 			pr, _ = advance(pr, headSHA)
 			return pr
 		}
@@ -44,13 +44,12 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 // back from either, so the push is a fresh start. A push onto a head CI has not judged yet, or onto
 // a red that counts nothing, is the same attempt, not a new one.
 func advance(pr record.PullRequest, headSHA string) (record.PullRequest, bool) {
-	pushes := arrivalPushes(pr, headSHA)
-	planned, decided, chained := arrivalPlan(pushes, pr.HeadSHA, headSHA)
+	planned, decided, chained := arrivalPlan(pr.Pushes, pr.HeadSHA, headSHA)
 	if !chained {
-		planned, decided = unchainedPlan(pushes, pr.HeadSHA, headSHA)
+		planned, decided = unchainedPlan(pr.Pushes, pr.HeadSHA, headSHA)
 	}
-	spared := sparedMove(pushes, pr.HeadSHA, headSHA)
-	pr.Moves = madeMoves(pr.Moves, pr.HeadSHA, headSHA, chainOf(pushes, pr.HeadSHA, headSHA))
+	spared := sparedMove(pr.Pushes, pr.HeadSHA, headSHA)
+	pr.Moves = madeMoves(pr.Moves, pr.HeadSHA, headSHA, chainOf(pr.Pushes, pr.HeadSHA, headSHA))
 	pr.Pushes = unspentPushes(pr.Pushes, pr.Moves, true)
 	switch verdict := HeadVerdict(pr); {
 	case verdict == "red" && !pr.PlannedRed && !spared:
@@ -72,25 +71,21 @@ func advance(pr record.PullRequest, headSHA string) (record.PullRequest, bool) {
 const maxMoves = 32
 
 // madeMoves is moves with the move from previous to head and the moves of chain's pushes made,
-// each pair of heads once and the newest last, at most maxMoves of them. A chain that ends at head
-// has the move from previous to head as its last push's, and that move is made once. A move of the
-// chain is pushed (record.Move.Pushed) unless its push carries an approval across, which is never
-// spent; the move from previous to head, when no push of its own made it, is pushed when a chain
-// of recorded pushes made it, since GitHub sends no push of those two heads for it, and otherwise
-// waits for its push. A move made again replaces its earlier record, repeat and all.
+// each once and the newest last, at most maxMoves of them. A chain that ends at head has the move
+// from previous to head as its last push's, and that move is made once.
 func madeMoves(moves []record.Move, previous, head string, chain []record.ClassifiedPush) []record.Move {
 	made := make([]record.Move, 0, len(chain)+1)
 	for _, p := range chain {
-		if moveIndex(made, p.Before, p.SHA) < 0 {
-			made = append(made, record.Move{Before: p.Before, SHA: p.SHA, Pushed: !carriesApproval(p)})
+		if m := (record.Move{Before: p.Before, SHA: p.SHA}); !slicesContain(made, m) {
+			made = append(made, m)
 		}
 	}
-	if previous != "" && moveIndex(made, previous, head) < 0 {
-		made = append(made, record.Move{Before: previous, SHA: head, Pushed: chain != nil})
+	if m := (record.Move{Before: previous, SHA: head}); previous != "" && !slicesContain(made, m) {
+		made = append(made, m)
 	}
 	kept := make([]record.Move, 0, len(moves)+len(made))
 	for _, m := range moves {
-		if moveIndex(made, m.Before, m.SHA) < 0 {
+		if !slicesContain(made, m) {
 			kept = append(kept, m)
 		}
 	}
@@ -101,63 +96,13 @@ func madeMoves(moves []record.Move, previous, head string, chain []record.Classi
 	return kept
 }
 
-// moveIndex is the index of the move from before to sha among moves, -1 when it is not there.
-func moveIndex(moves []record.Move, before, sha string) int {
-	for i, m := range moves {
-		if m.Before == before && m.SHA == sha {
-			return i
+func slicesContain(moves []record.Move, m record.Move) bool {
+	for _, n := range moves {
+		if n == m {
+			return true
 		}
 	}
-	return -1
-}
-
-// pushedMoves is moves once push arrives: a move of push's two heads made before its push was
-// recorded takes push as that push, and is pushed from then on; one already pushed keeps push as
-// its repeat (record.Move.Repeat) - the push delivered again, or the branch moving between the two
-// heads again, which only the head's next arrival by that move tells apart. Either way the move
-// spends push (unspentPushes). A push that carries an approval across is never spent, and changes
-// no move.
-//
-// The repeat is what lets a move made again find its push when that push arrived first. Without
-// it, h0..h1, a forced return h1..h0 and h0..h1 pushed again leave h1's second arrival with no
-// chain, and a head run that waits for a push already delivered. The repeat is no code on its way
-// (CodeOnItsWay) and plans nothing (unchainedPlan): a push delivered twice looks the same until a
-// head arrives by its move. Nor can a repeat be told from a push of another path to the same head
-// not delivered yet: an arrival it chains opens no head run, so such pushes, delivered after, leave
-// the judgement the repeat gave (TestARepeatStandsForAPushNotYetDeliveredByAnotherPath). That takes
-// the same two heads pushed again and another path to them, its middle head never synchronized.
-func pushedMoves(moves []record.Move, push record.ClassifiedPush) []record.Move {
-	i := moveIndex(moves, push.Before, push.SHA)
-	if i < 0 || carriesApproval(push) {
-		return moves
-	}
-	moves = clone(moves)
-	if moves[i].Pushed {
-		repeat := push
-		moves[i].Repeat = &repeat
-	} else {
-		moves[i].Pushed = true
-	}
-	return moves
-}
-
-// arrivalPushes is the pushes the arrival of head is judged with: pr's pushes, and, when no chain
-// of them leads to head from pr's head but one does with the repeats of the moves made
-// (pushedMoves), those repeats too.
-func arrivalPushes(pr record.PullRequest, head string) []record.ClassifiedPush {
-	if pr.HeadSHA == "" || chainOf(pr.Pushes, pr.HeadSHA, head) != nil {
-		return pr.Pushes
-	}
-	with := clone(pr.Pushes)
-	for _, m := range pr.Moves {
-		if m.Repeat != nil {
-			with = append(with, *m.Repeat)
-		}
-	}
-	if len(with) == len(pr.Pushes) || chainOf(with, pr.HeadSHA, head) == nil {
-		return pr.Pushes
-	}
-	return with
+	return false
 }
 
 // chainOf is the pushes of the shortest chain of recorded pushes from from to to, each of which
@@ -277,19 +222,18 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 // heads, the record has not made: a push still on its way, a link of a chain still to complete, or
 // one that returns the branch to a commit it held before. A push is spent by its own move alone,
 // never by the head it leaves: a branch reset to an earlier commit arrives there by a push of its
-// own; the move keeps what it spent as its own push or its repeat (pushedMoves). A push that did
-// not say which head it replaced is never a link: it stays on its way until a head arrives
-// (arrival), and then goes.
+// own. A push that did not say which head it replaced is never a link: it stays on its way until a
+// head arrives (arrival), and then goes.
 func unspentPushes(pushes []record.ClassifiedPush, moves []record.Move, arrival bool) []record.ClassifiedPush {
-	made := map[[2]string]bool{}
+	made := map[record.Move]bool{}
 	for _, m := range moves {
-		made[[2]string{m.Before, m.SHA}] = true
+		made[m] = true
 	}
 	kept := make([]record.ClassifiedPush, 0, len(pushes))
 	for _, p := range pushes {
 		switch {
 		case carriesApproval(p):
-		case p.Before == "" && arrival, made[pushKey(p)]:
+		case p.Before == "" && arrival, made[record.Move{Before: p.Before, SHA: p.SHA}]:
 			continue
 		}
 		kept = append(kept, p)
@@ -358,19 +302,16 @@ func arrivalPlan(pushes []record.ClassifiedPush, from, to string) (planned, deci
 
 // ApplyPush records a push. A push replaces an earlier record of the same two heads, so a
 // redelivered push is recorded once; a push whose own move the record has made is spent as it
-// arrives (unspentPushes), the move keeping it as its own push or as its repeat (pushedMoves); and
-// the pushes waiting for a link are bounded (boundedPushes). A push delivered late, after its head
-// arrived and the branch moved on, is that move's: it is not taken for the same two heads pushed
-// again until a head arrives by that move again. While a head run is open - a head arrived before
-// every push of its move was recorded - the push joins the run's pushes and the run is replayed
-// (replayRun): the count, its mark, the planned mark and the CI settlement become those every push
-// arriving before every head would have given. With no run open no head waits for a push of its
-// move - or the run that held one was cut to its bound (maxRunSteps) - and a push changes no
-// judgement until a head arrives: a push that reached the recorded head from another head - the
-// required-checks pass's compare from an approved head - says nothing about the move the count
-// counted.
+// arrives (unspentPushes); and the pushes waiting for a link are bounded (boundedPushes). A push
+// delivered late, after its head arrived and the branch moved on, is that move's: it is not taken
+// for the same two heads pushed again. While a head run is open - a head arrived before every push of its move was
+// recorded - the push joins the run's pushes and the run is replayed (replayRun): the count, its
+// mark, the planned mark and the CI settlement become those every push arriving before every head
+// would have given. With no run open no head waits for a push of its move - or the run that held
+// one was cut to its bound (maxRunSteps) - and a push changes no judgement until a head arrives: a
+// push that reached the recorded head from another head - the required-checks pass's compare from
+// an approved head - says nothing about the move the count counted.
 func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullRequest {
-	pr.Moves = pushedMoves(pr.Moves, push)
 	pr.Pushes = boundedPushes(unspentPushes(withPush(pr.Pushes, push), pr.Moves, false), pr.HeadSHA)
 	if pr.Run == nil {
 		return pr

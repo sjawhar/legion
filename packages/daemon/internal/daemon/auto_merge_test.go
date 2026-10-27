@@ -175,7 +175,7 @@ func TestAREADYMergeRowSubmitsOnlyTheAwaitedREADYHead(t *testing.T) {
 
 // The record can trust a head GitHub has already left: a late push whose move the record made
 // before is spent, so a branch re-pushed to the same next commit is not seen on its way until its
-// synchronize arrives (classify.unspentPushes). No merge lands that commit meanwhile: the READY merge
+// synchronize arrives (classify.keptPushes). No merge lands that commit meanwhile: the READY merge
 // row submits only READY's head, read from GitHub first (ghautomerge.Submit), and every mutation
 // carries it as GitHub's expected head. A read that shows GitHub's head re-pushed submits nothing;
 // a re-push between the read and the mutation is refused by GitHub ("Head branch was modified").

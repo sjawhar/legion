@@ -237,7 +237,7 @@ func TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEvery
 
 // The head's arrival completes the carry when GitHub delivered the push first: the push, classified
 // handoff-only while the record still said the code head, is kept for the head it made
-// (classify.AdvancePullRequestHead, unspentPushes), and the synchronize that moves the head onto it
+// (classify.AdvancePullRequestHead, keptPushes), and the synchronize that moves the head onto it
 // lets the code head's red stand for the new head (carriedBack) - the same carry the push completes
 // in the other order. So the arrival applies the CI rule in whatever phase the issue is, before
 // reviewing's re-ask: the work goes back from testing, reviewing, accepting, retro and merging, the

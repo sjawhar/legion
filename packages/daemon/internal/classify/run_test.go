@@ -290,9 +290,9 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 							i, len(pr.Run.Steps), len(pr.Run.Pushes), tc.maxSteps, tc.maxPushes)
 					}
 				}
-				distinct := map[[2]string]bool{}
+				distinct := map[record.Move]bool{}
 				for _, m := range pr.Moves {
-					distinct[[2]string{m.Before, m.SHA}] = true
+					distinct[m] = true
 				}
 				if len(pr.Moves) > maxMoves || len(distinct) != len(pr.Moves) || len(distinct) != min(i, maxMoves) {
 					t.Fatalf("after %d heads the record holds %d moves, %d distinct, want %d, each once", i, len(pr.Moves), len(distinct), min(i, maxMoves))
@@ -306,10 +306,9 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 	}
 }
 
-// One head records one move, its push delivered before the head or after it, and the move records
-// its push as spent either way.
+// One head records one move, its push delivered before the head or after it.
 func TestOneHeadRecordsItsMoveOnce(t *testing.T) {
-	want := []record.Move{{Before: "h0", SHA: "h1", Pushed: true}}
+	want := []record.Move{{Before: "h0", SHA: "h1"}}
 	push := record.ClassifiedPush{SHA: "h1", Before: "h0"}
 	fresh := func() record.PullRequest {
 		return record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{}, Required: []string{"ci"}}
@@ -321,90 +320,6 @@ func TestOneHeadRecordsItsMoveOnce(t *testing.T) {
 	late := ApplyPush(AdvancePullRequestHead(fresh(), "h1"), push)
 	if !reflect.DeepEqual(late.Moves, want) {
 		t.Errorf("the push after its head left moves %+v, want %+v", late.Moves, want)
-	}
-}
-
-// The same two heads pushed again, once the branch moved between them with its push recorded, give
-// the move made again its push: h0..h1, a forced return h1..h0, then h0..h1 pushed again, a red
-// settling at each head. Whichever order GitHub delivers the pushes in, the second arrival of h1 is
-// judged with its chain (arrivalPushes), so no head run stays open and the judgement is the one the
-// pushes arriving first give. A push GitHub never delivers leaves the run open, as any lost push
-// does. Until h1 arrives again the push made again looks like the first push delivered twice, so
-// it is no code on its way from h0; and a push delivered late for a move the record made before its
-// push was recorded is still that move's: the first h0..h1, delivered after the branch returned to
-// h0, is spent as it arrives.
-func TestAMoveMadeAgainTakesItsPushWhicheverArrivesFirst(t *testing.T) {
-	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
-	first, back, again := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true}, record.ClassifiedPush{SHA: "h1", Before: "h0"}
-	s1, s2, s3 := settles("h1", 2, "ci"), settles("h0", 3, "ci"), settles("h1", 4, "ci")
-	deliverAll := func(facts ...runFact) record.PullRequest {
-		pr := red
-		for _, f := range facts {
-			pr = stored(t, deliver(f, pr))
-		}
-		return pr
-	}
-	want := deliverAll(pushed(first), arrives("h1"), s1, pushed(back), arrives("h0"), s2, pushed(again), arrives("h1"), s3)
-	if want.Run != nil || want.FixAttempts != 4 || want.HeadCounted != "h1" || HeadVerdict(want) != "red" {
-		t.Errorf("pushes first: run open %v, fix=%d counted=%q verdict=%q, want no run, 4, \"h1\" and red", want.Run != nil, want.FixAttempts, want.HeadCounted, HeadVerdict(want))
-	}
-	for _, tc := range []struct {
-		name  string
-		facts []runFact
-	}{
-		{"every push late", []runFact{arrives("h1"), s1, pushed(first), arrives("h0"), s2, pushed(back), arrives("h1"), s3, pushed(again)}},
-		{"the push made again late", []runFact{pushed(first), arrives("h1"), s1, pushed(back), arrives("h0"), s2, arrives("h1"), s3, pushed(again)}},
-		{"the first push late, after the branch returned", []runFact{arrives("h1"), s1, pushed(back), arrives("h0"), s2, pushed(first), pushed(again), arrives("h1"), s3}},
-	} {
-		if got := deliverAll(tc.facts...); got.Run != nil || JudgementChanged(want, got) {
-			t.Errorf("%s: run open %v, fix=%d counted=%q verdict=%q, want no run and the pushes-first fix=%d counted=%q verdict=%q",
-				tc.name, got.Run != nil, got.FixAttempts, got.HeadCounted, HeadVerdict(got), want.FixAttempts, want.HeadCounted, HeadVerdict(want))
-		}
-	}
-	if lost := deliverAll(pushed(first), arrives("h1"), s1, pushed(back), arrives("h0"), s2, arrives("h1"), s3); lost.Run == nil {
-		t.Error("the push made again never delivered: the run closed, want it open waiting for that push")
-	}
-	if twice := deliverAll(pushed(first), arrives("h1"), s1, pushed(back), arrives("h0"), s2, pushed(first)); twice.Run != nil || CodeOnItsWay(twice) || len(twice.Pushes) != 0 {
-		t.Errorf("the first push delivered twice, after the branch returned to h0: run open %v, code on its way %v, pushes %+v, want it spent by its move",
-			twice.Run != nil, CodeOnItsWay(twice), twice.Pushes)
-	}
-	late := deliverAll(arrives("h1"), s1, pushed(back), arrives("h0"), s2, pushed(first))
-	if late.Run != nil || CodeOnItsWay(late) || len(late.Pushes) != 0 {
-		t.Errorf("the first push delivered after the branch returned to h0: run open %v, code on its way %v, pushes %+v, want it spent by its move",
-			late.Run != nil, CodeOnItsWay(late), late.Pushes)
-	}
-}
-
-// The limit of a repeat (record.Move.Repeat): it stands for the push of its two heads at the next
-// arrival by that move that no chain of other recorded pushes reaches, and cannot be told from a
-// push not yet delivered by another path. The implementer's h0..h1 is delivered twice, so the
-// second delivery is the move's repeat; the branch returns to h0, and the review App pushes h0..hx
-// and hx..h1, hx never synchronized. Delivered before h1 arrives, those pushes are h1's chain, the
-// review App's planned red. Delivered after, h1 has already been judged by the repeat, the
-// implementer's code, and no run waits for them. Main judged both orders alike, through a head run,
-// but left a run open on every move made again; the move made again is the common case. Pinned so
-// a change to it is deliberate.
-func TestARepeatStandsForAPushNotYetDeliveredByAnotherPath(t *testing.T) {
-	red := record.PullRequest{HeadSHA: "h0", CheckedHead: "h0", Failing: []string{"ci"}, Required: []string{"ci"},
-		CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, FixAttempts: 1}
-	code, back := record.ClassifiedPush{SHA: "h1", Before: "h0"}, record.ClassifiedPush{SHA: "h0", Before: "h1", Forced: true}
-	tests, onto := record.ClassifiedPush{SHA: "hx", Before: "h0", ByReviewApp: true}, record.ClassifiedPush{SHA: "h1", Before: "hx", ByReviewApp: true}
-	deliverAll := func(facts ...runFact) record.PullRequest {
-		pr := red
-		for _, f := range facts {
-			pr = stored(t, deliver(f, pr))
-		}
-		return pr
-	}
-	start := []runFact{pushed(code), arrives("h1"), settles("h1", 2, "ci"), pushed(code), pushed(back), arrives("h0"), settles("h0", 3, "ci")}
-	first := deliverAll(append(append([]runFact{}, start...), pushed(tests), pushed(onto), arrives("h1"))...)
-	if first.Run != nil || first.FixAttempts != 3 || !first.PlannedRed {
-		t.Errorf("the review App's pushes before h1: run open %v, fix=%d planned=%v, want no run, 3 and planned", first.Run != nil, first.FixAttempts, first.PlannedRed)
-	}
-	after := deliverAll(append(append([]runFact{}, start...), arrives("h1"), pushed(tests), pushed(onto))...)
-	if after.Run != nil || after.FixAttempts != 4 || after.PlannedRed {
-		t.Errorf("the review App's pushes after h1: run open %v, fix=%d planned=%v, want no run, 4 and unplanned: h1 judged by the repeat", after.Run != nil, after.FixAttempts, after.PlannedRed)
 	}
 }
 

@@ -43,14 +43,14 @@ func runStep(pr record.PullRequest, step record.RunStep) record.PullRequest {
 }
 
 // replayRun replays pr's open run: its steps from its anchor, with the run's pushes and every push
-// the pull request holds that carries an approval across - which no fact drops (unspentPushes), so
+// the pull request holds that carries an approval across - which no fact drops (keptPushes), so
 // the run does not keep a copy of them - less every push whose move the anchor had already made: a
 // push redelivered after its move was judged before the run opened is spent there, as it is when
-// it arrives first, and its move keeps it (pushedMoves). The run stays open from its first head
-// judged with no chain of pushes, its anchor the judgement before that head, and closes when there
-// is none; past maxRunSteps its oldest steps fold into the anchor too. The pull request keeps its
-// own pushes. BlockedAttempts is what was reported, so it stays, unless the count it reported is
-// no longer reached, as when a count is taken back.
+// it arrives first. The run stays open from its first head judged with no chain of pushes, its
+// anchor the judgement before that head, and closes when there is none; past maxRunSteps its oldest
+// steps fold into the anchor too. The pull request keeps its own pushes. BlockedAttempts is what
+// was reported, so it stays, unless the count it reported is no longer reached, as when a count is
+// taken back.
 func replayRun(pr record.PullRequest) record.PullRequest {
 	run, live := pr.Run, pr.Pushes
 	blocked := pr.BlockedAttempts
@@ -60,9 +60,6 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 		if carriesApproval(p) {
 			at.Pushes = withPush(at.Pushes, p)
 		}
-	}
-	for _, p := range at.Pushes {
-		at.Moves = pushedMoves(at.Moves, p)
 	}
 	at.Pushes = unspentPushes(at.Pushes, at.Moves, false)
 	type state struct {
