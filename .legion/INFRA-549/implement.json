@@ -2,10 +2,26 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-549",
-  "completed": "2026-10-27T07:34:15Z",
+  "completed": "2026-10-27T08:40:52Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2371",
-  "headSha": "e0040d229bba89bf903069f8f4b12ff12f04779f",
+  "headSha": "22e1c3aef576556ee672cb14e2c97539495ca0f6",
   "proof": [
+    {
+      "criterion": "Review finding 1 (thread PRRT_kwDORFy7ds6wmI-h): a change of the file store's limit must not leave the servers refusing every later reload, a users change's included; users are applied by the reloader and the pods roll for what nats-server cannot reload.",
+      "surface": "Three local nats-server v2.15.1 processes with the real reloader and exporter on the helm v3.20.2 render of the component's values, and the component under Pulumi mocks",
+      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ (https://github.com/sjawhar/legion/pull/2371#issuecomment-6437362977); go test -count=1 -run TestClusteredNatsHubRollsThePodsOnlyForASessionUserOrStoreChange ./gcp/",
+      "observed": "ok. (f) envoy-nats-0 refused the reload of a lower max_file_store ('config reload not supported for decreasing jetstream max memory and store') and with it the users change written beside it (live-added refused); restarted, it admitted live-added. The render pins the pod annotations no-auth-user and max-file-store; on the mocks maxFileStoreGb 8 changes the annotation to 8Gi beside maxSize and nothing else, and a users change still changes only auth.conf.",
+      "headSha": "22e1c3aef576556ee672cb14e2c97539495ca0f6",
+      "negativeControl": "go test -overlay with the max-file-store annotation removed from clusteredHubChartValues -> the roll test fails: expected \"9Gi\", actual <nil>."
+    },
+    {
+      "criterion": "Review finding 2 (thread PRRT_kwDORFy7ds6wmI-o): the tailnet advertiser exits on SIGTERM, so a host pod does not wait out its 60 s grace period.",
+      "surface": "The rendered advertiser script under /bin/sh (dash) and ENVOY_TEST_SHELL=bash with a real 30 s sleep",
+      "command": "cd packages/envoy/infra && go test -count=1 -run TestTailnetService ./gcp/ && ENVOY_TEST_SHELL=bash go test -count=1 -run TestTailnetService ./gcp/",
+      "observed": "ok under both shells; TestTailnetServiceAdvertiserExitsOnSIGTERM: SIGTERM mid-wait gives exit status 0 at once. The PID-1 drop is Linux's (pid_namespaces(7)); this pod's gVisor kernel delivers it anyway, so an unshare -Urpf run here exited for the old script too and cannot show the before.",
+      "headSha": "22e1c3aef576556ee672cb14e2c97539495ca0f6",
+      "negativeControl": "go test -overlay without the trap -> 'signal: terminated'; with the trap but a foreground sleep -> exits after 29.99 s."
+    },
     {
       "criterion": "A change of the no-credential session user rolls the pods onto the new session user (spec: \"a change of the no-credential session user rolls the pods one at a time\"); the tester observation that the chart StatefulSet and ConfigMap had no order.",
       "surface": "The plugin built at this head through the real Pulumi engine (CLI v3.268.0) on the README program (tailnet, priority class, session user) against a local kube-apiserver v1.33.0 + etcd (envtest binaries, RBAC on) with the namespace, PriorityClass, PodMonitoring CRD and seed Secret applied; and the helm v3.20.2 render of the vendored chart",
@@ -51,7 +67,10 @@
     "packages/envoy/infra/provider/provider.go, provider_test.go: registration and schema test",
     ".github/workflows/envoy-and-contracts.yaml: natslive step runs ./gcp/ with -timeout 30m; .gitignore: tracks the vendored chart",
     "packages/envoy/infra/README.md, AGENTS.md, docs/nats-hub.md, .dispatch/architecture/envoy.md, docs/site/src/content/docs/dispatch/envoy.md, packages/envoy/CHANGELOG.md",
-    "packages/envoy/infra/gcp/clusteredhub_kube.go, clusteredhub_kube_test.go, clusteredhub_live_test.go, README.md, docs/nats-hub.md: the StatefulSet carries config.kubernetes.io/depends-on naming the chart ConfigMap <name>-config (round 2)"
+    "packages/envoy/infra/gcp/clusteredhub_kube.go, clusteredhub_kube_test.go, clusteredhub_live_test.go, README.md, docs/nats-hub.md: the StatefulSet carries config.kubernetes.io/depends-on naming the chart ConfigMap <name>-config (round 2)",
+    "packages/envoy/infra/gcp/tailnet_service.go, tailnet_service_test.go: advertiser trap and nap (round 3; sent to INFRA-560 to copy byte for byte)",
+    "packages/envoy/infra/gcp/clusteredhub_kube.go, clusteredhub_kube_test.go, clusteredhub_live_test.go, clusteredhub_tailnet.go, testdata/clustered-hub-tailnet-pod.golden: store-limit annotation, live phase (f), grace comment (round 3)",
+    "packages/envoy/infra/README.md, docs/nats-hub.md, packages/envoy/CHANGELOG.md: what rolls the pods; the listener build INFRA-557's take-over requires (round 3)"
   ],
   "trickyParts": [
     "Chart children are not registered under Pulumi mocks, so the chart's values are pinned by mock tests and their effect by the natslive helm render; the StatefulSet's Protect transform is tested by calling it directly.",
@@ -70,5 +89,6 @@
   "openQuestions": [
     "The README's disk-growth procedure (orphan-delete the StatefulSet, state delete, recreate) and the PromQL for fewer than three current copies are documented from Kubernetes and exporter behaviour but not exercised on a cluster; the live proof on GKE is dispatch://INFRA-551's."
   ],
-  "round": 2
+  "round": 3,
+  "reviewRound": 1
 }
