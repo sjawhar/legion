@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -245,6 +246,47 @@ func TestListenerPermissionsRefuseTheSubscriptionToEveryTopicOnRealServers(t *te
 			logged := violationsOnceLogged(t, server, "notifications.>")
 			require.Len(t, logged, 1, "the server refused more than the subscription: %q", logged)
 			require.Equal(t, []string{"Subscription", "notifications.>"}, logged[0][1:], logged[0][0])
+		})
+	}
+}
+
+// A user holding ListenerPermissions alone opens the listener state bucket as the listener does,
+// creating it on first use with one value per key and a 10 minute age, finds it on a second open,
+// and takes, renews and releases its machine's delivery lease there, on the 2.10 image and on the
+// hub's. Every allowed operation comes first, so the refused publish after them is the only
+// violation the server logs.
+func TestListenerPermissionsOpenTheListenerStateBucketOnRealServers(t *testing.T) {
+	for _, image := range testnats.Images {
+		t.Run(image.Name, func(t *testing.T) {
+			t.Parallel()
+			seed, server, uri := startGrantServer(t, image.Ref, core.ListenerPermissions(liveMachineID))
+			conn, errs := connect(t, uri, seed)
+			js, err := conn.JetStream()
+			require.NoError(t, err)
+			config := &natsgo.KeyValueConfig{
+				Bucket: bus.ListenerStateBucket, History: 1, TTL: 10 * time.Minute, Storage: natsgo.FileStorage,
+			}
+			_, err = bus.EnsureKeyValue(js, config)
+			require.NoError(t, err, "create the %s bucket", bus.ListenerStateBucket)
+			kv, err := bus.EnsureKeyValue(js, config)
+			require.NoError(t, err, "open the existing %s bucket", bus.ListenerStateBucket)
+
+			lease := "lease." + bus.ListenerDurable(liveMachineID)
+			taken, err := kv.Create(lease, []byte(`{"holder":"box-a","boot":"0123456789abcdef"}`))
+			require.NoError(t, err, "take the lease")
+			renewed, err := kv.Update(lease, []byte(`{"holder":"box-a","boot":"0123456789abcdef"}`), taken)
+			require.NoError(t, err, "renew the lease")
+			_, err = kv.Update(lease, []byte(`{"holder":"box-a","boot":"0123456789abcdef","released":true}`), renewed)
+			require.NoError(t, err, "release the lease")
+			entry, err := kv.Get(lease)
+			require.NoError(t, err, "read the lease")
+			require.JSONEq(t, `{"holder":"box-a","boot":"0123456789abcdef","released":true}`, string(entry.Value()))
+
+			require.NoError(t, conn.Publish("outside.example", nil))
+			requireViolation(t, conn, errs, `Publish to "outside.example"`)
+			for _, v := range violationsOnceLogged(t, server, "outside.example") {
+				require.Equal(t, "outside.example", v[2], "the server refused what the grant should allow: %s", v[0])
+			}
 		})
 	}
 }

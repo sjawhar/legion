@@ -169,9 +169,9 @@ var listenerSignals = []struct {
 	{
 		alarm: "subscribe-exhausted", metric: "SubscribesExhausted",
 		filters: [][2]string{
-			{"subscribe-exhausted-filter", `{ $.level = "ERROR" && $.msg = "subscribe failed after max attempts, shutting down" }`},
+			{"subscribe-exhausted-filter", `{ $.level = "ERROR" && $.msg = "lease holder cannot deliver from the durable" }`},
 		},
-		description: "An Envoy listener start gave up setting up its durable subscription 135 s after its first attempt (`subscribe failed after max attempts, shutting down`). ECS had already stopped the old task, so every replacement exits 1 the same way once its own bind gives up. Read the line's `error` in /ecs/envoy-listener: `consumer is already bound to a subscription` means something still holds the durable's push binding (find it with `nats consumer info ENVOY_NOTIFICATIONS listener-<machine id>`, push_bound, and stop it); any other error is JetStream failing the consumer lookup, create or update.",
+		description: "An Envoy listener holding its machine's delivery lease has waited 135 s or more to receive from its durable consumer, which another subscriber holds push-bound (`lease holder cannot deliver from the durable`); it logs the line again every 5 min while that lasts and never exits for it, and until the binding ends nothing on the machine's durable reaches its sessions. The other subscriber is usually a listener build from before the delivery lease still running (a roll onto this build whose old task has not stopped). Read the line's `consumer` and `waited_ms` in /ecs/envoy-listener, find the binding with `nats consumer info ENVOY_NOTIFICATIONS listener-<machine id>` (push_bound) and stop the process holding it; the holder subscribes within a second of the binding's end.",
 	},
 }
 

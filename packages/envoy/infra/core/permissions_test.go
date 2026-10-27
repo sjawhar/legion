@@ -56,6 +56,14 @@ var listenerPublish = []string{
 	"$JS.API.CONSUMER.CREATE.KV_envoy_ci_state.>",
 	"$JS.API.CONSUMER.DELETE.KV_envoy_ci_state.>",
 	"$JS.FC.KV_envoy_ci_state.>",
+	"$JS.API.STREAM.INFO.KV_envoy_listener",
+	"$JS.API.STREAM.CREATE.KV_envoy_listener",
+	"$JS.API.DIRECT.GET.KV_envoy_listener.>",
+	"$JS.API.STREAM.MSG.GET.KV_envoy_listener",
+	"$KV.envoy_listener.>",
+	"$JS.API.CONSUMER.CREATE.KV_envoy_listener.>",
+	"$JS.API.CONSUMER.DELETE.KV_envoy_listener.>",
+	"$JS.FC.KV_envoy_listener.>",
 	"$JS.API.STREAM.PURGE.KV_envoy_interests",
 }
 
