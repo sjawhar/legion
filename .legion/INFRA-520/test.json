@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-520",
+  "completed": "2026-10-27T10:08:00Z",
+  "headTested": "ada64e82efba5f1018f9566084e83ad927b2d353 (code head 6b0588e3a8267b38b1e47d2b869eafcb0164ec2e)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Read every run, job and check run the proof cites through the Actions API. Criterion 1: runs on legion/INFRA-520 from 03:00Z to 10:00Z are CI runs only at the pushes (6467a0a7 04:18:11Z, 2382ac4e 07:49:08Z, 6b0588e3 08:42:06Z); the title/body edits at 04:24Z started only PR Title runs 40449549778 and 40449555048. Criterion 4: draft run 40449276647 has one job, ci-ok, failure, annotation 'Draft pull request: no test job runs. Mark it ready for review to start them.'; ready run 40455068939 ran changes (success) and then docs and lint. Criterion 6: run 40449420711 attempt 2, worker-image / build on a runner from 07:38:57Z, cancelled at 07:40:26Z, after head B 282fba33 (run 40468449754). Final job: ci-ok check runs 122068041847 ('envoy-plugin ended failure'), 122082333771 ('envoy-e2e-local ended cancelled'), 122062686310 ('lint ended failure' and 'changes ended failure'), all conclusion failure; whole-run cancellations (40449412482, 40448983432, 40469412329) leave ci-ok cancelled, never skipped or success. Criterion 8: live GET rulesets/12331919 vs the handoff putBody: name, target, enforcement, conditions and every rule but required_status_checks/merge_queue are equal (diff empty); required checks lint/typecheck/test/pr-title become ci-ok/pr-title, integration 15368; merge_queue added with SQUASH, the only method the live pull_request rule allows. Workflow syntax: actionlint v1.7.7 over ci.yaml, worker-image.yaml, pr-title.yaml exit 0. dispatch-memory's left-out guides: memory_profile_test.go:125-128 skips the test unless DISPATCH_EDIT_PROFILE_OUT is set, and no workflow sets it. dorny/paths-filter ceb8a2b8 src/main.ts: merge_group diffs merge_group.base_sha..head_sha, a push to main diffs from the push's before sha."
+  },
+  "failures": [
+    {
+      "criterion": "The pull request can be tested and merged at its head: GitHub reports #2316 CONFLICTING, so no CI run starts at any new head, and a change main merged into a workflow this PR deletes is lost",
+      "evidence": "`gh pr view 2316 -R sjawhar/legion --json mergeable,mergeStateStatus` at 09:50Z prints CONFLICTING/DIRTY at head ada64e82. main 719aae24 (#2167, merged 09:43Z) edits .github/workflows/envoy-and-contracts.yaml, which this PR deletes: a trial `jj new main@origin ada64e82` lists only that file in conflict ('2-sided conflict including 1 deletion'). #2167 sets envoy-go-race's timeout-minutes 45 -> 75 (with its comment) and adds the step 'Race-test the listener, the registry store and kvwatch' (`go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...`). ci.yaml's envoy-go-race job (ci.yaml:1995-2026) still has timeout-minutes 45 and one race step. Fix: merge main into legion/INFRA-520 (forward merge), port both changes into ci.yaml's envoy-go-race job, re-run coverage.py for envoy_go_race and envoy_e2e_local (#2167 also changed packages/envoy/scripts/e2e-local.sh's reads), push, and cite a CI run at the new head. Also: no CI run of this PR's own head has completed: every CI run on legion/INFRA-520 ended cancelled (40442352413, 40448983432, 40469412329) and run 40475336303 at 6b0588e3 was still queued at 10:00Z, so no green ci-ok at a head of this PR exists yet. No repository test pins this: it is GitHub's merge state."
+    },
+    {
+      "criterion": "Public text names no private host (AGENTS.md: this repository is public; check-pr-text.sh runs in ci.yaml's lint job and in pr-title.yaml)",
+      "evidence": "The PR body's line 34 (the E2E (implementer) line) links the coverage artifact by a Tailscale MagicDNS host (https://dispatch.<tailnet>.ts.net/...). `gh api repos/sjawhar/legion/pulls/2316 | jq '{pull_request: .}' > event.json && GITHUB_EVENT_PATH=event.json GITHUB_REPOSITORY=sjawhar/legion .github/scripts/check-pr-text.sh` exits 1: '::error file=body,line=34::body:34: names a Tailscale MagicDNS host'. So lint (and pr-title on the next edit) goes red at the next run, and ci-ok with it. Fix: cite the artifact as dispatch://INFRA-520/artifact/infra-520-coverage-tar-gz with no https link to the tailnet host. The existing check-pr-text.sh is the red test; no new test is needed."
+    }
+  ],
+  "failed": 2,
+  "proof": [],
+  "notTested": "Criteria 3, 5, 7, 9's after-values and the merge-queue rows are production-check rows. Criterion 2's coverage script and the checker tests were not re-run: the port changes envoy_go_race's step set, so coverage must be re-run at the merged head, and the checker tests are the test job's lane, which has not run at any head."
+}
