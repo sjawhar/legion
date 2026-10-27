@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-528",
+  "completed": "2026-10-27T10:30:00Z",
+  "testedHead": "7666a94db808b46e37f433d1fc084d0a1c95d5bb (code head f83f2681b7bcff5e0c36ea6dd111ab1fae271f05, merge of main 1b8d5c13)",
+  "rebaseCheck": "rebase re-check 54d81fe8 → 7666a94d: fingerprint unchanged, bare gates only. Computed by me with conflicts-and-rewrites.md's command (fileset '~(.legion | docs/solutions)'): b63ce8e7983b34ad2747e73f90f461b31ce90c6881653c516820dd70ec4592fb at both heads; the two fingerprint inputs are byte-identical (1,828 lines each, `cmp` equal). `git merge-tree` of 7666a94d with the current main@origin: clean.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Recomputed its fingerprint from my own last verified head 54d81fe8 instead of its pre-merge tip, and got the same value it reports (b63ce8e7…, unchanged); the merge brings nothing into packages/dispatch or packages/proof-editor."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "Bare gates after a conflict-forced merge with an unchanged diff: the smoke check of the changed surface at the new head",
+      "surface": "Dispatch Conversation and Inbox against the real Go Dispatch server and Postgres 17 + pgvector, Desktop Chrome",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts --project chromium",
+      "observed": "8 passed (55.1s)",
+      "headSha": "7666a94db808b46e37f433d1fc084d0a1c95d5bb",
+      "negativeControl": "Round 1: the same spec at the red commit ecc18ff3 failed every drawing row and the refusal row (24 failed, 4 passed across four projects)."
+    }
+  ],
+  "ci": "At 7666a94d on GitHub when read (10:25Z): build pending/queued, changes, lint, pr-title, test, typecheck queued (one earlier pr-title cancelled); no lane concluded, so CI green at the new head is not yet shown. f83f2681 has no runs (pushed with the handoff). A required red that settles sends the issue back from wherever it stands."
+}
