@@ -263,7 +263,11 @@ on a 2-vCPU pod. It does these steps:
      has 4 anchored and 4 plain root comments.
    - The route of each issue, in key order: issue i goes to session `ses-lg-<i>` (4 digits). Thus
      no step spends its warm-up on route changes.
-3. It waits until the outbox publishes every seed event (at most 900 s), then stops Dispatch.
+3. It waits until the outbox publishes every seed event (at most 900 s). Then it waits until
+   Dispatch's block-index backfill owes nothing (`document_block_versions` with a null version and
+   `block_grammar_owed` both empty, at most 900 s; a build older than migration 0121 has neither
+   table and skips this wait). Then it stops Dispatch. A seed that still owed the backfill would
+   give every step about 100 s of it in its window: Dispatch indexes 20 documents every 2 s.
 4. It runs `vacuum analyze`, then installs the commit-time trigger (`loadgen trigger-sql`).
 5. It writes `seed.meta.json` and renames the database to `dispatch_seed`, the template.
 
@@ -311,12 +315,17 @@ hold this package.
 A newer build migrates the restored copy forward when Dispatch starts. An older build cannot start
 on a seed that a newer build made. `run-step.sh` compares the highest migration file in the
 checkout (`packages/envoy/internal/dispatch/store/migrations`) with `seed.meta.json`. It refuses a
-build that is older than the seed, and names both levels. `meta.json` records the build commit and
-whether the tree had uncommitted changes.
+build that is older than the seed, and names both levels. For a build that is newer than the seed,
+it prints a note: a backfill that the new migrations start runs inside each step of that build.
+For example, a build at migration 0128 on a seed at 0120 indexes the blocks of all 1,000 specs in
+every step. To measure one build alone, seed with it (`stack.sh seed --force`). `meta.json`
+records the build commit and whether the tree had uncommitted changes.
 
-Committed rate at 1x varied from run to run on one build: 1.23 to 2.14 events/s in the
-2026-10-27 runs, with the commit-order lock held 100% of the time in every run. So a before and
-after compares several runs of each side, not one run of each.
+Committed rate at 1x varied from run to run on one build: 0.34 to 2.14 events/s in the
+2026-10-27 runs, with the commit-order lock held 100% of the time in every run. In the runs that
+recorded `box_busy_before`, it was at most 7%. It sees only this pod's CPU: other pods on the same
+node are not in `/proc/stat`. So a before and after compares several runs of each side, not one run
+of each.
 
 ## The load
 

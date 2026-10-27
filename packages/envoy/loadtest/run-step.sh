@@ -99,6 +99,10 @@ seed_level=$(jq -er .migration "$ROOT/seed.meta.json")
 if ((build_level < seed_level)); then
   die "this build's highest migration is $build_level ($migrations/$build_file), older than the seed's $seed_level (seed made by $(jq -r .build_commit "$ROOT/seed.meta.json")); reseed with this build (stack.sh seed --force) or run a newer one"
 fi
+if ((build_level > seed_level)); then
+  printf 'run-step.sh: note: the seed is at migration %s and this build at %s. Dispatch migrates the step'"'"'s copy forward at start, and any backfill those migrations start runs inside the step; reseed with this build (stack.sh seed --force) to measure it alone\n' \
+    "$seed_level" "$build_level" >&2
+fi
 
 build_info=$("$stack" build-info)
 read -r commit dirty <<<"$build_info"

@@ -535,6 +535,21 @@ cmd_seed() {
     ((SECONDS < deadline)) || die "the outbox still holds $pending unpublished events after 900 s; see $LOGS/dispatch-seed.log"
     sleep 2
   done
+  # Dispatch's block-index backfill (internal/dispatch/docs/block_index.go, migrations 0121-0126)
+  # indexes 20 owed documents a tick in the background. A seed that still owes it would hand every
+  # step about 100 s of that backfill, inside its window; production in steady state owes none.
+  # The tables do not exist in a build older than 0121, which owes nothing; Postgres resolves every
+  # table a statement names before it runs, so the existence check is its own query.
+  if [ "$(sql dispatch "select to_regclass('public.document_block_versions') is not null and to_regclass('public.block_grammar_owed') is not null")" = t ]; then
+    note "waiting for Dispatch's block-index backfill to finish"
+    deadline=$((SECONDS + 900))
+    while :; do
+      pending=$(sql dispatch 'select (select count(*) from document_block_versions where version is null) + (select count(*) from block_grammar_owed)')
+      [ "$pending" = 0 ] && break
+      ((SECONDS < deadline)) || die "Dispatch still owes $pending block-index entries after 900 s; see $LOGS/dispatch-seed.log"
+      sleep 2
+    done
+  fi
   stop_one dispatch
   trap - EXIT
 
