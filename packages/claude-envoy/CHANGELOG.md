@@ -36,6 +36,11 @@
 
 ### Changed
 
+- Pull requests no longer commit `dist/` and `legion/`: main's Rebuild Claude Envoy plugin
+  workflow commits them after each merge, so main's files lag its sources by one run.
+  `scripts/build.ts` takes `--in-place`, `--check` or `--out <dir>` (a runnable copy of the plugin
+  in a new or empty directory outside the repository) and refuses a run that names no mode
+  (INFRA-630).
 - The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`:
   `GET /legion/v1/state` gains the phase `awaiting_person`, a root that gave its admission slot up
   while its architect waits on a person's answer, and the issue field `waitingOn`, naming the

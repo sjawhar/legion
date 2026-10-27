@@ -20,7 +20,9 @@
 #   3. a private host below `.internal.`, in any case. A reserved example host (`<name>` then
 #      `.internal.example`, optionally `.com`, `.net` or `.org`) passes, and so does the NATS
 #      client's own `this` property of that name in the one bundle that vendors it
-#      (packages/claude-envoy/dist/envoy-channel.js), and nowhere else;
+#      (packages/claude-envoy/dist/envoy-channel.js, which reaches this check on main and in the
+#      two jobs that build it, the rebuild workflow's and the claude-envoy job, never in a pull
+#      request's diff), and nowhere else;
 #   4. a Tailscale MagicDNS host — a DNS label then `.ts.net`, in any case, with no letter or
 #      digit after it. A reserved tailnet name (`example-tailnet`, under any machine name of its
 #      own in front) passes.

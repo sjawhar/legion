@@ -227,9 +227,10 @@ EOF
 }
 
 # start_daemon runs the Go daemon with the run's Claude Code launch pinned: the claude and bun it
-# resolved here, and this checkout's claude-envoy package, whose dist/envoy-channel.js is every
-# Claude Code pane's MCP server and whose legion/ is the Legion plugin the pane loads. Its port is
-# kept, so each poll of it carries a timeout: until the daemon serves, a request waits unanswered.
+# resolved here, and the claude-envoy plugin built from this checkout into the run's work directory,
+# whose dist/envoy-channel.js is every Claude Code pane's MCP server and whose legion/ is the Legion
+# plugin the pane loads. Its port is kept, so each poll of it carries a timeout: until the daemon
+# serves, a request waits unanswered.
 start_daemon() {
   keep_port daemon_keeper port_daemon
   write_legion_config
@@ -239,7 +240,7 @@ start_daemon() {
     env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
     -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" -u ANTHROPIC_API_KEY \
     HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" \
-    LEGION_CLAUDE_PATH="$claude_bin" LEGION_BUN_PATH="$realbin/bun" LEGION_CLAUDE_PLUGIN_DIR="$root/packages/claude-envoy" \
+    LEGION_CLAUDE_PATH="$claude_bin" LEGION_BUN_PATH="$realbin/bun" LEGION_CLAUDE_PLUGIN_DIR="$work/claude-envoy" \
     "$work/legion" start --config "$work/legion.yaml"
   await_start daemon "$daemon_pid" 180 "the Go daemon to answer /healthz" \
     curl -fsS --max-time 5 "http://127.0.0.1:$port_daemon/healthz"
@@ -598,6 +599,9 @@ start_dispatch
 dispatch_human POST projects "$(jq -cn --arg key "$project" --arg name "Claude backend proof $project" '{key:$key,name:$name}')" >/dev/null
 dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project:$project,default:true}')" >/dev/null
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
+# The claude-envoy plugin the panes load, built from this checkout outside it: a pull request's tree
+# carries no fresh dist/ or legion/ (packages/claude-envoy/scripts/build.ts --out).
+bun "$root/packages/claude-envoy/scripts/build.ts" --out "$work/claude-envoy" >/dev/null
 envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion")
 pin=$(<"$root/.omp-pin")
