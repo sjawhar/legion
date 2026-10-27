@@ -83,6 +83,32 @@ func TestReadClassifiesAnUnknownYjsElement(t *testing.T) {
 	}
 }
 
+// Stored markdown can hold an element a newer build wrote too: a stored version's markdown is that
+// build's rendering. Its read-back classifies a typed block this build's manifest does not name, an
+// attribute a typed block does not declare, and a value its enum attribute does not list as
+// ErrUnknownElement, as the reader of a stored tree does. A known typed block in a broken shape
+// stays ErrSchema alone.
+func TestParseRenderingClassifiesAnUnknownTypedBlockElement(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		markdown string
+		unknown  bool
+	}{
+		{"an unknown typed block", ":::future_block{#b1}\nBody.\n:::\n", true},
+		{"an attribute the typed block does not declare", ":::callout{#b2 kind=\"note\" title=\"T\" icon=\"star\"}\nBody.\n:::\n", true},
+		{"a value the enum does not list", ":::callout{#b3 kind=\"danger\" title=\"T\"}\nBody.\n:::\n", true},
+		{"an unknown typed block inside a known one", "::::callout{#b4 kind=\"note\" title=\"T\"}\n:::future_block{#b5}\nBody.\n:::\n::::\n", true},
+		{"a bool attribute that is not true or false", ":::ask{#b6 urgency=\"med\" multiple=\"maybe\"}\nWhich one?\n:::\n", false},
+		{"an unclosed typed block", ":::callout{#b7 kind=\"note\" title=\"T\"}\nBody.\n", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := ParseRendering(test.markdown); !errors.Is(err, ErrSchema) || errors.Is(err, ErrUnknownElement) != test.unknown {
+				t.Fatalf("ParseRendering() = %v, want ErrSchema, and ErrUnknownElement %t", err, test.unknown)
+			}
+		})
+	}
+}
+
 func TestEqualIgnoresAttrKeyOrder(t *testing.T) {
 	a := &Node{Type: "text", Text: "x", Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "h", "title": nil}}}}
 	b := &Node{Type: "text", Text: "x", Marks: []Mark{{Type: "link", Attrs: Attrs{"title": nil, "href": "h"}}}}
