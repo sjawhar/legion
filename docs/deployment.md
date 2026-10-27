@@ -253,7 +253,8 @@ the same refusals:
   A checkout of a commit on `main`, never of a branch, already holds both (`AGENTS.md`, "Deploys
   come only from main"): main's Rebuild Claude Envoy plugin workflow commits them after each merge.
   `bun run check-dist` in that package confirms them, and `bun scripts/build.ts --in-place` there
-  refreshes a checkout taken in the minutes before the rebuild commit.
+  refreshes a checkout taken after a merge and before its rebuild commit (one run of that
+  workflow, its runner queues included).
 
 A missing one refuses the boot, naming every gap in one line. The daemon names no model for Claude
 Code. Its key reaches it the way an Oh My Pi pane's does: `provider_keys` (for example

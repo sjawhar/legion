@@ -116,9 +116,15 @@ Dispatch asks stay on Dispatch.
   own marketplace. `claude -p` has no interactive plan approval, multiple-choice,
   or consent surfaces; workers need pre-approved configuration.
 - A pull request never commits `dist/` or `legion/`. Main's Rebuild Claude Envoy plugin workflow
-  (`.github/workflows/claude-envoy-rebuild.yaml`) commits them after each merge, so main's files
-  lag its sources by one run (minutes). A pull request that already carries changes there drops
-  them at its next merge of main with
+  (`.github/workflows/claude-envoy-rebuild.yaml`) commits them after each merge, so main's built
+  files lag its sources by one run of that workflow, runner queues included: its build job and
+  its push job each wait for a runner, which can take more than an hour when the Actions queue is
+  long. The hand-written plugin files (`hooks/hooks.json`, `.mcp.json`, `bin/`,
+  `.claude-plugin/`) go live at the merge, beside the previous build, so a change that makes one
+  of them name a new or renamed bundle is broken on main until the rebuild lands: add the bundle
+  in one pull request and the entry that runs it in a later one, once the rebuild commit is on
+  main. A pull request that already carries changes under `dist/` or `legion/` drops them at its
+  next merge of main with
   `jj -R "$LEGION_WORKSPACE" restore --from main@origin packages/claude-envoy/dist packages/claude-envoy/legion`.
   To run the plugin from a tree, build it with `bun scripts/build.ts --out <dir>` into a directory
   outside the repository. A reviewer asks for any change under the two directories to be dropped.

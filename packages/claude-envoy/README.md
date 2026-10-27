@@ -255,14 +255,19 @@ every third-party package they inline, written from Bun's metafile by
 
 - Main's tree carries the bundles and `legion/`; a pull request never commits them. Main's Rebuild
   Claude Envoy plugin workflow (`.github/workflows/claude-envoy-rebuild.yaml`) builds main's tip
-  after each merge and commits `dist/` and `legion/` when they differ, so main's files lag its
-  sources by one run (minutes). `scripts/build.ts` takes exactly one mode and refuses a run that
-  names none (exit 2): `--in-place` rewrites the package's own `dist/` and `legion/` (that
-  workflow's build, `bun run build -- --in-place`); `--check` (`bun run check-dist`) builds into
-  a scratch directory and fails when the committed files differ from it; `--out <dir>` makes a
-  new or empty directory outside the repository a runnable copy of the plugin built from the tree
-  (its manifests, `.mcp.json`, `bin/`, `hooks/`, `package.json` and skills, the skill links
-  dereferenced, with a fresh `dist/` and `legion/`), which is how to run an unmerged tree.
+  after each merge and commits `dist/` and `legion/` when they differ, so main's built files lag
+  its sources by one run of that workflow, its two jobs' runner queues included (more than an
+  hour when the Actions queue is long). In that window `hooks/hooks.json`, `.mcp.json`, `bin/`
+  and `.claude-plugin/` from the merge are live beside the previous build, so an install then gets
+  a hook or server entry that names a bundle the previous build lacks; add a bundle in one pull
+  request and the entry that runs it in a later one. `scripts/build.ts` takes exactly one mode
+  and refuses a run that names none (exit 2): `--in-place` rewrites the package's own `dist/` and
+  `legion/` (that workflow's build, `bun run build -- --in-place`); `--check` (`bun run
+  check-dist`) builds into a scratch directory and fails when the committed files differ from it;
+  `--out <dir>` makes a new or empty directory outside the repository a runnable copy of the
+  plugin built from the tree (its manifests, `.mcp.json`, `bin/`, `hooks/`, `package.json` and
+  skills, the skill links dereferenced, with a fresh `dist/` and `legion/`), which is how to run
+  an unmerged tree.
 - The build is `Bun.build`, target `bun`, `minify: false`, no sourcemap, notices included. Minification is off entirely, not case by case: the partial-disable form (`{whitespace: false, identifiers: false, syntax: false}`) still routes through Bun 1.3.14's minifying code-generation path, which picks a non-deterministic CJS/ESM interop check on repeated builds of this exact module graph — on top of the syntax minifier's own separate bug, truncating constant-folded multi-operand string concatenation in CI builds, that made the partial form necessary before this. A plain `false` bypasses that whole path; whitespace and identifiers stay readable as a side effect, so independent changes still merge at line level.
 - Every mode builds only on the Bun version pinned in the repo-root `.bun-version`, because
   the bundler's own output depends on the exact Bun build, not only the declared version. Two

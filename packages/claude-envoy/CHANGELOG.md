@@ -37,7 +37,9 @@
 ### Changed
 
 - Pull requests no longer commit `dist/` and `legion/`: main's Rebuild Claude Envoy plugin
-  workflow commits them after each merge, so main's files lag its sources by one run.
+  workflow commits them after each merge, so main's built files lag its sources by one run of
+  that workflow, runner queues included, while the merge's hand-written files (`hooks/hooks.json`,
+  `.mcp.json`, `bin/`) are live at once beside the previous build.
   `scripts/build.ts` takes `--in-place`, `--check` or `--out <dir>` (a runnable copy of the plugin
   in a new or empty directory outside the repository) and refuses a run that names no mode
   (INFRA-630).
