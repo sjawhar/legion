@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-562",
+  "completed": "2026-10-27T12:23:16Z",
+  "round": 1,
+  "reviewedHead": "750061928f0e1838a333de80030928a1deeb97ee",
+  "codeHead": "125a3bfb0484c48e70407bd5c7fb5258a1fc003f",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 6,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head 125a3bfb0484 (compare to 75006192: handoffsOnly true, 2 files). At 12:23Z: pr-title and changes success, every other lane (test, lint, typecheck, dispatch-multiprocess, envoy-go, ...) still queued. Not a gate for a request for changes; the next round reads it again.",
+  "thermonuclear": {
+    "deepReview": "Verdict: CHANGES at 75006192 (one Medium: a resumed or retried comment mention re-resolves and can reach the route holder twice)",
+    "codeQuality": "Verdict: APPROVE at 75006192 (cleanup only: comment claim-mode enum, take-over loop written three times, pacing carried on ResolvedMention)"
+  },
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/comment_delivery.go:504",
+      "description": "A routed comment's attempt 1 stored with a pre-commit resolve_error and no session (the take-over window ran out) is, after a process death in the gap before its settle, resumed by delivery-resume (or taken by a Retry): the first try sends the stored error, which is retryable, and the loop then calls mentionResolutionFor with pending=nil and resolves the mention afresh. If the session is now live it is pinned and sent under <comment>:<target>:<mode>, while the outbox already sent the comment along the route the mention did not suppress, so the route holder hears it twice. Breaks the PR's own 'one copy, not two' and mentionResolutionFor's documented rule that a resumed attempt keeps the resolution it was opened with. Needs a red-first resume-path test."
+    },
+    {
+      "severity": "important",
+      "file": "PR #2387 body",
+      "description": "No '## Contract change census', while the PR adds refusals at process boundaries: envoy-dispatch redeliver-webhooks now exits 2 without DATABASE_URL; the GitHub proxy answers 503 GITHUB_RATE_LIMITED where it answered 502 GITHUB_UPSTREAM or passed GitHub's 403 through; the agent-stream publish test hook refuses 400 FRAME_INPUT; recorded listener failure text moves from 'envoy listener: ...' to 'envoy listener answered: ...'. Each needs its search command, every hit with a disposition, and a rollout line (warn-first, or immediate refusal with the reason)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/message_delivery.go:50",
+      "description": "A same-mode Retry of a stranded direct message resumes that same pending attempt (the unbound lapsed branch of recordPendingMessageDelivery) but sends it with urgency nil, while delivery-resume sends the same attempt with the urgency migration 0130 now records. The CHANGELOG promises a resumed direct message keeps the urgency it was sent with; the Retry branch should carry the row's urgency when it resumes the same attempt."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/issue_route_status.go:142",
+      "description": "A failed read of route_roster returns an unanswered roster, so GET /api/v1/issues?route_status=live|no_holder answers 503 ENVOY_UNAVAILABLE 'the Envoy listener did not answer' for a database failure; the reply should name the database."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/githubapi/proxy.go:166",
+      "description": "Comment says the web app waits as Retry-After asks; nothing in packages/dispatch/web reads Retry-After (GitHubLink.tsx:181-184 special-cases only GITHUB_TOKEN_UNAVAILABLE)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/routes_table.go:192",
+      "description": "'The first four hooks' fan out, but the fourth route is outside-schema; the fan-out routes are the 1st, 2nd, 3rd and 5th."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/comment_delivery.go:165",
+      "description": "Cleanup: claimCreating equals claimResume{attempt: 1} in every state that changes what is sent; the message path says 'bound' with one int (resumeAttempt). One bound-attempt int would delete the enum, the struct and the 'named' mapping."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/message_delivery.go:664",
+      "description": "Cleanup: the take-over retry loop is written in message_delivery.go:664-680, comment_delivery.go:491-513 and envoy_resolve.go:239-244; one takeoverRetry method taking send and renew closures keeps a later fix in one place."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/comment_delivery.go:466",
+      "description": "Cleanup: the take-over pacing rides on ResolvedMention.takeover, so 'paced := target.takeover' must be read before line 467 reassigns target; pass it as an argument instead."
+    }
+  ]
+}
