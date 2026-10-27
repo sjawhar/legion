@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +59,40 @@ func TestParseForWriteRefusesA33rdNestedTypedBlock(t *testing.T) {
 		expectedMaxTypedNesting+1, expectedMaxTypedNesting, expectedMaxTypedNesting)
 	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), refusal) {
 		t.Fatalf("%d nested callouts: %v, want ErrSchema saying %q", expectedMaxTypedNesting+1, err, refusal)
+	}
+}
+
+// The corpus's 33 nested typed blocks are refused by every reader of caller markdown at the 33rd
+// opener's line.
+func TestCorpusOf33NestedTypedBlocksIsRefused(t *testing.T) {
+	markdown, err := os.ReadFile("testdata/corpus-errors/typed-blocks-nested-33-deep.md")
+	if err != nil {
+		t.Fatalf("read 33 nested typed blocks corpus: %v", err)
+	}
+	refusal := fmt.Sprintf("line %d opens a typed block inside %d typed blocks; a document nests at most %d typed blocks",
+		expectedMaxTypedNesting+1, expectedMaxTypedNesting, expectedMaxTypedNesting)
+	for _, reader := range blockMarkdownReaders() {
+		if _, err := reader.parse(string(markdown)); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), refusal) {
+			t.Errorf("%s of 33 nested typed blocks: %v, want ErrSchema saying %q", reader.name, err, refusal)
+		}
+	}
+}
+
+// A tree whose typed blocks nest one past the bound, as a write can leave one by landing a typed
+// block inside 32 others, is refused on read-back for how deeply its typed blocks nest, not for a
+// line of a rendering nobody wrote.
+func TestReadBackRefusalNamesTheTypedBlockNesting(t *testing.T) {
+	doc, err := ParseForWrite(nestedCallouts(expectedMaxTypedNesting), nil)
+	if err != nil {
+		t.Fatalf("%d nested callouts: %v", expectedMaxTypedNesting, err)
+	}
+	block := &Node{Type: "callout", Attrs: Attrs{"blockId": "outer", "kind": "note", "title": "T"}, Children: doc.Children}
+	refusal := fmt.Sprintf("the result nests %d typed blocks inside one another; a document nests at most %d typed blocks",
+		expectedMaxTypedNesting+1, expectedMaxTypedNesting)
+	for name, check := range map[string]func(*Node) error{"BlockReadError": BlockReadError, "BlockShapeError": BlockShapeError} {
+		if err := check(block); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), refusal) {
+			t.Errorf("%s of %d nested callouts: %v, want ErrSchema saying %q", name, expectedMaxTypedNesting+1, err, refusal)
+		}
 	}
 }
 

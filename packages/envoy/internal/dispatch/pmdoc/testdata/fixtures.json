@@ -14155,65 +14155,14 @@
           ]
         },
         {
-          "type": "callout",
+          "type": "paragraph",
           "attrs": {
-            "kind": "note",
-            "title": "T",
-            "blockId": "b1"
+            "blockId": "b-000015"
           },
           "content": [
             {
-              "type": "bullet_list",
-              "attrs": {
-                "spread": false,
-                "blockId": "b-000015"
-              },
-              "content": [
-                {
-                  "type": "list_item",
-                  "attrs": {
-                    "label": "•",
-                    "listType": "bullet",
-                    "spread": false,
-                    "checked": null,
-                    "blockId": "b-000016"
-                  },
-                  "content": [
-                    {
-                      "type": "paragraph",
-                      "attrs": {
-                        "blockId": "b-000017"
-                      },
-                      "content": [
-                        {
-                          "type": "text",
-                          "text": "a"
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            },
-            {
-              "type": "blockquote",
-              "attrs": {
-                "blockId": "b-000018"
-              },
-              "content": [
-                {
-                  "type": "paragraph",
-                  "attrs": {
-                    "blockId": "b-000019"
-                  },
-                  "content": [
-                    {
-                      "type": "text",
-                      "text": "q"
-                    }
-                  ]
-                }
-              ]
+              "type": "text",
+              "text": ":::callout{#b1 kind=\"note\" title=\"T\"} - a > q :::"
             }
           ]
         },
@@ -14221,7 +14170,7 @@
           "type": "code_block",
           "attrs": {
             "language": null,
-            "blockId": "b-000020"
+            "blockId": "b-000016"
           },
           "content": [
             {
@@ -14233,13 +14182,13 @@
         {
           "type": "table",
           "attrs": {
-            "blockId": "b-000021"
+            "blockId": "b-000017"
           },
           "content": [
             {
               "type": "table_header_row",
               "attrs": {
-                "blockId": "b-000022"
+                "blockId": "b-000018"
               },
               "content": [
                 {
@@ -14249,13 +14198,13 @@
                     "rowspan": 1,
                     "colwidth": null,
                     "alignment": null,
-                    "blockId": "b-000023"
+                    "blockId": "b-000019"
                   },
                   "content": [
                     {
                       "type": "paragraph",
                       "attrs": {
-                        "blockId": "b-000024"
+                        "blockId": "b-000020"
                       },
                       "content": [
                         {
@@ -14271,7 +14220,7 @@
             {
               "type": "table_row",
               "attrs": {
-                "blockId": "b-000025"
+                "blockId": "b-000021"
               },
               "content": [
                 {
@@ -14281,13 +14230,13 @@
                     "rowspan": 1,
                     "colwidth": null,
                     "alignment": null,
-                    "blockId": "b-000026"
+                    "blockId": "b-000022"
                   },
                   "content": [
                     {
                       "type": "paragraph",
                       "attrs": {
-                        "blockId": "b-000027"
+                        "blockId": "b-000023"
                       },
                       "content": [
                         {
@@ -14304,8 +14253,8 @@
         }
       ]
     },
-    "yjs_update_v1_b64": "AWYBAAcBC3Byb3NlbWlycm9yAwJocigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAECBgQAAQMHLSBhIC0gYigAAQIHYmxvY2tJZAF3CGItMDAwMDAyhwECAwlwYXJhZ3JhcGgHAAEMBgQAAQ0EMS4gYSgAAQwHYmxvY2tJZAF3CGItMDAwMDAzhwEMAwlwYXJhZ3JhcGgHAAETBgQAARQEMi4gYigAARMHYmxvY2tJZAF3CGItMDAwMDA0hwETAwlwYXJhZ3JhcGgHAAEaBgQAARsDPiBxKAABGgdibG9ja0lkAXcIYi0wMDAwMDWHARoDB2hlYWRpbmcHAAEgBgQAASEBaCgAASACaWQBdwAoAAEgBWxldmVsAX0BKAABIAdibG9ja0lkAXcIYi0wMDAwMDaHASADCXBhcmFncmFwaAcAASYGBAABJwQ+IHEyKAABJgdibG9ja0lkAXcIYi0wMDAwMDeHASYDCXBhcmFncmFwaAcAAS0GBAABLgVhIC0gYigAAS0HYmxvY2tJZAF3CGItMDAwMDA4hwEtAwJocigAATUHYmxvY2tJZAF3CGItMDAwMDA5hwE1AwlwYXJhZ3JhcGgHAAE3BgQAATgDLSBhKAABNwdibG9ja0lkAXcIYi0wMDAwMTCHATcDCmNvZGVfYmxvY2sHAAE9BgQAAT4DLSB4KAABPQdibG9ja0lkAXcIYi0wMDAwMTGHAT0DCXBhcmFncmFwaAcAAUMGBAABRAMtIHkoAAFDB2Jsb2NrSWQBdwhiLTAwMDAxMocBQwMJcGFyYWdyYXBoBwABSQYEAAFKAS0oAAFJB2Jsb2NrSWQBdwhiLTAwMDAxM4cBSQMJcGFyYWdyYXBoBwABTQYEAAFOBy0gWyBdIHQoAAFNB2Jsb2NrSWQBdwhiLTAwMDAxNIcBTQMHY2FsbG91dAcAAVcDC2J1bGxldF9saXN0BwABWAMJbGlzdF9pdGVtBwABWQMJcGFyYWdyYXBoBwABWgYEAAFbAWEoAAFaB2Jsb2NrSWQBdwhiLTAwMDAxNygAAVkFbGFiZWwBdwPigKIoAAFZCGxpc3RUeXBlAXcGYnVsbGV0KAABWQZzcHJlYWQBeSgAAVkHYmxvY2tJZAF3CGItMDAwMDE2KAABWAZzcHJlYWQBeSgAAVgHYmxvY2tJZAF3CGItMDAwMDE1hwFYAwpibG9ja3F1b3RlBwABZAMJcGFyYWdyYXBoBwABZQYEAAFmAXEoAAFlB2Jsb2NrSWQBdwhiLTAwMDAxOSgAAWQHYmxvY2tJZAF3CGItMDAwMDE4KAABVwRraW5kAXcEbm90ZSgAAVcFdGl0bGUBdwFUKAABVwdibG9ja0lkAXcCYjGHAVcDCmNvZGVfYmxvY2sHAAFtBgQAAW4GLSBjb2RlKAABbQdibG9ja0lkAXcIYi0wMDAwMjCHAW0DBXRhYmxlBwABdgMQdGFibGVfaGVhZGVyX3JvdwcAAXcDDHRhYmxlX2hlYWRlcgcAAXgDCXBhcmFncmFwaAcAAXkGBAABegFhKAABeQdibG9ja0lkAXcIYi0wMDAwMjQoAAF4B2NvbHNwYW4BfQEoAAF4B3Jvd3NwYW4BfQEoAAF4B2Jsb2NrSWQBdwhiLTAwMDAyMygAAXcHYmxvY2tJZAF3CGItMDAwMDIyhwF3Awl0YWJsZV9yb3cHAAGBAQMKdGFibGVfY2VsbAcAAYIBAwlwYXJhZ3JhcGgHAAGDAQYEAAGEAQMtIGIoAAGDAQdibG9ja0lkAXcIYi0wMDAwMjcoAAGCAQdjb2xzcGFuAX0BKAABggEHcm93c3BhbgF9ASgAAYIBB2Jsb2NrSWQBdwhiLTAwMDAyNigAAYEBB2Jsb2NrSWQBdwhiLTAwMDAyNSgAAXYHYmxvY2tJZAF3CGItMDAwMDIxAA==",
-    "rendered_by_milkdown": "***\n\n\\- a - b\n\n1\\. a\n\n2\\. b\n\n\\> q\n\n# h\n\n\\> q2\n\na - b\n\n***\n\n\\- a\n\n```\n- x\n```\n\n\\- y\n\n\\-\n\n\\- \\[ ] t\n\n:::callout{#b1 kind=\"note\" title=\"T\"}\n* a\n\n> q\n:::\n\n```\n- code\n```\n\n| a   |\n| --- |\n| - b |\n"
+    "yjs_update_v1_b64": "AVQBAAcBC3Byb3NlbWlycm9yAwJocigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAECBgQAAQMHLSBhIC0gYigAAQIHYmxvY2tJZAF3CGItMDAwMDAyhwECAwlwYXJhZ3JhcGgHAAEMBgQAAQ0EMS4gYSgAAQwHYmxvY2tJZAF3CGItMDAwMDAzhwEMAwlwYXJhZ3JhcGgHAAETBgQAARQEMi4gYigAARMHYmxvY2tJZAF3CGItMDAwMDA0hwETAwlwYXJhZ3JhcGgHAAEaBgQAARsDPiBxKAABGgdibG9ja0lkAXcIYi0wMDAwMDWHARoDB2hlYWRpbmcHAAEgBgQAASEBaCgAASACaWQBdwAoAAEgBWxldmVsAX0BKAABIAdibG9ja0lkAXcIYi0wMDAwMDaHASADCXBhcmFncmFwaAcAASYGBAABJwQ+IHEyKAABJgdibG9ja0lkAXcIYi0wMDAwMDeHASYDCXBhcmFncmFwaAcAAS0GBAABLgVhIC0gYigAAS0HYmxvY2tJZAF3CGItMDAwMDA4hwEtAwJocigAATUHYmxvY2tJZAF3CGItMDAwMDA5hwE1AwlwYXJhZ3JhcGgHAAE3BgQAATgDLSBhKAABNwdibG9ja0lkAXcIYi0wMDAwMTCHATcDCmNvZGVfYmxvY2sHAAE9BgQAAT4DLSB4KAABPQdibG9ja0lkAXcIYi0wMDAwMTGHAT0DCXBhcmFncmFwaAcAAUMGBAABRAMtIHkoAAFDB2Jsb2NrSWQBdwhiLTAwMDAxMocBQwMJcGFyYWdyYXBoBwABSQYEAAFKAS0oAAFJB2Jsb2NrSWQBdwhiLTAwMDAxM4cBSQMJcGFyYWdyYXBoBwABTQYEAAFOBy0gWyBdIHQoAAFNB2Jsb2NrSWQBdwhiLTAwMDAxNIcBTQMJcGFyYWdyYXBoBwABVwYEAAFYMTo6OmNhbGxvdXR7I2IxIGtpbmQ9Im5vdGUiIHRpdGxlPSJUIn0gLSBhID4gcSA6OjooAAFXB2Jsb2NrSWQBdwhiLTAwMDAxNYcBVwMKY29kZV9ibG9jawcAAYsBBgQAAYwBBi0gY29kZSgAAYsBB2Jsb2NrSWQBdwhiLTAwMDAxNocBiwEDBXRhYmxlBwABlAEDEHRhYmxlX2hlYWRlcl9yb3cHAAGVAQMMdGFibGVfaGVhZGVyBwABlgEDCXBhcmFncmFwaAcAAZcBBgQAAZgBAWEoAAGXAQdibG9ja0lkAXcIYi0wMDAwMjAoAAGWAQdjb2xzcGFuAX0BKAABlgEHcm93c3BhbgF9ASgAAZYBB2Jsb2NrSWQBdwhiLTAwMDAxOSgAAZUBB2Jsb2NrSWQBdwhiLTAwMDAxOIcBlQEDCXRhYmxlX3JvdwcAAZ8BAwp0YWJsZV9jZWxsBwABoAEDCXBhcmFncmFwaAcAAaEBBgQAAaIBAy0gYigAAaEBB2Jsb2NrSWQBdwhiLTAwMDAyMygAAaABB2NvbHNwYW4BfQEoAAGgAQdyb3dzcGFuAX0BKAABoAEHYmxvY2tJZAF3CGItMDAwMDIyKAABnwEHYmxvY2tJZAF3CGItMDAwMDIxKAABlAEHYmxvY2tJZAF3CGItMDAwMDE3AA==",
+    "rendered_by_milkdown": "***\n\n\\- a - b\n\n1\\. a\n\n2\\. b\n\n\\> q\n\n# h\n\n\\> q2\n\na - b\n\n***\n\n\\- a\n\n```\n- x\n```\n\n\\- y\n\n\\-\n\n\\- \\[ ] t\n\n\\:::callout{#b1 kind=\"note\" title=\"T\"} - a > q :::\n\n```\n- code\n```\n\n| a   |\n| --- |\n| - b |\n"
   },
   {
     "name": "frontmatter",
@@ -25060,6 +25009,137 @@
     "rendered_by_milkdown": "1\\. not a list 2) also not a list\n\n* A tight item.\n  > 2. Quoted, numbered from two.\n* Another.\n  > > 3. Two quotes down.\n* An empty item.\n  > *\n\nA paragraph line 01. that no list interrupts.\n\nAnother 001) likewise.\n\nAnd one\n\n1. that a list interrupts.\n\n> Quoted 01. text.\n\nIn a definition[^o]:\n\n> [^o]: a 01. b\n"
   },
   {
+    "name": "outer-fence-closing-unclosed-inner-blocks",
+    "markdown": "An outer fence closing typed blocks left open inside it, each opened with as many colons; one closing line closes all three:\n\n:::callout{#o1 kind=\"note\" title=\"T\"}\n:::callout{#o2 kind=\"note\" title=\"T\"}\n:::callout{#o3 kind=\"note\" title=\"T\"}\na\n:::\n\nAfter.\n\n::::callout{#o4 kind=\"note\" title=\"T\"}\n::::callout{#o5 kind=\"note\" title=\"T\"}\n:::callout{#o6 kind=\"note\" title=\"T\"}\nb\n::::\n\nAfter again.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "An outer fence closing typed blocks left open inside it, each opened with as many colons; one closing line closes all three:"
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "T",
+            "blockId": "o1"
+          },
+          "content": [
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "T",
+                "blockId": "o2"
+              },
+              "content": [
+                {
+                  "type": "callout",
+                  "attrs": {
+                    "kind": "note",
+                    "title": "T",
+                    "blockId": "o3"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000002"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "T",
+            "blockId": "o4"
+          },
+          "content": [
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "T",
+                "blockId": "o5"
+              },
+              "content": [
+                {
+                  "type": "callout",
+                  "attrs": {
+                    "kind": "note",
+                    "title": "T",
+                    "blockId": "o6"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000004"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After again."
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ASwBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQF8QW4gb3V0ZXIgZmVuY2UgY2xvc2luZyB0eXBlZCBibG9ja3MgbGVmdCBvcGVuIGluc2lkZSBpdCwgZWFjaCBvcGVuZWQgd2l0aCBhcyBtYW55IGNvbG9uczsgb25lIGNsb3NpbmcgbGluZSBjbG9zZXMgYWxsIHRocmVlOigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwdjYWxsb3V0BwABfwMHY2FsbG91dAcAAYABAwdjYWxsb3V0BwABgQEDCXBhcmFncmFwaAcAAYIBBgQAAYMBAWEoAAGCAQdibG9ja0lkAXcIYi0wMDAwMDIoAAGBAQRraW5kAXcEbm90ZSgAAYEBBXRpdGxlAXcBVCgAAYEBB2Jsb2NrSWQBdwJvMygAAYABBGtpbmQBdwRub3RlKAABgAEFdGl0bGUBdwFUKAABgAEHYmxvY2tJZAF3Am8yKAABfwRraW5kAXcEbm90ZSgAAX8FdGl0bGUBdwFUKAABfwdibG9ja0lkAXcCbzGHAX8DCXBhcmFncmFwaAcAAY8BBgQAAZABBkFmdGVyLigAAY8BB2Jsb2NrSWQBdwhiLTAwMDAwM4cBjwEDB2NhbGxvdXQHAAGYAQMHY2FsbG91dAcAAZkBAwdjYWxsb3V0BwABmgEDCXBhcmFncmFwaAcAAZsBBgQAAZwBAWIoAAGbAQdibG9ja0lkAXcIYi0wMDAwMDQoAAGaAQRraW5kAXcEbm90ZSgAAZoBBXRpdGxlAXcBVCgAAZoBB2Jsb2NrSWQBdwJvNigAAZkBBGtpbmQBdwRub3RlKAABmQEFdGl0bGUBdwFUKAABmQEHYmxvY2tJZAF3Am81KAABmAEEa2luZAF3BG5vdGUoAAGYAQV0aXRsZQF3AVQoAAGYAQdibG9ja0lkAXcCbzSHAZgBAwlwYXJhZ3JhcGgHAAGoAQYEAAGpAQxBZnRlciBhZ2Fpbi4oAAGoAQdibG9ja0lkAXcIYi0wMDAwMDUA",
+    "rendered_by_milkdown": "An outer fence closing typed blocks left open inside it, each opened with as many colons; one closing line closes all three:\n\n:::::callout{#o1 kind=\"note\" title=\"T\"}\n::::callout{#o2 kind=\"note\" title=\"T\"}\n:::callout{#o3 kind=\"note\" title=\"T\"}\na\n:::\n::::\n:::::\n\nAfter.\n\n:::::callout{#o4 kind=\"note\" title=\"T\"}\n::::callout{#o5 kind=\"note\" title=\"T\"}\n:::callout{#o6 kind=\"note\" title=\"T\"}\nb\n:::\n::::\n:::::\n\nAfter again.\n"
+  },
+  {
     "name": "overlapping-marks",
     "markdown": "Two readers' comments may cover the same text, and a mark of one kind does not end another of its kind.\n\nOverlapping: <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:bob\">quick </span><span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:bob\"><span data-proof=\"comment\" data-id=\"c2\" data-by=\"user:alice\">brown</span></span><span data-proof=\"comment\" data-id=\"c2\" data-by=\"user:alice\"> fox</span> jumps.\n\nOne inside another, as runs: <span data-proof=\"comment\" data-id=\"c3\" data-by=\"user:bob\">quick </span><span data-proof=\"comment\" data-id=\"c3\" data-by=\"user:bob\"><span data-proof=\"comment\" data-id=\"c4\" data-by=\"user:alice\">brown</span></span><span data-proof=\"comment\" data-id=\"c3\" data-by=\"user:bob\"> fox</span> jumps.\n\nOne inside another, nested: <span data-proof=\"comment\" data-id=\"c5\" data-by=\"user:bob\">quick <span data-proof=\"comment\" data-id=\"c6\" data-by=\"user:alice\">brown</span> fox</span> jumps.\n\nTwo asks on one word: <span data-dispatch=\"ask\" data-id=\"a1\" data-by=\"user:bob\"><span data-dispatch=\"ask\" data-id=\"a2\" data-by=\"user:alice\">brown</span></span> fox.\n\nAn ask inside another: <span data-dispatch=\"ask\" data-id=\"a3\" data-by=\"user:bob\">quick <span data-dispatch=\"ask\" data-id=\"a4\" data-by=\"user:alice\">brown</span> fox</span> jumps.\n\nA suggestion inside a comment: <span data-proof=\"comment\" data-id=\"c7\" data-by=\"user:bob\">the <span data-proof=\"suggestion\" data-id=\"s1\" data-by=\"user:alice\" data-kind=\"replace\">quick</span> fox</span> jumps.\n",
     "pm_json": {
@@ -34221,6 +34301,936 @@
     },
     "yjs_update_v1_b64": "ARcBAAcBC3Byb3NlbWlycm9yAwtidWxsZXRfbGlzdAcAAQADCWxpc3RfaXRlbQcAAQEDCXBhcmFncmFwaAcAAQIGBAABAwl1bmNoZWNrZWQoAAECB2Jsb2NrSWQBdwhiLTAwMDAwMygAAQEFbGFiZWwBdwPigKIoAAEBCGxpc3RUeXBlAXcGYnVsbGV0KAABAQZzcHJlYWQBeSgAAQEHY2hlY2tlZAF5KAABAQdibG9ja0lkAXcIYi0wMDAwMDKHAQEDCWxpc3RfaXRlbQcAARMDCXBhcmFncmFwaAcAARQGBAABFQdjaGVja2VkKAABFAdibG9ja0lkAXcIYi0wMDAwMDUoAAETBWxhYmVsAXcD4oCiKAABEwhsaXN0VHlwZQF3BmJ1bGxldCgAARMGc3ByZWFkAXkoAAETB2NoZWNrZWQBeCgAARMHYmxvY2tJZAF3CGItMDAwMDA0KAABAAZzcHJlYWQBeSgAAQAHYmxvY2tJZAF3CGItMDAwMDAxAA==",
     "rendered_by_milkdown": "* [ ] unchecked\n* [x] checked\n"
+  },
+  {
+    "name": "typed-block-in-a-quote-ending-in-blank-lines",
+    "markdown": "A typed block in a quote, ending in blank lines.\n\n> :::callout{#q1 kind=\"note\" title=\"T\"}\n> a\n>\n>\n\nNext.\n\n> :::callout{#q2 kind=\"note\" title=\"T\"}\n> a\n> :::\n>\n>\n\nNext.\n\n> :::callout{#q3 kind=\"note\" title=\"T\"}\n> a\n>\n>\n> :::\n\nNext.\n\n> > :::callout{#q4 kind=\"note\" title=\"T\"}\n> > a\n> >\n>\n> tail\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A typed block in a quote, ending in blank lines."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "T",
+                "blockId": "q1"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000003"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "T",
+                "blockId": "q2"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000006"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "T",
+                "blockId": "q3"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000009"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000010"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000012"
+              },
+              "content": [
+                {
+                  "type": "callout",
+                  "attrs": {
+                    "kind": "note",
+                    "title": "T",
+                    "blockId": "q4"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000013"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000014"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "tail"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AT4BAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEwQSB0eXBlZCBibG9jayBpbiBhIHF1b3RlLCBlbmRpbmcgaW4gYmxhbmsgbGluZXMuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCmJsb2NrcXVvdGUHAAEzAwdjYWxsb3V0BwABNAMJcGFyYWdyYXBoBwABNQYEAAE2AWEoAAE1B2Jsb2NrSWQBdwhiLTAwMDAwMygAATQEa2luZAF3BG5vdGUoAAE0BXRpdGxlAXcBVCgAATQHYmxvY2tJZAF3AnExKAABMwdibG9ja0lkAXcIYi0wMDAwMDKHATMDCXBhcmFncmFwaAcAAT0GBAABPgVOZXh0LigAAT0HYmxvY2tJZAF3CGItMDAwMDA0hwE9AwpibG9ja3F1b3RlBwABRQMHY2FsbG91dAcAAUYDCXBhcmFncmFwaAcAAUcGBAABSAFhKAABRwdibG9ja0lkAXcIYi0wMDAwMDYoAAFGBGtpbmQBdwRub3RlKAABRgV0aXRsZQF3AVQoAAFGB2Jsb2NrSWQBdwJxMigAAUUHYmxvY2tJZAF3CGItMDAwMDA1hwFFAwlwYXJhZ3JhcGgHAAFPBgQAAVAFTmV4dC4oAAFPB2Jsb2NrSWQBdwhiLTAwMDAwN4cBTwMKYmxvY2txdW90ZQcAAVcDB2NhbGxvdXQHAAFYAwlwYXJhZ3JhcGgHAAFZBgQAAVoBYSgAAVkHYmxvY2tJZAF3CGItMDAwMDA5KAABWARraW5kAXcEbm90ZSgAAVgFdGl0bGUBdwFUKAABWAdibG9ja0lkAXcCcTMoAAFXB2Jsb2NrSWQBdwhiLTAwMDAwOIcBVwMJcGFyYWdyYXBoBwABYQYEAAFiBU5leHQuKAABYQdibG9ja0lkAXcIYi0wMDAwMTCHAWEDCmJsb2NrcXVvdGUHAAFpAwpibG9ja3F1b3RlBwABagMHY2FsbG91dAcAAWsDCXBhcmFncmFwaAcAAWwGBAABbQFhKAABbAdibG9ja0lkAXcIYi0wMDAwMTMoAAFrBGtpbmQBdwRub3RlKAABawV0aXRsZQF3AVQoAAFrB2Jsb2NrSWQBdwJxNCgAAWoHYmxvY2tJZAF3CGItMDAwMDEyhwFqAwlwYXJhZ3JhcGgHAAF0BgQAAXUEdGFpbCgAAXQHYmxvY2tJZAF3CGItMDAwMDE0KAABaQdibG9ja0lkAXcIYi0wMDAwMTEA",
+    "rendered_by_milkdown": "A typed block in a quote, ending in blank lines.\n\n> :::callout{#q1 kind=\"note\" title=\"T\"}\n> a\n> :::\n\nNext.\n\n> :::callout{#q2 kind=\"note\" title=\"T\"}\n> a\n> :::\n\nNext.\n\n> :::callout{#q3 kind=\"note\" title=\"T\"}\n> a\n> :::\n\nNext.\n\n> > :::callout{#q4 kind=\"note\" title=\"T\"}\n> > a\n> > :::\n>\n> tail\n"
+  },
+  {
+    "name": "typed-block-opening-a-list-item-then-blank-lines",
+    "markdown": "A typed block opening a list item, followed by blank lines.\n\n- :::callout{#l1 kind=\"note\" title=\"T\"}\n  a\n  :::\n\n\nAfter.\n\n- :::callout{#l2 kind=\"note\" title=\"T\"}\n  a\n  :::\n\n\n- b\n\nNext.\n\n1. :::callout{#l3 kind=\"note\" title=\"T\"}\n   - a\n   :::\n\n\n2. c\n\nNext.\n\n- - :::callout{#l4 kind=\"note\" title=\"T\"}\n    a\n    :::\n\n\n  b\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A typed block opening a list item, followed by blank lines."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000004"
+                  }
+                },
+                {
+                  "type": "callout",
+                  "attrs": {
+                    "kind": "note",
+                    "title": "T",
+                    "blockId": "l1"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000005"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": true,
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000008"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000009"
+                  }
+                },
+                {
+                  "type": "callout",
+                  "attrs": {
+                    "kind": "note",
+                    "title": "T",
+                    "blockId": "l2"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000010"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000011"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000012"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "b"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "order": 1,
+            "spread": true,
+            "blockId": "b-000014"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000015"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000016"
+                  }
+                },
+                {
+                  "type": "callout",
+                  "attrs": {
+                    "kind": "note",
+                    "title": "T",
+                    "blockId": "l3"
+                  },
+                  "content": [
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false,
+                        "blockId": "b-000017"
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "label": "•",
+                            "listType": "bullet",
+                            "spread": false,
+                            "checked": null,
+                            "blockId": "b-000018"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000019"
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000020"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000021"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "c"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000023"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000024"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000025"
+                  }
+                },
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000026"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000027"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000028"
+                          }
+                        },
+                        {
+                          "type": "callout",
+                          "attrs": {
+                            "kind": "note",
+                            "title": "T",
+                            "blockId": "l4"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000029"
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000030"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "b"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AYEBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBO0EgdHlwZWQgYmxvY2sgb3BlbmluZyBhIGxpc3QgaXRlbSwgZm9sbG93ZWQgYnkgYmxhbmsgbGluZXMuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADC2J1bGxldF9saXN0BwABPgMJbGlzdF9pdGVtBwABPwMJcGFyYWdyYXBoKAABQAdibG9ja0lkAXcIYi0wMDAwMDSHAUADB2NhbGxvdXQHAAFCAwlwYXJhZ3JhcGgHAAFDBgQAAUQBYSgAAUMHYmxvY2tJZAF3CGItMDAwMDA1KAABQgRraW5kAXcEbm90ZSgAAUIFdGl0bGUBdwFUKAABQgdibG9ja0lkAXcCbDEoAAE/BWxhYmVsAXcD4oCiKAABPwhsaXN0VHlwZQF3BmJ1bGxldCgAAT8Gc3ByZWFkAXkoAAE/B2Jsb2NrSWQBdwhiLTAwMDAwMygAAT4Gc3ByZWFkAXkoAAE+B2Jsb2NrSWQBdwhiLTAwMDAwMocBPgMJcGFyYWdyYXBoBwABUAYEAAFRBkFmdGVyLigAAVAHYmxvY2tJZAF3CGItMDAwMDA2hwFQAwtidWxsZXRfbGlzdAcAAVkDCWxpc3RfaXRlbQcAAVoDCXBhcmFncmFwaCgAAVsHYmxvY2tJZAF3CGItMDAwMDA5hwFbAwdjYWxsb3V0BwABXQMJcGFyYWdyYXBoBwABXgYEAAFfAWEoAAFeB2Jsb2NrSWQBdwhiLTAwMDAxMCgAAV0Ea2luZAF3BG5vdGUoAAFdBXRpdGxlAXcBVCgAAV0HYmxvY2tJZAF3AmwyKAABWgVsYWJlbAF3A+KAoigAAVoIbGlzdFR5cGUBdwZidWxsZXQoAAFaBnNwcmVhZAF5KAABWgdibG9ja0lkAXcIYi0wMDAwMDiHAVoDCWxpc3RfaXRlbQcAAWkDCXBhcmFncmFwaAcAAWoGBAABawFiKAABagdibG9ja0lkAXcIYi0wMDAwMTIoAAFpBWxhYmVsAXcD4oCiKAABaQhsaXN0VHlwZQF3BmJ1bGxldCgAAWkGc3ByZWFkAXkoAAFpB2Jsb2NrSWQBdwhiLTAwMDAxMSgAAVkGc3ByZWFkAXgoAAFZB2Jsb2NrSWQBdwhiLTAwMDAwN4cBWQMJcGFyYWdyYXBoBwABdAYEAAF1BU5leHQuKAABdAdibG9ja0lkAXcIYi0wMDAwMTOHAXQDDG9yZGVyZWRfbGlzdAcAAXwDCWxpc3RfaXRlbQcAAX0DCXBhcmFncmFwaCgAAX4HYmxvY2tJZAF3CGItMDAwMDE2hwF+AwdjYWxsb3V0BwABgAEDC2J1bGxldF9saXN0BwABgQEDCWxpc3RfaXRlbQcAAYIBAwlwYXJhZ3JhcGgHAAGDAQYEAAGEAQFhKAABgwEHYmxvY2tJZAF3CGItMDAwMDE5KAABggEFbGFiZWwBdwPigKIoAAGCAQhsaXN0VHlwZQF3BmJ1bGxldCgAAYIBBnNwcmVhZAF5KAABggEHYmxvY2tJZAF3CGItMDAwMDE4KAABgQEGc3ByZWFkAXkoAAGBAQdibG9ja0lkAXcIYi0wMDAwMTcoAAGAAQRraW5kAXcEbm90ZSgAAYABBXRpdGxlAXcBVCgAAYABB2Jsb2NrSWQBdwJsMygAAX0FbGFiZWwBdwPigKIoAAF9CGxpc3RUeXBlAXcGYnVsbGV0KAABfQZzcHJlYWQBeSgAAX0HYmxvY2tJZAF3CGItMDAwMDE1hwF9AwlsaXN0X2l0ZW0HAAGUAQMJcGFyYWdyYXBoBwABlQEGBAABlgEBYygAAZUBB2Jsb2NrSWQBdwhiLTAwMDAyMSgAAZQBBWxhYmVsAXcD4oCiKAABlAEIbGlzdFR5cGUBdwZidWxsZXQoAAGUAQZzcHJlYWQBeSgAAZQBB2Jsb2NrSWQBdwhiLTAwMDAyMCgAAXwFb3JkZXIBfQEoAAF8BnNwcmVhZAF4KAABfAdibG9ja0lkAXcIYi0wMDAwMTSHAXwDCXBhcmFncmFwaAcAAaABBgQAAaEBBU5leHQuKAABoAEHYmxvY2tJZAF3CGItMDAwMDIyhwGgAQMLYnVsbGV0X2xpc3QHAAGoAQMJbGlzdF9pdGVtBwABqQEDCXBhcmFncmFwaCgAAaoBB2Jsb2NrSWQBdwhiLTAwMDAyNYcBqgEDC2J1bGxldF9saXN0BwABrAEDCWxpc3RfaXRlbQcAAa0BAwlwYXJhZ3JhcGgoAAGuAQdibG9ja0lkAXcIYi0wMDAwMjiHAa4BAwdjYWxsb3V0BwABsAEDCXBhcmFncmFwaAcAAbEBBgQAAbIBAWEoAAGxAQdibG9ja0lkAXcIYi0wMDAwMjkoAAGwAQRraW5kAXcEbm90ZSgAAbABBXRpdGxlAXcBVCgAAbABB2Jsb2NrSWQBdwJsNCgAAa0BBWxhYmVsAXcD4oCiKAABrQEIbGlzdFR5cGUBdwZidWxsZXQoAAGtAQZzcHJlYWQBeSgAAa0BB2Jsb2NrSWQBdwhiLTAwMDAyNygAAawBBnNwcmVhZAF5KAABrAEHYmxvY2tJZAF3CGItMDAwMDI2hwGsAQMJcGFyYWdyYXBoBwABvgEGBAABvwEBYigAAb4BB2Jsb2NrSWQBdwhiLTAwMDAzMCgAAakBBWxhYmVsAXcD4oCiKAABqQEIbGlzdFR5cGUBdwZidWxsZXQoAAGpAQZzcHJlYWQBeCgAAakBB2Jsb2NrSWQBdwhiLTAwMDAyNCgAAagBBnNwcmVhZAF5KAABqAEHYmxvY2tJZAF3CGItMDAwMDIzAA==",
+    "rendered_by_milkdown": "A typed block opening a list item, followed by blank lines.\n\n*\n  :::callout{#l1 kind=\"note\" title=\"T\"}\n  a\n  :::\n\nAfter.\n\n*\n  :::callout{#l2 kind=\"note\" title=\"T\"}\n  a\n  :::\n\n* b\n\nNext.\n\n1.\n   :::callout{#l3 kind=\"note\" title=\"T\"}\n   * a\n   :::\n\n2. c\n\nNext.\n\n*\n\n  *\n    :::callout{#l4 kind=\"note\" title=\"T\"}\n    a\n    :::\n\n  b\n"
+  },
+  {
+    "name": "typed-blocks-nested-32-deep",
+    "markdown": "Thirty-two typed blocks nested inside one another, the most a document nests:\n\n::::::::::::::::::::::::::::::::::callout{#n1 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::::::::::::::callout{#n2 kind=\"note\" title=\"T\"}\n::::::::::::::::::::::::::::::::callout{#n3 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::::::::::::callout{#n4 kind=\"note\" title=\"T\"}\n::::::::::::::::::::::::::::::callout{#n5 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::::::::::callout{#n6 kind=\"note\" title=\"T\"}\n::::::::::::::::::::::::::::callout{#n7 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::::::::callout{#n8 kind=\"note\" title=\"T\"}\n::::::::::::::::::::::::::callout{#n9 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::::::callout{#n10 kind=\"note\" title=\"T\"}\n::::::::::::::::::::::::callout{#n11 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::::callout{#n12 kind=\"note\" title=\"T\"}\n::::::::::::::::::::::callout{#n13 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::callout{#n14 kind=\"note\" title=\"T\"}\n::::::::::::::::::::callout{#n15 kind=\"note\" title=\"T\"}\n:::::::::::::::::::callout{#n16 kind=\"note\" title=\"T\"}\n::::::::::::::::::callout{#n17 kind=\"note\" title=\"T\"}\n:::::::::::::::::callout{#n18 kind=\"note\" title=\"T\"}\n::::::::::::::::callout{#n19 kind=\"note\" title=\"T\"}\n:::::::::::::::callout{#n20 kind=\"note\" title=\"T\"}\n::::::::::::::callout{#n21 kind=\"note\" title=\"T\"}\n:::::::::::::callout{#n22 kind=\"note\" title=\"T\"}\n::::::::::::callout{#n23 kind=\"note\" title=\"T\"}\n:::::::::::callout{#n24 kind=\"note\" title=\"T\"}\n::::::::::callout{#n25 kind=\"note\" title=\"T\"}\n:::::::::callout{#n26 kind=\"note\" title=\"T\"}\n::::::::callout{#n27 kind=\"note\" title=\"T\"}\n:::::::callout{#n28 kind=\"note\" title=\"T\"}\n::::::callout{#n29 kind=\"note\" title=\"T\"}\n:::::callout{#n30 kind=\"note\" title=\"T\"}\n::::callout{#n31 kind=\"note\" title=\"T\"}\n:::callout{#n32 kind=\"note\" title=\"T\"}\na\n:::\n::::\n:::::\n::::::\n:::::::\n::::::::\n:::::::::\n::::::::::\n:::::::::::\n::::::::::::\n:::::::::::::\n::::::::::::::\n:::::::::::::::\n::::::::::::::::\n:::::::::::::::::\n::::::::::::::::::\n:::::::::::::::::::\n::::::::::::::::::::\n:::::::::::::::::::::\n::::::::::::::::::::::\n:::::::::::::::::::::::\n::::::::::::::::::::::::\n:::::::::::::::::::::::::\n::::::::::::::::::::::::::\n:::::::::::::::::::::::::::\n::::::::::::::::::::::::::::\n:::::::::::::::::::::::::::::\n::::::::::::::::::::::::::::::\n:::::::::::::::::::::::::::::::\n::::::::::::::::::::::::::::::::\n:::::::::::::::::::::::::::::::::\n::::::::::::::::::::::::::::::::::\n\nAfter.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Thirty-two typed blocks nested inside one another, the most a document nests:"
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "T",
+            "blockId": "n1"
+          },
+          "content": [
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "T",
+                "blockId": "n2"
+              },
+              "content": [
+                {
+                  "type": "callout",
+                  "attrs": {
+                    "kind": "note",
+                    "title": "T",
+                    "blockId": "n3"
+                  },
+                  "content": [
+                    {
+                      "type": "callout",
+                      "attrs": {
+                        "kind": "note",
+                        "title": "T",
+                        "blockId": "n4"
+                      },
+                      "content": [
+                        {
+                          "type": "callout",
+                          "attrs": {
+                            "kind": "note",
+                            "title": "T",
+                            "blockId": "n5"
+                          },
+                          "content": [
+                            {
+                              "type": "callout",
+                              "attrs": {
+                                "kind": "note",
+                                "title": "T",
+                                "blockId": "n6"
+                              },
+                              "content": [
+                                {
+                                  "type": "callout",
+                                  "attrs": {
+                                    "kind": "note",
+                                    "title": "T",
+                                    "blockId": "n7"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "callout",
+                                      "attrs": {
+                                        "kind": "note",
+                                        "title": "T",
+                                        "blockId": "n8"
+                                      },
+                                      "content": [
+                                        {
+                                          "type": "callout",
+                                          "attrs": {
+                                            "kind": "note",
+                                            "title": "T",
+                                            "blockId": "n9"
+                                          },
+                                          "content": [
+                                            {
+                                              "type": "callout",
+                                              "attrs": {
+                                                "kind": "note",
+                                                "title": "T",
+                                                "blockId": "n10"
+                                              },
+                                              "content": [
+                                                {
+                                                  "type": "callout",
+                                                  "attrs": {
+                                                    "kind": "note",
+                                                    "title": "T",
+                                                    "blockId": "n11"
+                                                  },
+                                                  "content": [
+                                                    {
+                                                      "type": "callout",
+                                                      "attrs": {
+                                                        "kind": "note",
+                                                        "title": "T",
+                                                        "blockId": "n12"
+                                                      },
+                                                      "content": [
+                                                        {
+                                                          "type": "callout",
+                                                          "attrs": {
+                                                            "kind": "note",
+                                                            "title": "T",
+                                                            "blockId": "n13"
+                                                          },
+                                                          "content": [
+                                                            {
+                                                              "type": "callout",
+                                                              "attrs": {
+                                                                "kind": "note",
+                                                                "title": "T",
+                                                                "blockId": "n14"
+                                                              },
+                                                              "content": [
+                                                                {
+                                                                  "type": "callout",
+                                                                  "attrs": {
+                                                                    "kind": "note",
+                                                                    "title": "T",
+                                                                    "blockId": "n15"
+                                                                  },
+                                                                  "content": [
+                                                                    {
+                                                                      "type": "callout",
+                                                                      "attrs": {
+                                                                        "kind": "note",
+                                                                        "title": "T",
+                                                                        "blockId": "n16"
+                                                                      },
+                                                                      "content": [
+                                                                        {
+                                                                          "type": "callout",
+                                                                          "attrs": {
+                                                                            "kind": "note",
+                                                                            "title": "T",
+                                                                            "blockId": "n17"
+                                                                          },
+                                                                          "content": [
+                                                                            {
+                                                                              "type": "callout",
+                                                                              "attrs": {
+                                                                                "kind": "note",
+                                                                                "title": "T",
+                                                                                "blockId": "n18"
+                                                                              },
+                                                                              "content": [
+                                                                                {
+                                                                                  "type": "callout",
+                                                                                  "attrs": {
+                                                                                    "kind": "note",
+                                                                                    "title": "T",
+                                                                                    "blockId": "n19"
+                                                                                  },
+                                                                                  "content": [
+                                                                                    {
+                                                                                      "type": "callout",
+                                                                                      "attrs": {
+                                                                                        "kind": "note",
+                                                                                        "title": "T",
+                                                                                        "blockId": "n20"
+                                                                                      },
+                                                                                      "content": [
+                                                                                        {
+                                                                                          "type": "callout",
+                                                                                          "attrs": {
+                                                                                            "kind": "note",
+                                                                                            "title": "T",
+                                                                                            "blockId": "n21"
+                                                                                          },
+                                                                                          "content": [
+                                                                                            {
+                                                                                              "type": "callout",
+                                                                                              "attrs": {
+                                                                                                "kind": "note",
+                                                                                                "title": "T",
+                                                                                                "blockId": "n22"
+                                                                                              },
+                                                                                              "content": [
+                                                                                                {
+                                                                                                  "type": "callout",
+                                                                                                  "attrs": {
+                                                                                                    "kind": "note",
+                                                                                                    "title": "T",
+                                                                                                    "blockId": "n23"
+                                                                                                  },
+                                                                                                  "content": [
+                                                                                                    {
+                                                                                                      "type": "callout",
+                                                                                                      "attrs": {
+                                                                                                        "kind": "note",
+                                                                                                        "title": "T",
+                                                                                                        "blockId": "n24"
+                                                                                                      },
+                                                                                                      "content": [
+                                                                                                        {
+                                                                                                          "type": "callout",
+                                                                                                          "attrs": {
+                                                                                                            "kind": "note",
+                                                                                                            "title": "T",
+                                                                                                            "blockId": "n25"
+                                                                                                          },
+                                                                                                          "content": [
+                                                                                                            {
+                                                                                                              "type": "callout",
+                                                                                                              "attrs": {
+                                                                                                                "kind": "note",
+                                                                                                                "title": "T",
+                                                                                                                "blockId": "n26"
+                                                                                                              },
+                                                                                                              "content": [
+                                                                                                                {
+                                                                                                                  "type": "callout",
+                                                                                                                  "attrs": {
+                                                                                                                    "kind": "note",
+                                                                                                                    "title": "T",
+                                                                                                                    "blockId": "n27"
+                                                                                                                  },
+                                                                                                                  "content": [
+                                                                                                                    {
+                                                                                                                      "type": "callout",
+                                                                                                                      "attrs": {
+                                                                                                                        "kind": "note",
+                                                                                                                        "title": "T",
+                                                                                                                        "blockId": "n28"
+                                                                                                                      },
+                                                                                                                      "content": [
+                                                                                                                        {
+                                                                                                                          "type": "callout",
+                                                                                                                          "attrs": {
+                                                                                                                            "kind": "note",
+                                                                                                                            "title": "T",
+                                                                                                                            "blockId": "n29"
+                                                                                                                          },
+                                                                                                                          "content": [
+                                                                                                                            {
+                                                                                                                              "type": "callout",
+                                                                                                                              "attrs": {
+                                                                                                                                "kind": "note",
+                                                                                                                                "title": "T",
+                                                                                                                                "blockId": "n30"
+                                                                                                                              },
+                                                                                                                              "content": [
+                                                                                                                                {
+                                                                                                                                  "type": "callout",
+                                                                                                                                  "attrs": {
+                                                                                                                                    "kind": "note",
+                                                                                                                                    "title": "T",
+                                                                                                                                    "blockId": "n31"
+                                                                                                                                  },
+                                                                                                                                  "content": [
+                                                                                                                                    {
+                                                                                                                                      "type": "callout",
+                                                                                                                                      "attrs": {
+                                                                                                                                        "kind": "note",
+                                                                                                                                        "title": "T",
+                                                                                                                                        "blockId": "n32"
+                                                                                                                                      },
+                                                                                                                                      "content": [
+                                                                                                                                        {
+                                                                                                                                          "type": "paragraph",
+                                                                                                                                          "attrs": {
+                                                                                                                                            "blockId": "b-000002"
+                                                                                                                                          },
+                                                                                                                                          "content": [
+                                                                                                                                            {
+                                                                                                                                              "type": "text",
+                                                                                                                                              "text": "a"
+                                                                                                                                            }
+                                                                                                                                          ]
+                                                                                                                                        }
+                                                                                                                                      ]
+                                                                                                                                    }
+                                                                                                                                  ]
+                                                                                                                                }
+                                                                                                                              ]
+                                                                                                                            }
+                                                                                                                          ]
+                                                                                                                        }
+                                                                                                                      ]
+                                                                                                                    }
+                                                                                                                  ]
+                                                                                                                }
+                                                                                                              ]
+                                                                                                            }
+                                                                                                          ]
+                                                                                                        }
+                                                                                                      ]
+                                                                                                    }
+                                                                                                  ]
+                                                                                                }
+                                                                                              ]
+                                                                                            }
+                                                                                          ]
+                                                                                        }
+                                                                                      ]
+                                                                                    }
+                                                                                  ]
+                                                                                }
+                                                                              ]
+                                                                            }
+                                                                          ]
+                                                                        }
+                                                                      ]
+                                                                    }
+                                                                  ]
+                                                                }
+                                                              ]
+                                                            }
+                                                          ]
+                                                        }
+                                                      ]
+                                                    }
+                                                  ]
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AYwBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBTVRoaXJ0eS10d28gdHlwZWQgYmxvY2tzIG5lc3RlZCBpbnNpZGUgb25lIGFub3RoZXIsIHRoZSBtb3N0IGEgZG9jdW1lbnQgbmVzdHM6KAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADB2NhbGxvdXQHAAFQAwdjYWxsb3V0BwABUQMHY2FsbG91dAcAAVIDB2NhbGxvdXQHAAFTAwdjYWxsb3V0BwABVAMHY2FsbG91dAcAAVUDB2NhbGxvdXQHAAFWAwdjYWxsb3V0BwABVwMHY2FsbG91dAcAAVgDB2NhbGxvdXQHAAFZAwdjYWxsb3V0BwABWgMHY2FsbG91dAcAAVsDB2NhbGxvdXQHAAFcAwdjYWxsb3V0BwABXQMHY2FsbG91dAcAAV4DB2NhbGxvdXQHAAFfAwdjYWxsb3V0BwABYAMHY2FsbG91dAcAAWEDB2NhbGxvdXQHAAFiAwdjYWxsb3V0BwABYwMHY2FsbG91dAcAAWQDB2NhbGxvdXQHAAFlAwdjYWxsb3V0BwABZgMHY2FsbG91dAcAAWcDB2NhbGxvdXQHAAFoAwdjYWxsb3V0BwABaQMHY2FsbG91dAcAAWoDB2NhbGxvdXQHAAFrAwdjYWxsb3V0BwABbAMHY2FsbG91dAcAAW0DB2NhbGxvdXQHAAFuAwdjYWxsb3V0BwABbwMJcGFyYWdyYXBoBwABcAYEAAFxAWEoAAFwB2Jsb2NrSWQBdwhiLTAwMDAwMigAAW8Ea2luZAF3BG5vdGUoAAFvBXRpdGxlAXcBVCgAAW8HYmxvY2tJZAF3A24zMigAAW4Ea2luZAF3BG5vdGUoAAFuBXRpdGxlAXcBVCgAAW4HYmxvY2tJZAF3A24zMSgAAW0Ea2luZAF3BG5vdGUoAAFtBXRpdGxlAXcBVCgAAW0HYmxvY2tJZAF3A24zMCgAAWwEa2luZAF3BG5vdGUoAAFsBXRpdGxlAXcBVCgAAWwHYmxvY2tJZAF3A24yOSgAAWsEa2luZAF3BG5vdGUoAAFrBXRpdGxlAXcBVCgAAWsHYmxvY2tJZAF3A24yOCgAAWoEa2luZAF3BG5vdGUoAAFqBXRpdGxlAXcBVCgAAWoHYmxvY2tJZAF3A24yNygAAWkEa2luZAF3BG5vdGUoAAFpBXRpdGxlAXcBVCgAAWkHYmxvY2tJZAF3A24yNigAAWgEa2luZAF3BG5vdGUoAAFoBXRpdGxlAXcBVCgAAWgHYmxvY2tJZAF3A24yNSgAAWcEa2luZAF3BG5vdGUoAAFnBXRpdGxlAXcBVCgAAWcHYmxvY2tJZAF3A24yNCgAAWYEa2luZAF3BG5vdGUoAAFmBXRpdGxlAXcBVCgAAWYHYmxvY2tJZAF3A24yMygAAWUEa2luZAF3BG5vdGUoAAFlBXRpdGxlAXcBVCgAAWUHYmxvY2tJZAF3A24yMigAAWQEa2luZAF3BG5vdGUoAAFkBXRpdGxlAXcBVCgAAWQHYmxvY2tJZAF3A24yMSgAAWMEa2luZAF3BG5vdGUoAAFjBXRpdGxlAXcBVCgAAWMHYmxvY2tJZAF3A24yMCgAAWIEa2luZAF3BG5vdGUoAAFiBXRpdGxlAXcBVCgAAWIHYmxvY2tJZAF3A24xOSgAAWEEa2luZAF3BG5vdGUoAAFhBXRpdGxlAXcBVCgAAWEHYmxvY2tJZAF3A24xOCgAAWAEa2luZAF3BG5vdGUoAAFgBXRpdGxlAXcBVCgAAWAHYmxvY2tJZAF3A24xNygAAV8Ea2luZAF3BG5vdGUoAAFfBXRpdGxlAXcBVCgAAV8HYmxvY2tJZAF3A24xNigAAV4Ea2luZAF3BG5vdGUoAAFeBXRpdGxlAXcBVCgAAV4HYmxvY2tJZAF3A24xNSgAAV0Ea2luZAF3BG5vdGUoAAFdBXRpdGxlAXcBVCgAAV0HYmxvY2tJZAF3A24xNCgAAVwEa2luZAF3BG5vdGUoAAFcBXRpdGxlAXcBVCgAAVwHYmxvY2tJZAF3A24xMygAAVsEa2luZAF3BG5vdGUoAAFbBXRpdGxlAXcBVCgAAVsHYmxvY2tJZAF3A24xMigAAVoEa2luZAF3BG5vdGUoAAFaBXRpdGxlAXcBVCgAAVoHYmxvY2tJZAF3A24xMSgAAVkEa2luZAF3BG5vdGUoAAFZBXRpdGxlAXcBVCgAAVkHYmxvY2tJZAF3A24xMCgAAVgEa2luZAF3BG5vdGUoAAFYBXRpdGxlAXcBVCgAAVgHYmxvY2tJZAF3Am45KAABVwRraW5kAXcEbm90ZSgAAVcFdGl0bGUBdwFUKAABVwdibG9ja0lkAXcCbjgoAAFWBGtpbmQBdwRub3RlKAABVgV0aXRsZQF3AVQoAAFWB2Jsb2NrSWQBdwJuNygAAVUEa2luZAF3BG5vdGUoAAFVBXRpdGxlAXcBVCgAAVUHYmxvY2tJZAF3Am42KAABVARraW5kAXcEbm90ZSgAAVQFdGl0bGUBdwFUKAABVAdibG9ja0lkAXcCbjUoAAFTBGtpbmQBdwRub3RlKAABUwV0aXRsZQF3AVQoAAFTB2Jsb2NrSWQBdwJuNCgAAVIEa2luZAF3BG5vdGUoAAFSBXRpdGxlAXcBVCgAAVIHYmxvY2tJZAF3Am4zKAABUQRraW5kAXcEbm90ZSgAAVEFdGl0bGUBdwFUKAABUQdibG9ja0lkAXcCbjIoAAFQBGtpbmQBdwRub3RlKAABUAV0aXRsZQF3AVQoAAFQB2Jsb2NrSWQBdwJuMYcBUAMJcGFyYWdyYXBoBwAB1AEGBAAB1QEGQWZ0ZXIuKAAB1AEHYmxvY2tJZAF3CGItMDAwMDAzAA==",
+    "rendered_by_milkdown": "Thirty-two typed blocks nested inside one another, the most a document nests:\n\n::::::::::::::::::::::::::::::::::callout{#n1 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::::::::::::::callout{#n2 kind=\"note\" title=\"T\"}\n::::::::::::::::::::::::::::::::callout{#n3 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::::::::::::callout{#n4 kind=\"note\" title=\"T\"}\n::::::::::::::::::::::::::::::callout{#n5 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::::::::::callout{#n6 kind=\"note\" title=\"T\"}\n::::::::::::::::::::::::::::callout{#n7 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::::::::callout{#n8 kind=\"note\" title=\"T\"}\n::::::::::::::::::::::::::callout{#n9 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::::::callout{#n10 kind=\"note\" title=\"T\"}\n::::::::::::::::::::::::callout{#n11 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::::callout{#n12 kind=\"note\" title=\"T\"}\n::::::::::::::::::::::callout{#n13 kind=\"note\" title=\"T\"}\n:::::::::::::::::::::callout{#n14 kind=\"note\" title=\"T\"}\n::::::::::::::::::::callout{#n15 kind=\"note\" title=\"T\"}\n:::::::::::::::::::callout{#n16 kind=\"note\" title=\"T\"}\n::::::::::::::::::callout{#n17 kind=\"note\" title=\"T\"}\n:::::::::::::::::callout{#n18 kind=\"note\" title=\"T\"}\n::::::::::::::::callout{#n19 kind=\"note\" title=\"T\"}\n:::::::::::::::callout{#n20 kind=\"note\" title=\"T\"}\n::::::::::::::callout{#n21 kind=\"note\" title=\"T\"}\n:::::::::::::callout{#n22 kind=\"note\" title=\"T\"}\n::::::::::::callout{#n23 kind=\"note\" title=\"T\"}\n:::::::::::callout{#n24 kind=\"note\" title=\"T\"}\n::::::::::callout{#n25 kind=\"note\" title=\"T\"}\n:::::::::callout{#n26 kind=\"note\" title=\"T\"}\n::::::::callout{#n27 kind=\"note\" title=\"T\"}\n:::::::callout{#n28 kind=\"note\" title=\"T\"}\n::::::callout{#n29 kind=\"note\" title=\"T\"}\n:::::callout{#n30 kind=\"note\" title=\"T\"}\n::::callout{#n31 kind=\"note\" title=\"T\"}\n:::callout{#n32 kind=\"note\" title=\"T\"}\na\n:::\n::::\n:::::\n::::::\n:::::::\n::::::::\n:::::::::\n::::::::::\n:::::::::::\n::::::::::::\n:::::::::::::\n::::::::::::::\n:::::::::::::::\n::::::::::::::::\n:::::::::::::::::\n::::::::::::::::::\n:::::::::::::::::::\n::::::::::::::::::::\n:::::::::::::::::::::\n::::::::::::::::::::::\n:::::::::::::::::::::::\n::::::::::::::::::::::::\n:::::::::::::::::::::::::\n::::::::::::::::::::::::::\n:::::::::::::::::::::::::::\n::::::::::::::::::::::::::::\n:::::::::::::::::::::::::::::\n::::::::::::::::::::::::::::::\n:::::::::::::::::::::::::::::::\n::::::::::::::::::::::::::::::::\n:::::::::::::::::::::::::::::::::\n::::::::::::::::::::::::::::::::::\n\nAfter.\n"
   },
   {
     "name": "unclosed-fences-before-the-next-block",

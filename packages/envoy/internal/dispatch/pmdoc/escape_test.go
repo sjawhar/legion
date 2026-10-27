@@ -95,7 +95,8 @@ func TestRenderKeepsTheBlocksAfterALineThatWouldOpenAFenceOrCloseATypedBlock(t *
 // misread. A `---` there opens front matter: a later line that is just `---` - a second rule, a
 // code line - closes it, and everything up to there reads as front matter; and with no such line
 // the browser editor's parser, having tried the front matter to the document's end, reads no
-// list, quote or footnote definition in the rest. Those documents write the rule `***`.
+// list, quote, footnote definition or typed block in the rest. Those documents write the rule
+// `***`.
 func TestRenderWritesALeadingRuleAsAsterisksOnlyWhereDashesAreMisread(t *testing.T) {
 	for name, test := range map[string]struct{ after, opener string }{
 		"alone":                     {"", "---"},
@@ -104,7 +105,7 @@ func TestRenderWritesALeadingRuleAsAsterisksOnlyWhereDashesAreMisread(t *testing
 		"a heading":                 {"# a\n", "---"},
 		"code":                      {"```\nc\n```\n", "---"},
 		"an image":                  {"![a](https://x.test/i.png)\n", "---"},
-		"a callout":                 {":::callout{#c1 kind=\"note\" title=\"T\"}\nx\n:::\n", "---"},
+		"a callout":                 {":::callout{#c1 kind=\"note\" title=\"T\"}\nx\n:::\n", "***"},
 		"a heading, then text":      {"## title: x\n\nBody.\n", "---"},
 		"a second rule":             {"x\n\n***\n\ny\n", "***"},
 		"a code line ---":           {"x\n\n```\n---\n```\n", "***"},
