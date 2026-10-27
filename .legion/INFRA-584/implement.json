@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-584",
-  "completed": "2026-10-27T05:59:27Z",
+  "completed": "2026-10-27T10:43:54Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2328",
   "proof": [
+    {
+      "criterion": "Review round 2: required test green on a merge ref that includes #2317, and the go-envoy-infra- and go-envoy- cache pairs run to completion on a pull request with no write",
+      "surface": "GitHub Actions in sjawhar/legion: this pull request's runs at d317a9a5 (Tests 40463123255, Docs 40463123212, Envoy 40463123196, Worker Image build)",
+      "command": "gh run view 40463123255 --json jobs; for j in 122080969483 122080969328 122080969316; do gh api repos/sjawhar/legion/actions/jobs/$j --jq '.name,.conclusion,(.steps[]|select(.name|test(\"cache\"))|[.name,.conclusion])'; done; gh api 'repos/sjawhar/legion/actions/caches?ref=refs/pull/2328/merge' --jq .total_count",
+      "observed": "Tests: lint, typecheck and test succeeded (test green after #2317). envoy-infra-go (job 122080969483, 10:10-10:17Z, success), envoy-e2e-local (job 122080969328, success) and pi-legion (job 122080969316, success): actions/cache/restore success and actions/cache/save skipped in each. refs/pull/2328/merge holds 0 cache entries. The Envoy run's non-required dispatch job failed one WebKit browser test (e2e/deep-links.e2e.ts:636), which this change does not touch; its failed job was re-run once.",
+      "headSha": "d317a9a5b79908b0615680e51c0eb621fc88d84e",
+      "negativeControl": "Pull requests without this change wrote entries under their own refs in the same hours: refs/pull/2322/merge and refs/pull/2303/merge each wrote go-notices-Linux-3477fd73… (2.2 GB), and refs/pull/2299/merge wrote buildkit-blob-1-* entries. At the earlier head, before #2317, test was red on 'read a slotted issue … got 20 and 31', which shows the check does fail when the daemon is broken."
+    },
     {
       "criterion": "1. No pull-request run writes a cache entry (pre-merge, this pull request)",
       "surface": "GitHub Actions in sjawhar/legion: this pull request's runs (Tests 40448807743, Worker Image 40448807776, Docs 40448807751, PR Title 40448807673) and scratch PRs #2329 (run 40447991840) and #2330",
@@ -31,15 +39,15 @@
     }
   ],
   "filesChanged": [
-    ".github/workflows/pr-and-main.yaml",
-    ".github/workflows/envoy-and-contracts.yaml",
-    ".github/workflows/docs.yaml",
-    ".github/workflows/worker-image.yaml",
     ".github/actions/setup-bun/action.yml",
     ".github/scripts/check-bun-version.sh",
     ".github/scripts/check-bun-version.test.sh",
     ".github/scripts/check-image-trigger-paths.sh",
     ".github/scripts/check-image-trigger-paths.test.sh",
+    ".github/workflows/docs.yaml",
+    ".github/workflows/envoy-and-contracts.yaml",
+    ".github/workflows/pr-and-main.yaml",
+    ".github/workflows/worker-image.yaml",
     "docs/kubernetes.md"
   ],
   "trickyParts": [
@@ -51,10 +59,12 @@
   "deviations": [
     "Plan Arm B moved setup-go's folders aside; implemented instead as setup-go `cache: false` plus an actions/cache/restore/save pair, because setup-go's post step writes core.warning('There are no cache folders on the disk') on every PR job when the folders are gone. New key families go-daemon-, go-envoy-, go-envoy-infra-, go-docs-: the Go module cache is cold on PRs until the first main run after the merge writes them.",
     "The notices filter also lists .github/workflows/pr-and-main.yaml (the step's own body), so this PR runs the step; the skip is proven by scratch #2329.",
-    "Spec departure 3 (plan) taken: off main, setup-bun is not restored (no-cache), because its only cache input also stops the restore. The cost is about 2 s per job (Setup Bun 0.03 min median, before and after)."
+    "Spec departure 3 (plan) taken: off main, setup-bun is not restored (no-cache), because its only cache input also stops the restore. The cost is about 2 s per job (Setup Bun 0.03 min median, before and after).",
+    "Round 2: check-bun-version.sh rule 8 now allows no-cache without pinning its value, as the reviewer recommended; nothing gates the wrapper's off-main no-cache line any more."
   ],
   "openQuestions": [
-    "test is red at every head: main's own test has been red since #2289 (`read a slotted issue … got 20 and 31`). The controller's note on dispatch://INFRA-520 says #2317 fixes it and that trees must not fix it themselves. Merge main again once #2317 lands.",
-    "Scratch PR #2330 stays open until its rerun's lint settles; the implementer closes it and deletes probe/infra-584-go-change on that settlement."
-  ]
+    "The production check after the merge: delete the pre-merge refs/pull/* cache entries (AC2), report what remains by ref and key family, check AC3 over 72 h, and run the 'Main still writes' check."
+  ],
+  "round": 2,
+  "reviewAnswered": "review 5663185626 at c93db8fe (changes requested)"
 }
