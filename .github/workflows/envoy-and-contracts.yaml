@@ -600,9 +600,23 @@ jobs:
       # Docker, pulling its pinned ubuntu image from mirror.gcr.io.
       # scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup_go
         with:
           go-version-file: packages/daemon/go.mod
-          cache-dependency-path: packages/daemon/go.sum
+          cache: false
+      # The Go module and build caches are restored on every run and saved at the end of the job
+      # only by a run on main: an entry a pull request writes is readable by no other pull request,
+      # and those entries pushed main's own out. setup-go's own cache has no restore-only input, so
+      # it is off. A changed go.sum restores main's newest entry for this Go by prefix.
+      # envoy-infra-go and envoy-e2e-local do the same.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: go_cache
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-daemon-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/daemon/go.sum') }}
+          restore-keys: go-daemon-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-legion
         run: bun run build
@@ -643,6 +657,13 @@ jobs:
         with:
           name: pi-legion-pr
           path: out/pr-artifacts/*.tgz
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.go_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go_cache.outputs.cache-primary-key }}
 
   dispatch:
     needs: changes
@@ -907,9 +928,19 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup_go
         with:
           go-version-file: packages/envoy/infra/go.mod
-          cache-dependency-path: packages/envoy/infra/go.sum
+          cache: false
+      # Restored on every run, saved at the end of the job only on main (the pi-legion job says why).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: go_cache
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-infra-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/envoy/infra/go.sum') }}
+          restore-keys: go-envoy-infra-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-
       - name: Pull the NATS and Postgres test container images
         uses: ./.github/actions/pull-test-images
         with:
@@ -935,6 +966,13 @@ jobs:
       - name: Live tests of envoy-infra against nats-server (natslive)
         run: go test -tags natslive ./core/ ./seed/
         working-directory: packages/envoy/infra
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.go_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go_cache.outputs.cache-primary-key }}
 
   # The document service and the API that drives it, pmdoc (LEGION-571: its own flakes under
   # -race and load, not a race in production code, cost three review rounds because nothing ran
@@ -1234,9 +1272,19 @@ jobs:
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup_go
         with:
           go-version-file: packages/envoy/go.mod
-          cache-dependency-path: packages/envoy/go.sum
+          cache: false
+      # Restored on every run, saved at the end of the job only on main (the pi-legion job says why).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: go_cache
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/envoy/go.sum') }}
+          restore-keys: go-envoy-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-
       # scripts/e2e-local.test.sh drives the driver's refusals, which the acceptance run below
       # never reaches: an unknown option, --help, and a NATS already holding the port, where the
       # driver must refuse rather than run the acceptance against a server it did not start. It
@@ -1253,3 +1301,10 @@ jobs:
         with:
           name: envoy-e2e-local-evidence-${{ github.run_attempt }}
           path: packages/envoy/out/e2e
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.go_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go_cache.outputs.cache-primary-key }}

@@ -62,11 +62,22 @@ jobs:
       # docs/site/scripts/build-binaries.sh builds the Go binaries the reference generators run, and
       # the screenshots step builds the Dispatch server; both modules name the same Go.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup_go
         with:
           go-version-file: packages/daemon/go.mod
-          cache-dependency-path: |
-            packages/daemon/go.sum
-            packages/envoy/go.sum
+          cache: false
+      # The Go module and build caches are restored on every run and saved at the end of the job
+      # only by a run on main: an entry a pull request writes is readable by no other pull request,
+      # and those entries pushed main's own out. setup-go's own cache has no restore-only input, so
+      # it is off. A changed go.sum restores main's newest entry for this Go by prefix.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: go_cache
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-docs-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/daemon/go.sum', 'packages/envoy/go.sum') }}
+          restore-keys: go-docs-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-
       - run: bun install --frozen-lockfile
       - name: Lint the docs site
         run: bun run lint
@@ -119,6 +130,13 @@ jobs:
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: docs/site/dist
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.go_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go_cache.outputs.cache-primary-key }}
 
   deploy:
     if: github.event_name == 'push'
