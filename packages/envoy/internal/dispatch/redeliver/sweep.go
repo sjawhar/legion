@@ -175,6 +175,10 @@ type Options struct {
 type Sweeper struct {
 	GitHub GitHub
 	State  bus.KeyValue
+	// Open, when set, opens State at the start of each of Run's sweeps until it has once: a sweep
+	// it fails for is skipped and logged as failed. envoy-dispatch sets it, so a sweeper made while
+	// NATS is down opens its bucket on the first sweep that finds NATS connected.
+	Open   func() (bus.KeyValue, error)
 	Logger *slog.Logger
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
@@ -249,6 +253,14 @@ func (s *Sweeper) Run(ctx context.Context, interval time.Duration, leases duty.L
 
 // sweepAndReport is one sweep of the running loop and its log line.
 func (s *Sweeper) sweepAndReport(ctx context.Context) {
+	if s.Open != nil {
+		state, err := s.Open()
+		if err != nil {
+			s.Logger.Warn("webhook redelivery sweep failed", "error", err)
+			return
+		}
+		s.State, s.Open = state, nil
+	}
 	report, err := s.Sweep(ctx, Options{})
 	if err != nil {
 		s.Logger.Warn("webhook redelivery sweep failed", "error", err)

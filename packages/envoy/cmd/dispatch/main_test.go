@@ -438,8 +438,12 @@ func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
 	}
 }
 
+// A process whose NATS is not connected serves every request that does not need the bus, so the
+// probe answers 200 with `ok` true and reports the bus in `nats` alone: a readiness probe that
+// failed with the bus would take every server process out of service at once.
 func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
-	handler := dispatchHandler(http.NewServeMux(), nil, &bus.Client{}, nil, "", nil)
+	database := storetest.Open(t)
+	handler := dispatchHandler(http.NewServeMux(), database, &bus.Client{}, nil, "", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -447,8 +451,11 @@ func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 		t.Fatalf("decode health response: %v", err)
 	}
+	if response.Code != http.StatusOK || health["ok"] != true {
+		t.Fatalf("healthz with NATS disconnected = %d %v, want 200 with ok true", response.Code, health)
+	}
 	if nats, ok := health["nats"].(bool); !ok || nats {
-		t.Fatalf("healthz nats = %#v, want false", nats)
+		t.Fatalf("healthz nats = %#v, want false", health["nats"])
 	}
 }
 

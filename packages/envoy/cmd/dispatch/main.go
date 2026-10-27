@@ -176,11 +176,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// INFRA-555: every NATS client of the server connects in the background (serverBus), so a bus
+	// that is down or refuses the credential at boot leaves the process serving everything that
+	// does not need the bus, and connected once the bus answers; only a configuration error (an
+	// unusable seed or proxy setting, a server that is not this machine's) ends the boot here.
 	var natsClient *bus.Client
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, serverBus(bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))...)
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -201,7 +205,7 @@ func main() {
 			slog.Info("dispatch: agent conversation relay off: it needs NATS")
 		}
 	} else {
-		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.Envoy.NatsURLs, env.lookup)
+		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.Envoy.NatsURLs, env.lookup, serverBus()...)
 		if err != nil {
 			slog.Error("dispatch: connect the agent conversation relay", "error", err)
 			os.Exit(1)
@@ -422,16 +426,17 @@ func main() {
 
 	// LEGION-567: the delivery timeline's 5-minute GitHub-App reconcile runs regardless of NATS
 	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
-	// a connected client, exactly like the outbox above. Both take the event broker: each writes
+	// a client, exactly like the outbox above. Both take the event broker: each writes
 	// issue.deployed on a pull request's issue once its shipping run is known (LEGION-781).
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker).Run(ctx, leases)
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
 		// its own (delivery.StartIntakes). Their clients stay open until the publisher closes, so a
 		// message still in its handler can be acknowledged while Dispatch shuts down; stop waits for
-		// both Runs, which return once ctx is cancelled, and not for that handler.
+		// both Runs, which return once ctx is cancelled, and not for that handler. Each connects in
+		// the background as the publisher does, and its bind poll binds the durable once it has.
 		connectIntake := func(name string) (*bus.Client, error) {
-			return bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName(name))
+			return bus.Connect(envoyConfig.Envoy.NatsURLs, serverBus(bus.WithEnvironment(env.lookup), bus.WithName(name))...)
 		}
 		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker)
 		if err != nil {
@@ -983,6 +988,15 @@ func openFileStore(ctx context.Context, boot bootConfig) (files.Store, error) {
 	return bucketStore, nil
 }
 
+// serverBus is the options every NATS client of the server connects with, after extra: it connects
+// in the background (bus.WithConnectInBackground), so a bus that is down at boot or refuses the
+// credential leaves the process serving and connects it once the bus answers, and it declares a
+// connection whose packets stop coming back lost within seconds (bus.WithSilentCutDetection), so
+// /healthz reports a cut bus within seconds of the cut.
+func serverBus(extra ...bus.ConnectOption) []bus.ConnectOption {
+	return append(extra, bus.WithConnectInBackground(), bus.WithSilentCutDetection())
+}
+
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API
 // route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
 // longer pattern, so "GET /healthz" wins over the router's "/".
@@ -993,19 +1007,28 @@ func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bu
 	return mux
 }
 
-// healthzHandler answers the probe: the process is serving, Postgres is reachable on the
-// health pool's own connection, and NATS is connected where it is configured. Nothing here
-// waits on the shared pool, and each probe bounds its own wait (store.healthProbeTimeout,
-// files.healthTimeout), which records why a probe that answers late is as bad as one that never
-// answers. The database and file-store probes run side by side: each takes up to two seconds,
-// and one after the other they would take four, past the three-second prober (the compose
-// healthcheck and the deploy script).
+// healthzHandler answers the readiness probe: 200 while this process can serve requests, which is
+// while Postgres answers on the health pool's own connection, and 503 while it does not; `ok` says
+// the same. Nothing here waits on the shared pool, and each probe bounds its own wait
+// (store.healthProbeTimeout, files.healthTimeout), which records why a probe that answers late is
+// as bad as one that never answers. The database and file-store probes run side by side: each
+// takes up to two seconds, and one after the other they would take four, past the three-second
+// prober (the compose healthcheck and the deploy script). A probe that fails while the database is
+// unreachable is right for readiness and wrong for liveness: a liveness probe on it would restart
+// every server process during a database failover.
 //
-// Where a file store is configured, `files` reports whether its bucket answered, and that is
-// all it does: it never decides `ok`. The load balancer replaces a task whose probe fails, and
-// production runs one, so a bucket outage, a slow HeadBucket or a grant someone changed would
-// take documents, asks and comments down with the files. A deploy check that wants the bucket
-// asserts `files: true` itself.
+// `nats` reports whether the server's publisher is connected to NATS (null when NATS is disabled),
+// and that is all it does: it never decides `ok`. A process serves reads and writes while the bus
+// is down or cut, and its outbox publishes what was written once the bus answers again, so a probe
+// that failed with the bus would take every server process out of service at once for an outage
+// each of them can serve through. The client declares a cut connection lost within seconds even
+// when no packet comes back to say so (bus.WithSilentCutDetection), so the field follows the bus
+// that closely. A check that needs the bus asserts `nats: true` itself, as the e2e scripts do.
+//
+// Where a file store is configured, `files` reports whether its bucket answered, and likewise
+// never decides `ok`: a bucket outage, a slow HeadBucket or a grant someone changed would
+// otherwise take documents, asks and comments down with the files. A deploy check that wants the
+// bucket asserts `files: true` itself.
 //
 // Beside those it reports what is deployed: `commit`, the legion commit this process's binary
 // was built from (null when the build did not stamp one), `fleet_commit`, the commit of the latest
@@ -1059,7 +1082,7 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, fileStore fil
 			natsOK = &connected
 		}
 		<-filesProbed
-		ok := databaseOK && (natsOK == nil || *natsOK)
+		ok := databaseOK
 		status := http.StatusOK
 		if !ok {
 			status = http.StatusServiceUnavailable
