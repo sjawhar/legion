@@ -151,7 +151,7 @@ func (s *server) decisionBlockChecks(
 		} else {
 			source.artifactID = artifact.ID
 		}
-		input := relatedInput{project: artifact.Project, text: block.Question, source: source, record: true}
+		input := relatedInput{project: artifact.Project, text: block.Question, title: block.Question, source: source, record: true}
 		checks[index] = decisionBlockCheck{BlockID: block.ID, Question: block.Question}
 		if index >= decisionBlockCheckLimit {
 			checks[index].Suggestions = s.relatedCheckNotRun(
@@ -208,7 +208,10 @@ type relatedInput struct {
 	project string
 	// text is what is checked: a new issue's title and spec, an ask's or decision block's question,
 	// or the no-write route's title and text.
-	text   string
+	text string
+	// title is the part of text the chosen terms are written as (relatedTerm.Surface): a new
+	// issue's or the no-write route's title, an ask's or decision block's question.
+	title  string
 	source suggestionSource
 	// excludeIssue leaves that issue and everything it owns out of the results and out of the
 	// terms' document frequencies, as an issue source's own issue is (the no-write route's
@@ -334,7 +337,7 @@ func (s *server) runRelatedCheck(
 	pick := &relatedPick{ready: make(chan struct{})}
 	keyword := make(chan relatedStage, 1)
 	go func() {
-		pick.terms, pick.err = s.pickRelatedTerms(keywordCtx, s.deps.Store.Pool, project, input.text, exclusion)
+		pick.terms, pick.err = s.pickRelatedTerms(keywordCtx, s.deps.Store.Pool, project, input.text, input.title, exclusion)
 		close(pick.ready)
 		stage := relatedStage{err: pick.err}
 		switch {
@@ -528,7 +531,7 @@ func (s *server) relatedSearch(
 }
 
 // relatedSearchQuery is Suggestions.SearchQuery: the best relatedSearchQueryTerms chosen terms,
-// each as the text spells it where one word of the text yields it, else its lexeme.
+// each as the title spells it where one word of the title yields it, else its lexeme.
 func relatedSearchQuery(terms []relatedTerm) string {
 	words := make([]string, 0, relatedSearchQueryTerms)
 	for _, term := range terms[:min(len(terms), relatedSearchQueryTerms)] {

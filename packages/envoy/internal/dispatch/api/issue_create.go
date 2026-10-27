@@ -427,6 +427,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	suggestions := s.relatedCheck(r.Context(), relatedInput{
 		project: input.Project,
 		text:    input.Title + "\n" + markdown,
+		title:   input.Title,
 		source:  suggestionSource{kind: "issue", issueKey: key, actor: actor},
 		record:  true,
 	})

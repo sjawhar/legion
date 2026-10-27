@@ -235,9 +235,9 @@ type relatedExclusion struct {
 // relatedTerm is one lexeme the picker chose.
 type relatedTerm struct {
 	Lexeme string
-	// Surface is the lexeme as the text spells it (the first whitespace-separated word whose own
-	// vector holds the lexeme, a word that is only that lexeme first, its outer punctuation
-	// trimmed), or empty where no single word of the text yields it.
+	// Surface is the lexeme as the title spells it (the first whitespace-separated word of the
+	// title whose own vector holds the lexeme, a word that is only that lexeme first, its outer
+	// punctuation trimmed), or empty where no single word of the title yields it.
 	Surface string
 	DF      int
 	Score   float64
@@ -259,7 +259,7 @@ type relatedTerms struct {
 }
 
 // relatedTermsSQL reads, for every lexeme of the text, its frequency there (tf), its df from the
-// project's statistics, and its surface word, in one statement.
+// project's statistics, and its surface word in the title, in one statement.
 //
 // The text is tokenized as a document version's vector is built (0087_search_vector_bound): ask
 // blocks stripped, search_text, then search_vector, so its lexemes are the ones stored vectors
@@ -276,8 +276,12 @@ type relatedTerms struct {
 // before refreshed_at but committed after it is subtracted though the refresh never saw it, and an
 // item written since may hold a word only the source held then.
 //
+// A surface costs a to_tsvector per distinct word, so only the title's words are read for one:
+// they are what a reader recognises (Suggestions.SearchQuery), and the title is a few words where
+// a spec can be thousands.
+//
 // Parameters: $1 project, $2 text, $3 excluded issue key (empty for none), $4 excluded document
-// artifact id (null for none).
+// artifact id (null for none), $5 the title.
 const relatedTermsSQL = `
 with body as (
   select search_text(regexp_replace($2::text, '(?s):::ask\{.*?:::', '', 'g')) as text
@@ -322,7 +326,7 @@ own_counts as (
 ),
 words as (
   select w.word, min(w.n) as n
-    from body cross join lateral regexp_split_to_table(body.text, '\s+') with ordinality w(word, n)
+    from regexp_split_to_table(search_text($5::text), '\s+') with ordinality w(word, n)
    where w.word <> ''
    group by w.word
 ),
@@ -423,13 +427,15 @@ type relatedCandidate struct {
 // whose df the excluded owner's items bring to zero, is probed live, the relatedProbeLimit most
 // frequent in the text, and a hit counts as df 1. A project with no statistics starts their
 // refresh (ensureSearchTermStats) and is picked in probe mode, every lexeme probed and N taken as
-// 0.
-func (s *server) pickRelatedTerms(ctx context.Context, q queryer, project, text string, exclude relatedExclusion) (relatedTerms, error) {
+// 0. Each chosen term's surface is read from title alone (relatedTermsSQL).
+func (s *server) pickRelatedTerms(
+	ctx context.Context, q queryer, project, text, title string, exclude relatedExclusion,
+) (relatedTerms, error) {
 	var artifactID *string
 	if exclude.artifactID != "" {
 		artifactID = &exclude.artifactID
 	}
-	rows, err := q.Query(ctx, relatedTermsSQL, project, text, exclude.issueKey, artifactID)
+	rows, err := q.Query(ctx, relatedTermsSQL, project, text, exclude.issueKey, artifactID, title)
 	if err != nil {
 		return relatedTerms{}, err
 	}

@@ -30,9 +30,10 @@ func refreshTermStats(t *testing.T, database *store.Store, project string) int {
 	return items
 }
 
+// pickTerms picks from text as an ask's question is picked: the whole text is its title.
 func pickTerms(t *testing.T, srv *server, project, text string, exclude relatedExclusion) relatedTerms {
 	t.Helper()
-	picked, err := srv.pickRelatedTerms(context.Background(), srv.deps.Store.Pool, project, text, exclude)
+	picked, err := srv.pickRelatedTerms(context.Background(), srv.deps.Store.Pool, project, text, text, exclude)
 	if err != nil {
 		t.Fatalf("pick related terms: %v", err)
 	}
@@ -327,6 +328,37 @@ func TestRelatedTermsQueryCastsAndMatchesTheItemsHoldingTheChosenWords(t *testin
 	}
 	if !found[walrus] || !found[tundra] || found[other] {
 		t.Fatalf("issues found %v, want %s and %s and not %s", found, walrus, tundra, other)
+	}
+}
+
+// A term is written as the title spells it, and as its lexeme where only the spec holds it: the
+// spec's words are never mapped, which is what keeps a 10,000-word spec's pick fast. The title
+// chooses no term: the same text picks the same lexemes with no title at all.
+func TestRelatedTermsSurfacesComeFromTheTitleAlone(t *testing.T) {
+	handler, database, srv := relatedTermsServer(t)
+	createSuggestionProject(t, handler, "SURF")
+	createSearchIssue(t, handler, "SURF", "Walrus migration", "")
+	createSearchIssue(t, handler, "SURF", "Tundra survey", "")
+	createSearchIssue(t, handler, "SURF", "Glacier survey", "")
+	refreshTermStats(t, database, "SURF")
+
+	title := "Walruses on the move"
+	text := title + "\nThey cross the tundra each spring."
+	picked, err := srv.pickRelatedTerms(context.Background(), srv.deps.Store.Pool, "SURF", text, title, relatedExclusion{})
+	if err != nil {
+		t.Fatalf("pick related terms: %v", err)
+	}
+	walrus, pickedWalrus := pickedTerm(picked, "walrus")
+	tundra, pickedTundra := pickedTerm(picked, "tundra")
+	if !pickedWalrus || !pickedTundra || walrus.Surface != "Walruses" || tundra.Surface != "" {
+		t.Fatalf("terms %+v, want walrus written 'Walruses' as the title has it and tundra, only in the spec, with no surface", picked.Terms)
+	}
+	untitled, err := srv.pickRelatedTerms(context.Background(), srv.deps.Store.Pool, "SURF", text, "", relatedExclusion{})
+	if err != nil {
+		t.Fatalf("pick related terms with no title: %v", err)
+	}
+	if got, want := termLexemes(untitled), termLexemes(picked); !slices.Equal(got, want) {
+		t.Fatalf("with no title picked %v, want %v as with one", got, want)
 	}
 }
 

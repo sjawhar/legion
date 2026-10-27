@@ -99,6 +99,7 @@ func (s *server) answerRelated(w http.ResponseWriter, r *http.Request, request r
 	WriteJSON(w, http.StatusOK, s.relatedCheck(r.Context(), relatedInput{
 		project:      project,
 		text:         request.checkText(),
+		title:        request.Title,
 		excludeIssue: request.ExcludeIssue,
 		keywordsOnly: request.KeywordsOnly,
 	}))
