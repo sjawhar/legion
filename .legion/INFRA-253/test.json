@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-253",
-  "completed": "2026-10-27T10:55:00Z",
-  "headSha": "26655eb1fdf7206814c9906a02aa58507b7908b7",
+  "completed": "2026-10-27T12:00:00Z",
+  "headSha": "c231c77ec150e04cbb31760793de1e72366bee56",
   "generation": 3,
   "implementerProof": {
     "verdict": "verified",
@@ -22,11 +22,19 @@
     },
     {
       "criterion": "Bare gate after the merge: the Stage 1 live proof at the new head",
-      "surface": "pod: the real legion built at 26655eb1, under tmux 3.5a, with Postgres 17",
+      "surface": "pod: the real legion built at c231c77e, under tmux 3.5a, with Postgres 17",
       "command": "LEGION_E2E_PG_DSN=<pod pg> bash scripts/e2e/stage1-skeleton.sh",
       "observed": "`stage 1 e2e: PASS`, including the keeper restart and the check that only the daemon and keeper hold the listening socket",
-      "headSha": "26655eb1fdf7206814c9906a02aa58507b7908b7",
+      "headSha": "c231c77ec150e04cbb31760793de1e72366bee56",
       "negativeControl": "the run's own first check: a DSN to a port with no Postgres is refused, naming the host and not the password"
+    },
+    {
+      "criterion": "docs.yaml after the merge of #2356: the docs build still runs when held-port.py changes",
+      "surface": "pod: Bun.YAML parse of .github/workflows/docs.yaml at c231c77e",
+      "command": "bun -e 'Bun.YAML.parse(<docs.yaml>).on.{push,pull_request}.paths'",
+      "observed": "push: held-port.py in paths = true; pull_request: held-port.py in paths = true, types [opened, synchronize, reopened, ready_for_review, closed] (#2356's)",
+      "headSha": "c231c77ec150e04cbb31760793de1e72366bee56",
+      "negativeControl": "none applies to a comment-only move; the interdiff shows no executable line changed"
     },
     {
       "criterion": "A1c after the merge of #2264 (round at e067b440, unchanged code since): envoy-dispatch on DISPATCH_LISTEN_FD serves beside a separate DISPATCH_PPROF_PORT listener, and a pprof port equal to the held socket's is refused",
@@ -45,7 +53,7 @@
       "negativeControl": "A1b's deterministic control: HoldPort mutated to release before Start fails TestHeldPortStaysHeldUntilItsProcessServes"
     }
   ],
-  "ciAtHead": "26655eb1 at 10:53Z: Tests 40490926408, Legion Envoy and Contracts 40490926489, Docs 40490926723 and Worker Image 40490926316 all queued. aef91766: Tests success (test, lint, typecheck); Docs and Worker Image success; Legion Envoy and Contracts 40474923941 cancelled by this push (changes success, every other job cancelled). Per the architect, approval rests on main's required checks (lint, typecheck, test, pr-title) at 26655eb1 plus these pod runs.",
+  "ciAtHead": "c231c77e at 11:58Z: Tests 40499349122, Legion Envoy and Contracts 40499349097, Docs 40499349091 and Worker Image 40499349109 all queued. 26655eb1: Docs success; Tests still running (1 of 3 jobs success) and the Envoy run queued when this push came; Worker Image cancelled. Approval rests on main's required checks (lint, typecheck, test, pr-title) at c231c77e plus the pod runs.",
   "devbox": "Unchanged since the last round: at 46502a84, stage2 PASS (23/23, restart-readopts included) and claude-backend PASS (9/9). stage3 has reached no restart checkpoint in four runs, each failing for a cause outside this PR, and a re-run waits for a quiet Actions queue. stage3-4b13b and dispatch-user-turns take only the gateway route and are not run.",
-  "rebaseRecheck": "rebase re-check aef91766 → 26655eb1: fingerprint unchanged (35d99ffc412580020c0d8bcd598ee9b1f888db489238036bf4df18c48263256c at both heads), so this PR's own diff did not move. 26655eb1 merges main b08a56bc..main for a GitHub-reported conflict; main's #2167 rewrote packages/envoy/scripts/e2e-local.sh around this PR's held-port lines: NATS is now this checkout's own internal/testnats/cmd/natsd, started with `-p ${E2E_NATS_PORT:--1}` and read back from its 'Listening for client connections on' line, and two refusal checks (an absent session, a bus that is gone) are added. As the architect asked, I ran e2e-local.sh to its PASS lines and e2e-local.test.sh at the new head (proof below), plus the Stage 1 smoke."
+  "rebaseRecheck": "26655eb1 → c231c77e (forward merge of main fd05f188 for a GitHub-reported conflict in .github/workflows/docs.yaml, from #2356): fingerprint changed, 35d99ffc412580020c0d8bcd598ee9b1f888db489238036bf4df18c48263256c → 2e28392bf341f922f0aafa29bddceb4c8cd0af13b75da26a23a2f9b9e09bdfc1. My interdiff of the PR's diff before and after the merge shows one moved hunk: docs.yaml's header comment, where #2356's sentences now follow this PR's held-port.py clause. No executable line moved. Bun.YAML parses the merged docs.yaml, and scripts/e2e/lib/held-port.py is still in both its push and pull_request paths. The Stage 1 smoke passes at c231c77e. The e2e-local proofs at 26655eb1 stand, because no line of them moved."
 }
