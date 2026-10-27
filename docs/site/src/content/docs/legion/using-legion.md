@@ -109,9 +109,8 @@ repository, submitted on GitHub while the issue is in `needs_review`, counts the
 **Request changes** sends the work back to the implementer with your comments, and an approval of
 the head can end the round. A review from an account without write access decides nothing, since
 any GitHub account can review a public repository's pull request, and a plain comment moves
-nothing. The approved head also carries the tree's handoff files under `.legion/<issue>/`. Retro's
-last commit removes them, so the head that merges carries none and the merge brings no handoff onto
-the default branch; the pull request's file list shows them only until that commit.
+nothing. Legion's handoffs are records on the Dispatch issue, never commits, so the pull request's
+file list shows only the change and the merge brings no handoff onto the default branch.
 
 ## Merge
 

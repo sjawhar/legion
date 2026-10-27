@@ -2212,8 +2212,9 @@ the synchronous listener call records the sent or failed attempt instead of blin
   its absence alone tells a consumer the listener predates the field), and `forced` (`"true"` or
   `"false"`, GitHub's own flag, present on every push the same way). A forced push's commits are
   listed from the merge base, so its `changed_paths` do not describe what it did to the head it
-  replaced. Envoy forwards what GitHub sent; what counts as a handoff-only push is the Legion
-  daemon's rule, not the listener's.
+  replaced. Envoy forwards what GitHub sent. The Legion daemon reads no `changed_paths`,
+  `changed_paths_truncated` or `forced` since INFRA-177, when its handoffs moved from committed
+  files to Dispatch records and no push is told apart by its paths; the listener still sends them.
 - A workflow run with no pull request publishes `workflow.<file>.<action>`. A finished Actions job on
   the default branch, of a run with no pull request, publishes `job.<run_id>.completed`: a completed
   `check_run` that lists no pull request, from the GitHub Actions App, whose

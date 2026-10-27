@@ -6,12 +6,10 @@ adopt children, split a change across repositories, or attach architecture compo
 ## Reading the tree
 
 Read the root issue, its acceptance criteria, its existing children and their current handoffs.
-Your issue record is the `legion` tool's `read_record`. A child's committed handoff is a plain file
-on its issue branch: read `.legion/<child>/<phase>.json` from that issue's workspace, or from GitHub:
-
-```bash
-gh api repos/<owner>/<repo>/contents/.legion/<child>/<phase>.json?ref=legion/<child> --jq .content | base64 -d
-```
+Your issue record is the `legion` tool's `read_record`. A child's handoffs are records on its
+Dispatch issue: read the newest of a phase with
+`dispatch handoff-read --issue <child> --phase <word>` (`plan`, `implement`, `test` or `review`),
+and an earlier one with `--version <n>`. The child's Conversation lists every version.
 
 ## Adopting children
 
@@ -62,6 +60,15 @@ other one by commit (a lock file or dependency pin), the pin is that commit. Do 
 child with `--blocked-by` instead, because Legion would start it at the blocker's close, before you
 name the merged commit. Read the other repositories with your gh's read-only access
 (`-R owner/repo`).
+
+## A root with no code of its own
+
+When every change of the tree lands through its children, the root's branch has no commit of its
+own, and GitHub opens no pull request for a branch with no commits ahead of its base: implementing
+would never end. The root's implementer then pushes one empty commit
+(`jj new -m '<KEY>: the root of its children; no code of its own'`, with no trailer) and opens the
+pull request on it, as its role prompt says; that push starts the required checks like any other.
+Plan no code for the root in that case, and do not create a child only to give the root a commit.
 
 ## Architecture components
 

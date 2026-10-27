@@ -123,7 +123,7 @@ block names the decision and that evidence. A plan never overturns a settled dec
 
 A design change that leaves the Summary, Acceptance, scope and settled decisions intact (a
 planner's measurement that finds a better way to build the same outcome) goes in the plan (the
-issue's `plan.md` document and `.legion/<issue>/plan.json`), never into the approved spec, even
+issue's `plan.md` document and the planner's `plan` handoff on the issue), never into the approved spec, even
 where the spec's text describes the older design; the reviewer reads the plan beside the spec.
 
 When a planner's `phase-finished` names a departure from the spec's design, compare it with the

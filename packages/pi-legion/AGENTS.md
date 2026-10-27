@@ -367,7 +367,9 @@ sub-architect, an architect whose issue is not its tree), running it on the phas
 every harness shares (`executePhaseOp` in `@legion/pi-shared/legion-phase-ops`) and closing the
 phase (`onPhaseCompleted`) only once it succeeded. A file-backed phase (planning, implementing,
 testing, reviewing) ends with a handoff record on the Dispatch issue, which the worker writes with
-`dispatch handoff-write --issue <issue> --phase <word> --body-file <file>`. The operation finds
+`dispatch handoff-write --issue <issue> --phase <word> --body-file <file>`, the body file under
+`$TMPDIR` rather than the workspace, whose every file jj snapshots; no handoff is a commit or a
+push. The operation finds
 what it reports in the pane first (`@legion/pi-shared/handoff-record`): the issue's phase from
 the daemon's state, the role from the session; for a file-backed phase the role works, the newest
 record of the phase's word, read from the pane's Dispatch (the envoy.json its session reads),
@@ -384,8 +386,11 @@ operation reads the daemon's state first, and an implementer's call on an issue 
 there; `pending` is refused on a phase completion) and `summary` alone, no handoff and no `commit`;
 the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VERDICT_REQUIRED`
 (`packages/daemon/internal/api/handoff.go`). The daemon reads the named record back from Dispatch
-and refuses one written by another session than the claim's (`HANDOFF_SESSION_MISMATCH`) or the
-one the role named for its previous phase (`HANDOFF_NOT_NEW`), and, for the merger's `ready: true`, reads the pull request's
+and refuses, recording nothing, a completion that names no record (`HANDOFF_RECORD_REQUIRED`), a
+record Dispatch does not have (`HANDOFF_RECORD_NOT_FOUND`), a read Dispatch did not answer
+(`DISPATCH_READ_FAILED`), a record of another issue, phase or version (`HANDOFF_RECORD_MISMATCH`),
+one written by another session than the claim's (`HANDOFF_SESSION_MISMATCH`, the import's records
+included), and the one the role named for its previous phase (`HANDOFF_NOT_NEW`); for the merger's `ready: true`, it reads the pull request's
 head on GitHub and refuses a packet the workflow must not take on, each refusal named in the
 merger's role prompt
 (`packages/daemon/internal/prompts/go/merger.md`); a refusal changed nothing, and the answer's

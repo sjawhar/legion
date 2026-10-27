@@ -42,7 +42,7 @@ on:
         default: ""
   # Pre-merge iteration: a pull request against main that touches an image input builds its head and
   # publishes :sha-<short> only. `pull_request` (not `push`) because GitHub evaluates these paths against
-  # the whole PR diff, so the check attaches to every head of such a PR — a handoff-only commit on top
+  # the whole PR diff, so the check attaches to every head of such a PR — a docs-only commit on top
   # of a Dockerfile change still gets it. A `push` trigger filters on the pushed commits alone and left
   # a PR head with no image check (LEGION-23 tester round 1). The paths are every file worker.Dockerfile
   # builds from: the root manifest, lockfile, patches and every root workspace's package.json (the plugin

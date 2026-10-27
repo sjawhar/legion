@@ -72,8 +72,6 @@ allowlist=(
   # The release workflow's first-release seed reads the old name's npm version, so the two new
   # packages continue its version line instead of restarting at 0.x.
   .github/workflows/release.yaml
-  # Committed handoffs quote the plan that names the split.
-  .legion/
   # This check and its test spell the name they hunt.
   .github/scripts/check-plugin-names.sh
   .github/scripts/check-plugin-names.test.sh

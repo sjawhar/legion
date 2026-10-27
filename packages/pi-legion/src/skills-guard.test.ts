@@ -154,28 +154,6 @@ test("the controller skill reads pull requests as the review App, and nothing sa
   expect(offending).toEqual([]);
 });
 
-// GitHub honours the `skip-checks: true` trailer only as the last line after two empty lines; the
-// recipe's first live run wrote one and GitHub started every workflow (LEGION-631). The worker
-// skill's trailer reference and the daemon's worker part carry the recipe with two, and no skill
-// or prompt carries one with fewer: a `$'\n…skip-checks: true'` form is the recipe, so it ends
-// with exactly three `\n`.
-test("the skip-checks recipe writes two empty lines before the trailer, everywhere it is written", () => {
-  const recipe = "$'\\n\\n\\nskip-checks: true'";
-  expect(
-    readFileSync(path.join(staged, "legion-worker/references/skip-checks-trailer.md"), "utf8")
-  ).toContain(recipe);
-  expect(readFileSync(path.join(promptsRoot, "go/worker-common.md"), "utf8")).toContain(recipe);
-  const short = [staged, promptsRoot]
-    .flatMap(files)
-    .filter((file) => {
-      if (!file.endsWith(".md")) return false;
-      const forms = readFileSync(file, "utf8").match(/\$'(\\n)*skip-checks: true'/g) ?? [];
-      return forms.some((form) => form !== recipe);
-    })
-    .map((file) => path.relative(REPO_ROOT, file));
-  expect(short).toEqual([]);
-});
-
 // INFRA-83 took the `CI:` line out of the pull request body, and the forward merge of main put the
 // paragraph that defined it back into skills/legion-worker/references/pr-body.md with no conflict
 // for anyone to read: a merge keeps both sides by design, so a deletion is undone in silence. The
@@ -238,39 +216,4 @@ test("no staged skill or daemon prompt says what a pull request body `CI` line h
         .map(({ index }) => `${name}:${text.slice(0, index).split("\n").length}`);
     });
   expect(instructing).toEqual([]);
-});
-
-// Whether retro's push carries that trailer was once stated three ways that disagreed: a rule keyed
-// to the paths a push touched, an exception list that named retro's removal commit, and a reason
-// that held only while retro also wrote a learning (INFRA-149). A retro with nothing to write took
-// the path rule, so the commit that merges arrived with no check runs, which a base branch that
-// requires a check blocks while Legion carries the earlier code head's verdict and reads the head as
-// green. One sentence now replaces all three, and an edit that un-states it in any of the five texts
-// must fail a lane here rather than pass with every required check green. Counted per file and never
-// against a composed prompt: the composed implementer prompt carries the sentence twice, from
-// `roles/implementer.md` and from `go/worker-common.md`. The whole sentence is counted literally, so
-// a reworded half cannot satisfy it. The `packages/claude-envoy/legion/` mirror needs no pin of its
-// own; `packages/claude-envoy/tests/legion-plugin-fresh.test.ts` fails when it drifts from these.
-//
-// INFRA-83 adds the fifth text. It moved the trailer's contract out of `legion-worker/SKILL.md`
-// into `legion-worker/references/skip-checks-trailer.md`, which is now the file a worker reads
-// before it writes the line, so a copy of the sentence that lived there unpinned would be the
-// drift this test exists to stop. The four INFRA-149 pinned are pinned unchanged.
-test("one sentence states that retro's push never carries the trailer, in each text that states it", () => {
-  const rule =
-    "Retro's push never carries the line, whatever paths it touches, because it is the last " +
-    "push before the merge and a base that requires a check will not merge a head whose checks " +
-    "never ran.";
-  const texts = [
-    path.join(staged, "legion-worker/SKILL.md"),
-    path.join(staged, "legion-worker/references/skip-checks-trailer.md"),
-    path.join(staged, "legion-retro/SKILL.md"),
-    path.join(promptsRoot, "go/worker-common.md"),
-    path.join(promptsRoot, "roles/implementer.md"),
-  ];
-  const counts = texts.map((file) => ({
-    file: path.relative(REPO_ROOT, file),
-    found: readFileSync(file, "utf8").split(rule).length - 1,
-  }));
-  expect(counts).toEqual(texts.map((file) => ({ file: path.relative(REPO_ROOT, file), found: 1 })));
 });

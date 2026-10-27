@@ -2,7 +2,8 @@
 
 Part of `skill://legion-worker`. Read it when GitHub reports the pull request `CONFLICTING`, the
 controller asks you to resolve a conflict, the pull request is retargeted to a new base, you
-compare two heads after such a merge, or you are about to rewrite a commit you already pushed.
+compare two heads after such a merge, a push is refused because the handoff import moved the
+branch, or you are about to rewrite a commit you already pushed.
 Every path it cites is in sjawhar/legion.
 
 ## Reintegrating the base
@@ -39,16 +40,23 @@ Every path it cites is in sjawhar/legion.
     jj -R "$LEGION_WORKSPACE" new legion/<KEY> "${base}@origin" -m "merge: resolve conflict against ${base}@origin"
   ```
 
-  Merge from the bookmark, never from `@`: a handoff split leaves `@` an empty, undescribed
+  Merge from the bookmark, never from `@`: a `jj split` leaves `@` an empty, undescribed
   commit above the described one the bookmark already names, and `jj git push` refuses to push
   any commit without a description — merging from `@` drags that undescribed commit into the
   ancestry and the push fails (`Won't push commit … since it has no description`); the bookmark
   is always on a described, already-pushed commit. If the merge conflicts, resolve it in that
   one commit — edit the markers directly; there is nothing to squash, since the merge is the
   only new commit. Then `jj -R "$LEGION_WORKSPACE" new` to move off it, and push it (*Every role
-  pushes its own commits* in `skill://legion-worker`; a merge is a code push, so its head carries
-  no `skip-checks: true` line): the merge descends from both the bookmark's old position and the
-  destination, so it is a genuine fast-forward and *Rewriting pushed commits* never applies.
+  pushes its own commits* in `skill://legion-worker`; a merge is a code push like any other): the
+  merge descends from both the bookmark's old position and the destination, so it is a genuine
+  fast-forward and *Rewriting pushed commits* never applies.
+- **After the handoff import moved the branch.** `legion handoffs import` moves `legion/<KEY>`
+  once, with a commit whose message is `chore(legion): <KEY>'s handoffs are on its Dispatch issue
+  now`, which removes the `.legion/` directory where handoffs lived before they moved to Dispatch.
+  A push it refuses as a moved branch is cured forward: `jj -R "$LEGION_WORKSPACE" git fetch`,
+  then `jj -R "$LEGION_WORKSPACE" new @- legion/<KEY>@origin -m "merge: legion/<KEY>@origin after
+  the handoff import"` (from `@-`, your own described tip, since your local bookmark may now
+  disagree with the remote one), `jj -R "$LEGION_WORKSPACE" new`, and the push — never a rewrite.
 - **After a retarget.** Retargeting a pull request to a new base does not re-run Tests. Read
   `base` again and merge the bookmark onto it in one command
   (`base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && jj -R "$LEGION_WORKSPACE" new legion/<KEY> "${base}@origin" -m "<message>"`) and push it the
@@ -81,13 +89,14 @@ fingerprint=$(set -o pipefail; jj -R "$LEGION_WORKSPACE" diff --from "fork_point
 - `--context 0` drops context lines; the `sed` drops `@@` hunk headers (line positions move
   on a rebase) and `index` lines (blob ids move when the base's copy of a file changed). What
   is left is exactly the added and removed lines per file.
-- The single fileset `'~(.legion | docs/solutions)'` leaves out the handoff ledger and retro's
-  learnings: process artifacts the merge gate already exempts from re-review
+- The single fileset `'~(.legion | docs/solutions)'` leaves out `.legion/`, where handoffs lived
+  before they moved to Dispatch (the handoff import's commit removes it), and retro's learnings:
+  paths the merge gate lets through above an approval
   (`skill://legion-worker/references/merge-gate.md`), which change
   between one role's verified head and the next without changing the product. This is what lets
   each role compare against *its own* last verified head instead of trusting another role's
   numbers. It must be one expression: jj unions positional filesets, so two separate
-  `'~.legion' '~docs/solutions'` arguments select every file and exclude nothing. Once
+  `'~.legion' '~docs/solutions'` arguments select every file and exclude nothing. Where
   `.legion/` is gone, jj warns `No matching entries for paths: .legion` on stderr; the hash is
   unaffected.
 
@@ -127,10 +136,8 @@ the rewritten head — the one sanctioned non-fast-forward move, and the only pl
 cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards && jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
 ```
 
-A rewrite head is a code push and never carries the `skip-checks: true` line: when the rewrite
-carried one onto it (a squash of a trailered handoff commit into a code commit), describe the head
-again without that line before you push. `jj git push` still refuses a remote branch another role
-moved since your fetch: report the refusal to the architect with its output, never force.
+A rewrite head is a code push like any other. `jj git push` still refuses a remote branch another
+role moved since your fetch: report the refusal to the architect with its output, never force.
 
 Once a base is frozen for others to stack on, never rewrite it: fixes land as new commits on top,
 and the PR body's `Chain` line records what is frozen.

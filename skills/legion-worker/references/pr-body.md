@@ -62,6 +62,13 @@ CI or a merge*: subscribe, then end the turn), never by a sleep loop. A completi
 still stands is sent back, at once for a required check and at the daemon's next read of the runs
 (within two minutes) for a required workflow.
 
+A pull-request body edit re-runs a check that judges the body at once, on the head as it is. While
+the pull request conflicts with its base (GitHub shows it `CONFLICTING`), no workflow triggered
+`on: pull_request` runs for any of its activity types, so a body edit re-judges nothing there; a
+push cures it only once the pull request is mergeable, so the implementer forward-merges a
+conflicting one first (*Reintegrating the base* in
+`skill://legion-worker/references/conflicts-and-rewrites.md`).
+
 ## The brief for the human
 
 `## For the reviewer` is written for the person who merges; `## Verification` below it stays the
@@ -95,15 +102,15 @@ and the tester's proof below are both this proof.
 ## The rules every phase's evidence follows
 
 - **The implementer proves the change before its phase completes, and writes the `E2E (implementer)` line when the pull request opens.**
-  The proof is the one defined above. It goes into `.legion/<issue>/implement.json` as the required `proof`
-  array, and into the PR body, because the reviewer and the merger verify facts on GitHub and never
-  from a handoff. Nothing checks the handoff's shape when you complete — `handoff_complete` reports
-  the pushed commit carrying the file, and the daemon reads nothing in it — so an implement handoff
-  without a `proof` array, or with a blank or whitespace-only field in one, reaches the tester as it
-  is, and the tester records it as a failure against you.
+  The proof is the one defined above. It goes into the `implement` handoff on the Dispatch issue as
+  the required `proof` array, and into the PR body, because the reviewer and the merger verify facts
+  on GitHub and never from a handoff. Nothing checks the handoff's shape when you complete —
+  `handoff_complete` reports the newest record's id and version, and the daemon reads nothing in
+  its body — so an implement handoff without a `proof` array, or with a blank or whitespace-only
+  field in one, reaches the tester as it is, and the tester records it as a failure against you.
 - **The tester verifies the implementer's proof and adds its own `E2E (tester)` line.** It re-runs
   the implementer's command or drives the same surface independently, and records the verdict in
-  `.legion/<issue>/test.json` as `implementerProof` (`{verdict, how}`). The tester runs the
+  its `test` handoff as `implementerProof` (`{verdict, how}`). The tester runs the
   application, not CI again. Try to break the changed surface — wrong and boundary inputs, the
   second and the concurrent run, the party it must refuse — judge whether the implementer's tests
   would catch the ways it breaks, writing the red test for one that none would, and
@@ -123,7 +130,7 @@ and the tester's proof below are both this proof.
   until the implementer has executed it against a devN stack; if no surface can reach it, the
   tester names that missing surface as the blocker instead of passing the phase. Environment or
   secret-scrub evidence (e.g. "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in
-  `.legion/<issue>/test.json`, and only when the issue's acceptance criteria call for it — never
+  its `test` handoff, and only when the issue's acceptance criteria call for it — never
   re-pasted into the PR body each round. After a conflict-forced rebase, compute the
   fingerprint (*The unchanged-diff check* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`) at the head your `E2E` line

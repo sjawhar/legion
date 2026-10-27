@@ -146,7 +146,6 @@ representatives=(
   packages/daemon/internal/daemon/imageprobe_test.go
   packages/daemon/cmd/legion/controller_test.go
   .github/workflows/release.yaml
-  .legion/plan.json
 )
 for index in "${!representatives[@]}"; do
   file=${representatives[index]}

@@ -29,7 +29,7 @@ skill before the tree's work starts: extend the issue's own primary document in 
 specification (never post a second "spec" artifact — that replaces the human's document). It adds
 only the evidence each decision needs and what the human decides, each as a decision block at the
 end of the section that discusses it; your decomposition, its waves, how each outcome is proven
-and the integration test go in the child issues and the planner's `.legion/<issue>/plan.json`, not the root
+and the integration test go in the child issues and the planner's `plan` handoff, not the root
 spec. Once its decision blocks are settled (`skill://dispatch`, "Approval of a spec"), have the
 fresh read-only `plan-gap-analyst` check the current spec against the code and the human's words
 and resolve every finding before requesting approval with `dispatch request-approval`. Its
@@ -101,5 +101,5 @@ A merge is never a human to-do: open no `dispatch ask` for it. The daemon submit
 merge itself once it accepts READY, under the repository's own rules; a by-hand READY tells you
 that a person merges under the repository's rules.
 
-The root architect writes no `.legion/` handoff: unlike a phase worker, it is not a file-backed
-phase, and its root-issue close plus Envoy messaging are the durable record of its work.
+The root architect writes no handoff: unlike a phase worker, it is not a file-backed phase, and
+its root-issue close plus Envoy messaging are the durable record of its work.

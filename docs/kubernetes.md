@@ -512,7 +512,7 @@ rather than in the next image build.
 `.github/scripts/check-image-trigger-paths.sh` (the lint job of `pr-and-main.yaml`) parses the Dockerfile
 and fails when trigger (1) or (2) misses a file it reads, so these lists cannot drift from it.
 Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path filters against the whole PR
-diff, so a later commit that touches none of those paths (a handoff, a docs fix) still gets the check and the
+diff, so a later commit that touches none of those paths (retro's learnings, a docs fix) still gets the check and the
 PR head never loses it; a `push` trigger filters on the pushed commits alone and would leave such a head
 unguarded. The workflow's `packages`/`contents` permissions apply to same-repo pull requests (this
 repository takes no fork PRs, whose token would be read-only). The `attest` job's `id-token` and
@@ -627,7 +627,7 @@ Every refusal is exit 1 with the message on stderr, and none falls back to file 
 
 Only the transcript moves, and only the transcript survives the pod. Tool artifacts, image blobs
 and `models.db` stay under the agent directory
-on local disk (`~/.omp/profiles/legion/agent/…`), and `.legion/` handoffs live in the repository. A
+on local disk (`~/.omp/profiles/legion/agent/…`), and handoffs are records on each Dispatch issue. A
 pod that dies loses those local files — the conversation it does not. OMP's logs
 are under the role's state home (`/legion/scratch/state/<role>/omp/profiles/legion/logs`, [Anatomy
 of a Sandbox pod](#anatomy-of-a-sandbox-pod)), which is on the pod's own disk, the one directory

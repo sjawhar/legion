@@ -65,8 +65,8 @@ asks a person in a Dispatch ask whether it needs an issue, rather than filing on
 Each admitted issue gets an **architect**, which owns the issue's tree. It writes the spec, splits
 large work into child issues, and runs each change through phase workers in turn: a **planner**, an
 **implementer**, a **tester** and a **reviewer**, then a **merger**. Every agent works in a
-workspace of its own, and every phase commits a structured handoff under `.legion/` on the issue
-branch, which is what a restarted agent recovers from. The coordinator writes the issue's status
+workspace of its own, and every phase records a structured handoff on the issue in Dispatch, which
+the next role reads and a restarted agent recovers from. The coordinator writes the issue's status
 back to Dispatch as the work moves (In Progress, Testing, Needs Review, Retro).
 
 Two decisions stay with people:

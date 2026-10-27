@@ -2,9 +2,9 @@
 
 ## Plan record
 
-Read the handoffs already committed under `$LEGION_WORKSPACE/.legion/<issue>/` with the `read` tool before planning.
+Read the handoffs already on the issue with `dispatch handoff-read --issue <issue> --phase <word>` (`plan`, `implement`, `test` or `review`; a phase with none answers `HANDOFF_NOT_FOUND`) before planning.
 
-The plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document (`dispatch artifact` on the issue), never in the issue's primary document, which is its spec. Legion sets no rule on whether a plan or spec goes in the repository: commit a plan, a spec or spec code when the issue, its spec or the repository asks for it. Otherwise, a skill step that says "save the plan to a file" is satisfied by the plan handoff below.
+The plan lives in your `plan` handoff and the issue's `plan.md` document (`dispatch artifact` on the issue), never in the issue's primary document, which is its spec. Legion sets no rule on whether a plan or spec goes in the repository: commit a plan, a spec or spec code when the issue, its spec or the repository asks for it. Otherwise, a skill step that says "save the plan to a file" is satisfied by the plan handoff below.
 
 ## A departure from the spec
 
@@ -17,8 +17,7 @@ When it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; otherwise `@` hol
 resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split` the
 working-copy commit you found at the turn's start. Do not move a bookmark you do
 not own. Put only your logical paths in `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`.
-Push your commits as the daemon part below says: a push that touches only `.legion/` ends its
-head's message with the trailer, and one that also carries other files does not.
+Push any commits you make as the daemon part below says; your handoff is never a commit.
 
 ## Two checks on the plan
 
@@ -32,7 +31,7 @@ A missing check never blocks the plan. When a check's call fails (the task retur
 
 ## Plan handoff
 
-Write `.legion/<issue>/plan.json` with the `write` tool, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "plan"`, `issue: "<issue>"`, `completed: "<RFC 3339 UTC time of writing>"`, `requiredSkills` (above), and the three records below; nothing stamps the first four for you. Commit it with `jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/<issue>/plan.json`, push it, then report completion.
+Write the plan handoff, as the daemon part below says: a JSON object with `schemaVersion: 1`, `phase: "plan"`, `issue: "<issue>"`, `completed: "<RFC 3339 UTC time of writing>"`, `requiredSkills` (above), and the three records below; nothing stamps the first four for you. Write it with the `write` tool to `$TMPDIR/<issue>-plan.json`, record it with `dispatch handoff-write --issue <issue> --phase plan --body-file "$TMPDIR/<issue>-plan.json"`, then report completion.
 
 The handoff records the two plan checks and the plan's departures from the spec:
 
@@ -40,6 +39,6 @@ The handoff records the two plan checks and the plan's departures from the spec:
 - `planReview`: `{"verdict": "approved", "rounds": N}` when the last round approved; `{"verdict": "rejected", "rounds": 3, "remainingIssues": [{"issue": "…", "evidence": "…"}]}` when the third round still rejected, each blocking issue that round named; or `{"verdict": "failed", "rounds": N, "error": "…"}` when a review's call failed. `rounds` counts the reviews run, a failed one included.
 - `specDepartures`: `[]` when the plan follows the spec's design; otherwise one `{"spec": "…", "plan": "…", "evidence": "…", "outcome": {"kind": "changed", "scope": "…"}}` per departure, naming what the spec says, what the plan does instead, and the measurement or reading behind it. Use `{"kind": "unchanged"}` only when the spec's Summary, Acceptance, scope and every decision a human settled in its decision blocks still hold. Otherwise `kind` is `"changed"` and names one or more changed `summary` lines, `acceptance` lines, `scope`, or `settledDecisions` (`decision` and `detail`). Record at most 16 departures; every string is at most 1,024 bytes.
 
-Nothing checks the file's shape at completion: these records are what the next roles read, so a missing or malformed one is yours to catch before you commit. `handoff_complete` reports the pushed commit carrying `plan.json` and refuses an unpushed one, so do not report completion before the push has landed.
+Nothing checks the handoff's shape at completion: these records are what the next roles read, so a missing or malformed one is yours to catch before you record it. `handoff_complete` reports the newest `plan` record on the issue, and refuses when there is none, so do not report completion before `dispatch handoff-write` has printed the version it recorded.
 
 When the review ended `rejected` or either check failed, say so in your completion summary.
