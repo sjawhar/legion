@@ -338,7 +338,7 @@ func TestDomainMembershipWhoseRefreshFailsAfterAnotherAccountSignedInLeavesThatA
 	if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, ErrNoIdentity) {
 		t.Fatalf("the old account's failed confirmation: err = %v, want ErrNoIdentity", err)
 	}
-	login := CookieIdentity{SigningKey: "signing-key", Sessions: rig.sessions, Membership: rig.membership}
+	login := CookieIdentity{SigningKey: testSigningKey, Sessions: rig.sessions, Membership: rig.membership}
 	if email, err := login.Login(cookieRequest(t, memberEmail, newGeneration)); err != nil || email != memberEmail {
 		t.Fatalf("the new account's cookie: login %q, %v; want %s still signed in", email, err, memberEmail)
 	}

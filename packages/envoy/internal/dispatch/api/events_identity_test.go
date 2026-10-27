@@ -262,7 +262,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 
 	database := storetest.Open(t)
 	rig.database = database
-	rig.people = store.NewPgPeopleStore(database.Pool, "signing-key", nil)
+	rig.people = store.NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	rig.sessions = store.NewPgSessionStore(database.Pool)
 	if err := rig.people.SignIn(ctx, rig.email, signIn.RefreshToken, time.Now()); err != nil {
 		t.Fatalf("record the sign-in: %v", err)
@@ -270,11 +270,11 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	if rig.generation, err = rig.sessions.EnsureSession(ctx, rig.email); err != nil {
 		t.Fatalf("establish the session: %v", err)
 	}
-	if rig.cookie, err = http.ParseSetCookie(auth.IssueSessionCookie(rig.email, rig.generation, "signing-key", false)); err != nil {
+	if rig.cookie, err = http.ParseSetCookie(auth.IssueSessionCookie(rig.email, rig.generation, testSigningKey, false)); err != nil {
 		t.Fatalf("parse the session cookie: %v", err)
 	}
 	person := identity.CookieIdentity{
-		SigningKey: "signing-key",
+		SigningKey: testSigningKey,
 		Sessions:   rig.sessions,
 		Membership: &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Rule: identity.GroupRule{Group: "dispatch-members"}},
 	}

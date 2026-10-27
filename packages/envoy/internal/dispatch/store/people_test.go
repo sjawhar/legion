@@ -21,7 +21,7 @@ func TestPgPeopleStoreKeepsEachPersonsMembership(t *testing.T) {
 	if err := database.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	email := "person-" + randomDatabaseSuffix(t) + "@d.example"
 
 	if _, found, err := people.Membership(ctx, email); err != nil || found {
@@ -66,7 +66,7 @@ func TestPeopleTableRefusesAnEmailThatIsNotLowercase(t *testing.T) {
 	if err := database.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	for _, email := range []string{"Sami@d.example", ""} {
 		if err := people.Record(ctx, email); err == nil {
 			t.Errorf("Record(%q) was accepted", email)
@@ -147,7 +147,7 @@ func TestPgPeopleStoreSealsTheRefreshTokenAtRest(t *testing.T) {
 	if err := database.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	email := "sealed-" + randomDatabaseSuffix(t) + "@d.example"
 	confirmed := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	for _, write := range []struct {
@@ -192,7 +192,7 @@ func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
 		revoked bool
 	}{
 		"sealed under another signing key": {store: func(t *testing.T, _ *PgPeopleStore, email, token string) {
-			if err := NewPgPeopleStore(database.Pool, "rotated-signing-key", nil).SignIn(ctx, email, token, confirmed); err != nil {
+			if err := NewPgPeopleStore(database.Pool, auth.SingleSigningKey("rotated-signing-key"), nil).SignIn(ctx, email, token, confirmed); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -211,7 +211,7 @@ func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			pool, flow := revokingPool(t)
-			people := NewPgPeopleStore(database.Pool, "signing-key", flow)
+			people := NewPgPeopleStore(database.Pool, testSigningKey, flow)
 			email := "unopened-" + randomDatabaseSuffix(t) + "@d.example"
 			token := "refresh-" + randomDatabaseSuffix(t)
 			unopened.store(t, people, email, token)
@@ -263,7 +263,7 @@ func TestRetirePlainRefreshTokensRevokesEachThenForgetsIt(t *testing.T) {
 	ctx := context.Background()
 	database := migratedEmptyStore(t)
 	pool, flow := revokingPool(t)
-	people := NewPgPeopleStore(database.Pool, "signing-key", flow)
+	people := NewPgPeopleStore(database.Pool, testSigningKey, flow)
 	storePlainRefreshToken(t, database, "plain-1@d.example", "plain-token-1")
 	storePlainRefreshToken(t, database, "plain-2@d.example", "plain-token-2")
 	if err := people.SignIn(ctx, "sealed@d.example", "sealed-token", time.Now()); err != nil {
@@ -313,7 +313,7 @@ func TestRetirePlainRefreshTokensLeavesATokenThePoolDidNotRevoke(t *testing.T) {
 	ctx := context.Background()
 	database := migratedEmptyStore(t)
 	pool, flow := revokingPool(t)
-	people := NewPgPeopleStore(database.Pool, "signing-key", flow)
+	people := NewPgPeopleStore(database.Pool, testSigningKey, flow)
 	email := "plain@d.example"
 	storePlainRefreshToken(t, database, email, "plain-token")
 	pool.FailRevocation(http.StatusServiceUnavailable, "")
@@ -349,7 +349,7 @@ func TestRetirePlainRefreshTokensRetiresATokenStoredAfterTheLastBoot(t *testing.
 	ctx := context.Background()
 	database := openEmptyTestStore(t)
 	pool, flow := revokingPool(t)
-	people := NewPgPeopleStore(database.Pool, "signing-key", flow)
+	people := NewPgPeopleStore(database.Pool, testSigningKey, flow)
 	boot := func() (retired, failed int) {
 		t.Helper()
 		if err := database.Migrate(ctx); err != nil {
@@ -390,7 +390,7 @@ func TestPgPeopleStoreSignInRetiresThePlainTokenItReplaces(t *testing.T) {
 	}
 	for _, status := range []int{0, http.StatusBadRequest} {
 		pool, flow := revokingPool(t)
-		people := NewPgPeopleStore(database.Pool, "signing-key", flow)
+		people := NewPgPeopleStore(database.Pool, testSigningKey, flow)
 		email := "replaced-" + randomDatabaseSuffix(t) + "@d.example"
 		plain := "plain-" + randomDatabaseSuffix(t)
 		storePlainRefreshToken(t, database, email, plain)
@@ -425,7 +425,7 @@ func TestRetireKeepsASignInRecordedSinceTheRead(t *testing.T) {
 	ctx := context.Background()
 	database := migratedEmptyStore(t)
 	_, flow := revokingPool(t)
-	people := NewPgPeopleStore(database.Pool, "signing-key", flow)
+	people := NewPgPeopleStore(database.Pool, testSigningKey, flow)
 	email := "raced@d.example"
 	if err := people.SignIn(ctx, email, "refresh-new", time.Now()); err != nil {
 		t.Fatal(err)
@@ -457,7 +457,7 @@ func sessionGeneration(t *testing.T, sessions *PgSessionStore, login string) (in
 func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t *testing.T) {
 	ctx := context.Background()
 	database := migratedEmptyStore(t)
-	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	sessions := NewPgSessionStore(database.Pool)
 	const email = "a.person@example.com"
 	membership := func() auth.PersonMembership {
@@ -551,7 +551,7 @@ func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t 
 func TestPgPeopleStoreRecordsNoSubjectWhoseRevokeFailed(t *testing.T) {
 	ctx := context.Background()
 	database := migratedEmptyStore(t)
-	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	sessions := NewPgSessionStore(database.Pool)
 	const email = "a.person@example.com"
 	if err := people.SignInSubject(ctx, email, "subject-1", "refresh-1", time.Now()); err != nil {
@@ -590,7 +590,7 @@ func TestPgPeopleStoreRecordsNoSubjectWhoseRevokeFailed(t *testing.T) {
 func TestPgPeopleStoreEndsTheSessionsOfAConcurrentFirstSignIn(t *testing.T) {
 	ctx := context.Background()
 	database := migratedEmptyStore(t)
-	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	sessions := NewPgSessionStore(database.Pool)
 	const email = "a.person@example.com"
 	first, err := database.Pool.Begin(ctx)
@@ -642,7 +642,7 @@ func TestPgPeopleStoreEndsTheSessionsOfAConcurrentFirstSignIn(t *testing.T) {
 func TestPgPeopleStoreConfirmKeepsTheRowOfAnotherGoogleAccount(t *testing.T) {
 	ctx := context.Background()
 	database := migratedEmptyStore(t)
-	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	const email = "a.person@example.com"
 	signedIn := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 	later := signedIn.Add(90 * time.Minute)
@@ -686,7 +686,7 @@ func TestPgPeopleStoreConfirmKeepsTheRowOfAnotherGoogleAccount(t *testing.T) {
 func TestPgPeopleStoreEndSubjectEndsOnlyTheAccountItNames(t *testing.T) {
 	ctx := context.Background()
 	database := migratedEmptyStore(t)
-	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	sessions := NewPgSessionStore(database.Pool)
 	const email = "a.person@example.com"
 	if err := people.SignInSubject(ctx, email, "subject-2", "refresh-2", time.Now()); err != nil {

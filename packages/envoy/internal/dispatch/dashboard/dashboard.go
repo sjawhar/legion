@@ -4,7 +4,7 @@
 // tab holding one build's page asks for that build's content-hashed chunks, and whichever process
 // answers must have them. Every process publishes its build at boot, before it listens (Publish),
 // prunes the builds no process needs (Prune), and answers a local miss from the database (Store,
-// the router's routes.AssetStore). The tables are migration 0121's.
+// the router's routes.AssetStore). The tables are migration 0122's.
 package dashboard
 
 import (
@@ -24,6 +24,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -46,10 +47,10 @@ var (
 	entryPath    = regexp.MustCompile(`^/assets/index-[^/]+\.js$`)
 )
 
-// BuildID returns the build id of the web dist at distDir — the hex of the first 16 bytes of the
-// sha256 of its index.html, the bytes the page's ETag hashes (routes.servePage) — and the entry
-// chunk its page names (`/assets/index-*.js`, the path a tab compares to tell builds apart, read
-// as DeploymentResilience.tsx reads it), or an empty entry when the page names none. It returns
+// BuildID returns the build id of the web dist at distDir — processes.DashboardBuild's name for
+// it, the one each process records in the registry of live server processes — and the entry chunk
+// its page names (`/assets/index-*.js`, the path a tab compares to tell builds apart, read as
+// DeploymentResilience.tsx reads it), or an empty entry when the page names none. It returns
 // ErrNoBuild when there is no index.html.
 func BuildID(distDir string) (build, entry string, err error) {
 	page, err := os.ReadFile(filepath.Join(distDir, "index.html"))
@@ -59,7 +60,9 @@ func BuildID(distDir string) (build, entry string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("read the dashboard's index.html: %w", err)
 	}
-	sum := sha256.Sum256(page)
+	if build = processes.DashboardBuild(distDir); build == "" {
+		return "", "", errors.New("read the dashboard's index.html: it could not be read a second time")
+	}
 	for _, match := range scriptSource.FindAllSubmatch(page, -1) {
 		source, _, _ := strings.Cut(string(match[1]), "?")
 		source, _, _ = strings.Cut(source, "#")
@@ -68,7 +71,7 @@ func BuildID(distDir string) (build, entry string, err error) {
 			break
 		}
 	}
-	return hex.EncodeToString(sum[:16]), entry, nil
+	return build, entry, nil
 }
 
 // Published is what a Publish stored.

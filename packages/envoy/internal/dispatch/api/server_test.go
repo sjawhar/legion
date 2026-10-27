@@ -95,15 +95,18 @@ type testServerOptions struct {
 	streamHeartbeat time.Duration
 }
 
+// testSigningKey is the one-key set the package's session cookies are signed with.
+var testSigningKey = auth.SingleSigningKey("signing-key")
+
 // headerIdentity is the test header identity that records each named person in the database.
 func headerIdentity(database *store.Store) identity.HeaderIdentity {
-	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)}
+	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)}
 }
 
 // seedPeople records emails as people who have signed in: the assignee picker's options.
 func seedPeople(t testing.TB, database *store.Store, emails ...string) {
 	t.Helper()
-	people := store.NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := store.NewPgPeopleStore(database.Pool, testSigningKey, nil)
 	for _, email := range emails {
 		if err := people.Record(context.Background(), email); err != nil {
 			t.Fatalf("seed person %q: %v", email, err)
@@ -1872,7 +1875,7 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 	t.Helper()
 	database := storetest.Open(t)
 	sessions := store.NewPgSessionStore(database.Pool)
-	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions}
+	cookieIdentity := identity.CookieIdentity{SigningKey: testSigningKey, Sessions: sessions}
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
 		Store: database, Events: broker, Identity: cookieIdentity, Settle: time.Hour,
@@ -1891,7 +1894,7 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)
 	}
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice@d.example", generation, "signing-key", true))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice@d.example", generation, testSigningKey, true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}

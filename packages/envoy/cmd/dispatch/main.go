@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -39,6 +40,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
@@ -114,9 +116,9 @@ type bootConfig struct {
 	// WebDist is DISPATCH_WEB_DIST: the dashboard directory to serve, or empty to find it from
 	// the binary (defaultWebDistDir).
 	WebDist string
-	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie key, or empty to keep one in the
-	// data dir (sessionSigningKey).
-	SigningKey string
+	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie keys, the current one first, or the
+	// empty set to keep one key in the data dir (sessionSigningKey).
+	SigningKey auth.SigningKeys
 	// InsecureCookie (DISPATCH_INSECURE_COOKIE set to anything) drops Secure from every cookie.
 	InsecureCookie bool
 	// EnvoyToken is ENVOY_TOKEN, the bearer every Envoy listener call sends.
@@ -243,8 +245,10 @@ func main() {
 	// that another process serves, during a rolling update or a rollback, finds its chunks here,
 	// and this process answers another build's from there (dashboard.Store below). A process that
 	// cannot publish exits before it is ready, and a rolling update keeps the processes it would
-	// have replaced.
-	if err := publishDashboard(store.WithTransactionTracking(ctx), database.Pool, webDistDir, dashboardPublishTimeout); err != nil {
+	// have replaced. The build is what the process registers below as the build it serves, and its
+	// entry chunk what GET /api/v1/dashboard/builds answers as this process's.
+	dashboardBuild, err := publishDashboard(store.WithTransactionTracking(ctx), database.Pool, webDistDir, dashboardPublishTimeout)
+	if err != nil {
 		slog.Error("dispatch: publish dashboard assets", "error", err)
 		os.Exit(1)
 	}
@@ -316,23 +320,25 @@ func main() {
 	}
 
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
-		SigningKey:  signingKey,
-		WebDistDir:  webDistDir,
-		AssetStore:  dashboard.NewStore(database.Pool),
-		People:      people,
-		Sessions:    sessions,
-		Identity:    requestIdentity,
-		SignIn:      signIn,
-		Store:       database,
-		ServerURL:   serverURL,
-		Docs:        documentService,
-		Embedder:    embedder,
-		Events:      broker,
-		App:         appCfg,
-		OIDC:        serviceTokens,
-		AgentStream: agentStream,
-		Files:       fileStore,
-		Lifetime:    ctx,
+		SigningKey: signingKey,
+		WebDistDir: webDistDir,
+		AssetStore: dashboard.NewStore(database.Pool),
+		// The entry chunk publishDashboard read is the one GET /api/v1/dashboard/builds answers.
+		DashboardEntry: dashboardBuild.Entry,
+		People:         people,
+		Sessions:       sessions,
+		Identity:       requestIdentity,
+		SignIn:         signIn,
+		Store:          database,
+		ServerURL:      serverURL,
+		Docs:           documentService,
+		Embedder:       embedder,
+		Events:         broker,
+		App:            appCfg,
+		OIDC:           serviceTokens,
+		AgentStream:    agentStream,
+		Files:          fileStore,
+		Lifetime:       ctx,
 	}))
 
 	if err != nil {
@@ -475,7 +481,32 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery); err != nil {
+	// INFRA-555: the process enters the registry of live server processes once its port is bound
+	// and before it serves its first request, after one probe that the database answers. The
+	// registration refuses a key set a live peer does not share (processes.Register): a cookie this
+	// process minted would not verify there, or the reverse, and the people it signed in would be
+	// signed out on the next request the load balancer sends to the other. That refusal ends the
+	// process with 1 here, before anything is served, so a roll stalls on the new pod while the old
+	// ones keep serving. The registration's heartbeat runs until shutdown deregisters it, after the
+	// HTTP drain (shutdown), so a draining process counts as live until its last request is
+	// answered. The prune loop deletes what processes that died without deregistering left behind,
+	// once overall under its lease.
+	if _, err := database.Pool.Healthy(ctx); err != nil {
+		slog.Error("dispatch: probe the database", "error", err)
+		os.Exit(1)
+	}
+	registration, err := processes.Register(ctx, database.Pool, processes.Instance{
+		Commit:         buildCommit,
+		DashboardBuild: dashboardBuild.Build,
+		SigningKeys:    signingKey.Fingerprints(),
+	})
+	if err != nil {
+		slog.Error("dispatch: register this server process", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("dispatch: registered this server process", "instance", registration.ID)
+	go processes.RunPrune(ctx, database.Pool, leases)
+	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery, deregisterAfterDrain(registration)); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}
@@ -590,7 +621,6 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
 		WebDist:            env.get("DISPATCH_WEB_DIST"),
 		FileStoreBucket:    strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
-		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
 		DevSignInSharedKey: env.get("DISPATCH_DEV_SIGNIN_SHARED_KEY"),
 		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
 		EnvoyToken:         env.get("ENVOY_TOKEN"),
@@ -607,6 +637,11 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_TOKEN %w", err)
 	}
 	boot.AgentTokens = tokens
+	if setting := env.get("DISPATCH_SIGNING_KEY"); strings.TrimSpace(setting) != "" {
+		if boot.SigningKey, err = auth.ParseSigningKeys(setting); err != nil {
+			return bootConfig{}, fmt.Errorf("DISPATCH_SIGNING_KEY %w", err)
+		}
+	}
 	listenAddr, err := listenAddress(env)
 	if err != nil {
 		return bootConfig{}, err
@@ -727,7 +762,7 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 	if err := loopbackDatabase(boot.DatabaseURL); err != nil {
 		return err
 	}
-	if boot.SigningKey != "" {
+	if !boot.SigningKey.Empty() {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process, or derived from DISPATCH_DEV_SIGNIN_SHARED_KEY when the processes of one local harness share their cookies; unset DISPATCH_SIGNING_KEY")
 	}
 	if !boot.NATSDisabled && env.get(bus.AllowRemoteEnvVar) == "1" {
@@ -824,20 +859,25 @@ func explainMigrateError(err error) error {
 	)
 }
 
-// sessionSigningKey is the key session cookies are signed with: under dev sign-in, the key derived
-// from DISPATCH_DEV_SIGNIN_SHARED_KEY when it is set (devSignInSharedSigningKey) and otherwise one
-// generated for this process; outside it, DISPATCH_SIGNING_KEY when it is set (a deployment's, from
-// its secrets manager), otherwise the data dir's signing-key file, created on first start (a local
-// run's). Outside dev sign-in the key must stay the same across deploys, or every dsession cookie
-// is invalidated whenever a container rolls.
-func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
+// sessionSigningKey is the key set session cookies are signed with. Under dev sign-in it holds one
+// key: the key derived from DISPATCH_DEV_SIGNIN_SHARED_KEY when it is set
+// (devSignInSharedSigningKey), otherwise one generated for this process. Outside it, it is
+// DISPATCH_SIGNING_KEY's keys when that is set (a deployment's, from its secrets manager),
+// otherwise the data dir's signing-key file, created on first start (a local run's). Outside dev
+// sign-in the keys must stay the same across deploys, or every dsession cookie is invalidated
+// whenever a container rolls; a rotation adds the new key second first.
+func sessionSigningKey(boot bootConfig, dataDir string) (auth.SigningKeys, error) {
 	if boot.DevSignIn {
 		if boot.DevSignInSharedKey != "" {
-			return devSignInSharedSigningKey(boot.DevSignInSharedKey), nil
+			return auth.SingleSigningKey(devSignInSharedSigningKey(boot.DevSignInSharedKey)), nil
 		}
-		return auth.NewSigningKey()
+		key, err := auth.NewSigningKey()
+		if err != nil {
+			return auth.SigningKeys{}, err
+		}
+		return auth.SingleSigningKey(key), nil
 	}
-	if boot.SigningKey != "" {
+	if !boot.SigningKey.Empty() {
 		return boot.SigningKey, nil
 	}
 	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))
@@ -873,34 +913,48 @@ const dashboardPublishTimeout = 60 * time.Second
 
 // publishDashboard stores the dashboard build at webDistDir in the database
 // (dashboard.Publish, stamped with buildCommit) and then prunes the builds no process needs any
-// more (dashboard.Prune), both within timeout. A dist with no index.html (the Go test rigs serve an
-// empty directory) publishes nothing and logs that it did not. A failed publish is the error
-// returned, and refuses the boot; a failed prune is logged and the start goes on, since it leaves
-// only builds the next boot's prune deletes.
-func publishDashboard(ctx context.Context, pool *store.Pool, webDistDir string, timeout time.Duration) error {
+// more (dashboard.Prune), both within timeout, and returns what it published: the build's id
+// (processes.DashboardBuild's) and entry chunk among it. A dist with no index.html (the Go test
+// rigs serve an empty directory) publishes nothing, logs that it did not, and returns the zero
+// Published, whose empty build and entry say this process serves no dashboard. A failed publish
+// is the error returned, and refuses the boot; a failed prune is logged and the start goes on,
+// since it leaves only builds the next boot's prune deletes.
+func publishDashboard(ctx context.Context, pool *store.Pool, webDistDir string, timeout time.Duration) (dashboard.Published, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	published, err := dashboard.Publish(ctx, pool, webDistDir, buildCommit)
 	switch {
 	case errors.Is(err, dashboard.ErrNoBuild):
 		slog.Info("dispatch: no dashboard build to publish: the web dist holds no index.html", "dir", webDistDir)
+		published = dashboard.Published{}
 	case err != nil:
-		return err
+		return dashboard.Published{}, err
 	default:
 		slog.Info("dispatch: published dashboard assets", "build", published.Build, "entry", published.Entry,
 			"assets", published.Assets, "written", published.Written)
 	}
-	// No process keeps a record of the build it runs yet (INFRA-555's registry of live server
-	// processes adds one), so no build is live here and the newest dashboard.KeepNewest builds
-	// alone are kept: every build a running process serves stays as long as fewer than that many
-	// builds have started since it did.
-	pruned, err := dashboard.Prune(ctx, pool, nil)
+	// The prune keeps every build a live server process serves (processes.Live, read here at boot)
+	// beside the newest dashboard.KeepNewest. This process registers only once it listens, after
+	// this, so it is not among them yet; the publish above has just renewed its build's
+	// last_started_at, which puts it among the newest.
+	live, err := processes.Live(ctx, pool)
 	if err != nil {
 		slog.Error("dispatch: prune dashboard builds", "error", err)
-		return nil
+		return published, nil
+	}
+	var liveBuilds []string
+	for _, process := range live {
+		if process.DashboardBuild != "" && !slices.Contains(liveBuilds, process.DashboardBuild) {
+			liveBuilds = append(liveBuilds, process.DashboardBuild)
+		}
+	}
+	pruned, err := dashboard.Prune(ctx, pool, liveBuilds)
+	if err != nil {
+		slog.Error("dispatch: prune dashboard builds", "error", err)
+		return published, nil
 	}
 	slog.Info("dispatch: pruned dashboard builds", "builds", pruned.Builds, "assets", pruned.Assets)
-	return nil
+	return published, nil
 }
 
 // decidedWordingRestoreTimeout bounds the boot's restoration of decided asks' wordings. On the

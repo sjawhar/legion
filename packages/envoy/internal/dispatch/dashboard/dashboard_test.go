@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -123,8 +124,10 @@ func TestPublishStoresEveryFileOfTheBuild(t *testing.T) {
 	if want := (Published{Build: build, Entry: "/assets/index-a1.js", Assets: 4, Written: 4}); published != want || entry != want.Entry {
 		t.Fatalf("Publish = %+v (BuildID entry %q), want %+v", published, entry, want)
 	}
-	if len(build) != 32 {
-		t.Errorf("build id %q, want 32 hex digits", build)
+	// The registry of live server processes records this id for the process serving the dist, and
+	// the builds route joins the two on it.
+	if registered := processes.DashboardBuild(dist); build != registered || registered == "" {
+		t.Errorf("build id %q, want the registry's %q", build, registered)
 	}
 	assets := NewStore(pool)
 	for name, content := range files {

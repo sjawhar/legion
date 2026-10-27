@@ -149,13 +149,14 @@ func discoverSignIn(ctx context.Context, boot bootConfig) (*oidc.CodeFlow, error
 	return oidc.DiscoverCodeFlow(ctx, boot.SignInIssuer, boot.SignInClientID, boot.SignInClientSecret, boot.SignInDomain, oidc.DiscoveryTimeout)
 }
 
-// openPeople is the people store main serves boot with over pool, and the key session cookies are
-// signed with (sessionSigningKey): the store seals each refresh token under that same key, and
-// revokes a token stored in plain text at signIn's pool, nil when boot configures none.
-func openPeople(boot bootConfig, dataDir string, pool *store.Pool, signIn *oidc.CodeFlow) (*store.PgPeopleStore, string, error) {
+// openPeople is the people store main serves boot with over pool, and the keys session cookies are
+// signed with (sessionSigningKey): the store seals each refresh token under the current key and
+// opens one sealed under any of them, and revokes a token stored in plain text at signIn's pool,
+// nil when boot configures none.
+func openPeople(boot bootConfig, dataDir string, pool *store.Pool, signIn *oidc.CodeFlow) (*store.PgPeopleStore, auth.SigningKeys, error) {
 	signingKey, err := sessionSigningKey(boot, dataDir)
 	if err != nil {
-		return nil, "", err
+		return nil, auth.SigningKeys{}, err
 	}
 	var revoker store.RefreshTokenRevoker
 	if signIn != nil {
@@ -181,7 +182,7 @@ func retirePlainRefreshTokens(ctx context.Context, people *store.PgPeopleStore, 
 // server takes the header's email; a cookie server verifies its signed session cookie and, with
 // sign-in configured, confirms at least hourly that the person is still in DISPATCH_SIGNIN_GROUP
 // or DISPATCH_SIGNIN_DOMAIN (signInRule).
-func requestIdentityFor(boot bootConfig, signingKey string, people auth.PeopleStore, sessions auth.SessionStore, signIn *oidc.CodeFlow) identity.Identity {
+func requestIdentityFor(boot bootConfig, signingKey auth.SigningKeys, people auth.PeopleStore, sessions auth.SessionStore, signIn *oidc.CodeFlow) identity.Identity {
 	if boot.IdentityHeader != "" {
 		return identity.HeaderIdentity{Header: boot.IdentityHeader, People: people}
 	}

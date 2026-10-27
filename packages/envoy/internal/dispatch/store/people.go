@@ -29,11 +29,12 @@ type PgPeopleStore struct {
 }
 
 // NewPgPeopleStore returns a PeopleStore backed by pool that seals each refresh token under a key
-// derived from signingKey, the key session cookies are signed with (DISPATCH_SIGNING_KEY), and
-// retires one stored in plain text by revoking it through revoker, the sign-in pool's code flow; a
-// nil revoker (no sign-in pool) revokes nothing, so such a token stays.
-func NewPgPeopleStore(pool *Pool, signingKey string, revoker RefreshTokenRevoker) *PgPeopleStore {
-	return &PgPeopleStore{pool: pool, seal: newRefreshTokenSeal(signingKey), revoker: revoker}
+// derived from the current key of keys, the keys session cookies are signed with
+// (DISPATCH_SIGNING_KEY), opens one sealed under any of them, and retires one stored in plain text
+// by revoking it through revoker, the sign-in pool's code flow; a nil revoker (no sign-in pool)
+// revokes nothing, so such a token stays. keys must not be empty.
+func NewPgPeopleStore(pool *Pool, keys auth.SigningKeys, revoker RefreshTokenRevoker) *PgPeopleStore {
+	return &PgPeopleStore{pool: pool, seal: newRefreshTokenSeal(keys), revoker: revoker}
 }
 
 // Record notes that email has signed in, keeping any membership it already holds.
@@ -135,11 +136,11 @@ func (s *PgPeopleStore) SignInSubject(ctx context.Context, email, subject, refre
 }
 
 // Membership reads email's membership; found is false for a person who never signed in. A refresh
-// token that does not open (sealed under another signing key, for another person, or stored in
-// plain text) is no refresh token: the read answers none, so the person signs in again, and logs
-// that without the value. The read writes nothing: the next boot retires a token stored in plain
-// text (RetirePlainRefreshTokens), and the person's next sign-in replaces whatever the row holds.
-// The subject is read whatever the refresh token holds.
+// token that does not open (sealed under no key of the signing key set, for another person, or
+// stored in plain text) is no refresh token: the read answers none, so the person signs in again,
+// and logs that without the value. The read writes nothing: the next boot retires a token stored in
+// plain text (RetirePlainRefreshTokens), and the person's next sign-in replaces whatever the row
+// holds. The subject is read whatever the refresh token holds.
 func (s *PgPeopleStore) Membership(ctx context.Context, email string) (auth.PersonMembership, bool, error) {
 	var sealed *string
 	var confirmedAt *time.Time

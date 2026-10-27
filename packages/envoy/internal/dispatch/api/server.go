@@ -110,6 +110,9 @@ type Deps struct {
 	// (whileCallerResolves), each closing once the caller no longer resolves, and a delivery
 	// socket pings its page and sends it a heartbeat frame.
 	StreamHeartbeat time.Duration
+	// DashboardEntry is the entry chunk (`/assets/index-*.js`) of the dashboard build this process
+	// serves, "" when it serves none; GET /api/v1/dashboard/builds answers it as serving.
+	DashboardEntry string
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -154,6 +157,8 @@ type DepsInput struct {
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
 	StreamHeartbeat time.Duration
+	// DashboardEntry is this process's dashboard entry chunk; see Deps.DashboardEntry.
+	DashboardEntry string
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -213,6 +218,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		Lifetime:         input.Lifetime,
 		TestHooksEnabled: input.TestHooksEnabled,
 		StreamHeartbeat:  heartbeat,
+		DashboardEntry:   input.DashboardEntry,
 	}, nil
 }
 
