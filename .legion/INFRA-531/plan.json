@@ -1,0 +1,167 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-531",
+  "completed": "2026-10-27T00:58:50Z",
+  "planDocument": "dispatch://INFRA-531/artifact/plan-md",
+  "baseCommit": "7f7edb8de",
+  "summary": "Go's pmdoc reader reads bare web addresses and emails as remark-gfm reads them as a whole: micromark's autolink-literal tokenizer at every position it starts an address (inside goldmark's inline parse, the guard asked at every unescaped ASCII punctuation character and searching each run to the next question, with goldmark's text splits joined back so document weight is unchanged), then mdast-util-gfm-autolink-literal's transform (URL pass, then email pass) over decoded text runs at block close, weighed as autolinks. goldmark's own linkify parser leaves the reader, the writer's `http\\:` escape is deleted, and the email rows flip once INFRA-530 (mailto: href) is on main.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: proof objects, PR body, red-then-green commits, the base-reintegration rule the INFRA-530 dependency relies on (references/pr-body.md, references/conflicts-and-rewrites.md)",
+      "ce-simplify-code: the simplify pass on the settled change before the final proofs",
+      "dispatch: the production record on the issue after the merge (A8) and any Dispatch write"
+    ],
+    "test": [
+      "legion-worker: re-running every proof at the head with negative controls (references/pr-body.md#what-a-proof-is)",
+      "dispatch: reading the plan document and spec, and any finding as a dispatch ask"
+    ],
+    "review": [
+      "legion-worker: review threads, approval of the head and the merge gate (references/review-threads.md, references/merge-gate.md)",
+      "ce-simplify-code: judging whether the guard, transform port and writer changes are as simple as the engine-faithful reading allows"
+    ]
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Linear-test clock defect, own commit first",
+      "files": ["packages/envoy/internal/dispatch/pmdoc/linear_test.go"],
+      "detail": "growthVerdict (linear_test.go:711-742) divides by the 16 KiB sample, which this pod's CPU clock reads as 0s; TestBareURLShapesParseAndRenderLinearly fails 3/3 on main here ('\"-www.x_\" took 40-60ms at 256 KiB, +Inf times the 0s it took at 16 KiB'). Floor the smaller sample at the process CPU clock's measured resolution so a linear shape passes and a quadratic one still fails."
+    },
+    {
+      "id": "T2",
+      "title": "Red tests (commit 1, the negative control at main's Go)",
+      "files": [
+        "packages/envoy/internal/dispatch/pmdoc/render_readback_test.go",
+        "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/bare-address-after-punctuation.md (new) and testdata/fixtures.json (regenerated with `cd gen && bun run gen`)",
+        "packages/envoy/internal/dispatch/pmdoc/linear_test.go",
+        "packages/envoy/internal/dispatch/pmdoc/linkify_test.go",
+        "packages/envoy/internal/dispatch/pmdoc/gen/url-corpus.ts",
+        "packages/envoy/internal/dispatch/docs (an ask round-trip test and a stale plain-URL edit/accept test)",
+        "packages/dispatch/e2e/address-links.e2e.ts (new)"
+      ],
+      "detail": "Rows 356-365 of TestURLReadingsBesideEscapesAgreeWhereRecorded become agree:true (renamed keeping the TestURLReadings prefix); add discriminating rows (x;https://x.test/a_ b, x;https://x.test/a<b c, x;https://a.test/*b* c, see http\\://x.test/a_ b, see http\\://x.test/a<b c), class rows (éhttps://, x—https://, x;www., x]https://, x|https://, x!https://, &amp;https://, x\"https://x.test\", [https://, x1https://, a table cell opening \"https://, `c`;https://, a soft-broken foo; line) and email rows (\\*a@b.test, \"a@b.test\", éa@b.test, x&amp;a@b.test, see www\\.a@b.test, x;mailto:a@b.test); the same shapes in a new corpus document; linear shapes ;https://-a.b, x;www.a_, \\*https://-a, &amp;https://-a., éhttps://-a., http\\://-a., www\\.a_, x\"www.a_, ;;, \\*, ;a_a@, é+a@b-, www\\.a@; url-corpus befores and schemes; TestLinkifyGuardLinksWhatGoldmarkLinks becomes the engine's table; the e2e test per acceptance A1."
+    },
+    {
+      "id": "T3",
+      "title": "The change (commit 2)",
+      "files": [
+        "packages/envoy/internal/dispatch/pmdoc/linkify.go",
+        "packages/envoy/internal/dispatch/pmdoc/parse.go",
+        "packages/envoy/internal/dispatch/pmdoc/elements.go (only if a node kind is added, with weighed, cmd/dispatch/README.md and TestEveryNodeOfTheSchemaWeighsWhatItMakes)",
+        "packages/envoy/internal/dispatch/pmdoc/escape.go",
+        "packages/envoy/internal/dispatch/pmdoc/render_inline.go",
+        "packages/envoy/internal/dispatch/pmdoc/render.go"
+      ],
+      "detail": "Design sections 1-3 of the plan document: tokenizer reading (email first, then protocol/www) at every position via new punctuation triggers and a run search, splits joined back in a three-argument CloseBlock and not charged by elementInlineCounter; transform URL then email pass over decoded runs at block close, links weighed as autolinks with decoded label and href; goldmark's linkify parser, emailLocal and the per-line @ records removed; urlSchemes/urlSchemeColon deleted and the bare-link writer predicates brought to the new reading."
+    },
+    {
+      "id": "T4",
+      "title": "Docs (commit 3)",
+      "files": [
+        "packages/envoy/internal/dispatch/pmdoc/linkify.go (doc comment)",
+        "packages/envoy/AGENTS.md (a paragraph before line 1635)",
+        "packages/envoy/CHANGELOG.md ([Unreleased] Fixed, correcting 1639-1640)"
+      ]
+    },
+    {
+      "id": "T5",
+      "title": "Email rows after INFRA-530",
+      "detail": "Once INFRA-530 is on main, the branch conflicts with it in linkify_test.go; reintegrate main on that conflict, flip INFRA-530's seven rows in email_readback_test.go to agree:true, add the email shapes to the corpus document and the e2e test. If INFRA-530 has not merged when the web-address work is done, tell the architect and wait; INFRA-531 merges after INFRA-530."
+    },
+    {
+      "id": "T6",
+      "title": "Simplify pass, then every proof again at the head that merges"
+    }
+  ],
+  "acceptance": [
+    {
+      "id": "A1",
+      "criterion": "Each row of render_readback_test.go:356-365 and each of INFRA-530's seven email rows reads the same in Go and the engine, and a document written through the API shows each as a link on the issue page.",
+      "surface": "Go tests against the engine; the issue page's live Document editor and the conversation, in Dispatch's browser suite",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && go test -count=1 -v -run 'TestURLReadings|TestEmailReadings' ./internal/dispatch/pmdoc/ ; cd -- \"$LEGION_WORKSPACE/packages/dispatch\" && bun run build:web && DATABASE_URL='postgres://postgres@127.0.0.1:5433/dispatch_infra531?sslmode=disable' bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/address-links.e2e.ts",
+      "negativeControl": "At commit 1 (tests only, main's Go) the URL rows fail 'recorded as agreeing: true' and the e2e run fails on the first document link assertion with the row's text present and no link, while the comment assertions pass; both runs quoted on the pull request. A Go run must show PASS, not SKIP (bun on PATH)."
+    },
+    {
+      "id": "A2",
+      "criterion": "Go reads like the engine where the tokenizer and the transform differ, and at every position of the class.",
+      "command": "the A1 Go command plus `go test -count=1 -run TestParseMatchesMilkdownForFixtures ./internal/dispatch/pmdoc/`; the e2e test includes x;https://a.test/a_ b (link https://a.test/a) and see http\\://b.test/a_ b (link http://b.test/a_)"
+    },
+    {
+      "id": "A3",
+      "criterion": "An API-written document holding x;https://x.test b is stored without a backslash before the colon.",
+      "command": "a TestURLReadings row requiring Render(Parse(md)) == md; getArtifactText of the e2e spec holds no '\\:'"
+    },
+    {
+      "id": "A4",
+      "criterion": "Document weight is unchanged.",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && go test -count=1 -run 'TestAWriteMayNotGrowADocumentPastWhatOneUploadMayHold|TestEveryNodeOfTheSchemaWeighsWhatItMakes' ./internal/dispatch/docs/ ./internal/dispatch/pmdoc/",
+      "negativeControl": "with the CloseBlock join removed, the growth test fails at More."
+    },
+    {
+      "id": "A5",
+      "criterion": "Reading and writing stay linear.",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && go test -count=1 -run 'TestBareURLShapesParseAndRenderLinearly|TestLiteralURLReadsEachOffsetAsAFreshRead|Linear' ./internal/dispatch/pmdoc/ in the pod after T1, and CI's envoy-go and race jobs"
+    },
+    {
+      "id": "A6",
+      "criterion": "No regression across the corpus.",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy/internal/dispatch/pmdoc\" && mkdir -p \"$TMPDIR/urls\" && bun gen/url-corpus.ts \"$TMPDIR/urls/urls.jsonl\" && bash gen/differential.sh --base main --corpus \"$TMPDIR/urls\" --out \"$TMPDIR/diff\"",
+      "expected": "regressions 0, engine-tree regressions 0, head panics 0; misreads, churn, engine-tree churn and lost fixed points each explained on the pull request by shape"
+    },
+    {
+      "id": "A7",
+      "criterion": "The whole suite passes.",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/envoy\" && go vet ./internal/dispatch/... && go test -count=1 $(go list ./... | grep -v /integration) and with -race; cd packages/envoy/internal/dispatch/pmdoc/gen && bun run check; bunx biome check packages/dispatch/ packages/envoy/internal/dispatch/pmdoc/gen/; bunx tsc --noEmit in packages/dispatch"
+    },
+    {
+      "id": "A8",
+      "criterion": "After the merge closes the issue, the deployment's Dispatch production check runs on the page.",
+      "command": "gh api \"repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main\" -H \"Accept: application/vnd.github.raw\" | bash -s -- --commit <merged sha> --page /issues/INFRA-531/spec --route <each /api/ route the spec page reads>; output on the pull request and the issue, saying which build runs and whether it carries the merge (dispatch://INFRA-64)"
+    }
+  ],
+  "decisionsForArchitect": [
+    "Scope: the plan takes the whole class of positions for web addresses and emails (non-ASCII or digit previous, ], |, !, character references, line or cell opening with punctuation, x;www.), not only the listed rows. Recommendation: keep it.",
+    "INFRA-530 dependency: the email rows need INFRA-530's mailto: href on main; the branch takes main on the conflict INFRA-530's merge makes in linkify_test.go, and INFRA-531 merges after INFRA-530.",
+    "Plain-text addresses in a tree (typed in the live editor, ask text) read back as links in Go, as the engine already reads them; accepted, no migration of stored documents."
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Seven of the ten rows are read by the engine's tokenizer, not by remark-gfm's transform; the two readers end URLs differently (x;https://x.test/a_ b vs see http\\://x.test/a_ b; x;https://a.test/*b* c), and the ten rows cannot tell them apart.", "answer": "The plan reads with both readers (departure 1) and adds discriminating rows to the Go test and the e2e test (A2)."},
+      {"finding": "goldmark never asks Go at these positions; adding triggers splits text nodes and changes document weight (PR #2094's revert, growth_test.go:39-40 pins More. at 4); a post-parse pass cannot undo emphasis the tokenizer would have claimed.", "answer": "Design 1: new punctuation triggers plus a run search inside goldmark's parse; the guard records each split it causes, elementInlineCounter does not charge it, and a three-argument CloseBlock joins it back, so the weighed tree is main's (A4, with a negative control)."},
+      {"finding": "Links made outside goldmark's tree would not be weighed; escapes inside them would stop being counted.", "answer": "Design 2 makes transform links nodes of goldmark's tree at block close, weighed as autolinks; a new node kind joins weighed, the README table and TestEveryNodeOfTheSchemaWeighsWhatItMakes."},
+      {"finding": "Making see http\\://x.test a link changes how every stored plain-text https\\:// reads; the escape becomes dead; typed URLs stay plain in the live tree; joined edits may be newly refused; asks gain links.", "answer": "Departure 3 deletes the escape; Consequences names each effect (typed URLs, asks, joined edits, stored documents, no migration) for the architect; T2 adds an ask round-trip test and a stale plain-URL edit/accept test."},
+      {"finding": "Is the fix the ten rows or the whole class with the same cause?", "answer": "The whole class (departure 2), with class rows in the Go test, the corpus document and the differential corpus; named for the architect as decision 1."},
+      {"finding": "Emails at the same positions, and coordination with INFRA-530.", "answer": "The architect added seven email shapes to the spec; the plan reads emails with micromark's email tokenizer and the transform's email pass, removes goldmark's linkify parser, and sequences after INFRA-530 (T5, decision 2)."},
+      {"finding": "Links Go makes over decoded text need decoded label and href (www\\.x.test, character references).", "answer": "Design 2's rule: parse.go gives a transform link its decoded label and href."},
+      {"finding": "Writer rules and pinned renderings are tied to Go's current reading; the differential's churn and lost-fixed-point gates will fire.", "answer": "Design 3 brings wwwMayFollow, isBareWWWLink, isBareURLLink, followsBareURL and endsBareURL to the new reading; changed pinned renderings must read back in both readers; A6 requires every non-zero gate explained by shape."},
+      {"finding": "'The recorded divergences leave the test' reads as delete or flip; a local pass may be a skip; CI needs a bun-free pin.", "answer": "Flip to agree:true and keep the rows; A1 requires PASS not SKIP; the new corpus document holds the shapes in TestParseMatchesMilkdownForFixtures without bun."},
+      {"finding": "'Shows each as a link on the issue page' names no expected link, surface or negative-control mechanics.", "answer": "A1 names the live Document editor (not the version view, which uses the engine), distinct hosts per row, each link name and href from the engine, a comment contrast, and commit 1 (tests only) as the negative control."},
+      {"finding": "Production check: page, production write, pass criterion.", "answer": "A8: page /issues/INFRA-531/spec, routes the page reads, no production write; the record is the script's output saying which build runs and whether it carries the merge."},
+      {"finding": "Linearity has no check that runs in this pod (growthVerdict divides by a 0s sample).", "answer": "T1 fixes the test defect first (deployment rule: a pre-existing defect is paired with a fix), and A5 names the pod run and CI."},
+      {"finding": "Running the e2e suite in a pod needs Postgres with pgvector, psql, go, openssl, flock and Playwright browsers.", "answer": "A1 cites the INFRA-42 solution document for the pod setup, everything under $TMPDIR, and runs at commit 1 and at the head."},
+      {"finding": "packages/envoy/CHANGELOG.md:1639-1640 records the residual as still text on the server.", "answer": "T4 corrects it under [Unreleased] Fixed."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {
+      "spec": "Change: 'Go reads these addresses as remark-gfm's transform does.'",
+      "plan": "Go reads as remark-gfm reads as a whole: micromark's autolink-literal tokenizer wherever it starts an address (at parse time), then mdast-util-gfm-autolink-literal's transform over the decoded text left.",
+      "evidence": "Probe of Go Parse against gen/differential.ts at main: x;https://x.test/a_ b gives the engine link https://x.test/a (tokenizer) while see http\\://x.test/a_ b gives http://x.test/a_ (transform); x;https://a.test/*b* c gives link https://a.test/*b and no emphasis; www.a@b.test gives mailto:www.a@b.test (tokenizer tries the email first). Seven of the ten rows and all seven email shapes are tokenizer readings.",
+      "outcome": {"kind": "unchanged"}
+    },
+    {
+      "spec": "The rows of render_readback_test.go:343-365 and INFRA-530's seven email shapes.",
+      "plan": "Every position with the same cause: a previous character outside ASCII or a digit, ], |, !, a character reference, a line or table cell opening with punctuation, x;www., for web addresses and emails.",
+      "evidence": "Probe at main: éhttps://x.test b, x—https://x.test b, x;www.x.test b, x]https://, x|https://, x!https://, &amp;https://, [https://x.test b, \\*a@b.test, \"a@b.test\", éa@b.test are links in the engine and text in Go.",
+      "outcome": {"kind": "changed", "scope": "Scope grows from the listed rows to every position where the engine starts a web address or email; A1 holds and gains rows (plan A2)."}
+    },
+    {
+      "spec": "Summary: 'the command line also shows a backslash before its colon'; the spec does not say what happens to the writer's escape.",
+      "plan": "The writer's http\\: escape (escape.go:37-39, 124, 766-768; render_inline.go:424) is deleted; a plain-text URL is written bare and reads back as a link in both readers.",
+      "evidence": "After the change no markdown spelling keeps a plain-text URL in a transform position plain: the transform reads decoded text, so http\\://x.test is a link in both readers (engine already, probe row see http\\://x.test b).",
+      "outcome": {"kind": "changed", "scope": "Plain-text URLs in stored trees (typed in the live editor, ask text) read back as links in Go as they already do in the engine; no stored-document migration."}
+    }
+  ]
+}
