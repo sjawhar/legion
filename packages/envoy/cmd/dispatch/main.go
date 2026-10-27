@@ -81,6 +81,10 @@ type bootConfig struct {
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
+	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
+	// before its edit notice goes, zero for the document service's own 30 s; only
+	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
+	EditNoticeQuiet time.Duration
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -273,11 +277,12 @@ func main() {
 
 	broker := events.NewBroker()
 	documentService := newDocumentService(boot, docs.Deps{
-		Store:     database,
-		Events:    broker,
-		Identity:  requestIdentity,
-		ServerURL: serverURL,
-		Settle:    boot.SettleDelay,
+		Store:           database,
+		Events:          broker,
+		Identity:        requestIdentity,
+		ServerURL:       serverURL,
+		Settle:          boot.SettleDelay,
+		EditNoticeQuiet: boot.EditNoticeQuiet,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
@@ -337,8 +342,9 @@ func main() {
 	// shared one's request connections are not spent on. A boot that cannot open it is a boot
 	// whose loops would each run everywhere, so it ends here.
 	//
-	// The loops come in three shapes (INFRA-607), so that a database nobody writes costs them
-	// nothing except where GitHub gives them nothing to wake on:
+	// The loops come in these shapes (INFRA-607), so that a database nobody writes costs them
+	// nothing except where GitHub gives them nothing to wake on, and the two timers of the last
+	// shape:
 	//   - woken loops, which run a pass at start and then only when a Postgres notification on the
 	//     shared listener below says their work may have changed, or when a due time their last
 	//     pass asked for comes round: the embedding queue (embedqueue.WakeChannel), the reference
@@ -359,6 +365,10 @@ func main() {
 	//     (duty_passes, migration 0115), which is what makes it run once per period rather than
 	//     once per process: two tickers started minutes apart almost never meet inside a pass, so
 	//     the lease alone would exclude nothing.
+	//   - timers that poll the database: the block-index reconciliation (every 30 s, 2 s while a
+	//     batch is full) and the edit-notice sweep (every 5 s), each recording its passes in
+	//     duty_passes like the timers above; each tick sends its statements whether or not
+	//     anything is owed.
 	//
 	// The shared listener is one pglisten.Hub per process, on one held connection of the store's
 	// listener pool, carrying every woken loop's channel. Every wake is registered before it runs
@@ -456,6 +466,15 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531), woken by the refs trigger that announces each mention left owed.
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases, excerptsWake)
+	// Each document's edit notice goes once its quiet window after a person's last
+	// settled version ends, as one artifact.human_edited event; the window is a row, so a notice
+	// still pending when this process stops is sent by the next sweep of either process.
+	go documentService.RunEditNotices(ctx, leases)
+	// The block index: each document version no block-aware write indexed - every document at
+	// migration 0121, each version a build without the block index writes during a roll, and each
+	// rebuild-refs marks - and each comment, ask and issue message citing a block (`#b-`) that such
+	// a build indexed without the block grammar.
+	go documentService.RunBlockIndexReconciliation(ctx, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -667,6 +686,16 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", raw)
 		}
 		boot.SettleDelay = delay
+	}
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_EDIT_NOTICE_QUIET")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_EDIT_NOTICE_QUIET")
+		}
+		quiet, err := time.ParseDuration(raw)
+		if err != nil || quiet <= 0 {
+			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", raw)
+		}
+		boot.EditNoticeQuiet = quiet
 	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {

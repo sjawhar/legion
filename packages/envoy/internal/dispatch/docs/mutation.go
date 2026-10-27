@@ -20,7 +20,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 type versionWrite struct {
@@ -707,11 +706,21 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 		return VersionResult{Version: latest.Version}, nil
 	}
 	capture.authors[actorKey(actor)] = actor
+	_, open, err := lockArtifactOwner(ctx, tx, artifactID)
+	if err != nil {
+		return VersionResult{}, err
+	}
+	if !open {
+		return VersionResult{}, ErrIssueClosed
+	}
 	result, err := s.writeVersionTx(ctx, tx, artifactID, rendered, actor, &versionWrite{
 		authors: actorSlice(capture.authors),
 		capture: &capture,
 	})
 	if err != nil {
+		return VersionResult{}, err
+	}
+	if err := s.recordEditNotice(ctx, tx, artifactID, result.version.Number, actorSlice(capture.authors), capture.latest); err != nil {
 		return VersionResult{}, err
 	}
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
@@ -1181,6 +1190,11 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 	if err != nil {
 		return VersionResult{}, err
 	}
+	// A person's credit in this version opens the edit notice: the owner lock this transaction
+	// holds keeps the sweep's lock order (sendEditNotice).
+	if err := s.recordEditNotice(ctx, tx, artifactID, result.version.Number, actorSlice(capture.authors), capture.latest); err != nil {
+		return VersionResult{}, err
+	}
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
 }
 
@@ -1456,11 +1470,11 @@ type versionWriteResult struct {
 
 // renderedTree is a document tree with its canonical markdown and each identified block's byte
 // range in that markdown, all from one render (pmdoc.RenderWithBlockOffsets), so a version write
-// stores the markdown and cuts its mentions' excerpts from that render rather than rendering the
-// tree again for them. An upload that changes the document still renders it twice: ReplaceText
-// renders the replacement to tell whether it changes anything, and applyLive renders the fork it
-// leaves; the excerpts are cut from applyLive's render, which IndexDocumentReferences checks is
-// the version's markdown.
+// stores the markdown and indexes its blocks and cuts its mentions' excerpts from that render
+// rather than rendering the tree again for them. An upload that changes the document still renders
+// it twice: ReplaceText renders the replacement to tell whether it changes anything, and applyLive
+// renders the fork it leaves; the blocks and excerpts are cut from applyLive's render, which
+// IndexDocumentReferences checks is the version's markdown.
 type renderedTree struct {
 	tree     *pmdoc.Node
 	markdown string
@@ -1468,10 +1482,10 @@ type renderedTree struct {
 }
 
 // writeVersionTx is the only path that changes the durable version protocol:
-// version writes index references, move open approval asks to the new version, carry a human's
-// approval to the version his answer to a decision block writes (carryApproval), refresh anchors,
-// and retain their author capture until the enclosing transaction commits. A nil write records no
-// version but keeps a transactional tree mutation's anchors in the same path.
+// version writes index references and blocks, move open approval asks to the new version, carry a
+// human's approval to the version his answer to a decision block writes (carryApproval), refresh
+// anchors, and retain their author capture until the enclosing transaction commits. A nil write
+// records no version but keeps a transactional tree mutation's anchors in the same path.
 func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID string, rendered renderedTree, actor model.Actor, write *versionWrite) (versionWriteResult, error) {
 	markdown, tree := rendered.markdown, rendered.tree
 	if write == nil {
@@ -1503,13 +1517,11 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 	if err := json.Unmarshal(authorsRaw, &version.Authors); err != nil {
 		return versionWriteResult{}, fmt.Errorf("decode document version authors: %w", err)
 	}
-	changes, err := refs.ReplaceCounted(ctx, tx, "artifact", artifactID, markdown, s.serverURL)
+	// The version's references, its mentions' excerpts and its blocks are indexed from the render
+	// this version's markdown came from, in its own transaction, so GET /api/v1/references serves
+	// them without rendering the document.
+	changes, err := s.indexDocument(ctx, tx, artifactID, version.Number, version.CreatedAt, markdown, rendered)
 	if err != nil {
-		return versionWriteResult{}, err
-	}
-	// The mentions' excerpts are cut from the render this version's markdown came from, in its own
-	// transaction, so GET /api/v1/references serves them without rendering the document.
-	if err := s.recordTreeExcerpts(ctx, tx, artifactID, version.Number, rendered); err != nil {
 		return versionWriteResult{}, err
 	}
 	// The open approval request follows the document version without leaving its thread or opening

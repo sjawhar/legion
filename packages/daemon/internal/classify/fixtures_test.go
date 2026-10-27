@@ -218,11 +218,14 @@ func replayFixture(function string, input json.RawMessage) ([]byte, error) {
 		}
 		return canonicalOutcome(EffectiveOutcome(decoded.PR.record(), decoded.Incoming.candidate()))
 	case "classifyPush":
-		var decoded PushPayload
+		var decoded struct {
+			PushPayload
+			Issue string `json:"issue"`
+		}
 		if err := decodeFixture(input, &decoded); err != nil {
 			return nil, err
 		}
-		return canonicalJSON(ClassifyPush(decoded))
+		return canonicalJSON(ClassifyPush(decoded.PushPayload, decoded.Issue))
 	case "reduceDispatchEvent":
 		return replayDispatchDecision(input)
 	case "reduceGithubEvent":
@@ -280,9 +283,15 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 		}
 	case "push":
 		login := decoded.Config.ReviewAppLogin
+		// The push's issue is the one its branch, legion/<issue>, names; a push to any other
+		// branch names none, and changes no handoff of any issue.
+		issue, onIssueBranch := strings.CutPrefix(stringValue(payload, "ref"), "refs/heads/legion/")
+		if !onIssueBranch {
+			issue = ""
+		}
 		classification := ClassifyPush(PushPayload{
 			ChangedPaths: optionalString(payload, "changed_paths"), ChangedPathsTruncated: optionalString(payload, "changed_paths_truncated"),
-		})
+		}, issue)
 		pr = ApplyPush(pr, record.ClassifiedPush{SHA: stringValue(payload, "after"), Before: stringValue(payload, "before"),
 			HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
 			ByReviewApp: login != "" && stringValue(payload, "pusher") == login})
