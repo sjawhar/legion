@@ -12,7 +12,7 @@
   to each session the document credits, never to a person. The quiet window is a row of the new
   table `document_edit_notices` (migration 0129), so a notice still pending when a process stops
   is sent by the next sweep of either process; the sweep runs every 5 seconds under the
-  `edit-notices` lease, and the lease pool grows from eight connections to nine for it. A notice
+  `edit-notices` lease, and the lease pool grows from nine connections to ten for it. A notice
   on an issue closed inside its quiet window is dropped. The dashboard's issue log reads `Edited
   spec.md v4 to v7`. `DISPATCH_TEST_EDIT_NOTICE_QUIET`, under `DISPATCH_TEST_HOOKS=1`, sets the
   quiet time for an end-to-end test process. The actor is the sender of the latest edit a person
