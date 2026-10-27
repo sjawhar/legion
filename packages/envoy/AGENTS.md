@@ -2436,21 +2436,24 @@ the synchronous listener call records the sent or failed attempt instead of blin
   last handed back, `quiet: true`) has `notify` false and reaches no follower, as a human's unnamed
   `artifact.version` reaches nobody; the first move after an opening or a hand-back is not quiet. A
   notifying comment-thread or message-reply event without an `ask_id` keeps the author routes:
-  a comment reply's
-  thread-root author and its direct parent author when different; a message reply's direct parent
-  author; for a bare resolve or reopen, the resolved comment's own root author; and for a new
-  comment on a document (no `reply_to`, no `ask_id`) and its edit, every session the document
-  credits - the one that created it (`artifacts.created_by`) and every one a version lists
-  (`artifact_versions.authors`), read in one query (`loadDocumentSessionAuthors`) - so a person's
-  comment on a passage, on a whole document or as a suggestion reaches the agent that wrote the
-  document. That document is the anchor's (`anchor.artifact_id`) for a comment on a passage of an
-  issue's document, and the event's own for a project document; a comment on an issue's
-  conversation names no document and reaches no author. An author route is skipped for a human
-  author, who has no topic, for the event's own actor, so a session commenting on a document it
-  wrote is never told of its own comment, and for a session the comment's mentions already reach
-  (`suppressed_authors`: on a new comment every session a mention resolved to, so a mentioned
-  writer hears the comment once; on a reply only the thread's root author when mentioned). An
-  agent's comment notifies nobody (`notify` is false), so it takes no author route at all.
+  a comment reply's thread-root author, its direct parent author when different, and every
+  session its document credits; a message reply's direct parent author; for a bare resolve or
+  reopen, the resolved comment's own root author; and for a new comment on a document (no
+  `reply_to`, no `ask_id`) and its edit, every session the document credits - the one that created
+  it (`artifacts.created_by`) and every one a version lists (`artifact_versions.authors`), read in
+  one query (`loadDocumentSessionAuthors`) - so a person's comment on a passage, on a whole
+  document, as a suggestion or as a reply in a thread on a document reaches the agent that wrote
+  the document. That document is the anchor's (`anchor.artifact_id`) for a comment on a passage of
+  an issue's document, and the event's own for a project document; a reply carries no anchor, so
+  its document is the event's own project document, else its thread root's (`loadThreadRoot`, the
+  one walk that also finds the root author). A comment or reply on an issue's conversation names
+  no document and reaches no document author. An author route is skipped for a human author, who
+  has no topic, for the event's own actor, so a session commenting on a document it wrote is never
+  told of its own comment, and for a session the comment's mentions already reach
+  (`suppressed_authors`: on a new comment or a reply outside an ask's thread, every session a
+  mention resolved to, so a mentioned writer or thread author hears the comment once; only on a
+  reply in an ask's thread is it the thread's root author alone, when mentioned). An agent's
+  comment notifies nobody (`notify` is false), so it takes no author route at all.
   `ask.follower_added` and `ask.follower_removed` also route directly to the session they name,
   since a newly added follower is not subscribed to the issue topic by default.
 - Dispatch document events use `notifications.dispatch.document.<PROJECT>.<slug>.<type>` and

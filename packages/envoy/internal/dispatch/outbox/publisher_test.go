@@ -941,7 +941,7 @@ func TestRunRetriesSubscriptionRemovedWhenTheAuthorRoutePublishFails(t *testing.
 	}
 }
 
-func TestLoadRootCommentAuthorTerminatesOnACycle(t *testing.T) {
+func TestLoadThreadRootTerminatesOnACycle(t *testing.T) {
 	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	commentID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
@@ -956,15 +956,15 @@ func TestLoadRootCommentAuthorTerminatesOnACycle(t *testing.T) {
 	var ok bool
 	go func() {
 		defer close(done)
-		_, ok, _ = loadRootCommentAuthor(context.Background(), Deps{Store: database}, commentID)
+		_, _, ok, _ = loadThreadRoot(context.Background(), Deps{Store: database}, commentID)
 	}()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("loadRootCommentAuthor did not terminate on a cyclic reply_to chain")
+		t.Fatal("loadThreadRoot did not terminate on a cyclic reply_to chain")
 	}
 	if ok {
-		t.Fatal("loadRootCommentAuthor reported a root for a cyclic reply_to chain, want none")
+		t.Fatal("loadThreadRoot reported a root for a cyclic reply_to chain, want none")
 	}
 }
 

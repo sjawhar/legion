@@ -66,10 +66,14 @@
   body (`edited_at` when edited), a message's body. Each carries its relation to the session, the
   ask and its question where it is in one, its owner, `dispatch://` ref and deep link. `max_chars`
   stops the list after the item that takes the running sum of text lengths past it, while `total`
-  counts the whole window. The read is `store.SessionAnswers`, which the outbox's tests read back
+  counts the whole window. The read is `sessionanswers.List`, which the outbox's tests read back
   through after publishing. Migrations `0129` (`events_person_words`, a partial index on a person's
-  events of those four types by time) and `0130` (`comment_deliveries_session`) serve it; on
-  1,000,000 events `0129` built in about a second and the route's query ran in 6-8 ms.
+  events of those four types by time), `0130` (`comment_deliveries_session`) and `0131`
+  (`message_deliveries_session_created`, a partial covering index on a session's sent message
+  deliveries by time) serve it; on 1,000,000 events `0129` built in about a second and the route's
+  query ran in 6-8 ms. Through `0131` the read of a session's message deliveries, in a cached
+  generic plan as well, is an index-only scan of only those since an hour before the window: on a
+  session holding 60,003 deliveries, 1,019 of them in range, it took 0.3-0.4 ms and 11 buffers.
 - A person's reply in a comment thread on a document now also reaches every session the document
   credits (its creator and every session a version lists), on its own
   `notifications.agent.<session_id>` topic, after the thread's root author and the parent's

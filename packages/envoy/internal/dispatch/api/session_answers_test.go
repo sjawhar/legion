@@ -330,7 +330,7 @@ func TestSessionAnswersListsACommentOnADocumentTheSessionWrote(t *testing.T) {
 
 // A person's reply under another person's comment on a document the session wrote reaches the
 // session through the document's author route, so its list carries the reply. A reply carries
-// replied_in_a_comment_thread, which store.SessionAnswers ranks above commented_on_a_document.
+// replied_in_a_comment_thread, which sessionanswers.List ranks above commented_on_a_document.
 func TestSessionAnswersListsAPersonsReplyInAThreadOnADocumentTheSessionWrote(t *testing.T) {
 	f := newAnswersFixture(t)
 	uploaded := sessionRequest(t, f.handler, http.MethodPost, "/api/v1/projects/ANS/artifacts", map[string]any{

@@ -1,4 +1,7 @@
-package store
+// Package sessionanswers is the read model of what people wrote that Dispatch delivered to one
+// session: GET /api/v1/agents/{session_id}/answers' read, which the outbox's tests read back
+// through too, so the route reads what the publisher records.
+package sessionanswers
 
 import (
 	"context"
@@ -11,16 +14,11 @@ import (
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// Queryer is the read surface *Pool and pgx.Tx share.
-type Queryer interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
-
-// sessionAnswersQuery reads, in one statement, every item a person wrote that Dispatch delivered to
-// the session $1 since $2, $3 being the session's own topic (contracts.AgentSubject). Its three
-// sources:
+// query reads, in one statement, every item a person wrote that Dispatch delivered to the session
+// $1 since $2, $3 being the session's own topic (contracts.AgentSubject). Its three sources:
 //
 //   - S1 (reached): events a person wrote of a type that carries a person's words to a session -
 //     ask.answered, comment.created, message.created and message.answered (a reply to a message) -
@@ -29,17 +27,22 @@ type Queryer interface {
 //     the list holds what the follower, author and session routes delivered, and never what an
 //     issue's role: route delivered to a role topic, which names no session. It reads the partial
 //     index events_person_words (0129) for the window and filters the array on those rows.
-//   - S2 (message_ids' second arm): the session's sent message deliveries (message_deliveries_session):
-//     targeted messages, direct or on an issue, and broadcast copies.
+//   - S2 (message_ids' second arm): the session's sent message deliveries: targeted messages, direct
+//     or on an issue, and broadcast copies. It is an index-only scan of
+//     message_deliveries_session_created (0131), whose predicate is the arm's state = 'sent' and
+//     which carries message_id, so a cached generic plan chooses it over message_deliveries_session
+//     (0051, session_id alone) too.
 //   - S3 (mentioned): the session's sent comment deliveries, a mention's (comment_deliveries_session,
 //     0130).
 //
 // A delivery row's created_at is its transaction's now(), which for a first attempt can precede the
 // comment's or message's own clock_timestamp() created_at by as long as that transaction ran, so
-// the window is applied to the comment or message and not to its delivery. Both delivery arms still
-// read only rows created since an hour before the window, so a long-lived session's every earlier
-// delivery is not read on every request: a delivery of an item in the window was created in or
-// after the transaction that wrote the item, and no such transaction runs for an hour.
+// the window is applied to the comment or message and not to its delivery. Each delivery arm still
+// reads only the session's rows created since an hour before the window, a range of its index on
+// (session_id, created_at desc), so a long-lived session's earlier deliveries - a session that
+// receives every broadcast copy holds tens of thousands - are not read on every request: a
+// delivery of an item in the window was created in or after the transaction that wrote the item,
+// and no such transaction runs for an hour.
 //
 // Each source names a row by its id, and each kind's ids are a set, so an item reached several ways
 // is one row. Every row is then read at its current words: an ask's current answer (asks.answer)
@@ -55,7 +58,7 @@ type Queryer interface {
 // so the actor check runs on those few rows: with it inside the scan, the planner ANDs in
 // events_person_words, whose predicate the check implies, and reads every entry of that index for
 // each ask.
-const sessionAnswersQuery = `
+const query = `
 	with reached as (
 		select e.type, e.payload->>'id' as id
 		from events e
@@ -128,11 +131,9 @@ const sessionAnswersQuery = `
 	where m.author->>'kind' = 'user' and m.created_at >= $2
 	order by at desc, id desc`
 
-// SessionAnswers lists what people wrote that Dispatch delivered to session since since, newest
-// first by time, then by id descending: an ask's current answer, a comment at its current body, or
-// a message, each (kind, id) once (sessionAnswersQuery). It is GET
-// /api/v1/agents/{session_id}/answers' read, which the outbox's tests read back through too, so
-// the route reads what the publisher records.
+// List lists what people wrote that Dispatch delivered to session since since, newest first by
+// time, then by id descending: an ask's current answer, a comment at its current body, or a
+// message, each (kind, id) once (query).
 //
 // An item reached several ways carries one relation, the most specific to the session, in this
 // order of precedence: a comment is mentioned_you when a mention delivered it to the session (it
@@ -142,13 +143,13 @@ const sessionAnswersQuery = `
 // message is replied_to_your_message when it replies to a message the session wrote, else
 // sent_you_a_message. An answer is always answered_your_ask: an ask's answer reaches its asker and
 // its followers, and the session route reaches the session an issue is routed to.
-func SessionAnswers(ctx context.Context, q Queryer, session string, since time.Time) ([]model.SessionAnswer, error) {
-	rows, err := q.Query(ctx, sessionAnswersQuery, session, since, contracts.AgentSubject(session))
+func List(ctx context.Context, pool *store.Pool, session string, since time.Time) ([]model.SessionAnswer, error) {
+	rows, err := pool.Query(ctx, query, session, since, contracts.AgentSubject(session))
 	if err != nil {
 		return nil, fmt.Errorf("read session %q answers: %w", session, err)
 	}
 	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.SessionAnswer, error) {
-		return scanSessionAnswer(row, session)
+		return scan(row, session)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("read session %q answers: %w", session, err)
@@ -159,8 +160,8 @@ func SessionAnswers(ctx context.Context, q Queryer, session string, since time.T
 	return items, nil
 }
 
-// scanSessionAnswer decodes one sessionAnswersQuery row into the item it is to session.
-func scanSessionAnswer(row pgx.Row, session string) (model.SessionAnswer, error) {
+// scan decodes one query row into the item it is to session.
+func scan(row pgx.Row, session string) (model.SessionAnswer, error) {
 	var (
 		item                                                model.SessionAnswer
 		author, answer                                      []byte
@@ -221,16 +222,15 @@ func scanSessionAnswer(row pgx.Row, session string) (model.SessionAnswer, error)
 	if askID != nil {
 		item.Ask = &model.SessionAnswerAsk{ID: *askID, Question: *askQuestion}
 	}
-	item.Owner, item.Ref, item.Href = sessionAnswerPlace(item.Kind, item.ID, session, issueKey, issueTitle, docProject, docSlug, docName)
+	item.Owner, item.Ref, item.Href = place(item.Kind, item.ID, session, issueKey, issueTitle, docProject, docSlug, docName)
 	return item, nil
 }
 
-// sessionAnswerPlace is where an item lives: its owner, its dispatch:// address and its relative
-// deep link, in the shapes DISPATCH_HREF_REFERENCES (packages/contracts/src/dispatch-href.ts)
-// lists - under its issue, or under the project document holding it. A message on no issue is a
-// direct message to the session: it has no owner and no address, and links to the session's
-// conversation.
-func sessionAnswerPlace(kind, id, session string, issueKey, issueTitle, docProject, docSlug, docName *string) (*model.OpenAskOwner, *string, string) {
+// place is where an item lives: its owner, its dispatch:// address and its relative deep link, in
+// the shapes DISPATCH_HREF_REFERENCES (packages/contracts/src/dispatch-href.ts) lists - under its
+// issue, or under the project document holding it. A message on no issue is a direct message to
+// the session: it has no owner and no address, and links to the session's conversation.
+func place(kind, id, session string, issueKey, issueTitle, docProject, docSlug, docName *string) (*model.OpenAskOwner, *string, string) {
 	var segment string
 	switch kind {
 	case model.SessionAnswerKindAnswer:

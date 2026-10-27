@@ -867,22 +867,42 @@ is written. Its own migration, so its transaction holds `comments` alone: the dr
 refuses and rewrites no row; its census answers `0`.
 
 Migrations `0129_events_person_words` and `0130_comment_deliveries_session` add two partial
-indexes for `GET /api/v1/agents/{session_id}/answers` (`store.SessionAnswers`, Routes below), which
+indexes for `GET /api/v1/agents/{session_id}/answers` (`sessionanswers.List`, Routes below), which
 every agent host reads on every model request. `0129` creates `events_person_words` on `events
 (created_at desc, id desc)` where the actor is a person and the type is `ask.answered`,
 `comment.created`, `message.created` or `message.answered`: the route reads the window's human
 events of those types through it, newest first, and keeps those whose `published_destinations`
-hold the session's own topic. It names no column the outbox updates, so the outbox's append of
-each topic it published an event to stays a HOT update, which a GIN index on that array would end.
-`0130` creates `comment_deliveries_session` on `comment_deliveries (session_id, created_at desc)`
-where `session_id` is not null, the session's mentions, as `message_deliveries_session` (`0051`)
-already serves its message deliveries. Each is a plain `create index` inside the runner's
+hold the session's own topic. A GIN index on `published_destinations` would find the session's
+events directly, but the outbox appends each topic it published an event to that array, and every
+such append would then also write the new element's entry into the index: a write load every
+outbox append would pay for a read only this route makes. `0130` creates
+`comment_deliveries_session` on `comment_deliveries (session_id, created_at desc)` where
+`session_id` is not null: the route reads the session's mentions created since an hour before its
+window as one range of it. Each is a plain `create index` inside the runner's
 transaction, so it holds `SHARE` on its table while it builds: writes to it wait, reads do not. On
 a local Postgres 17 (two CPUs, `maintenance_work_mem` 64 MB) with `events` seeded to 1,000,000
 rows (421 MB with its indexes, 126,541 of them in the index), `0129` built in 0.66-1.13 s over
 three runs and `0130` in 0.11-0.14 s on 50,003 deliveries. Both censuses answer `0`: an index
 build refuses and rewrites no row, and the census report already counts and sizes each table it
 reads.
+
+Migration `0131_message_deliveries_session_created` creates `message_deliveries_session_created`
+on `message_deliveries (session_id, created_at desc) include (message_id)` where `state` is
+`sent`, for the same route's read of the session's sent message deliveries created since an hour
+before its window. `message_deliveries_session` (`0051`) keys `session_id` alone, so through it
+that read fetched the session's whole delivery history and filtered it by time: a long-lived
+session that receives every broadcast copy read all of its deliveries on every model request.
+The new index holds only the read's sent rows and carries the one column it returns, so the read
+is an index-only scan of the window's range, and a cached generic plan, which knows neither the
+session nor the window, chooses it too: costed as a plain `(session_id, created_at desc)` index it
+came within a percent of `0051`, which the generic plan kept. `0051` stays for the conversation
+window, which reads every delivery a session ever received. On the seeded database above, with one
+session given 60,003 sent deliveries (1,019 since an hour before its window), the read of them
+went from 58,984 rows fetched and discarded (798 buffers, 20-22 ms) to an index-only scan of the
+1,019 (11 buffers, 0.3-0.4 ms), in the custom and the generic plan alike; the index built in
+0.34-0.52 s over three runs on 110,003 deliveries. A plain `create index` inside the runner's
+transaction, it holds `SHARE` on `message_deliveries` while it builds: writes to it wait, reads do
+not. Its census answers `0`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

@@ -10,13 +10,13 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/sessionanswers"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // TestSessionAnswersReadsWhatThePublisherRecorded publishes real events through the outbox's own
 // publish path (scan, which calls publish for each pending event) and reads the session's list back
-// with store.SessionAnswers, the read GET /api/v1/agents/{session_id}/answers serves: S1 holds
+// with sessionanswers.List, the read GET /api/v1/agents/{session_id}/answers serves: S1 holds
 // exactly the person's events whose published_destinations the publisher gave the session's own
 // topic, and never an agent's event that reached it, nor a person's event that reached only a role.
 func TestSessionAnswersReadsWhatThePublisherRecorded(t *testing.T) {
@@ -89,7 +89,7 @@ func TestSessionAnswersReadsWhatThePublisherRecorded(t *testing.T) {
 		t.Fatalf("the routed comment reached %v, want the role's topic and not the asker's", topics)
 	}
 
-	items, err := store.SessionAnswers(ctx, database.Pool, asker.ID, time.Now().Add(-72*time.Hour))
+	items, err := sessionanswers.List(ctx, database.Pool, asker.ID, time.Now().Add(-72*time.Hour))
 	if err != nil {
 		t.Fatalf("read the asker's answers: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestSessionAnswersReadsWhatThePublisherRecorded(t *testing.T) {
 	if want := "dispatch://T-1/ask/" + askID; current.Ref == nil || *current.Ref != want || current.Href != "/issues/T-1/asks/"+askID {
 		t.Fatalf("answer place = %v %q, want %s", current.Ref, current.Href, want)
 	}
-	if other, err := store.SessionAnswers(ctx, database.Pool, "session-nobody", time.Now().Add(-72*time.Hour)); err != nil || len(other) != 0 || other == nil {
+	if other, err := sessionanswers.List(ctx, database.Pool, "session-nobody", time.Now().Add(-72*time.Hour)); err != nil || len(other) != 0 || other == nil {
 		t.Fatalf("a session nothing reached = %#v, %v; want an empty list", other, err)
 	}
 }

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/sessionanswers"
 )
 
 const (
@@ -21,7 +21,7 @@ const (
 )
 
 // listSessionAnswers answers GET /api/v1/agents/{session_id}/answers: what people wrote that
-// Dispatch delivered to one session since the window's start (store.SessionAnswers), newest
+// Dispatch delivered to one session since the window's start (sessionanswers.List), newest
 // first, with total counting every item in the window. With max_chars the list stops after the
 // item whose text takes the running sum of text lengths, in UTF-16 units as an agent host counts
 // its cap, past max_chars: a superset of what fits under the host's cap, and a body bounded at
@@ -47,7 +47,7 @@ func (s *server) listSessionAnswers(w http.ResponseWriter, r *http.Request) {
 			"max_chars must be one integer from 1 to %d", sessionAnswersMaxChars))
 		return
 	}
-	items, err := store.SessionAnswers(r.Context(), s.deps.Store.Pool, session, since)
+	items, err := sessionanswers.List(r.Context(), s.deps.Store.Pool, session, since)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

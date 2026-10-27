@@ -62,7 +62,7 @@ const (
 	// destination suppresses the repeat inside the stream's duplicate window. Neither is fixed
 	// here.
 	claimWindow = time.Minute
-	// maxCommentThreadDepth bounds the reply_to walk in loadRootCommentAuthor so a
+	// maxCommentThreadDepth bounds the reply_to walk in loadThreadRoot so a
 	// malformed cycle (comments.reply_to has no acyclicity constraint) cannot spin the
 	// recursive query and stall the outbox scan.
 	maxCommentThreadDepth = 32
@@ -754,13 +754,14 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 // or is the thread's own root author never learns about the human's reply, resolution,
 // reopening, or edit, and the agent that wrote a document never learns of a new comment on it.
 // A reply reaches its thread's root author and its direct parent's author, and a reply not in an
-// ask's thread on a document (the event's own project document, else its thread root's, by
-// loadThreadDocument) then also reaches every session that document credits; a new comment on a
-// document (no reply_to and no ask_id), and its edit, reach every session that document credits
-// (loadDocumentSessionAuthors); a comment or reply on an issue's conversation names no document and
-// reaches no document author. Ask threads are not walked here: their asker and repliers are the
-// ask's followers (publishFollowerRoutes). The event's own actor is skipped, and so is a session
-// the comment's mentions already reach (suppressed_authors).
+// ask's thread on a document (the event's own project document, else its thread root's, which
+// loadThreadRoot finds in the same walk as the root's author) then also reaches every session that
+// document credits; a new comment on a document (no reply_to and no ask_id), and its edit, reach
+// every session that document credits (loadDocumentSessionAuthors); a comment or reply on an
+// issue's conversation names no document and reaches no document author. Ask threads are not
+// walked here: their asker and repliers are the ask's followers (publishFollowerRoutes). The
+// event's own actor is skipped, and so is a session the comment's mentions already reach
+// (suppressed_authors).
 func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
 	suppressedAuthors := payloadStringSet(event.Payload, "suppressed_authors")
 	seen := map[string]bool{}
@@ -820,9 +821,11 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 	if inReplyTo != "" {
 		// New comment threads persist ReplyTo as their root ID. Walking still keeps
 		// routing correct for legacy nested rows and finds the root author.
-		if err := considerLoaded(loadRootCommentAuthor(ctx, deps, inReplyTo)); err != nil {
+		rootAuthor, rootDocument, found, err := loadThreadRoot(ctx, deps, inReplyTo)
+		if err != nil {
 			return err
 		}
+		consider(rootAuthor, found)
 		if err := considerLoaded(loadCommentAuthor(ctx, deps, inReplyTo)); err != nil {
 			return err
 		}
@@ -831,19 +834,18 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 			// thread root's.
 			document := commentedDocument(event)
 			if document == "" {
-				var err error
-				if document, err = loadThreadDocument(ctx, deps, inReplyTo); err != nil {
-					return err
-				}
+				document = rootDocument
 			}
 			if err := considerDocument(document); err != nil {
 				return err
 			}
 		}
 	} else if commentID != "" && (event.Type == "comment.resolved" || event.Type == "comment.reopened") {
-		if err := considerLoaded(loadRootCommentAuthor(ctx, deps, commentID)); err != nil {
+		rootAuthor, _, found, err := loadThreadRoot(ctx, deps, commentID)
+		if err != nil {
 			return err
 		}
+		consider(rootAuthor, found)
 	} else if notAskComment {
 		if err := considerDocument(commentedDocument(event)); err != nil {
 			return err
@@ -883,7 +885,7 @@ func loadCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.
 // commentedDocument names the artifact a comment's event places it on: its anchor's for a comment
 // on a passage (of an issue's document or a project artifact), otherwise the event's own artifact
 // for a comment or reply on a project artifact. A reply carries no anchor, so a reply on an issue's
-// document names none here (loadThreadDocument finds it). The author lookup decides whether that
+// document names none here (loadThreadRoot finds it). The author lookup decides whether that
 // artifact is a document.
 func commentedDocument(event model.Event) string {
 	document := ""
@@ -933,54 +935,36 @@ func loadDocumentSessionAuthors(ctx context.Context, deps Deps, artifactID strin
 	return authors, nil
 }
 
-// loadRootCommentAuthor walks a comment's reply_to chain up to its thread root - the comment
-// humans reply under - and returns that root's author. comments.reply_to has no acyclicity
-// constraint, so the walk unions on the visited row and stops at maxCommentThreadDepth: a
-// cycle then finds no reply_to-is-null row and reports no root rather than spinning.
-func loadRootCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.Actor, bool, error) {
-	var authorJSON []byte
+// loadThreadRoot walks a comment's reply_to chain up to its thread root - the comment humans reply
+// under - and returns that root's author and the artifact the root is on: its anchor's for a
+// comment on a passage, otherwise its own for a comment on a whole project artifact, and "" for a
+// root on an issue's conversation. The author lookup decides whether that artifact is a document.
+// comments.reply_to has no acyclicity constraint, so the walk unions on the visited row and stops
+// at maxCommentThreadDepth: a cycle then finds no reply_to-is-null row and reports no root rather
+// than spinning.
+func loadThreadRoot(ctx context.Context, deps Deps, commentID string) (model.Actor, string, bool, error) {
+	var (
+		authorJSON []byte
+		document   string
+	)
 	if err := deps.Store.Pool.QueryRow(ctx, `
 		with recursive chain as (
-			select id, reply_to, author, 0 as depth from comments where id = $1
-			union
-			select c.id, c.reply_to, c.author, h.depth + 1
-			from comments c join chain h on c.id = h.reply_to
-			where h.depth < $2
-		)
-		select author from chain where reply_to is null limit 1
-	`, commentID, maxCommentThreadDepth).Scan(&authorJSON); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return model.Actor{}, false, nil
-		}
-		return model.Actor{}, false, fmt.Errorf("load root comment author %q: %w", commentID, err)
-	}
-	return decodeAuthor(authorJSON, "comment", commentID)
-}
-
-// loadThreadDocument walks a comment's reply_to chain up to its thread root, as
-// loadRootCommentAuthor does and under the same maxCommentThreadDepth guard, and names the artifact
-// that root is on: its anchor's for a comment on a passage, otherwise its own for a comment on a
-// whole project artifact. It returns "" for a root on an issue's conversation, and for a chain that
-// finds no root. The author lookup decides whether that artifact is a document.
-func loadThreadDocument(ctx context.Context, deps Deps, commentID string) (string, error) {
-	var document string
-	if err := deps.Store.Pool.QueryRow(ctx, `
-		with recursive chain as (
-			select id, reply_to, coalesce(anchor->>'artifact_id', artifact_id::text, '') as document, 0 as depth
+			select id, reply_to, author, coalesce(anchor->>'artifact_id', artifact_id::text, '') as document, 0 as depth
 			from comments where id = $1
 			union
-			select c.id, c.reply_to, coalesce(c.anchor->>'artifact_id', c.artifact_id::text, ''), h.depth + 1
+			select c.id, c.reply_to, c.author, coalesce(c.anchor->>'artifact_id', c.artifact_id::text, ''), h.depth + 1
 			from comments c join chain h on c.id = h.reply_to
 			where h.depth < $2
 		)
-		select document from chain where reply_to is null limit 1
-	`, commentID, maxCommentThreadDepth).Scan(&document); err != nil {
+		select author, document from chain where reply_to is null limit 1
+	`, commentID, maxCommentThreadDepth).Scan(&authorJSON, &document); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil
+			return model.Actor{}, "", false, nil
 		}
-		return "", fmt.Errorf("load thread document %q: %w", commentID, err)
+		return model.Actor{}, "", false, fmt.Errorf("load thread root %q: %w", commentID, err)
 	}
-	return document, nil
+	author, found, err := decodeAuthor(authorJSON, "comment", commentID)
+	return author, document, found, err
 }
 
 func decodeAuthor(raw []byte, kind, id string) (model.Actor, bool, error) {
