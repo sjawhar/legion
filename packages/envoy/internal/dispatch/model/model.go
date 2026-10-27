@@ -967,6 +967,25 @@ type AskAnswer struct {
 	At       time.Time `json:"at"`
 }
 
+// UnmarshalJSON decodes an answer and reads a null or absent selected as an empty list: an answer
+// that chose no option sends `"selected":[]`, never null, though rows and ask.answered events
+// written before answers stored an empty list hold null there.
+func (a *AskAnswer) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	type plain AskAnswer
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if value.Selected == nil {
+		value.Selected = []string{}
+	}
+	*a = AskAnswer(value)
+	return nil
+}
+
 // OpenAskOwner identifies the issue or standalone project document holding an ask.
 type OpenAskOwner struct {
 	Issue    *OpenAskIssue    `json:"issue,omitempty"`

@@ -59,13 +59,5 @@ func (s *server) attachAskStates(ctx context.Context, q queryer, results []model
 			}
 		}
 	}
-
-	// An answer that chose no option reads as an empty list, never null: a row or an event
-	// written with no selected stores null there.
-	for _, id := range askIDs {
-		if state := results[indexByID[id]].Ask; state != nil && state.Answer != nil && state.Answer.Selected == nil {
-			state.Answer.Selected = []string{}
-		}
-	}
 	return nil
 }
