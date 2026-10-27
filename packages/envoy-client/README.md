@@ -379,3 +379,5 @@ anything, a `delete` or `retype` by block id that would take an `ask` block out 
 (the block itself, or one inside a deleted block) while its ask is open: the edit would write its
 version at once and settlement would retract the ask without writing another, so the question
 would leave the human's Inbox unanswered and the approval refusal would find no block to judge.
+
+<!-- scratch INFRA-520 envoy-client -->
