@@ -194,6 +194,10 @@ stamps.
   `daemon_url`, pass `--daemon-url`, or start the tunnel; the command never tries another address.
 - **`… is readable by its group or others (mode 0640); chmod 0600 it`.** The operator token and the
   NATS seed must be readable by you alone.
+- **`stdin is not a terminal: Oh My Pi would run headless print mode, …`** Run
+  `legion controller start` at a terminal. With no terminal, Oh My Pi would run the controller's
+  start command headless, after the daemon had already revoked the running controller, so the
+  command refuses before it asks the daemon for anything.
 - **`unknown key "<key>" in the controller configuration; …`** The controller reads its own small
   file, not `legion.yaml`; compare with `deploy/kubernetes/daemon/controller.yaml.example`.
 - **The plugin refusal.** `legion controller start` probes your Oh My Pi before it asks the daemon

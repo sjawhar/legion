@@ -829,6 +829,31 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
+- Daemon API contract 40 and plugin interface version 4 (INFRA-511): the operator's controller
+  start turn runs after Oh My Pi's startup, where the operator sees it, can type during it and can
+  interrupt it with Esc. The extension sent the start message (`LEGION_CONTROLLER_START_MESSAGE`)
+  from its `session_start` claim, and Oh My Pi holds every send a `session_start` handler makes and
+  drains them at the end of its startup, so the whole start turn ran inside the startup wait: the
+  TUI showed no start message and no busy row, Enter did not take typed text, and Esc did nothing.
+  The claim at `session_start` now only makes the message due, still right after the role claim
+  and before the controller-topic subscription opens (LEGION-392's order), and names the session in
+  the plugin interface's new `startupTurn`. `legion controller start` ends Oh My Pi's command line
+  with `/legion-controller-start`, which Oh My Pi runs once its startup is over and its TUI
+  listens, and that new extension command sends the due message — as a follow-up when the operator
+  already started a turn — and stamps the mark's `sentAt`; when the claim failed before the start
+  was due it warns, naming `/legion-claim-controller`, and with nothing to send it says so. A claim
+  after startup (`/legion-claim-controller`, a re-claim after a session change) still sends
+  directly, and the message still goes out once per process. The session's first `agent_start` and
+  its `session_shutdown` clear the mark. The daemon-launched controller still sends no start
+  message of its own and sets the mark, with `sentAt` now, right before `claims/ready`, after which
+  the daemon delivers its start prompt. `legion controller start` refuses a stdin that is not a
+  terminal, right after the operator token file's check and before any probe or mint: given the
+  positional word and no terminal, Oh My Pi would run headless print mode, running the start
+  command after the mint revoked the running controller. A pi-legion before 40 under this CLI
+  would send from `session_start` and then get the word as a prompt, and this plugin under an
+  earlier CLI would never send the start, so the controller probe refuses either pair before the
+  mint. Install this release's pair with a `legion` built from the same commit.
+
 - The `legion-architect` skill was 51,256 bytes, over Oh My Pi's 51,200-byte spill threshold, so it
   reached an architect with its middle cut out; its Wake routing table moves unchanged to
   `skill://legion-architect/references/wake-routing.md` (INFRA-376).

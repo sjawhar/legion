@@ -147,9 +147,10 @@ want_contract=$(jq -r .legion.daemonApiVersion "$root/packages/pi-legion/package
 note "plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile, daemonApiVersion $want_contract"
 # The boot gate resolves the model of every task agent the prompts dispatch, so the profile names
 # their roles and the default one model, served by a static-key provider that listens nowhere: the
-# controller's one model turn, which the pi-legion extension starts from
-# LEGION_CONTROLLER_START_MESSAGE once its claim succeeds, fails against it, no check reads its
-# answer, and no credential the machine carries decides the gate.
+# controller's one model turn, the start message (LEGION_CONTROLLER_START_MESSAGE) that pi-legion's
+# `/legion-controller-start`, the word `legion controller start` puts on Oh My Pi's command line,
+# sends once Oh My Pi's startup is over, fails against it, no check reads its answer, and no
+# credential the machine carries decides the gate.
 mkdir -p "$profile_agent"
 cat >"$profile_agent/models.yml" <<'EOF'
 providers:

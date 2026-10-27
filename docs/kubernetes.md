@@ -6127,10 +6127,14 @@ to the same rule, and lets the group read only a root-owned file, as a pod's kub
 `--daemon-url <url>`, which replaces it) is the daemon's API as your machine reaches it. In order, and
 keeping nothing until the daemon has answered, the command:
 
-1. reads the file and refuses as above, and refuses a blank or unreadable Envoy or Dispatch token
-   file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or
-   holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi invocation that
-   does not resolve;
+1. reads the file and refuses as above, the operator token file others can read included; then
+   refuses a stdin that is not a terminal (``stdin is not a terminal: Oh My Pi would run headless
+   print mode, …; run `legion controller start` at a terminal``), since given step 6's positional
+   word with no terminal Oh My Pi runs headless print mode, which would run the start command only
+   after step 3's mint had revoked the running controller; then a blank or unreadable Envoy or
+   Dispatch token file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or
+   others, or holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi
+   invocation that does not resolve;
 2. reads the project's repositories from the daemon's unauthenticated `GET /legion/v1/state`
    (`repositories`), since the controller's addressing names them, and refuses a daemon that does
    not answer, a body with no `repositories` object, and a mapped entry that is not `owner/name`;
@@ -6177,12 +6181,14 @@ keeping nothing until the daemon has answered, the command:
    script, a `gh` wrapper of the operator's machine that would answer in place of the review App;
 6. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
    `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line,
-   the project's repositories sentence and the deployment instructions, no `--resume`, no
-   `--mode rpc`) with the controller's
+   the project's repositories sentence and the deployment instructions, then the one positional
+   word `/legion-controller-start`, no `--resume`, no `--mode rpc`) with the controller's
    environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
-   `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (the pi-legion
-   extension sends it as the session's first turn right after its role claim succeeds and before
-   it opens the live wake subscription, so the controller's first turn runs its start procedure
+   `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (Oh My Pi runs the
+   positional word once its startup is over and its TUI listens, and pi-legion's command of that
+   name sends the message as the session's first turn, which the operator sees, can type during
+   and can interrupt with Esc; the extension's role claim made the start due before it opened the
+   live wake subscription, so the controller's first turn runs its start procedure
    deterministically, with nothing typed, rather than racing a wake for the session's one
    first-turn slot — LEGION-392), its grant and secret files, `LEGION_GH_OWNERS_DIR` naming
    `<state_dir>/gh` (the bundle step 5 wrote), `GH_CONFIG_DIR` its default owner's directory (the

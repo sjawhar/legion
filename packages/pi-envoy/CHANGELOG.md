@@ -136,6 +136,11 @@
 
 ### Changed
 
+- Plugin interface version 4 (INFRA-511): the interface carries `startupTurn`, the session whose
+  first turn a start that runs after Oh My Pi's startup owns and when that start was sent, which
+  `@sjawhar/pi-legion` sets for its controller's start message and clears at that session's first
+  run or shutdown. Install it with the `@sjawhar/pi-legion` released beside it.
+
 - `dispatch` and `dispatch-first` say that a Legion session files no issue for a finding outside its
   own issue, and point to `legion-worker/references/findings.md`: a defect with a clear fix in code
   the session's own tree touches is fixed in that tree's pull request, any other goes to the

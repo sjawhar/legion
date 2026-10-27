@@ -26,6 +26,12 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 40 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-511): `legion controller start` ends the operator's Oh My Pi command line with
+  `/legion-controller-start`, and pi-legion sends the controller's start message from that
+  command rather than from `session_start`, so the start turn runs after Oh My Pi's startup;
+  nothing this plugin reads or writes moved, and a session of it registers with a daemon at 40.
+  `dist/envoy-channel.js`, which embeds the number, is rebuilt.
 - The plugin declares daemon API contract 38 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is
   waiting to start behind an unfinished Dispatch issue, each `{issue, blockedBy}`, and

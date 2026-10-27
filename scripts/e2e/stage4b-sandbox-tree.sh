@@ -5428,9 +5428,11 @@ grep -qF "[legion] the controller's gh acts as the review App for owners ${gh_co
 note "the operator-launched controller's gh: pull request state $state, viewer $viewer from $controller_gh; GH_CONFIG_DIR=/nonexistent failed; controller.stderr names the review App and its owners; github-credential.log exists"
 # The controller's first turn starts itself (LEGION-392): nothing is ever typed into its pane, so
 # its session's first user message is the start message `legion controller start` carries as
-# LEGION_CONTROLLER_START_MESSAGE (daemon.ControllerStartMessage, internal/daemon/controller.go) and
-# the pi-legion extension sends right after its role claim, before it opens the live wake
-# subscription a tick could race it on (controller-session.ts `claim`); the model answers it.
+# LEGION_CONTROLLER_START_MESSAGE (daemon.ControllerStartMessage, internal/daemon/controller.go),
+# which pi-legion's `/legion-controller-start` (daemon.ControllerStartCommand, the word the command
+# puts on Oh My Pi's command line) sends once Oh My Pi's startup is over; the extension's role
+# claim made it due before it opened the live wake subscription a tick could race it on
+# (controller-session.ts `claim`, `sendStartMessage`); the model answers it.
 controller_started_itself() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do
