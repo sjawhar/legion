@@ -224,6 +224,18 @@ func HeadPushKnown(pr record.PullRequest, head string) bool {
 // never by the head it leaves: a branch reset to an earlier commit arrives there by a push of its
 // own. A push that did not say which head it replaced is never a link: it stays on its way until a
 // head arrives (arrival), and then goes.
+//
+// A push is matched to a move by its two heads alone, so the same two heads pushed again are spent
+// too: after h0..h1, a forced return h1..h0 and h0..h1 pushed again, the repeat is spent as it
+// arrives (it looks the same as the first push delivered twice), and h1's second arrival finds no
+// chain of pushes (AdvancePullRequestHead). Its head run opens and stays open until its bound
+// (maxRunSteps) although no push was lost, and a red at each head of that run is held up to 10
+// minutes (workflow's redHold) before it is decided as it stands. That costs a delay and loses
+// nothing. Letting a move keep its repeat for the next arrival by it would close that run, but a
+// repeat cannot be told from a push not yet delivered on another path to the same head (h0..hx and
+// hx..h1, hx never synchronized): an arrival the repeat chains opens no run, so that path's pushes,
+// delivered after, would never replay the judgement, which would then depend on delivery order. The
+// delay is the safer trade, and it needs no more state on each move.
 func unspentPushes(pushes []record.ClassifiedPush, moves []record.Move, arrival bool) []record.ClassifiedPush {
 	made := map[record.Move]bool{}
 	for _, m := range moves {
