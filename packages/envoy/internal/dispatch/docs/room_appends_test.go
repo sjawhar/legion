@@ -276,10 +276,13 @@ func TestQueuedBrowserUpdatesOfOneRoomCommitInOneTransactionOffTheSharedPool(t *
 }
 
 // creditedStep is one browser update of a credit scenario: who was connected while the room
-// applied it, nobody when author is nil, and whether a committed version listed its credit before
-// its append took it (UpdateCredit.take answers include=false then).
+// applied it, nobody when author is nil, and beside it a second connection when beside is not
+// nil, so no one peer made the update and both are credited with it; and whether a committed
+// version listed its credit before its append took it (UpdateCredit.take answers include=false
+// then).
 type creditedStep struct {
 	author   *model.Actor
+	beside   *model.Actor
 	consumed bool
 }
 
@@ -304,10 +307,16 @@ func storeCreditedUpdates(t *testing.T, service *Service, observer *store.Store,
 			unlock = holdDocumentLock(t, observer, artifactID)
 		}
 		edit := appendBlocks(t, fmt.Sprintf("Update %d.\n", index))
+		if step.beside != nil {
+			service.addConnection(artifactID, uint64(len(steps)+index+1), *step.beside)
+		}
 		if step.author != nil {
 			typeInRoom(t, service, artifactID, uint64(index+1), *step.author, edit)
 		} else {
 			editAsPeer(t, service, artifactID, edit)
+		}
+		if step.beside != nil {
+			service.removeConnection(artifactID, uint64(len(steps)+index+1))
 		}
 		if step.consumed {
 			state := service.lockState(artifactID)
@@ -336,11 +345,14 @@ func storeCreditedUpdates(t *testing.T, service *Service, observer *store.Store,
 }
 
 // creditRows is what a document's updates left of their credit: its pending authors, each with the
-// update that recorded it counted from base, and its pending settlement's latest edit source.
+// update that recorded it counted from base, and its pending settlement's latest edit source and
+// latest person sender, with that person's id.
 type creditRows struct {
-	authors   []string
-	owed      bool
-	lastActor string
+	authors      []string
+	owed         bool
+	lastActor    string
+	lastPerson   string
+	lastPersonID string
 }
 
 func creditRowsSince(t *testing.T, database *store.Store, artifactID string, base int64) creditRows {
@@ -357,10 +369,10 @@ func creditRowsSince(t *testing.T, database *store.Store, artifactID string, bas
 	if err != nil {
 		t.Fatalf("read the document's pending authors: %v", err)
 	}
-	var lastActor *string
+	var lastActor, lastPerson, lastPersonID *string
 	err = database.Pool.QueryRow(ctx, `
-		select last_actor::text from doc_settlements_pending where artifact_id = $1
-	`, artifactID).Scan(&lastActor)
+		select last_actor::text, last_person::text, last_person->>'id' from doc_settlements_pending where artifact_id = $1
+	`, artifactID).Scan(&lastActor, &lastPerson, &lastPersonID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return creditRows{authors: authors}
 	}
@@ -371,26 +383,41 @@ func creditRowsSince(t *testing.T, database *store.Store, artifactID string, bas
 	if lastActor != nil {
 		found.lastActor = *lastActor
 	}
+	if lastPerson != nil {
+		found.lastPerson = *lastPerson
+	}
+	if lastPersonID != nil {
+		found.lastPersonID = *lastPersonID
+	}
 	return found
 }
 
 // The rows a room's queued updates leave are the rows the same updates leave stored one at a time:
 // a pending author per credited update, recorded at that update's own version, none for a credit a
 // committed version already listed, and a pending settlement whose latest edit source is the last
-// credited update's actor when that update names one, and is kept otherwise (markUpdateOwedBy,
-// markUpdateOwed). Each scenario is made twice on two documents, queued and one at a time.
+// credited update's actor when that update names one, and is kept otherwise, and whose latest
+// person sender is what the credited updates do to it in order by latestPersonOf: a person's
+// update names that person, a two-peer update crediting a person clears it, and a session's update
+// leaves it (updateOwedStatement). Each scenario is made twice on two documents, queued and one at
+// a time.
 func TestABatchLeavesThePendingAuthorRowsOneAtATimeAppendsLeave(t *testing.T) {
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	carol := model.Actor{Kind: "session", ID: "carol"}
+	dave := model.Actor{Kind: "session", ID: "dave"}
+	// person is the id of the latest person sender the steps leave, "" for none.
 	cases := []struct {
-		name  string
-		steps []creditedStep
+		name   string
+		steps  []creditedStep
+		person string
 	}{
-		{name: "credits not consumed", steps: []creditedStep{{author: &alice}, {author: &bob}, {author: &alice}, {author: &carol}}},
-		{name: "credits consumed", steps: []creditedStep{{author: &alice, consumed: true}, {author: &bob}, {author: &carol, consumed: true}, {author: &alice}}},
-		{name: "the last credit consumed", steps: []creditedStep{{author: &alice}, {author: &bob, consumed: true}}},
-		{name: "no connected author", steps: []creditedStep{{author: &alice}, {}, {author: &bob}, {}}},
+		{name: "credits not consumed", steps: []creditedStep{{author: &alice}, {author: &bob}, {author: &alice}, {author: &carol}}, person: "alice"},
+		{name: "credits consumed", steps: []creditedStep{{author: &alice, consumed: true}, {author: &bob}, {author: &carol, consumed: true}, {author: &alice}}, person: "alice"},
+		{name: "the last credit consumed", steps: []creditedStep{{author: &alice}, {author: &bob, consumed: true}}, person: "alice"},
+		{name: "no connected author", steps: []creditedStep{{author: &alice}, {}, {author: &bob}, {}}, person: "bob"},
+		{name: "a person's update before a session's", steps: []creditedStep{{author: &bob}, {author: &carol}}, person: "bob"},
+		{name: "a two-peer update clears the person a session's update then keeps", steps: []creditedStep{{author: &alice}, {author: &bob, beside: &carol}, {author: &dave}}, person: ""},
+		{name: "a two-peer update of sessions keeps the person", steps: []creditedStep{{author: &alice}, {author: &carol, beside: &dave}}, person: "alice"},
 	}
 	database := storetest.Open(t)
 	observer := storetest.SecondProcess(t, database)
@@ -410,6 +437,13 @@ func TestABatchLeavesThePendingAuthorRowsOneAtATimeAppendsLeave(t *testing.T) {
 			if !slices.Equal(queued.authors, oneByOne.authors) || queued.owed != oneByOne.owed || queued.lastActor != oneByOne.lastActor {
 				t.Errorf("the queued updates left pending authors %q and a pending settlement %t naming %q; one at a time the same updates left %q, %t, %q",
 					queued.authors, queued.owed, queued.lastActor, oneByOne.authors, oneByOne.owed, oneByOne.lastActor)
+			}
+			if queued.lastPerson != oneByOne.lastPerson {
+				t.Errorf("the queued updates left a pending settlement whose latest person sender is %q; one at a time the same updates left %q",
+					queued.lastPerson, oneByOne.lastPerson)
+			}
+			if queued.lastPersonID != test.person || oneByOne.lastPersonID != test.person {
+				t.Errorf("the latest person sender is %q queued and %q one at a time, want %q", queued.lastPersonID, oneByOne.lastPersonID, test.person)
 			}
 			if got := storedHead(t, observer, queuedDoc) - queuedBase; got != int64(len(test.steps)) {
 				t.Errorf("the queued updates are stored as %d rows, want %d", got, len(test.steps))

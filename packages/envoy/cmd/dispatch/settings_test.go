@@ -31,6 +31,7 @@ import (
 	gws "github.com/gorilla/websocket"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
@@ -1423,6 +1424,21 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_EDIT_NOTICE_QUIET": func(t *testing.T) {
+			const shortQuiet = 3 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":             "1",
+				"DISPATCH_TEST_EDIT_NOTICE_QUIET": shortQuiet.String(),
+			})
+			if boot.EditNoticeQuiet != shortQuiet {
+				t.Errorf("DISPATCH_TEST_EDIT_NOTICE_QUIET: EditNoticeQuiet = %v, want %v", boot.EditNoticeQuiet, shortQuiet)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_EDIT_NOTICE_QUIET": invalid},
+					fmt.Sprintf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_EDIT_NOTICE_QUIET": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 	}
 	for _, row := range settings {
 		test, ok := cases[row.Name]
@@ -1484,7 +1500,8 @@ func answersSharedToken(response *httptest.ResponseRecorder) bool {
 // setting does not list. A request that authenticates with a value after the first is logged once
 // per address and User-Agent, with the load balancer's address and never a token.
 func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
-	var logged bytes.Buffer
+	// The server's request goroutines write the log while the test reads it.
+	var logged cmdtest.LockedBuffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })

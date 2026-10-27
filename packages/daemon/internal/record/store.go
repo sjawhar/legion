@@ -39,7 +39,9 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
-const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, handout_seq, coalesce(declared_seq, 0), declared_at`
+// issueColumns reads an empty ancestry as NULL, so a record with none scans as a nil Ancestry, as
+// it was written.
+const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, handout_seq, coalesce(declared_seq, 0), declared_at, nullif(ancestry, '{}'), handed_over_from`
 
 func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error) {
 	issue, err := scanIssue(tx.QueryRow(ctx, "select "+issueColumns+" from issues where key = $1", key))
@@ -53,36 +55,52 @@ func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, er
 }
 
 func (s *Postgres) Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
-	rows, err := tx.Query(ctx, "select "+issueColumns+" from issues order by key")
+	issues, err := queryIssues(ctx, tx, "select "+issueColumns+" from issues order by key")
 	if err != nil {
 		return nil, fmt.Errorf("list issues: %w", err)
+	}
+	return issues, nil
+}
+
+func (s *Postgres) QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]Issue, error) {
+	issues, err := queryIssues(ctx, tx, "select "+issueColumns+` from issues
+		where status = 'todo' and handed_over and key = tree and $1 = any(ancestry)
+		order by key`, key)
+	if err != nil {
+		return nil, fmt.Errorf("list the queued roots whose chain holds %s: %w", key, err)
+	}
+	return issues, nil
+}
+
+// queryIssues is every issue record query selects with args, in its order.
+func queryIssues(ctx context.Context, tx pgx.Tx, query string, args ...any) ([]Issue, error) {
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	issues := []Issue{}
 	for rows.Next() {
 		issue, err := scanIssue(rows)
 		if err != nil {
-			return nil, fmt.Errorf("list issues: %w", err)
+			return nil, err
 		}
 		issues = append(issues, *issue)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list issues: %w", err)
-	}
-	return issues, nil
+	return issues, rows.Err()
 }
-
-// slottedIssueColumns is issueColumns of the issues table under the alias the slot join gives it.
-const slottedIssueColumns = `i.key, i.tree, i.project, i.title, i.parent, i.phase, i.generation, i.status, i.rank, i.handed_over, i.taken_back, i.linger_until, i.held_from, i.last_dispatch_seq, i.ready_pending_version, coalesce(i.hold_reason, ''), i.dispatch_status, i.repo, i.default_branch, i.github_repo`
 
 // SlottedIssues is the record of each issue of project that holds an admission slot, in slot order
 // (index, then issue), in one read: what admission judges when it releases the slots a fact has
 // finished with (admit's releaseSlots), on every fact and under the one fact lock. The slots table
 // is shared by every project's daemon, so another project's slot is left out here rather than by
-// the caller, and no issue of another project, and no issue holding no slot, is read at all.
+// the caller, and no issue of another project, and no issue holding no slot, is read at all. It
+// selects issueColumns itself, so it reads every column scanIssue scans: the slots join is a
+// derived table whose columns are renamed, so no column of issueColumns is ambiguous.
 func (s *Postgres) SlottedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
-	rows, err := tx.Query(ctx, `select `+slottedIssueColumns+` from slots s join issues i on i.key = s.issue
-		where i.project = $1 order by s.index, s.issue`, project)
+	rows, err := tx.Query(ctx, `select `+issueColumns+` from issues
+		join (select index, issue from slots) slot (slot_index, slot_issue) on slot.slot_issue = issues.key
+		where issues.project = $1 order by slot.slot_index, slot.slot_issue`, project)
 	if err != nil {
 		return nil, fmt.Errorf("list the slotted issues of project %s: %w", project, err)
 	}
@@ -143,8 +161,10 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	// handout_seq, declared_seq and declared_at are StartHandout's, TakeInThrough's, Declare's and
 	// ClearDeclared's alone, so a copy of the issue read before any of them never writes them back.
 	tag, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason, dispatch_status, repo, default_branch, github_repo,
-		awaiting_ask, awaiting_gate_version, awaiting_artifact, awaiting_answered_at, awaiting_answered_by, awaiting_answered_detail, awaiting_since_seq, awaiting_since)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, nullif($16::text, ''), $17, $18, $19, $20, $21, $22, $23, $24, nullif($25::text, ''), nullif($26::text, ''), $27, $28)
+		awaiting_ask, awaiting_gate_version, awaiting_artifact, awaiting_answered_at, awaiting_answered_by, awaiting_answered_detail, awaiting_since_seq, awaiting_since,
+		ancestry, handed_over_from)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, nullif($16::text, ''), $17, $18, $19, $20, $21, $22, $23, $24, nullif($25::text, ''), nullif($26::text, ''), $27, $28,
+		coalesce($29::text[], '{}'), $30)
 		on conflict (key) do update set tree = excluded.tree, project = excluded.project, title = excluded.title,
 		parent = excluded.parent, phase = excluded.phase, generation = excluded.generation,
 		status = excluded.status, rank = excluded.rank, handed_over = excluded.handed_over, taken_back = excluded.taken_back,
@@ -155,12 +175,13 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 		awaiting_artifact = excluded.awaiting_artifact,
 		awaiting_answered_at = excluded.awaiting_answered_at, awaiting_answered_by = excluded.awaiting_answered_by,
 		awaiting_answered_detail = excluded.awaiting_answered_detail,
-		awaiting_since_seq = excluded.awaiting_since_seq, awaiting_since = excluded.awaiting_since
+		awaiting_since_seq = excluded.awaiting_since_seq, awaiting_since = excluded.awaiting_since,
+		ancestry = excluded.ancestry, handed_over_from = excluded.handed_over_from
 		where issues.repo = excluded.repo and issues.default_branch = excluded.default_branch and issues.github_repo = excluded.github_repo`,
 		issue.Key, issue.Tree, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
 		issue.Rank, issue.HandedOver, issue.TakenBack, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion, string(holdReason), issue.DispatchStatus,
 		issue.Repo, issue.DefaultBranch, issue.GitHubRepo, awaitingAsk, awaitingGate, awaitingArtifact, answeredAt, string(answeredBy), answeredDetail,
-		sinceSeq, since,
+		sinceSeq, since, issue.Ancestry, issue.HandedOverFrom,
 	)
 	if err != nil {
 		return fmt.Errorf("put issue %s: %w", issue.Key, err)
@@ -293,7 +314,7 @@ func scanIssue(row scanner) (*Issue, error) {
 	if err := row.Scan(&issue.Key, &issue.Tree, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
 		&issue.Rank, &issue.HandedOver, &issue.TakenBack, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion, &holdReason, &issue.DispatchStatus,
 		&issue.Repo, &issue.DefaultBranch, &issue.GitHubRepo, &awaitingAsk, &awaitingGate, &awaitingArtifact, &answeredAt, &answeredBy, &answeredDetail,
-		&sinceSeq, &since, &issue.HandoutSeq, &issue.DeclaredSeq, &declaredAt); err != nil {
+		&sinceSeq, &since, &issue.HandoutSeq, &issue.DeclaredSeq, &declaredAt, &issue.Ancestry, &issue.HandedOverFrom); err != nil {
 		return nil, err
 	}
 	if declaredAt != nil {

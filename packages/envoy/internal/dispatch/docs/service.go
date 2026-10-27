@@ -73,6 +73,9 @@ type Deps struct {
 	UnrecordedMarkTTL time.Duration
 	MaxLiveRooms      int
 	MaxDocConnections int
+	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
+	// before its edit notice goes (recordEditNotice, RunEditNotices); zero means 30 s.
+	EditNoticeQuiet time.Duration
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
@@ -123,10 +126,16 @@ type Service struct {
 	settle            time.Duration
 	markWait          time.Duration
 	unrecordedMarkTTL time.Duration
-	rooms             sync.Map
-	shutdownRooms     sync.Map
-	nextConnection    atomic.Uint64
-	stopping          atomic.Bool
+	// editNoticeQuiet is Deps.EditNoticeQuiet, with its default applied.
+	editNoticeQuiet time.Duration
+	// afterEditNoticeIDs runs once an edit-notice sweep has read its due ids, with no lock held,
+	// and before it locks the first. Nil outside tests; tests use it to delete a document in that
+	// window.
+	afterEditNoticeIDs func(ids []string)
+	rooms              sync.Map
+	shutdownRooms      sync.Map
+	nextConnection     atomic.Uint64
+	stopping           atomic.Bool
 	// quiescing holds off every settlement while Quiesce empties the rooms, so a timer that
 	// fires mid-quiesce cannot re-arm the room Quiesce just closed.
 	quiescing atomic.Bool
@@ -639,6 +648,10 @@ func New(deps Deps) *Service {
 	if unrecordedMarkTTL <= 0 {
 		unrecordedMarkTTL = time.Minute
 	}
+	editNoticeQuiet := deps.EditNoticeQuiet
+	if editNoticeQuiet <= 0 {
+		editNoticeQuiet = defaultEditNoticeQuiet
+	}
 	if deps.Events == nil {
 		deps.Events = events.NewBroker()
 	}
@@ -675,6 +688,7 @@ func New(deps Deps) *Service {
 		now:               time.Now,
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
+		editNoticeQuiet:   editNoticeQuiet,
 		reads:             newDocumentReads(readBudget),
 		roomCap:           roomCap,
 		connectionCap:     connectionCap,
@@ -1416,9 +1430,9 @@ type settlementVersionCredit struct {
 // once the room holds it, so every in-flight credit taken is for a change the copy holds; one
 // observed after the take stays pending for the next version. Holding state.mu across the copy
 // would block the update observer that credits and broadcasts every peer's keystroke.
-func (s *Service) readSettlementTree(state *roomState, owed map[string]model.Actor, doc *crdt.Doc, room string, afterTake func(room string)) (*pmdoc.Node, settlementVersionCredit, error) {
+func (s *Service) readSettlementTree(state *roomState, owed map[string]model.Actor, durableLatest *model.Actor, doc *crdt.Doc, room string, afterTake func(room string)) (*pmdoc.Node, settlementVersionCredit, error) {
 	state.mu.Lock()
-	credit := settlementAuthors(state, owed)
+	credit := settlementAuthors(state, owed, durableLatest)
 	state.mu.Unlock()
 	if afterTake != nil {
 		afterTake(room)
@@ -1430,8 +1444,8 @@ func (s *Service) readSettlementTree(state *roomState, owed map[string]model.Act
 // settlementAuthors takes the authors a settlement's version lists (captureAuthors), and names
 // the actor its derived events carry: the latest editor when the version lists them or lists no
 // one, otherwise SettlementActor. The caller holds state.mu.
-func settlementAuthors(state *roomState, owed map[string]model.Actor) settlementVersionCredit {
-	capture := captureAuthors(state, owed, nil, nil)
+func settlementAuthors(state *roomState, owed map[string]model.Actor, durableLatest *model.Actor) settlementVersionCredit {
+	capture := captureAuthors(state, owed, durableLatest, nil, nil)
 	credit := settlementVersionCredit{capture: capture, state: state, authors: actorSlice(capture.authors)}
 	if latest := state.lastActor; latest != nil {
 		if _, found := capture.authors[actorKey(*latest)]; found || len(credit.authors) == 0 {
@@ -1643,6 +1657,14 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		retry(err)
 		return
 	}
+	// The document's latest person sender as its stored updates and commits recorded it
+	// (readLastPerson), which names who edited last once the room holds no in-flight credit that
+	// decides (latestEditSource): every landed browser edit, in this process or another.
+	durableLatest, err := readLastPerson(ctx, tx, room)
+	if err != nil {
+		retry(err)
+		return
+	}
 	// The settlement reads the document three times, and each read has its own name: read is this
 	// one, before the database work; reconciled is the tree the ask blocks are reconciled on, the
 	// stamp's when it stamped ids; versioned is the one the version is rendered from, read again
@@ -1656,7 +1678,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// transaction's write, credited at its commit and published after the copy; the supersession
 	// check below then writes no version, since the write still holds its slot or its publish moved
 	// the generation.
-	read, credit, err := s.readSettlementTree(state, owed, doc, room, s.afterSettleAuthorsTake)
+	read, credit, err := s.readSettlementTree(state, owed, durableLatest, doc, room, s.afterSettleAuthorsTake)
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
@@ -1829,7 +1851,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		// its author. The same is true when the copy holds an edit whose update observer had not yet
 		// credited it - ygo runs the observer only once the edit's transaction has released the
 		// document.
-		versioned, credit, err = s.readSettlementTree(state, owed, doc, room, s.afterSettleAuthorsTake)
+		versioned, credit, err = s.readSettlementTree(state, owed, durableLatest, doc, room, s.afterSettleAuthorsTake)
 		if err != nil {
 			abandon(err)
 			return
@@ -1937,6 +1959,13 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 				abandon(err)
 				return
 			}
+		}
+		// A person's version opens or moves on the document's edit notice, under the owner lock
+		// this settlement took first (lockArtifactOwner above): the sweep takes the two in that
+		// order too (sendEditNotice).
+		if err := s.recordEditNotice(ctx, tx, room, result.version.Number, credit.authors, credit.capture.latest); err != nil {
+			abandon(err)
+			return
 		}
 		published = append(published, ledger.events...)
 		// A document body cites nodes whose rows carry a backlink count, so the version event

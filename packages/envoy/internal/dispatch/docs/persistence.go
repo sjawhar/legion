@@ -14,7 +14,6 @@ import (
 	"github.com/reearth/ygo/encoding"
 	"github.com/reearth/ygo/persistence"
 
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -355,17 +354,17 @@ func (p *PgVersioned) appendWrites(room string, head int64, updates []BrowserUpd
 	versions := make([]int64, len(updates))
 	contents := make([][]byte, len(updates))
 	classes := make([]bool, len(updates))
-	credited := false
-	var lastActor *model.Actor
+	var owed owedUpdates
 	var authors []pendingAuthor
 	for index, appended := range updates {
 		version := head + int64(index) + 1
 		versions[index], contents[index], classes[index] = version, appended.Update, appended.ContentChanged
 		updateAuthors, updateActor, include := appended.Credit.take()
 		// An edit credited to authors names its latest edit source, none included when no one
-		// peer made it; an update no one is credited with keeps the row's.
+		// peer made it, and does to the latest person sender what latestPersonOf says; an update
+		// no one is credited with keeps the row's.
 		if include && (len(updateAuthors) > 0 || updateActor != nil) {
-			credited, lastActor = true, updateActor
+			owed.credit(updateActor, anyPerson(updateAuthors))
 		}
 		if include {
 			authors = append(authors, pendingAuthorsAt(updateAuthors, persistence.Version(version))...)
@@ -376,7 +375,7 @@ func (p *PgVersioned) appendWrites(room string, head int64, updates []BrowserUpd
 	if err != nil {
 		return nil, 0, err
 	}
-	owed, err := updateOwedStatement(room, credited, lastActor)
+	owedStatement, err := updateOwedStatement(room, owed)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -384,7 +383,7 @@ func (p *PgVersioned) appendWrites(room string, head int64, updates []BrowserUpd
 		sql:  appendUpdatesStatement,
 		args: []any{room, versions, contents, classes, room, notice},
 		what: "append document update",
-	}, owed}
+	}, owedStatement}
 	if len(authors) > 0 {
 		upsert, err := pendingAuthorsStatement(room, authors)
 		if err != nil {
