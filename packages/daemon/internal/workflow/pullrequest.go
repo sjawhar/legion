@@ -68,7 +68,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 			carried = classify.AdvancePullRequestHead(carried, fact.HeadSHA)
 		}
 		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = carried.FixAttempts, carried.BlockedAttempts, recorded.ReviewSeen
-		pr.HeadCounted, pr.HeadCountedBefore = carried.HeadCounted, carried.HeadCountedBefore
+		pr.HeadCounted, pr.HeadCountedBefore, pr.HeadCountedFrom = carried.HeadCounted, carried.HeadCountedBefore, carried.HeadCountedFrom
 		pr.Required, pr.Workflows, pr.WorkflowsHead = recorded.Required, recorded.Workflows, recorded.WorkflowsHead
 		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}

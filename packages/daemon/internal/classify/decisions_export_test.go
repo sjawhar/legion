@@ -24,10 +24,48 @@ func TestAdvancePullRequestHeadCountsRedFixAndConsumesHandoffClassification(t *t
 }
 
 func TestApplyPushTakesBackOnlyTheCurrentHandoffOnlyCount(t *testing.T) {
-	counted := record.PullRequest{HeadSHA: "head", FixAttempts: 3, BlockedAttempts: 3, HeadCounted: "head"}
-	got := ApplyPush(counted, record.ClassifiedPush{SHA: "head", HandoffOnly: true})
-	if got.FixAttempts != 2 || got.BlockedAttempts != 0 || got.HeadCounted != "" {
+	counted := record.PullRequest{HeadSHA: "head", FixAttempts: 3, BlockedAttempts: 3, HeadCounted: "head", HeadCountedFrom: "prev"}
+	got := ApplyPush(counted, record.ClassifiedPush{SHA: "head", Before: "prev", HandoffOnly: true})
+	if got.FixAttempts != 2 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.HeadCountedFrom != "" {
 		t.Fatalf("handoff-only take-back = %#v, want decremented unblocked head", got)
+	}
+}
+
+// Only the counted move's own push takes the count back: the push that left the counted head from
+// the head the count moved from. A push that left the same head from another head - the
+// required-checks pass's compare from an approved head (daemon's readApprovalCarry) - says only
+// what changed between those two heads, not in the move the count counted, which can carry code:
+// here h3 changed code on the approved h1, and h4 takes that code out again, so h1 to h4 changes
+// only handoffs while h3 to h4 changes code.
+func TestApplyPushTakesBackOnlyTheCountedMovesOwnPush(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		push record.ClassifiedPush
+	}{
+		{"a handoff-only push", record.ClassifiedPush{HandoffOnly: true}},
+		{"the review App's push", record.ClassifiedPush{ByReviewApp: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counted := AdvancePullRequestHead(record.PullRequest{HeadSHA: "h3", CheckedHead: "h3", Failing: []string{"ci"}, Required: []string{"ci"},
+				FixAttempts: 2, HeadCounted: "h2"}, "h4")
+			if counted.FixAttempts != 3 || counted.HeadCounted != "h4" || counted.HeadCountedBefore != "h2" || counted.HeadCountedFrom != "h3" {
+				t.Fatalf("a push onto red h3 = %#v, want h4 counted from h3 over the mark on h2", counted)
+			}
+			fromApproved := tc.push
+			fromApproved.SHA, fromApproved.Before = "h4", "h1"
+			got := ApplyPush(counted, fromApproved)
+			if got.FixAttempts != 3 || got.HeadCounted != "h4" || got.HeadCountedBefore != "h2" || got.HeadCountedFrom != "h3" {
+				t.Fatalf("a push from the approved h1 to h4 = fixAttempts=%d headCounted=%q headCountedBefore=%q headCountedFrom=%q, want 3, \"h4\", \"h2\" and \"h3\": it did not make the counted move",
+					got.FixAttempts, got.HeadCounted, got.HeadCountedBefore, got.HeadCountedFrom)
+			}
+			own := tc.push
+			own.SHA, own.Before = "h4", "h3"
+			got = ApplyPush(got, own)
+			if got.FixAttempts != 2 || got.HeadCounted != "h2" || got.HeadCountedBefore != "" || got.HeadCountedFrom != "" {
+				t.Fatalf("h4's own push from h3 = fixAttempts=%d headCounted=%q headCountedBefore=%q headCountedFrom=%q, want 2, \"h2\", \"\" and \"\": the count taken back",
+					got.FixAttempts, got.HeadCounted, got.HeadCountedBefore, got.HeadCountedFrom)
+			}
+		})
 	}
 }
 

@@ -407,6 +407,13 @@ type PullRequest struct {
 	// App's (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
 	// which of the push and the head's arrival GitHub delivers first.
 	HeadCountedBefore string
+	// HeadCountedFrom is the head HeadCounted replaced when it was counted: the recorded head the
+	// count moved from, which the counted head's own push names as the head it replaced. Only that
+	// push takes the count back (classify.ApplyPush); a push that left the counted head from another
+	// head - the required-checks pass's compare from an approved head, say - did not make the move
+	// the count counted. Empty when no count stands, and for a mark a take-back restored, which no
+	// push takes back.
+	HeadCountedFrom string
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
