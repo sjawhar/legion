@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-158",
-  "completed": "2026-10-27T01:50:04Z",
+  "completed": "2026-10-27T02:18:54Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2233",
-  "head": "61b165e79e06042306fa3578b1999897046e99a3",
+  "head": "83649d6aa94f89254e8c6143308cce339fe1de7d",
   "proof": [
+    {
+      "criterion": "Eleventh forward merge leaves the change intact and the pull request mergeable",
+      "surface": "the merged tree's builds and GitHub's mergeability",
+      "command": "go build ./... and go vet of internal/dispatch/api and docs; cd packages/dispatch && bun run typecheck; cd packages/claude-envoy && bun run check-dist; gh pr view 2233 --json mergeable",
+      "observed": "All pass; GitHub reports MERGEABLE. Fingerprint 3c8663bf c3cf2574 -> 83649d6a c3cf2574, unchanged.",
+      "headSha": "83649d6aa94f89254e8c6143308cce339fe1de7d",
+      "negativeControl": "At 3c8663bf GitHub reported CONFLICTING (packages/envoy/CHANGELOG.md)"
+    },
     {
       "criterion": "Review round 6: in the server's real frame order (sync, then authenticate), a read-only load stores nothing, a reopen and a second close show no false unsent edit, and an edit typed after a reopen's reconnect survives a reload",
       "surface": "Dispatch's browser suite (Playwright, chromium and iphone) on the real Go server, production SPA and real Postgres; the real Hocuspocus provider replaying ygo's order in connection.test.ts",
@@ -168,6 +176,7 @@
     }
   ],
   "filesChanged": [
+    "round 9: eleventh forward merge 83649d6a (packages/envoy/CHANGELOG.md, both sides kept)",
     "round 8: tenth forward merge 707b80e2; pending-sync.ts/connection.ts (held stamp removed, authenticated(readOnly) + synced(), provider's own isSynced/isAuthenticated), connection.test.ts (one real-provider harness, ygo order), pending-fixture.ts, offline-edits.e2e.ts (real-order case), e2e/editor.ts back to its pre-52159aaf form; docs.LogUnindexedAskBlocks shared by api and rebuild.go; issue_close_unloadable_test.go",
     "round 7: dispatch web pending-sync.ts (authenticated() flag at authentication, read-only own updates held in memory and stored first on the writable flip), connection.ts, pending-sync.test.ts, e2e/editor.ts (admitWithoutSync), e2e/offline-edits.e2e.ts (gap case on the heading spec)",
     "round 6: ninth forward merge 58b805d9 (pi-envoy and pi-legion CHANGELOGs, both sides kept)",
@@ -204,5 +213,5 @@
     "R7 local runs at 39c12172 (from a git archive of the head): api ok (1562 s), store ok, cmd/dispatch ok, -tags multiprocess cmd/dispatch ok (350 s); docs failed only TestAHealthyRoomUnderWritesIsNeverRefused ('too few to say anything' under load), which passes alone (ok 6.6 s) and is not in the diff; pmdoc failed only its timing tests and the differential tests that need the workspace's @legion/proof-editor link absent from the archive (pmdoc is not in the diff). bun test packages/contracts packages/envoy-client: one envoy-config timing test failed under load and passes alone. packages/dispatch: typecheck clean; bun test 2388 pass on the re-run (the first run under load had 2 failures not reproduced). biome check of contracts, dispatch, claude-envoy, envoy-client: no errors. claude-envoy check-dist passes. -race was not run locally (the pod has no C compiler); CI's envoy-go-race lane runs it."
   ],
   "openQuestions": [],
-  "round": 8
+  "round": 9
 }
