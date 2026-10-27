@@ -123,8 +123,8 @@ async function openRepo(options: Options): Promise<GitRepo> {
   return git;
 }
 
-/** Reads and analyses every pull request updated at or after `sinceInstant`, any state, whose
- * head branch starts with the prefix; sorted by number. */
+/** Reads and analyses every pull request updated at or after `sinceInstant`, any state, or open
+ * now, whose head branch starts with the prefix; sorted by number. */
 async function readPullRequests(
   git: GitRepo,
   options: Options,

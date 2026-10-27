@@ -19,7 +19,9 @@ For every pull request it reads, the script takes GitHub's list of the pull requ
   merged into its parent). Each forward merge is re-run with
   `git merge-tree --write-tree --name-only --no-messages <branch parent> <upstream parent>`; the
   paths it reports are the merge's conflicted files, and none means the merge was clean. A merge
-  whose parent objects are missing from the clone is undeterminable.
+  with a parent the clone lacks and cannot fetch is counted as a `forward` merge whose conflicts
+  are undeterminable (`error: "parent object missing"`): without the parent, its kind is not
+  checked by ancestry, so it may be an `other-branch` merge.
 - **Force pushes.** Each force push's pre-push head is merged with main as it stood at the push
   time (`git rev-list -1 --first-parent --before=<push time>`). A conflict there means the rewrite,
   usually a rebase, plausibly resolved a conflict. Pull requests whose base is not main are
@@ -46,23 +48,30 @@ Its limits:
 
 ## Which pull requests it reads
 
-Every pull request, in any state, that GitHub's search says was updated at or after the window's
-start: `gh pr list --state all --search "updated:>=<since>"`. A pull request carrying a merge dated
-in the window was pushed after that merge, so it was updated inside or after the window; the run
-reads it whether it is open now, was merged in the window or after it, or was closed unmerged.
-GitHub's search returns at most 1000 pull requests, so a list of 1000 stops the run (exit 1) with
-the window too large for one search; measure shorter windows instead.
+Two lists, taken together by number. The first is every pull request, in any state, that GitHub's
+search says was updated at or after the window's start:
+`gh pr list --state all --search "updated:>=<since>"`. A pull request carrying a merge dated in the
+window was pushed after that merge, and one merged or closed in or after the window was updated
+when it closed, so this list holds every one of them. The second is every pull request open now:
+`gh pr list --state open`. It adds those opened before the window and still open that nothing
+updated since, which the first list misses (the Python run read every open pull request too). Each
+list is cut at 1000 pull requests (GitHub's search returns no more), so a list of 1000 stops the
+run (exit 1): from the search, with the window too large for one search (measure shorter windows
+instead); from the open list, with too many open pull requests for one list.
 
-`--branch-prefix` is applied to that list before any pull request is fetched, so a prefixed run's
-raw records hold only the pull requests whose head branch starts with the prefix.
+`--branch-prefix` is applied to the two lists before any pull request is fetched, so a prefixed
+run's raw records hold only the pull requests whose head branch starts with the prefix.
 
-The search has no upper bound, so its list grows with every day between the window's end and the
-run. The summary therefore narrows it to the pull requests that existed in the window: one counts
-when it was opened by the window's end and was neither merged nor closed unmerged (by its
-`closedAt`, when the record has one) before the window's start, or when it carries a merge or force
-push dated inside the window (a pull request opened later from a branch that merged main in the
-window). Every section counts only these, so a run made days after its window counts the same pull
-requests as one made as it ended. The Python run's records are read as they are.
+Both lists run to when the run is made, not to the window's end: the search grows with every day
+between them, and the open list holds pull requests opened after the window. The summary therefore
+narrows them to the pull requests that existed in the window: one counts when it was opened by the
+window's end and was neither merged nor closed unmerged (by its `closedAt`, when the record has
+one) before the window's start, or when it carries a merge or force push dated inside the window (a
+pull request opened later from a branch that merged main in the window). Every pull request that
+existed in the window is open now or was updated since its start, so it is on one of the lists
+whenever the run is made. Every section counts only these, so a run made days after its window
+counts the same pull requests as one made as it ended. The Python run's records are read as they
+are.
 
 ## Flags
 
@@ -83,7 +92,7 @@ The report is markdown on stdout. A live run writes its raw records to
 `<workdir>/conflicts-<since>_<until>.json` and names the file on stderr. The exit code is 0 for a
 report, 2 for a usage error (a bad flag or window, `--since` missing from a live run, an unreadable
 or invalid raw-records file, a `--fixed` commit git cannot resolve or that is not on main) and 1 for
-a failed run (git, `gh`, the search cap). A bad flag, or a live run's bad window, is refused before
+a failed run (git, `gh`, a list's cap). A bad flag, or a live run's bad window, is refused before
 any git or `gh` call.
 
 ## The report's sections

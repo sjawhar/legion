@@ -126,6 +126,14 @@ export function readRawRun(text: string): RawRun {
         `raw records: prs[${index}] needs a number, headRefName, state, merges and force_pushes`
       );
     }
+    if (typeof pr.createdAt !== "string") {
+      throw new UsageError(`raw records: prs[${index}].createdAt is missing or not a string`);
+    }
+    if (pr.mergedAt !== null && typeof pr.mergedAt !== "string") {
+      throw new UsageError(
+        `raw records: prs[${index}].mergedAt is missing or not a string or null`
+      );
+    }
     if ("closedAt" in pr && pr.closedAt !== null && typeof pr.closedAt !== "string") {
       throw new UsageError(`raw records: prs[${index}].closedAt is not a string or null`);
     }

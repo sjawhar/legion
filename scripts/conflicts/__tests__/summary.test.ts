@@ -258,6 +258,16 @@ describe("summarise", () => {
       expect(summary.snapshot.rows).toEqual([]);
     });
 
+    test("a PR opened before the window, open now and untouched in it, is read", () => {
+      const summary = summarise(runOf([pr(49, { createdAt: early })], "updated-since"), {
+        prefix: "legion/",
+      });
+      expect(summary.combined.prs).toBe(1);
+      expect(summary.merged.prs).toBe(0);
+      expect(summary.other.prs).toBe(1);
+      expect(summary.snapshot.open).toBe(1);
+    });
+
     test("a run without a selection (the Python run) reads every PR", () => {
       const summary = summarise(runOf(cases.map((c) => c.pr)), { prefix: "legion/" });
       expect(summary.combined.prs).toBe(cases.length);
@@ -589,11 +599,13 @@ describe("readRawRun", () => {
     expect(readRawRun(JSON.stringify({ ...run, prs: [] })).prs).toEqual([]);
   });
 
-  test("takes closedAt as a string or null, or absent, and refuses anything else", () => {
+  describe("a PR record", () => {
     const pr = {
       number: 1,
       headRefName: "legion/A",
       state: "CLOSED",
+      createdAt: "2026-10-19T00:00:00Z",
+      mergedAt: null,
       merges: [],
       force_pushes: [],
     };
@@ -605,11 +617,27 @@ describe("readRawRun", () => {
           origin_main: "abc",
           prs: [{ ...pr, ...fields }],
         })
-      ).prs[0].closedAt;
-    expect(read({ closedAt: "2026-10-21T00:00:00Z" })).toBe("2026-10-21T00:00:00Z");
-    expect(read({ closedAt: null })).toBeNull();
-    expect(read({})).toBeUndefined();
-    expect(() => read({ closedAt: 5 })).toThrow(UsageError);
+      ).prs[0];
+
+    test("takes closedAt as a string or null, or absent, and refuses anything else", () => {
+      expect(read({ closedAt: "2026-10-21T00:00:00Z" }).closedAt).toBe("2026-10-21T00:00:00Z");
+      expect(read({ closedAt: null }).closedAt).toBeNull();
+      expect(read({}).closedAt).toBeUndefined();
+      expect(() => read({ closedAt: 5 })).toThrow(UsageError);
+    });
+
+    test("needs createdAt as a string", () => {
+      expect(read({}).createdAt).toBe("2026-10-19T00:00:00Z");
+      expect(() => read({ createdAt: undefined })).toThrow(UsageError);
+      expect(() => read({ createdAt: null })).toThrow(UsageError);
+    });
+
+    test("needs mergedAt as a string or null", () => {
+      expect(read({ mergedAt: "2026-10-21T00:00:00Z" }).mergedAt).toBe("2026-10-21T00:00:00Z");
+      expect(read({}).mergedAt).toBeNull();
+      expect(() => read({ mergedAt: 5 })).toThrow(UsageError);
+      expect(() => read({ mergedAt: undefined })).toThrow(UsageError);
+    });
   });
 });
 
