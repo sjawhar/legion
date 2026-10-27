@@ -76,3 +76,40 @@ func TestTheTmuxBootGateRefusesARoleOverlayOhMyPiCannotParse(t *testing.T) {
 		})
 	}
 }
+
+// The gate boot builds for a tmux daemon (prepare) refuses a role file Oh My Pi cannot parse,
+// before the plugin gate's load probes run, naming the role and the file.
+func TestTheTmuxBootRefusesARoleOverlayOhMyPiCannotParse(t *testing.T) {
+	t.Setenv("LEGION_TEST_PG_DSN", "postgres://legion:legion@127.0.0.1:1/legion?sslmode=disable&connect_timeout=1")
+	dir := t.TempDir()
+	omp := filepath.Join(dir, "omp")
+	script := "#!/bin/sh\nIFS=:\nfor f in $PI_CONFIG_FILES; do case \"$f\" in *malformed*)\n" +
+		"  echo \"error: Failed to parse config overlay $f: SyntaxError\" >&2; exit 1;; esac; done\n" +
+		"echo '{\"value\": false}'\n"
+	if err := os.WriteFile(omp, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	malformed := filepath.Join(dir, "malformed.yml")
+	if err := os.WriteFile(malformed, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig(t)
+	cfg.RoleConfigFiles = map[claim.Role][]string{claim.RoleMerger: {malformed}}
+	p, err := prepare(cfg, quietLogger(), overrides{environ: []string{}, getenv: func(name string) string {
+		if name == "LEGION_OMP_PATH" {
+			return omp
+		}
+		return os.Getenv(name)
+	}})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	want := "boot gate: role_config_files.merger: the merger's Oh My Pi would not start: Oh My Pi refuses " + malformed +
+		": error: Failed to parse config overlay " + malformed + ": SyntaxError"
+	if p.gate == nil {
+		t.Fatal("prepare built no boot gate")
+	}
+	if err := p.gate(context.Background()); err == nil || err.Error() != want {
+		t.Fatalf("the boot gate = %v, want %q", err, want)
+	}
+}

@@ -357,7 +357,9 @@ What each part is for:
   that role's start. Under tmux boot and `--check-config` refuse a file the host does not have, and
   boot refuses one Oh My Pi cannot parse. The capability report's `model-fallback` row reads only
   the overlays every role names, so a deployment that turns fallback on for some roles alone
-  records `capabilities.decided.model-fallback`. The repository's `docs/kubernetes.md` ("Operator
+  records `capabilities.decided.model-fallback`. Only loading is per role: every role of a pod, and every pane
+  under tmux, can read every role's overlay file, so never put a secret in one. Adding the mount
+  to a running deployment replaces each issue pod at its next relaunch. The repository's `docs/kubernetes.md` ("Operator
   configuration") shows the overlay and its mount.
 
 The loader refuses any key it does not know, naming it, and refuses `omp_invocation` and

@@ -330,7 +330,8 @@ provider_keys:
   alone, and refuses the boot when Oh My Pi exits non-zero (`boot gate: role_config_files.<role>:
   the <role>'s Oh My Pi would not start: Oh My Pi refuses <file>: error: …`), rather than letting
   every launch of that role fail. `docs/kubernetes.md` ("Operator configuration") has the rest of
-  the key's rules.
+  the key's rules. Every pane runs as the daemon's Unix user, so each role can read every role's
+  overlay file; only loading is per role, so never put a secret in one.
 - **`take_over: kubernetes`** lets this daemon take over the claims a daemon running the project
   under `runtime: kubernetes` recorded on the same store ([Moving a project onto
   tmux](#moving-a-project-onto-tmux)). `kubernetes` is the only accepted value. Without the key, a

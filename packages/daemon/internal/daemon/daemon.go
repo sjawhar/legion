@@ -769,11 +769,13 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			log:            log,
 		}
 		image := capabilities.Image{Launch: omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation), Env: environPairs(env), WorkDir: cfg.StateDir}
+		// The role overlays first: a cheap read whose refusal names the operator's file, before the
+		// plugin gate's slower load probes.
 		p.gate = func(ctx context.Context) error {
-			if err := gate.verify(ctx); err != nil {
+			if err := checkPaneRoleOverlays(ctx, cfg, image, log); err != nil {
 				return err
 			}
-			return checkPaneRoleOverlays(ctx, cfg, image, log)
+			return gate.verify(ctx)
 		}
 		p.modelFallback = func(ctx context.Context) string {
 			state, err := capabilities.ReadModelFallback(ctx, image)
@@ -806,10 +808,10 @@ func checkPaneRoleOverlays(ctx context.Context, cfg config.Config, image capabil
 			continue
 		}
 		why, err := capabilities.CheckOverlays(ctx, image, slices.Concat(every, own), own)
-		switch {
-		case err != nil:
-			log.Warn("boot gate: Oh My Pi did not answer on a role's overlays; its files were read", "role", role, "error", err)
-		case why != "":
+		if err != nil {
+			log.Warn("boot gate: Oh My Pi did not answer on some of a role's overlays; its files were read", "role", role, "error", err)
+		}
+		if why != "" {
 			return fmt.Errorf("boot gate: role_config_files.%s: the %s's Oh My Pi would not start: %s", role, role, why)
 		}
 	}

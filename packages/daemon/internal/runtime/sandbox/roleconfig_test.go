@@ -154,3 +154,66 @@ func TestNewRefusesRoleOverlaysNoRoleCouldCarry(t *testing.T) {
 		})
 	}
 }
+
+// Adding a role's overlay to a running deployment — the operator's volume and mount holding it, and
+// role_config_files naming it — leaves every issue pod created before without that mount, while the
+// role's next generation is started with the file in its PI_CONFIG_FILES, on which its Oh My Pi
+// would refuse to start. So the role is reported StaleAddress, its detail naming the file and the
+// volume the pod lacks, and its relaunch replaces the issue pod; the new pod mounts the volume,
+// holds nothing a pod created now is not handed, and a sibling the key does not name resumes into
+// that same new pod.
+func TestAddingARoleOverlaysMountReplacesAnIssuePodMadeWithoutIt(t *testing.T) {
+	g := newRig(t, nil)
+	tester, reviewer := workerSpec(t), testSpec(t, otherToken, claim.RoleReviewer, testTree)
+	testerLoc, reviewerLoc := g.spawn(tester), g.spawn(reviewer)
+
+	const file = "/etc/legion-operator-roles/fallback.yml"
+	roles := corev1.Volume{Name: "operator-roles", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-roles"},
+	}}}
+	r2 := secondRuntime(t, g, func(o *Options) {
+		o.Pod.Volumes = append(o.Pod.Volumes, roles)
+		o.Pod.VolumeMounts = append(o.Pod.VolumeMounts, corev1.VolumeMount{Name: roles.Name, MountPath: "/etc/legion-operator-roles", ReadOnly: true})
+		o.RoleConfigFiles = map[claim.Role][]string{claim.RoleTester: {file}}
+	})()
+	g.connectRunning(workerToken, testerLoc.Sandbox.Generation)
+	g.eventually("the tester's launcher to report its child to the restarted daemon", func() bool {
+		state, connected := r2.launchers.state(workerToken, testerLoc.Sandbox.PodUID)
+		return connected && state.Child != nil
+	})
+	obs := readopt(t, g.ctx, r2, testerLoc)[0]
+	if obs.Kind != runtime.StaleAddress || obs.Locator != testerLoc {
+		t.Fatalf("%s at %+v, want StaleAddress at the recorded locator: %s", obs.Kind, obs.Locator, obs.Detail)
+	}
+	if want := (movedAddress{"role_config_files.tester " + file, "(unset)", "volume operator-roles from ConfigMap legion-operator-roles items []"}).String(); !strings.Contains(obs.Detail, want) {
+		t.Errorf("detail %q lacks %q", obs.Detail, want)
+	}
+
+	tester.Generation, tester.BootToken, tester.ResumeSessionFile = 2, "boot-tester-g2", resumeSession
+	newTester, err := r2.Resume(g.ctx, &testerLoc, tester)
+	if err != nil {
+		t.Fatalf("Resume the tester: %v", err)
+	}
+	if newTester.Sandbox.PodUID == testerLoc.Sandbox.PodUID {
+		t.Fatalf("Resume kept the pod %s, which does not mount the tester's overlay %s", testerLoc.Sandbox.PodUID, file)
+	}
+	pod := g.pod(testerLoc.Sandbox.Name)
+	if held := heldInPod(r2, pod, claim.Roles); len(held) > 0 {
+		t.Fatalf("the replaced pod holds %+v, which a pod created now is not handed", held)
+	}
+	if !slices.ContainsFunc(containerNamed(t, pod.Spec, workerContainer).VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == roles.Name }) {
+		t.Errorf("the replaced pod does not mount %s", roles.Name)
+	}
+	if got := startEnv(lastStart(t, g, workerToken))["PI_CONFIG_FILES"]; !strings.HasSuffix(got, file) {
+		t.Errorf("the tester's generation 2 PI_CONFIG_FILES = %q, want it to end with %s", got, file)
+	}
+
+	reviewer.Generation, reviewer.BootToken, reviewer.ResumeSessionFile = 2, "boot-reviewer-g2", resumeSession
+	newReviewer, err := r2.Resume(g.ctx, &reviewerLoc, reviewer)
+	if err != nil {
+		t.Fatalf("Resume the reviewer: %v", err)
+	}
+	if newReviewer.Sandbox.PodUID != newTester.Sandbox.PodUID {
+		t.Fatalf("the reviewer resumed into pod %s, want the tester's new pod %s", newReviewer.Sandbox.PodUID, newTester.Sandbox.PodUID)
+	}
+}

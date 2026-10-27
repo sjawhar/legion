@@ -124,7 +124,7 @@ cluster and the image:
     <file>: error: …`, quoting Oh My Pi's own error): a file `role_config_files` names for that
     role is not in the mount you gave it, or Oh My Pi cannot parse it. Add the key to the ConfigMap
     the mount serves (an `items` entry too, when the volume lists them), or fix the file or the
-    path; `its legion CLI has no --role-config-files` is an image older than the key, built before
+    path; `its legion CLI has no -role-config-files` is an image older than the key, built before
     this daemon's commit. Under tmux the boot gate refuses the same way: `boot gate:
     role_config_files.<role>: the <role>'s Oh My Pi would not start: Oh My Pi refuses <file>: …`.
 

@@ -5481,6 +5481,16 @@ issue's pod (every role of it alike) and the image probe's.
   flag and is refused as one to rebuild from this daemon's commit. The probe reads the ConfigMap as
   it is at boot, and a pod reads it when it starts; a file mounted by `sub_path` is never refreshed
   in a running pod, so a changed file reaches a role once its pod is replaced.
+  **Rolling it out:** adding the overlay's volume and mount to `runtime.kubernetes.pod` (or
+  changing that volume's ConfigMap, Secret or `items`) together with `role_config_files` reaches a
+  running issue pod, or the daemon-launched controller's, only by replacing it: at its next
+  relaunch a role whose pod lacks the mount holding one of its files is reported `StaleAddress`
+  (`role_config_files.<role> <file>: held (unset), handed volume … from ConfigMap …`), and the
+  relaunch replaces the pod, the other roles of the issue moving into the new pod with their
+  sessions, as a change of the secrets broker's enrollment does.
+  **Who can read the files:** only loading is per role. Every role of a pod mounts every operator
+  volume, so each role can read every role's overlay file; never put a secret in one (a credential
+  travels in `provider_keys` or a mounted Secret the operator means every role to hold).
   The capability report's `model-fallback` row reads the operator's overlays alone: a deployment
   that turns fallback on only for some roles, as here, reports the row open, and records that with
   `capabilities.decided.model-fallback: "<reason>"`.

@@ -2,6 +2,7 @@ package capabilities
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -23,9 +24,11 @@ func OverlayEntries(value string) []string {
 // first overlay it would not start on and why — a file this process cannot read
 // (podsafety.CheckOverlay), or `<Launch> config get retry.modelFallback --json` exiting non-zero
 // under PI_CONFIG_FILES set to that file alone, then to the whole list, with Oh My Pi's own error
-// line — and is "" when it starts. err is a run that never reached an exit of its own (Oh My Pi
-// would not start at all, or timed out), which says nothing of the overlays, so a caller reports it
-// rather than refuse on it. img.Env's own PI_CONFIG_FILES is replaced on each run.
+// line — and is "" when it starts. err joins the runs that never reached an exit of their own (Oh
+// My Pi would not start at all, or timed out), which say nothing of the overlays: such a run does
+// not stop the check, every later run still goes, and a refusal found after one is still refused;
+// a caller reports err rather than refuse on it. img.Env's own PI_CONFIG_FILES is replaced on each
+// run.
 func CheckOverlays(ctx context.Context, img Image, overlays, own []string) (refused string, err error) {
 	for _, file := range overlays {
 		if err := podsafety.CheckOverlay(file); err != nil {
@@ -43,20 +46,24 @@ func CheckOverlays(ctx context.Context, img Image, overlays, own []string) (refu
 		}
 		return "", nil
 	}
+	var unanswered []error
 	for _, file := range own {
 		why, err := run([]string{file})
-		if err != nil || why != "" {
-			if why != "" {
-				why = fmt.Sprintf("Oh My Pi refuses %s: %s", file, why)
-			}
-			return why, err
+		if why != "" {
+			return fmt.Sprintf("Oh My Pi refuses %s: %s", file, why), errors.Join(unanswered...)
+		}
+		if err != nil {
+			unanswered = append(unanswered, err)
 		}
 	}
 	why, err := run(overlays)
+	if err != nil {
+		unanswered = append(unanswered, err)
+	}
 	if why != "" {
 		why = fmt.Sprintf("Oh My Pi refuses PI_CONFIG_FILES %s: %s", strings.Join(overlays, ":"), why)
 	}
-	return why, err
+	return why, errors.Join(unanswered...)
 }
 
 // withOverlays is img with PI_CONFIG_FILES set to list alone.

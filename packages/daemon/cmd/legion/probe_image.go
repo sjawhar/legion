@@ -220,10 +220,10 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		img := capabilities.Image{Launch: invocation, Env: environ, WorkDir: workDir}
 		why, err := capabilities.CheckOverlays(ctx, img, overlays, entry.files)
 		if err != nil {
-			// Oh My Pi never reached an exit of its own, which says nothing of the overlays: every
-			// file was read above, so the run is reported, as the model-fallback read is, not refused.
-			fmt.Fprintf(stderr, "legion probe-image: role %s's overlays were read but Oh My Pi did not answer on them: %v\n", entry.role, err)
-			continue
+			// A run that never reached an exit of its own says nothing of the overlays: every file
+			// was read above, so it is reported, as the model-fallback read is, and the rest of the
+			// role's runs still decide.
+			fmt.Fprintf(stderr, "legion probe-image: role %s's overlays were read but Oh My Pi did not answer on some of them: %v\n", entry.role, err)
 		}
 		if why != "" {
 			fmt.Fprintln(stderr, bootprobe.RoleOverlaysRefusedLine(entry.role, why))
