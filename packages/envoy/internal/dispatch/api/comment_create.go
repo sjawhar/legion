@@ -430,7 +430,11 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	// thread's sessions and the document's authors only when it publishes, so every session a
 	// mention resolved to is named, on a new comment, a reply and an ask's thread alike. The ask's
 	// follower routes do not read the list.
-	suppressedAuthors := append([]string{}, slices.Sorted(maps.Keys(mentionedSessions))...)
+	// Never nil: an empty list encodes as [].
+	suppressedAuthors := slices.Sorted(maps.Keys(mentionedSessions))
+	if suppressedAuthors == nil {
+		suppressedAuthors = []string{}
+	}
 	turn := threadTarget.replyTurn(actor, input.Turn)
 	var rowID string
 	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {

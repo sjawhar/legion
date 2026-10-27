@@ -147,31 +147,42 @@ func threadReplyOf(event model.Event) string {
 // already failed is skipped. When the query fails, each reply event of the batch fails with it and
 // is backed off, as an event whose publish failed is, and the batch's other events go on.
 func resolveCommentRecipients(ctx context.Context, deps Deps, pending []pendingEvent) {
-	var commentIDs []string
-	for _, item := range pending {
-		if item.failure == nil {
-			if commentID := threadReplyOf(item.event); commentID != "" {
-				commentIDs = append(commentIDs, commentID)
-			}
-		}
+	// A reply's key is its comment's canonical uuid, or "" when it is not a uuid: such a reply
+	// has no entry, but still fails with the query.
+	type reply struct {
+		index int
+		key   string
 	}
-	if len(commentIDs) == 0 {
+	var replies []reply
+	var commentIDs []string
+	for index, item := range pending {
+		if item.failure != nil {
+			continue
+		}
+		commentID := threadReplyOf(item.event)
+		if commentID == "" {
+			continue
+		}
+		key := ""
+		if parsed, err := uuid.Parse(commentID); err == nil {
+			key = parsed.String()
+			commentIDs = append(commentIDs, key)
+		}
+		replies = append(replies, reply{index: index, key: key})
+	}
+	if len(replies) == 0 {
 		return
 	}
 	recipients, err := loadCommentRecipients(ctx, deps, commentIDs)
-	for index := range pending {
-		item := &pending[index]
-		commentID := threadReplyOf(item.event)
-		if item.failure != nil || commentID == "" {
-			continue
-		}
+	for _, r := range replies {
+		item := &pending[r.index]
 		if err != nil {
 			item.failure = err
 			item.failureLog = "dispatch outbox: load comment recipients"
 			continue
 		}
-		if parsed, parseErr := uuid.Parse(commentID); parseErr == nil {
-			item.threadSessions = recipients[parsed.String()]
+		if r.key != "" {
+			item.threadSessions = recipients[r.key]
 		}
 	}
 }

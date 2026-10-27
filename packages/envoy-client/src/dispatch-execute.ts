@@ -2200,9 +2200,8 @@ function messageSummary({ message, replies }: MessageRead, graph: readonly strin
 /** Each open thread anchored on the document, in full, as dispatch_doc_read prints it: an open ask
  *  with its question and every reply under it (a comment whose `ask_id` names the ask), then each
  *  open comment thread with its root and every reply in order. A reply carries no anchor, so the
- *  threads are read from the owner's comments unfiltered (one read, as the anchor-filtered read
- *  was) and grouped by their ask or root. A resolved or answered ask and a resolved thread are not
- *  printed, nor are their replies. */
+ *  threads are read from the owner's comments unfiltered and grouped by their ask or root. A
+ *  resolved or answered ask and a resolved thread are not printed, nor are their replies. */
 async function openAnchoredThreads(
   client: DispatchClient,
   resolved: ResolvedArtifact

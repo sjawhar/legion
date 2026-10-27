@@ -11,7 +11,7 @@ import { RECEIPT_TIMEOUT_CAUSE } from "../../../packages/contracts/src/dispatch-
 // never counted.
 
 /** comments.csv's columns, in order: the contract in deliveryaudit/README.md. */
-export const COMMENT_COLUMNS = [
+const COMMENT_COLUMNS = [
   "comment_id",
   "event_id",
   "owner",
@@ -34,7 +34,7 @@ export const COMMENT_COLUMNS = [
   "route_source",
 ] as const;
 /** receipts.tsv's columns, in order: INFRA-608's output contract. */
-export const RECEIPT_COLUMNS = [
+const RECEIPT_COLUMNS = [
   "comment_id",
   "event_id",
   "target",
@@ -63,27 +63,24 @@ const COMMENT_LEVEL_COLUMNS = [
   "claim_used",
   "route_source",
 ] as const;
-const SHAPES: Readonly<Record<string, true>> = {
-  ask_thread: true,
-  reply: true,
-  anchored: true,
-  conversation: true,
-};
-const MENTION_STATES: Readonly<Record<string, true>> = {
-  "": true,
-  pending: true,
-  sent: true,
-  failed: true,
-};
-const MENTION_MODES: Readonly<Record<string, true>> = { btw: true, aside: true, steer: true };
+const SHAPES = ["ask_thread", "reply", "anchored", "conversation"] as const;
+const MENTION_STATES = ["", "pending", "sent", "failed"] as const;
+const MENTION_MODES = ["btw", "aside", "steer"] as const;
 const STATUSES = ["received", "not_received", "unknown"] as const;
 const UNKNOWN_REASONS = ["session_not_in_store", "role", "btw"] as const;
 /** Why a target was owed a comment, in the order a `not-addressed` cause names them. */
 const OWED_REASONS = ["claimant", "route", "follower", "asker", "mention"] as const;
 
+type Shape = (typeof SHAPES)[number];
+type MentionMode = (typeof MENTION_MODES)[number];
 type OwedReason = (typeof OWED_REASONS)[number];
 export type Status = (typeof STATUSES)[number];
 export type UnknownReason = (typeof UNKNOWN_REASONS)[number];
+
+function isOneOf<T extends string>(values: readonly T[], value: string): value is T {
+  return (values as readonly string[]).includes(value);
+}
+
 type Row<T extends readonly string[]> = { readonly [K in T[number]]: string } & {
   readonly line: number;
 };
@@ -101,15 +98,15 @@ export class ReportRefusal extends Error {
 
 // ---------------------------------------------------------------- reading the files
 
-interface Record_ {
+interface RawRecord {
   readonly fields: string[];
   readonly line: number;
 }
 
 /** RFC 4180 records, as psql --csv writes them: a quoted field may hold commas, `""` and
  *  newlines. `line` is the line the record starts on. */
-function csvRecords(text: string, file: string, problems: string[]): Record_[] {
-  const records: Record_[] = [];
+function csvRecords(text: string, file: string, problems: string[]): RawRecord[] {
+  const records: RawRecord[] = [];
   let fields: string[] = [];
   let field = "";
   let quoted = false;
@@ -172,7 +169,7 @@ const TSV_ESCAPES: Readonly<Record<string, string>> = {
 
 /** TSV with a header: one record a line, fields split by tabs, backslash escapes. A NULL
  *  (`\N`) reads as empty. */
-function tsvRecords(text: string): Record_[] {
+function tsvRecords(text: string): RawRecord[] {
   const lines = text.split("\n");
   if (lines.at(-1) === "") lines.pop();
   return lines.map((raw, index) => ({
@@ -188,7 +185,7 @@ function tsvRecords(text: string): Record_[] {
 }
 
 function table<T extends readonly string[]>(
-  records: readonly Record_[],
+  records: readonly RawRecord[],
   columns: T,
   file: string,
   separator: string,
@@ -216,17 +213,17 @@ function table<T extends readonly string[]>(
   return rows;
 }
 
-export function parseCommentsCsv(text: string, problems: string[]): CommentRow[] {
+function parseCommentsCsv(text: string, problems: string[]): CommentRow[] {
   const records = csvRecords(text, "comments.csv", problems);
   return table(records, COMMENT_COLUMNS, "comments.csv", ",", problems);
 }
 
-export function parseReceiptsTsv(text: string, problems: string[]): ReceiptRow[] {
+function parseReceiptsTsv(text: string, problems: string[]): ReceiptRow[] {
   return table(tsvRecords(text), RECEIPT_COLUMNS, "receipts.tsv", "\t", problems);
 }
 
 /** receipts-counts.txt's keys, one line each, in order: INFRA-608's output contract. */
-export const COUNT_KEYS = [
+const COUNT_KEYS = [
   "from",
   "to",
   "listed_pairs",
@@ -254,7 +251,7 @@ export type ReceiptCounts = { readonly from: string; readonly to: string } & {
 /** receipts-counts.txt: exactly one `<key>\t<value>` line for each of COUNT_KEYS, in order, and
  *  a newline at the end. `from` and `to` are `YYYY-MM-DDTHH:MM:SSZ`; every other value is a plain
  *  integer. Undefined, with a problem for each line that is not so. */
-export function parseCounts(text: string, problems: string[]): ReceiptCounts | undefined {
+function parseCounts(text: string, problems: string[]): ReceiptCounts | undefined {
   const found: string[] = [];
   if (!text.endsWith("\n")) problems.push("receipts-counts.txt: the last line has no newline");
   const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
@@ -324,6 +321,16 @@ function attempts(value: string): string[] {
   return value === "" ? [] : value.split(",");
 }
 
+/** A row's mention attempts: its modes, and its envelope ids, one element per attempt. An
+ *  attempt with no envelope id is an empty element, so both lists have one element per attempt;
+ *  a single attempt with none is the empty string. */
+function mentionAttempts(row: CommentRow): { modes: string[]; envelopes: string[] } {
+  const modes = attempts(row.mention_modes);
+  const envelopes =
+    modes.length === 0 ? attempts(row.mention_envelope_ids) : row.mention_envelope_ids.split(",");
+  return { modes, envelopes };
+}
+
 // ---------------------------------------------------------------- the model
 
 /** One row of receipts.tsv. */
@@ -358,7 +365,7 @@ export interface Pair {
   readonly mentionEnvelopeIds: readonly string[];
   readonly mentionBtwReplyId: string;
   /** One element per attempt, by attempt, in the order of mentionEnvelopeIds. */
-  readonly mentionModes: readonly string[];
+  readonly mentionModes: readonly MentionMode[];
   readonly mentionState: string;
   readonly mentionError: string;
   readonly receipt: Receipt;
@@ -372,7 +379,7 @@ export interface Comment {
   readonly publishedAt: string;
   readonly publishedUs: number | undefined;
   readonly author: string;
-  readonly shape: string;
+  readonly shape: Shape;
   /** Sorted by target. Empty for a comment with no target. */
   readonly pairs: readonly Pair[];
 }
@@ -382,16 +389,12 @@ interface CommentDraft extends Omit<Comment, "pairs"> {
   readonly pairs: readonly PairRow[];
 }
 
-function isOwedReason(value: string): value is OwedReason {
-  return (OWED_REASONS as readonly string[]).includes(value);
-}
-
 function commentsFrom(rows: readonly CommentRow[], problems: string[]): CommentDraft[] {
   const byId = new Map<string, CommentRow[]>();
   for (const row of rows) {
     const where = `comments.csv line ${row.line} (comment ${row.comment_id})`;
     if (row.comment_id === "") problems.push(`comments.csv line ${row.line}: no comment_id`);
-    if (SHAPES[row.shape] !== true) problems.push(`${where}: shape "${row.shape}"`);
+    if (!isOneOf(SHAPES, row.shape)) problems.push(`${where}: shape "${row.shape}"`);
     if (row.reopened !== "true" && row.reopened !== "false") {
       problems.push(`${where}: reopened "${row.reopened}"`);
     }
@@ -404,11 +407,11 @@ function commentsFrom(rows: readonly CommentRow[], problems: string[]): CommentD
     if (row.published_at !== "" && instant(row.published_at) === undefined) {
       problems.push(`${where}: published_at "${row.published_at}"`);
     }
-    if (MENTION_STATES[row.mention_state] !== true) {
+    if (!isOneOf(MENTION_STATES, row.mention_state)) {
       problems.push(`${where}: mention_state "${row.mention_state}"`);
     }
-    const modes = attempts(row.mention_modes);
-    if (!modes.every((mode) => MENTION_MODES[mode] === true)) {
+    const { modes, envelopes } = mentionAttempts(row);
+    if (!modes.every((mode) => isOneOf(MENTION_MODES, mode))) {
       problems.push(`${where}: mention_modes "${row.mention_modes}"`);
     }
     if ((row.mention_state === "") !== (modes.length === 0)) {
@@ -416,10 +419,6 @@ function commentsFrom(rows: readonly CommentRow[], problems: string[]): CommentD
         `${where}: mention_state "${row.mention_state}" with mention_modes "${row.mention_modes}"`
       );
     }
-    // An attempt with no envelope id is an empty element, so both lists have one element per
-    // attempt; a single attempt with none is the empty string.
-    const envelopes =
-      modes.length === 0 ? attempts(row.mention_envelope_ids) : row.mention_envelope_ids.split(",");
     if (envelopes.length !== modes.length) {
       problems.push(
         `${where}: mention_envelope_ids "${row.mention_envelope_ids}" has ${envelopes.length} ` +
@@ -436,7 +435,9 @@ function commentsFrom(rows: readonly CommentRow[], problems: string[]): CommentD
     } else {
       if (!/^(session|role):./.test(row.target)) problems.push(`${where}: target "${row.target}"`);
       const reasons = row.owed_reasons.split(";");
-      const known = row.owed_reasons === "addressed-only" || reasons.every(isOwedReason);
+      const known =
+        row.owed_reasons === "addressed-only" ||
+        reasons.every((reason) => isOneOf(OWED_REASONS, reason));
       if (!known || row.owed_reasons === "") {
         problems.push(`${where}: owed_reasons "${row.owed_reasons}"`);
       }
@@ -472,22 +473,29 @@ function commentsFrom(rows: readonly CommentRow[], problems: string[]): CommentD
     if (group.length > 1 && seen.has("")) {
       problems.push(`comments.csv: comment ${id} has a row with no target beside rows with one`);
     }
+    // A shape or a mention mode that is none of the known ones is refused above, and makes no
+    // comment or pair.
+    if (!isOneOf(SHAPES, first.shape)) continue;
     const pairs = group
-      .filter((row) => row.target !== "")
-      .map(
-        (row): PairRow => ({
-          line: row.line,
-          target: row.target,
-          reasons: OWED_REASONS.filter((reason) => row.owed_reasons.split(";").includes(reason)),
-          addressed: row.addressed === "true",
-          mentionSessionId: row.mention_session_id,
-          mentionEnvelopeIds: row.mention_modes === "" ? [] : row.mention_envelope_ids.split(","),
-          mentionBtwReplyId: row.mention_btw_reply_id,
-          mentionModes: attempts(row.mention_modes),
-          mentionState: row.mention_state,
-          mentionError: row.mention_error,
-        })
-      )
+      .flatMap((row): PairRow[] => {
+        const { modes, envelopes } = mentionAttempts(row);
+        if (row.target === "" || !modes.every((mode) => isOneOf(MENTION_MODES, mode))) return [];
+        const owed = row.owed_reasons.split(";");
+        return [
+          {
+            line: row.line,
+            target: row.target,
+            reasons: OWED_REASONS.filter((reason) => owed.includes(reason)),
+            addressed: row.addressed === "true",
+            mentionSessionId: row.mention_session_id,
+            mentionEnvelopeIds: envelopes,
+            mentionBtwReplyId: row.mention_btw_reply_id,
+            mentionModes: modes,
+            mentionState: row.mention_state,
+            mentionError: row.mention_error,
+          },
+        ];
+      })
       .sort((left, right) => compare(left.target, right.target));
     comments.push({
       id,
@@ -526,11 +534,9 @@ function receiptsFrom(rows: readonly ReceiptRow[], problems: string[]): Receipt[
   const receipts: Receipt[] = [];
   for (const row of rows) {
     const where = `receipts.tsv line ${row.line} (comment ${row.comment_id})`;
-    const status = (STATUSES as readonly string[]).includes(row.status)
-      ? (row.status as Status)
-      : undefined;
-    const reason = (UNKNOWN_REASONS as readonly string[]).includes(row.unknown_reason)
-      ? (row.unknown_reason as UnknownReason)
+    const status = isOneOf(STATUSES, row.status) ? row.status : undefined;
+    const reason = isOneOf(UNKNOWN_REASONS, row.unknown_reason)
+      ? row.unknown_reason
       : row.unknown_reason === ""
         ? ""
         : undefined;
@@ -639,7 +645,7 @@ function join(
     comments.push({ ...draft, pairs });
   }
   for (const [key, receipt] of listed) {
-    if (!paired.has(key) && byComment.has(receipt.commentId)) {
+    if (!paired.has(key)) {
       problems.push(
         `receipts.tsv line ${receipt.line}: comment ${receipt.commentId} and target ` +
           `"${receipt.target}" is a listed row that comments.csv does not hold`
@@ -827,40 +833,32 @@ export const CAUSES: Readonly<Record<string, CauseEntry>> = {
   },
 };
 
-const CAUSE_CATEGORIES = [
-  "never-published",
-  "no-target",
-  "not-addressed",
-  "mention-failed",
-  "not-running",
-  "running-no-row",
-] as const;
-const MENTION_ERROR_CLASSES = ["session-not-live", "receipt-timeout", "other"] as const;
-
-/** A mention delivery's error, as one of MENTION_ERROR_CLASSES. */
-export function mentionErrorClass(error: string): (typeof MENTION_ERROR_CLASSES)[number] {
+/** A mention delivery's error, as the rule of its `mention-failed` cause. */
+export function mentionErrorClass(error: string): "session-not-live" | "receipt-timeout" | "other" {
   if (/^no live session\b|session not found|not live/i.test(error)) return "session-not-live";
   if (error === RECEIPT_TIMEOUT_CAUSE) return "receipt-timeout";
   return "other";
 }
 
-/** Orders causes as the report checks them: by category, then by rule. */
-function causeKey(cause: string): number[] {
-  const [category = "", rule = ""] = cause.split(":", 2);
-  const index = (CAUSE_CATEGORIES as readonly string[]).indexOf(category);
-  const head = index === -1 ? CAUSE_CATEGORIES.length : index;
-  if (category === "not-addressed") {
-    return [head, ...rule.split("+").map((part) => OWED_REASONS.indexOf(part as OwedReason))];
-  }
-  if (category === "mention-failed") {
-    return [head, MENTION_ERROR_CLASSES.indexOf(rule as (typeof MENTION_ERROR_CLASSES)[number])];
-  }
-  return [head];
+/** A cause's parts: `not-addressed:<a>+<b>` is `not-addressed:<a>` and `not-addressed:<b>`;
+ *  any other cause is its one part. */
+function causeParts(cause: string): string[] {
+  return cause.startsWith("not-addressed:")
+    ? cause
+        .slice("not-addressed:".length)
+        .split("+")
+        .map((rule) => `not-addressed:${rule}`)
+    : [cause];
 }
 
-export function compareCauses(left: string, right: string): number {
-  const a = causeKey(left);
-  const b = causeKey(right);
+const CAUSE_RANKS = new Map(Object.keys(CAUSES).map((cause, index) => [cause, index]));
+
+/** Orders causes as the report checks them: by the CAUSES place of each part in turn, a part
+ *  with no entry after every part with one. */
+function compareCauses(left: string, right: string): number {
+  const rank = (part: string) => CAUSE_RANKS.get(part) ?? CAUSE_RANKS.size;
+  const a = causeParts(left).map(rank);
+  const b = causeParts(right).map(rank);
   for (let index = 0; index < Math.max(a.length, b.length); index++) {
     const difference = (a[index] ?? -1) - (b[index] ?? -1);
     if (difference !== 0) return difference;
@@ -869,17 +867,11 @@ export function compareCauses(left: string, right: string): number {
 }
 
 /** What `causes` says of a cause, or undefined when a part of it has no entry. */
-export function describeCause(
+function describeCause(
   cause: string,
   causes: Readonly<Record<string, CauseEntry>>
 ): CauseEntry | undefined {
-  const parts = cause.startsWith("not-addressed:")
-    ? cause
-        .slice("not-addressed:".length)
-        .split("+")
-        .map((rule) => `not-addressed:${rule}`)
-    : [cause];
-  const entries = parts.map((part) => causes[part]);
+  const entries = causeParts(cause).map((part) => causes[part]);
   if (entries.some((entry) => entry === undefined)) return undefined;
   const found = entries as CauseEntry[];
   return {
@@ -892,7 +884,7 @@ export function describeCause(
  *  that applies: never-published; not-addressed, when it was owed, the outbox did not send it,
  *  and no mention attempt was sent or failed; mention-failed; not-running, when published_at is
  *  outside the checked session's times; else running-no-row. */
-export function judgePair(comment: Comment, pair: Pair): Verdict {
+function judgePair(comment: Comment, pair: Pair): Verdict {
   const { receipt } = pair;
   if (receipt.status === "received") return { ...DELIVERED, evidence: receipt.evidence };
   if (receipt.status === "unknown")
@@ -1001,7 +993,7 @@ export interface Counts {
   readonly causes: ReadonlyMap<string, number>;
 }
 
-export function countVerdicts(
+function countVerdicts(
   verdicts: readonly Verdict[],
   causes: Readonly<Record<string, CauseEntry>>
 ): Counts {
@@ -1021,7 +1013,7 @@ export function countVerdicts(
 }
 
 /** `Total T = delivered D + not delivered N (cause n, ...) + unknown U`. */
-export function identityLine(counts: Counts): string {
+function identityLine(counts: Counts): string {
   const causes = [...counts.causes].map(([cause, count]) => `${cause} ${count}`).join(", ");
   return (
     `Total ${counts.total} = delivered ${counts.delivered} + not delivered ` +
@@ -1188,11 +1180,15 @@ function mentionText(pair: Pair): string {
   return `${each.join(", ")}; newest ${pair.mentionState}${error}`;
 }
 
+/** Why the pair was owed the comment, for the document. */
+function owedText(pair: Pair): string {
+  return pair.reasons.length === 0 ? "not owed, only sent" : pair.reasons.join(", ");
+}
+
 /** The markdown document. Deterministic: the same files give the same bytes. */
-export function renderReport(
+function renderReport(
   report: Report,
-  traces: readonly { readonly name: string; readonly text: string }[],
-  causes: Readonly<Record<string, CauseEntry>> = CAUSES
+  traces: readonly { readonly name: string; readonly text: string }[]
 ): string {
   const { commentCounts: counts, pairCounts, receiptCounts: tq } = report;
   const out: string[] = [];
@@ -1264,7 +1260,7 @@ export function renderReport(
     compareCauses
   );
   for (const cause of allCauses) {
-    const entry = describeCause(cause, causes);
+    const entry = describeCause(cause, CAUSES);
     out.push(
       `| \`${cause}\` | ${counts.causes.get(cause) ?? 0} | ${pairCounts.causes.get(cause) ?? 0} | ` +
         `${cell(entry?.meaning ?? "")} | ${cell(entry?.fix ?? "")} |`
@@ -1301,8 +1297,7 @@ export function renderReport(
       judged.pairs
         .map(({ pair, verdict: its }) => {
           const result = its.class === "not-delivered" ? its.cause : verdictText(its);
-          const owed = pair.reasons.length === 0 ? "not owed, only sent" : pair.reasons.join(", ");
-          return `${pair.target} (${owed}): ${result}`;
+          return `${pair.target} (${owedText(pair)}): ${result}`;
         })
         .join("<br>") || "(none)";
     out.push(
@@ -1326,8 +1321,7 @@ export function renderReport(
     }
     for (const { pair, verdict } of judged.pairs) {
       out.push(
-        `| ${id} | ${pair.target} | ` +
-          `${pair.reasons.length === 0 ? "not owed, only sent" : pair.reasons.join(", ")} | ` +
+        `| ${id} | ${pair.target} | ${owedText(pair)} | ` +
           `${pair.addressed ? "yes" : "no"} | ${cell(mentionText(pair))} | ` +
           `${cell(pair.receipt.checkedSession)} | ${pair.receipt.status} | ` +
           `${cell(verdictText(verdict))} | ${causeText(verdict)} |`
@@ -1377,7 +1371,7 @@ function parseArguments(argv: readonly string[]): Options {
   return { comments, receipts, counts, traces: values.trace ?? [] };
 }
 
-export async function run(argv: readonly string[]): Promise<string> {
+async function run(argv: readonly string[]): Promise<string> {
   const options = parseArguments(argv);
   const [comments, receipts, counts, ...traceTexts] = await Promise.all(
     [options.comments, options.receipts, options.counts, ...options.traces].map((path) =>

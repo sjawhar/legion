@@ -588,7 +588,7 @@ func publishDestinations(ctx context.Context, deps Deps, pending pendingEvent, i
 				return err
 			}
 		}
-		if err := publishClaimant(deps, event.ID, item, event, pending.route, pending.claimant, a); err != nil {
+		if err := publishClaimant(deps, item, pending, a); err != nil {
 			return err
 		}
 		if err := publishAuthorRoutes(ctx, deps, event.ID, item, event, pending.threadSessions, a); err != nil {
@@ -607,7 +607,8 @@ func publishDestinations(ctx context.Context, deps Deps, pending pendingEvent, i
 // own thread does not matter: a comment in an ask's thread reaches the claimant too, as it would
 // reach the route. The actor is skipped, and so is a claimant the comment's mentions already reach
 // (suppressed_authors).
-func publishClaimant(deps Deps, eventID int64, item contracts.Envelope, event model.Event, route *string, claimant string, a *attempt) error {
+func publishClaimant(deps Deps, item contracts.Envelope, pending pendingEvent, a *attempt) error {
+	event, route, claimant := pending.event, pending.route, pending.claimant
 	if claimant == "" || (route != nil && *route != "") {
 		return nil
 	}
@@ -620,7 +621,7 @@ func publishClaimant(deps Deps, eventID int64, item contracts.Envelope, event mo
 	if _, suppressed := payloadStringSet(event.Payload, "suppressed_authors")[claimant]; suppressed {
 		return nil
 	}
-	return publishSessionRoutes(deps, eventID, item, a, []string{claimant}, "publish claimant route to")
+	return publishSessionRoutes(deps, event.ID, item, a, []string{claimant}, "publish claimant route to")
 }
 
 // attempt is one pass over an event's destinations, sent through sender, its batch's window
