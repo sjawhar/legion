@@ -335,7 +335,7 @@ func byHandShare(mergeNote string) string {
 // the completion's key and the corrected retry at the same commit is applied:
 //
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
-//     READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE
+//     READY_HEAD_MOVED, READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE
 //     (unreviewedChange: the head is not the review round's approved head plus retro's commits),
 //     READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED, READY_DISARM_PENDING.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.

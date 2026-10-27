@@ -76,9 +76,9 @@ func mergeableStandIn(t *testing.T, state string) *httptest.Server {
 }
 
 // seedUnjudgedRound records a round as a live tree had one before the daemon read required sets:
-// the reviewer's round open at its own handoff head, and the code head's settlement that stands
-// for it red only on two workflow_dispatch lanes and an advisory review check, beside a required
-// gate that passed. No required set is recorded, so no verdict stands for the head.
+// the reviewer's round open at the code head, whose settlement is red only on two
+// workflow_dispatch lanes and an advisory review check, beside a required gate that passed. No
+// required set is recorded, so no verdict stands for the head.
 func seedUnjudgedRound(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	records := record.NewStore()
@@ -89,10 +89,10 @@ func seedUnjudgedRound(t *testing.T, pool *pgxpool.Pool) {
 			return err
 		}
 		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "CAPTURE-1", Repo: "acme/widgets",
-			Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "handoff", CheckedHead: "code",
+			Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "code", CheckedHead: "code",
 			Failing:    []string{"dev-apply / dev-chain-tripwire", "dev-apply / staging-e2e / staging-e2e", "review"},
 			CheckRuns:  []record.AttemptRun{{Name: "dev-apply / dev-chain-tripwire", ID: 2}, {Name: "pr-checks-result", ID: 1}, {Name: "review", ID: 3}},
-			Generation: 1, Snapshot: "settled", Pushes: []record.ClassifiedPush{{SHA: "handoff", Before: "code", HandoffOnly: true}}}); err != nil {
+			Generation: 1, Snapshot: "settled"}); err != nil {
 			return err
 		}
 		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim"}); err != nil {
@@ -161,7 +161,7 @@ func TestTheBootReadOfRequiredChecksJudgesTheHeadByTheSetItRecords(t *testing.T)
 			if tc.want == phase.Reviewing && len(reasons) != 0 {
 				t.Fatalf("checks-red notices %q, want none: no required check is red", reasons)
 			}
-			if want := "CI is red at handoff: review"; tc.want == phase.Implementing && (len(reasons) != 1 || reasons[0] != want) {
+			if want := "CI is red at code: review"; tc.want == phase.Implementing && (len(reasons) != 1 || reasons[0] != want) {
 				t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
 			}
 		})
@@ -199,7 +199,7 @@ func TestAnUnreadableRulesetLeavesTheHeadUndecided(t *testing.T) {
 	if got, _ := capturePhase(t, pool); got != phase.Implementing {
 		t.Fatalf("after the next pass read the set the issue is in %s, want implementing: the required review check is red", got)
 	}
-	if reasons := noticeReasons(t, pool, "checks-red"); len(reasons) != 1 || reasons[0] != "CI is red at handoff: review" {
+	if reasons := noticeReasons(t, pool, "checks-red"); len(reasons) != 1 || reasons[0] != "CI is red at code: review" {
 		t.Fatalf("checks-red notices %q, want one naming the required review check", reasons)
 	}
 }

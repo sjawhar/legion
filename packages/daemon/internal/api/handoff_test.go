@@ -46,24 +46,14 @@ func (t handoffTokens) ReadToken(ctx context.Context, role appauth.AppRole, owne
 	return lease, err
 }
 
-// handoffFile is a handoff of phase word as a worker stamps it for issue: READY reads only whether
-// the head still carries the directory, never what a file holds.
-func handoffFile(word, issue string) string {
-	return fmt.Sprintf(`{"schemaVersion":1,"phase":%q,"issue":%q,"completed":"2026-10-09T08:00:00Z"}`, word, issue)
-}
-
 // handoffGitHub is GitHub's REST API for one repository, acme/widgets unless a test names another
-// (repo), as READY reads it: the files at each commit (whether a head still carries
-// .legion/<issue>/), and what READY reads of pull request #42 on main. A test changes what it
-// serves between calls; every call's bearer, every path it is asked for (served) and every
-// contents read are recorded. Nothing but READY reads GitHub at a completion.
+// (repo), as READY reads it: what READY reads of pull request #42 on main. A test changes what it
+// serves between calls; every call's bearer and every path it is asked for (served) are recorded.
+// Nothing but READY reads GitHub at a completion.
 type handoffGitHub struct {
 	url  string
 	mu   sync.Mutex
 	repo string
-	// files is the content of each path at each commit, by sha then path; a directory is listed
-	// when a path is under it.
-	files map[string]map[string]string
 	// fail is the status GitHub answers every route under the given path prefix with instead of
 	// its answer: GitHub's trouble.
 	fail map[string]int
@@ -87,10 +77,8 @@ type handoffGitHub struct {
 	checkRuns   string
 	statuses    string
 	bearers     []string
-	// served is each path the stand-in was asked for, relative to the repository, and contentsRead
-	// each path read through the contents API, as path@ref.
-	served       []string
-	contentsRead []string
+	// served is each path the stand-in was asked for, relative to the repository.
+	served []string
 	// compare is GitHub's answer to the compare of approvedSHA with pullHead, the pull request's
 	// head; compareAnswers holds the answer to any other basehead (<base>...<head>), and one in
 	// neither is GitHub's 404 (fail makes the compare fail outright); compareRead is each basehead
@@ -103,7 +91,7 @@ type handoffGitHub struct {
 func newHandoffGitHub(t *testing.T) *handoffGitHub {
 	t.Helper()
 	g := &handoffGitHub{
-		files: map[string]map[string]string{}, fail: map[string]int{}, repo: "acme/widgets",
+		fail: map[string]int{}, repo: "acme/widgets",
 		pullFiles: `[{"filename":"src/main.go"}]`,
 		pullHead:  headSHA, mergeableState: "clean", pullState: "open", pullUpdatedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC),
 		rules:      `[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`,
@@ -134,7 +122,6 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 				return
 			}
 		}
-		ref := r.URL.Query().Get("ref")
 		switch {
 		case path == "branches/main":
 			_, _ = io.WriteString(w, g.mainBranch)
@@ -152,20 +139,6 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 			_, _ = fmt.Fprintf(w, `{"statuses":%s}`, g.statuses)
 		case path == "pulls/42/files":
 			_, _ = io.WriteString(w, g.pullFiles)
-		case strings.HasPrefix(path, "contents/"):
-			file := strings.TrimPrefix(path, "contents/")
-			g.contentsRead = append(g.contentsRead, file+"@"+ref)
-			var listing []string
-			for name := range g.files[ref] {
-				if strings.HasPrefix(name, file+"/") {
-					listing = append(listing, fmt.Sprintf(`{"name":%q,"path":%q,"type":"file"}`, strings.TrimPrefix(name, file+"/"), name))
-				}
-			}
-			if len(listing) == 0 {
-				notFound(w, "Not Found")
-				return
-			}
-			_, _ = io.WriteString(w, "["+strings.Join(listing, ",")+"]")
 		case strings.HasPrefix(path, "compare/"):
 			basehead := strings.TrimPrefix(path, "compare/")
 			g.compareRead = append(g.compareRead, basehead)
@@ -187,28 +160,11 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 	return g
 }
 
-// put is content at path of commit sha.
-func (g *handoffGitHub) put(sha, path, content string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.files[sha] == nil {
-		g.files[sha] = map[string]string{}
-	}
-	g.files[sha][path] = content
-}
-
 // set changes what the fake serves, under its lock.
 func (g *handoffGitHub) set(change func(g *handoffGitHub)) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	change(g)
-}
-
-// reads is each contents read made so far, as path@ref.
-func (g *handoffGitHub) reads() []string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return append([]string(nil), g.contentsRead...)
 }
 
 // serves is each path the stand-in was asked for so far, relative to the repository.
@@ -616,8 +572,8 @@ func TestHandoffCompleteRecordsRetroAtTheCommitItStandsOn(t *testing.T) {
 	if fact, ok := got[0].(intake.HandoffComplete); !ok || fact.Summary != "retro done" || fact.Commit != "c0ffee" || fact.HandoffRecord != "" {
 		t.Fatalf("handoff fact = %#v, want summary %q at c0ffee naming no record", got[0], "retro done")
 	}
-	if reads := github.reads(); len(reads) != 0 {
-		t.Fatalf("contents reads = %v, want none for phases that write no file", reads)
+	if served := github.serves(); len(served) != 0 {
+		t.Fatalf("GitHub was asked for %v, want nothing for phases that are not READY", served)
 	}
 }
 
@@ -1814,76 +1770,6 @@ func TestHandoffCompleteReadyAcceptsAHeadWithoutReadingItsChecks(t *testing.T) {
 	}
 }
 
-// A merger's READY names the head a human merges, and a squash merge commits that head merged into
-// the default branch: the issue's own handoffs, .legion/<issue>/, must be gone from it (retro's last
-// commit removes them; dispatch://LEGION-605). READY reads the head's tree on GitHub and is refused,
-// naming the head and the directory, while it still holds .legion/<issue>/, and published once
-// GitHub answers that the head has none. A read GitHub fails leaves the head unknown, and READY is
-// refused as GitHub's failure to retry, never sending the issue back to retro. A pull request a
-// person already merged is published unread, its answer saying so: its head can no longer change,
-// and the workflow takes it on to the production check only on that READY.
-func TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs(t *testing.T) {
-	const (
-		stillCarries  = `READY_HEAD_CARRIES_HANDOFFS: head c0de00000000 of pull request #42 still carries .legion/LEGION-208/`
-		readRefused   = `GITHUB_READ_FAILED: GitHub's read of .legion/LEGION-208/ at head c0de00000000 of pull request #42 failed, so whether the head still carries it is unknown: complete again`
-		alreadyMerged = `pull request #42 is already merged, so READY was published without reading its head's handoffs`
-	)
-	for _, tc := range []struct {
-		name      string
-		merged    bool
-		carries   bool
-		readFails bool
-		want      string
-	}{
-		{"a head that still carries them", false, true, false, stillCarries},
-		{"a head retro removed them from", false, false, false, ""},
-		{"a head whose tree GitHub fails to read", false, false, true, readRefused},
-		{"a pull request a person merged while its head still carried them", true, true, false, alreadyMerged},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			github := newHandoffGitHub(t)
-			github.set(func(g *handoffGitHub) {
-				g.merged = tc.merged
-				if tc.readFails {
-					g.fail["contents/"] = http.StatusInternalServerError
-				}
-			})
-			h, facts, merger := newReadyHarness(t, github)
-			if tc.carries {
-				github.put(headSHA, ".legion/LEGION-208/implement.json", handoffFile("implement", "LEGION-208"))
-			}
-			code, body := ready(t, h, merger)
-			switch {
-			case tc.merged:
-				if code != http.StatusOK || body != alreadyMerged {
-					t.Fatalf("READY of a merged pull request = %d %q; want it published saying %q", code, body, alreadyMerged)
-				}
-				if reads := github.reads(); len(reads) != 0 {
-					t.Fatalf("READY read %v of a merged pull request's head, want nothing", reads)
-				}
-			case tc.want == "":
-				if code != http.StatusOK || body != "" {
-					t.Fatalf("READY = %d %q; want it published", code, body)
-				}
-				if reads := github.reads(); len(reads) != 1 || reads[0] != ".legion/LEGION-208@"+headSHA {
-					t.Fatalf("READY read %v, want the handoffs directory at the pull request's head", reads)
-				}
-			case tc.readFails:
-				if code != http.StatusBadGateway || !strings.HasPrefix(body, tc.want) {
-					t.Fatalf("READY = %d %q; want %q", code, body, tc.want)
-				}
-			default:
-				if code != http.StatusConflict || !strings.HasPrefix(body, tc.want) {
-					t.Fatalf("READY = %d %q; want %q", code, body, tc.want)
-				}
-			}
-			if recorded := len(facts.recorded()); (recorded == 1) != (code == http.StatusOK) {
-				t.Fatalf("READY = %d with %d facts recorded; want one exactly when it was published", code, recorded)
-			}
-		})
-	}
-}
-
 // What the base branch requires of a head is GitHub's business, and READY reads none of it: its
 // refusals hold the same on a base that requires a check of every head and on one that requires
 // nothing, and a rulesets read that would fail - a private repository on a plan without rulesets
@@ -1892,11 +1778,10 @@ func TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs(t *te
 // since READY makes no such read.
 func TestHandoffCompleteReadyRefusesTheSameWhateverTheBaseRequires(t *testing.T) {
 	const (
-		unprotected  = `{"name":"main","protected":false}`
-		protected    = `{"name":"main","protected":true,"protection":{"required_status_checks":{"contexts":["legacy"]}}}`
-		requiresCI   = `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`
-		stillCarries = `READY_HEAD_CARRIES_HANDOFFS: head c0de00000000 of pull request #42 still carries .legion/LEGION-208/`
-		conflicts    = `READY_HEAD_CONFLICTS: head c0de00000000 of pull request #42 conflicts with its base main`
+		unprotected = `{"name":"main","protected":false}`
+		protected   = `{"name":"main","protected":true,"protection":{"required_status_checks":{"contexts":["legacy"]}}}`
+		requiresCI  = `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`
+		conflicts   = `READY_HEAD_CONFLICTS: head c0de00000000 of pull request #42 conflicts with its base main`
 	)
 	for _, base := range []struct {
 		name, rules, branch string
@@ -1909,11 +1794,9 @@ func TestHandoffCompleteReadyRefusesTheSameWhateverTheBaseRequires(t *testing.T)
 		t.Run(base.name, func(t *testing.T) {
 			for _, tc := range []struct {
 				name, mergeableState, want string
-				carries                    bool
 			}{
-				{"a head retro removed the handoffs from", "clean", "", false},
-				{"a head that still carries them", "clean", stillCarries, true},
-				{"a head that conflicts with its base", "dirty", conflicts, false},
+				{"a head that does not conflict", "clean", ""},
+				{"a head that conflicts with its base", "dirty", conflicts},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					github := newHandoffGitHub(t)
@@ -1921,9 +1804,6 @@ func TestHandoffCompleteReadyRefusesTheSameWhateverTheBaseRequires(t *testing.T)
 						g.rules, g.rulesStatus, g.mainBranch, g.mergeableState = base.rules, base.rulesStatus, base.branch, tc.mergeableState
 					})
 					h, facts, merger := newReadyHarness(t, github)
-					if tc.carries {
-						github.put(headSHA, ".legion/LEGION-208/implement.json", handoffFile("implement", "LEGION-208"))
-					}
 					code, body := ready(t, h, merger)
 					switch {
 					case tc.want == "":

@@ -182,16 +182,16 @@ func TestARequiredCheckCancelledOrMissingLeavesTheHeadUndecided(t *testing.T) {
 }
 
 // seedRoundOnRedsBesideTheGate seeds the live shape that once stuck a round: the reviewer's round
-// open at its own handoff head, whose verdict is the code head's settlement carried across the
-// handoff-only push, red only on checks beside the one gate the base branch requires. required is
+// open at the code head, whose settlement is red only on checks beside the one gate the base
+// branch requires. required is
 // the pull request's recorded required set, nil for a row recorded before the daemon read one.
 func seedRoundOnRedsBesideTheGate(t *testing.T, pool *pgxpool.Pool, required []string) {
 	t.Helper()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42,
-		Branch: "legion/LEGION-208", HeadSHA: "handoff", CheckedHead: "code", Failing: redsBesideTheGate, CheckRuns: runsBesideTheGate,
-		Generation: 1, Snapshot: "settled", Pushes: []record.ClassifiedPush{{SHA: "handoff", Before: "code", HandoffOnly: true}}, Required: required})
+		Branch: "legion/LEGION-208", HeadSHA: "code", CheckedHead: "code", Failing: redsBesideTheGate, CheckRuns: runsBesideTheGate,
+		Generation: 1, Snapshot: "settled", Required: required})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
 }
@@ -199,12 +199,12 @@ func seedRoundOnRedsBesideTheGate(t *testing.T, pool *pgxpool.Pool, required []s
 // A red only on checks the base branch never required is no red at all, whichever head it stands
 // for: the read that records the required set - the boot read for a pull request recorded before
 // any was read - judges the head by that set alone, sends nothing back and tells nobody, and the
-// reviewer's approval of its handoff head then ends the round. A read that names one of those reds
+// reviewer's approval of the head then ends the round. A read that names one of those reds
 // as required brings a red that stands for the head, and sends the work back to implementing from
 // under the open round, naming the check and taking the phase from the reviewer still at work.
 func TestARedTheBaseBranchDoesNotRequireSendsNothingBack(t *testing.T) {
 	approval := []intake.Fact{
-		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "handoff", Author: testReviewApp, Body: "looks right"},
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "code", Author: testReviewApp, Body: "looks right"},
 		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "approved", HandoffRecord: "review-1", HandoffVersion: 1},
 	}
 	for _, tc := range []struct {
@@ -232,7 +232,7 @@ func TestARedTheBaseBranchDoesNotRequireSendsNothingBack(t *testing.T) {
 					from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'`).Scan(&reason, &quiesce); err != nil {
 					t.Fatalf("read the architect's checks-red notice and the implementer's start: %v", err)
 				}
-				if reason != "CI is red at handoff: review" || claim.Role(quiesce) != claim.RoleReviewer {
+				if reason != "CI is red at code: review" || claim.Role(quiesce) != claim.RoleReviewer {
 					t.Fatalf("checks-red %q, the implementer's start waiting for %q; want the required review check named and the reviewer's turn waited for", reason, quiesce)
 				}
 				return
@@ -328,43 +328,6 @@ func TestAReopenedPullRequestKeepsWhatItsBaseBranchRequires(t *testing.T) {
 	}
 	if task := implementerTask(t, pool); !strings.Contains(task, "CI is red at head: "+workflow) {
 		t.Fatalf("implementer task %q, want it to name the failed required workflow", task)
-	}
-}
-
-// A push classified late that completes the carry of the code head's red to the READY head sends
-// nothing back from awaiting_merge, as the settlement it carries would not either
-// (TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing): the red carried from the code
-// head stood before the READY, and only the head's own red withdraws the READY
-// (classify.RedWithdrawsReady). The CI rule the push applies in every phase before awaiting_merge
-// (standingRed) does not act there, so the READY stands, nobody is told, and nothing is started.
-func TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing(t *testing.T) {
-	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-		Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
-	// The head has moved to the READY head, the red settlement stands recorded at the code head it
-	// replaced, and the push between the two is not yet known: no verdict stands.
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "code", Required: []string{requiredGate},
-		CheckRuns: []record.AttemptRun{{Name: requiredGate, ID: 1}}, Failing: []string{requiredGate}})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
-	applyRefusingNothing(t, pool, readyEngine("merge-queue"), pushedFromTo("code", "head", ".legion/LEGION-208/implement.json", "legion-implementer[bot]"))
-	if got := pullRequestAt(t, pool); got.verdict != "red" {
-		t.Fatalf("after the push the head's verdict is %q, want the code head's red carried to it", got.verdict)
-	}
-	if got := issuePhase(t, pool); got != phase.AwaitingMerge {
-		t.Fatalf("after the late push completed the carry the issue is in %s, want awaiting_merge: a carried red withdraws no READY", got)
-	}
-	if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
-		t.Fatalf("notices %v, want none", got)
-	}
-	assertOutboxCount(t, pool, "supervise", 0)
-	assertOutboxCount(t, pool, "dispatch_status", 0)
-	if published := mergeQueuePublishes(t, pool); len(published) != 0 {
-		t.Fatalf("merge queue publishes %v, want none: the READY stands", published)
-	}
-	if rounds := implementerRounds(t, pool); rounds != 0 {
-		t.Fatalf("rounds = %d, want none counted: nothing went back", rounds)
 	}
 }
 

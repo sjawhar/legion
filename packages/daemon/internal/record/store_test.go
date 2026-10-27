@@ -311,8 +311,8 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	updatedAt := time.Date(2026, 9, 22, 14, 12, 13, 456000000, time.UTC)
 	approved := 7
 	pushes := []ClassifiedPush{
-		{SHA: "b1c2d3", Before: "a0b1c2", HandoffOnly: true, Unknown: "paths_truncated", ByReviewApp: true},
-		{SHA: "c2d3e4", Before: "b1c2d3", Forced: true},
+		{SHA: "b1c2d3", Before: "a0b1c2", ByReviewApp: true},
+		{SHA: "c2d3e4", Before: "b1c2d3"},
 	}
 	pr := PullRequest{
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-208",

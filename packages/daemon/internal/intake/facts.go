@@ -381,18 +381,13 @@ type MergeFailed struct {
 
 func (MergeFailed) isFact() {}
 
-// Push records a branch push. Nil ChangedPaths and Truncated preserve an omitted normalized field.
+// Push records a branch push.
 type Push struct {
 	Repo   string
 	Branch string
 	// Before is the head the push replaced, After the head it left.
-	Before       string
-	After        string
-	ChangedPaths *string
-	Truncated    *string
-	// Forced is the listener's "true" or "false" for whether the push rewrote history; absent from
-	// a listener that predates the field.
-	Forced *string
+	Before string
+	After  string
 	// Pusher is the push's pusher login (the listener's `pusher`, GitHub's pusher.name).
 	Pusher string
 }

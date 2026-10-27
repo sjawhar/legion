@@ -24,26 +24,14 @@ type AttemptRun struct {
 	ID   int64  `json:"id"`
 }
 
-// ClassifiedPush is one branch push as its changed paths classify it: a fact about two commits,
-// the head it replaced (Before) and the head it left (SHA), true whenever it is learned.
+// ClassifiedPush is one branch push as the daemon records it: a fact about two commits, the head it
+// replaced (Before) and the head it left (SHA), true whenever it is learned, and whose push it was.
 type ClassifiedPush struct {
 	SHA string `json:"sha"`
 	// Before is the head the push replaced, empty when the push did not say.
-	Before      string `json:"before,omitempty"`
-	HandoffOnly bool   `json:"handoffOnly"`
-	Unknown     string `json:"unknown,omitempty"`
+	Before string `json:"before,omitempty"`
 	// ByReviewApp is whether the push was the review App's (its pusher is the review App's bot login).
 	ByReviewApp bool `json:"byReviewApp,omitempty"`
-	// Forced is a push that rewrote history, or did not say whether it did. Its changed paths list
-	// the commits it added since the merge base, not what it did to the head it replaced, so it
-	// never carries an approval across.
-	Forced bool `json:"forced,omitempty"`
-}
-
-// MayChangeCode is whether the push may have changed anything outside .legion/ in the head it
-// replaced.
-func (p ClassifiedPush) MayChangeCode() bool {
-	return !p.HandoffOnly || p.Forced
 }
 
 // Issue is one durable workflow record. Status is the issue's lifecycle status as the daemon holds
@@ -253,10 +241,9 @@ type PullRequest struct {
 	// redelivery and changes nothing (classify.LateLifecycle).
 	HeadUpdatedAt time.Time
 	// CheckedHead is the head whose CI settlement Failing, Cancelled, CheckRuns, Generation and
-	// Snapshot record, empty while none is recorded: the current head, or a head the current one
-	// replaced through pushes that changed only .legion/ (a handoff push starts no CI of its own,
-	// so the code head's settlement is the head's), or an earlier head whose settlement no longer
-	// counts. What the settlement comes to is the required set's to say (classify.HeadVerdict).
+	// Snapshot record, empty while none is recorded: the current head, or an earlier head whose
+	// settlement no longer counts, since a settlement stands only for the head it names. What the
+	// settlement comes to is the required set's to say (classify.HeadVerdict).
 	CheckedHead string
 	// Failing and Cancelled are the checks the settlement names as failed and as cancelled.
 	Failing         []string
@@ -266,9 +253,9 @@ type PullRequest struct {
 	CheckRuns       []AttemptRun
 	Generation      int64
 	Snapshot        string
-	// Pushes are the branch's pushes as they were classified: every push that changed only .legion/
-	// and said which head it replaced, which carry an approval across, and the pushes whose heads
-	// have not arrived yet. A push that may change code is spent once its head arrives.
+	// Pushes are the branch's pushes the daemon still reads: those still on their way from the head,
+	// and any recorded since the head arrived. A head's arrival spends every push not on its way
+	// from that head (classify.AdvancePullRequestHead).
 	Pushes []ClassifiedPush
 	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
 	// across every head pushed on top of it until one is pushed onto a green verdict, or onto a
@@ -277,12 +264,12 @@ type PullRequest struct {
 	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
 	// HeadCountedBefore is the mark HeadCounted held before the count that set it. A count made
-	// before its head's push arrived is taken back when that push proves handoff-only or the review
-	// App's (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
+	// before its head's push arrived is taken back when that push proves the review App's
+	// (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
 	// which of the push and the head's arrival GitHub delivers first.
 	HeadCountedBefore string
-	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
-	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
+	// PlannedRed is whether the newest head was the review App's (the tester's red tests): a red on
+	// it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
 	// Required is the checks the pull request's base branch requires (its rulesets' required status
 	// checks and its branch protection's), as the daemon last read them from GitHub

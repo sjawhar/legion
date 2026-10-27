@@ -8,12 +8,11 @@ import (
 
 // AdvancePullRequestHead applies the shipped resetPrHead fix-attempt decision to a new observed
 // head. A red prior verdict counts once, unless the red was planned (PlannedRed: the review App's
-// red tests) or the head's own push was handoff-only or the review App's. A code-changing head
-// decides the planned mark (the review App's sets it, anyone else's clears it); a handoff-only
-// head, or one whose push has not arrived (ApplyPush settles it), carries it. The recorded CI
-// settlement stays, as CheckedHead's: it is the new head's too once every push between them is
-// known to change only .legion/ (HeadVerdict), and a settlement for another head replaces it
-// (SettlementFor). The pushes it keeps are keptPushes'.
+// red tests) or the head's own push was the review App's. The head's push decides the planned mark
+// (the review App's sets it, anyone else's clears it); a head whose push has not arrived carries
+// it, and ApplyPush settles it. The recorded CI settlement stays, as CheckedHead's, but stands for
+// nothing at the new head (HeadVerdict): a settlement stands only for the head it names, and the
+// new head's own replaces it (SettlementFor). The pushes it keeps are keptPushes'.
 //
 // HeadCounted names the head the count last counted, and the attempt it marks runs on through every
 // head pushed on top of it until one is pushed onto a green verdict, or onto a settled head whose
@@ -22,19 +21,19 @@ import (
 // a red that counts nothing, is the same attempt, not a new one. Only a counted head is ever named, so
 // ApplyPush's take-back never undoes a count it did not make. A count keeps the mark it replaces
 // (HeadCountedBefore), which the take-back restores: a head whose push has not arrived is counted,
-// and when that push proves handoff-only or the review App's, the attempt is left as it would have
-// been had the push arrived first.
+// and when that push proves the review App's, the attempt is left as it would have been had the
+// push arrived first.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
 	pending := headPush(pr.Pushes, pr.HeadSHA, headSHA)
 	pr.Pushes = keptPushes(pr.Pushes, headSHA)
 	switch verdict := HeadVerdict(pr); {
-	case verdict == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)):
+	case verdict == "red" && !pr.PlannedRed && (pending == nil || !pending.ByReviewApp):
 		pr.FixAttempts++
 		pr.HeadCountedBefore, pr.HeadCounted = pr.HeadCounted, headSHA
 	case verdict == "green" || nothingRequired(pr):
 		pr.HeadCounted, pr.HeadCountedBefore = "", ""
 	}
-	if pending != nil && !pending.HandoffOnly {
+	if pending != nil {
 		pr.PlannedRed = pending.ByReviewApp
 	}
 	pr.HeadSHA = headSHA
@@ -42,32 +41,24 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 }
 
 // settled says whether a CI settlement stands for the pull request's current head: one recorded
-// for the head itself, or for a head the current one replaced through pushes that each changed
-// only .legion/ and said which head they replaced (a handoff push can carry GitHub's skip-checks
-// trailer and start no CI of its own). A checked head is recorded only with a settlement
-// (SettlementFor, then ApplySettlement), and cleared with it (a new generation, migration 0028).
+// for the head itself. A checked head is recorded only with a settlement (SettlementFor, then
+// ApplySettlement), and cleared with it (a new generation, migration 0028).
 func settled(pr record.PullRequest) bool {
-	return pr.CheckedHead != "" && carriedBack(pr.Pushes, pr.HeadSHA, pr.CheckedHead)
+	return pr.CheckedHead != "" && pr.CheckedHead == pr.HeadSHA
 }
 
 // SettlementFor says whether a CI settlement of candidate.Head may stand for the pull request's
-// current head, and returns the pull request ready to apply it. It may when head is the current
-// head, or a head the current one replaced through pushes that each changed only .legion/, unless
-// a settlement already stands for the current head from a head nearer it on that path, which
-// outranks it.
-// Every other settlement - an earlier code head's, a head a force push left - stands for nothing.
-// A settlement of a head other than the recorded one starts that head's fence afresh, since
-// check runs, generations and snapshots are each head's own.
+// current head, and returns the pull request ready to apply it. It may only when candidate.Head is
+// the current head: every other settlement - an earlier head's, a head a force push left - stands
+// for nothing. A settlement of a head other than the recorded one starts that head's fence afresh,
+// since check runs, generations and snapshots are each head's own.
 func SettlementFor(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
 	head := candidate.Head
-	if !carriedBack(pr.Pushes, pr.HeadSHA, head) {
+	if head != pr.HeadSHA {
 		return pr, false
 	}
 	if head == pr.CheckedHead {
 		return pr, true
-	}
-	if head != pr.HeadSHA && settled(pr) && carriedBack(pr.Pushes, pr.CheckedHead, head) {
-		return pr, false
 	}
 	pr.CheckedHead = head
 	pr.Failing = []string{}
@@ -96,18 +87,8 @@ func headPush(pushes []record.ClassifiedPush, previous, head string) *record.Cla
 	return found
 }
 
-// HeadPushKnown says whether the push that left head is recorded (headPush), as the push that
-// replaced pr's head when the branch has one, so the pushes can say what the move from pr's head to
-// head changed. Until it is, the head's code is unknown: its push may be on its way, with the paths
-// an approval of pr's head is judged against (ApprovalStands).
-func HeadPushKnown(pr record.PullRequest, head string) bool {
-	return headPush(pr.Pushes, pr.HeadSHA, head) != nil
-}
-
-// keptPushes is what a head's arrival keeps: every push that changed only .legion/, did not
-// rewrite history and said which head it replaced - a fact about two commits, true whenever it is
-// learned, which an approval is carried across - and the pushes still on their way from the new
-// head. Any other push is spent once its head arrives, or was late for a head already gone.
+// keptPushes is what a head's arrival keeps: the pushes still on their way from the new head. Any
+// other push is spent once its head arrives, or was late for a head already gone.
 func keptPushes(pushes []record.ClassifiedPush, head string) []record.ClassifiedPush {
 	onPath := map[string]bool{}
 	for _, p := range pathFrom(pushes, head, false) {
@@ -115,23 +96,17 @@ func keptPushes(pushes []record.ClassifiedPush, head string) []record.Classified
 	}
 	var kept []record.ClassifiedPush
 	for _, p := range pushes {
-		if carriesApproval(p) || onPath[p.SHA] {
+		if onPath[p.SHA] {
 			kept = append(kept, p)
 		}
 	}
 	return kept
 }
 
-// carriesApproval is whether an approval of the head a push replaced also approves the head it
-// left: the push changed only .legion/, did not rewrite history, and said which head it replaced.
-func carriesApproval(p record.ClassifiedPush) bool {
-	return !p.MayChangeCode() && p.Before != ""
-}
-
 // ApplyPush records a push and, for the current head, settles its planned mark and takes back
-// exactly its counted fix attempt when the late push is handoff-only or the review App's, restoring
-// the counted attempt's mark that count replaced (AdvancePullRequestHead). A push replaces an
-// earlier record of the same two heads, so a redelivered push is recorded once.
+// exactly its counted fix attempt when the late push is the review App's, restoring the counted
+// attempt's mark that count replaced (AdvancePullRequestHead). A push replaces an earlier record of
+// the same two heads, so a redelivered push is recorded once.
 func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullRequest {
 	pushes := make([]record.ClassifiedPush, 0, len(pr.Pushes)+1)
 	for _, p := range pr.Pushes {
@@ -143,10 +118,8 @@ func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullReq
 	if pr.HeadSHA != push.SHA {
 		return pr
 	}
-	if !push.HandoffOnly {
-		pr.PlannedRed = push.ByReviewApp
-	}
-	if (push.HandoffOnly || push.ByReviewApp) && pr.HeadCounted == push.SHA {
+	pr.PlannedRed = push.ByReviewApp
+	if push.ByReviewApp && pr.HeadCounted == push.SHA {
 		if pr.BlockedAttempts == pr.FixAttempts {
 			pr.BlockedAttempts = 0
 		}
@@ -219,96 +192,53 @@ func pathFrom(pushes []record.ClassifiedPush, head string, unplaced bool) []reco
 	return path
 }
 
-// ApprovalStands says whether an approval of reviewed approves the pull request's current head:
-// walking back from the current head through pushes that carry an approval across
-// (carriesApproval) reaches reviewed, so every push between them changed only .legion/. Nothing
-// stands while a push that may change code is on its way (CodeOnItsWay): the push event can come
-// first, and the approval is then of a head already on its way out.
+// ApprovalStands says whether an approval of reviewed approves the pull request's current head: it
+// is an approval of the head itself, since any push may change code. Nothing stands while a push is
+// on its way from the head (CodeOnItsWay): the push event can come first, and the approval is then
+// of a head already on its way out.
 func ApprovalStands(pr record.PullRequest, reviewed string) bool {
-	if reviewed == "" || CodeOnItsWay(pr) {
-		return false
-	}
-	return carriedBack(pr.Pushes, pr.HeadSHA, reviewed)
+	return reviewed != "" && reviewed == pr.HeadSHA && !CodeOnItsWay(pr)
 }
 
-// CodeOnItsWay says whether a push that may change code lies on the path forward from the pull
-// request's current head, its new head not arrived yet. That includes a push delivered late, after
-// its new head arrived and the branch returned to this one: nothing tells it from the same two
-// heads pushed again, so it counts until the next head arrives, by design. In Legion's flow one
-// always follows an approval (the reviewer's handoff push).
+// CodeOnItsWay says whether a push lies on the path forward from the pull request's current head,
+// its new head not arrived yet: any push may change code. That includes a push delivered late,
+// after its new head arrived and the branch returned to this one: nothing tells it from the same
+// two heads pushed again, so it counts until the next head arrives, by design.
 func CodeOnItsWay(pr record.PullRequest) bool {
-	for _, p := range pathFrom(pr.Pushes, pr.HeadSHA, true) {
-		if p.MayChangeCode() {
-			return true
-		}
-	}
-	return false
-}
-
-// carriedBack is whether earlier is head, or walking back from head through pushes that carry an
-// approval across (carriesApproval) reaches it: every push between them changed only .legion/, so
-// the two heads' code is the same.
-func carriedBack(pushes []record.ClassifiedPush, head, earlier string) bool {
-	if head == earlier {
-		return true
-	}
-	reached := map[string]bool{head: true}
-	for frontier := []string{head}; len(frontier) > 0; {
-		current := frontier[0]
-		frontier = frontier[1:]
-		for _, p := range pushes {
-			if p.SHA != current || !carriesApproval(p) || reached[p.Before] {
-				continue
-			}
-			if p.Before == earlier {
-				return true
-			}
-			reached[p.Before] = true
-			frontier = append(frontier, p.Before)
-		}
-	}
-	return false
+	return len(pathFrom(pr.Pushes, pr.HeadSHA, true)) > 0
 }
 
 // RedSendsBack says whether the verdict that stands for the pull request's head (HeadVerdict) sends
 // an issue in testing, reviewing, retro or merging back to implementing: it is red, and the review
 // App did not plan it (PlannedRed, the tester's own failing tests, which the implementer is meant
-// to make pass). HeadVerdict carries a code commit's settlement to the handoff heads above it
-// (SettlementFor, carriedBack): a head a handoff-only push reached changed only .legion/, so its
-// code is the head before it, and a red standing for it is that code's red, whether the code head's
-// own or the handoff head's second run of it. Such a head is no exception, and neither is a red a
-// required workflow alone makes: CI is the daemon's own rule, read beside the review round and
-// never by it (workflow's decideChecks), so the reviewer's approval and a red at its head are two
-// facts, each acted on as it arrives. The fix-attempt cap is the caller's (FixAttemptCapHolds).
+// to make pass). A red a required workflow alone makes is no exception: CI is the daemon's own
+// rule, read beside the review round and never by it (workflow's decideChecks), so the reviewer's
+// approval and a red at its head are two facts, each acted on as it arrives. The fix-attempt cap
+// is the caller's (FixAttemptCapHolds).
 func RedSendsBack(pr record.PullRequest) bool {
 	return HeadVerdict(pr) == "red" && !pr.PlannedRed
 }
 
 // RedWithdrawsReady says whether the verdict that stands for the pull request's head is red against
 // a READY, in awaiting_merge: the pull request is open, and CI is red at the head by its own
-// settlement and its own workflow runs (HeadVerdict, with the settlement of the head itself). The
-// daemon has submitted the merge of that head, so what takes the submission back is a red of the
-// head's own - a required check failing on a rerun, a newly required one, a required workflow
-// re-run red - which the implementer's next push replaces, and the submission names the commit
-// about to be replaced: Legion withdraws its own request, rather than refusing a merge the
-// repository's rules allow. A red carried to the head from the one a .legion/-only push replaced
-// (SettlementFor) stood before the READY and says nothing new about that commit, so it sends
-// nothing back. As with RedSendsBack
-// before READY, a head a .legion/-only push reached is no exception: every worker is suspended in
-// awaiting_merge, and only the implementer can change the red. PlannedRed is a red the tester's own
-// tests planned for a review round the approval and the acceptance have ended since, so it is not
-// read here. The
-// caller decides when such a red is read: a red only required workflows make (RedOnlyByWorkflows)
-// withdraws the READY on a read of their runs, never on a CI settlement, which reads no run and
-// would judge them by a read up to one pass old (workflow's decideChecks).
+// settlement and its own workflow runs (HeadVerdict). The daemon has submitted the merge of that
+// head, so what takes the submission back is a red of the head's own - a required check failing
+// on a rerun, a newly required one, a required workflow re-run red - which the implementer's next
+// push replaces, and the submission names the commit about to be replaced: Legion withdraws its
+// own request, rather than refusing a merge the repository's rules allow. Every worker is suspended
+// in awaiting_merge, and only the implementer can change the red. PlannedRed is a red the tester's
+// own tests planned for a review round the approval and the acceptance have ended since, so it is
+// not read here. The caller decides when such a red is read: a red only required workflows make
+// (RedOnlyByWorkflows) withdraws the READY on a read of their runs, never on a CI settlement, which
+// reads no run and would judge them by a read up to one pass old (workflow's decideChecks).
 func RedWithdrawsReady(pr record.PullRequest) bool {
-	return pr.State == record.PullRequestOpen && pr.CheckedHead == pr.HeadSHA && HeadVerdict(pr) == "red"
+	return pr.State == record.PullRequestOpen && HeadVerdict(pr) == "red"
 }
 
 // ConflictWithdrawsReady says whether a READY pull request, in awaiting_merge, has started
 // conflicting with its base: the pull request is open, and the daemon's last read of GitHub's
 // mergeability found MergeabilityConflicting. Unlike RedWithdrawsReady, a conflict is not a
-// settlement's to carry across a handoff-only push (SettlementFor) or a read ever to go stale on:
+// settlement's to judge or a read ever to go stale on:
 // Mergeability stands for whatever head GitHub last computed it on, and the daemon's own read is
 // the only path to it, so there is no older read to prefer. GitHub runs no checks at all on a
 // conflicting head - there is no merge ref to run them against - so no verdict of HeadVerdict's
@@ -327,8 +257,7 @@ func ConflictWithdrawsReady(pr record.PullRequest) bool {
 // re-run failing again, a red after the head read green, a second push before CI settled - and the
 // architect decides what follows (workflow's standingRed). A head pushed onto a green verdict, or
 // onto a settled head whose base requires nothing, is not that loop: it raised no count and left
-// the attempt, so its red is new. A head a handoff-only push left is in the attempt of the code
-// head it replaced, as its red is that head's (RedSendsBack). A green head is the fix that worked.
+// the attempt, so its red is new. A green head is the fix that worked.
 func FixAttemptCapHolds(pr record.PullRequest, cap int) bool {
 	return cap > 0 && pr.FixAttempts >= cap && pr.HeadCounted != "" && HeadVerdict(pr) == "red"
 }

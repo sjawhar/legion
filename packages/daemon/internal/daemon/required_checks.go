@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
-	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -67,9 +66,9 @@ func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 // whatever phase the issue is in. It then reads what the base branch requires with the implement
 // App's installation token, the credential the daemon reads GitHub with for its own work
 // (requiredchecks.Required, which this pass is the only reader of), and, when that includes a workflow,
-// each required workflow's latest run on the head whose settlement stands for the pull request's
-// (classify.WorkflowHead, requiredchecks.Workflows). It applies an intake.RequiredChecks fact when
-// that read differs from the one recorded, which decides the head's verdict again (workflow's
+// each required workflow's latest run on the pull request's head (requiredchecks.Workflows). It
+// applies an intake.RequiredChecks fact when that read differs from the one recorded, which decides
+// the head's verdict again (workflow's
 // requiredChecks). A read that fails is logged with the repository, the pull request and GitHub's
 // HTTP status, and changes nothing: the pull request keeps the set and runs last read, and one
 // never read keeps no checks verdict, neither red nor green, until a later pass reads it. A
@@ -211,7 +210,7 @@ func (w *workflowRuntime) requiredFor(ctx context.Context, github githubrest.Cli
 	if len(set.Workflows) == 0 {
 		return fact, nil
 	}
-	fact.WorkflowsHead = classify.WorkflowHead(pr)
+	fact.WorkflowsHead = pr.HeadSHA
 	runs, err := requiredchecks.Workflows(ctx, github, fact.WorkflowsHead, set.Workflows)
 	if err != nil {
 		return intake.RequiredChecks{}, fmt.Errorf("read the workflow runs on %s: %w", fact.WorkflowsHead, err)

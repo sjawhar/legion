@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -34,9 +33,8 @@ func githubReadFailed(err error) *refusal {
 // readyChecks refuses a READY the workflow must not take on to the merge: one its issue has no
 // pull request recorded for (NO_PULL_REQUEST), one GitHub shows closed without merging
 // (READY_PULL_REQUEST_CLOSED), one at another head than READY names (READY_HEAD_MOVED), one
-// carrying a change no review approved (READY_NOT_APPROVED, READY_UNREVIEWED_CHANGE), one whose
-// merge would carry the issue's handoffs onto the base branch (READY_HEAD_CARRIES_HANDOFFS), and
-// one GitHub cannot merge at all for a conflict with its base (READY_HEAD_CONFLICTS). Whether the
+// carrying a change no review approved (READY_NOT_APPROVED, READY_UNREVIEWED_CHANGE), and one
+// GitHub cannot merge at all for a conflict with its base (READY_HEAD_CONFLICTS). Whether the
 // merge then happens is GitHub's to decide, under the base branch's own rules: the daemon reads
 // none of the head's check runs or commit statuses and judges none of them, and its submission of
 // the merge (record.ReadyMerge) waits on GitHub for whatever those rules require of the head.
@@ -44,12 +42,10 @@ func githubReadFailed(err error) *refusal {
 // A pull request already merged has nothing left to gate: a person merged it before READY, which
 // the workflow takes on to the production check, and no commit can change its head, so READY is
 // published without reading it, and the note says so. Otherwise the head must be the one GitHub
-// shows (the two clocks below), the approved code plus retro's commits alone (unreviewedChange,
+// shows (the two clocks below) and the approved code plus retro's commits alone (unreviewedChange,
 // which nothing else holds those commits to: the merger only quotes them, and a READY a person
-// merges is held to it too), and free of .legion/<issue>/ (headCarries), which retro's last commit
-// removes (dispatch://LEGION-605): a squash merge commits the head merged into the base, and
-// nothing on the base branch reads a handoff. A read GitHub fails is refused as GitHub's failure,
-// to retry, not the head's.
+// merges is held to it too). A read GitHub fails is refused as GitHub's failure, to retry, not the
+// head's.
 //
 // The note is the completion's answer (HandoffCompleteResponse.Note): the already-merged sentence,
 // or the by-hand note (mergeReadyPolicy) when the pull request is one a person merges, and nothing
@@ -92,7 +88,7 @@ func readyChecks(ctx context.Context, github githubrest.Client, rules config.Mer
 	head := shortSHA(pull.Head.SHA)
 	number := pr.Number
 	if pull.Merged {
-		answer.note = fmt.Sprintf("pull request #%d is already merged, so READY was published without reading its head's handoffs", number)
+		answer.note = fmt.Sprintf("pull request #%d is already merged, so READY was published without reading its head", number)
 		return answer, nil
 	}
 	if pull.State == "closed" {
@@ -107,13 +103,6 @@ func readyChecks(ctx context.Context, github githubrest.Client, rules config.Mer
 	}
 	if refused := unreviewedChange(ctx, github, issue, number, approvedHead, pull.Head.SHA); refused != nil {
 		return readyAnswer{}, refused
-	}
-	dir := handoffDir(issue)
-	switch carries, err := headCarries(ctx, github, dir, pull.Head.SHA); {
-	case err != nil:
-		return readyAnswer{}, &refusal{http.StatusBadGateway, "GITHUB_READ_FAILED", fmt.Sprintf("GitHub's read of %s/ at head %s of pull request #%d failed, so whether the head still carries it is unknown: complete again; this is GitHub's failure, not the head's: %v", dir, head, number, err)}
-	case carries:
-		return readyAnswer{}, &refusal{http.StatusConflict, "READY_HEAD_CARRIES_HANDOFFS", fmt.Sprintf("head %s of pull request #%d still carries %s/, this issue's handoffs, which its merge would carry onto the base branch: retro's last commit removes them, so the issue goes back to retro; tell the architect", head, number, dir)}
 	}
 	// A pull request GitHub cannot merge gets no merge ref, no pull_request run of its own and no
 	// merge: it is refused by name, so the implementer brings the base into the branch rather than
@@ -188,10 +177,12 @@ func pullRequestPaths(ctx context.Context, github githubrest.Client, number int)
 	return changedPaths(files), len(files), nil
 }
 
-// changedFile is one file GitHub lists in a change, a pull request's or a compare's.
+// changedFile is one file GitHub lists in a change, a pull request's or a compare's, with what the
+// change did to it ("added", "removed", "modified", "renamed", ...).
 type changedFile struct {
 	Filename         string `json:"filename"`
 	PreviousFilename string `json:"previous_filename"`
+	Status           string `json:"status"`
 }
 
 // changedPaths is every path files touch: each file's name, and a renamed file's old name too,
@@ -215,25 +206,6 @@ func shortSHA(sha string) string {
 	return sha
 }
 
-// headCarries is whether head holds dir, a directory relative to the repository root: GitHub's
-// contents read of that path at head answers 404 when it does not. Any other failure of the read is
-// an error, which leaves the answer unknown.
-func headCarries(ctx context.Context, github githubrest.Client, dir, head string) (bool, error) {
-	err := github.Get(ctx, "/contents/"+dir+"?ref="+url.QueryEscape(head), nil)
-	var answer *githubrest.Answer
-	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
-		return false, nil
-	}
-	return err == nil, err
-}
-
-// handoffDir is the directory issue's handoffs live under, relative to the repository root, with no
-// trailing slash: .legion/<issue>/<phase>.json is written there by each file-backed phase's role,
-// and retro's last commit removes the directory from the head a human merges, so none reaches main
-// (dispatch://LEGION-605). READY reads whether the head still carries it (headCarries); the daemon
-// reads nothing inside it.
-func handoffDir(issue string) string { return ".legion/" + issue }
-
 // compareFilesLimit is the most changed files GitHub's compare of two commits lists: "it includes
 // up to 300 changed files for the entire comparison" (REST API, Compare two commits,
 // https://docs.github.com/en/rest/commits/commits#compare-two-commits). A comparison that reaches
@@ -246,8 +218,11 @@ const unreviewedChangeNamed = 10
 // unreviewedChange is READY's refusal of head, pull request number's, when it carries a change no
 // review approved, nil when it carries none. approved is the head issue's review round approved
 // (record.ApprovedHead), and only retro's commits may sit above it: its learnings under
-// docs/solutions/, and its last commit's removal of the issue's handoffs, .legion/<issue>/
-// (handoffDir). A round with no approval has no head to hold READY to (READY_NOT_APPROVED).
+// docs/solutions/, and the removal of .legion/, where Legion's handoffs lived before they moved to
+// the Dispatch issue (legion handoffs import removes the whole directory, other issues' merged from
+// older branches included). A file under .legion/ is let through only when GitHub lists it removed: one added or
+// changed above the approved head is a change no review approved. A round with no approval has no
+// head to hold READY to (READY_NOT_APPROVED).
 // Otherwise GitHub's compare of approved with head, as the implement App, must show approved to be
 // head's ancestor ("ahead", or "identical" for a READY at the approved head itself; "diverged" or
 // "behind" is not the approved code plus anything), list its files, and list fewer than
@@ -286,11 +261,15 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 		return unreviewed("%s answered no file list, so what changed above the approved head is unknown", compared)
 	}
 	files := *compare.Files
-	handoffs := handoffDir(issue) + "/"
 	var outside []string
-	for _, path := range changedPaths(files) {
-		if !strings.HasPrefix(path, "docs/solutions/") && !strings.HasPrefix(path, handoffs) {
-			outside = append(outside, path)
+	for _, file := range files {
+		if file.Status == "removed" && strings.HasPrefix(file.Filename, ".legion/") {
+			continue
+		}
+		for _, path := range [...]string{file.Filename, file.PreviousFilename} {
+			if path != "" && !strings.HasPrefix(path, "docs/solutions/") {
+				outside = append(outside, path)
+			}
 		}
 	}
 	if len(outside) > 0 {
@@ -298,7 +277,7 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 		if len(outside) > unreviewedChangeNamed {
 			named += fmt.Sprintf(" and %d more", len(outside)-unreviewedChangeNamed)
 		}
-		return unreviewed("head %s of pull request #%d changes %s since %s: only retro's commits, to docs/solutions/ and %s, may sit above it, so no review approved that change", shortSHA(head), number, named, approvedAt, handoffs)
+		return unreviewed("head %s of pull request #%d changes %s since %s: only retro's commits, to docs/solutions/, and the removal of .legion/ may sit above it, so no review approved that change", shortSHA(head), number, named, approvedAt)
 	}
 	if len(files) >= compareFilesLimit {
 		return unreviewed("%s lists %d changed files, the most it lists, so a path past them is unread and may be one no review approved", compared, len(files))

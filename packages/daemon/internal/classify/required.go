@@ -69,9 +69,8 @@ const Failed = "failure"
 const Cancelled = "cancelled"
 
 // HeadChecks is each check the pull request's base branch requires (Required), judged by the
-// settlement that stands for its head (settled), its own or one carried back from a head a
-// .legion/-only push replaced, then each workflow it requires (Workflows), judged by its latest run
-// on the head that settlement is of, as the daemon last read it. A check the settlement names as
+// settlement of its head (settled), then each workflow it requires (Workflows), judged by its
+// latest run on the head, as the daemon last read it. A check the settlement names as
 // failed failed, one it reports otherwise passed, one it names as cancelled is Pending, and one it
 // does not report at all is Missing: a settlement can come before a required check is decided,
 // since the listener settles a commit once every check it has seen is terminal and the commit is
@@ -80,13 +79,11 @@ const Cancelled = "cancelled"
 // decides it. It may never report: a head with no verdict is sent nowhere by the workflow, and
 // nothing refuses the merger's READY for it - GitHub, under the base branch's own rules, decides
 // whether the merge happens, and the daemon's submission waits on GitHub for it.
-// A workflow's result stands only when the daemon read it at the settlement's head (WorkflowHead),
-// and is Pending otherwise, until the daemon's next read: a run that succeeded passed, one still
-// running is Pending, one the head has no run of is Missing, and one that ended any other way
-// failed with its conclusion - except a run cancelled at a head a .legion/-only push replaced,
-// which is Pending: that push's own run cancelled it (a workflow that cancels a run in flight on a
-// push), and the head's own settlement and run decide it. ok is false when there is nothing to
-// judge: no settlement stands for the head, or the required set was never read.
+// A workflow's result stands only when the daemon read it at the head, and is Pending otherwise,
+// until the daemon's next read: a run that succeeded passed, one still running is Pending, one the
+// head has no run of is Missing, and one that ended any other way failed with its conclusion. ok is
+// false when there is nothing to judge: no settlement stands for the head, or the required set was
+// never read.
 func HeadChecks(pr record.PullRequest) (checks []Standing, ok bool) {
 	checks, workflows, ok := headStandings(pr)
 	return append(checks, workflows...), ok
@@ -118,27 +115,14 @@ func headStandings(pr record.PullRequest) (checks, workflows []Standing, ok bool
 
 // WorkflowStanding is how one required workflow of the pull request stands at its head
 // (HeadChecks): its latest run's result as the daemon read it, except Pending when the runs were
-// read at another head than the settlement's, or when the run was cancelled at a head a
-// .legion/-only push replaced. It is the one judgment of a required workflow, so whatever names a
+// read at another head. It is the one judgment of a required workflow, so whatever names a
 // workflow red names exactly the ones HeadVerdict counts.
 func WorkflowStanding(pr record.PullRequest, workflow record.RequiredWorkflow) Standing {
 	result := workflow.Result
-	if pr.WorkflowsHead != pr.CheckedHead || (result == Cancelled && pr.WorkflowsHead != pr.HeadSHA) {
+	if pr.WorkflowsHead != pr.HeadSHA {
 		result = Pending
 	}
 	return Standing{Name: workflow.Path, Result: result}
-}
-
-// WorkflowHead is the head whose workflow runs stand for the pull request's head: the head the
-// settlement standing for it is of (settled), which a .legion/-only push that started no CI of its
-// own can have left, else the head itself, whose settlement is still to come. The daemon reads the
-// required workflows' runs there (intake.RequiredChecks), and HeadChecks judges by them only while
-// that is still the settlement's head.
-func WorkflowHead(pr record.PullRequest) string {
-	if settled(pr) {
-		return pr.CheckedHead
-	}
-	return pr.HeadSHA
 }
 
 // HeadVerdict is the CI verdict that stands for the pull request's current head: "red" when a check

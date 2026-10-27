@@ -23,9 +23,8 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	// A handoff push can start no CI of its own (GitHub's skip-checks trailer), so the settlement
-	// that stands for the head can be of the code head it replaced, arriving after it. A
-	// settlement is for the commit it names, never the head by default.
+	// The listener settles every commit of the pull request, its head or not, and a settlement
+	// stands only for the commit it names: it is for the head only when it names the head.
 	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Failing: fact.Failing, Cancelled: fact.Cancelled}
 	var stands bool
 	if *pr, stands = classify.SettlementFor(*pr, candidate); !stands {
@@ -347,9 +346,9 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 			return intake.Result{}, err
 		}
 	}
-	// The decision belongs to the review round, not to the pull request's head: the reviewer's own
-	// handoff push is a new head, and the round must still know, when the reviewer completes, what
-	// the review decided, on which head, and what it said for the next round's implementer. The
+	// The decision belongs to the review round, not to the pull request's head: the round must still
+	// know, when the reviewer completes, what the review decided, on which head, and what it said for
+	// the next round's implementer. The
 	// round is open while the issue is in reviewing, and while it is held from reviewing, since the
 	// retry puts it back there with the reviewer's work kept. A review outside the round decides
 	// nothing and counts no round. An approval is judged against the head it names when the
@@ -380,8 +379,8 @@ const (
 type roundOutcome int
 
 const (
-	// roundOpen is a round still owed its reviewer's completion or its decision, or waiting on a
-	// head a push that may change code is bringing; or an issue not in reviewing, since one held
+	// roundOpen is a round still owed its reviewer's completion or its decision, or waiting on the
+	// head a push is bringing; or an issue not in reviewing, since one held
 	// from reviewing ends only once the retry restores it.
 	roundOpen roundOutcome = iota
 	// roundApproved ends the round: its reviewer completed, and its approval approves the head's code
@@ -434,8 +433,8 @@ func (r round) stuckAs(other round) bool {
 // in testing. A completed round that nothing on its way would end is stuck, its reason naming the
 // head, since the decision it needs is of the head: no review decided it (stuckUndecided), or its
 // approval is of other code than the head's (stuckApprovedOtherCode). An approval of the head a
-// push that may change code is still on its way from (classify.CodeOnItsWay) keeps the round open:
-// the push's new head decides whether the approval stands.
+// push is still on its way from (classify.CodeOnItsWay) keeps the round open until the push's new
+// head arrives.
 func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest) round {
 	if issue.Phase != phase.Reviewing {
 		return round{}
@@ -473,20 +472,18 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 // tester has found, the round holds or the merger is doing, unless the fix-attempt cap holds the
 // red (classify.FixAttemptCapHolds): then nothing moves on it, and the architect decides what
 // follows (decideChecks's count report), a review round's own decision governing meanwhile. The
-// rule runs before awaiting_merge: there only the head's own red withdraws the READY
-// (classify.RedWithdrawsReady, decideChecks's AwaitingMerge case), never one carried to the READY
-// head from the code head a .legion/-only push replaced, since that red stood before the READY and
-// says nothing new about the submitted head. The invariant is that the rule is applied by whichever
-// fact makes a red stand for the head, in whatever phase the issue is when it does, and never by a
-// review, which changes nothing about the verdict and reads none. A red comes to stand by a
-// settlement or a read of the required set, the facts that change the verdict (decideChecks); by a
-// push classified late, or a head arriving over a push already known, either of which can complete
-// the carry of a code head's settlement to the handoff head above it (classify.SettlementFor; push,
-// pullRequestSynchronized); by a hold's retry, which restores a phase a settlement reached while the
-// issue was held, where nothing moves (retryOrEscalate); and by the implementer's completion, which
-// hands on a head a red may have come to stand for while it was implementing, where nothing moves
-// (implementationReady). A fact that finds no red standing applies nothing, so each applies the rule
-// before whatever else it does.
+// rule runs before awaiting_merge: there the head's red withdraws the READY
+// (classify.RedWithdrawsReady, decideChecks's AwaitingMerge case). The invariant is that the rule is
+// applied by whichever fact makes a red stand for the head, in whatever phase the issue is when it
+// does, and never by a review, which changes nothing about the verdict and reads none. A red comes
+// to stand by a settlement or a read of the required set, the facts that change the verdict
+// (decideChecks); by a push naming the recorded head, which settles its planned-red mark and can
+// take back the fix attempt its head's arrival counted (classify.ApplyPush; push); by a head's
+// arrival at a commit whose own settlement is recorded, a push back to it (pullRequestSynchronized);
+// by a hold's retry, which restores a phase a settlement reached while the issue was held, where
+// nothing moves (retryOrEscalate); and by the implementer's completion, which hands on a head a red may have come
+// to stand for while it was implementing, where nothing moves (implementationReady). A fact that
+// finds no red standing applies nothing, so each applies the rule before whatever else it does.
 func (e *Engine) standingRed(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) (bool, error) {
 	if issue.Phase == phase.AwaitingMerge || pr == nil || !classify.RedSendsBack(*pr) || classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
 		return false, nil
