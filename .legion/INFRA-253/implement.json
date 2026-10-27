@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-253",
-  "completed": "2026-10-27T10:46:26Z",
+  "completed": "2026-10-27T11:52:50Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2229",
-  "codeHead": "26655eb1fdf7206814c9906a02aa58507b7908b7",
+  "codeHead": "c231c77ec150e04cbb31760793de1e72366bee56",
   "proof": [
     {
       "criterion": "After the forward merge of main 2e8c68cd (#2167): e2e-local.sh still runs NATS, the listener and the fake session on kernel-chosen ports and uses overrides as given, and #2167's bus-down steps pass",
@@ -158,7 +158,8 @@
     "Forward merge of main ef3a531d (#2270) for a GitHub-reported conflict in scripts/e2e/stage1-skeleton.sh's cleanup: the keeper stop and #2270's `docker rm -f -v` both kept. Fingerprint unchanged (890278d4). Retro's docs/solutions/ files stay; .legion/INFRA-253/ is written again here, so READY needs retro's removal again.",
     "Forward merge of main baadccdc for #2317's fix of the daemon admission tests #2289 broke, the only red in the required test job at 9c51021b; no conflict, fingerprint unchanged (890278d4).",
     "Forward merge of main b08a56bc (#2304, Apps and keys through agent-secrets) for a GitHub-reported conflict in four tool-list lines (scripts/e2e/README.md, claude-backend-tmux.sh, stage3-4b13b-acceptance.sh, stage3-devbox-workflow.sh): main's lines kept with this PR's ss → python3. Fingerprint 890278d4 → 35d99ffc, only those three scripts' line pairs moved. The listenfd path-filter check needed no change: every job that builds or tests cmdtest, cmd/dispatch or cmd/listener filters on packages/envoy/**, the dispatch filter lists listenfd, and no ci.yaml exists yet.",
-    "Forward merge of main 2e8c68cd (#2167) for a GitHub-reported conflict in two comments of packages/envoy/scripts/e2e-local.sh beside #2167's stop_nats; both sides kept, fingerprint unchanged (35d99ffc)."
+    "Forward merge of main 2e8c68cd (#2167) for a GitHub-reported conflict in two comments of packages/envoy/scripts/e2e-local.sh beside #2167's stop_nats; both sides kept, fingerprint unchanged (35d99ffc).",
+    "Forward merge of main fd05f188 (#2356) for a GitHub-reported conflict in .github/workflows/docs.yaml's header comment: this PR's held-port.py clause kept, then #2356's draft/closed sentences; both trigger lists keep held-port.py. Fingerprint 35d99ffc → 2e28392b, that comment alone. actionlint and check-image-trigger-paths pass."
   ],
   "openQuestions": [
     "envoy-smoke at the code head is the first run of SCM_RIGHTS into a host-network container (plan risk 6); if it fails the plan says report to the architect, no fallback.",
@@ -168,7 +169,7 @@
     "The Dispatch memory tests that reset peak memory need write access to /proc/<pid>/clear_refs, which gVisor pods refuse; CI's dispatch-memory job is their surface (the same failure on the base harness).",
     "WebKit and Firefox Playwright projects cannot launch in the pod (missing system libraries, no root); CI's dispatch job runs them."
   ],
-  "round": 13,
+  "round": 14,
   "notRunEndToEnd": [
     "stage3-devbox-workflow.sh, stage3-4b13b-acceptance.sh, claude-backend-tmux.sh, dispatch-user-turns.sh, and stage2-tmux-supervision.sh from model-turn-through-the-route on: the devbox has no working model route. Their changed functions ran against real processes: rig.sh start_held/keep_port/start_kept/report_port/held_only_by with the real envoy-listener, envoy-dispatch (env -i, DISPATCH_LISTEN_FD=3), run-server.sh, nats-server -p -1 and legion start on a keeper, in the pod; the keeper daemon path is Stage 1's (pod and CI PASS); the stage3/4b13b cleanup with keeper stops runs in smoke-cleanup.test.ts and stage3-4b13b-notes.test.ts (pod, CI); stage2's gate checks, architect-registers-and-is-ready and envoy-role-held passed on the devbox with the two gate strings patched.",
     "lib/bridge-tunnel.sh (stage4a bridge mode): no cluster with pods/portforward and no devbox result; ran in the pod against a stub kubectl that binds :0 and stub chisel (port read from the Forwarding line, port-forward and chisel restarted on a new port, bridge_stop leaves nothing).",
