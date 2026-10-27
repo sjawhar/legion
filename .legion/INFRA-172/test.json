@@ -2,23 +2,14 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-172",
-  "completed": "2026-10-27T02:52:36Z",
-  "testedHead": "3b340b735fa14c647798781a7f6dfd655e167f04 (round 3; code head 20dedb367e08, runtime change 969762065d66: refuseCodePipeInTableCell compares TableCodePipes before and after, by code text, counted)",
+  "completed": "2026-10-27T03:13:31Z",
+  "testedHead": "cd211658b124bb73422a92a8e6009e2fb3a85123 (round 4: 87fa023f merges main@origin b6d8fa2a into 5f444e1c)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 3: drove the implementer's round-3 proof and every contract-change-census entry independently through the real dispatch CLI and the browser against the harness server built from the workspace at 3b340b73 (throwaway spec $TMPDIR/infra172-test/harness/zz-tester-pipes.e2e.ts, test 'tester r3'; output $TMPDIR/infra172-test/r3/e2e-r3.txt); re-ran the 20,000-document generated differential at the head (stored markdown byte-identical to a6ecbc12). Round 1 and 2 verification of the reading itself stands."
+    "how": "Round 4: re-ran the implementer's browser parity test and drove every contract-change-census entry independently at cd211658 against a server and SPA rebuilt from the merged tree (bun run e2e zz-tester-pipes editor-paste -g \"tester|two backslashes\": 7 passed, 1 skipped by design; output $TMPDIR/infra172-test/r3/e2e-r4.txt)."
   },
-  "failed": 2,
-  "failures": [
-    {
-      "criterion": "CI at the head (read on GitHub): the pull request must be mergeable for its required checks to run; round 3's code (969762065d66, 20dedb36) has no CI run at all",
-      "evidence": "gh api repos/sjawhar/legion/pulls/2272 at 02:50Z: mergeable false, mergeable_state 'dirty' (gh pr view: CONFLICTING). gh api actions/runs?head_sha=3b340b73 and ?head_sha=20dedb36: no workflow runs. git merge-tree --write-tree main@origin 3b340b73 (read-only): CONFLICT (content) packages/envoy/CHANGELOG.md; CONFLICT (modify/delete) skills/dispatch/references/document-edits.md and skills/dispatch/references/documents.md, deleted on main by ea460e50f 'feat(skills): three Dispatch skills under 2,000 words' and modified by this PR's 20dedb36. So the census's 'migrated' skill entry has to land in main's new Dispatch skill layout, and the code needs its required checks (lint, typecheck, test) read green after the base is brought in. A real conflict: the sanctioned case for reintegrating the base."
-    },
-    {
-      "criterion": "Required check pr-title (rulesets on main require lint, typecheck, test, pr-title)",
-      "evidence": "Workflow 'PR Title' completed failure at e4fea036 (00:40Z), 64772417 (01:01Z) and 9f12932b (01:27Z, run log at 02:04Z): '::error::PR title must be a conventional commit subject (type(scope): summary)'. The title is 'Go reads an escaped pipe in a table row as the browser editor does', which does not match '^[a-z]+(\\([^)]+\\))?!?: .+'. Retitle to a conventional subject, e.g. 'fix(pmdoc): a table cell ends at a pipe after two backslashes, as the browser editor reads it' (no private names)."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "verifiedCriteria": [
     {
       "criterion": "A1",
@@ -58,7 +49,8 @@
   ],
   "observations": [
     "Adjacent code merges into one span: beside browser-left `a\\|b` followed by text 'three', replacing 'three' with `ls | wc -l` is refused, and the refusal quotes the merged span 'a\\|bls | wc -l' rather than what the caller wrote. Conservative (storing it would take a | out of the merged code); the caller sees a span text it did not write. The reviewer judges whether the message needs a word on merged spans.",
-    "aa.md:791 still backs the browser's backslash rule with Go's comment rather than browser code (weak citation, not wrong)."
+    "aa.md:791 still backs the browser's backslash rule with Go's comment rather than browser code (weak citation, not wrong).",
+    "CI at cd211658, read at 03:12Z: required lint, typecheck, test and pr-title queued; not read green this round (the claude-envoy dist check-dist lane is CI's)."
   ],
   "proof": [
     {
@@ -100,6 +92,14 @@
       "observed": "beside-browser-edit replace exits 1 naming row 2, column 1; duplicate and in-span delete refused; plain text, `ls | wc -l` and the rewrite to `a|b` stored; browser accept of `git log \\| wc -l` HTTP 400 INVALID_OP, page shows the refusal, document unchanged, suggestion open; wide bare row TABLE_WIDTH 'got 3 cells, table has 2', fitting row stored as 'new \\' | 'b'; widened header stored as no table in Go and the engine.",
       "headSha": "3b340b735fa14c647798781a7f6dfd655e167f04",
       "negativeControl": "`ls | wc -l` added to the other cell of the same table is accepted and stored as `ls \\| wc -l` while `c\\|d` there is refused; a fitting bare row '| new \\\\| b |' is stored while '| new | a \\\\| b |' is refused."
+    },
+    {
+      "criterion": "After the merge from main: the changed reading, the new refusals and the moved agent guidance hold on the merged tree",
+      "surface": "the real dispatch command and Dispatch's SPA against the harness server rebuilt from cd211658 on a rootless Postgres; the dispatch command's --help",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra172_tester?sslmode=disable bun run e2e zz-tester-pipes editor-paste -g \"tester|two backslashes\" (throwaway spec in $TMPDIR/infra172-test/harness); bun packages/envoy-client/bin/dispatch.ts doc-edit --help and artifact --help with an empty HOME",
+      "observed": "7 passed, 1 skipped (CLI test is chromium-only); every refusal and acceptance as in round 3; both new tool-description sentences printed.",
+      "headSha": "cd211658b124bb73422a92a8e6009e2fb3a85123",
+      "negativeControl": "upload of '| a \\\\| b | c |' into a two-column table exits 1 'a table row holding 3 cells where its table has 2'; `ls | wc -l` beside browser-left code is stored while `c\\|d` there is refused."
     }
   ],
   "round1Failures": [
@@ -119,5 +119,24 @@
     "Census 3 (changed reading): upload '| a \\\\| b |\\n| --- |\\n| c |' is stored as a paragraph; doc-read and the engine show no table, as the engine reads the input.",
     "Skill text: a replace with bare `ls | wc -l` into a cell is stored as `ls \\| wc -l` (documents the 'write a | bare' rule correctly).",
     "Runtime reading unchanged: the 20,000 generated table documents render byte-identically to a6ecbc12; 0 pipe disagreements against the engine. Image alt text with 1-4 backslashes before a | in a cell reads back unchanged in Go with the cell count the engine reads (the removed altReadsBack guard)."
+  ],
+  "fingerprint": {
+    "before": "3b340b735fa14c647798781a7f6dfd655e167f04 666e2377b4a0aaedd682a570533c3935c8b637e930bdb4c99f8adaee6bb3a5c7",
+    "after": "cd211658b124bb73422a92a8e6009e2fb3a85123 7498a1a25236ef58172729a0b336a7e5d44369931c8db0f743fb64ca861fb59b",
+    "verdict": "changed: the skill text moved from skills/dispatch/references/{document-edits,documents}.md (deleted on main by ea460e50f) into packages/contracts/src/dispatch-tools.ts's doc-edit and artifact descriptions and the three generated packages/claude-envoy/dist files; no Go file of the change differs; main changed no pmdoc file. Full real-surface round re-run at the merged head."
+  },
+  "round3Failures": [
+    {
+      "criterion": "CI at the head (read on GitHub): the pull request must be mergeable for its required checks to run; round 3's code (969762065d66, 20dedb36) has no CI run at all",
+      "resolution": "Fixed: 87fa023f merges main; GitHub reports mergeable MERGEABLE (mergeStateStatus BLOCKED on review and checks); workflows now run at cd211658 (Tests, Legion Envoy and Contracts, PR Title, Docs, Worker Image queued at 03:12Z)."
+    },
+    {
+      "criterion": "Required check pr-title (rulesets on main require lint, typecheck, test, pr-title)",
+      "resolution": "Fixed: title is 'fix(dispatch): Go reads an escaped pipe in a table cell as the browser does', matching '^[a-z]+(\\([^)]+\\))?!?: .+'; its pr-title run at cd211658 was queued when read."
+    }
+  ],
+  "round4Verified": [
+    "At cd211658 (merged tree): the implementer's parity test passes in chromium and iphone; CLI replace adding code `git log \\| wc -l` to a cell exits 1 naming the cell; beside browser-left code `a\\|b`, adding `c\\|d` exits 1 while plain text, `ls | wc -l` and the rewrite to `a|b` are stored; the duplicate and the in-span delete are refused; the browser Accept suggestion is HTTP 400 INVALID_OP with the document unchanged; the wide bare row is 'got 3 cells, table has 2' and the fitting one stored; a widened header is no table; typing `a\\|b` into a cell stores `` xyz `a\\`\\|`b` `` read alike by the engine and Go.",
+    "The moved agent guidance reaches agents: bun packages/envoy-client/bin/dispatch.ts doc-edit --help prints 'In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has a backslash right before a | cannot be stored in a cell and is INVALID_OP, naming the cell.'; artifact --help prints 'In a table row, write every | in a cell as \\|, in code too: a | after two backslashes ends the cell, and a row with more cells than its table is refused.'; each of claude-envoy dist/dispatch.js, envoy-channel.js and session-hook.js holds the doc-edit sentence once. Both sentences match behaviour driven above (a bare | in with is stored escaped; \\\\| ends a cell)."
   ]
 }
