@@ -2,23 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-526",
-  "completed": "2026-10-27T02:10:00Z",
+  "completed": "2026-10-27T03:20:00Z",
+  "round": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2310",
   "proof": [
     {
       "criterion": "A1a. A comment holding a callout with a title shows the callout's kind and title (with A2: one-row header, filled badge)",
       "surface": "Issue Conversation tab /issues/<KEY>/conversation, comment thread expanded; real Go Dispatch server (e2e/run-server.sh), production SPA bundle, Postgres 17 + pgvector, Playwright Chromium; projects chromium and iphone",
       "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone",
-      "observed": "4 passed: 'a comment's callout shows the document's header with its kind and title' passed in chromium and iphone ([data-proof-block-name]=callout, [data-proof-block-badge]=warning with a non-transparent background, [data-proof-block-title]=Read this visible with width > 0, header height <= 40)",
-      "headSha": "b6720fc14297faf0ca8121e725320578760cb65f",
+      "observed": "Round 2, the whole spec file: 6 passed, including 'a comment's callout shows the document's header with its kind and title' in chromium and iphone ([data-proof-block-name]=callout, [data-proof-block-badge]=warning with a non-transparent background, [data-proof-block-title]=Read this visible with width > 0, header height <= 40)",
+      "headSha": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208",
       "negativeControl": "Same command at base 64e8c890 with only the red test committed: 4 failed; the callout test failed in both projects on section[data-proof-block-type=callout] [data-proof-block-content] 'Body text.' (element(s) not found: the bare section has no content hole or header)"
     },
     {
       "criterion": "A1b. A comment holding an ask block shows its card (with A2: source list folded under rows, 4px accent border)",
       "surface": "Same as A1a",
       "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone",
-      "observed": "'a comment's ask block shows the decision card' passed in chromium and iphone: [data-dispatch-ask-pill=high] 'High', 'Decision' in [data-dispatch-ask-header], two visible rows A/first and B/second under [data-dispatch-ask-record], [data-proof-block-content] > ul present once and hidden, border-left-width 4px",
-      "headSha": "b6720fc14297faf0ca8121e725320578760cb65f",
+      "observed": "'a comment's ask block shows the decision card' passed in chromium and iphone at round 2: [data-dispatch-ask-pill=high] 'High', 'Decision' in [data-dispatch-ask-header], two visible rows A/first and B/second under [data-dispatch-ask-record], [data-proof-block-content] > ul present once and hidden, border-left-width 4px",
+      "headSha": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208",
       "negativeControl": "Same command at base 64e8c890: the ask test failed in both projects on [data-dispatch-ask-header] (element(s) not found)"
     },
     {
@@ -33,9 +34,17 @@
       "criterion": "A4. Documents and past versions unchanged",
       "surface": "Document editor, version view, Conversation, Inbox, references (real stack, Playwright chromium and iphone)",
       "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts e2e/typed-blocks.e2e.ts e2e/ask-blocks.e2e.ts e2e/conversation.e2e.ts e2e/inbox.e2e.ts e2e/doc.e2e.ts e2e/document.e2e.ts e2e/references.e2e.ts --project chromium --project iphone",
-      "observed": "214 passed, 2 skipped (phone-only rows on the desktop project) in 17.9m from a fresh build at the head; bun test web/src/features/doc green inside the full package suite (2419 pass, 0 fail)",
-      "headSha": "b6720fc14297faf0ca8121e725320578760cb65f",
-      "negativeControl": "n/a for an unchanged-behaviour criterion; the same spec list before the simplify pass (head 2e4b92a8) also gave 214 passed, so the applied simplify (one shell spec for the editor's node view) changed no document row"
+      "observed": "Round 2: 216 passed, 2 skipped (phone-only rows on the desktop project) in 18.2m from a fresh build at the head, including the tester's red test 'a reply under a document's decision keeps the lists of the typed blocks it holds' in chromium and iphone",
+      "headSha": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208",
+      "negativeControl": "At b6720fc1 (before the round-2 fix) the tester's red test failed in both projects: 'step one' inside the reply's callout resolved hidden, because the outer decision's fold rule reached the reply's typed blocks"
+    },
+    {
+      "criterion": "Round 2 (tester's failure): a reply under a document's decision keeps the lists of the typed blocks it holds",
+      "surface": "Issue page /issues/<KEY>, the spec's decision block [data-dispatch-ask-block=storage] with a reply holding a callout list and a malformed inner decision; real Go Dispatch server, production SPA bundle, Postgres 17 + pgvector, Playwright chromium and iphone",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/text-typed-blocks.e2e.ts --project chromium --project iphone (inside the round-2 run of the eight specs)",
+      "observed": "The tester's test (commit 49082939, unchanged: the file diff against that commit is empty) passed in chromium and iphone: 'Broken inner?', 'step one', 'step two' and 'Fine: ok' visible inside the decision's thread",
+      "headSha": "9439f4a8ef90669b5a184c2a5ca9c484eb3dc208",
+      "negativeControl": "At b6720fc1, whose fold rule used a descendant combinator before [data-proof-block-content], the same test failed in both projects: getByText('step one') Expected visible, Received hidden (the tester's run, test.json)"
     },
     {
       "criterion": "A5. The provider does not move the editor's ask-block.ts into the entry chunk",
@@ -60,14 +69,15 @@
     "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx (mounts the card into ask shells)",
     "packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx (header, card, forged attributes, no provider, malformed)",
     "packages/dispatch/web/src/app.tsx (provides TextAskBlockCard)",
-    "packages/dispatch/web/src/styles.css (header and card rules under :is(.dispatch-doc, .dispatch-markdown))",
+    "packages/dispatch/web/src/styles.css (header and card rules under :is(.dispatch-doc, .dispatch-markdown); round 2: the fold, margin and editing rules take only the block's own content hole, > [data-proof-block-content])",
     "packages/dispatch/AGENTS.md (typed blocks in bodies; the drawing module)"
   ],
   "trickyParts": [
     "A collapsed comment turn renders MarkdownPreview (two lines, D7); the full MarkdownBody appears once the thread is expanded, and on the phone layout inside the 'Thread' dialog. The e2e opens the thread (by data-turn=comment:<id>) on both projects.",
     "AskBlockCard cannot be imported by useRenderedMarkdown (AskBlockCard -> AskCard/AskOptionList -> AskOptionRow -> MarkdownBody -> useRenderedMarkdown cycle, biome noImportCycles), so the app provides it through the TextAskCard context; without a provider the ask keeps its source list.",
     "The headless engine passes renderBlock the same BlockTypeSchema object Dispatch handed it; only the declared content type differs, so renderTypedBlock takes Pick<BlockTypeSchema, 'attributes'>.",
-    "Simplify made AskBlockView build its shell from renderAskBlockShell via DOMSerializer.renderSpec: same elements, attributes and order of children; attribute order on the frame differs (visible only in outerHTML text)."
+    "Simplify made AskBlockView build its shell from renderAskBlockShell via DOMSerializer.renderSpec: same elements, attributes and order of children; attribute order on the frame differs (visible only in outerHTML text).",
+    "Round 2: once every typed block in a body has a [data-proof-block-content] hole, any rule written as '.proof-typed-block-ask [data-proof-block-content] ...' reaches the typed blocks of a reply or answer note inside the card's footer. The decision's own hole is a direct child of its section in both drawings (renderAskBlockShell; the schema's toDOM wrapper adds attributes only), so the four rules now use a child combinator."
   ],
   "deviations": [
     "The plan said the comment turn renders the full MarkdownBody (ConversationTab.tsx:737); that line is a targeted message turn, and a comment's full body shows only with its thread expanded. The test expands the thread; acceptance and assertions are as planned.",
