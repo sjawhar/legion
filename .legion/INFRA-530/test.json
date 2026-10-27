@@ -2,24 +2,23 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-530",
-  "completed": "2026-10-27T02:28:32Z",
-  "verdict": "fail",
+  "completed": "2026-10-27T02:37:02Z",
+  "verdict": "pass",
   "implementerProof": {
     "verdict": "verified",
     "how": "Re-ran its two commands in the pod harness (tester lane): Go 'go test ./internal/dispatch/pmdoc -run TestLinkifyGuardLinksWhatGoldmarkLinks|TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine|TestEmailReadingsThatDifferAreRecorded|TestRenderKeepsStoredMarkdownThatReadsBack -count=1 -v' 4 PASS with the engine compared (no skip); 'bun run e2e -- email-links.e2e.ts' 2 passed (chromium, iphone). With parse.go restored from 5158fd92 (main + tests): Go AutoLink and linkify tests FAIL naming href a@b.test against the engine's mailto:a@b.test, and e2e 2 failed on the stored-markdown assertion."
   },
-  "failed": 2,
-  "failures": [
-    {
-      "criterion": "The base branch's required checks can pass at the head: required check pr-title",
-      "evidence": "Required check 'pr-title' (main's ruleset requires lint, typecheck, test, pr-title) concluded failure at code head 8a431a763f9e9cb8a99b9cea2383a626a453671e, run 40434368969: 'PR title must be a conventional commit subject (type(scope): summary)'. The title is 'Dispatch stores an email address written into a document as a mailto: link'. Fix: gh pr edit 2307 --repo sjawhar/legion --title 'fix(dispatch): <summary>' (squash subject and release versioning read it). Command: gh api repos/sjawhar/legion/commits/8a431a763f9e9cb8a99b9cea2383a626a453671e/check-runs."
-    },
-    {
-      "criterion": "The pull request can merge and run CI: no conflict with main",
-      "evidence": "gh api repos/sjawhar/legion/pulls/2307 --jq '.mergeable, .mergeable_state' prints 'false dirty' (gh pr view: CONFLICTING) against main@origin 08c345f7f145; main moved since base 7f7edb8de and touches packages/envoy/CHANGELOG.md, which this PR edits. GitHub computes no merge ref and runs no checks on a conflicting head (handoff head 9ad1a1f9 has 0 check runs). The implementer brings main in (real conflict, skill://legion-worker/references/conflicts-and-rewrites.md); the tester then compares the unchanged-diff fingerprint."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
+    {
+      "criterion": "rebase re-check: the change verified at 8a431a76 is the change at b6a86edf, and it still holds there",
+      "surface": "the pull request's diff against its fork point, and the Dispatch spec page in real Chromium against the real Go server + Postgres (email-links.e2e.ts)",
+      "command": "fingerprint command above for 8a431a76 and b6a86edf; cd packages/dispatch && bun run e2e -- email-links.e2e.ts; cd packages/envoy && go test ./internal/dispatch/pmdoc -run '<the four tests>' -count=1 -v",
+      "observed": "fingerprint 10032dfc… on both sides; e2e 2 passed; Go 4 PASS, no skip",
+      "headSha": "b6a86edf087d3fa27e6d76c79af3ec14eae8887e",
+      "negativeControl": "round 1: the same e2e and Go tests with parse.go from 5158fd92 (no fix) gave e2e 2 failed (stored [first@b.test](first@b.test)) and Go FAIL (href a@b.test against the engine's mailto:a@b.test); the code is the same now, as the fingerprint shows"
+    },
     {
       "criterion": "A1 stores: a bare email written through the API is stored as a mailto: link",
       "surface": "The agent's dispatch CLI (packages/envoy-client/bin/dispatch.ts, its own process) against the real Go Dispatch server + Postgres 17/pgvector in the pod harness",
@@ -49,5 +48,24 @@
     "Five email shapes read differently in Go and the editor's engine at the head and identically so at main + tests (not caused by this change): '_a@b.test_', '\"a@b.test\"', 'a@-b.test', 'a\\\\@b.test', '\\\\<a@b.test>'. '_a@b.test_' and 'a\\\\@b.test' are also not stable through one Go Render (Go reads no link; the rendering '*a@b.test*' / 'a@b.test' reads back as a link). Same email-boundary class as D1 (INFRA-531).",
     "/legion/harness/setup.sh guarded the Postgres start with pg_ctl status (the INFRA-95/INFRA-304 kill): the tester's run shut down the implementer's server. Changed in place on the issue volume to a pg_isready guard; verified it prints 'postgres already answers ... starting nothing' against the live server."
   ],
-  "ciRead": "At 8a431a76 (read 02:26Z): pr-title failure (required); typecheck success; changes success; Docs success; test, lint, build, envoy-go, envoy-go-race, envoy-smoke, envoy-e2e-local, envoy-infra-go, dispatch, dispatch-memory, dispatch-multiprocess, broker-multiprocess queued or in progress. Handoff head 9ad1a1f9: 0 check runs (PR conflicting)."
+  "ciRead": "At b6a86edf (read 02:36Z): lint, typecheck, test, pr-title, build, changes queued; read as running. At 8a431a76 in round 1: pr-title failure (since retitled).",
+  "round2": {
+    "kind": "rebase re-check 8a431a763f9e9cb8a99b9cea2383a626a453671e → b6a86edf087d3fa27e6d76c79af3ec14eae8887e: fingerprint unchanged, bare gates only",
+    "fingerprint": "jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum → 10032dfcdebbcda1ae265372a0a7b22c89cd249b5f4190fcb8d6c4abec0444c3 at both 8a431a76 and b6a86edf",
+    "roundOneFailuresCleared": [
+      "pr-title: the title is now 'fix(dispatch): store an email address written into a document as a mailto: link'",
+      "conflict: gh api repos/sjawhar/legion/pulls/2307 → mergeable true, mergeable_state blocked (required checks pending), after the forward merge 1e5169a6 with main@origin 08c345f7"
+    ],
+    "roundOneFailures": [
+      {
+        "criterion": "The base branch's required checks can pass at the head: required check pr-title",
+        "evidence": "Required check 'pr-title' (main's ruleset requires lint, typecheck, test, pr-title) concluded failure at code head 8a431a763f9e9cb8a99b9cea2383a626a453671e, run 40434368969: 'PR title must be a conventional commit subject (type(scope): summary)'. The title is 'Dispatch stores an email address written into a document as a mailto: link'. Fix: gh pr edit 2307 --repo sjawhar/legion --title 'fix(dispatch): <summary>' (squash subject and release versioning read it). Command: gh api repos/sjawhar/legion/commits/8a431a763f9e9cb8a99b9cea2383a626a453671e/check-runs."
+      },
+      {
+        "criterion": "The pull request can merge and run CI: no conflict with main",
+        "evidence": "gh api repos/sjawhar/legion/pulls/2307 --jq '.mergeable, .mergeable_state' prints 'false dirty' (gh pr view: CONFLICTING) against main@origin 08c345f7f145; main moved since base 7f7edb8de and touches packages/envoy/CHANGELOG.md, which this PR edits. GitHub computes no merge ref and runs no checks on a conflicting head (handoff head 9ad1a1f9 has 0 check runs). The implementer brings main in (real conflict, skill://legion-worker/references/conflicts-and-rewrites.md); the tester then compares the unchanged-diff fingerprint."
+      }
+    ],
+    "smoke": "at b6a86edf: the four pmdoc tests (TestLinkifyGuardLinksWhatGoldmarkLinks, TestAnEmailAutolinkIsAMailLinkInGoAndTheEngine, TestEmailReadingsThatDifferAreRecorded, TestRenderKeepsStoredMarkdownThatReadsBack) PASS with the engine compared; 'bun run e2e -- email-links.e2e.ts' 2 passed (chromium, iphone)"
+  }
 }
