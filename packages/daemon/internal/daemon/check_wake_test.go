@@ -8,8 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -34,7 +32,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
-	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // The commits a production check wake is driven with: the merge the check looks for, the build the
@@ -228,10 +225,6 @@ type checkWakeRig struct {
 	records     record.Store
 	pool        *pgxpool.Pool
 	logs        *syncBuffer
-	// feed is the local bare repository every provision of this rig's daemon clones from
-	// (checkWakeFeed): the daemon launches the implementer when a wake opens a look, and a launch
-	// provisions, which reaches GitHub in production and must reach nothing outside this test.
-	feed string
 	// built is what the daemon handed the fake runtime: the worker stream a pane's shim dials.
 	built *built
 	// api calls the booted daemon's HTTP API.
@@ -260,7 +253,7 @@ func newCheckWakeRig(t *testing.T) *checkWakeRig {
 	until := time.Now().Add(time.Hour)
 	opened := time.Now().Add(-time.Hour).UTC().Truncate(time.Microsecond)
 	rig := &checkWakeRig{cfg: cfg, root: root, implementer: implementer, js: workflowJetStream(t, natsURL), github: newCheckWakeGitHub(t),
-		rt: fake.NewRuntime(), built: &built{}, records: record.NewStore(), pool: pool, logs: &syncBuffer{}, feed: checkWakeFeed(t, "sjawhar/legion", "main")}
+		rt: fake.NewRuntime(), built: &built{}, records: record.NewStore(), pool: pool, logs: &syncBuffer{}}
 
 	ctx := context.Background()
 	st, err := store.Open(ctx, cfg.PostgresDSN)
@@ -289,44 +282,11 @@ func newCheckWakeRig(t *testing.T) *checkWakeRig {
 		t.Fatalf("record the suspended implementer: %v", err)
 	}
 	writePrompt(t, cfg, implementer)
+	// A wake resumes the implementer, and a launch provisions the issue's workspace when the host
+	// has none — which reaches GitHub. The workspace is here already, whole, so the launch
+	// provisions nothing and this test reaches nothing outside the host.
+	hostWorkspace(t, cfg.StateDir, "sjawhar/legion", root)
 	return rig
-}
-
-// checkWakeFeed makes the feed a rig's daemon provisions from: one bare repository of repo, at the
-// layout a feed has (<feed>/<owner>/<name>.git), with one commit on defaultBranch. The daemon's
-// launches then clone and fetch over the filesystem, with no credential and nothing of GitHub,
-// which a test host and a CI runner may not reach at all.
-func checkWakeFeed(t *testing.T, repo, defaultBranch string) string {
-	t.Helper()
-	root := t.TempDir()
-	feed := filepath.Join(root, "feed")
-	bare, err := workspace.FeedRepository(feed, ghrepo.MustParse(repo))
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed := filepath.Join(root, "seed")
-	run := func(dir string, argv ...string) {
-		t.Helper()
-		command := exec.Command(argv[0], argv[1:]...)
-		command.Dir = dir
-		// No configuration of the test host reaches these commands: a global or system git
-		// configuration could name a credential helper, a hook or another default branch.
-		command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
-			"GIT_TERMINAL_PROMPT=0", "GIT_AUTHOR_NAME=Legion test", "GIT_AUTHOR_EMAIL=test@example.invalid",
-			"GIT_COMMITTER_NAME=Legion test", "GIT_COMMITTER_EMAIL=test@example.invalid")
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("%s: %v\n%s", strings.Join(argv, " "), err, output)
-		}
-	}
-	run(root, "git", "init", "--bare", "--quiet", "--initial-branch="+defaultBranch, bare)
-	run(root, "git", "init", "--quiet", "--initial-branch="+defaultBranch, seed)
-	if err := os.WriteFile(filepath.Join(seed, "README"), []byte("seed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run(seed, "git", "add", "README")
-	run(seed, "git", "commit", "--quiet", "--no-gpg-sign", "-m", "seed")
-	run(seed, "git", "push", "--quiet", bare, defaultBranch)
-	return feed
 }
 
 // boot runs the daemon as the release build over the rig until the test ends, returning once it
@@ -339,7 +299,7 @@ func (rig *checkWakeRig) boot(t *testing.T) {
 	go func() {
 		done <- run(ctx, rig.cfg, Build{Revision: checkWakeDaemonBuild, Repository: "sjawhar/legion"}, slog.New(slog.NewJSONHandler(rig.logs, nil)), overrides{
 			listen: heldListen, runtime: fakeRuntime(rig.rt, rig.built).runtime, clock: stillClock{},
-			workflowTokens: &workflowTokenRecorder{}, githubAPI: rig.github.url, workspaceFeed: rig.feed,
+			workflowTokens: &workflowTokenRecorder{}, githubAPI: rig.github.url,
 		})
 	}()
 	t.Cleanup(func() {
