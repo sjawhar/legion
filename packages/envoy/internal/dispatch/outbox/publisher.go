@@ -119,8 +119,8 @@ func Run(ctx context.Context, deps Deps) {
 			scan(ctx, deps)
 		case <-retry.C:
 			scan(ctx, deps)
-		case <-compact.C:
-			compactDocuments(ctx, deps)
+		case due := <-compact.C:
+			compactDocuments(ctx, deps, due)
 		}
 	}
 }
@@ -128,9 +128,10 @@ func Run(ctx context.Context, deps Deps) {
 // compactDocuments runs the daily compaction of every document under documentCompactionLease, so
 // that one process does that walk however many serve the database, once per compactInterval and
 // not once per process: the period is this loop's own tick, so a process whose ticker fires hours
-// after the other's finds the day's compaction already done and skips it.
-func compactDocuments(ctx context.Context, deps Deps) {
-	duty.Exclusive(ctx, deps.Leases, documentCompactionLease, compactInterval, func(ctx context.Context) {
+// after the other's finds the day's compaction already done and skips it. due is the tick's own
+// time, the one its ticker delivered.
+func compactDocuments(ctx context.Context, deps Deps, due time.Time) {
+	duty.Exclusive(ctx, deps.Leases, documentCompactionLease, due, compactInterval, func(ctx context.Context) {
 		if err := deps.Docs.CompactAll(ctx); err != nil {
 			slog.Error("dispatch outbox: compact documents", "error", err)
 		}

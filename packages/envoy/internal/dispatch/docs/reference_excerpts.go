@@ -91,20 +91,23 @@ func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases 
 	// interval instead would make the converging 2 s steps - this loop's whole point when a
 	// rebuild leaves thousands of mentions owed an excerpt - one batch per five minutes.
 	period := ReferenceExcerptReconcileInterval
+	// due is when this tick was meant to run: now for the first, then the time each wait's timer
+	// delivered.
+	due := time.Now()
 	for {
 		// A tick whose lease another process holds, or whose period that process has already
 		// served, waits the full interval: that process is doing this work, and the drift it
 		// leaves is what the next tick to take the lease finds. leases is required, as it is of
 		// every leased loop.
 		wait := ReferenceExcerptReconcileInterval
-		duty.Exclusive(ctx, leases, referenceExcerptLease, period, func(ctx context.Context) {
+		duty.Exclusive(ctx, leases, referenceExcerptLease, due, period, func(ctx context.Context) {
 			wait = s.reconcileExcerptTick(ctx, started)
 		})
 		period = wait
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(wait):
+		case due = <-time.After(wait):
 		}
 	}
 }

@@ -169,8 +169,8 @@ func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, interval t
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			duty.Exclusive(ctx, leases, suggestionOutcomeLease, interval, func(ctx context.Context) {
+		case due := <-ticker.C:
+			duty.Exclusive(ctx, leases, suggestionOutcomeLease, due, interval, func(ctx context.Context) {
 				if err := sweepSuggestionOutcomes(ctx, pool); err != nil {
 					slog.Warn("dispatch: suggestion outcome sweep failed", "error", err)
 				}

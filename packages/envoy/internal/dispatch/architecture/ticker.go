@@ -37,12 +37,13 @@ func Run(ctx context.Context, importer *Importer, leases duty.Leases) {
 		}
 		slog.Info("dispatch architecture: no GitHub App key — the architecture importer is idle")
 		return true
-	}, func(ctx context.Context) { syncAllLeased(ctx, importer, leases) })
+	}, func(ctx context.Context, due time.Time) { syncAllLeased(ctx, importer, leases, due) })
 }
 
-// syncAllLeased runs one import pass under the lease, for the SyncInterval this loop ticks on.
-func syncAllLeased(ctx context.Context, importer *Importer, leases duty.Leases) {
-	duty.Exclusive(ctx, leases, architectureImportLease, SyncInterval, func(ctx context.Context) { syncAll(ctx, importer) })
+// syncAllLeased runs one import pass under the lease, for the SyncInterval this loop ticks on and
+// the tick due at due.
+func syncAllLeased(ctx context.Context, importer *Importer, leases duty.Leases, due time.Time) {
+	duty.Exclusive(ctx, leases, architectureImportLease, due, SyncInterval, func(ctx context.Context) { syncAll(ctx, importer) })
 }
 
 // syncAll imports every enabled source, ordered by project and then id; a

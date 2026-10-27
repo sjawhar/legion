@@ -37,7 +37,7 @@ const (
 )
 
 // readPeriod answers two things, both from the database's clock: the aligned start of the period
-// the tick about to run falls in - to_timestamp(floor(epoch / period) * period) - and whether a
+// the tick about to run was due in - to_timestamp(floor(epoch / period) * period) - and whether a
 // pass has already served that period. recordPass stores that boundary, with the period it was
 // computed from, once the pass has run (migration 0115).
 //
@@ -46,10 +46,18 @@ const (
 // interval, the row is stamped a few milliseconds later when the lease is taken, and
 // "began_at > now() - period" then reduces to a comparison of this tick's lease-acquire delay
 // against the previous tick's, which is a coin toss (measured on a lone process against real
-// Postgres: ran 7 skipped 3, ran 6 skipped 4, ran 6 skipped 4 over ten one-second ticks). Both
-// sides of this comparison are boundaries rather than instants, so it cannot turn on that delay:
-// a tick one period after the last one is always at the next boundary, and no tolerance constant
-// has to be chosen to make that true.
+// Postgres: ran 7 skipped 3, ran 6 skipped 4, ran 6 skipped 4 over ten one-second ticks).
+//
+// The boundary is the one the tick was due in, not the one the query happens to run in: $3 is
+// how long ago the tick was due, measured just before the query, and it is taken off now() before
+// the bucket is chosen. A boundary of now() alone carries the same acquire delay in by another
+// door: a tick due just before a boundary whose lease took longer than the time left lands in the
+// next period, and the next tick, on time one period later, finds that period served and is
+// refused - a lone loop losing a period (INFRA-523; measured: ran 9 skipped 1 over ten one-second
+// ticks). Taken back to its due time, a tick one period after the last one is at the next
+// boundary whatever either tick's delay, and no tolerance constant has to be chosen to make that
+// true. Only the elapsed time crosses from this process; the clock that reads it is still the
+// database's, so two processes' boundaries agree however far their wall clocks differ.
 //
 // The period is stored and compared beside the boundary because a boundary means nothing on
 // another period's scale. docs.RunReferenceExcerptReconciliation varies its own period between
@@ -62,15 +70,18 @@ const (
 // runs, and the loop is on its own scale from then on. That costs one pass at each change, which
 // is the direction to err in - the other direction is a loop that stops.
 //
-// Everything is read in the database because two processes' wall clocks differ by whatever their
-// hosts' do, and the database's is the one clock every pass is judged by. The period crosses as
-// the whole number of nanoseconds a Go duration is, stored and compared as that integer, and the
-// seconds the boundary arithmetic needs are derived from it in numeric: a scale equality decided
-// by a float's rounding would be this same defect in a new coat.
+// Every instant is read on the database's clock because two processes' wall clocks differ by
+// whatever their hosts' do, and the database's is the one clock every pass is judged by; what
+// this process contributes is a duration, which no host's offset changes. The period and the
+// time since the tick was due cross as the whole number of nanoseconds a Go duration is, the
+// period stored and compared as that integer, and the seconds the boundary arithmetic needs are
+// derived from them in numeric: a scale equality decided by a float's rounding would be this same
+// defect in a new coat.
 const (
 	readPeriod = `with tick as (
 			select to_timestamp(
-				floor(extract(epoch from now()) / ($2::numeric / 1000000000))
+				floor((extract(epoch from now()) - $3::numeric / 1000000000)
+					/ ($2::numeric / 1000000000))
 				* ($2::numeric / 1000000000)) as boundary)
 		select tick.boundary, exists (
 			select 1 from duty_passes
@@ -114,12 +125,14 @@ var errLeaseNotHeld = errors.New("the unlock reports this session did not hold t
 // first - so their passes almost never overlap and a guard that only excluded concurrent passes
 // would let every process run the whole pass every period.
 //
-// period is the loop's own interval, the time it means to leave between passes, and is compared
-// against the database's record of when this lease's last pass began (duty_passes, migration
-// 0115). A period of zero or less is no period at all - mutual exclusion and nothing else - which
-// is what the delivery consumers' reconciliation wants: it is not a periodic loop, since it runs
-// on every bind poll, and it carries a throttle of its own (delivery.bindThrottle). Such a pass
-// reads and records nothing.
+// period is the loop's own interval, the time it means to leave between passes, and due is the
+// moment this tick was scheduled for - the value its ticker or timer delivered, not the moment the
+// pass got round to running. The tick is placed in the period-aligned bucket due falls in, and
+// that bucket is compared against the database's record of the bucket this lease's last pass
+// served (duty_passes, migration 0115; readPeriod). A period of zero or less is no period at all -
+// mutual exclusion and nothing else - which is what the delivery consumers' reconciliation wants:
+// it is not a periodic loop, since it runs on every bind poll, and it carries a throttle of its
+// own (delivery.bindThrottle). Such a pass reads and records nothing, and due is not read.
 //
 // The lease is a session-level two-key advisory lock, leaseNamespace and the name's hashtext, taken
 // on a connection of its own with pg_try_advisory_lock: a lease the database reports held elsewhere
@@ -143,7 +156,7 @@ var errLeaseNotHeld = errors.New("the unlock reports this session did not hold t
 // process killed in the middle of a pass - a task replaced by a deploy, an out-of-memory kill -
 // leaves no lease behind, and the surviving process takes it on its next tick. A lease row in a
 // table would instead have to be waited out.
-func Exclusive(ctx context.Context, leases Leases, name string, period time.Duration, pass func(context.Context)) bool {
+func Exclusive(ctx context.Context, leases Leases, name string, due time.Time, period time.Duration, pass func(context.Context)) bool {
 	conn, err := leases.Acquire(ctx)
 	if err != nil {
 		reportFailure(name, "dispatch duty: take the lease", err)
@@ -163,7 +176,7 @@ func Exclusive(ctx context.Context, leases Leases, name string, period time.Dura
 	// Deferred, so a pass that panics gives its lease back on the way out rather than holding it
 	// for as long as the connection lives.
 	defer freeLeaseOn(conn, name)
-	boundary, served, err := periodServed(ctx, conn, name, period)
+	boundary, served, err := periodServed(ctx, conn, name, due, period)
 	if err != nil {
 		// The record could not be read, so whether this period is served is unknown. The pass
 		// does not run: a tick that runs on no answer is the duplicate work the record is here
@@ -199,20 +212,22 @@ func Exclusive(ctx context.Context, leases Leases, name string, period time.Dura
 	return true
 }
 
-// periodServed answers the aligned start of the period this tick falls in - the boundary
-// to_timestamp(floor(epoch / period) * period) on the database's clock - and whether a pass has
-// already served that period, whichever process ran it. A period of zero or less has no period to
-// serve and reads nothing.
+// periodServed answers the aligned start of the period this tick was due in - the boundary
+// to_timestamp(floor(epoch / period) * period) of due, read on the database's clock as now() less
+// the time since due - and whether a pass has already served that period, whichever process ran
+// it. A period of zero or less has no period to serve and reads nothing.
 //
-// Both sides of the comparison are boundaries, never an instant: a boundary compared against
-// now() would let the acquire-delay jitter back in through a different door. And a stored
-// boundary counts only against a tick of the same period, since a boundary carries no record of
-// the scale that produced it (readPeriod).
-func periodServed(ctx context.Context, conn *pgxpool.Conn, name string, period time.Duration) (boundary time.Time, served bool, err error) {
+// Both sides of the comparison are boundaries, never an instant, and the tick's boundary is its
+// due time's rather than the query's: a boundary of the moment the query runs would let the
+// acquire-delay jitter back in through a different door (readPeriod). The time since due is
+// measured here, immediately before the query, so the only delay it leaves out is that one round
+// trip. And a stored boundary counts only against a tick of the same period, since a boundary
+// carries no record of the scale that produced it.
+func periodServed(ctx context.Context, conn *pgxpool.Conn, name string, due time.Time, period time.Duration) (boundary time.Time, served bool, err error) {
 	if period <= 0 {
 		return time.Time{}, false, nil
 	}
-	err = conn.QueryRow(ctx, readPeriod, name, period.Nanoseconds()).Scan(&boundary, &served)
+	err = conn.QueryRow(ctx, readPeriod, name, period.Nanoseconds(), time.Since(due).Nanoseconds()).Scan(&boundary, &served)
 	return boundary, served, err
 }
 

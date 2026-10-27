@@ -36,7 +36,7 @@ func TestAnImportPassWhoseLeaseIsHeldElsewhereReadsNothing(t *testing.T) {
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)
 	go func() {
-		held <- duty.Exclusive(ctx, leases, architectureImportLease, 0, func(context.Context) {
+		held <- duty.Exclusive(ctx, leases, architectureImportLease, time.Time{}, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})
@@ -47,7 +47,7 @@ func TestAnImportPassWhoseLeaseIsHeldElsewhereReadsNothing(t *testing.T) {
 		t.Fatal("the other caller never took the architecture-import lease")
 	}
 
-	syncAllLeased(ctx, importer, leases)
+	syncAllLeased(ctx, importer, leases, time.Now())
 	if trees, blobs := fake.reads(); trees != 0 || blobs != 0 {
 		t.Fatalf("the pass read %d trees and %d blobs under a lease held elsewhere; want none", trees, blobs)
 	}
@@ -60,7 +60,7 @@ func TestAnImportPassWhoseLeaseIsHeldElsewhereReadsNothing(t *testing.T) {
 	}
 
 	// The lease is the pass's, not the process's: the next pass takes it and imports.
-	syncAllLeased(ctx, importer, leases)
+	syncAllLeased(ctx, importer, leases, time.Now())
 	if trees, _ := fake.reads(); trees == 0 {
 		t.Fatal("the pass read no tree with the lease free")
 	}

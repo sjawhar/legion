@@ -79,13 +79,13 @@ func (r *Reconcile) Run(ctx context.Context, leases duty.Leases) {
 		}
 		slog.Info("dispatch delivery: no GitHub App key — the reconcile is idle")
 		return true
-	}, func(ctx context.Context) { r.leasedPass(ctx, leases) })
+	}, func(ctx context.Context, due time.Time) { r.leasedPass(ctx, leases, due) })
 }
 
 // leasedPass runs one reconcile pass under the lease, for the ReconcileInterval this loop ticks
-// on.
-func (r *Reconcile) leasedPass(ctx context.Context, leases duty.Leases) {
-	duty.Exclusive(ctx, leases, deliveryReconcileLease, ReconcileInterval, r.runOnce)
+// on and the tick due at due.
+func (r *Reconcile) leasedPass(ctx context.Context, leases duty.Leases, due time.Time) {
+	duty.Exclusive(ctx, leases, deliveryReconcileLease, due, ReconcileInterval, r.runOnce)
 }
 
 // runOnce performs one reconcile pass: a permission check (so a missing Actions or Pull-requests

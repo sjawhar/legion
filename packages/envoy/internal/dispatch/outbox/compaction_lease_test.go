@@ -52,7 +52,7 @@ func TestTheCompactionTickWhoseLeaseIsHeldElsewhereCompactsNothing(t *testing.T)
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)
 	go func() {
-		held <- duty.Exclusive(ctx, leases, documentCompactionLease, 0, func(context.Context) {
+		held <- duty.Exclusive(ctx, leases, documentCompactionLease, time.Time{}, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})
@@ -63,7 +63,7 @@ func TestTheCompactionTickWhoseLeaseIsHeldElsewhereCompactsNothing(t *testing.T)
 		t.Fatal("the other caller never took the document-compaction lease")
 	}
 
-	compactDocuments(ctx, deps)
+	compactDocuments(ctx, deps, time.Now())
 	if got := compacting.compactions.Load(); got != 0 {
 		t.Fatalf("the tick compacted %d times under a lease held elsewhere; want none", got)
 	}
@@ -73,7 +73,7 @@ func TestTheCompactionTickWhoseLeaseIsHeldElsewhereCompactsNothing(t *testing.T)
 	}
 
 	// The lease is the pass's, not the process's: the tick after it is given back compacts.
-	compactDocuments(ctx, deps)
+	compactDocuments(ctx, deps, time.Now())
 	if got := compacting.compactions.Load(); got != 1 {
 		t.Fatalf("the tick compacted %d times with the lease free; want once", got)
 	}
