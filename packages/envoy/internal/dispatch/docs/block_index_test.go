@@ -453,6 +453,86 @@ func TestBlockIndexIndexesAClosedDocumentWithAnUnsettledEdit(t *testing.T) {
 	}
 }
 
+// A closed issue's document indexed while its live text was ahead of its latest version must not
+// keep a history that no version holds once the issue reopens. The reopen's settlement writes the
+// edit the close could not settle into version 2. The block that edit made is then dated to
+// version 2, the first version that holds it. Every text recorded at version 1 is text version 1
+// holds, so a reference pinned to version 1 never shows a block or a text that version 1 does not
+// have.
+func TestTheReopensSettlementDatesAClosedDocumentsUnsettledEditToItsVersion(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	stored := "Ship it after dispatch://CORE-2.\n"
+	spec := createOwedDocument(t, database, service, "", "spec", stored+"\nUnsettled typed line.\n", stored)
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'CORE-1'`); err != nil {
+		t.Fatalf("close CORE-1: %v", err)
+	}
+	closeDocumentRoom(t, service, spec)
+	reconcileBlockIndex(t, service, "")
+	live, liveBlocks, err := service.TextWithBlocks(ctx, spec)
+	if err != nil {
+		t.Fatalf("read the live document: %v", err)
+	}
+	var typed string
+	for _, block := range liveBlocks {
+		if strings.Contains(live[block.From:block.To], "Unsettled typed line.") {
+			typed = block.ID
+		}
+	}
+	if typed == "" {
+		t.Fatalf("no live block holds the unsettled edit: %q %#v", live, liveBlocks)
+	}
+
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = null where key = 'CORE-1'`); err != nil {
+		t.Fatalf("reopen CORE-1: %v", err)
+	}
+	if err := service.SettleIssueDocuments(ctx, "CORE-1"); err != nil {
+		t.Fatalf("settle the reopened issue's documents: %v", err)
+	}
+	var latest int
+	var second string
+	if err := database.Pool.QueryRow(ctx, `
+		select number, markdown from artifact_versions where artifact_id = $1 order by number desc limit 1
+	`, spec).Scan(&latest, &second); err != nil {
+		t.Fatalf("read the latest version: %v", err)
+	}
+	if latest != 2 || !strings.Contains(second, "Unsettled typed line.") {
+		t.Fatalf("latest version %d %q, want version 2 holding the edit", latest, second)
+	}
+	if version := blockIndexAt(t, database, spec); version == nil || *version != 2 {
+		t.Fatalf("blocks indexed at %v, want version 2", version)
+	}
+
+	var changed int
+	if err := database.Pool.QueryRow(ctx, `
+		select changed_version from document_blocks where artifact_id = $1 and block_id = $2
+	`, spec, typed).Scan(&changed); err != nil {
+		t.Fatalf("read the typed block: %v", err)
+	}
+	if changed != 2 {
+		t.Fatalf("the block the unsettled edit made is dated version %d, want 2, the first version that holds it", changed)
+	}
+	rows, err := database.Pool.Query(ctx, `
+		select block_id, text from document_block_texts where artifact_id = $1 and version = 1
+	`, spec)
+	if err != nil {
+		t.Fatalf("read the texts recorded at version 1: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, blockText string
+		if err := rows.Scan(&id, &blockText); err != nil {
+			t.Fatalf("scan a text recorded at version 1: %v", err)
+		}
+		if !strings.Contains(stored, blockText) {
+			t.Fatalf("block %s is recorded at version 1 with text %q, which version 1 %q does not hold", id, blockText, stored)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the texts recorded at version 1: %v", err)
+	}
+}
+
 // Twenty-five documents of an open issue whose ids sort first are skipped as live ahead, owed a
 // settlement that has not run. The keyset moves past them, so the document that sorts last is
 // indexed in the second batch rather than waiting behind them; they stay owed, and the next tick
