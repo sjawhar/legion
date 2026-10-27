@@ -92,6 +92,10 @@
   close and unregister (`closeReplayedRemoval`), and which one-time notices are a card or a
   warning (`routeReplayNotice`) (INFRA-439).
 
+- `renderInbound` renders an `artifact.human_edited` card as `edit: spec.md v4 to v7, edited by
+  person@example.com`, then the diff in a fenced `diff` block after the card, then `(diff cut at
+  4,096 bytes)` when Dispatch cut it; an issue's event log (`dispatch read dispatch://KEY/log`)
+  names the same line.
 - `dispatch read --ref` reads one block of a document: `dispatch://KEY/spec#b-<id>`,
   `dispatch://KEY/artifact/<slug>#b-<id>` or `dispatch://PROJECT/artifact/<slug>#b-<id>`,
   optionally pinned `@v<N>`, or a live document page's URL ending `#b-<id>`. It prints `Block:`,
