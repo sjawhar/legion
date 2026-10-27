@@ -2,12 +2,21 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-571",
-  "completed": "2026-10-27T06:43:19Z",
+  "completed": "2026-10-27T07:03:14Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2364",
-  "codeHead": "e365a3b4fc81",
+  "codeHead": "469388f8cbdd",
   "round2": "Tester verdict fail (test.json): PR CONFLICTING with main 448a4100 (#2270 CPU/memory limits on every docker run), so no CI ran. Fix: forward merge 95693430 (jj new legion/INFRA-571 main@origin), every conflicting site keeps main's --cpus/--memory and this PR's pg18 image and /var/lib/postgresql mount; main's two new /var/lib/postgresql/data mounts on the 18 image (internal/testpg testcontainers tmpfs, stage4a-sandbox-runtime.sh session database) moved to /var/lib/postgresql; dev-postgres.test.sh's printed-run expectations gain --cpus 2 --memory 2g. Fingerprint 783d3cbe… -> 78722ecf… (changed), posted as https://github.com/sjawhar/legion/pull/2364#issuecomment-6434963164. GitHub now reports MERGEABLE.",
   "round3": "Reviewer changes_requested at dab48bfa (code 95693430): 1 important (16-lane coverage), 2 minor (dev-postgres rm -v; stopped-container race and no restored-data check). Fixed in e365a3b4: broker-go-postgres-16 (envoy-and-contracts.yaml: ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/broker/... ./internal/broker/... plus -tags multiprocess ./cmd/broker) and daemon-go-postgres-16 (pr-and-main.yaml: go test -count=1 ./... in packages/daemon with the test job's prerequisites), both on the 0.8.7-pg16 digest with the Dispatch lane's naming and comment; dev-postgres.sh prints a pg_isready wait after starting a stopped container, a database listing before the dump and after the restore (gating the removal), docker rm -v / docker rm -f -v; its header, packages/dispatch/README.md and running-dispatch.md say 18 is the version Dispatch's tests and dev databases run (production stays 16 until INFRA-572). Threads PRRT_kwDORFy7ds6wkllh, PRRT_kwDORFy7ds6wkllk, PRRT_kwDORFy7ds6wkllo answered and resolved at e365a3b4.",
+  "round4": "Tester verdict fail at e365a3b4 with a red test (4cbf4534, dev-postgres.test.sh: the checks printed before docker rm -v must tell an empty restore from a whole one). INFRA-148 architect at the review round cap (2026-10-27T06:55Z, Envoy 8e1e40baa11c06f0c1b51e37269ce591) narrowed the round to that test alone: the printed move reads the tables in the restored dispatch database, must match the old container's count, and stops before docker rm -v when they differ; no other change to the move. Fixed in 469388f8: count_tables (psql -d dispatch, count of relkind 'r' in public) printed against the old container before the dump and the new one after the restore, with the stop-before-removal text; only the script's own earlier test cases were adjusted (sequence array, dump_line index); the red block is byte-identical to 4cbf4534.",
   "proof": [
+    {
+      "criterion": "The checks dev-postgres.sh prints before docker rm -v tell a restore of an empty dump from a whole one (tester's red test 4cbf4534)",
+      "surface": "dev-postgres.sh's printed move replayed as printed on two real PostgreSQL clusters (old with a dispatch database of 25 rows, new created as POSTGRES_DB does) through the red test's fake docker",
+      "command": "source /legion/scratch/tmp/infra571/pg/env.sh; (pgenv 18; cd packages/envoy && bash scripts/dev-postgres.test.sh); same with pgenv 16; and on a plain PATH (SKIP)",
+      "observed": "PASS: the checks printed before `docker rm -v` tell a restore of an empty dump from a whole one (exit 0 on 18.6 and 16.15; the dispatch table count prints 1 after the whole restore, 0 after the empty one); plain PATH: the case SKIPs and every other case passes; dev-broker.test.sh passes; jj diff --from 4cbf4534 on the test file has no hunk past old line 221, so the red block is unchanged",
+      "headSha": "469388f8cbdd",
+      "negativeControl": "at e365a3b4 (before the count) the same red case fails: 'the checks printed before `docker rm -v` print the same after a restore of an empty dump as after a whole one' with 'dispatch postgres 1 180006' both times"
+    },
     {
       "criterion": "Until INFRA-572, CI runs the broker's and the daemon's Postgres-backed suites on production's Postgres 16 (INFRA-148 architect decision, review round 1 finding)",
       "surface": "the new lanes' Postgres-backed packages on a PGDG PostgreSQL 16.15 cluster in the pod (scram-sha-256 over TCP, as CI's service), plus actionlint on the two workflows; the full lanes run on GitHub at e365a3b4",
