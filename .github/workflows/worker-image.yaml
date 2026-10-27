@@ -237,3 +237,4 @@ jobs:
         with:
           subject-name: ${{ needs.build.outputs.image }}
           subject-digest: ${{ needs.build.outputs.digest }}
+# scratch INFRA-520: a pull request build reads the worker-image cache scope and writes none
