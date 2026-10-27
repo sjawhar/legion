@@ -35,6 +35,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
@@ -464,7 +465,32 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery); err != nil {
+	// INFRA-555: the process enters the registry of live server processes once its port is bound
+	// and before it serves its first request, after one probe that the database answers. The
+	// registration refuses a key set a live peer does not share (processes.Register): a cookie this
+	// process minted would not verify there, or the reverse, and the people it signed in would be
+	// signed out on the next request the load balancer sends to the other. That refusal ends the
+	// process with 1 here, before anything is served, so a roll stalls on the new pod while the old
+	// ones keep serving. The registration's heartbeat runs until shutdown deregisters it, after the
+	// HTTP drain (shutdown), so a draining process counts as live until its last request is
+	// answered. The prune loop deletes what processes that died without deregistering left behind,
+	// once overall under its lease.
+	if _, err := database.Pool.Healthy(ctx); err != nil {
+		slog.Error("dispatch: probe the database", "error", err)
+		os.Exit(1)
+	}
+	registration, err := processes.Register(ctx, database.Pool, processes.Instance{
+		Commit:         buildCommit,
+		DashboardBuild: processes.DashboardBuild(webDistDir),
+		SigningKeys:    signingKey.Fingerprints(),
+	})
+	if err != nil {
+		slog.Error("dispatch: register this server process", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("dispatch: registered this server process", "instance", registration.ID)
+	go processes.RunPrune(ctx, database.Pool, leases)
+	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery, deregisterAfterDrain(registration)); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/processes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -51,10 +52,31 @@ const silentProbes = 3
 // probes it runs every pass.
 const drainPollInterval = 250 * time.Millisecond
 
-// serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown). It returns
-// the error that ended serving when serving failed, which cancels ctx.
+// deregisterTimeout bounds the delete that takes this process out of the registry of live server
+// processes at shutdown. It is one delete by primary key, so five seconds is a slow round trip
+// rather than a slow statement; a deregistration that does not land leaves a row whose heartbeat
+// has stopped, which drops out of the live window (processes.LiveWindow) on its own.
+const deregisterTimeout = 5 * time.Second
+
+// deregisterAfterDrain is the deregistration shutdown runs once HTTP has drained: registration's
+// row deleted within deregisterTimeout, a failure logged.
+func deregisterAfterDrain(registration *processes.Registration) func() {
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
+		defer cancel()
+		if err := registration.Deregister(ctx); err != nil {
+			slog.Warn("dispatch: deregister this server process", "instance", registration.ID, "error", err)
+			return
+		}
+		slog.Info("dispatch: deregistered this server process", "instance", registration.ID)
+	}
+}
+
+// serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown), deregistering
+// it once HTTP has drained. It returns the error that ended serving when serving failed, which
+// cancels ctx.
 func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener,
-	addr string, documentService *docs.Service, pool *store.Pool, waitDelivery func()) error {
+	addr string, documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func()) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("dispatch: listening", "addr", addr)
@@ -65,7 +87,7 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 	}()
 	<-ctx.Done()
 	slog.Info("dispatch: shutting down")
-	shutdown(server, documentService, pool, waitDelivery)
+	shutdown(server, documentService, pool, waitDelivery, deregister)
 	select {
 	case err := <-serveErr:
 		return err
@@ -81,10 +103,13 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // Lifetime-driven shutdown. The database pool closes once every request has answered and no
 // connection of the shared or document-rooms pool is in use. While the database answers, nothing
 // but the runtime's kill bounds that wait, so a write in flight commits and is answered if it
-// finishes before the kill. A database that has stopped answering (silentProbes) holds its
-// connections forever, so Dispatch exits without them, and the database rolls back whatever they
-// held open.
-func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func()) {
+// finishes before the kill. Then deregister takes this process out of the registry of live server
+// processes: it runs only once HTTP has drained, so a draining process counts as live until its
+// last request is answered, and before the pool closes. A database that has stopped answering
+// (silentProbes) holds its connections forever, so Dispatch exits without them, and the database
+// rolls back whatever they held open; it deregisters nothing then, since the delete would wait on
+// that database too, and its row's heartbeat stops with the process instead.
+func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery, deregister func()) {
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -104,6 +129,7 @@ func shutdown(server *http.Server, documentService *docs.Service, pool *store.Po
 	}
 	waitDelivery()
 	if waitUntilIdle(drained, pool) {
+		deregister()
 		pool.Close()
 	}
 }

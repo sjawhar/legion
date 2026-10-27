@@ -55,10 +55,9 @@ func multiprocessNATS(t *testing.T) string {
 	return url
 }
 
-// multiprocessSigningKey is the one DISPATCH_SIGNING_KEY every process of a pair carries: the
-// deployment rule INFRA-66 wrote down, since a session cookie minted by one process is presented
-// to the other on the next request and nothing can tell a key the other process does not hold
-// from a session that has ended.
+// multiprocessSigningKey is the one DISPATCH_SIGNING_KEY every process of a pair carries: a
+// session cookie minted by one process is presented to the other on the next request, and a
+// process whose key set a live peer does not share refuses to start (processes.Register).
 const multiprocessSigningKey = "multiprocess-signing-key"
 
 // dispatchPair is two envoy-dispatch processes on one database and one NATS server.
@@ -1299,9 +1298,9 @@ const (
 
 // A person signs in on one process and their next request lands on the other, which is what a
 // load balancer in front of two tasks does on every page load. The session itself is in Postgres,
-// which both read; what each process needs of its own is DISPATCH_SIGNING_KEY, and nothing in
-// Dispatch can tell a cookie signed with another key from a session that has ended - the third
-// process here, carrying a key of its own, answers the same 401 either way.
+// which both read; what each process needs of its own is DISPATCH_SIGNING_KEY. A process carrying
+// a key no live peer shares refuses to start (TestAProcessWhoseKeySetALivePeerDoesNotShareRefusesToStart),
+// so no third process with a key of its own serves beside these two.
 func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *testing.T) {
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
@@ -1315,12 +1314,6 @@ func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *
 	}
 	pair := newPair(t)
 	pair.start(t, signIn)
-	// The negative control: a third process on the same database and the same sign-in issuer,
-	// whose signing key is its own, as a deployment that rolled one task with a new secret has.
-	odd := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
-		NATSURL: pair.nats, SigningKey: "a-key-of-its-own", Env: signIn,
-	})
-	odd.waitHealthy(t)
 
 	session := signInThrough(t, pair.a, issuer)
 	for _, target := range []struct {
@@ -1330,7 +1323,6 @@ func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *
 	}{
 		{"the process it was minted on", pair.a, http.StatusOK},
 		{"the other process of the pair", pair.b, http.StatusOK},
-		{"a process carrying a key of its own", odd, http.StatusUnauthorized},
 	} {
 		answer, status := whoami(t, target.process, session)
 		if status != target.status {
@@ -1340,6 +1332,74 @@ func TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey(t *
 		if status == http.StatusOK && !strings.Contains(answer, cookiePerson) {
 			t.Errorf("%s answered whoami %s, want the person the session names (%s)", target.name, answer, cookiePerson)
 		}
+	}
+}
+
+// The registry of live server processes refuses a process whose signing key set a live peer does
+// not share both ways (processes.Register): with a pair live under one key, a process carrying a
+// key of its own - a task rolled with a changed secret - and one with no DISPATCH_SIGNING_KEY,
+// which signs with a key it minted in its own data dir, each exit 1 with the refusal and never
+// answer /healthz, since each would sign people out of the pair or be signed out by it. A process
+// given the pair's key first and another second, the first step of a rotation, starts beside them.
+func TestAProcessWhoseKeySetALivePeerDoesNotShareRefusesToStart(t *testing.T) {
+	pair := startPair(t, nil)
+	for _, refused := range []struct{ name, key string }{
+		{"a process carrying a key of its own", "a-key-of-its-own"},
+		{"a process with no key, which minted one in its data dir", ""},
+	} {
+		process := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{NATSURL: pair.nats, SigningKey: refused.key})
+		requireRefusedToStart(t, process, refused.name)
+	}
+
+	rotating := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: multiprocessSigningKey + " a-key-of-its-own",
+	})
+	rotating.waitHealthy(t)
+	var registered int
+	if err := pair.database.Pool.QueryRow(context.Background(), `select count(*) from server_processes`).Scan(&registered); err != nil {
+		t.Fatalf("count the registered server processes: %v", err)
+	}
+	if registered != 3 {
+		t.Errorf("%d server processes registered, want the pair and the process given the pair's key first", registered)
+	}
+}
+
+// requireRefusedToStart waits up to a minute for the process to exit, asking its /healthz all the
+// while, and requires that it exited 1 with the registry's refusal, never having answered /healthz
+// nor logged that it serves.
+func requireRefusedToStart(t *testing.T, p *dispatchProcess, name string) {
+	t.Helper()
+	client := &http.Client{Timeout: time.Second}
+	deadline := time.Now().Add(time.Minute)
+	answered := 0
+	for exited := false; !exited; {
+		select {
+		case <-p.Exited:
+			exited = true
+			continue
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s was still running a minute after it started:\n%s", name, p.Output.String())
+		}
+		if response, err := client.Get(p.url("/healthz")); err == nil {
+			_ = response.Body.Close()
+			answered++
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	output := p.Output.String()
+	if code := p.Cmd.ProcessState.ExitCode(); code != 1 {
+		t.Errorf("%s exited %d, want 1:\n%s", name, code, output)
+	}
+	if answered > 0 {
+		t.Errorf("%s answered /healthz %d times before it exited", name, answered)
+	}
+	if !p.logged(`msg="dispatch: register this server process"`, "signing key set does not match a live server process", "DISPATCH_SIGNING_KEY") {
+		t.Errorf("%s did not log the registry's refusal:\n%s", name, output)
+	}
+	if p.logged(`msg="dispatch: listening"`) {
+		t.Errorf("%s logged that it serves:\n%s", name, output)
 	}
 }
 

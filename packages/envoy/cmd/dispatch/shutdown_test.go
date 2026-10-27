@@ -226,7 +226,7 @@ func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
 			close(entered)
 			<-release
 			waitDelivery()
-		})
+		}, func() {})
 	}()
 	select {
 	case <-entered:
