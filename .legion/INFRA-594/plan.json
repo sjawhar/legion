@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-594",
+  "completed": "2026-10-27T04:50:30Z",
+  "plan": "dispatch://INFRA-594/artifact/plan-md",
+  "summary": "Each Oh My Pi, Claude Code and serving-port session gets a durable JetStream pull consumer s-<session id> on ENVOY_NOTIFICATIONS (agent subject plus followed stored topics), created and owned by the listener that holds the session's registration. That listener relays each message in order on the unstored core subject notifications.envoy.deliver.<id> (HTTP prompt_async for serving-port sessions); the plugin answers received at decode, progress while held, done after the transcript write, and only done acks the stored message. Every new relay start restarts the consumer at its ack floor so order holds; the plugin's persisted ledger (from sjawhar/legion#2228) drops repeats. Lane receipts stay; RequestCoreTo also requires the stream's PubAck. The role lane moves to one queue group across listeners (fallback to per-machine when the grant lacks it), non-blocking receipt waits, no pending limit. EV-12, EV-10/EP-21, EV-14, EV-15 fixed. Listener grant gains session-consumer API; session grant unchanged; a listener without the grant answers registrations core (today's path).",
+  "order": [
+    "0 start on main after sjawhar/legion#2228 merges; merge INFRA-547 forward if it merged first",
+    "1 internal/bus: session-consumer client (jetstream package, own connection), RequestCoreTo PubAck, role-lane connection without pending limits, filter reduction",
+    "2 infra/core grants, goldens, natslive test, infra docs",
+    "3 cmd/listener: delivery registration field, consumer manager, relay loops (NATS and HTTP), ownership, durable skip, subject index, serving-port workers, exception Nats-Msg-Id, live-lane skip, role lane",
+    "4 packages/envoy-client consumer-delivery module and registration",
+    "5 packages/pi-envoy consumer mode, EV-12, late-frame rule",
+    "6 packages/claude-envoy consumer mode, dist rebuild",
+    "7 packages/daemon/internal/claudebridge --replay-user-messages ack",
+    "8 scripts/e2e/envoy-session-delivery.sh live test",
+    "9 load measurement on INFRA-589's harness after it merges (harness sessions taught consumer delivery)",
+    "10 docs",
+    "11 simplify pass, PR, CHANGELOGs"
+  ],
+  "acceptance": [
+    {
+      "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its connection, either listener, a Dispatch pod; plugin acks after write; unacked redelivered",
+      "surface": "Real omp and Claude Code (bridge mode, bunx 2.1.311) sessions, natsd -js, two listener binaries, envoy-dispatch on Postgres, in the issue pod",
+      "command": "bash scripts/e2e/envoy-session-delivery.sh",
+      "negativeControl": "Built from c3d09eec: count 0 under disruption (a) for agent, issue and role; from #2228's merge: 0 for role under (a)"
+    },
+    {
+      "criterion": "Replay driven by the stored stream, not polling",
+      "surface": "Listener with session consumers; envoy-client",
+      "command": "cd packages/envoy && go test -count=1 -run TestSessionConsumer ./cmd/listener; bun test packages/envoy-client",
+      "negativeControl": "Relay disabled fails; polling call injected in consumer mode fails"
+    },
+    {
+      "criterion": "One role message stored and forwarded once; slow holder does not stall other roles; nothing dropped for queueing",
+      "surface": "Two listener binaries on one NATS",
+      "command": "cd packages/envoy && go test -count=1 -run TestRoleLane ./cmd/listener",
+      "negativeControl": "Main's lane stores 200 forwards with two listeners; second role p99 over 2 s"
+    },
+    {
+      "criterion": "EV-12, EV-10/EP-21, EV-14, EV-15 fixed",
+      "surface": "Plugin tests on fakes; listener tests; Go benchmark",
+      "command": "bun test packages/pi-envoy packages/claude-envoy; cd packages/envoy && go test -count=1 -run 'TestServePortWorkers|TestOneException|TestSubjectIndex' ./cmd/listener ./internal/...; go test -run x -bench BenchmarkMatch ./internal/store",
+      "negativeControl": "Each test fails with its change reverted"
+    },
+    {
+      "criterion": "Serving-port role holder gets the stored forward with ack and redelivery (INFRA-590 dependency)",
+      "surface": "Listener binary, in-process NATS, httptest serving-port session",
+      "command": "cd packages/envoy && go test -count=1 -run TestServePortHolder ./cmd/listener",
+      "negativeControl": "On main the stored forward is acknowledged away"
+    },
+    {
+      "criterion": "Load at 40 events/s, 1,000 sessions: delivery p99 from write arrival and from NATS publish, listener and nats-server CPU and memory",
+      "surface": "INFRA-589's committed harness, same machine before and after",
+      "command": "INFRA-589's step command with consumer-mode simulated sessions",
+      "negativeControl": "Before run on main (core path)"
+    },
+    {
+      "criterion": "Docs say what is now true",
+      "surface": "Files listed in plan.md section Docs",
+      "command": "A grep per file for the old phrase",
+      "negativeControl": "On main each grep finds the old phrase"
+    }
+  ],
+  "crossTree": {
+    "INFRA-439/INFRA-278 architect (04:24Z)": "#2228 merges first (expected 2026-10-27); INFRA-594 builds on its ledger, unwritten frames, dedupe settle, Claude Code state file, envoy_stream_id; keep its late-BTW and held-notice guarantees.",
+    "INFRA-14 architect (04:24Z)": "Grant in this PR; listener must work without it (core path); consumers at the stream's replica count, report cost first; INFRA-553 restores consumers; keep POST /v1/replay until no registered plugin needs it.",
+    "INFRA-547 implementer (04:36Z)": "Second to merge merges main forward, keeps the publish route's receipt-or-error contract and the serverchange soak green.",
+    "INFRA-514 architect (04:43Z)": "Make serving-port delivery from the stream with ack and redelivery explicit and tested (INFRA-590 counts the PubAck as receipt for serving-port holders)."
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: handoff, proof objects, PR body, pushes",
+      "ce-simplify-code: the simplify pass required on a runtime diff",
+      "envoy: messages to the INFRA-278, INFRA-14, INFRA-547, INFRA-546, INFRA-548 roles about merge order and shared files",
+      "dispatch: production record and any Dispatch write"
+    ],
+    "test": [
+      "legion-worker: tester evidence rules, negative controls, verifying the implementer's proof",
+      "envoy: reading deliveries and publishing to topics while driving the live test"
+    ],
+    "review": [
+      "legion-worker: merge gate, review threads, approval of the head by SHA"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Listener grant cannot be scoped to s-* consumers (wildcards are whole tokens); host users share the listener grant with their sessions; a grant change replaces the hub VM", "answer": "Accepted wider listener grant on the trusted listener, Dispatch and host users (host sessions already share the listener's durable grants); session grant unchanged; INFRA-14 carries it at INFRA-553's one replacement or a later live reload; listener falls back to core without it; natslive test proves the members user is refused."},
+      {"finding": "Removing core delivery would drop unstored topics, role-held notice subjects, and every frame against an older listener", "answer": "Registration answer carries mode consumer or core; core keeps today's path; unstored topics and role-held notice subjects stay core in both modes; test against a listener without the field."},
+      {"finding": "Durable role delivery rests on a core publish being stored after the receipt", "answer": "RequestCoreTo succeeds only with both the PubAck and the receipt; missing PubAck returns ErrForwardNotStored mapped to delivery_failed; test with no stream."},
+      {"finding": "Durable role forwards reverse the live-only design and can deliver stale role messages and ad-hoc copies", "answer": "The spec requires role topics across restarts; stored forwards and ad-hoc copies are shown when they arrive; docs/solutions page and AGENTS.md updated; INFRA-14 agreed role lanes stay core."},
+      {"finding": "Follow updates the filter only at the next registration; overlapping filters refused", "answer": "Filter updated inside the subscribe call before it answers; envoy_subscribe calls it immediately; containment reduction and common-prefix widening with plugin-side drop; tests for a publish 100 ms after a follow and overlapping follows."},
+      {"finding": "Ack on done conflicts with order and the 1 s p99", "answer": "received at decode is the timed receipt; done after write acks; MaxAckPending 1,024, AckWait 60 s with progress every 20 s, MaxDeliver unlimited; held-frame test."},
+      {"finding": "Ownership across listeners and replicas and restart resume unspecified", "answer": "Owner is the entry's machine id and, within a machine, the task holding the durable binding; serving-port owner is the interest's machine; relay set from the watched cache; restart at ack floor on every relay start; listener-kill test."},
+      {"finding": "bus.Client holds one subscription of each kind", "answer": "New session-consumer client on its own connection with the jetstream package; role lane on its own connection; message INFRA-546/547/548 implementers before editing shared files."},
+      {"finding": "Relay subject hits the live lane; any session can forge done", "answer": "Live lane skips notifications.envoy.deliver.>; forged done accepted and documented, same exposure as today's notifications.> reads."},
+      {"finding": "Hub-side JetStream cost unmeasured", "answer": "Load table adds nats-server CPU, RSS, consumer count and pull-request rate; replicas three per INFRA-14, numbers to INFRA-14 before any change."},
+      {"finding": "Return horizon unbounded", "answer": "InactiveThreshold equals stream retention; floor below first sequence shows #2228's gap notice."},
+      {"finding": "A late targeted frame could run a BTW model call", "answer": "A frame with Envoy-Delivered over 1 or stored before the current epoch never starts a side turn; shown as a card (INFRA-439 guarantee)."},
+      {"finding": "Role-lane change needs a grant change; pending limits drop; remaining senders unclear", "answer": "Grant adds envoy-roles and keeps the per-machine entry; fallback on refusal; non-blocking handler, own connection, pending limits off, slow-consumer counter; test with a silent holder at 40 msg/s."},
+      {"finding": "Claude Code done signal has no source; bridge acks before writing", "answer": "Bridge mode adds --replay-user-messages (present in 2.1.311) and acks on the echo; channel mode acks on the awaited notification write, documented; bridge change owned here."},
+      {"finding": "Removing /v1/replay reaches other trees", "answer": "Not removed: INFRA-14 requires it until no registered plugin needs it; grant stays; INFRA-547's soak case keeps working."},
+      {"finding": "Plugin cursor shape differs from #2228's", "answer": "Resume point is stream id plus the sequence below which nothing is held unwritten; used only when the consumer is missing."},
+      {"finding": "Load bullet has no threshold; 10x cannot commit on main; harness unaware of the new protocol", "answer": "From-publish p99 at most 1 s gated, from-arrival reported; direct NATS publish mode where Dispatch cannot commit; harness sessions taught consumer delivery here (departure 2)."},
+      {"finding": "Live-test disruptions and check undefined; Claude Code mode unproven in the pod", "answer": "Committed script with six disruptions, three topic kinds, two session kinds, exactly-once and order check, negative controls; bridge mode measured to run (claude -p in pod); channel mode tried under script, else reported."},
+      {"finding": "Stored and forwarded once and no stall need commands", "answer": "TestRoleLane counts stored forwards and forwards per listener and measures the other role's receipt p99."},
+      {"finding": "Docs list short and unchecked", "answer": "List extended (envoy AGENTS.md, skills/envoy, docs/solutions page, tool-contract.ts, infra docs); a grep per file."},
+      {"finding": "Rollout outside the repo", "answer": "Any order works by the mode answer; dist rebuilt in the same commit; releases from main; grant reaches the hub through INFRA-14."},
+      {"finding": "EV-10 and EV-14 scope", "answer": "Subject index and skip before decode with a benchmark; HTTP push kept for OpenCode with per-session workers and consumer relay."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {
+      "spec": "Replay after a reconnect is driven by the stored stream, not by polling on a heartbeat.",
+      "plan": "Consumer delivery replaces polling whenever the listener confirms it; the plugin keeps #2228's polling catch-up and the listener keeps POST /v1/replay as the fallback for listeners without the consumer grant and older plugins.",
+      "evidence": "INFRA-14 architect, Envoy 2026-10-27 04:24Z: the listener must keep working without the grant, and /v1/replay keeps answering until no registered session's plugin needs it.",
+      "outcome": {"kind": "changed", "acceptance": ["Replay after a reconnect is driven by the stored stream: proven on the consumer path; the polling path stays as fallback"], "scope": "Fallback polling path and /v1/replay retained until INFRA-548's version field shows no plugin needs them and every hub carries the grant."}
+    },
+    {
+      "spec": "On the committed load reproduction at ten times: delivery p99 from the write's arrival, and the listener's CPU and memory.",
+      "plan": "This issue teaches INFRA-589's harness sessions consumer delivery, adds nats-server CPU, memory, consumer count and pull rate, and gates a from-publish p99 of 1 s beside the reported from-arrival number.",
+      "evidence": "INFRA-589's sessions subscribe over core NATS (load reproduction report); on the 2-core machine Dispatch's event lock and pool dominate from-arrival latency (INFRA-514 spec findings 1-2).",
+      "outcome": {"kind": "changed", "acceptance": ["Load bullet: adds from-publish p99 at most 1 s and nats-server figures"], "scope": "Harness change in INFRA-589's code, after it merges."}
+    },
+    {
+      "spec": "Today paragraph names EP-5 (outbox role routes on core NATS).",
+      "plan": "No outbox change: INFRA-590 owns the outbox role-route forward with a receipt.",
+      "evidence": "INFRA-590 spec acceptance (agreed with INFRA-14's architect).",
+      "outcome": {"kind": "unchanged"}
+    }
+  ]
+}
