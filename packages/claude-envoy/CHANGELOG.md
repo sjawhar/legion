@@ -94,6 +94,14 @@
 
 ### Fixed
 
+- The `dispatch` skill this plugin ships (through its symlink to `skills/dispatch`) says what a
+  claim delivers once Dispatch sends a person's comment to the claimant of an issue with no route
+  (sjawhar/legion#2366): a claim on such an issue brings people's comments on it to the claiming
+  session. It said a claim delivers no comments. Routing the issue to the session (and clearing
+  the route on release), or subscribing to the issue's topic, stays the way to get everything
+  else, and its Legion sentence forbids writing the status or route of a `legion` issue or one
+  under it (INFRA-596).
+
 - The `legion-worker` skill: `HANDOFF_STALE_GENERATION` is no longer one of the refusals the
   daemon records. The daemon now refuses a completion of a run the issue has left before it applies
   any fact and names the current run's queued task, so the worker ends the turn and calls
