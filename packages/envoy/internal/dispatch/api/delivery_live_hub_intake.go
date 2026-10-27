@@ -228,11 +228,17 @@ func (h *deliveryHub) receive(g *hubGeneration, event model.Event) {
 // under. Those are every writer of a field the Delivery page shows (Task 0 Step 18: route has one
 // writer, PATCH /api/v1/issues/{key}, whose event is issue.updated or issue.closed). The event is
 // the relay's, shared with every other subscriber, and is only read.
+//
+// Each of those events also marks every view being recomputed. Its issues, ancestors and sessions
+// are still its last answer's (none before its first) while its read runs outside the lock, so an
+// event for something the new answer shows can miss them, and the read may have passed the row
+// before the event committed; the mark makes another recompute follow the one in flight.
 func (h *deliveryHub) applyEventLocked(g *hubGeneration, event model.Event, now time.Time) {
 	var issueKey string
 	if event.IssueKey != nil {
 		issueKey = *event.IssueKey
 	}
+	touches := true
 	switch event.Type {
 	case "issue.created", "issue.updated", "issue.closed":
 		var issue struct {
@@ -263,8 +269,11 @@ func (h *deliveryHub) applyEventLocked(g *hubGeneration, event model.Event, now 
 		h.dirtyIssueLocked(g, issueKey, p0, now)
 	case "architecture.synced":
 		h.dirtyAllLocked(g, now)
+	default:
+		touches = false
 	}
 	if event.Actor.Kind == "session" && event.Actor.ID != "" {
+		touches = true
 		// The title delivery.ResolveSessionTitles reads: the newest event's, or the id when it
 		// carries none.
 		title := event.Actor.ID
@@ -273,6 +282,13 @@ func (h *deliveryHub) applyEventLocked(g *hubGeneration, event model.Event, now 
 		}
 		for _, view := range h.views {
 			if shown, ok := view.sessions[event.Actor.ID]; ok && shown != title {
+				h.markDirtyLocked(g, view, now, deliveryCauseChange)
+			}
+		}
+	}
+	if touches {
+		for _, view := range h.views {
+			if view.computing {
 				h.markDirtyLocked(g, view, now, deliveryCauseChange)
 			}
 		}

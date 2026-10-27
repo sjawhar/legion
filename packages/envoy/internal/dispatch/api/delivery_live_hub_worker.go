@@ -164,6 +164,7 @@ func (h *deliveryHub) recompute(g *hubGeneration, view *deliveryView, cause stri
 	h.note(deliveryHubNote{what: "recompute begin", view: spec.key, cause: cause})
 
 	read, err := h.read(g, view, spec)
+	h.note(deliveryHubNote{what: "recompute read", view: spec.key, cause: cause})
 
 	now := h.clock.Now()
 	h.mu.Lock()

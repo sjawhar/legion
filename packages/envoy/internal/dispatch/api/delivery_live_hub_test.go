@@ -871,6 +871,66 @@ func TestAParentsComponentChangeReachesPagesHoldingItsChildren(t *testing.T) {
 	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
 }
 
+// TestTheHubRecomputesAViewAgainAfterAnEventDuringItsRead: a view's first read finishes before an
+// issue it shows is retitled, and the retitle's event reaches the hub while that recompute still
+// holds no issue of the view's. The view is recomputed once more and its page gets the new title.
+func TestTheHubRecomputesAViewAgainAfterAnEventDuringItsRead(t *testing.T) {
+	reading := make(chan struct{})
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	var held atomic.Bool
+	rig := newHubRig(t, func(hub *deliveryHub) {
+		observe := hub.observe
+		hub.observe = func(note deliveryHubNote) {
+			observe(note)
+			if note.what == "recompute read" && held.CompareAndSwap(false, true) {
+				// Hold the view's first recompute between its read and its answer.
+				close(reading)
+				<-release
+			}
+		}
+	})
+	// Registered after the rig's, so it runs first: a failed test never leaves the hub held.
+	t.Cleanup(releaseOnce)
+	seedHubSettings(t, rig.database)
+	key := createHubIssue(t, rig.handler, map[string]any{"title": "Ship widgets"})
+	upsertPR(t, rig.database, prNaming(1, time.Now().UTC().Add(-3*time.Hour), key))
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	select {
+	case <-reading:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the view's first recompute never finished its read")
+	}
+
+	start := rig.mark()
+	patchHubIssue(t, rig.handler, key, map[string]any{"title": "Ship the widgets"})
+	var newest int64
+	if err := rig.database.Pool.QueryRow(t.Context(), `select max(id) from events`).Scan(&newest); err != nil {
+		t.Fatalf("read the newest event: %v", err)
+	}
+	rig.waitFor(t, start, 3*time.Second, "the retitle on the hub's feed", func(note deliveryHubNote) bool {
+		return note.what == "event" && note.through == newest
+	})
+	releaseOnce()
+
+	snapshot := conn.snapshot(t, 5*time.Second, "t")
+	var read struct {
+		IssueTitles map[string]string `json:"issue_titles"`
+	}
+	if err := json.Unmarshal(snapshot.Body, &read); err != nil {
+		t.Fatalf("decode the snapshot: %v", err)
+	}
+	if got := read.IssueTitles[key]; got != "Ship widgets" {
+		t.Fatalf("the snapshot, read before the retitle, titles %s %q, want %q", key, got, "Ship widgets")
+	}
+	delta := conn.delta(t, 3*time.Second, "t")
+	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {
+		t.Fatalf("the delta's issue_titles = %v, want %s retitled", got, key)
+	}
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
+}
+
 // unownedP0Fields is the unowned_p0 and status a body of kind shows, decoded: a measures body's
 // own, a timeline's from its measures.
 func unownedP0Fields(t *testing.T, body json.RawMessage, kind string) map[string]any {
