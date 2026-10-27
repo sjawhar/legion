@@ -9,10 +9,6 @@ import (
 	"time"
 )
 
-// expectedMaxTypedNesting is how many typed blocks a document may open inside one another, the
-// same bound the browser's read-only engine draws a deeper `:::` opener as text past (INFRA-581).
-const expectedMaxTypedNesting = 32
-
 // The two bodies that froze a reader's tab in the browser engine (INFRA-581) are refused by a
 // document write in a few milliseconds: Go reads a bare `:::a` as a malformed directive, whatever
 // it is nested in. Each refusal is held to 1 s of this process's CPU time (cpuTimeOf), hundreds of

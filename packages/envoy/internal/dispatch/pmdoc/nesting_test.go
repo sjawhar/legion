@@ -20,6 +20,10 @@ const (
 	expectedMaxTreeDepth       = 1_000
 	expectedMaxNodeAttrNesting = 100
 	expectedMaxMarkAttrNesting = 99
+
+	// expectedMaxTypedNesting is how many typed blocks a document may open inside one another, the
+	// same bound the browser's read-only engine draws a deeper `:::` opener as text past (INFRA-581).
+	expectedMaxTypedNesting = 32
 )
 
 // A markdown document opens at most 100 blocks inside one another, however the nesting is written:

@@ -30,13 +30,12 @@ const maxTypedNesting = 32
 // stand past the bound, rather than leave the container without that child, which goldmark's list
 // parser does not expect and panics on at the next line. So a list's guard counts its first item.
 // Goldmark opens a list item only directly inside a list, so every later item of that list stands
-// one level inside it, where the first item did, and list items need no guard of their own. typed
-// says the parser opens typed blocks, and the guard also refuses one it would open inside
-// maxTypedNesting typed blocks, whatever other blocks stand between them.
+// one level inside it, where the first item did, and list items need no guard of their own. The
+// guard also refuses a typed block it would open inside maxTypedNesting typed blocks, whatever
+// other blocks stand between them.
 type nestingGuard struct {
 	parser.BlockParser
 	withChild bool
-	typed     bool
 }
 
 // nestingRefusalKey holds the nestingError for the first block nestingGuard refused.
@@ -60,7 +59,7 @@ func (g nestingGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Cont
 	refusal := nestingError{line: line}
 	switch {
 	case opensPastBound(parent, opens):
-	case g.typed && typedNesting(parent) >= maxTypedNesting:
+	case node.Kind() == kindTypedDirective && typedNesting(parent) >= maxTypedNesting:
 		refusal.typed = true
 	default:
 		return node, state

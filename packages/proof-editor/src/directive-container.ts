@@ -117,6 +117,8 @@ export const maxDirectiveNesting = 32;
 
 /** Per parse, what its document tokenizer has found of the directive containers around its lines. */
 interface ParseRecord {
+  /** The line `depth` was last recorded on. */
+  line: number;
   /**
    * How many directive containers are open around `line`: the depth of the innermost block whose
    * continuation the line passed. The document tokenizer runs continuations outermost first and
@@ -124,7 +126,6 @@ interface ParseRecord {
    * container still open around it. A start only reads this, so a start that micromark runs inside
    * `effects.check` and throws away cannot change it.
    */
-  line: number;
   depth: number;
   /** The depth of the innermost directive container that is open and not closed. */
   open: number;
@@ -145,6 +146,12 @@ function recordOpenAround(context: TokenizeContext, depth: number): void {
   const record = parseRecord(context);
   record.line = context.now().line;
   record.depth = depth;
+}
+
+/** How many directive containers are open around the current line; it never creates a record. */
+function openAround(context: TokenizeContext): number {
+  const record = parses.get(context.parser);
+  return record !== undefined && record.line === context.now().line ? record.depth : 0;
 }
 
 const directiveContainer: Construct = {
@@ -193,10 +200,9 @@ function tokenizeLazyContentEnd(
 
   function start(code: Code): State | undefined {
     const record = parses.get(self.parser);
-    const line = self.now().line;
     if (record === undefined || markdownLineEnding(code)) return nok(code);
-    if (record.open <= (record.line === line ? record.depth : 0)) return nok(code);
-    self.parser.lazy[line] = true;
+    if (record.open <= openAround(self)) return nok(code);
+    self.parser.lazy[self.now().line] = true;
     return ok(code);
   }
 }
@@ -338,8 +344,11 @@ function resolveContentExits(events: Event[], context: TokenizeContext): void {
       const own = exiting._directive;
       const owner = owners[position];
       const block = own ?? (owner === -1 ? undefined : open[owner]._directive);
+      // Whether the exit is a directive container's own, or one inside a directive container that
+      // exits in this run too.
+      const blockEnds = block !== undefined && (own !== undefined || owner >= remaining);
       let gap = end;
-      if (block !== undefined && (own !== undefined || owner >= remaining) && block.closed) {
+      if (blockEnds && block.closed) {
         // A closed directive container ends right after its closing fence, a line or less back.
         gap = index - 1;
         while (
@@ -350,7 +359,7 @@ function resolveContentExits(events: Event[], context: TokenizeContext): void {
         }
         gap++;
         settled.push(exiting);
-      } else if (block !== undefined && (own !== undefined || owner >= remaining)) {
+      } else if (blockEnds) {
         // An unclosed one ends with the containers inside it right after its last content. When the
         // line after was lazy for it, the flow construct left the last line ending out of its
         // content, so a last line that held nothing else (past the prefixes of the containers
@@ -477,8 +486,7 @@ function tokenizeDirectiveContainerStart(
   return start;
 
   function start(code: Code): State | undefined {
-    const around = parses.get(self.parser);
-    depth = (around !== undefined && around.line === self.now().line ? around.depth : 0) + 1;
+    depth = openAround(self) + 1;
     if (depth > maxDirectiveNesting) return nok(code);
     opener = effects.enter("directiveContainer", { _container: true });
     effects.enter("directiveContainerFence");
@@ -576,7 +584,10 @@ function tokenizeDirectiveContainerContinuation(
   }
 
   function content(code: Code): State | undefined {
-    if (block !== undefined) block.contentStarts[self.now().line - block.line] = self.now().offset;
+    if (block !== undefined) {
+      const point = self.now();
+      block.contentStarts[point.line - block.line] = point.offset;
+    }
     return ok(code);
   }
 }
